@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -46,11 +47,25 @@ class StreamArrowCancelSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     val client  = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
-    val router  = new FlightSqlRouter(sup, new SessionRegistry, tracker, adapter)
-    new FlightProducerImpl(router)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val router = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
+    new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
   /** Counts putNext calls and total rows; flips to cancelled after `cancelAfter` batches. */
   private final class CountingListener(cancelAfter: Int = Int.MaxValue)

@@ -132,18 +132,27 @@ services:
       QOD_BOOTSTRAP_YAML: ${QOD_BOOTSTRAP_YAML:-}
 
       # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
+      # AUTH=false leaves no password login. The manager then boots only with
+      # another FlightSQL authenticator (a Keycloak or Azure password backend,
+      # or a bearer provider such as JWT_SECRET_KEY below, set from
+      # SESSION_JWT_SECRET) and a way to sign in to the admin UI (Keycloak,
+      # Azure, or system-scope OIDC: QOD_MGMT_IDENTITY_SOURCE=oidc with
+      # QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID, which gates only
+      # the UI and REST). This file passes none of them but JWT_SECRET_KEY;
+      # otherwise the manager refuses to boot. No static API key is passed
+      # either: people log in, and automation uses a personal access token.
       QOD_AUTH_DB_ENABLED: ${AUTH:-true}
       # Either name works: the manager's own QOD_ADMIN_* wins, then the short
       # .env alias, then `admin`. The long name must win because .env.example
       # (copied into .env on first run) always sets the short one.
       QOD_ADMIN_USERNAME:  ${QOD_ADMIN_USERNAME:-${ADMIN_USERNAME:-admin}}
       QOD_ADMIN_PASSWORD:  ${QOD_ADMIN_PASSWORD:-${ADMIN_PASSWORD:-admin}}
-      QOD_API_KEY:         ${API_KEY:-}
       PROXY_TLS_ENABLED:        ${TLS:-false}
 
       # ----- Starflow pairing (starflow profile; inert unless STARFLOW_ENABLED=true) -----
-      # Empty values equal unset: the Starlake menu/SSO stays off and boot
-      # generates a session secret, exactly as without these lines.
+      # Empty values equal unset: the Starlake menu/SSO stays off and the
+      # manager signs sessions with the secret its control-plane database
+      # stores (generated on first boot), exactly as without these lines.
       SL_ENABLED:             ${STARFLOW_ENABLED:-false}
       SL_URL:                 ${STARFLOW_URL:-http://localhost:${STARFLOW_PORT:-9900}}
       QOD_SESSION_JWT_SECRET: ${SESSION_JWT_SECRET:-}
@@ -366,10 +375,10 @@ services:
   #   STARFLOW_ENABLED=true docker compose --profile starflow up -d --build
   # (or put STARFLOW_ENABLED=true and COMPOSE_PROFILES=starflow in .env).
   #
-  # Required in .env, stable across restarts so SSO and the Starflow -> QoD
-  # calls keep working (starflow-db-init refuses to proceed without them):
-  #   API_KEY=$(openssl rand -hex 32)              # QOD_API_KEY on both sides
+  # Required in .env, stable across restarts so SSO keeps working
+  # (starflow-db-init refuses to proceed without it):
   #   SESSION_JWT_SECRET=$(openssl rand -hex 48)   # QoD session secret = Starflow JWT key
+  # Starflow calls QoD with the signed-in user's own session: no shared key.
   #
   # Optional: STARFLOW_VERSION (release baked into the image, default 1.8.8),
   # STARFLOW_PORT (host port, 9900), STARFLOW_URL (browser-facing URL,
@@ -392,7 +401,6 @@ services:
       PGDATABASE: postgres
       STARFLOW_DB:        ${STARFLOW_DB:-starlake}
       STARFLOW_ENABLED:   ${STARFLOW_ENABLED:-false}
-      API_KEY:            ${API_KEY:-}
       SESSION_JWT_SECRET: ${SESSION_JWT_SECRET:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -400,7 +408,6 @@ services:
         set -eu
         missing=""
         [ "$${STARFLOW_ENABLED}" = "true" ] || missing="$$missing STARFLOW_ENABLED=true"
-        [ -n "$${API_KEY}" ] || missing="$$missing API_KEY"
         [ -n "$${SESSION_JWT_SECRET}" ] || missing="$$missing SESSION_JWT_SECRET"
         if [ -n "$$missing" ]; then
           echo "starflow profile needs in .env:$$missing (see the starflow section of docker-compose.yml)" >&2
@@ -441,7 +448,6 @@ services:
       QOD_TLS_INSECURE: "true"
       # Browser-facing: must work from the user's machine.
       QOD_UI_URL:       ${QOD_PUBLIC_URL:-http://localhost:${MANAGER_PORT:-20900}}/ui
-      QOD_API_KEY:      ${API_KEY:-}
       JWT_SECRET_KEY:   ${SESSION_JWT_SECRET:-}
       # Starflow itself; metadata in its own database on the same Postgres.
       SL_API_HTTP_PORT:        "9900"

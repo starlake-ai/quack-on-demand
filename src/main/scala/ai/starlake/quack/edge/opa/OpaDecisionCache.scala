@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.opa
 
+import ai.starlake.quack.observability.metrics.CacheMetrics
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
+import io.micrometer.core.instrument.MeterRegistry
 import java.util.concurrent.TimeUnit
 
 /** Everything a decision depends on. `settings` fingerprints the tenant's OPA URL / path / token /
@@ -23,7 +25,10 @@ final case class OpaCacheKey(
     edge: String,
     parentPools: List[String],
     accesses: List[String],
-    textHash: String
+    textHash: String,
+    // SHA-256 of a node decision's whole input (kinds, columns, via, locations: what `accesses`
+    // above does not carry); empty for the gateway's inputs.
+    detail: String = ""
 )
 
 /** Short-TTL decision cache. `Error` is never stored; ttlSec 0 disables caching. */
@@ -33,8 +38,17 @@ final class OpaDecisionCache(ttlSec: Int):
       Caffeine
         .newBuilder()
         .expireAfterWrite(ttlSec.toLong, TimeUnit.SECONDS)
-        .maximumSize(50_000)
+        .maximumSize(OpaDecisionCache.MaxEntries)
+        .recordStats()
         .build[OpaCacheKey, Decision]()
+    )
+
+  /** Its size, hits, misses, evictions and capacity under `cache=qod_opa_decisions`; nothing while
+    * caching is off (ttlSec 0), since there is no cache.
+    */
+  def bindMetrics(registry: MeterRegistry): Unit =
+    cache.foreach(c =>
+      CacheMetrics.bind(registry, OpaDecisionCache.MetricName, c, OpaDecisionCache.MaxEntries)
     )
 
   def getOrCompute(key: OpaCacheKey)(compute: => Decision): (Decision, Boolean) =
@@ -46,3 +60,11 @@ final class OpaDecisionCache(ttlSec: Int):
           case _: Decision.Error => ()
           case _                 => cache.foreach(_.put(key, d))
         (d, false)
+
+object OpaDecisionCache:
+
+  /** Decisions kept at most. */
+  val MaxEntries: Long = 50_000L
+
+  /** The `cache` tag of its meters. */
+  val MetricName: String = "qod_opa_decisions"

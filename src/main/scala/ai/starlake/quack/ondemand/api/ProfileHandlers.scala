@@ -2,6 +2,8 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.StatementHistoryStore
 import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.rbac.HandshakeDenial
 import ai.starlake.quack.ondemand.telemetry.{TelemetryStore, UsageQuery}
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -9,23 +11,24 @@ import sttp.model.StatusCode
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 
-/** Handlers behind `/api/profile/usage` and `/api/profile/statements`: the read-only self-service
-  * view a regular (non-admin) user gets of their own activity.
+/** Handlers behind `/api/profile/usage`, `/api/profile/statements` and `/api/profile/pools`: the
+  * read-only self-service view a regular (non-admin) user gets of their own activity and of the
+  * pools they may use.
   *
   * **Self-scoping is the whole security story.** The `(tenant, username)` pair comes from the
-  * verified session and from nowhere else -- neither route accepts a tenant or user input -- so
-  * these endpoints cannot be aimed at another principal. Rows are matched on:
+  * verified session and from nowhere else -- no route accepts a tenant or user input -- so these
+  * endpoints cannot be aimed at another principal. Rows are matched on:
   *   - `username`, exactly as recorded by the FlightSQL router, and
   *   - the session tenant's ALIAS SET (`{id, displayName}`), because telemetry and the statement
   *     ring carry whichever shape the router held at execution time. This mirrors the allow-set
   *     that [[StatementHistoryHandlers]] builds for tenant admins.
   *
   * The tenant scope is keyed off the session SCOPE, not `profile.tenant`: only a superuser matches
-  * on username alone across tenants. A non-superuser whose profile carries no tenant (an OIDC
-  * tenant-scoped login) falls back to its `manageableTenants`, and a non-superuser with neither
-  * gets an empty alias set that matches nothing -- fail closed, never an unfiltered window. A
-  * caller with no resolvable session -- the static API key, or open mode with no token at all --
-  * has no identity to scope by and gets `400 no_session_identity`.
+  * on username alone across tenants. A non-superuser whose profile carries no tenant (a
+  * system-realm login in OIDC mode) falls back to its `manageableTenants`, and a non-superuser with
+  * neither gets an empty alias set that matches nothing: fail closed, never an unfiltered window. A
+  * caller whose credential no longer resolves (a session that expired between the guard and the
+  * handler) has no identity to scope by and gets `400 no_session_identity`.
   *
   * `tenantById` is a lookup seam (`PoolSupervisor.getTenantById` in production) and `now` is
   * injectable, so the whole contract is testable without Postgres.
@@ -39,6 +42,10 @@ final class ProfileHandlers(
     telemetry: TelemetryStore,
     stmtHistory: StatementHistoryStore,
     tenantById: String => Option[Tenant],
+    // The pool listing: the supervisor's pools and handshake decision, and the resolver that
+    // turns the bearer into the caller the routed executor would run (session or PAT).
+    sup: PoolSupervisor,
+    callers: RestCaller,
     now: () => Instant = () => Instant.now()
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -105,35 +112,93 @@ final class ProfileHandlers(
       }
     }
 
+  /** `GET /api/profile/pools`: the pools the caller may connect to.
+    *
+    * Which tenants: every tenant for a superuser identity (a superuser session, or a PAT whose
+    * owning row has no tenant: the handshake's own superuser rule); anyone else's own (the
+    * profile's tenant, else the session's manageable tenants, as the usage filter reads them).
+    * Never wider: the handshake resolves a user name per tenant, and in another tenant the same
+    * name can be another user.
+    *
+    * Which pools: a PAT's `databases` and `pools` axes narrow the candidates first; each remaining
+    * pool is then decided by `PoolSupervisor.authorizeHandshakeDetailed` with the request the
+    * routed executor sends for the same caller ([[ExecCaller.authzRequest]] of
+    * [[RestCaller.callerOf]]): the kill switches, a registered and enabled user, then the pool
+    * grant or the tenant's OPA (a superuser skips that last step). A denied pool is left out
+    * without a reason. An unavailable decision (the tenant's OPA unreachable) answers 503 with the
+    * handshake's message: an outage never reads as a shorter list.
+    */
+  def pools(token: Option[String]): Out[ProfilePoolsResponse] = IO.blocking {
+    callers.resolve(token) match
+      case Right(principal @ RestCaller.Principal.Session(s)) =>
+        listFor(
+          principal,
+          if s.scope.superuser then None
+          else Some(s.profile.tenant.map(Set(_)).getOrElse(s.scope.manageableTenants))
+        )
+      case Right(principal @ RestCaller.Principal.Pat(p)) =>
+        listFor(principal, p.user.tenant.map(Set(_)))
+      // Anything that is not a session or a PAT has no identity to list for.
+      case _ => Left(NoSessionIdentity)
+  }
+
   // ---------- internals ----------
 
   private def clamp(requested: Option[Int], default: Int, max: Int): Int =
     math.max(1, math.min(max, requested.getOrElse(default)))
 
+  /** The pools of `tenants` (None: every tenant) that `principal` may connect to. Decided lazily
+    * and in order: the first unavailable decision answers for the whole listing, so no later pool
+    * is asked about (each OPA-mode decision is a round trip).
+    */
+  private def listFor(
+      principal: RestCaller.Principal,
+      tenants: Option[Set[String]]
+  ): Either[(StatusCode, ErrorResponse), ProfilePoolsResponse] =
+    val caller  = RestCaller.callerOf("profile-pools", principal)
+    val decided = sup
+      .list()
+      .filter(p => tenants.forall(_.contains(p.key.tenant)))
+      .filter(p =>
+        caller.restriction.allowsDatabase(p.key.tenantDb) &&
+          caller.restriction.allowsPool(p.key.pool)
+      )
+      .sortBy(_.key.toString)
+      .to(LazyList)
+      .map(p => p -> sup.authorizeHandshakeDetailed(caller.authzRequest(p.key)))
+    decided.collectFirst { case (_, Left(HandshakeDenial.Unavailable(msg))) => msg } match
+      case Some(msg) =>
+        Left((StatusCode.ServiceUnavailable, ErrorResponse("authz_unavailable", msg)))
+      case None =>
+        Right(ProfilePoolsResponse(decided.toList.collect { case (p, Right(_)) =>
+          ProfilePool(p.key.tenant, p.key.tenantDb, p.key.pool, PoolHandlers.statusOf(p))
+        }))
+
+  /** The one refusal every profile route answers when the caller has no identity to scope by. */
+  private val NoSessionIdentity: (StatusCode, ErrorResponse) =
+    (
+      StatusCode.BadRequest,
+      ErrorResponse(
+        "no_session_identity",
+        "profile endpoints need a logged-in session or a personal access token"
+      )
+    )
+
   /** Resolve the caller's session, or the single error every profile route answers with. Every
     * failed lookup collapses to the same code on purpose: the client's remedy is identical (log in,
-    * then retry), and a caller presenting the static key has no identity at all.
+    * then retry).
     */
   private def requireSession(
       token: Option[String]
   ): Either[(StatusCode, ErrorResponse), SessionTokenStore.Session] =
     token.flatMap(sessionOf) match
       case Some(s) => Right(s)
-      case None    =>
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse(
-              "no_session_identity",
-              "profile endpoints need a logged-in session; a static API key has no identity to scope by"
-            )
-          )
-        )
+      case None    => Left(NoSessionIdentity)
 
   /** Tenant alias set the session may see, or None for an unrestricted (superuser) session.
     * Fail-closed: a non-superuser with no resolvable tenant yields an empty set (matches nothing)
     * rather than dropping the tenant predicate. Keyed on the session SCOPE, never on
-    * `profile.tenant` -- an OIDC tenant login mints `profile.tenant = None` with
+    * `profile.tenant` -- a system-realm login in OIDC mode mints `profile.tenant = None` with
     * `superuser = false`, and must still be tenant-confined.
     */
   private def visibleTenantAliases(s: SessionTokenStore.Session): Option[Set[String]] =

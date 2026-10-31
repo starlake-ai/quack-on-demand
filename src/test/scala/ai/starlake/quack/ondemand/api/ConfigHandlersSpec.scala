@@ -1,8 +1,9 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, ValidationConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, ValidationConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
+import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.unsafe.implicits.global
 import com.typesafe.config.ConfigFactory
 import org.scalatest.flatspec.AnyFlatSpec
@@ -15,7 +16,6 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
       managerCls = classOf[ManagerConfig],
       flightCls = classOf[FlightConfig],
       authCls = classOf[AuthenticationConfig],
-      aclCls = classOf[AclConfig],
       validationCls = classOf[ValidationConfig],
       metricsCls = classOf[MetricsConfig]
     )
@@ -34,7 +34,9 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     es.exists(_.path == "quack-flightsql.auth.database.password") shouldBe true
     es.exists(_.path == "quack-flightsql.auth.oauthScopes") shouldBe true
     es.exists(_.path == "quack-flightsql.validation.bypassUsers") shouldBe true
-    es.exists(_.path == "quack-flightsql.acl.enabled") shouldBe true
+    // The acl block was removed (its keys refuse boot): the config page lists none of them.
+    es.exists(_.path.startsWith("quack-flightsql.acl.")) shouldBe false
+    es.exists(_.path == "quack-flightsql.opa.defaultMode") shouldBe true
   }
 
   it should "carry the env-var name on each entry" in {
@@ -54,7 +56,7 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     val sens = liveEntries.filter(_.sensitive).map(_.path).toSet
     sens should contain("quack-on-demand.admin.password")
     sens should contain("quack-on-demand.defaultMetastore.pgPassword")
-    sens should contain("quack-on-demand.apiKey")
+    sens should contain("quack-on-demand.auth.management.sessionJwtSecret")
     sens should contain("quack-flightsql.auth.database.password")
     sens should contain("quack-flightsql.auth.jwt.secretKey")
     sens should contain("quack-flightsql.auth.keycloak.clientSecret")
@@ -63,10 +65,15 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     sens should contain("quack-on-demand.metrics.azure.instrumentationKey")
   }
 
+  it should "drop the removed static API key from the config page" in {
+    liveEntries.exists(_.path == "quack-on-demand.apiKey") shouldBe false
+    liveEntries.exists(_.envVar == "QOD_API_KEY") shouldBe false
+  }
+
   "ConfigHandlers.list" should "never leak sensitive values; render plain ones as-is" in {
     val cfg   = ConfigFactory.load()
     val views = new ConfigHandlers(cfg, liveEntries)
-      .list(None)((_: String) => None)
+      .list(None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
@@ -83,18 +90,41 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     byPath("quack-flightsql.port").value shouldBe "31338"
   }
 
+  it should "never carry the session secret, configured or the control plane's" in {
+    val secret                         = "config-page-session-secret-0123456789abcdef"
+    def entries(sessionSecret: String) =
+      val cfg = ConfigFactory
+        .parseString(s"""quack-on-demand.auth.management.sessionJwtSecret = "$sessionSecret"""")
+        .withFallback(ConfigFactory.load())
+      new ConfigHandlers(cfg, liveEntries)
+        .list(None)(_ => SessionScope.Superuser)
+        .unsafeRunSync()
+        .toOption
+        .get
+        .entries
+    val path = "quack-on-demand.auth.management.sessionJwtSecret"
+
+    val configured = entries(secret)
+    configured.exists(_.value.contains(secret)) shouldBe false
+    configured.find(_.path == path).map(_.value) shouldBe Some("(set)")
+    // Unset, the manager signs with the control plane's secret: the page reads only the
+    // configuration, so it shows the key as unset and has no path to the stored value.
+    entries("").find(_.path == path).map(_.value) shouldBe Some("(unset)")
+  }
+
   it should "render missing optional values as '(unset)'" in {
-    val cfg   = ConfigFactory.load()
+    // smtp.host has no default in application.conf; dropping the path keeps the case independent
+    // of QOD_SMTP_HOST in the invoking shell.
+    val cfg   = ConfigFactory.load().withoutPath("quack-on-demand.smtp.host")
     val views = new ConfigHandlers(cfg, liveEntries)
-      .list(None)((_: String) => None)
+      .list(None)(_ => ai.starlake.quack.ondemand.auth.SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
       .entries
     val byPath = views.map(v => v.path -> v).toMap
 
-    // apiKey has no default in application.conf and no env var set in the test JVM.
-    val apiKey = byPath("quack-on-demand.apiKey")
-    apiKey.isSet shouldBe false
-    apiKey.value shouldBe "(unset)"
+    val host = byPath("quack-on-demand.smtp.host")
+    host.isSet shouldBe false
+    host.value shouldBe "(unset)"
   }

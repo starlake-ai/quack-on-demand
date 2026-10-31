@@ -1,0 +1,4 @@
+"statement":"EXPORT"
+{"op":"export","target":"@DIR@/exp","type":"csv"}
+{"op":"copy_to","target":"@DIR@/exp/t.csv","type":"csv"}
+{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id","tags","v"],"kind":"table","name":"t","schema":"main","via":null}

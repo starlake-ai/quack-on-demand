@@ -1,11 +1,14 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.FleetConfig
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
+import ai.starlake.quack.edge.authz.NodeKeys
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.runtime.FleetQuackBackend
+import ai.starlake.quack.ondemand.telemetry.{AuditRecorder, NoopTelemetryStore}
 import ai.starlake.quack.ondemand.state.{
   ApproveResult,
   ClaimMiss,
@@ -29,11 +32,20 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   private val t0                            = Instant.parse("2026-09-25T10:00:00Z")
   private val hbCfg                         = FleetConfig(joinToken = "secret", heartbeatSec = 7)
   private val loopback: Option[InetAddress] = Some(InetAddress.getByName("127.0.0.1"))
-  private def addr(s: String): Option[InetAddress] = Some(InetAddress.getByName(s))
-  private def fixture()                            =
+  private def addr(s: String): Option[InetAddress]               = Some(InetAddress.getByName(s))
+  private def fixture(nodeKeys: NodeKeys = NodeKeys.ephemeral()) =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val backend = new FleetQuackBackend(store, hbCfg, clock = () => t0)
-    (store, new FleetHandlers(store, hbCfg, backend = Some(backend)))
+    (
+      store,
+      new FleetHandlers(
+        store,
+        hbCfg,
+        backend = Some(backend),
+        nodeKeys = nodeKeys,
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+    )
   private def req(name: String = "srv-1", host: String = "10.0.0.1") =
     FleetHeartbeatRequest(
       name,
@@ -79,7 +91,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "return the current assignment" in {
-    val (store, h) = fixture()
+    val keys       = NodeKeys.ephemeral()
+    val (store, h) = fixture(keys)
     h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
     store.claim(
       FleetAssignment(
@@ -92,7 +105,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         Map("pgHost" -> "h"),
         "",
         "",
-        "",
         ""
       ),
       30,
@@ -101,6 +113,83 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val r = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().toOption.get
     r.assignment.map(a => (a.nodeId, a.epoch, a.poolKey.tenant, a.env("pgHost"))) shouldBe
       Some(("n1", 1L, "acme", "h"))
+    // The node's key is derived from the assignment's node id on every heartbeat, never stored
+    // (the check does not echo it).
+    r.assignment.map(_.authzKey == keys.keyHex("n1")) shouldBe Some(true)
+  }
+
+  it should "carry the manager's extension policy in the assignment, off by default" in {
+    def assigned(h: FleetHandlers, store: FleetServerStore): Option[FleetNodeExtensionsDto] =
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+      store.claim(
+        FleetAssignment(
+          0,
+          "n1",
+          PoolKey("acme", "db", "bi"),
+          21900,
+          "tok",
+          "memory",
+          Map("pgHost" -> "h"),
+          "",
+          "",
+          ""
+        ),
+        30,
+        None
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None)
+        .unsafeRunSync()
+        .toOption
+        .flatMap(_.assignment)
+        .map(_.nodeExtensions)
+    val (store, h) = fixture()
+    assigned(h, store) shouldBe Some(FleetNodeExtensionsDto(false, false, false))
+    val onStore = new InMemoryFleetServerStore(clock = () => t0)
+    val on      = new FleetHandlers(
+      onStore,
+      hbCfg,
+      backend = Some(new FleetQuackBackend(onStore, hbCfg, clock = () => t0)),
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
+  }
+
+  it should "carry the manager's decide limits in the assignment" in {
+    def limits(h: FleetHandlers, store: FleetServerStore): Option[FleetNodeAuthzLimitsDto] =
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+      store.claim(
+        FleetAssignment(
+          epoch = 0,
+          nodeId = "n1",
+          poolKey = PoolKey("acme", "db", "bi"),
+          port = 21900,
+          token = "tok",
+          kind = "memory",
+          env = Map("pgHost" -> "h"),
+          objectStoreSql = "",
+          extraSetupSql = ""
+        ),
+        30,
+        None
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None)
+        .unsafeRunSync()
+        .toOption
+        .flatMap(_.assignment)
+        .map(_.authzLimits)
+    val (store, h) = fixture()
+    limits(h, store) shouldBe Some(FleetNodeAuthzLimitsDto(2000, 10000))
+    val setStore = new InMemoryFleetServerStore(clock = () => t0)
+    val set      = new FleetHandlers(
+      setStore,
+      hbCfg,
+      backend = Some(new FleetQuackBackend(setStore, hbCfg, clock = () => t0)),
+      nodeKeys = NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0)
+    )
+    limits(set, setStore) shouldBe Some(FleetNodeAuthzLimitsDto(750, 0))
   }
 
   it should "409 an address change on a known name even when idle (no takeover)" in {
@@ -173,7 +262,9 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val h = new FleetHandlers(
       failing,
       hbCfg,
-      backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0))
+      backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0)),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val e = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().left.toOption.get
     (e._1, e._2.error) shouldBe (StatusCode.BadGateway, "backend_error")
@@ -185,7 +276,13 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "400 fleet_disabled and write no server row when the manager is not in fleet mode" in {
     val store = new InMemoryFleetServerStore(clock = () => t0)
-    val h     = new FleetHandlers(store, hbCfg, backend = None)
+    val h     = new FleetHandlers(
+      store,
+      hbCfg,
+      backend = None,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     h.heartbeat(req(), Some("secret"), loopback, None)
       .unsafeRunSync()
       .left
@@ -207,7 +304,16 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     )
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
-    (store, new FleetHandlers(store, cfg, backend = Some(backend)))
+    (
+      store,
+      new FleetHandlers(
+        store,
+        cfg,
+        backend = Some(backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+    )
 
   "heartbeat approval" should "leave a server joined from outside the list pending" in {
     val (store, h) = approvalFixture("10.0.0.0/8")
@@ -262,7 +368,9 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val widened = new FleetHandlers(
       store,
       FleetConfig(joinToken = "secret", heartbeatSec = 7),
-      backend = Some(new FleetQuackBackend(store, hbCfg, clock = () => t0))
+      backend = Some(new FleetQuackBackend(store, hbCfg, clock = () => t0)),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     widened
       .heartbeat(req(), Some("secret"), addr("192.168.1.5"), None)
@@ -285,7 +393,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         Map("pgPassword" -> "p"),
         "",
         "",
-        "",
         ""
       )
     )
@@ -305,7 +412,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         "tok",
         "memory",
         Map("pgPassword" -> "p"),
-        "",
         "",
         "",
         ""
@@ -350,7 +456,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         Map("pgPassword" -> "p"),
         "",
         "",
-        "",
         ""
       ),
       30,
@@ -384,12 +489,32 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
 
   // --- Admin surface (Task 8) ----------------------------------------------------------------
 
+  // The approver an approval records is the calling user, resolved like the audit actor: the token
+  // "k" every admin case sends is a superuser session for "root" here.
+  private val rootAudit = new AuditRecorder(
+    NoopTelemetryStore,
+    t =>
+      Option.when(t == "k")(
+        SessionTokenStore.Session(
+          AuthenticatedProfile("root", "admin", Set.empty, Map.empty, "db", None),
+          SessionScope.Superuser,
+          t0
+        )
+      )
+  )
   private def adminFixture() =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
     val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
-    val h       =
-      new FleetHandlers(store, cfg, backend = Some(backend), publish = StateChangePublisher.noop)
+    val h       = new FleetHandlers(
+      store,
+      cfg,
+      backend = Some(backend),
+      publish = StateChangePublisher.noop,
+      audit = rootAudit,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     (store, h)
   private def beat(store: InMemoryFleetServerStore, name: String, host: String) =
     store.recordHeartbeat(
@@ -420,12 +545,11 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       Map.empty,
       "",
       "",
-      "",
       ""
     )
-  private val superuser: String => Option[SessionScope]   = _ => Some(SessionScope.Superuser)
-  private val tenantAdmin: String => Option[SessionScope] =
-    _ => Some(SessionScope(false, Set("acme")))
+  private val superuser: SessionScope.Resolver   = _ => SessionScope.Superuser
+  private val tenantAdmin: SessionScope.Resolver =
+    _ => SessionScope(false, Set("acme"))
 
   "listServers" should "carry the node's suggested action from the heartbeat" in {
     val (_, h) = adminFixture()
@@ -549,13 +673,15 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryFleetServerStore(),
       FleetConfig(joinToken = "s"),
       backend = None,
-      publish = StateChangePublisher.noop
+      publish = StateChangePublisher.noop,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
       Left("fleet_disabled")
   }
 
-  "approve" should "approve a pending server, idempotently, superuser only" in {
+  "approve" should "approve a pending server, idempotently, superuser only, recording the approving user" in {
     val (store, h) = adminFixture()
     store.recordHeartbeat(
       Heartbeat(
@@ -581,7 +707,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     h.approve(FleetServerOpRequest("p"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
     val row = store.get("p").get
     row.approved shouldBe true
-    row.approvedBy shouldBe Some("static-key")
+    row.approvedBy shouldBe Some("root")
     h.approve(FleetServerOpRequest("p"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
     h.approve(FleetServerOpRequest("ghost"), Some("k"))(superuser)
       .unsafeRunSync()
@@ -700,7 +826,14 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
     val backend = new FleetQuackBackend(probe, cfg, clock = () => t0)
     val pub     = new CountingPublisher
-    val h       = new FleetHandlers(probe, cfg, backend = Some(backend), publish = pub)
+    val h       = new FleetHandlers(
+      probe,
+      cfg,
+      backend = Some(backend),
+      publish = pub,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     (inner, probe, pub, h)
 
   "heartbeat" should "not reply with an assignment bound to another source, whatever the store said" in {
@@ -762,4 +895,51 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     beat(store, "gone", "10.0.0.3"); store.backdate("gone", 100)
     FleetHandlers.livenessByName(store, backend) shouldBe
       Map("up" -> "reachable", "late" -> "unreachable", "gone" -> "dead")
+  }
+
+  "a stored assignment" should "decode with a tenantStoreSql an earlier manager wrote" in {
+    import FleetAssignment.given
+    val json =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"dbInitSql":"","objectStoreSql":"",
+        |"extraSetupSql":"","lockdownSql":"","tenantStoreSql":"x"}""".stripMargin
+    io.circe.parser.decode[FleetAssignment](json).map(_.nodeId) shouldBe Right("n1")
+  }
+
+  // Task 20: an assignment stored before the tenant's initSql travelled apart carried it in
+  // dbInitSql, together with the manager's resource SETs. Nothing reads that field any more, so its
+  // SQL never runs as the manager's.
+  it should "drop the dbInitSql of an earlier manager rather than trust it" in {
+    import FleetAssignment.given
+    val json =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"dbInitSql":"CREATE VIEW v AS SELECT 1;",
+        |"objectStoreSql":"","extraSetupSql":"","lockdownSql":""}""".stripMargin
+    val a = io.circe.parser.decode[FleetAssignment](json).toOption.get
+    (a.resourceSql, a.tenantDbInitSql, a.tenantDbInitTrusted) shouldBe ("", "", false)
+    io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "CREATE VIEW"
+  }
+
+  // Phase D: an assignment an earlier manager stored carries lockdownSql. It still decodes, the field
+  // is dropped, and no heartbeat hands it on.
+  it should "drop the lockdownSql of an earlier manager" in {
+    import FleetAssignment.given
+    import Dtos.given
+    val json =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"resourceSql":"","objectStoreSql":"",
+        |"extraSetupSql":"","lockdownSql":"SET disabled_filesystems = 'LocalFileSystem';"}""".stripMargin
+    val a = io.circe.parser.decode[FleetAssignment](json).toOption.get
+    a.nodeId shouldBe "n1"
+    io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "lockdownSql"
+    val dto = FleetHandlers.toDto(
+      a,
+      "ab" * 32,
+      ai.starlake.quack.NodeExtensionsConfig(),
+      ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    io.circe
+      .Encoder[FleetAssignmentDto]
+      .apply(dto)
+      .noSpaces should not include "disabled_filesystems"
   }

@@ -1,0 +1,1 @@
+PREPARE p2 AS SELECT v FROM t WHERE id = $1

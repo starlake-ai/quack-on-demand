@@ -1,8 +1,8 @@
 """`--with-starflow`: run Starflow (the Starlake API + UI) beside the manager.
 
-Logic only (no typer): env and URL resolution, shared secrets, the installer,
-the Starflow database on QoD's Postgres server, and the process launch and
-teardown. The command glue lives in commands/_starflow.py. Design:
+Logic only (no typer): env and URL resolution, the shared session secret, the
+installer, the Starflow database on QoD's Postgres server, and the process
+launch and teardown. The command glue lives in commands/_starflow.py. Design:
 docs/superpowers/specs/2026-10-04-with-starflow-design.md.
 """
 
@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .config import REMOVED_API_KEY
 from .serve_provision import wait_ready
 
 DEFAULT_PORT = 9900
@@ -102,29 +103,25 @@ def ensure_shared_secrets(
     base_env: dict,
     save: Callable[[dict], None],
     token: Callable[[int], str] = secrets.token_urlsafe,
-) -> tuple[str, str]:
-    """The API key and session secret both sides must share. Generated once and
-    persisted (qod config [start] table) so SSO survives a restart."""
-    api_key = base_env.get("QOD_API_KEY") or ""
+) -> str:
+    """The session secret both sides share: the manager signs its sessions with it
+    and Starflow mints its SSO tokens with it. Generated once and persisted (qod
+    config [start] table) so SSO survives a restart. Nothing else is shared: no
+    static API key is part of the pairing."""
     secret = base_env.get("QOD_SESSION_JWT_SECRET") or ""
-    fresh: dict[str, str] = {}
-    if not api_key:
-        api_key = fresh["QOD_API_KEY"] = token(32)
     if not secret:
-        secret = fresh["QOD_SESSION_JWT_SECRET"] = token(48)
-    if fresh:
-        save(fresh)
-    return api_key, secret
+        secret = token(48)
+        save({"QOD_SESSION_JWT_SECRET": secret})
+    return secret
 
 
-def manager_env(url: str, api_key: str, secret: str) -> dict[str, str]:
-    """Overlay for the manager JVM: Starlake menu/SSO on, shared secrets.
+def manager_env(url: str, secret: str) -> dict[str, str]:
+    """Overlay for the manager JVM: Starlake menu/SSO on, the shared secret.
     JWT_SECRET_KEY feeds the edge's bearer provider, which must verify the
     tokens Starflow mints with the same secret."""
     return {
         "SL_ENABLED": "true",
         "SL_URL": url,
-        "QOD_API_KEY": api_key,
         "QOD_SESSION_JWT_SECRET": secret,
         "JWT_SECRET_KEY": secret,
     }
@@ -137,20 +134,21 @@ def starflow_env(
     *,
     port: int,
     url: str,
-    api_key: str,
     secret: str,
     pg: PgCoords,
     java_home: str,
 ) -> dict[str, str]:
     """Starflow's process env: process env (minus the manager's JAVA_OPTS), then
     the env file, then the coupling vars, which win so a stale value in the
-    file cannot break the pairing with the manager just launched."""
+    file cannot break the pairing with the manager just launched. QOD_API_KEY is
+    dropped from both sources: no static key is part of the pairing, and an older
+    Starflow holding one sends it instead of falling back to the user's session."""
     mgr_port = mgr_env.get("QOD_ON_DEMAND_PORT") or "20900"
     flight_port = mgr_env.get("PROXY_PORT") or "31338"
     tls = (mgr_env.get("PROXY_TLS_ENABLED") or "true").lower() != "false"
     public = (mgr_env.get("QOD_PUBLIC_BASE_URL") or f"http://localhost:{mgr_port}").rstrip("/")
-    env = {k: v for k, v in proc_env.items() if k != "JAVA_OPTS"}
-    env.update(file_env)
+    env = {k: v for k, v in proc_env.items() if k not in ("JAVA_OPTS", REMOVED_API_KEY)}
+    env.update({k: v for k, v in file_env.items() if k != REMOVED_API_KEY})
     # local-run-api defaults this to http://localhost:9900/airflow/; follow the
     # Starflow URL instead, unless the user set it.
     env.setdefault("SL_API_ORCHESTRATOR_URL", f"{url}/airflow/")
@@ -164,7 +162,6 @@ def starflow_env(
             "QOD_TLS_INSECURE": "true",
             # Browser-facing: must work from other machines.
             "QOD_UI_URL": f"{public}/ui",
-            "QOD_API_KEY": api_key,
             "JWT_SECRET_KEY": secret,
             "SL_API_HTTP_PORT": str(port),
             "SL_API_HTTP_FRONT_URL": url,

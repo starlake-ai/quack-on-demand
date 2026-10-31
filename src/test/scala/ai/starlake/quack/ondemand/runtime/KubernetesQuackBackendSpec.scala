@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import io.fabric8.kubernetes.api.model.{Container, ObjectMeta, Pod, PodSpec}
 import io.fabric8.kubernetes.client.server.mock.KubernetesServer
 import org.scalatest.{BeforeAndAfterEach, OptionValues}
@@ -28,7 +30,9 @@ class KubernetesQuackBackendSpec
       quackPort = 8080,
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
-      readPodReady = _ => true
+      readPodReady = _ => true,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(
       PoolKey("acme", "acme_default", "sales"),
@@ -53,7 +57,9 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      stopTimeoutSec = 2
+      stopTimeoutSec = 2,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key = PoolKey("acme", "acme_default", "sales")
     noException should be thrownBy backend.stop(key, "quack-never-existed").unsafeRunSync()
@@ -77,7 +83,9 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      readEnv = name => fakeEnv.get(name)
+      readEnv = name => fakeEnv.get(name),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val node = backend
       .start(
@@ -113,7 +121,9 @@ class KubernetesQuackBackendSpec
     env.get("QOD_S3_USE_SSL") shouldBe Some("false")
     env.contains("PATH") shouldBe false
 
-  it should "let per-node metastore override the forwarded env var" in:
+  // SEC-1: the object-store settings are the manager's own. A tenant-db's metastore (tenant-admin
+  // input) neither replaces a forwarded value nor suppresses it.
+  it should "forward the manager's object-store settings whatever the metastore names" in:
     val fakeEnv = Map("QOD_S3_ENDPOINT" -> "http://from-manager:8333")
     val backend = new KubernetesQuackBackend(
       client = server.getClient,
@@ -123,19 +133,29 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      readEnv = name => fakeEnv.get(name)
+      readEnv = name => fakeEnv.get(name),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
-    val node = backend
-      .start(
-        NodeSpec(
-          PoolKey("acme", "acme_default", "sales"),
-          "quack-cred-override",
-          Role.Dual,
-          metastore = Map("QOD_S3_ENDPOINT" -> "http://per-pool:8333"),
-          s3 = Map.empty
+    val (node, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
+      backend
+        .start(
+          NodeSpec(
+            PoolKey("acme", "acme_default", "sales"),
+            "quack-cred-override",
+            Role.Dual,
+            metastore = Map("QOD_S3_ENDPOINT" -> "http://per-pool:8333"),
+            s3 = Map.empty
+          )
         )
-      )
-      .unsafeRunSync()
+        .unsafeRunSync()
+    )
+    // The metastore's key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      List((Level.ERROR, "acme/acme_default/sales", "QOD_S3_ENDPOINT"))
+    withClue("the metastore's value in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("per-pool")) shouldBe false
+    )
 
     val container = server.getClient.pods
       .inNamespace("default")
@@ -144,9 +164,10 @@ class KubernetesQuackBackendSpec
       .getSpec
       .getContainers
       .get(0)
-    val env = container.getEnv.asScala.map(e => e.getName -> e.getValue).toMap
+    val endpoints =
+      container.getEnv.asScala.filter(_.getName == "QOD_S3_ENDPOINT").map(_.getValue).toList
 
-    env("QOD_S3_ENDPOINT") shouldBe "http://per-pool:8333"
+    endpoints shouldBe List("http://from-manager:8333")
 
   it should "discover existing pods by label on restart" in:
     val client = server.getClient
@@ -182,7 +203,9 @@ class KubernetesQuackBackendSpec
       8080,
       "managed-by=quack-on-demand",
       5,
-      readPodReady = _ => true
+      readPodReady = _ => true,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val nodes = backend.discoverExisting().unsafeRunSync()
     nodes.map(_.nodeId) should contain("quack-acme-sales-1")
@@ -197,7 +220,9 @@ class KubernetesQuackBackendSpec
     quackPort = 8080,
     podLabel = "managed-by=quack-on-demand",
     startupTimeoutSec = 5,
-    readPodReady = _ => true
+    readPodReady = _ => true,
+    nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+    nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
   )
 
   /** Same shape as the real federation blob -- a short ATTACH-flavoured string. */
@@ -577,7 +602,9 @@ class KubernetesQuackBackendSpec
       quackPort = 8080,
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 1,
-      readPodReady = _ => false
+      readPodReady = _ => false,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(FedKey, "quack-fail-1", Role.Dual, metastore = Map.empty, s3 = Map.empty)
 
@@ -617,7 +644,9 @@ class KubernetesQuackBackendSpec
       quackPort = 8080,
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 1,
-      readPodReady = _ => false
+      readPodReady = _ => false,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     an[Exception] should be thrownBy failing
       .start(
@@ -652,7 +681,9 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      stopTimeoutSec = 5
+      stopTimeoutSec = 5,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key  = PoolKey("acme", "acme_default", "sales")
     val spec =
@@ -678,7 +709,9 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      stopTimeoutSec = 1
+      stopTimeoutSec = 1,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key  = PoolKey("acme", "acme_default", "sales")
     val spec =
@@ -698,7 +731,9 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      stopTimeoutSec = 1
+      stopTimeoutSec = 1,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key  = PoolKey("acme", "acme_default", "sales")
     val spec =
@@ -753,7 +788,9 @@ class KubernetesQuackBackendSpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      podTemplateEnabled = podTemplateEnabled
+      podTemplateEnabled = podTemplateEnabled,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
 
   private def backend: KubernetesQuackBackend = makeBackend(podTemplateEnabled = true)
@@ -879,7 +916,9 @@ class KubernetesQuackBackendSpec
       startupTimeoutSec = 5,
       readPodReady = _ => true,
       serviceAccount = Some("quack-nodes"),
-      serviceType = "NodePort"
+      serviceType = "NodePort",
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(
       PoolKey("acme", "acme_default", "sales"),
@@ -902,7 +941,9 @@ class KubernetesQuackBackendSpec
       quackPort = 8080,
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
-      readPodReady = _ => true
+      readPodReady = _ => true,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val keyA = PoolKey("acme", "acme_default", "sales")
     val keyB = PoolKey("acme", "acme_default", "bi")
@@ -922,7 +963,9 @@ class KubernetesQuackBackendSpec
       quackPort = 8080,
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
-      readPodReady = _ => true
+      readPodReady = _ => true,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(
       PoolKey("acme", "acme_default", "sales"),

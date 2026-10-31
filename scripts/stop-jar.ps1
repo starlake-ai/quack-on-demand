@@ -7,7 +7,7 @@
   / FlightSQL listen ports and ITS child Quack nodes by their spawn-quack-node.ps1
   wrapper, whose command line carries the manager's marker
   `<rest-port>-<boot id>` (LocalQuackBackend.managerMarker), plus any orphaned
-  duckdb.exe of that manager. Another manager's nodes (a different REST port) and
+  qod-node.exe (or an earlier release's duckdb.exe) of that manager. Another manager's nodes (a different REST port) and
   unmarked nodes from an older manager are left alone. Terminates each process
   tree with `taskkill /T` (graceful) escalating to `/T /F` (force) after
   FORCE_AFTER seconds.
@@ -72,10 +72,11 @@ for ($i = 0; $i -lt $ForceAfter; $i++) {
 # ---- Force: taskkill /T /F ----
 Write-Host "still running after ${ForceAfter}s; force-killing."
 foreach ($p in $pids) { & taskkill /PID $p /T /F *> $null }
-# Sweep any orphaned node duckdb.exe of THIS manager left behind (its command line runs
-# `duckdb ... -init <...>\quack-node.<rest-port>-<boot id>.<id>\init`), not an unrelated duckdb.exe
+# Sweep any orphaned node of THIS manager left behind: a qod-node.exe whose command line names
+# `--secret-directory <...>\quack-node.<rest-port>-<boot id>.<id>\secrets\...` (an earlier release's
+# `duckdb.exe ... -init <...>\quack-node.<rest-port>-<boot id>.<id>\init`), not an unrelated process
 # nor another manager's node.
-Get-CimInstance Win32_Process -Filter "Name='duckdb.exe'" -ErrorAction SilentlyContinue |
+Get-CimInstance Win32_Process -Filter "Name = 'qod-node.exe' OR Name = 'duckdb.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -match "quack-node\.$MgrPort-[0-9a-f]+\." } |
   ForEach-Object { & taskkill /PID $_.ProcessId /T /F *> $null }
 

@@ -6,6 +6,7 @@ import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.rbac.{EffectiveSet, HandshakeDenial}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser}
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.*
@@ -38,6 +39,14 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       cfg,
       new OpaClient(timeoutMs, OpaClient.jdkPost(timeoutMs)),
       new OpaDecisionCache(ttl),
+      OpaInstruments.noop
+    )
+
+  private def stubbedAuthorizer(reply: Either[String, (Int, String)]) =
+    new OpaAuthorizer(
+      OpaConfig("qod", "", 500, 0),
+      new OpaClient(500, (_, _, _) => reply),
+      new OpaDecisionCache(0),
       OpaInstruments.noop
     )
 
@@ -244,6 +253,37 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       case Left(HandshakeDenial.Unavailable(_)) => succeed
       case other                                => fail(other.toString)
 
+  it should "answer the shared message, never the transport cause, and log the cause at WARN" in:
+    val cause          = "ConnectException: opa.internal:8181"
+    val user           = rbacUser("alice")
+    val eff            = EffectiveSet(user, Nil, Nil, Nil, Nil)
+    val (answer, logs) = LogCapture.logged(classOf[OpaAuthorizer].getName)(
+      stubbedAuthorizer(Left(cause))
+        .connect(tenant(), PoolKey("acme", "tpch", "bi"), Nil, user, eff, "flightsql")
+    )
+    answer shouldBe Left(HandshakeDenial.Unavailable(OpaAuthorizer.UnavailableMessage))
+    val leaked = answer.left.toOption.exists(_.toString.contains("opa.internal"))
+    leaked shouldBe false
+    val warned = logs.exists(e =>
+      e.getLevel == ch.qos.logback.classic.Level.WARN &&
+        e.getFormattedMessage.contains(cause) &&
+        e.getFormattedMessage.contains("tenant=acme") &&
+        e.getFormattedMessage.contains("connect")
+    )
+    warned shouldBe true
+
+  it should "answer the shared message when no OPA URL is configured" in:
+    val user = rbacUser("alice")
+    val eff  = EffectiveSet(user, Nil, Nil, Nil, Nil)
+    authorizer().connect(
+      Tenant("acme", acl = TenantAcl(Some("opa"))),
+      PoolKey("acme", "tpch", "bi"),
+      Nil,
+      user,
+      eff,
+      "flightsql"
+    ) shouldBe Left(HandshakeDenial.Unavailable(OpaAuthorizer.UnavailableMessage))
+
   it should "carry parentPool, roles and claims from the EffectiveSet into the request body" in:
     wm.resetAll()
     wm.stubFor(post(anyUrl()).willReturn(okJson("""{"result":{"allow":true}}""")))
@@ -271,3 +311,62 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         .withRequestBody(matchingJsonPath("$.input.user.roles[0]", equalTo("analyst")))
         .withRequestBody(matchingJsonPath("$.input.user.claims.dept", equalTo("fin")))
     )
+
+  "OpaClient.jdkPost" should "never carry the bearer token in a transport error" in:
+    val token  = "s3cr3t-opa-token\ninjected"
+    val result = OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", Some(token))
+    result.isLeft shouldBe true
+    val leaked = result.left.toOption.exists(_.contains("s3cr3t-opa-token"))
+    leaked shouldBe false
+
+  "decide" should "key the decision cache on kinds, columns, via and locations" in:
+    var calls = 0
+    val auth  = new OpaAuthorizer(
+      OpaConfig("qod", "", 500, 60),
+      new OpaClient(
+        500,
+        (_, _, _) => {
+          calls += 1
+          Right((200, """{"result":{"allow":true}}"""))
+        }
+      ),
+      new OpaDecisionCache(60),
+      OpaInstruments.noop
+    )
+    val a = OpaAccess("tpch", "main", "orders", "table", Verb.Read, List("id"), None)
+    def run(x: OpaAccess, locs: List[OpaLocation] = Nil) =
+      auth.decide(tenant(), tgt, usr, "u-1", "READ", List(x), locs)
+    run(a) shouldBe Decision.Allow(None)
+    run(a)
+    calls shouldBe 1
+    run(a.copy(columns = List("id", "ssn")))
+    calls shouldBe 2
+    run(a.copy(via = Some("tpch.main.v")))
+    calls shouldBe 3
+    run(a.copy(kind = "view"))
+    calls shouldBe 4
+    run(a, List(OpaLocation("read", "s3://b/x.parquet", "s3://b/", "read_parquet")))
+    calls shouldBe 5
+
+  it should "ask the statement rule with edge node and never the text" in:
+    var posted = ""
+    var url    = ""
+    val auth   = new OpaAuthorizer(
+      OpaConfig("qod", "", 500, 0),
+      new OpaClient(
+        500,
+        (u, body, _) => {
+          url = u
+          posted = body
+          Right((200, """{"result":{"allow":false,"reason":"no"}}"""))
+        }
+      ),
+      new OpaDecisionCache(0),
+      OpaInstruments.noop
+    )
+    val a = OpaAccess("tpch", "main", "orders", "table", Verb.Read, Nil, None)
+    auth.decide(tenant(text = true), tgt, usr, "u-1", "READ", List(a), Nil) shouldBe
+      Decision.Deny("no", Set(TableAccess(TableRef("tpch", "main", "orders"), Verb.Read)), None)
+    url should endWith("/statement")
+    posted should include("\"edge\":\"node\"")
+    posted should not include "\"text\""

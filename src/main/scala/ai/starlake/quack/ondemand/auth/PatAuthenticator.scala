@@ -33,7 +33,7 @@ final case class PatPrincipal(
   *     `AuthHandlers.mintSessionFor` applies at login. A PAT authenticates AS its owning user, so
   *     it must never outrank that user's own login session: a tenant-less non-admin row is demoted
   *     to a profile-only principal here exactly as login refuses it `admin_required`. (The data
-  *     plane -- `PostgresAclValidator`, the RLS/CLS rewriters, the handshake pool gate -- keys its
+  *     plane -- the node's grant check, the RLS/CLS rewriters, the handshake pool gate -- keys its
   *     own bypass off `tenant.isEmpty` alone; that is the FlightSQL side's rule, not this one.)
   *   - `manageableTenants` = the tenants where this principal carries role `admin`, from the owning
   *     row or any sibling grant.
@@ -52,9 +52,9 @@ final case class PatPrincipal(
   * @param grantsFor
   *   MUST be wired row-only: `u => List(UserGrant(u.tenant, u.kind))`, the grant list
   *   `AuthHandlers.mintSessionFor` builds in `Db` mode. A PAT is bound to one `qodstate_user` row,
-  *   so the principal is unambiguous; an identity-keyed lookup (`UserStore.grantsForIdentity`,
-  *   which matches by username across tenants) would fold in the grants of the SAME-NAMED but
-  *   DIFFERENT user in another tenant -- usernames are unique only per tenant
+  *   so the principal is unambiguous; an identity-keyed lookup (`UserStore.grantsForIdentity` in
+  *   `LoginRealm.System`, which matches by username across every realm) would fold in the grants of
+  *   the SAME-NAMED but DIFFERENT user in another tenant -- usernames are unique only per tenant
   *   (`qodstate_user_scoped_unique`) -- handing the PAT `manageableTenants` its owner's own login
   *   session does not have. The seam exists so tests can stub, not so callers can widen the
   *   principal.
@@ -96,9 +96,10 @@ final class PatAuthenticator(
   def isAdmin(token: String): Boolean = resolve(token).exists(_.isAdmin)
 
   /** A synthetic session equivalent to what a password login would mint for this principal, so the
-    * session-consuming handlers (whoami, the profile endpoints) work off a PAT unchanged. The role
-    * is the computed privilege level, not the raw `qodstate_user.kind` label, matching the `admin`
-    * / `user` distinction `LoginResponse.admin` carries.
+    * session-consuming code (the guard's admission, the profile endpoints, the self-lock guard,
+    * audit attribution, `/api/auth/whoami`) works off a PAT unchanged. The role is the computed
+    * privilege level, not the raw `qodstate_user.kind` label, matching the `admin` / `user`
+    * distinction `LoginResponse.admin` carries.
     */
   def sessionOf(token: String): Option[SessionTokenStore.Session] =
     resolve(token).map { p =>

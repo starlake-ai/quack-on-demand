@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":[],"catalog":"system","name":"nextval","schema":"main","type":"scalar","via":null}],"objects":[{"access":"update","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"sequence","name":"seq1","schema":"main","via":null}],"settings":[],"statement":"PROJECTION","v":1}

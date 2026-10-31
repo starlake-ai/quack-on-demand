@@ -9,7 +9,7 @@ import typer
 from .. import admin_password, launcher, starflow
 from ..config import config_path, load_start_env
 from . import _starflow
-from ._launch import _exec, resolve_jar, resolve_java
+from ._launch import _exec, refuse_a_static_api_key, resolve_jar, resolve_java
 
 # Tenant-db Postgres databases created by the bundled demo manifests; NUKE=1
 # drops them alongside the control-plane DB, mirroring run-jar.sh.
@@ -179,8 +179,10 @@ def start(
     without the checkout). Postgres is assumed reachable (QOD_PG_* env vars);
     supports run-jar's LOAD_TPCH/LOAD_TPCDS/LOAD_SSB/LOAD_TPC, DEMO, NUKE,
     JAVA_OPTS, JAVA_BIN, JAR_CACHE_DIR, DUCKDB_VERSION, and DUCKDB_CACHE_DIR.
-    Run `qod setup` once to persist QOD_PG_*/admin/API-key/TLS settings so you
+    Run `qod setup` once to persist QOD_PG_*/admin/auth/TLS settings so you
     don't have to export them every time - a real env var still overrides it.
+    Refuses to launch while QOD_API_KEY is set in the shell or stored by qod
+    setup: the static API key was removed.
     With --demo, runs the self-contained demo instead (no Postgres needed,
     and qod setup's stored config is not applied - see qod setup --help).
     Ctrl-C tears the manager and its nodes down gracefully (same as qod stop).
@@ -201,6 +203,9 @@ def start(
     except Exception:
         pass  # purely decorative; must never block a start
 
+    # Before anything is installed or launched, the demo alias included.
+    refuse_a_static_api_key()
+
     sf_request = _starflow.request(
         with_starflow, starflow_home, starflow_version, starflow_port, starflow_url,
         starflow_env_file,
@@ -213,8 +218,8 @@ def start(
         )
         raise typer.Exit(1)
     if sf_request is not None:
-        # qod cannot know, or inject, the running manager's API key and session
-        # secret, so the pair could never authenticate (same refusal as serve).
+        # qod cannot know, or inject, the running manager's session secret, so
+        # the pair could never authenticate (same refusal as serve).
         port = {**load_start_env(), **os.environ}.get("QOD_ON_DEMAND_PORT") or "20900"
         manager_url = f"http://localhost:{port}"
         if _manager_running(manager_url):
@@ -243,8 +248,9 @@ def start(
     try:
         duckdb_bin = launcher.ensure_duckdb_cli(app_home)
         libduckdb = launcher.ensure_libduckdb(app_home)
+        node_bin = launcher.node_binary(jar_path, app_home)
     except Exception as e:
-        typer.echo(f"could not provision duckdb: {e}", err=True)
+        typer.echo(f"could not provision the node runtime: {e}", err=True)
         raise typer.Exit(1)
     spawn_sh, spawn_ps1 = launcher.materialize_spawn_scripts(app_home / "scripts")
     # `qod setup` persists QOD_*/PROXY_* vars to the CLI config file; a real
@@ -255,10 +261,10 @@ def start(
     base_env = {**load_start_env(), **os.environ}
     sf_plan = _starflow.prepare(sf_request, base_env, java) if sf_request else None
     env = launcher.runtime_env(
-        base_env, app_home, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb
+        base_env, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb, qod_node_bin=node_bin
     )
     if sf_plan is not None:
-        env.update(starflow.manager_env(sf_plan.url, sf_plan.api_key, sf_plan.secret))
+        env.update(starflow.manager_env(sf_plan.url, sf_plan.secret))
     # The manager's startup banner names the CLI config file it was launched with.
     env["QOD_CONFIG_FILE"] = str(config_path())
 

@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"alter","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"pk_parent","schema":"main","via":null},{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"fk_child","schema":"main","via":null}],"settings":[],"statement":"CREATE_TABLE","v":1}

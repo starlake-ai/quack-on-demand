@@ -25,6 +25,7 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(
         launcher, "ensure_libduckdb", lambda cache_dir=None, **kw: tmp_path / "duckdb" / launcher.DUCKDB_CLI_VERSION / "lib"
     )
+    monkeypatch.setattr(launcher, "node_binary", lambda *a, **kw: None)
     monkeypatch.setattr(
         launcher,
         "materialize_spawn_scripts",
@@ -319,6 +320,64 @@ def test_start_real_env_var_wins_over_setup_config(runner, wired, monkeypatch):
     assert wired["env"]["QOD_PG_HOST"] == "from-shell"
 
 
+@pytest.mark.parametrize("demo", [False, True])
+def test_start_refuses_a_static_api_key_in_the_shell(runner, wired, monkeypatch, demo):
+    # `qod start --demo` (the demo's deprecated alias) goes through the same check.
+    import qod_cli.commands.demo as demo_mod
+    from qod_cli.main import app
+
+    ran = []
+    monkeypatch.setattr(demo_mod, "run_demo", lambda *a, **kw: ran.append(1))
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
+    args = ["start", "--jar", str(wired["jar"])] + (["--demo"] if demo else [])
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert "your shell: run `unset QOD_API_KEY`" in result.output
+    assert "stale-key-value" not in result.output
+    assert "cmd" not in wired
+    assert ran == []
+
+
+def test_start_refuses_a_static_api_key_in_the_start_table(runner, wired):
+    from qod_cli.config import config_path, save_start_env
+    from qod_cli.main import app
+
+    save_start_env({"QOD_API_KEY": "stale-key-value"})
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 1
+    assert (
+        f"the [start] table of {config_path()}: delete its QOD_API_KEY line, or run "
+        "qod setup --unset QOD_API_KEY --non-interactive"
+    ) in result.output
+    assert "your shell" not in result.output
+    assert "stale-key-value" not in result.output
+    assert "cmd" not in wired
+
+
+def test_start_names_every_source_of_a_static_api_key(runner, wired, monkeypatch):
+    from qod_cli.config import save_start_env
+    from qod_cli.main import app
+
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
+    save_start_env({"QOD_API_KEY": "stale-key-value"})
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 1
+    assert "your shell" in result.output
+    assert "the [start] table of" in result.output
+
+
+def test_start_accepts_an_empty_static_api_key(runner, wired, monkeypatch):
+    # The manager accepts an empty value (older Compose files render API_KEY= as one).
+    from qod_cli.config import save_start_env
+    from qod_cli.main import app
+
+    monkeypatch.setenv("QOD_API_KEY", "  ")
+    save_start_env({"QOD_API_KEY": ""})
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 0, result.output
+    assert "cmd" in wired
+
+
 def test_start_load_flags_warn_and_skip_on_windows(runner, wired, monkeypatch, tmp_path):
     from qod_cli.commands import start as start_cmd
     from qod_cli.main import app
@@ -434,11 +493,16 @@ def test_start_with_starflow_wires_both_sides(runner, starflow_wired, monkeypatc
     stored = load_start_env()
     assert mgr["SL_ENABLED"] == "true"
     assert mgr["SL_URL"] == "http://localhost:9000"
-    assert mgr["QOD_API_KEY"] == stored["QOD_API_KEY"]
     assert mgr["QOD_SESSION_JWT_SECRET"] == stored["QOD_SESSION_JWT_SECRET"]
     assert mgr["JWT_SECRET_KEY"] == stored["QOD_SESSION_JWT_SECRET"]
     sf = starflow_wired["starflow"]
-    assert sf["env"]["QOD_API_KEY"] == mgr["QOD_API_KEY"]
+    # Booleans first: a failing assertion must never print an environment.
+    key_in = {
+        "manager": "QOD_API_KEY" in mgr,
+        "starflow": "QOD_API_KEY" in sf["env"],
+        "[start]": "QOD_API_KEY" in stored,
+    }
+    assert key_in == {"manager": False, "starflow": False, "[start]": False}
     assert sf["env"]["JWT_SECRET_KEY"] == mgr["QOD_SESSION_JWT_SECRET"]
     assert sf["env"]["SL_API_JDBC_URL"] == "jdbc:postgresql://localhost:5433/starlake"
     assert sf["env"]["SL_API_JDBC_PASSWORD"] == "azizam"
@@ -463,20 +527,23 @@ def test_start_with_starflow_env_file_and_remote_url(runner, starflow_wired, tmp
     sf_env = starflow_wired["starflow"]["env"]
     assert sf_env["SL_API_HTTP_PORT"] == "9000"
     assert sf_env["SL_API_MODE"] == "ALL"
-    assert sf_env["QOD_API_KEY"] != "stale"
+    key_in_starflow = "QOD_API_KEY" in sf_env
+    assert not key_in_starflow  # the env file's stale key never reaches Starflow
     assert sf_env["SL_API_DOMAIN"] == "sf.example.com"
     assert starflow_wired["env"]["SL_URL"] == "https://sf.example.com"
 
 
-def test_start_with_starflow_reuses_persisted_secrets(runner, starflow_wired):
-    from qod_cli.config import save_start_env
+def test_start_with_starflow_reuses_the_persisted_secret(runner, starflow_wired):
+    from qod_cli.config import load_start_env, save_start_env
     from qod_cli.main import app
 
-    save_start_env({"QOD_API_KEY": "k1", "QOD_SESSION_JWT_SECRET": "s1"})
+    save_start_env({"QOD_SESSION_JWT_SECRET": "s1"})
     result = runner.invoke(app, ["start", "--jar", str(starflow_wired["jar"]), "--with-starflow"])
     assert result.exit_code == 0, result.output
-    assert starflow_wired["env"]["QOD_API_KEY"] == "k1"
+    assert starflow_wired["env"]["JWT_SECRET_KEY"] == "s1"
     assert starflow_wired["starflow"]["env"]["JWT_SECRET_KEY"] == "s1"
+    # Key names only: the stored values never reach an assertion message.
+    assert sorted(load_start_env()) == ["QOD_SESSION_JWT_SECRET"]
 
 
 def test_start_starflow_flag_without_with_starflow_is_a_usage_error(runner, wired):
@@ -507,8 +574,8 @@ def test_start_demo_refuses_with_starflow(runner, starflow_wired):
 def test_start_with_starflow_refuses_when_a_manager_is_already_running(
     runner, starflow_wired, monkeypatch
 ):
-    # qod cannot know, or inject, the running manager's API key and session
-    # secret, so the pair could never authenticate.
+    # qod cannot know, or inject, the running manager's session secret, so the
+    # pair could never authenticate.
     from qod_cli import starflow
     from qod_cli.commands import start as start_cmd
     from qod_cli.config import load_start_env
@@ -520,7 +587,6 @@ def test_start_with_starflow_refuses_when_a_manager_is_already_running(
     monkeypatch.setattr(
         starflow, "stop_running", lambda *a, **kw: pytest.fail("must not reap anything")
     )
-    monkeypatch.delenv("QOD_API_KEY", raising=False)
     monkeypatch.delenv("QOD_SESSION_JWT_SECRET", raising=False)
     result = runner.invoke(app, ["start", "--jar", str(starflow_wired["jar"]), "--with-starflow"])
     assert result.exit_code == 1
@@ -531,8 +597,7 @@ def test_start_with_starflow_refuses_when_a_manager_is_already_running(
     ) in result.output
     assert "cmd" not in starflow_wired
     assert "starflow" not in starflow_wired
-    stored = load_start_env()
-    assert "QOD_API_KEY" not in stored and "QOD_SESSION_JWT_SECRET" not in stored
+    assert sorted(load_start_env()) == []
 
 
 def test_start_with_starflow_probe_reads_the_port_from_the_stored_config(
@@ -621,46 +686,26 @@ def test_start_with_starflow_leftover_stop_failure_is_a_warning(
     assert "starflow" in starflow_wired
 
 
-def test_start_with_starflow_says_which_secrets_it_generated(
-    runner, starflow_wired, monkeypatch
-):
+def test_start_with_starflow_says_it_generated_the_session_secret(runner, starflow_wired):
     from qod_cli.config import config_path, load_start_env
     from qod_cli.main import app
 
-    monkeypatch.delenv("QOD_API_KEY", raising=False)
-    monkeypatch.delenv("QOD_SESSION_JWT_SECRET", raising=False)
     result = runner.invoke(app, ["start", "--jar", str(starflow_wired["jar"]), "--with-starflow"])
     assert result.exit_code == 0, result.output
-    stored = load_start_env()
     assert (
-        "generated QOD_API_KEY/QOD_SESSION_JWT_SECRET for the Starflow pairing "
+        "generated QOD_SESSION_JWT_SECRET for the Starflow pairing "
         f"(stored in {config_path()})"
     ) in result.output
-    assert stored["QOD_API_KEY"] not in result.output
-    assert stored["QOD_SESSION_JWT_SECRET"] not in result.output
+    assert "QOD_API_KEY" not in result.output
+    secret_printed = load_start_env()["QOD_SESSION_JWT_SECRET"] in result.output
+    assert not secret_printed
 
 
-def test_start_with_starflow_names_only_the_generated_secret(runner, starflow_wired, monkeypatch):
-    from qod_cli.config import load_start_env, save_start_env
-    from qod_cli.main import app
-
-    monkeypatch.delenv("QOD_API_KEY", raising=False)
-    monkeypatch.delenv("QOD_SESSION_JWT_SECRET", raising=False)
-    save_start_env({"QOD_API_KEY": "k1"})
-    result = runner.invoke(app, ["start", "--jar", str(starflow_wired["jar"]), "--with-starflow"])
-    assert result.exit_code == 0, result.output
-    assert "generated QOD_SESSION_JWT_SECRET for the Starflow pairing" in result.output
-    assert "QOD_API_KEY/" not in result.output
-    assert load_start_env()["QOD_SESSION_JWT_SECRET"] not in result.output
-
-
-def test_start_with_starflow_silent_when_secrets_exist(runner, starflow_wired, monkeypatch):
+def test_start_with_starflow_silent_when_the_secret_exists(runner, starflow_wired):
     from qod_cli.config import save_start_env
     from qod_cli.main import app
 
-    monkeypatch.delenv("QOD_API_KEY", raising=False)
-    monkeypatch.delenv("QOD_SESSION_JWT_SECRET", raising=False)
-    save_start_env({"QOD_API_KEY": "k1", "QOD_SESSION_JWT_SECRET": "s1"})
+    save_start_env({"QOD_SESSION_JWT_SECRET": "s1"})
     result = runner.invoke(app, ["start", "--jar", str(starflow_wired["jar"]), "--with-starflow"])
     assert result.exit_code == 0, result.output
     assert "generated" not in result.output

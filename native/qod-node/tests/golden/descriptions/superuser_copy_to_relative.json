@@ -1,0 +1,1 @@
+{"control":[{"op":"copy_to","target":"rel/out.csv","type":"csv"}],"functions":[],"objects":[],"settings":[],"statement":"COPY_TO_FILE","v":1}

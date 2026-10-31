@@ -26,8 +26,11 @@ class SpawnScriptDuckDb20Spec extends AnyFlatSpec with Matchers with SpawnScript
       ) ++ extra)*
     )
 
-  "the node init SQL" should "serve plain HTTP (disable_ssl)" in {
-    ducklake() should include("disable_ssl := true")
+  // Plain HTTP (disable_ssl) is now qod-node's: its ServeStatement, pinned by sql_script_test.
+  "the node init SQL" should "leave loading quack and serving to qod-node" in {
+    val sql = ducklake()
+    sql should not include "quack_serve"
+    sql should not include "LOAD quack"
   }
 
   it should "hold one statement per line (a failing INSTALL must not skip a LOAD)" in

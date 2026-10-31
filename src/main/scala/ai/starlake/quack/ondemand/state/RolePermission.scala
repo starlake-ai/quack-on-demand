@@ -7,10 +7,10 @@ import java.time.Instant
   * wildcard. `verb` must be one of [[RolePermission.ValidVerbs]].
   *
   * The verb vocabulary is intentionally coarser than SQL keywords because the enforcement layer
-  * (`PostgresAclValidator`) only distinguishes Read / Write / Ddl per parsed statement. Storing
-  * granular SELECT / INSERT / UPDATE / DELETE would be a lie: a grant of `INSERT` would silently
-  * also admit DELETE on the same table. The four values below line up exactly with what the
-  * validator actually checks.
+  * (the node decision pipeline's `GrantMatch.verbCovers`) only distinguishes Read / Write / Ddl per
+  * described object. Storing granular SELECT / INSERT / UPDATE / DELETE would be a lie: a grant of
+  * `INSERT` would silently also admit DELETE on the same table. The four values below line up
+  * exactly with what that check distinguishes.
   */
 final case class RolePermission(
     id: String,
@@ -23,7 +23,7 @@ final case class RolePermission(
 )
 
 object RolePermission:
-  /** Canonical grant verbs. Match `PostgresAclValidator.verbCovers` 1:1.
+  /** Canonical grant verbs. Match `GrantMatch.verbCovers` 1:1.
     *
     *   - `RO` covers any SELECT-class access.
     *   - `RW` covers SELECT + any DML (INSERT/UPDATE/DELETE/MERGE/TRUNCATE) target.

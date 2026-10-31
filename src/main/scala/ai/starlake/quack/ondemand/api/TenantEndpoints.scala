@@ -98,6 +98,43 @@ object TenantEndpoints:
       .in(authToken)
       .out(jsonBody[OpaTestResponse])
 
+  // ----- Tenant authorized locations (in-engine authorization) -----
+  val listTenantLocations: PublicEndpoint[
+    (TenantLocationListRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantLocationListResponse,
+    Any
+  ] =
+    base.post
+      .in("tenant" / "location" / "list")
+      .in(jsonBody[TenantLocationListRequest])
+      .in(authToken)
+      .out(jsonBody[TenantLocationListResponse])
+
+  val addTenantLocation: PublicEndpoint[
+    (AddTenantLocationRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantLocationChangeResponse,
+    Any
+  ] =
+    base.post
+      .in("tenant" / "location" / "add")
+      .in(jsonBody[AddTenantLocationRequest])
+      .in(authToken)
+      .out(jsonBody[TenantLocationChangeResponse])
+
+  val removeTenantLocation: PublicEndpoint[
+    (RemoveTenantLocationRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantLocationChangeResponse,
+    Any
+  ] =
+    base.post
+      .in("tenant" / "location" / "remove")
+      .in(jsonBody[RemoveTenantLocationRequest])
+      .in(authToken)
+      .out(jsonBody[TenantLocationChangeResponse])
+
   // ----- Tenant databases -----
   val createTenantDb: PublicEndpoint[
     (TenantDbRequest, Option[String]),

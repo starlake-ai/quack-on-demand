@@ -6,7 +6,10 @@ import ai.starlake.quack.edge.auth.{
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
-  BasicAuthProvider
+  BasicAuthProvider,
+  BearerAuthProvider,
+  DatabaseAuthenticator,
+  TenantOidcRegistry
 }
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
@@ -113,18 +116,72 @@ object InMemoryAuthService:
                     role = u.kind,
                     groups = Set.empty,
                     claims = Map.empty,
-                    authMethod = "in-memory",
+                    // Stands in for the database authenticator, so its profile is the
+                    // authenticator's own: the management login takes it as the verified
+                    // qodstate_user row (the (tenant, kind) it carries) and reads no directory.
+                    authMethod = DatabaseAuthenticator.AuthMethod,
                     tenant = u.tenant
                   )
                 )
           else Left(AuthFailure.InvalidCredentials("invalid credentials"))
 
+  /** A REAL [[AuthenticationService]] (its own `authenticateBasic`, first match wins, with the
+    * failure latches) whose basic chain is exactly `providers`. It is built from
+    * [[emptyAuthConfig]], so it opens no connection, and the private chain is then replaced: a spec
+    * can drive the production chain walk over stub providers, such as the in-memory database check
+    * followed by the real password-grant authenticator against a stub token endpoint.
+    */
+  def realServiceWithBasicChain(providers: List[BasicAuthProvider]): AuthenticationService =
+    realServiceWithChains(providers, Nil, None)
+
+  /** A REAL [[AuthenticationService]] whose basic chain admits any user name with any password, as
+    * that user of the scope's realm (the database authenticator's profile shape). For specs that
+    * pin what happens around the auth chain, now that a service with no provider refuses every
+    * connection.
+    */
+  def acceptingAnyPassword(): AuthenticationService =
+    realServiceWithBasicChain(List(new BasicAuthProvider:
+      val name = "any-password"
+      def authenticate(
+          scope: AuthScope,
+          username: String,
+          password: String
+      ): Either[AuthFailure, AuthenticatedProfile] =
+        Right(
+          AuthenticatedProfile(
+            username = username,
+            role = "user",
+            groups = Set.empty,
+            claims = Map.empty,
+            authMethod = DatabaseAuthenticator.AuthMethod,
+            tenant = scope.tenantId
+          )
+        )))
+
+  /** A REAL [[AuthenticationService]] whose basic chain is `basic` and whose manager-wide bearer
+    * chain is `bearer`, with `tenantOidcRegistry` substituting a tenant's own OIDC authenticator
+    * into a tenant-scope bearer chain as in production. Built like [[realServiceWithBasicChain]].
+    */
+  def realServiceWithChains(
+      basic: List[BasicAuthProvider],
+      bearer: List[BearerAuthProvider],
+      tenantOidcRegistry: Option[TenantOidcRegistry]
+  ): AuthenticationService =
+    val svc = new AuthenticationService(emptyAuthConfig, "test-jwt-secret", tenantOidcRegistry):
+      override val hasProviders: Boolean = true
+    List("basicProviders" -> basic, "bearerProviders" -> bearer).foreach { (name, chain) =>
+      val field = classOf[AuthenticationService].getDeclaredField(name)
+      field.setAccessible(true)
+      field.set(svc, chain)
+    }
+    svc
+
   /** [[AuthenticationService]] subclass whose parent constructor opens no external connections (all
     * providers disabled via [[emptyAuthConfig]]) and whose `authenticateBasic` is wired to the
     * in-memory provider.
     *
-    * Pass `providersEnabled = false` to flip `hasProviders` back to `false`, driving the
-    * `auth_disabled` 503 branch in auth handlers end-to-end.
+    * Pass `providersEnabled = false` to flip `hasProviders` back to `false`: no password verifies,
+    * and the edge handshake refuses every connection.
     */
   final class Service(
       store: InMemoryControlPlaneStore,

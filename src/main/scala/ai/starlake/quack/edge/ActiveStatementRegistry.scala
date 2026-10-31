@@ -56,6 +56,9 @@ final class ActiveStatementRegistry(sqlPreviewChars: Int = 500):
 
   def deregister(id: String): Unit = { entries.remove(id); () }
 
+  /** True while `id` is registered: neither killed nor deregistered. */
+  def isRegistered(id: String): Boolean = entries.contains(id)
+
   def list(): List[ActiveStatement] =
     entries.values.map(_.info).toList.sortBy(_.startedAt).reverse
 

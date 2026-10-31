@@ -81,7 +81,6 @@ class EmbeddedControlPlaneSpec extends AnyFlatSpec with Matchers:
       // Everything else is untouched: this is the demo-posture guardrail in assertion form.
       applied.defaultMetastore.dataPath shouldBe base.defaultMetastore.dataPath
       applied.defaultMetastore.schemaName shouldBe base.defaultMetastore.schemaName
-      applied.apiKey shouldBe base.apiKey
       applied.runtimeType shouldBe base.runtimeType
       applied.admin shouldBe base.admin
       applied.auth shouldBe base.auth

@@ -10,7 +10,7 @@
 #                       resolves to the existing superuser.
 #   reader / reader  -- demo non-superuser; gets default-roles-qod only,
 #                       can be granted qodstate_role_permission rows via
-#                       the admin UI to exercise the PostgresAclValidator.
+#                       the admin UI to exercise the nodes' grant check.
 #
 # A hardcoded protocol mapper adds `tenant: "tpch"` to every access token
 # so the FlightSQL edge's tenant-claim routing (PROXY_TENANT_CLAIM=tenant

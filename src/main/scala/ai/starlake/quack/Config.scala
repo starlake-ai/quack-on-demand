@@ -136,10 +136,11 @@ final case class ManagementAuthConfig(
     @field @ConfigField(
       envVar = "QOD_SESSION_JWT_SECRET",
       description =
-        "HS256 secret used to sign UI session JWTs. Pin a stable value (>= 32 chars) to make " +
-          "sessions survive manager restart and to share session state across replicas. Empty " +
-          "= autogenerate a fresh 32-byte secret at boot, printed to the console (sessions die " +
-          "on restart; HA refuses to boot).",
+        "HS256 secret used to sign UI session JWTs and password-reset links. Empty (the " +
+          "default) = the control plane's: generated once by the first boot, stored in " +
+          "qodstate_boot_secret and read by every restart and every HA replica, so sessions " +
+          "survive restarts. A set value (>= 32 chars) wins and is never stored; set one when " +
+          "another service must verify the sessions (the Starflow pairing).",
       sensitive = true
     )
     sessionJwtSecret: String,
@@ -165,7 +166,8 @@ final case class ManagementAuthConfig(
       envVar = "QOD_MGMT_PUBLIC_BASE_URL",
       description = "Externally visible manager base URL (e.g. https://qod.example.com). " +
         "Used to build OIDC redirect_uri and post_logout_redirect_uri for admin-UI SSO. " +
-        "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
+        "When empty, falls back to http://localhost on the manager's REST port " +
+        "(http://localhost:20900 by default); set it for any non-localhost deploy."
     )
     publicBaseUrl: String = "",
     oidc: ManagementOidcConfig = ManagementOidcConfig(),
@@ -387,7 +389,7 @@ final case class PatConfig(
     maxDepth: Int = 8
 )
 
-/** MCP server for AI agents at POST /mcp. Auth: PAT or the static API key; session JWTs and
+/** MCP server for AI agents at POST /mcp. Auth: a personal access token as Bearer; session JWTs and
   * passwords are never accepted there.
   */
 final case class McpConfig(
@@ -491,15 +493,6 @@ final case class ManagerConfig(
     )
     port: Int,
     @field @ConfigField(
-      envVar = "QOD_API_KEY",
-      description =
-        "Static admin API key sent as X-API-Key. Unset or empty: outside HA a random key is " +
-          "generated at boot and printed to the console; under HA the static-key arm stays " +
-          "disabled and /api accepts only session and PAT credentials (never open).",
-      sensitive = true
-    )
-    apiKey: Option[String],
-    @field @ConfigField(
       envVar = "QOD_RUNTIME_TYPE",
       description =
         "Quack node runtime backend: 'local' (child processes), 'kubernetes' (pods) or 'fleet' " +
@@ -580,6 +573,11 @@ final case class ManagerConfig(
     smtp: SmtpConfig = SmtpConfig(),
     mcp: McpConfig = McpConfig(),
     pat: PatConfig = PatConfig(),
+    tenantFiles: TenantFilesConfig = TenantFilesConfig(),
+    userS3: UserS3Config = UserS3Config(),
+    nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
+    nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
+    nodeAuthzLimits: NodeAuthzLimitsConfig = NodeAuthzLimitsConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
       description =
@@ -615,6 +613,230 @@ final case class ManagerConfig(
     nodeLeaseSec >= 1,
     s"nodeLeaseSec (QOD_QUACK_NODE_LEASE_SEC) must be >= 1, got $nodeLeaseSec"
   )
+
+/** Where tenants may authorize local folders for their users (in-engine authorization, decision
+  * 15): only under `<root>/<tenant id>/`. Unset, no local folder can be authorized. The root must
+  * be the real path on the nodes (no symlink component): nodes check real paths.
+  */
+final case class TenantFilesConfig(
+    @field @ConfigField(
+      envVar = "QOD_TENANT_FILES_ROOT",
+      description =
+        "Absolute folder under which tenant admins may authorize local folders, one subfolder per " +
+          "tenant id (<root>/<tenant>/...). Unset: no local folder can be authorized, and " +
+          "non-superusers reach no local file. Must be a real path on the nodes."
+    )
+    root: String = ""
+):
+  require(
+    root.trim.isEmpty || TenantFilesConfig.validRoot(root.trim),
+    s"tenantFiles.root (QOD_TENANT_FILES_ROOT) must be an absolute folder of at least one " +
+      s"segment with no empty, '.' or '..' segment, got '$root'"
+  )
+
+  /** The root without its trailing `/`, or None when unset. */
+  def rootOpt: Option[String] = Option(root.trim).filter(_.nonEmpty).map(_.stripSuffix("/"))
+
+object TenantFilesConfig:
+  def validRoot(r: String): Boolean =
+    val body = r.stripPrefix("/").stripSuffix("/")
+    r.startsWith("/") && body.nonEmpty &&
+    body.split("/", -1).forall(s => s.nonEmpty && s != "." && s != "..")
+
+/** The S3-compatible endpoints a user may name for their own S3 credentials (in-engine
+  * authorization, decision 23). Empty: AWS's own endpoint only. A node signs a user's requests to
+  * the endpoint the user named, so the operator lists the hosts that may be named at all.
+  */
+final case class UserS3Config(
+    @field @ConfigField(
+      envVar = "QOD_USER_S3_ALLOWED_ENDPOINTS",
+      description =
+        "S3-compatible endpoints users may name for their own S3 credentials, comma separated: " +
+          "host[:port] (TLS) or http://host[:port] (plain HTTP). Empty: AWS's own endpoint only."
+    )
+    allowedEndpoints: String = ""
+):
+  require(
+    ai.starlake.quack.model.UserS3CredentialRules.parseAllowedEndpoints(allowedEndpoints).isRight,
+    "userS3.allowedEndpoints (QOD_USER_S3_ALLOWED_ENDPOINTS): " +
+      ai.starlake.quack.model.UserS3CredentialRules
+        .parseAllowedEndpoints(allowedEndpoints)
+        .left
+        .getOrElse("")
+  )
+
+  /** The allowed endpoints, normalized (UserS3CredentialRules.normalizeEndpoint). */
+  def endpoints: List[String] =
+    ai.starlake.quack.model.UserS3CredentialRules
+      .parseAllowedEndpoints(allowedEndpoints)
+      .getOrElse(Nil)
+
+/** In-engine authorization: node keys and the URL nodes reach this replica on. */
+final case class NodeAuthzConfig(
+    @field @ConfigField(
+      envVar = "QOD_NODE_KEY_SECRET",
+      description =
+        "Secret every node key derives from (>= 32 characters). Unset: one value generated by the " +
+          "first boot and kept in the control-plane database, shared by every replica. Changing " +
+          "it means restarting every node.",
+      sensitive = true
+    )
+    keySecret: String = "",
+    @field @ConfigField(
+      envVar = "QOD_INTERNAL_URL",
+      description =
+        "URL nodes reach this replica on, carried in every session handle: nodes call " +
+          "it for their statements' verdicts (plain http). Default http://<QOD_POD_IP>:<manager " +
+          "port> when the pod IP is set, else http://<QOD_ON_DEMAND_HOST>:<manager port> when " +
+          "the manager listens on one specific address, else http://127.0.0.1:<manager port>. " +
+          "Required in fleet mode (this replica's own address, one per replica, never a load " +
+          "balancer); never a loopback URL on Kubernetes."
+    )
+    internalUrl: String = "",
+    @field @ConfigField(
+      envVar = "QOD_POD_IP",
+      description = "This replica's pod IP; the Helm chart sets it from the downward API. With " +
+        "QOD_INTERNAL_URL unset, nodes reach this replica on http://<pod IP>:<manager port>, so " +
+        "the replica that minted a handle, not the Service, answers its node."
+    )
+    podIp: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUTHZ_HANDLE_CONTEXTS_MAX",
+      description =
+        "How many session handle contexts this replica keeps for its nodes' verdict and " +
+          "credential calls (at least 1000). Each is kept 360 s whatever the statement's " +
+          "duration, so this caps the replica's sustained tenant statements at about this / 360 " +
+          "per second (about 555 at the default); past it a statement can be refused with " +
+          "'authorization context expired; retry'. Watch " +
+          "cache_evictions_total{cache=\"qod_minted_handles\"}."
+    )
+    handleContextsMax: Int = 200000
+):
+  require(
+    handleContextsMax >= NodeAuthzConfig.HandleContextsFloor,
+    s"nodeAuthz.handleContextsMax (QOD_AUTHZ_HANDLE_CONTEXTS_MAX) must be at least " +
+      s"${NodeAuthzConfig.HandleContextsFloor}, got $handleContextsMax"
+  )
+
+  /** [[internalUrl]]; else this pod's address on `restPort`; else, when the manager listens on one
+    * specific address (`bindHost`, QOD_ON_DEMAND_HOST, neither a wildcard nor `localhost` /
+    * `127.0.0.1`), that address; else this host's loopback URL on `restPort`. An IPv6 address goes
+    * in brackets.
+    */
+  def replicaUrl(bindHost: String, restPort: Int): String =
+    val pod  = podIp.trim
+    val bind = bindHost.trim
+    if internalUrl.trim.nonEmpty then internalUrl.trim
+    else if pod.nonEmpty then s"http://${urlHost(pod)}:$restPort"
+    else if specificBindHost(bind) then s"http://${urlHost(bind)}:$restPort"
+    else s"http://127.0.0.1:$restPort"
+
+  private def urlHost(host: String): String =
+    if host.contains(':') && !host.startsWith("[") then s"[$host]" else host
+
+  /** A bind address the loopback default does not reach: not blank, not a wildcard, not `localhost`
+    * or `127.0.0.1`.
+    */
+  private def specificBindHost(host: String): Boolean =
+    !Set("", "*", "0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0", "localhost", "127.0.0.1")
+      .contains(host.toLowerCase(java.util.Locale.ROOT))
+
+object NodeAuthzConfig:
+
+  /** The least [[NodeAuthzConfig.handleContextsMax]] accepted. */
+  val HandleContextsFloor: Int = 1000
+
+/** The three extension settings qod-node fixes in a node's database config before it opens (spec
+  * decision 17). Off unless turned on here: DuckDB refuses to turn either `allow_*` setting on
+  * while a database runs, so this is the only way to turn one on, and a change applies at each
+  * node's next start. Every backend hands all three to the spawn script ([[env]]), which passes
+  * qod-node a flag for each one that is on.
+  */
+final case class NodeExtensionsConfig(
+    @field @ConfigField(
+      envVar = "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS",
+      description =
+        "Let nodes load community extensions (allow_community_extensions). Off by default; a pool " +
+          "or database initSql that installs a community extension needs it. Applies at each " +
+          "node's next start."
+    )
+    allowCommunity: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+      description =
+        "Let nodes load extensions with a missing or invalid signature (allow_unsigned_extensions). " +
+          "Off by default. Applies at each node's next start."
+    )
+    allowUnsigned: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS",
+      description = "Let nodes download a known extension the first time a statement needs it " +
+        "(autoinstall_known_extensions). Off by default: nodes install what QoD's own setup " +
+        "needs explicitly. Applies at each node's next start."
+    )
+    autoinstallKnown: Boolean = false
+):
+  /** The spawn environment carrying these to qod-node: all three names, always, `true` or `false`,
+    * so neither a variable the launcher inherited nor a node's metastore decides one.
+    */
+  def env: Map[String, String] = Map(
+    NodeExtensionsConfig.AllowCommunityEnv   -> allowCommunity.toString,
+    NodeExtensionsConfig.AllowUnsignedEnv    -> allowUnsigned.toString,
+    NodeExtensionsConfig.AutoinstallKnownEnv -> autoinstallKnown.toString
+  )
+
+object NodeExtensionsConfig:
+  val AllowCommunityEnv: String   = "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"
+  val AllowUnsignedEnv: String    = "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"
+  val AutoinstallKnownEnv: String = "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
+  val EnvNames: Set[String]       = Set(AllowCommunityEnv, AllowUnsignedEnv, AutoinstallKnownEnv)
+
+/** The decide limits qod-node reads from its environment at start (in-engine authorization): how
+  * long one decide call may take, and how many plan verdicts a node keeps. Every backend hands both
+  * to every node it starts ([[env]]), so the manager's setting applies on every runtime (before,
+  * Kubernetes pods and fleet nodes ran qod-node's defaults whatever the manager was given); a
+  * change applies at each node's next start. The defaults and ranges are qod-node's own
+  * (`ParseAuthzLimits`, native/qod-node/src/decide_client.cpp), so a node never refuses to start on
+  * what the manager forwards.
+  */
+final case class NodeAuthzLimitsConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUTHZ_DECIDE_TIMEOUT_MS",
+      description =
+        "How long a node waits for one verdict from the manager, connect to last byte, in ms " +
+          "(1 to 60000). A slower answer refuses the statement, as retryable when it is a " +
+          "single statement. Applies at each node's next start."
+    )
+    decideTimeoutMs: Int = 2000,
+    @field @ConfigField(
+      envVar = "QOD_AUTHZ_CACHE_ENTRIES",
+      description =
+        "How many plan verdicts a node caches (0 to 10000000; 0 caches none). Applies at each " +
+          "node's next start."
+    )
+    cacheEntries: Int = 10000
+):
+  require(
+    decideTimeoutMs >= 1 && decideTimeoutMs <= 60000,
+    s"nodeAuthzLimits.decideTimeoutMs (QOD_AUTHZ_DECIDE_TIMEOUT_MS) must be 1 to 60000, " +
+      s"got $decideTimeoutMs"
+  )
+  require(
+    cacheEntries >= 0 && cacheEntries <= 10000000,
+    s"nodeAuthzLimits.cacheEntries (QOD_AUTHZ_CACHE_ENTRIES) must be 0 to 10000000, " +
+      s"got $cacheEntries"
+  )
+
+  /** The spawn environment carrying these to qod-node: both names, always. */
+  def env: Map[String, String] = Map(
+    NodeAuthzLimitsConfig.DecideTimeoutEnv -> decideTimeoutMs.toString,
+    NodeAuthzLimitsConfig.CacheEntriesEnv  -> cacheEntries.toString
+  )
+
+object NodeAuthzLimitsConfig:
+  val DecideTimeoutEnv: String = "QOD_AUTHZ_DECIDE_TIMEOUT_MS"
+  val CacheEntriesEnv: String  = "QOD_AUTHZ_CACHE_ENTRIES"
+  val EnvNames: Set[String]    = Set(DecideTimeoutEnv, CacheEntriesEnv)
 
 final case class RoutingConfig(
     @field @ConfigField(
@@ -865,19 +1087,35 @@ final case class FleetConfig(
 
   def ephemeralLocal: Boolean = ephemeral == "local"
 
-  def validateForRuntime(runtimeType: String, duckdbOnHost: => Boolean): Either[String, Unit] =
+  /** QOD_FLEET_EPHEMERAL=local also needs qod-node on the manager host: Main resolves it for every
+    * manager that runs local nodes (BootFactories.runsLocalNodes) and refuses to boot without it.
+    */
+  def validateForRuntime(runtimeType: String): Either[String, Unit] =
     if !FleetConfig.isFleet(runtimeType) then Right(())
     else if joinToken.trim.isEmpty then
       Left("QOD_FLEET_JOIN_TOKEN must be set when runtimeType=fleet")
-    else if ephemeralLocal && !duckdbOnHost then
-      Left(
-        "QOD_FLEET_EPHEMERAL=local needs a duckdb binary on the manager host (DUCKDB_BIN or PATH)"
-      )
     else Right(())
 
+/** The names `runtimeType` (QOD_RUNTIME_TYPE) accepts, in any case: one predicate per backend,
+  * which every site that tests the name goes through, so an alias (`k8s`) reaches every check.
+  */
+object RuntimeType:
+  private def name(runtimeType: String): String = runtimeType.toLowerCase(java.util.Locale.ROOT)
+
+  def isLocal(runtimeType: String): Boolean = name(runtimeType) == "local"
+
+  def isKubernetes(runtimeType: String): Boolean =
+    val n = name(runtimeType)
+    n == "kubernetes" || n == "k8s"
+
+  def isFleet(runtimeType: String): Boolean = name(runtimeType) == "fleet"
+
+  /** The backends several managers can share (HA): Kubernetes and fleet. */
+  def isMultiManager(runtimeType: String): Boolean =
+    isKubernetes(runtimeType) || isFleet(runtimeType)
+
 object FleetConfig:
-  def isFleet(runtimeType: String): Boolean =
-    runtimeType.toLowerCase(java.util.Locale.ROOT) == "fleet"
+  def isFleet(runtimeType: String): Boolean = RuntimeType.isFleet(runtimeType)
 
   def parseCidrs(env: String, raw: String): Either[String, List[Cidr]] =
     Cidr.parseList(raw).left.map(e => s"$env: $e")

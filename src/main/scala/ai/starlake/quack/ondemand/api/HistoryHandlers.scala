@@ -8,11 +8,11 @@ import sttp.model.StatusCode
 /** REST handler for `GET /api/history/trends` and `GET /api/history/statements`.
   *
   * Scoping rules (identical to AuditHandlers):
-  *   - Superuser or unresolvable token (static key / open mode): `tenants` = requested tenant
-  *     filter (or None).
-  *   - Tenant admin (resolved, not superuser): `tenants` pinned to `manageableTenants`; a requested
-  *     `?tenant=` narrows WITHIN them only (tenant not in manageable set falls back to the full
-  *     manageable set, no error, no existence leak).
+  *   - Superuser: `tenants` = requested tenant filter (or None).
+  *   - Anyone else (a tenant admin, or a caller with no resolvable credential, whose manageable set
+  *     is empty): `tenants` pinned to `manageableTenants`; a requested `?tenant=` narrows WITHIN
+  *     them only (tenant not in manageable set falls back to the full manageable set, no error, no
+  *     existence leak).
   *
   * Rollup rows always carry a tenant value so there is no `includeNullTenant` concern.
   *
@@ -29,7 +29,7 @@ final class HistoryHandlers(store: TelemetryStore):
       tenant: Option[String],
       pool: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[TrendsResponse] = IO.blocking {
+  )(scopeOf: SessionScope.Resolver): Out[TrendsResponse] = IO.blocking {
     val gran = granularity.getOrElse("")
     if gran != "hour" && gran != "day" then
       Left(
@@ -39,7 +39,7 @@ final class HistoryHandlers(store: TelemetryStore):
         )
       )
     else
-      val tenants = SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), tenant)
+      val tenants = SessionScope.tenantsFilter(scopeOf(apiKey), tenant)
 
       for
         f <- QueryParams.instant(from, "from")
@@ -84,8 +84,8 @@ final class HistoryHandlers(store: TelemetryStore):
       limit: Option[Int],
       before: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[StatementSearchResponse] = IO.blocking {
-    val tenants = SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), tenant)
+  )(scopeOf: SessionScope.Resolver): Out[StatementSearchResponse] = IO.blocking {
+    val tenants = SessionScope.tenantsFilter(scopeOf(apiKey), tenant)
 
     for
       f <- QueryParams.instant(from, "from")

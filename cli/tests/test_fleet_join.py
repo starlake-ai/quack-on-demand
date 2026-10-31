@@ -1,6 +1,7 @@
 import io
 import os
 import pathlib
+import re
 import signal
 import stat
 import subprocess
@@ -9,15 +10,16 @@ import sys
 import httpx
 import pytest
 
+from qod_cli import fleet_join
 from qod_cli.fleet_join import (
     BACKOFF_MIN_S,
+    PLAIN_HTTP_MARKERS,
     FleetMember,
     cgroup_cpu_limit,
     cgroup_memory_limit,
     host_capacity,
     network_hint,
     node_failure_action,
-    probe_duckdb_version,
     status_hint,
 )
 
@@ -75,8 +77,9 @@ def recorded_signals(monkeypatch):
 
 def assignment(epoch, node_id="quack-acme-db-bi-1", port=21900):
     return {"epoch": epoch, "nodeId": node_id, "poolKey": {"tenant": "acme", "tenantDb": "db", "pool": "bi"},
-            "port": port, "token": "tok", "kind": "memory", "env": {"pgHost": "h", "pgPassword": "pw"},
-            "dbInitSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": ""}
+            "port": port, "token": "tok", "authzKey": "ab" * 32, "kind": "memory",
+            "env": {"pgHost": "h", "pgPassword": "pw"},
+            "resourceSql": "", "objectStoreSql": "", "extraSetupSql": ""}
 
 
 def read_secrets(env):
@@ -86,11 +89,31 @@ def read_secrets(env):
 
 
 def make_member(http, popen, tmp_path, port_open=lambda p: True, **kw):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     spawn = tmp_path / "spawn.sh"; spawn.write_text("#!/bin/sh\nexit 0\n")
     kw.setdefault("capacity", lambda: (8, 64 << 30))
+    kw.setdefault("node_bin", None)
     return FleetMember("https://mgr:20900", "secret", name="srv-1", advertise_host="10.0.0.7", bind_host="10.0.0.7",
-                 node_port=21900, spawn_script=spawn, duckdb_bin=None, state_dir=tmp_path / "state",
+                 node_port=21900, spawn_script=spawn, state_dir=tmp_path / "state",
                  insecure=False, http=http, popen=popen, sleep=lambda s: None, port_open=port_open, **kw)
+
+
+def test_the_node_runs_the_members_qod_node(tmp_path, monkeypatch):
+    # The node's binary comes from the member (the bundled install, or --qod-node-bin), never from a
+    # QOD_NODE_BIN or DUCKDB_BIN this process happens to carry.
+    monkeypatch.setenv("QOD_NODE_BIN", "/elsewhere/qod-node")
+    monkeypatch.setenv("DUCKDB_BIN", "/elsewhere/duckdb")
+    envs = []
+    def popen(cmd, env=None, **kw):
+        envs.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    make_member(http, popen, tmp_path, node_bin=tmp_path / "q" / "bin" / "qod-node").run_once()
+    assert envs[0]["QOD_NODE_BIN"] == str(tmp_path / "q" / "bin" / "qod-node")
+    assert "DUCKDB_BIN" not in envs[0]
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    envs.clear()
+    make_member(http, popen, tmp_path / "other").run_once()
+    assert "QOD_NODE_BIN" not in envs[0]
 
 
 def test_heartbeat_carries_identity_capacity_and_no_node_initially(tmp_path):
@@ -117,8 +140,10 @@ def test_assignment_starts_node_with_spawn_contract_and_reports_running(tmp_path
     member.run_once()
     cmd, env, kw, secrets = procs[0]
     assert cmd[-1] == "21900" and env["kind"] == "memory"
-    assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok"}
+    assert re.fullmatch(r"[0-9a-f]{32}", secrets.pop("QOD_INIT_NONCE"))
+    assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
     assert env["QOD_NODE_BIND"] == "10.0.0.7" and env["QOD_SECRETS_DIR_EPHEMERAL"] == "1"
+    assert env["QOD_NODE_ID"] == "quack-acme-db-bi-1"
     assert kw["start_new_session"] is True
     assert (tmp_path / "state" / "node.pid").read_text().strip() == "4242"
     member.run_once()
@@ -232,30 +257,37 @@ def test_reap_orphan_kills_recorded_pid_only_when_it_is_a_spawn_script(tmp_path,
 def test_refuses_plain_http_without_insecure(tmp_path):
     with pytest.raises(SystemExit):
         FleetMember("http://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
-              spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=False)
+              spawn_script=tmp_path / "x", node_bin=None, state_dir=tmp_path, insecure=False)
     FleetMember("http://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
-          spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=True)
+          spawn_script=tmp_path / "x", node_bin=None, state_dir=tmp_path, insecure=True)
 
 
 def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp_path, monkeypatch):
     monkeypatch.setenv("QOD_FLEET_JOIN_TOKEN", "fleet-wide-secret")
     monkeypatch.setenv("lockdownSql", "X")
+    monkeypatch.setenv("QOD_INIT_TRUSTED_DB", "1")
     monkeypatch.setenv("SOME_RANDOM_SECRET", "nope")
     monkeypatch.setenv("QOD_S3_ENDPOINT", "minio:9000")
     envs = []
     def popen(cmd, env=None, **kw):
         envs.append(env); return FakeProc()
-    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    # An earlier manager's assignment still carries lockdownSql.
+    stale = dict(assignment(1), lockdownSql="SET disabled_filesystems = 'LocalFileSystem';")
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": stale})])
     make_member(http, popen, tmp_path).run_once()
     env = envs[0]
     assert "QOD_FLEET_JOIN_TOKEN" not in env and "SOME_RANDOM_SECRET" not in env
     assert "PATH" in env and env["QOD_S3_ENDPOINT"] == "minio:9000"
-    assert env["lockdownSql"] == "" and env["dbInitSql"] == ""
+    assert "lockdownSql" not in env and env["resourceSql"] == ""
+    leaked = any("disabled_filesystems" in v for v in env.values())
+    assert not leaked, "an earlier manager's lockdownSql reached the node"
+    # Trust rides the secret file's name, never a variable: none reaches the node.
+    assert "QOD_INIT_TRUSTED_DB" not in env and "QOD_INIT_TRUSTED_POOL" not in env
     assert env["kind"] == "memory" and env["QOD_NODE_BIND"] == "10.0.0.7"
 
 
 SECRET_VALUES = {"pw", "tok", "hunter2", "fed-sql-secret", "store-sql-secret", "s3-key-id", "s3-secret",
-                 "az-conn"}
+                 "az-conn", "ab" * 32}
 
 
 def secret_assignment():
@@ -280,12 +312,177 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
     for value in SECRET_VALUES | {"k3y"}:
         assert value not in env.values() and value not in cmd, value
         assert not any(value in v for v in env.values()), value
+    assert re.fullmatch(r"[0-9a-f]{32}", secrets.pop("QOD_INIT_NONCE"))
     assert secrets == {"pgPassword": "hunter2", "encryptionKey": "k3y", "extraSetupSql": "fed-sql-secret",
                        "objectStoreSql": "store-sql-secret", "QOD_NODE_TOKEN": "tok",
+                       "QOD_NODE_AUTHZ_KEY": "ab" * 32,
                        "QOD_S3_ACCESS_KEY_ID": "s3-key-id", "QOD_S3_SECRET_ACCESS_KEY": "s3-secret",
                        "QOD_AZURE_CONNECTION_STRING": "az-conn"}
     assert env["QOD_S3_ENDPOINT"] == "minio:9000"
     assert dir_mode == 0o700 and set(file_modes.values()) == {0o600}
+
+
+# SEC-1: an assignment's env is a tenant-db's metastore, tenant-admin input. Only the keys the
+# spawn script reads from its environment (TenantDb.NodeEnvKeys) are laid over the node's
+# environment, and only the metastore's own secrets become files: BASH_ENV (bash expands it before
+# running the script), PATH or QOD_NODE_BIN would run commands on this server. Defense in depth: the
+# manager filters too, but an older manager or a manager bug must not reach a node.
+SEC1_ALLOWED = {"pgHost": "h", "pgPort": "5432", "pgUser": "u", "dbName": "lake", "catalogAlias": "lake",
+                "schemaName": "main", "dataPath": "s3://lake/acme", "encrypted": "true"}
+SEC1_HOSTILE = {"BASH_ENV": "/nonexistent/sec1-marker-bash-env", "PATH": "/nonexistent/sec1-marker-path",
+                "QOD_NODE_BIN": "/nonexistent/sec1-marker-node-bin", "lockdownSql": "SELECT 'sec1-marker-lockdown';",
+                "dbInitSql": "SELECT 'sec1-marker-db-init';", "kind": "sec1-marker-kind",
+                "resourceSql": "SELECT 'sec1-marker-resource';", "tenantDbInitSql": "SELECT 'sec1-marker-tdb';",
+                "QOD_INIT_TRUSTED_DB": "sec1-marker-trusted",
+                "QOD_NODE_ID": "sec1-marker-node-id", "QOD_NODE_BIND": "sec1-marker-bind",
+                "extraSetupSql": "SELECT 'sec1-marker-extra';", "QOD_S3_SECRET_ACCESS_KEY": "sec1-marker-s3-secret",
+                "QOD_NODE_TOKEN": "sec1-marker-token", "sec1Unknown": "sec1-marker-unknown"}
+
+
+def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, capsys):
+    for k in fleet_join._CLOUD_CRED_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("QOD_NODE_BIN", raising=False)
+    a = dict(assignment(1), env={**SEC1_ALLOWED, "PgPassword": "pw", **SEC1_HOSTILE})
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append((cmd, env, read_secrets(env))); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    cmd, env, secrets = seen[0]
+    # The checks name variables, never print the environment: it holds this process's own values.
+    leaked = sorted(k for k, v in env.items() if "sec1-marker" in v)
+    assert leaked == []
+    assert {k: env.get(k) for k in SEC1_ALLOWED} == SEC1_ALLOWED
+    assert [k for k in ("BASH_ENV", "sec1Unknown", "QOD_NODE_BIN") if k in env] == []
+    own_path = env.get("PATH") == os.environ.get("PATH")
+    assert own_path, "the node's PATH is not this process's own"
+    assert [env.get(k) for k in ("lockdownSql", "resourceSql", "kind", "QOD_NODE_ID", "QOD_NODE_BIND")] == \
+        [None, "", "memory", "quack-acme-db-bi-1", "10.0.0.7"]
+    assert "dbInitSql" not in env
+    nonce = secrets.pop("QOD_INIT_NONCE")
+    assert re.fullmatch(r"[0-9a-f]{32}", nonce)
+    assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
+    err = capsys.readouterr().err
+    named = "'BASH_ENV'" in err and "'sec1Unknown'" in err
+    assert named, "the dropped keys are not named on stderr"
+    assert "sec1-marker" not in err, "a dropped value was printed"
+
+
+def test_tenant_init_sql_goes_to_the_file_its_trust_names(tmp_path):
+    # Task 20 (review I2): the tenant-db's and the pool's initSql are secret files whose name is their
+    # trust, ...Trusted only for a JSON true; and every start gets a fresh init marker nonce.
+    a = dict(assignment(1), tenantDbInitSql="SET threads = 2;", tenantDbInitTrusted=True,
+             tenantPoolInitSql="SET threads = 3;", tenantPoolInitTrusted="true")
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append((env, read_secrets(env))); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    env, secrets = seen[0]
+    assert secrets["tenantDbInitSqlTrusted"] == "SET threads = 2;"
+    assert secrets["tenantPoolInitSql"] == "SET threads = 3;"
+    assert "tenantDbInitSql" not in secrets and "tenantPoolInitSqlTrusted" not in secrets
+    assert re.fullmatch(r"[0-9a-f]{32}", secrets["QOD_INIT_NONCE"])
+    assert "SET threads" not in "".join(env.values())
+    assert not any(k.startswith("QOD_INIT_") for k in env)
+
+
+EXTENSION_ENV = ("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+                 "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS")
+
+
+def _extension_env(tmp_path, a):
+    """The three extension variables the node of assignment `a` is started with."""
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return [seen[0].get(k) for k in EXTENSION_ENV]
+
+
+def test_the_extension_policy_comes_from_the_assignment_only(tmp_path, monkeypatch):
+    # Decision 17: neither this process's own environment nor the metastore (tenant-admin input)
+    # decides a node's extension settings; all three are always set.
+    for k in EXTENSION_ENV:
+        monkeypatch.setenv(k, "true")
+    spoofed = dict(assignment(1), env={"pgHost": "h", "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS": "true"})
+    assert _extension_env(tmp_path / "off", spoofed) == ["false", "false", "false"]
+    on = dict(assignment(1), nodeExtensions={"allowCommunity": False, "allowUnsigned": True,
+                                             "autoinstallKnown": False})
+    assert _extension_env(tmp_path / "on", on) == ["false", "true", "false"]
+
+
+def test_an_extension_setting_is_on_only_for_a_json_true(tmp_path):
+    odd = dict(assignment(1), nodeExtensions={"allowCommunity": "true", "allowUnsigned": 1,
+                                              "autoinstallKnown": None})
+    assert _extension_env(tmp_path, odd) == ["false", "false", "false"]
+
+
+LIMIT_ENV = ("QOD_AUTHZ_DECIDE_TIMEOUT_MS", "QOD_AUTHZ_CACHE_ENTRIES")
+
+
+def _limit_env(tmp_path, a):
+    """The two decide-limit variables the node of assignment `a` is started with (None: unset)."""
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return [seen[0].get(k) for k in LIMIT_ENV]
+
+
+def test_the_decide_limits_come_from_the_assignment_only(tmp_path, monkeypatch):
+    # Neither this process's own environment nor the metastore decides them; an older manager
+    # sends none, which leaves qod-node's defaults.
+    for k in LIMIT_ENV:
+        monkeypatch.setenv(k, "9")
+    spoofed = dict(assignment(1), env={"pgHost": "h", "QOD_AUTHZ_CACHE_ENTRIES": "1"})
+    assert _limit_env(tmp_path / "none", spoofed) == [None, None]
+    sent = dict(assignment(1), authzLimits={"decideTimeoutMs": 750, "cacheEntries": 0})
+    assert _limit_env(tmp_path / "sent", sent) == ["750", "0"]
+
+
+def test_a_decide_limit_is_set_only_for_a_json_integer(tmp_path):
+    odd = dict(assignment(1), authzLimits={"decideTimeoutMs": "750", "cacheEntries": True})
+    assert _limit_env(tmp_path, odd) == [None, None]
+    assert _limit_env(tmp_path / "list", dict(assignment(1), authzLimits=[750, 0])) == [None, None]
+
+
+def test_a_dropped_assignment_key_is_named_once_per_pool(tmp_path, capsys):
+    member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
+    a = dict(assignment(1), env={**SEC1_ALLOWED, "PATH": "/nonexistent/sec1-marker-path"})
+    member._launch_spec(a)
+    member._launch_spec(dict(a, epoch=2))
+    assert capsys.readouterr().err.count("'PATH'") == 1
+    member._launch_spec(dict(a, poolKey={"tenant": "acme", "tenantDb": "db", "pool": "etl"}))
+    assert capsys.readouterr().err.count("'PATH'") == 1
+
+
+def test_node_env_keys_match_the_manager():
+    # The manager's TenantDb.NodeEnvKeys (NodeSecretFilesSpec pins the same list from the Scala side).
+    scala = (pathlib.Path(__file__).resolve().parents[2] / "src" / "main" / "scala" / "ai" / "starlake" / "quack"
+             / "model" / "TenantDb.scala")
+    if not scala.exists():
+        pytest.skip("repo checkout not present (running from an sdist)")
+    text = scala.read_text(encoding="utf-8")
+    start = text.index("val NodeEnvKeys: Set[String] =")
+    body = text[text.index("Set(", start):text.index(")", text.index("Set(", start))]
+    assert sorted(fleet_join._NODE_ENV_KEYS) == sorted(re.findall(r'"([^"]+)"', body))
+
+
+def test_metastore_secret_keys_are_pinned_by_name():
+    # TenantDb.NodeSecretEnvKeys (NodeSecretFilesSpec pins the same list against the Scala constant).
+    assert sorted(fleet_join._METASTORE_SECRET_KEYS) == ["encryptionKey", "pgPassword"]
+
+
+def test_cloud_credential_keys_are_pinned_by_name():
+    # _CLOUD_CRED_KEYS is a slice of _SECRET_KEYS (NodeSecretFiles.CloudCredKeys on the manager): a
+    # key added before the cloud credentials must not shift it unnoticed.
+    assert fleet_join._CLOUD_CRED_KEYS == (
+        "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING",
+        "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
 
 
 def test_secrets_dir_is_removed_once_the_node_is_up_and_on_stop(tmp_path):
@@ -327,8 +524,9 @@ def test_stale_secrets_dirs_are_swept_at_startup(tmp_path):
 
 
 def test_the_spawn_script_reads_then_deletes_the_secrets_dir(tmp_path):
-    # Runs the real bundled script in dry-run mode: the token and password come from the files,
-    # the directory is gone afterwards, and a value left in the environment is ignored.
+    # Runs the real bundled script in dry-run mode: the password comes from its file, the token stays
+    # out of the init SQL (qod-node reads it itself), the directory is gone afterwards, and a value
+    # left in the environment is ignored.
     from qod_cli.fleet_join import write_secrets_dir
     script = pathlib.Path(__file__).resolve().parents[1] / "src" / "qod_cli" / "scripts" / "spawn-quack-node.sh"
     d = write_secrets_dir(tmp_path / "secrets", {"pgPassword": "from-file", "QOD_NODE_TOKEN": "tok-file"})
@@ -337,7 +535,7 @@ def test_the_spawn_script_reads_then_deletes_the_secrets_dir(tmp_path):
            "dataPath": str(tmp_path / "lake"), "QOD_SECRETS_DIR": str(d), "QOD_SECRETS_DIR_EPHEMERAL": "1",
            "encryptionKey": "from-env"}
     out = subprocess.run(["bash", str(script), "21999"], env=env, capture_output=True, text=True, check=True)
-    assert "PASSWORD 'from-file'" in out.stdout and "token := 'tok-file'" in out.stdout
+    assert "PASSWORD 'from-file'" in out.stdout and "tok-file" not in out.stdout
     # The password rides a temporary secret, never an ATTACH string (duckdb_databases() prints it).
     attaches = [line for line in out.stdout.splitlines() if line.startswith("ATTACH")]
     assert attaches and all("password" not in line.lower() for line in attaches)
@@ -497,7 +695,7 @@ def test_reap_orphan_never_signals_pid_1(tmp_path, monkeypatch, recorded_signals
 def test_scheme_check_is_case_insensitive(tmp_path):
     with pytest.raises(SystemExit):
         FleetMember("HTTP://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
-              spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=False)
+              spawn_script=tmp_path / "x", node_bin=None, state_dir=tmp_path, insecure=False)
 
 
 def test_default_advertise_host_refuses_loopback(monkeypatch):
@@ -693,52 +891,6 @@ class _Done:
         self.stdout = stdout
 
 
-def test_probe_duckdb_version_parses_the_cli_banner(tmp_path):
-    run = lambda *a, **kw: _Done("v1.5.6 (Variegata) 0b83e5d2f6\n")
-    assert probe_duckdb_version(tmp_path / "duckdb", run=run) == "1.5.6"
-
-
-def test_probe_duckdb_version_runs_with_agent_mode_off(tmp_path):
-    seen = {}
-
-    def run(*a, **kw):
-        seen.update(kw.get("env") or {})
-        return _Done("v2.0.0 (Cyanoptera) b15358c371\n")
-
-    assert probe_duckdb_version(tmp_path / "duckdb", run=run) == "2.0.0"
-    assert seen.get("DUCKDB_AGENT_MODE") == "0"
-
-
-def test_probe_duckdb_version_fails_soft(tmp_path):
-    def boom(*a, **kw):
-        raise subprocess.TimeoutExpired("duckdb", 5)
-    assert probe_duckdb_version(tmp_path / "duckdb", run=boom) is None
-    assert probe_duckdb_version(tmp_path / "duckdb", run=lambda *a, **kw: _Done("garbage")) is None
-    def missing(*a, **kw):
-        raise FileNotFoundError("duckdb")
-    assert probe_duckdb_version(tmp_path / "duckdb", run=missing) is None
-
-
-def test_probe_duckdb_version_tolerates_non_utf8_output(tmp_path):
-    binary = tmp_path / "duckdb"
-    binary.write_text("#!/bin/sh\nprintf 'v1.5.6 \\377\\376 junk\\n'\n")
-    binary.chmod(0o755)
-    assert probe_duckdb_version(binary) == "1.5.6"
-
-
-def test_probe_duckdb_version_none_stdout_is_none(tmp_path):
-    class NoOut:
-        stdout = None
-
-    assert probe_duckdb_version(tmp_path / "duckdb", run=lambda *a, **kw: NoOut()) is None
-
-
-def test_probe_duckdb_version_non_executable_is_none(tmp_path):
-    binary = tmp_path / "duckdb"
-    binary.write_text("#!/bin/sh\necho v1.5.6\n")
-    assert probe_duckdb_version(binary) is None
-
-
 def test_refusal_prints_the_managers_fix_instead_of_the_local_hint(tmp_path, capsys):
     body = {"error": "address_change_refused",
             "message": "server 'srv-1' is registered at 10.0.0.9:21900; this heartbeat reports 10.0.0.7:21900 (not drained, holds no node)",
@@ -799,13 +951,14 @@ def test_network_failure_leads_with_the_explanation(tmp_path, capsys, plain_http
     member.run_once()
     err = capsys.readouterr().err.splitlines()
     line = next(l for l in err if "cannot reach the manager" in l)
-    assert "answered plain HTTP" in line and "WRONG_VERSION_NUMBER" not in line
-    assert any("(cause:" in l and "WRONG_VERSION_NUMBER" in l for l in err)
+    assert "answered plain HTTP" in line and not any(m in line for m in PLAIN_HTTP_MARKERS)
+    assert any("(cause:" in l and any(m in l for m in PLAIN_HTTP_MARKERS) for l in err)
 
 
 @pytest.mark.parametrize("error,expected", [
-    ("exited with 1: ERROR: duckdb not found (DUCKDB_BIN='', 'duckdb' not on PATH)", "duckdb is missing on this server"),
-    ("exited with 1: ERROR: /x/duckdb cannot run the .shell dot-command the node keep-alive needs", "lacks the .shell dot-command"),
+    ("exited with 1: ERROR: qod-node not found (QOD_NODE_BIN='', 'qod-node' not on PATH)", "qod-node is missing on this server"),
+    ("exited with 134: dyld[42]: Library not loaded: @rpath/libduckdb.dylib", "cannot load its libduckdb"),
+    ("exited with 127: qod-node: error while loading shared libraries: libduckdb.so: cannot open shared object file", "cannot load its libduckdb"),
     ("exited with 1: IO Error: Could not bind: Address already in use", "another process holds port 21900"),
     ('exited with 1: HTTP Error: Failed to download extension "postgres_scanner" at URL "http://extensions.duckdb.org/x"', "cannot download DuckDB extensions"),
     ('exited with 1: IO Error: Unable to connect to Postgres at "host=pg port=5432": connection to server at "pg" (10.0.0.5), port 5432 failed: Connection refused', "cannot reach the catalog Postgres"),

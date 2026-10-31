@@ -1,0 +1,1 @@
+INSERT INTO u VALUES (5, 'e', NULL)

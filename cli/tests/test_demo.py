@@ -261,6 +261,7 @@ def _capture_exec(monkeypatch):
     monkeypatch.setattr(
         launcher, "ensure_libduckdb", lambda cache_dir=None, **kw: pathlib.Path("/stub/db/lib")
     )
+    monkeypatch.setattr(launcher, "node_binary", lambda *a, **kw: None)
     monkeypatch.setattr(
         launcher,
         "materialize_spawn_scripts",
@@ -564,20 +565,18 @@ def test_scripts_running_the_duckdb_cli_pin_agent_mode_off():
             rel = path.relative_to(repo).as_posix()
             flagged.add(rel)
             assert _AGENT_MODE_OFF.search(code), f"{rel} runs the duckdb CLI without DUCKDB_AGENT_MODE=0"
-    # The detector must keep seeing the known launchers, or the loop above proves nothing.
+    # The detector must keep seeing the known launchers, or the loop above proves nothing. The spawn
+    # scripts run qod-node, not the CLI.
     known = {
         f"{d}/{name}"
         for d in ("scripts", "cli/src/qod_cli/scripts")
         for name in (
-            "spawn-quack-node.sh",
             "_load-common.sh",
             "load-tpch-dbgen.sh",
             "load-tpcds-dbgen.sh",
             "load-ssb-dbgen.sh",
         )
     } | {
-        "scripts/spawn-quack-node.ps1",
-        "cli/src/qod_cli/scripts/spawn-quack-node.ps1",
         "scripts/_load-common.ps1",
         "scripts/load-tpch-dbgen.ps1",
         "scripts/run-jar.sh",
@@ -596,10 +595,9 @@ def test_materialize_spawn_scripts_are_executable(tmp_path):
     assert ps1.name == "spawn-quack-node.ps1"
 
 
-def test_demo_env_wires_spawn_script_duckdb_and_app_home(tmp_path):
+def test_demo_env_wires_spawn_script_and_duckdb(tmp_path):
     env = launcher.runtime_env(
         {"PATH": "/usr/bin"},
-        app_home=tmp_path,
         duckdb_bin=tmp_path / "duckdb" / "bin",
         spawn_sh=tmp_path / "scripts" / "spawn-quack-node.sh",
         spawn_ps1=tmp_path / "scripts" / "spawn-quack-node.ps1",
@@ -607,26 +605,26 @@ def test_demo_env_wires_spawn_script_duckdb_and_app_home(tmp_path):
     )
     assert env["QOD_SPAWN_SCRIPT"] == str(tmp_path / "scripts" / "spawn-quack-node.sh")
     assert env["QOD_SPAWN_SCRIPT_WINDOWS"] == str(tmp_path / "scripts" / "spawn-quack-node.ps1")
-    assert env["QOD_APP_HOME"] == str(tmp_path)
+    # Nothing reads QOD_APP_HOME any more, and no QOD_NODE_BIN unless the caller provisioned one.
+    assert "QOD_APP_HOME" not in env and "QOD_NODE_BIN" not in env
     assert env["PATH"].startswith(str(tmp_path / "duckdb" / "bin"))
     assert env["PATH"].endswith("/usr/bin")
-    # DUCKDB_BIN pins the provisioned exe by absolute path so the spawn scripts
-    # do not depend on PATH inheritance reaching the spawned node. runtime_env
-    # defaults os_name to sys.platform, so the exe name is whatever this test
-    # actually runs under (duckdb.exe on Windows).
+    # DUCKDB_BIN pins the provisioned exe by absolute path so the loaders do not
+    # depend on PATH inheritance. runtime_env defaults os_name to sys.platform,
+    # so the exe name is whatever this test actually runs under (duckdb.exe on
+    # Windows).
     exe = "duckdb.exe" if sys.platform == "win32" else "duckdb"
     assert env["DUCKDB_BIN"] == str(tmp_path / "duckdb" / "bin" / exe)
-    # Nodes, loaders and the seeder run the duckdb CLI with DuckDB 2.0's agent mode off.
+    # Loaders and the seeder run the duckdb CLI with DuckDB 2.0's agent mode off.
     assert env["DUCKDB_AGENT_MODE"] == "0"
 
 
 def test_runtime_env_pins_duckdb_bin_windows(tmp_path):
-    # Windows regression: the prepended PATH dir does not reliably reach the
-    # spawned PowerShell node, so DUCKDB_BIN (which spawn-quack-node.ps1 reads
-    # directly) must point at duckdb.exe by absolute path.
+    # Windows regression: the prepended PATH dir does not reliably reach a
+    # process the JVM starts, so DUCKDB_BIN (which the loaders read directly)
+    # must point at duckdb.exe by absolute path.
     env = launcher.runtime_env(
         {"PATH": "C:\\Windows\\System32"},
-        app_home=tmp_path,
         duckdb_bin=tmp_path / "duckdb" / "bin",
         spawn_sh=tmp_path / "s.sh",
         spawn_ps1=tmp_path / "s.ps1",
@@ -643,7 +641,6 @@ def test_runtime_env_windows_hands_the_jvm_its_duckdb_dll(tmp_path):
     # Split on the host's os.pathsep, so the base entry carries no drive colon.
     env = launcher.runtime_env(
         {"PATH": "/windows/system32"},
-        app_home=tmp_path,
         duckdb_bin=bin_dir,
         spawn_sh=tmp_path / "s.sh",
         spawn_ps1=tmp_path / "s.ps1",
@@ -669,6 +666,10 @@ def test_demo_provisions_app_home_and_passes_env(runner, monkeypatch, tmp_path, 
     monkeypatch.setattr(launcher, "default_cache_dir", lambda: tmp_path / "cache")
     # The real ensure_* over a provisioned cache: the demo must provision libduckdb too.
     bin_dir, lib_dir = _duckdb_cache.plant(tmp_path / "cache")
+    # On Windows the demo also provisions the release's qod-node.exe; stand one in.
+    node_exe = tmp_path / "qod-node.exe"
+    node_exe.write_text("")
+    monkeypatch.setattr(launcher, "ensure_windows_qod_node", lambda *a, **k: node_exe)
     monkeypatch.setattr(
         launcher,
         "materialize_spawn_scripts",
@@ -765,7 +766,6 @@ def test_ensure_libduckdb_does_not_reuse_another_versions_cache(tmp_path):
 def test_runtime_env_adds_library_path_darwin(tmp_path):
     env = launcher.runtime_env(
         {"PATH": "/usr/bin"},
-        app_home=tmp_path,
         duckdb_bin=tmp_path / "duckdb" / "bin",
         spawn_sh=tmp_path / "s.sh",
         spawn_ps1=tmp_path / "s.ps1",
@@ -781,7 +781,6 @@ def test_runtime_env_exports_the_versioned_cache_root_for_the_preload(tmp_path, 
     bin_dir, lib_dir = _duckdb_cache.plant(tmp_path, os_name=os_name)
     env = launcher.runtime_env(
         {"PATH": "/usr/bin", "DUCKDB_CACHE_DIR": "/somewhere/else"},
-        app_home=tmp_path,
         duckdb_bin=bin_dir,
         spawn_sh=tmp_path / "s.sh",
         spawn_ps1=tmp_path / "s.ps1",
@@ -801,7 +800,6 @@ def test_runtime_env_exports_the_versioned_cache_root_for_the_preload(tmp_path, 
 def test_runtime_env_adds_library_path_linux(tmp_path):
     env = launcher.runtime_env(
         {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/opt/lib"},
-        app_home=tmp_path,
         duckdb_bin=tmp_path / "duckdb" / "bin",
         spawn_sh=tmp_path / "s.sh",
         spawn_ps1=tmp_path / "s.ps1",

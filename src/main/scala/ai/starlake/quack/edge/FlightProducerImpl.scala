@@ -19,9 +19,14 @@ import scala.jdk.CollectionConverters.*
 /** Minimal FlightSqlProducer that forwards SQL to the [[FlightSqlRouter]]. The router talks to the
   * chosen Quack node through the native Quack wire client and hands us back an
   * [[org.apache.arrow.vector.ipc.ArrowReader]] that we stream batch-by-batch to the Flight client.
+  *
+  * `preparedIdleTtlSec`: a prepared handle unused this long is dropped ([[PreparedHandles]]); the
+  * edge passes its session TTL. The edge also drops a session's handles when the session leaves
+  * [[ConnectionContext]] ([[dropSession]], through [[FlightEdgeServer.sessionEvicted]]).
   */
 final class FlightProducerImpl(
-    router: FlightSqlRouter
+    router: FlightSqlRouter,
+    preparedIdleTtlSec: Long
 ) extends NoOpFlightSqlProducer
     with LazyLogging:
 
@@ -139,7 +144,25 @@ final class FlightProducerImpl(
     serializeSchema(adminStatusSchema)
 
   private val preparedStatements =
-    scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
+    new PreparedHandles[PreparedExec](
+      preparedIdleTtlSec * 1000L,
+      () => System.currentTimeMillis(),
+      _.connId
+    )
+
+  /** Drop every prepared handle of the session `connectionId`, which just left
+    * [[ConnectionContext]]: a later use of one answers "no such prepared statement".
+    */
+  def dropSession(connectionId: String): Unit =
+    val n = preparedStatements.dropConnection(connectionId)
+    if n > 0 then logger.debug(s"dropped $n prepared handle(s) of evicted session $connectionId")
+
+  /** Drop the prepared handles unused for `preparedIdleTtlSec`; run by the edge's session sweeper.
+    */
+  def expireIdlePrepared(): Int = preparedStatements.expireIdle()
+
+  /** Visible for tests. */
+  private[edge] def preparedCount: Int = preparedStatements.size
 
   /** Serialize an Arrow schema as a single IPC `Schema` message. */
   private def serializeSchema(schema: org.apache.arrow.vector.types.pojo.Schema): ByteString =
@@ -159,6 +182,22 @@ final class FlightProducerImpl(
       description: String => String = p => s"no connection context for peer $p"
   ): RuntimeException =
     CallStatus.UNAUTHENTICATED.withDescription(description(peer)).toRuntimeException()
+
+  /** The session bound to `peer` and the effective set its statement runs under, resolved again
+    * first when its tenant's policy version moved ([[SessionGrants]]). Left: no session
+    * (`missing`), or its grants now refuse it (UNAUTHORIZED) or could not be resolved
+    * (UNAVAILABLE).
+    */
+  private def liveSession(
+      peer: String,
+      missing: => Throwable
+  ): Either[
+    Throwable,
+    (ConnectionContext.Entry, Option[ai.starlake.quack.ondemand.rbac.EffectiveSet])
+  ] =
+    ConnectionContext.entry(peer) match
+      case None    => Left(missing)
+      case Some(e) => e.effectiveSet().left.map(toFlightException).map(eff => (e, eff))
 
   /** Standard single-endpoint FlightInfo for a metadata RPC: the command packed into the one
     * Ticket, unknown record / byte counts.
@@ -320,8 +359,8 @@ final class FlightProducerImpl(
 
   /** Resolve a prepared handle into an executable plan, enforcing two invariants: the calling peer
     * must be the handle's creator (a leaked handle cannot be replayed), and the [[EffectiveSet]] is
-    * read live from [[ConnectionContext]] (mid-session revocation is honored; an expired session
-    * denies instead of running).
+    * read live from [[ConnectionContext]] (resolved again once the tenant's policy version moved,
+    * so mid-session revocation is honored; an expired session denies instead of running).
     */
   private def resolvePreparedCall(
       handle: String,
@@ -347,18 +386,18 @@ final class FlightProducerImpl(
       case Some(p) =>
         ConnectionContext.entry(callerPeer) match
           case Some(e) if e.user == p.user =>
-            Right(
+            e.effectiveSet().left.map(toFlightException).map { eff =>
               PreparedCall(
                 sql = p.sql,
                 connId = p.connId,
                 user = p.user,
                 poolKey = p.poolKey,
-                effectiveSet = e.effectiveSet,
+                effectiveSet = eff,
                 preferredNode = p.preferredNode,
                 prepareDurationMs = p.prepareDurationMs,
                 datasetSchema = p.datasetSchema
               )
-            )
+            }
           case _ =>
             // Session gone (expired / unbound) or rebound to a different user: the handle
             // outlived the authorization that created it. Force a re-prepare.
@@ -382,8 +421,8 @@ final class FlightProducerImpl(
     val sql  = request.getQuery
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
 
-    ConnectionContext.entry(peer) match
-      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
+    liveSession(peer, noContext(peer)) match
+      case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
         // Registers the handle and answers the Prepare with the advertised schema (None: absent).
         def prepared(schema: Option[Schema], node: Option[String], durationMs: Option[Long]) =
           val handle = java.util.UUID.randomUUID().toString
@@ -448,8 +487,8 @@ final class FlightProducerImpl(
 
           case PrepareStrategy.ProbeWrap(probe) => probeThenPrepare(probe)
           case PrepareStrategy.FullExecute      => probeThenPrepare(sql)
-      case _ =>
-        listener.onError(noContext(peer))
+      case Left(err) =>
+        listener.onError(err)
 
   override def closePreparedStatement(
       request: FlightSql.ActionClosePreparedStatementRequest,
@@ -650,8 +689,8 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
-    ConnectionContext.entry(peer) match
-      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
+    liveSession(peer, noContext(peer)) match
+      case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
         val tablesAttempt = scala.util.Try(
           router.execute(connId, user, poolKey, listSql, eff).unsafeRunSync()
         )
@@ -667,8 +706,8 @@ final class FlightProducerImpl(
               (cat, sch, name, typ, schemaBytes)
             }
             emitTablesWithSchema(withSchemas, listener)
-      case _ =>
-        listener.error(noContext(peer))
+      case Left(err) =>
+        listener.error(err)
 
   /** Drain a QueryResult into a List of (catalog, schema, name, type) tuples. */
   private def collectRowsAndClose(
@@ -881,16 +920,19 @@ final class FlightProducerImpl(
     new Runnable:
       def run(): Unit =
         drainPutStream(flightStream)
-        ConnectionContext.entry(peer) match
-          case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
+        liveSession(
+          peer,
+          noContext(peer, _ => "no pool bound to session; authenticate first")
+        ) match
+          case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
             logger.debug(s"acceptPutStatement pool=$poolKey sql='${loggableSql(sql)}'")
             ackUpdateResult(
               scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync()),
               ackStream,
               "acceptPutStatement"
             )
-          case _ =>
-            ackStream.onError(noContext(peer, _ => "no pool bound to session; authenticate first"))
+          case Left(err) =>
+            ackStream.onError(err)
 
   /** Prepared-update entrypoint: Arrow JDBC / ADBC / DBeaver prepare every statement, so literal
     * DML lands here rather than [[acceptPutStatement]]. Replays the Prepare-time SQL and acks the
@@ -1397,8 +1439,8 @@ final class FlightProducerImpl(
       peer: String,
       sql: String
   ): Option[Schema] =
-    ConnectionContext.entry(peer) match
-      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
+    liveSession(peer, noContext(peer)) match
+      case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
         val probeSqlOpt: Option[String] = strategyOf(sql) match
           case PrepareStrategy.SkipExecute | PrepareStrategy.Unprobed => None
           case PrepareStrategy.ProbeWrap(probe)                       => Some(probe)
@@ -1417,8 +1459,8 @@ final class FlightProducerImpl(
             case scala.util.Failure(t) =>
               throw internalError("probeStatementSchema", t)
         }
-      case _ =>
-        throw noContext(peer)
+      case Left(err) =>
+        throw err
 
   /** Dedicated GetSchema RPC for CommandStatementQuery: same probed schema, empty for DML/DDL (the
     * documented contract for this RPC) and for an unprobed statement, whose schema only its
@@ -1451,8 +1493,8 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
-    ConnectionContext.entry(peer) match
-      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
+    liveSession(peer, noContext(peer)) match
+      case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
         logger.debug(s"runStatement pool=$poolKey sql='${loggableSql(sql)}'")
         val outcome =
           scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync())
@@ -1476,8 +1518,8 @@ final class FlightProducerImpl(
             logger.warn(s"router.execute Left: $f")
             listener.error(toFlightException(f))
 
-      case _ =>
-        listener.error(noContext(peer))
+      case Left(err) =>
+        listener.error(err)
 
   /** Stream batches from `reader` to the Flight `listener`. Gated on !isCancelled(): clients
     * legitimately abandon streams mid-flight, and pumping batches into a cancelled gRPC stream

@@ -67,10 +67,9 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     sup.createTenant(Tenant(Tenant0)).unsafeRunSync()
 
-    // Every test in this spec calls tools as McpPrincipal.StaticKey, so no PAT ever resolves
-    // through this seam; the handler-level calls below (newRoleId, newUserId) that need a
-    // SessionScope => Option resolver reuse it as the "no session" default.
-    val scopeOf: String => Option[SessionScope] = _ => None
+    // Every test in this spec calls tools as the fixture superuser PAT, and the handler-level
+    // calls below (newRoleId, newUserId) present that same token.
+    val scopeOf: SessionScope.Resolver = McpSuperuserPat.scopeOf
 
     val userStore       = makeDuckDbUserStore()
     val users           = new UserHandlers(sup, userStore)
@@ -92,7 +91,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
 
     def newRoleId(): String =
       roleHandlers
-        .createRole(RoleCreateRequest(Tenant0, "reader"), None)(scopeOf)
+        .createRole(RoleCreateRequest(Tenant0, "reader"), Some(McpSuperuserPat.Token))(scopeOf)
         .unsafeRunSync()
         .toOption
         .get
@@ -106,7 +105,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
             username = "bob",
             password = "s3cret-s3cret"
           ),
-          None
+          Some(McpSuperuserPat.Token)
         )(scopeOf)
         .unsafeRunSync()
         .toOption
@@ -118,7 +117,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val roleId = f.newRoleId()
     val out    = f.call(
       "grant_role_permission",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "role_id" -> Json.fromString(roleId),
       "schema"  -> Json.fromString("main"),
       "table"   -> Json.fromString("customer"),
@@ -126,7 +125,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     )
     out.isRight shouldBe true
     val permId = f.idOf(out)
-    f.call("list_role_permissions", McpPrincipal.StaticKey, "role_id" -> Json.fromString(roleId))
+    f.call("list_role_permissions", McpSuperuserPat.principal, "role_id" -> Json.fromString(roleId))
       .toOption
       .get
       .hcursor
@@ -134,9 +133,9 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
       .values
       .get
       .size shouldBe 1
-    f.call("revoke_role_permission", McpPrincipal.StaticKey, "id" -> Json.fromString(permId))
+    f.call("revoke_role_permission", McpSuperuserPat.principal, "id" -> Json.fromString(permId))
       .isRight shouldBe true
-    f.call("list_role_permissions", McpPrincipal.StaticKey, "role_id" -> Json.fromString(roleId))
+    f.call("list_role_permissions", McpSuperuserPat.principal, "role_id" -> Json.fromString(roleId))
       .toOption
       .get
       .hcursor
@@ -151,7 +150,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val roleId  = f.newRoleId()
     val created = f.call(
       "create_column_policy",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "role_id"       -> Json.fromString(roleId),
       "column_name"   -> Json.fromString("c_phone"),
       "action"        -> Json.fromString("mask"),
@@ -161,11 +160,11 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val id = f.idOf(created)
     f.call(
       "update_column_policy",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "id"     -> Json.fromString(id),
       "action" -> Json.fromString("deny")
     ).isRight shouldBe true
-    f.call("list_column_policies", McpPrincipal.StaticKey, "role_id" -> Json.fromString(roleId))
+    f.call("list_column_policies", McpSuperuserPat.principal, "role_id" -> Json.fromString(roleId))
       .toOption
       .get
       .hcursor
@@ -173,7 +172,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
       .values
       .get
       .size shouldBe 1
-    f.call("delete_column_policy", McpPrincipal.StaticKey, "id" -> Json.fromString(id))
+    f.call("delete_column_policy", McpSuperuserPat.principal, "id" -> Json.fromString(id))
       .isRight shouldBe true
   }
 
@@ -182,7 +181,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val roleId  = f.newRoleId()
     val created = f.call(
       "create_row_policy",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "role_id"       -> Json.fromString(roleId),
       "predicate_sql" -> Json.fromString("c_mktsegment = 'BUILDING'")
     )
@@ -190,11 +189,11 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val id = f.idOf(created)
     f.call(
       "update_row_policy",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "id"            -> Json.fromString(id),
       "predicate_sql" -> Json.fromString("c_mktsegment = 'MACHINERY'")
     ).isRight shouldBe true
-    f.call("list_row_policies", McpPrincipal.StaticKey, "role_id" -> Json.fromString(roleId))
+    f.call("list_row_policies", McpSuperuserPat.principal, "role_id" -> Json.fromString(roleId))
       .toOption
       .get
       .hcursor
@@ -202,7 +201,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
       .values
       .get
       .size shouldBe 1
-    f.call("delete_row_policy", McpPrincipal.StaticKey, "id" -> Json.fromString(id))
+    f.call("delete_row_policy", McpSuperuserPat.principal, "id" -> Json.fromString(id))
       .isRight shouldBe true
   }
 
@@ -211,13 +210,13 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val userId = f.newUserId()
     val out    = f.call(
       "grant_pool_permission",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"  -> Json.fromString(Tenant0),
       "user_id" -> Json.fromString(userId)
     )
     out.isRight shouldBe true
     val permId = f.idOf(out)
-    f.call("list_pool_permissions", McpPrincipal.StaticKey, "tenant" -> Json.fromString(Tenant0))
+    f.call("list_pool_permissions", McpSuperuserPat.principal, "tenant" -> Json.fromString(Tenant0))
       .toOption
       .get
       .hcursor
@@ -226,7 +225,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
       .get
       // createTenant also seeds the built-in qod_all_pools group grant; count the user's only.
       .count(_.hcursor.get[String]("userId").toOption.contains(userId)) shouldBe 1
-    f.call("revoke_pool_permission", McpPrincipal.StaticKey, "id" -> Json.fromString(permId))
+    f.call("revoke_pool_permission", McpSuperuserPat.principal, "id" -> Json.fromString(permId))
       .isRight shouldBe true
   }
 
@@ -235,7 +234,7 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     val userId = f.newUserId()
     val out    = f.call(
       "grant_pool_permission",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "user_id"  -> Json.fromString(userId),
       "group_id" -> Json.fromString("g-nope")

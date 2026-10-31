@@ -53,12 +53,10 @@ class DataDiffAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpe
       )
     )
 
-  private def boot(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def boot(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addFixtures(fix)
-    (ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey), fix)
+    (ManagerServerHarness.boot(fix.store), fix)
 
   private def diffUrl(
       tenant: String,
@@ -68,7 +66,7 @@ class DataDiffAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpe
     s"/api/catalog/tenant/$tenant/database/$tenantDb/schemas/main/tables/region/data-diff$params"
 
   "data-diff endpoint" should "reject a credential-less GET with 401" in {
-    val (h, _) = boot(staticApiKey = Some("static-key-for-datadiff-authz"))
+    val (h, _) = boot()
     try
       val resp = get(h.httpClient, h.baseUrl + diffUrl(SecurityFixtures.TenantId, DuckLakeTenantDb))
       withClue(s"credential-less GET data-diff body: ${resp.body()}") {

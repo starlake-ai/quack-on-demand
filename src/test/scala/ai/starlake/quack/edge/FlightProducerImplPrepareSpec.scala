@@ -2,6 +2,7 @@ package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.admin.AdminStatementExecutor
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -54,11 +55,17 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
 
     val sent = mutable.Buffer.empty[(String, String)] // (endpoint, sql)
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         sent += (endpoint -> sql)
         IO.pure(TestArrow.okResponse())
 
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router =
       if wireAdmin then
@@ -67,10 +74,20 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
           sessions,
           tracker,
           adapter,
-          adminExecutor = Some(new AdminStatementExecutor(sup))
+          adminExecutor = Some(new AdminStatementExecutor(sup)),
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
-      else new FlightSqlRouter(sup, sessions, tracker, adapter)
-    val producer = new FlightProducerImpl(router)
+      else
+        new FlightSqlRouter(
+          sup,
+          sessions,
+          tracker,
+          adapter,
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+        )
+    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
     val peer          = s"peer-${java.util.UUID.randomUUID()}"
     val superuserEff =
@@ -82,7 +99,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       poolKey,
       s"conn-${java.util.UUID.randomUUID()}",
       "alice",
-      effectiveSet = superuserEff
+      grants = superuserEff.map(SessionGrants.fixed)
     )
     (producer, sent, router, peer)
 
@@ -599,7 +616,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       val command                = prepareQueryHandle(producer, peer, "SELECT a FROM t")
       // A second, unrelated session presents the same handle.
       val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
-      ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
+      ConnectionContext.bind(
+        otherPeer,
+        poolKey,
+        s"conn-${java.util.UUID.randomUUID()}",
+        "mallory",
+        grants = None
+      )
       val listener = new RecordingStreamListener
       producer.getStreamPreparedStatement(command, fakeCallContext(otherPeer), listener)
       listener.awaitTerminal()
@@ -630,7 +653,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       .setPreparedStatementHandle(handle)
       .build()
     val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
-    ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
+    ConnectionContext.bind(
+      otherPeer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "mallory",
+      grants = None
+    )
     val ack = new RecordingPutListener
     producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(otherPeer), null, ack).run()
     ack.completed shouldBe false
@@ -647,6 +676,41 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     listener.onErrorRef.get() shouldBe null
     // The query actually reached a node.
     sent.exists(_._2.contains("SELECT a FROM t")) shouldBe true
+
+  // ---- a session's prepared handles leave with the session ----
+
+  it should "be gone once the edge's eviction hook ran for its session, live sessions' kept" in:
+    val (producer, _, router, peer) = setupProducer()
+    val command = prepareQueryHandle(producer, peer, "SELECT a FROM t")
+    val connId  = ConnectionContext.connectionIdFor(peer).get
+    // A second live session of the same producer keeps its handle.
+    val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
+    ConnectionContext.bind(
+      otherPeer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "bob",
+      grants = None
+    )
+    val kept = prepareQueryHandle(producer, otherPeer, "SELECT b FROM t")
+    producer.preparedCount shouldBe 2
+    // What the Flight edge installs as ConnectionContext's evict hook, called with the
+    // connection id of the dropped session (the global hook itself is left alone here).
+    ConnectionContext.unbind(peer)
+    FlightEdgeServer.sessionEvicted(router, producer)(connId)
+    producer.preparedCount shouldBe 1
+    val listener = new RecordingStreamListener
+    producer.getStreamPreparedStatement(command, fakeCallContext(peer), listener)
+    listener.awaitTerminal()
+    val err =
+      listener.onErrorRef.get().asInstanceOf[org.apache.arrow.flight.FlightRuntimeException]
+    err.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.INVALID_ARGUMENT
+    err.getMessage should include("no such prepared statement")
+    an[org.apache.arrow.flight.FlightRuntimeException] should be thrownBy
+      producer.getSchemaPreparedStatement(command, fakeCallContext(peer), null)
+    producer.getSchemaPreparedStatement(kept, fakeCallContext(otherPeer), null) should not be null
+    ConnectionContext.unbind(otherPeer)
+
   // ---- audit F17: a schema probe never runs a statement the Execute runs again ----
   //
   // The node runs every statement of the text it is sent. Probing `SELECT 1; INSERT ...` (or any

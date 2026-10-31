@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
+import ai.starlake.quack.ondemand.auth.LoginRealm
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -49,8 +50,9 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
           pgPassword
         )
         try
-          val ps = c.prepareStatement("DELETE FROM qodstate_user WHERE username = ?")
-          ps.setString(1, u)
+          // Every username this spec creates starts with the random prefix `u`.
+          val ps = c.prepareStatement("DELETE FROM qodstate_user WHERE username LIKE ?")
+          ps.setString(1, s"$u%")
           ps.executeUpdate()
           ps.close()
         finally c.close()
@@ -58,13 +60,13 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
 
   "grantsForIdentity" should "return an empty list when no row matches" in {
     requirePg()
-    store.grantsForIdentity(s"$u-nobody", None) shouldBe Nil
+    store.grantsForIdentity(LoginRealm.System, s"$u-nobody", None) shouldBe Nil
   }
 
   it should "surface a superuser grant when the user has tenant=NULL" in {
     requirePg()
     store.upsertUser(tenant = None, username = u, plaintext = "x", kind = "admin")
-    val gs = store.grantsForIdentity(u, None)
+    val gs = store.grantsForIdentity(LoginRealm.System, u, None)
     gs should contain(UserGrant(None, "admin"))
   }
 
@@ -72,7 +74,7 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
     requirePg()
     val t = "t-grants-test"
     store.upsertUser(tenant = Some(t), username = u, plaintext = "x", kind = "admin")
-    val gs = store.grantsForIdentity(u, None)
+    val gs = store.grantsForIdentity(LoginRealm.System, u, None)
     gs.map(_.tenant).toSet should contain(Some(t))
   }
 
@@ -85,7 +87,8 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
       plaintext = "x",
       kind = "admin"
     )
-    val gs = store.grantsForIdentity(identity = s"$u-not-real", email = Some(email))
+    val gs =
+      store.grantsForIdentity(LoginRealm.System, identity = s"$u-not-real", email = Some(email))
     gs.map(_.tenant) should contain(Some("t-grants-test"))
   }
 
@@ -107,11 +110,83 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
       ps.close()
     }
     // Sanity: disabled row contributes no grant.
-    store.grantsForIdentity(u, None).filter(_.tenant.contains(t)) shouldBe Nil
+    store.grantsForIdentity(LoginRealm.System, u, None).filter(_.tenant.contains(t)) shouldBe Nil
     // Rotate password + role; enabled must stay false.
     store.upsertUser(tenant = Some(t), username = u, plaintext = "y", kind = "reader")
-    store.grantsForIdentity(u, None).filter(_.tenant.contains(t)) shouldBe Nil
+    store.grantsForIdentity(LoginRealm.System, u, None).filter(_.tenant.contains(t)) shouldBe Nil
   }
+
+  // ---- realms: a tenant realm reads only that tenant's rows ----
+
+  it should "bind only the named tenant's row in a tenant realm, never a same-named superuser or other-tenant row" in {
+    requirePg()
+    val name = s"$u-r1"
+    store.upsertUser(tenant = None, username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-a"), username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-b"), username = name, plaintext = "x", kind = "admin")
+    store.grantsForIdentity(LoginRealm.Tenant("t-realm-a"), name, None) shouldBe
+      List(UserGrant(Some("t-realm-a"), "admin"))
+  }
+
+  it should "answer no grant in a tenant realm that holds no row for the identity, whatever other realms hold" in {
+    requirePg()
+    val name = s"$u-r2"
+    store.upsertUser(tenant = None, username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-b"), username = name, plaintext = "x", kind = "admin")
+    store.grantsForIdentity(LoginRealm.Tenant("t-realm-a"), name, None) shouldBe Nil
+  }
+
+  it should "keep the email fallback inside the tenant realm, whatever other realms hold" in {
+    requirePg()
+    val name  = s"$u-r3"
+    val email = s"$u-r3@example.com"
+    // Other realms only: a disabled identity row in t-realm-b, email-keyed rows as superuser and
+    // in t-realm-b. None belongs to t-realm-a, so none denies, stops the fallback, or grants.
+    store.upsertUser(tenant = Some("t-realm-b"), username = name, plaintext = "x", kind = "admin")
+    disable("t-realm-b", name)
+    store.upsertUser(tenant = None, username = email, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-b"), username = email, plaintext = "x", kind = "admin")
+    store.grantsForIdentity(LoginRealm.Tenant("t-realm-a"), name, Some(email)) shouldBe Nil
+    // The realm's own email-keyed row is bound through the fallback.
+    store.upsertUser(tenant = Some("t-realm-a"), username = email, plaintext = "x", kind = "admin")
+    store.grantsForIdentity(LoginRealm.Tenant("t-realm-a"), name, Some(email)) shouldBe
+      List(UserGrant(Some("t-realm-a"), "admin"))
+  }
+
+  it should "deny a tenant realm whose row is disabled, with no email fallback and no other realm's row" in {
+    requirePg()
+    val name  = s"$u-r4"
+    val email = s"$u-r4@example.com"
+    store.upsertUser(tenant = Some("t-realm-a"), username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-b"), username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-a"), username = email, plaintext = "x", kind = "admin")
+    disable("t-realm-a", name)
+    store.grantsForIdentity(LoginRealm.Tenant("t-realm-a"), name, Some(email)) shouldBe Nil
+  }
+
+  it should "match the identity in every realm in the system realm" in {
+    requirePg()
+    val name = s"$u-r5"
+    store.upsertUser(tenant = None, username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-a"), username = name, plaintext = "x", kind = "admin")
+    store.upsertUser(tenant = Some("t-realm-b"), username = name, plaintext = "x", kind = "user")
+    store.grantsForIdentity(LoginRealm.System, name, None).toSet shouldBe Set(
+      UserGrant(None, "admin"),
+      UserGrant(Some("t-realm-a"), "admin"),
+      UserGrant(Some("t-realm-b"), "user")
+    )
+  }
+
+  private def disable(tenant: String, username: String): Unit =
+    withRawConn { c =>
+      val ps = c.prepareStatement(
+        "UPDATE qodstate_user SET enabled = false WHERE tenant = ? AND username = ?"
+      )
+      ps.setString(1, tenant)
+      ps.setString(2, username)
+      ps.executeUpdate()
+      ps.close()
+    }
 
   private def withRawConn(f: java.sql.Connection => Unit): Unit =
     val c = java.sql.DriverManager.getConnection(

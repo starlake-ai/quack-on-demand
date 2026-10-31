@@ -1,0 +1,230 @@
+// qod-node: the DuckDB process that serves one Quack node.
+//
+// It opens a DuckDB instance from an official release library, runs the init SQL the spawn script
+// assembled (statement by statement, best effort, as the DuckDB CLI did), then serves over quack
+// until a stop signal arrives or the spawn wrapper that started it ends; either one, while it is still
+// starting, ends it at once. What must not fail silently runs strict, here rather than in the SQL: the
+// secret directory, loading quack, the parse screen and quack_serve; the identity checks (node_hooks)
+// are registered before any SQL runs. The extension settings are fixed in the config before the
+// database opens (spec decision 17). So are the two shared file caches (off) and the guard that
+// resets the environment's S3 defaults whenever httpfs loads (decision 23). A tenant admin's initSql
+// arrives inside marked sections, which run under the tenant initSql allowlist (init_policy); the
+// manager checks such SQL at write time with --check-init, the same code.
+
+#include "authz.hpp"
+#include "build_info.hpp"
+#include "duckdb.hpp"
+#include "functions_list.hpp"
+#include "init_policy.hpp"
+#include "init_runner.hpp"
+#include "lifetime.hpp"
+#include "node_config.hpp"
+#include "node_hooks.hpp"
+#include "options.hpp"
+#include "secrets.hpp"
+#include "settings_list.hpp"
+#include "sql_script.hpp"
+#include "utf8_args.hpp"
+#ifdef QOD_NODE_DUCKDB_STATIC
+#include "static_extensions.hpp"
+#endif
+
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+
+namespace {
+
+using namespace qod;
+
+//! Runs every init file; `nonce` marks a tenant's sections (empty: none, the --list-* modes). A
+//! serving node's init file must open with the nonce line (RequireInitNonceLine): a stream whose
+//! script read another nonce is refused whole, never run with its tenant sections trusted.
+void RunInitFiles(duckdb::Connection &con, const NodeOptions &options, const std::string &nonce = "",
+                  const std::function<void(const std::string &)> &before_trusted = nullptr) {
+	for (auto &file : options.init_files) {
+		auto sql = ReadAll(file);
+		RunInit(con, nonce.empty() ? sql : RequireInitNonceLine(sql, nonce), nonce, before_trusted);
+	}
+}
+
+//! --check-init: the tenant initSql allowlist's verdict on the SQL read from stdin, as one line of
+//! canonical JSON on stdout (InitVerdictJson). Judges, never runs: nothing of the SQL executes.
+int CheckInitMode(const NodeOptions &options) {
+	auto sql = ReadAll("-");
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
+	duckdb::Connection con(db);
+	std::cout << InitVerdictJson(CheckInit(*con.context, sql)) << std::endl;
+	return 0;
+}
+
+int ListSettingsMode(const NodeOptions &options) {
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
+	duckdb::Connection con(db);
+	RunInitFiles(con, options);
+	ListSettings(duckdb::DBConfig::GetConfig(*db.instance), std::cout);
+	return 0;
+}
+
+int ListFunctionsMode(const NodeOptions &options) {
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
+	// qod_session and qod_screen are functions every node has. The id and key are never used: no
+	// handle is verified in this mode.
+	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>("qod-node-list", std::string(32, '\0')));
+	duckdb::Connection con(db);
+	RunInitFiles(con, options);
+	ListFunctions(con, std::cout);
+	return 0;
+}
+
+//! What qod-node reads from its secrets directory itself.
+struct NodeSecrets {
+	std::string token;
+	std::string node_key;
+	//! This spawn's init marker nonce (ReadInitNonce).
+	std::string init_nonce;
+};
+
+// The secrets directory goes whether or not the reads succeed: nothing in it is needed again.
+NodeSecrets ReadNodeSecrets(const NodeOptions &options) {
+	try {
+		NodeSecrets secrets {ReadSecret(options.secrets_dir, "QOD_NODE_TOKEN"), ReadNodeKey(options.secrets_dir),
+		                     ReadInitNonce(options.secrets_dir)};
+		DisposeSecrets(options.secrets_dir, options.secrets_ephemeral);
+		return secrets;
+	} catch (...) {
+		DisposeSecrets(options.secrets_dir, options.secrets_ephemeral);
+		throw;
+	}
+}
+
+int Serve(const NodeOptions &options) {
+	auto secrets = ReadNodeSecrets(options);
+	// Before DuckDB opens: a malformed limit stops the node at start, never at its first decide call.
+	auto limits = AuthzLimitsFromEnv();
+
+	// Before the database opens (decision 17): nothing that runs in it, the init SQL included, can
+	// then turn on community or unsigned extensions.
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	// Decision 23: no shared file cache, and no S3 setting the environment filled, from the first
+	// statement on. httpfs is installed at init and autoloaded on first use (a user's first credential
+	// secret included): the guard fires on that autoload too.
+	ApplyCachePolicy(config);
+	// Item 32 A: no constant subtree folded before the binder, so the describer reads every call.
+	ApplyOptimizerPolicy(config);
+	RegisterS3EnvironmentGuard(config);
+	duckdb::DuckDB db(nullptr, &config);
+	// Before any SQL: qod_session, the parse screen and the post_bind backstop apply to every
+	// connection quack opens from here on.
+	RegisterNodeAuthz(*db.instance,
+	                  std::make_shared<NodeAuthz>(options.node_id, secrets.node_key, SystemNowMs, limits));
+	duckdb::Connection con(db);
+
+	// Before any CREATE SECRET or ATTACH: once duckdb_secrets() has put the secret manager in use,
+	// DuckDB refuses to change secret_directory from any session.
+	RunStrict(con, "SET secret_directory = " + QuoteLiteral(options.secret_directory), "setting the secret directory");
+	RunStrict(con, "SELECT count(*) FROM duckdb_secrets()", "starting the secret manager");
+
+	// quack loads after the trusted init statements that set where extensions come from
+	// (custom_extension_repository, extension_directory), and before the first one that restricts the
+	// node's file or network access (a superuser's initSql may disable the local file system, and
+	// quack's extension file is local). Without such a statement, after the init SQL.
+	auto quack_loaded = false;
+	auto load_quack = [&]() {
+		if (!quack_loaded) {
+			quack_loaded = true;
+			RunStrict(con, "INSTALL quack", "installing quack");
+			RunStrict(con, "LOAD quack", "loading quack");
+		}
+	};
+	RunInitFiles(con, options, secrets.init_nonce, [&](const std::string &statement) {
+		if (RestrictsNodeAccess(*con.context, statement)) {
+			load_quack();
+		}
+	});
+	load_quack();
+
+	// A trusted init statement may have set disabled_optimizers: remote_pushdown stays in it.
+	auto optimizers = RunStrict(con, "SELECT current_setting('disabled_optimizers')", "reading disabled_optimizers");
+	auto optimizers_chunk = optimizers->Fetch();
+	auto current =
+	    optimizers_chunk && optimizers_chunk->size() > 0 ? optimizers_chunk->GetValue(0, 0).ToString() : std::string();
+	auto restored = WithDisabledOptimizer(current);
+	if (!restored.empty()) {
+		RunStrict(con, "SET GLOBAL disabled_optimizers = " + QuoteLiteral(restored), "disabling remote_pushdown");
+		std::cerr << "[qod-node] the init SQL dropped " << kDisabledOptimizer
+		          << " from disabled_optimizers: disabled again" << std::endl;
+	}
+
+	// After the init SQL, so nothing it ran can replace the screen.
+	RunStrict(con, std::string("SET GLOBAL quack_authorization_function = ") + QuoteLiteral(kScreenFunction),
+	          "installing the parse screen");
+	auto served = RunStrict(con, ServeStatement(options.bind, options.port, secrets.token), "quack_serve");
+	auto chunk = served->FetchRaw();
+	std::cerr << "[qod-node] serving on " << (chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : "?")
+	          << std::endl;
+	MarkServing();
+	std::cerr << "[qod-node] ready" << std::endl;
+
+	auto reason = WaitForStop();
+	std::cerr << "[qod-node] stopping: " << reason << std::endl;
+	return 0;
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+	NodeOptions options;
+	try {
+		options = ParseOptions(Utf8Arguments(argc, argv));
+	} catch (std::invalid_argument &error) {
+		std::cerr << "qod-node: " << error.what() << "\n" << Usage();
+		return 2;
+	} catch (std::exception &error) {
+		std::cerr << "qod-node: " << error.what() << std::endl;
+		return 1;
+	}
+	if (options.mode == NodeOptions::Mode::BUILD_INFO) {
+		std::cout << BuildInfo() << std::endl;
+#ifndef QOD_NODE_DUCKDB_STATIC
+		// Also the libduckdb this process loaded: the manager runs --build-info at boot to learn the
+		// binary starts here, against the release it was built for.
+		try {
+			CheckLinkedDuckDB();
+		} catch (std::exception &error) {
+			std::cerr << "[qod-node] " << error.what() << std::endl;
+			return 1;
+		}
+#endif
+		return 0;
+	}
+
+	StartStopWatch(options.parent_pid);
+	try {
+#ifdef QOD_NODE_DUCKDB_STATIC
+		RegisterStaticExtensions();
+#else
+		CheckLinkedDuckDB();
+#endif
+		if (options.mode == NodeOptions::Mode::LIST_SETTINGS) {
+			return ListSettingsMode(options);
+		}
+		if (options.mode == NodeOptions::Mode::LIST_FUNCTIONS) {
+			return ListFunctionsMode(options);
+		}
+		if (options.mode == NodeOptions::Mode::CHECK_INIT) {
+			return CheckInitMode(options);
+		}
+		return Serve(options);
+	} catch (std::exception &error) {
+		std::cerr << "[qod-node] " << error.what() << std::endl;
+		return 1;
+	}
+}

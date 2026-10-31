@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from secrets import token_hex as _token_hex
 from typing import Callable
 
 import httpx
@@ -38,12 +39,12 @@ PIDFILE = "node.pid"
 
 # A failed node's error (exit status and stderr tail) -> the fix to suggest; first match wins.
 _NODE_FAILURES: tuple[tuple[re.Pattern, str], ...] = (
-    (re.compile(r"duckdb not found"),
-     "duckdb is missing on this server: re-run qod fleet join without --duckdb-bin to let qod "
-     "provision it, or pass --duckdb-bin <path-to-duckdb>"),
-    (re.compile(r"cannot run the \.shell dot-command"),
-     "this duckdb build lacks the .shell dot-command the node needs: pass --duckdb-bin with the "
-     "DuckDB release CLI"),
+    (re.compile(r"qod-node not found"),
+     "qod-node is missing on this server: re-run qod fleet join without --qod-node-bin to use the "
+     "one qod bundles, or pass --qod-node-bin <path-to-qod-node>"),
+    (re.compile(r"Library not loaded|cannot open shared object file|loaded .* install the matching libduckdb"),
+     "qod-node cannot load its libduckdb: re-run qod fleet join without --qod-node-bin to let qod "
+     "provision both, or put the matching libduckdb in the lib/ directory beside its bin/"),
     (re.compile(r"address already in use", re.I),
      "another process holds port {port} on this server: stop it, or re-run qod fleet join with "
      "--node-port <free-port>"),
@@ -67,12 +68,11 @@ def node_failure_action(error: str | None, port: int) -> str | None:
 DRAIN_JOIN_S = 0.5
 
 # The node's environment is built from this allowlist, never from this process's whole environment:
-# the join process holds QOD_FLEET_JOIN_TOKEN (the fleet-wide credential), and tenant SQL on a node
-# without lockdown can read /proc/self/environ.
+# the join process holds QOD_FLEET_JOIN_TOKEN (the fleet-wide credential), which no node's process
+# environment may hold.
 _ENV_PASSTHROUGH = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "SHELL",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
-    "DUCKDB_BIN", "QOD_APP_HOME",
     # The spawn script's CREATE DATABASE admin db, and libpq / OpenSSL settings for a metastore
     # reached over TLS: without them every node of the fleet fails, silently.
     "PG_ADMIN_DB", "PGSSLMODE", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGCONNECT_TIMEOUT",
@@ -80,15 +80,42 @@ _ENV_PASSTHROUGH = (
 )
 # Object-storage settings the spawn script reads.
 _ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
-_SQL_KEYS = ("dbInitSql", "lockdownSql")
+_SQL_KEYS = ("resourceSql",)
+# The tenant-db's and the pool's initSql: assignment key, its trust key, and the secret file it goes
+# to by trust. The file's name is the trust: the spawn script runs a ...Trusted file as written (a
+# superuser's or the manager's text) and any other under qod-node's tenant initSql allowlist. Trusted
+# only for a JSON true.
+_TENANT_INIT_KEYS = (("tenantDbInitSql", "tenantDbInitTrusted", "tenantDbInitSqlTrusted"),
+                     ("tenantPoolInitSql", "tenantPoolInitTrusted", "tenantPoolInitSqlTrusted"))
+# The manager's extension policy (quack-on-demand.nodeExtensions, spec decision 17), assignment key
+# -> the variable the spawn script reads. Always all three, from the assignment only.
+_NODE_EXTENSION_ENV = (("allowCommunity", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"),
+                       ("allowUnsigned", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"),
+                       ("autoinstallKnown", "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"))
+# The manager's decide limits (quack-on-demand.nodeAuthzLimits), assignment key -> the variable
+# qod-node reads. From the assignment only; an older manager sends none, and a value that is not a
+# JSON integer is dropped, both leaving qod-node's defaults (it refuses to start on a malformed one).
+_NODE_AUTHZ_LIMIT_ENV = (("decideTimeoutMs", "QOD_AUTHZ_DECIDE_TIMEOUT_MS"),
+                         ("cacheEntries", "QOD_AUTHZ_CACHE_ENTRIES"))
 # Sensitive values never sit in the node's environment or command line (a node user with SQL reads
 # both back through getenv() or /proc/<pid>/environ|cmdline): they go to a private directory, one
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
 # spawn-quack-node.sh and NodeSecretFiles.Keys on the manager.
 _SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "QOD_NODE_TOKEN",
-                "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING",
-                "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
-_CLOUD_CRED_KEYS = _SECRET_KEYS[5:]
+                "QOD_NODE_AUTHZ_KEY", "tenantDbInitSql", "tenantDbInitSqlTrusted", "tenantPoolInitSql",
+                "tenantPoolInitSqlTrusted", "QOD_INIT_NONCE", "QOD_S3_ACCESS_KEY_ID",
+                "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
+_CLOUD_CRED_KEYS = _SECRET_KEYS[11:]
+# An assignment's env is a tenant-db's metastore, tenant-admin input: only the keys the spawn script
+# reads from its environment are laid over the node's environment, and only the metastore's own
+# secrets below become files. Any other name (BASH_ENV, which bash expands before running the
+# script, PATH, QOD_NODE_BIN...) would run commands on this server or replace what this
+# process sets. The manager filters too; this is defense in depth against an older manager or a
+# manager bug. Same set as TenantDb.NodeEnvKeys on the manager (NodeSecretFilesSpec pins it).
+_NODE_ENV_KEYS = ("pgHost", "pgPort", "pgUser", "dbName", "catalogAlias", "schemaName", "dataPath", "encrypted")
+# The metastore's own secrets, taken from an assignment's env in any spelling: same set as
+# TenantDb.NodeSecretEnvKeys (NodeSecretFilesSpec pins it).
+_METASTORE_SECRET_KEYS = ("pgPassword", "encryptionKey")
 SECRETS_DIR = "secrets"
 
 
@@ -205,28 +232,6 @@ def host_capacity(root: Path = CGROUP_ROOT) -> tuple[int | None, int | None]:
     return cpus, mem
 
 
-def probe_duckdb_version(binary: Path, run=subprocess.run) -> str | None:
-    """The version a duckdb binary reports (`v1.5.6 (Variegata) <sha>` -> "1.5.6"), or
-    None when it cannot be run or says nothing parsable."""
-    try:
-        out = run(
-            [str(binary), "--version"],
-            capture_output=True,
-            # Normal output even under an agent env var (DuckDB 2.0 agent mode).
-            env={**os.environ, "DUCKDB_AGENT_MODE": "0"},
-            text=True,
-            errors="replace",
-            timeout=5,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for token in (out or "").split():
-        m = re.fullmatch(r"v?(\d+\.\d+\.\d+)", token)
-        if m:
-            return m.group(1)
-    return None
-
-
 def _port_open(host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, port), timeout=0.25):
@@ -306,10 +311,15 @@ def _causes(exc: BaseException) -> list[BaseException]:
     return seen
 
 
+# How OpenSSL reports a plain-HTTP answer to a TLS handshake: WRONG_VERSION_NUMBER up to 3.4,
+# "record layer failure" from 3.5 on.
+PLAIN_HTTP_MARKERS = ("WRONG_VERSION_NUMBER", "record layer failure")
+
+
 def scheme_mismatch(exc: BaseException, manager_url: str) -> bool:
     """An https:// URL whose port answered plain HTTP: no retry can fix that, only another URL."""
     return (httpx.URL(manager_url).scheme == "https"
-            and any("WRONG_VERSION_NUMBER" in str(e) for e in _causes(exc)))
+            and any(m in str(e) for e in _causes(exc) for m in PLAIN_HTTP_MARKERS))
 
 
 def network_hint(exc: BaseException, manager_url: str) -> str | None:
@@ -407,7 +417,7 @@ class _Node:
 
 class FleetMember:
     def __init__(self, manager_url: str, join_token: str, *, name: str, advertise_host: str, bind_host: str,
-                 node_port: int, spawn_script: Path, duckdb_bin: Path | None, state_dir: Path, insecure: bool,
+                 node_port: int, spawn_script: Path, node_bin: Path | None, state_dir: Path, insecure: bool,
                  http=httpx, popen=subprocess.Popen, sleep: Callable[[float], None] = time.sleep,
                  port_open: Callable[[int], bool] | None = None, clock: Callable[[], float] = time.monotonic,
                  capacity: Callable[[], tuple[int | None, int | None]] = host_capacity,
@@ -417,7 +427,7 @@ class FleetMember:
             raise SystemExit(2)
         self.manager_url, self.join_token = manager_url.rstrip("/"), join_token
         self.name, self.advertise_host, self.bind_host, self.node_port = name, advertise_host, bind_host, node_port
-        self.spawn_script, self.duckdb_bin, self.state_dir = spawn_script, duckdb_bin, Path(state_dir)
+        self.spawn_script, self.node_bin, self.state_dir = spawn_script, node_bin, Path(state_dir)
         self.http, self.popen, self.sleep, self.clock, self.capacity = http, popen, sleep, clock, capacity
         probe_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
         self.port_open = port_open or (lambda p: _port_open(probe_host, p))
@@ -436,6 +446,8 @@ class FleetMember:
         self.approval: str | None = None
         # Monotonic deadline of the scheduled restart of a failed node; None while none is scheduled.
         self.next_restart_at: float | None = None
+        # (pool, key) of each assignment env key already named as dropped, so it is named once.
+        self.dropped_keys: set[tuple[str, str]] = set()
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- pidfile ----
@@ -495,6 +507,16 @@ class FleetMember:
                 "action": node_failure_action(n.error, n.assignment["port"]) if n.state == "failed" else None}
 
     # ---- process control ----
+    def _warn_dropped(self, assignment: dict, keys: list[str]) -> None:
+        """Name each assignment env key that reaches no node, once per pool and key, never its value."""
+        pool = assignment.get("poolKey") or {}
+        pool_id = "/".join(str(pool.get(p, "?")) for p in ("tenant", "tenantDb", "pool"))
+        for k in sorted(keys):
+            if (pool_id, k) not in self.dropped_keys:
+                self.dropped_keys.add((pool_id, k))
+                sys.stderr.write(f"qod fleet join: WARN ignoring {k!r} in the assignment env for {pool_id}: a node "
+                                 f"gets only {', '.join(_NODE_ENV_KEYS)} and the metastore's own secrets\n")
+
     def _launch_spec(self, assignment: dict) -> tuple[list[str], dict[str, str], dict[str, str]]:
         """Command, environment and secret files for `assignment`. Raises KeyError/TypeError on a
         malformed assignment, before anything is stopped."""
@@ -502,27 +524,48 @@ class FleetMember:
                if (k in _ENV_PASSTHROUGH or k.startswith(_ENV_PASSTHROUGH_PREFIXES))
                and _canonical_secret(k) is None}
         secrets = {k: os.environ[k] for k in _CLOUD_CRED_KEYS if os.environ.get(k)}
+        dropped = []
         for k, v in assignment["env"].items():
-            canonical = _canonical_secret(str(k))
-            if canonical is None:
-                env[str(k)] = str(v)
-            elif canonical == str(k) or canonical not in secrets or canonical in _CLOUD_CRED_KEYS:
-                # The exact spelling wins over a differently-cased one; the assignment wins over this
-                # process's own object-store credentials.
-                secrets[canonical] = str(v)
+            k = str(k)
+            canonical = _canonical_secret(k)
+            if k in _NODE_ENV_KEYS:
+                env[k] = str(v)
+            elif canonical in _METASTORE_SECRET_KEYS:
+                if canonical == k or canonical not in secrets:
+                    # The exact spelling wins over a differently-cased one.
+                    secrets[canonical] = str(v)
+            else:
+                dropped.append(k)
+        self._warn_dropped(assignment, dropped)
         env["kind"] = str(assignment["kind"])
         env["QOD_NODE_BIND"] = self.bind_host
         # Always from the assignment, empty when absent: a stray value in this process's environment
-        # (a lockdownSql=... exported by hand) must never reach a node.
+        # (a resourceSql=... exported by hand) must never reach a node.
         for key in _SQL_KEYS:
             env[key] = str(assignment.get(key) or "")
         for key in ("extraSetupSql", "objectStoreSql"):
             if assignment.get(key):
                 secrets[key] = str(assignment[key])
+        for key, trusted, trusted_file in _TENANT_INIT_KEYS:
+            if assignment.get(key):
+                secrets[trusted_file if assignment.get(trusted) is True else key] = str(assignment[key])
+        # A fresh init marker nonce per start: the spawn script marks the tenant's sections with it,
+        # and qod-node honours only marker lines carrying it.
+        secrets["QOD_INIT_NONCE"] = _token_hex(16)
         secrets["QOD_NODE_TOKEN"] = str(assignment["token"])
-        if self.duckdb_bin is not None:
-            env["DUCKDB_BIN"] = str(self.duckdb_bin)
-            env["PATH"] = str(Path(self.duckdb_bin).parent) + os.pathsep + env.get("PATH", "")
+        secrets["QOD_NODE_AUTHZ_KEY"] = str(assignment["authzKey"])
+        env["QOD_NODE_ID"] = str(assignment["nodeId"])
+        # On only for a JSON true; an older manager sends no policy, which leaves all three off.
+        extensions = assignment.get("nodeExtensions") or {}
+        for key, name in _NODE_EXTENSION_ENV:
+            env[name] = "true" if extensions.get(key) is True else "false"
+        limits = assignment.get("authzLimits")
+        for key, name in _NODE_AUTHZ_LIMIT_ENV:
+            value = limits.get(key) if isinstance(limits, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool):
+                env[name] = str(value)
+        if self.node_bin is not None:
+            env["QOD_NODE_BIN"] = str(self.node_bin)
         env["QOD_SECRETS_DIR_EPHEMERAL"] = "1"
         cmd = ["bash", str(self.spawn_script), str(int(assignment["port"]))]
         return cmd, env, {k: v for k, v in secrets.items() if v}

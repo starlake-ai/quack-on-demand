@@ -3,6 +3,7 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.auth.{AuthScope, DatabaseAuthenticator}
 import ai.starlake.quack.edge.config.DatabaseAuthConfig
+import ai.starlake.quack.ondemand.auth.LoginRealm
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PostgresControlPlaneStore, UserStore}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import at.favre.lib.crypto.bcrypt.BCrypt
@@ -83,6 +84,28 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
         val r = auth.authenticate(AuthScope.System, "root", "rootpw")
         r.isRight shouldBe true
         r.toOption.get.username shouldBe "root"
+      finally auth.close()
+    }
+
+  it should "stamp the profile of a verified row with DatabaseAuthenticator.AuthMethod, the tag by which the management login takes it as its own grant" in
+    withFreshDb { (store, url) =>
+      import ai.starlake.quack.model.Tenant
+      store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+      store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = true)
+      store.upsertUserWithHash(Some("acme"), "alice", hash("alicepw"), "user", enabled = true)
+      val auth = new DatabaseAuthenticator(authConfig(url), roleClaim = "role")
+      try
+        val system = auth.authenticate(AuthScope.System, "root", "rootpw").toOption.get
+        val tenant = auth.authenticate(AuthScope.Tenant("acme"), "alice", "alicepw").toOption.get
+        // AuthHandlers.mintSessionFor reads no directory for exactly this tag: were the
+        // authenticator to stamp another one, every database login would be not_provisioned.
+        system.authMethod shouldBe DatabaseAuthenticator.AuthMethod
+        system.tenant shouldBe None
+        system.role shouldBe "admin"
+        tenant.authMethod shouldBe DatabaseAuthenticator.AuthMethod
+        tenant.tenant shouldBe Some("acme")
+        tenant.role shouldBe "user"
+        auth.name shouldBe DatabaseAuthenticator.AuthMethod
       finally auth.close()
     }
 
@@ -168,7 +191,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
     withFreshDb { (store, url) =>
       store.upsertUserWithHash(None, "carol", hash("x"), "admin", enabled = false)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
-      try us.grantsForIdentity("carol", None) shouldBe Nil
+      try us.grantsForIdentity(LoginRealm.System, "carol", None) shouldBe Nil
       finally us.close()
     }
 
@@ -176,7 +199,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
     withFreshDb { (store, url) =>
       store.upsertUserWithHash(None, "dave", hash("x"), "admin", enabled = true)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
-      try us.grantsForIdentity("dave", None).map(_.kind) shouldBe List("admin")
+      try us.grantsForIdentity(LoginRealm.System, "dave", None).map(_.kind) shouldBe List("admin")
       finally us.close()
     }
 
@@ -189,7 +212,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       store.upsertUserWithHash(None, "erin", hash("x"), "admin", enabled = false)
       store.upsertUserWithHash(None, "erin@example.com", hash("x"), "admin", enabled = true)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
-      try us.grantsForIdentity("erin", Some("erin@example.com")) shouldBe Nil
+      try us.grantsForIdentity(LoginRealm.System, "erin", Some("erin@example.com")) shouldBe Nil
       finally us.close()
     }
 
@@ -207,7 +230,8 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       store.upsertUserWithHash(Some("globex"), "frank", hash("x"), "admin", enabled = true)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
       try
-        us.grantsForIdentity("frank", None).map(_.tenant) shouldBe List(Some("globex"))
+        us.grantsForIdentity(LoginRealm.System, "frank", None).map(_.tenant) shouldBe
+          List(Some("globex"))
       finally us.close()
     }
 
@@ -223,6 +247,6 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       store.upsertUserWithHash(Some("globex"), "gina", hash("x"), "admin", enabled = false)
       store.upsertUserWithHash(None, "gina@example.com", hash("x"), "admin", enabled = true)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
-      try us.grantsForIdentity("gina", Some("gina@example.com")) shouldBe Nil
+      try us.grantsForIdentity(LoginRealm.System, "gina", Some("gina@example.com")) shouldBe Nil
       finally us.close()
     }

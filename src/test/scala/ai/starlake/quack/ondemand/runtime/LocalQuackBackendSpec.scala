@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -12,7 +14,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       min = 23000,
       max = 23010,
-      commandFor = (_, _, _) => sleepCmd(30)
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-1", Role.Dual, Map.empty, Map.empty)
     val node = backend.start(spec).unsafeRunSync()
@@ -24,7 +28,13 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     finally backend.stop(PoolKey("t", "t_default", "p"), "node-1").unsafeRunSync()
 
   it should "release the port on stop" in:
-    val backend = new LocalQuackBackend(23020, 23021, commandFor = (_, _, _) => sleepCmd(30))
+    val backend = new LocalQuackBackend(
+      23020,
+      23021,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
     backend.start(spec).unsafeRunSync()
     backend.stop(PoolKey("t", "t_default", "p"), "node-2").unsafeRunSync()
@@ -35,10 +45,16 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
   // (holding its port) and its port lease leaked.
   it should "stop the process it still holds under a node id before starting another one" in:
     assume(!isWindows)
-    val backend = new LocalQuackBackend(23130, 23131, commandFor = (_, _, _) => sleepCmd(30))
-    val key     = PoolKey("t", "t_default", "p")
-    val spec    = NodeSpec(key, "node-again", Role.Dual, Map.empty, Map.empty)
-    val first   = backend.start(spec).unsafeRunSync()
+    val backend = new LocalQuackBackend(
+      23130,
+      23131,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    val key   = PoolKey("t", "t_default", "p")
+    val spec  = NodeSpec(key, "node-again", Role.Dual, Map.empty, Map.empty)
+    val first = backend.start(spec).unsafeRunSync()
     try
       val second = backend.start(spec).unsafeRunSync()
       val handle = java.lang.ProcessHandle.of(first.pid.value)
@@ -55,9 +71,15 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
   it should "never signal an adopted pid whose process did not start when the node did" in:
     assume(!isWindows)
     val unrelated = new java.lang.ProcessBuilder(sleepCmd(30)*).start()
-    val backend   = new LocalQuackBackend(23135, 23136, commandFor = (_, _, _) => sleepCmd(30))
-    val key       = PoolKey("t", "t_default", "p")
-    val row       = ai.starlake.quack.model.RunningNode(
+    val backend   = new LocalQuackBackend(
+      23135,
+      23136,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    val key = PoolKey("t", "t_default", "p")
+    val row = ai.starlake.quack.model.RunningNode(
       nodeId = "adopted-mismatch",
       poolKey = key,
       role = Role.Dual,
@@ -82,8 +104,14 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       ()
 
   it should "carry NodeSpec.maxConcurrent through to RunningNode" in:
-    val backend = new LocalQuackBackend(23030, 23031, commandFor = (_, _, _) => sleepCmd(30))
-    val spec    = NodeSpec(
+    val backend = new LocalQuackBackend(
+      23030,
+      23031,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    val spec = NodeSpec(
       PoolKey("t", "t_default", "p"),
       "node-3",
       Role.Dual,
@@ -101,7 +129,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       min = 23040,
       max = 23041,
-      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(
       PoolKey("t", "t_default", "p"),
@@ -132,7 +162,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       min = 23042,
       max = 23043,
-      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     // Mirrors what effectiveMetastoreFor produces for a pathless duckdb-file
     // tenant-db: dataPath removed entirely, not merely blank.
@@ -161,6 +193,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (spec, port, token) =>
         argv.set(LocalQuackBackend.defaultCommand("spawn.sh")(spec, port, token))
         envDumpCmd(capture.getAbsolutePath, 5)
+      ,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val storeSql = "CREATE OR REPLACE SECRET qod_db_store (TYPE s3, SECRET 'store-secret');"
     val spec     = NodeSpec(
@@ -214,6 +249,271 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       java.nio.file.Files.exists(dir) shouldBe false
     finally backend.stop(PoolKey("t", "t_default", "p"), "node-secrets").unsafeRunSync()
 
+  // The node's identity reaches the spawn script as the manager derived it: the key as a file of
+  // the secrets directory (never env or argv), the id as the plain env var the script passes on as
+  // --node-id. A metastore entry spelled like either one replaces neither. The environment checks
+  // are booleans: a failing `should not include` would print the whole environment dump.
+  it should "hand the node its key as a file and its id as env, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-identity-", ".txt")
+    capture.deleteOnExit()
+    val keys       = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val argv       = new java.util.concurrent.atomic.AtomicReference[List[String]](Nil)
+    val production = LocalQuackBackend.defaultCommand(
+      "spawn.sh",
+      "spawn.ps1",
+      LocalQuackBackend.managerMarker(20900)
+    )
+    val backend = new LocalQuackBackend(
+      min = 23092,
+      max = 23093,
+      nodeKeys = keys,
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      commandFor = (spec, port, token) =>
+        argv.set(production(spec, port, token))
+        envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    val nodeId = "node-identity"
+    val key    = keys.keyHex(nodeId)
+    val spec   = NodeSpec(
+      PoolKey("t", "t_default", "p"),
+      nodeId,
+      Role.Dual,
+      // The id variable's own name, and the key file's name in another case (isKey compares names
+      // case-insensitively).
+      metastore = Map("pgHost" -> "h", "QOD_NODE_ID" -> "spoof", "qod_node_authz_key" -> "spoof"),
+      s3 = Map.empty
+    )
+    val (_, logged) =
+      LogCapture.logged(classOf[LocalQuackBackend].getName)(backend.start(spec).unsafeRunSync())
+    try
+      // Each spoofed key named once, at ERROR, never with its value.
+      LogCapture.droppedKeyLines(logged) shouldBe
+        List("QOD_NODE_ID", "qod_node_authz_key").map((Level.ERROR, spec.poolKey.toString, _))
+      withClue("a spoofed value in the backend's log")(
+        logged.exists(_.getFormattedMessage.contains("spoof")) shouldBe false
+      )
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      // The id is the node's own, set once; nothing the metastore spoofed reached the environment.
+      out.linesIterator.filter(_.startsWith("QOD_NODE_ID=")).toList shouldBe
+        List(s"QOD_NODE_ID=$nodeId")
+      withClue("a spoofed value in the node's environment")(out.contains("spoof") shouldBe false)
+      withClue("a variable named like the node key file")(
+        out.linesIterator
+          .map(_.takeWhile(_ != '='))
+          .exists(_.equalsIgnoreCase(NodeSecretFiles.AuthzKey)) shouldBe false
+      )
+      // The key is in no environment and no argv, only in its file.
+      withClue("the node's key in its environment")(out.contains(key) shouldBe false)
+      withClue("the node's key in its argv")(argv.get().exists(_.contains(key)) shouldBe false)
+      val dir = java.nio.file.Paths.get(
+        out.linesIterator
+          .find(_.startsWith(s"${NodeSecretFiles.DirEnv}="))
+          .value
+          .stripPrefix(s"${NodeSecretFiles.DirEnv}=")
+      )
+      // Exactly the node's token and key, nothing the metastore named. A cloud credential the
+      // developer's shell exports is delivered too (the backend forwards the manager's own), so it
+      // is set aside rather than counted.
+      (dir.toFile.list().toSet -- NodeSecretFiles.CloudCredKeys) shouldBe
+        Set(NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey, NodeSecretFiles.InitNonceKey)
+      val onDisk = java.nio.file.Files.readString(dir.resolve(NodeSecretFiles.AuthzKey))
+      withClue("the key file does not hold the key derived for the node id")(
+        (onDisk == key) shouldBe true
+      )
+    finally backend.stop(PoolKey("t", "t_default", "p"), nodeId).unsafeRunSync()
+
+  // Decision 17: the extension policy reaches the spawn script as three plain variables, always all
+  // three, with the values of the backend's config; a metastore entry spelled like one is dropped
+  // (NodeMetastore) and does not change it. The checks print only these three variables, never the
+  // dump.
+  it should "hand the node the manager's extension policy, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-extensions-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23098,
+      max = 23099,
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowUnsigned = true),
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    val key  = PoolKey("t", "t_default", "p")
+    val spec = NodeSpec(
+      key,
+      "node-extensions",
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS" -> "true"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      ai.starlake.quack.NodeExtensionsConfig.EnvNames.toList.sorted.map { name =>
+        out.linesIterator.filter(_.startsWith(s"$name=")).toList
+      } shouldBe List(
+        List("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS=false"),
+        List("QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS=true"),
+        List("QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS=false")
+      )
+    finally backend.stop(key, "node-extensions").unsafeRunSync()
+
+  // The decide limits reach the spawn script as two plain variables, always both, with the
+  // backend's config values; a metastore entry spelled like one is dropped and changes nothing.
+  // The checks print only these two variables, never the dump.
+  it should "hand the node the manager's decide limits, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-limits-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23094,
+      max = 23095,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    val key  = PoolKey("t", "t_default", "p")
+    val spec = NodeSpec(
+      key,
+      "node-limits",
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "QOD_AUTHZ_CACHE_ENTRIES" -> "1"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames.toList.sorted.map { name =>
+        out.linesIterator.filter(_.startsWith(s"$name=")).toList
+      } shouldBe List(
+        List("QOD_AUTHZ_CACHE_ENTRIES=0"),
+        List("QOD_AUTHZ_DECIDE_TIMEOUT_MS=750")
+      )
+    finally backend.stop(key, "node-limits").unsafeRunSync()
+
+  // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
+  // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
+  // QOD_NODE_BIN would run commands as the manager's user, and a stale lockdownSql
+  // (Phase D removed it) must reach no node. The metastore's other keys never become a secret file either. The values are inert
+  // markers, and the checks are booleans: a failing `should not include` would print the dump.
+  it should "pass only TenantDb.NodeEnvKeys of the metastore to the spawn environment" in:
+    val captures = scala.collection.concurrent.TrieMap.empty[String, java.io.File]
+    def capture(nodeId: String): java.io.File =
+      captures.getOrElseUpdate(
+        nodeId, {
+          val f = java.io.File.createTempFile(s"env-capture-$nodeId-", ".txt")
+          f.deleteOnExit()
+          f
+        }
+      )
+    val managerBin = java.nio.file.Paths.get("/opt/qod-sec1/manager/bin/qod-node")
+    val backend    = new LocalQuackBackend(
+      min = 23096,
+      max = 23097,
+      nodeBin = Some(managerBin),
+      commandFor = (spec, _, _) => envDumpCmd(capture(spec.nodeId).getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    val allowed = Map(
+      "pgHost"       -> "sec1-pg-host",
+      "pgPort"       -> "15432",
+      "pgUser"       -> "sec1_user",
+      "dbName"       -> "sec1_db",
+      "catalogAlias" -> "sec1_alias",
+      "schemaName"   -> "sec1_schema",
+      "dataPath"     -> "/data/sec1",
+      "encrypted"    -> "true"
+    )
+    // A PATH that still resolves `env` and `sleep`, so the dump is written whether or not it leaks.
+    val markedPath =
+      "/nonexistent/sec1-marker-path" + java.io.File.pathSeparator +
+        sys.env.getOrElse("PATH", "/usr/bin:/bin")
+    val hostile = Map(
+      "BASH_ENV"                 -> "/nonexistent/sec1-marker-bash-env",
+      "PATH"                     -> markedPath,
+      "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
+      "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
+      "kind"                     -> "sec1-marker-kind",
+      "extraSetupSql"            -> "SELECT 'sec1-marker-extra';",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
+      "sec1Unknown"              -> "sec1-marker-unknown"
+    )
+    val key = PoolKey("t", "t_default", "p")
+
+    def spec(nodeId: String) = NodeSpec(
+      key,
+      nodeId,
+      Role.Dual,
+      metastore = allowed ++ hostile + ("pgPassword" -> "sec1-pg-password"),
+      s3 = Map.empty,
+      kindWire = "memory"
+    )
+    def dumpOf(nodeId: String): String =
+      val f        = capture(nodeId)
+      val deadline = System.currentTimeMillis() + 3000
+      while f.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      java.nio.file.Files.readString(f.toPath)
+    def lines(out: String, name: String): List[String] =
+      out.linesIterator.filter(_.startsWith(s"$name=")).toList
+    val (_, logged) = LogCapture.logged(classOf[LocalQuackBackend].getName) {
+      backend.start(spec("node-sec1-a")).unsafeRunSync()
+      backend.start(spec("node-sec1-b")).unsafeRunSync()
+    }
+    try
+      // Each dropped key named once for the pool, not once per node, at ERROR, never with its value
+      // (a boolean check: the PATH value holds this process's own PATH).
+      LogCapture.droppedKeyLines(logged) shouldBe
+        hostile.keys.toList.sorted.map((Level.ERROR, key.toString, _))
+      withClue("a metastore marker in the backend's log: ")(
+        logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
+      )
+      val a = dumpOf("node-sec1-a")
+      val b = dumpOf("node-sec1-b")
+      Seq(a, b).foreach { out =>
+        withClue("a metastore marker in the spawn environment: ")(
+          out.contains("sec1-marker") shouldBe false
+        )
+        allowed.foreach { case (k, v) =>
+          withClue(s"$k as the metastore has it: ")((lines(out, k) == List(s"$k=$v")) shouldBe true)
+        }
+        withClue("the unknown key: ")(lines(out, "sec1Unknown").isEmpty shouldBe true)
+        // What the manager sets stays the manager's, whatever the metastore names.
+        withClue("the manager's qod-node: ")(
+          (lines(out, "QOD_NODE_BIN") == List(s"QOD_NODE_BIN=$managerBin")) shouldBe true
+        )
+        withClue("the kind: ")((lines(out, "kind") == List("kind=memory")) shouldBe true)
+        // The secrets directory holds the metastore's password and the node's own keys, and nothing
+        // the metastore named otherwise (a cloud credential the developer's shell exports is the
+        // manager's own, delivered too, so it is set aside rather than counted).
+        val dir = java.nio.file.Paths.get(
+          lines(out, NodeSecretFiles.DirEnv).headOption.value
+            .stripPrefix(s"${NodeSecretFiles.DirEnv}=")
+        )
+        (dir.toFile.list().toSet -- NodeSecretFiles.CloudCredKeys) shouldBe
+          Set(
+            "pgPassword",
+            NodeSecretFiles.TokenKey,
+            NodeSecretFiles.AuthzKey,
+            NodeSecretFiles.InitNonceKey
+          )
+        val s3 = dir.resolve("QOD_S3_SECRET_ACCESS_KEY")
+        withClue("the metastore's cloud credential in its file: ")(
+          (java.nio.file.Files.exists(s3) &&
+            java.nio.file.Files.readString(s3).contains("sec1-marker")) shouldBe false
+        )
+      }
+      withClue("a lockdownSql in the spawn environment: ")(
+        Seq(a, b).forall(lines(_, "lockdownSql").isEmpty) shouldBe true
+      )
+    finally
+      backend.stop(key, "node-sec1-a").unsafeRunSync()
+      backend.stop(key, "node-sec1-b").unsafeRunSync()
+
   // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
   // must SIGTERM every tracked child, wait for them to exit (falling
   // back to SIGKILL on stragglers), then clear its registry maps so a
@@ -226,7 +526,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       // immediately), so the cleanup wait should never need the
       // 5 s SIGKILL fallback. (Windows console apps ignore the graceful
       // taskkill, so the timing assertion below is Unix-only.)
-      commandFor = (_, _, _) => sleepCmd(30)
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val a = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-a", Role.Dual, Map.empty, Map.empty)
     val b = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-b", Role.Dual, Map.empty, Map.empty)
@@ -260,7 +562,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       23070,
       23073,
-      commandFor = (_, _, _) => List("bash", "-c", "trap '' TERM; sleep 30 & wait")
+      commandFor = (_, _, _) => List("bash", "-c", "trap '' TERM; sleep 30 & wait"),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec =
       NodeSpec(PoolKey("t", "t_default", "p"), "node-tree", Role.Dual, Map.empty, Map.empty)
@@ -289,7 +593,13 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
   it should "cleanup(): terminate adopt-only nodes tracked by pid" in:
     assume(!isWindows)
     val orphan  = new java.lang.ProcessBuilder("sh", "-c", "sleep 30").start()
-    val backend = new LocalQuackBackend(23080, 23081, commandFor = (_, _, _) => sleepCmd(30))
+    val backend = new LocalQuackBackend(
+      23080,
+      23081,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     backend
       .adopt(
         ai.starlake.quack.model.RunningNode(

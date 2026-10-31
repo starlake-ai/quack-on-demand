@@ -72,6 +72,63 @@ def test_login_sends_credentials(runner, respx_mock):
     assert sent == {"username": "bob", "password": "pw", "tenant": "acme"}
 
 
+def test_login_password_stdin_reads_the_first_line(runner, respx_mock):
+    import json
+
+    mock_login_routes(respx_mock)
+    result = runner.invoke(
+        app, ["login", "--username", "bob", "--password-stdin"], input="s3cret pw\nnext line\n"
+    )
+    assert result.exit_code == 0, result.output
+    sent = json.loads(respx_mock.calls[0].request.content)
+    assert sent == {"username": "bob", "password": "s3cret pw"}
+    assert "Password:" not in result.output  # no prompt
+    assert "s3cret" not in result.output
+    assert load_settings().token == "jwt-abc"
+
+
+def test_login_password_stdin_strips_a_crlf(runner, respx_mock):
+    import json
+
+    mock_login_routes(respx_mock)
+    result = runner.invoke(
+        app, ["login", "--username", "bob", "--password-stdin"], input="pw\r\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(respx_mock.calls[0].request.content)["password"] == "pw"
+
+
+def test_password_from_stdin_strips_a_crlf_that_reaches_it(monkeypatch):
+    # CliRunner's text stdin translates CRLF already; a POSIX sys.stdin splits at "\n"
+    # only, so a CRLF line (a file saved on Windows, piped) arrives with its "\r".
+    import io
+    import sys
+
+    from qod_cli.commands import auth as auth_cmd
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("pw\r\nnext\r\n", newline="\n"))
+    assert auth_cmd._password_from_stdin() == "pw"
+
+
+def test_login_password_stdin_refuses_an_empty_line_and_never_reads_the_environment(
+    runner, respx_mock, monkeypatch
+):
+    # No flag or env var ever carries a password: QOD_PASSWORD (the opt-in SQL-plane
+    # password) is no fallback.
+    monkeypatch.setenv("QOD_PASSWORD", "from-env")
+    login = respx_mock.post(f"{BASE}/api/auth/login")
+    result = runner.invoke(app, ["login", "--username", "bob", "--password-stdin"], input="\n")
+    assert result.exit_code == 1
+    assert "--password-stdin read no password" in result.output
+    assert not login.called
+
+
+def test_login_has_no_password_flag(runner):
+    result = runner.invoke(app, ["login", "--username", "bob", "--password", "pw"])
+    assert result.exit_code != 0
+    assert "No such option" in result.output
+
+
 def test_logout(runner, respx_mock):
     route = respx_mock.post(f"{BASE}/api/auth/logout").mock(return_value=httpx.Response(200))
     assert runner.invoke(app, ["logout"]).exit_code == 0

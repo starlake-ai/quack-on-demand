@@ -1,15 +1,10 @@
 package ai.starlake.quack.federation
 
-import ai.starlake.quack.edge.sql.{
-  Allowed, Denied, PostgresAclValidator, ValidationContext
-}
 import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, PostgresSecretResolver}
-import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{
-  FederatedSourceStore, LiquibaseRunner, PoolPermission, PostgresControlPlaneStore,
-  RbacGroup, RbacRole, RbacUser, RolePermission
+  FederatedSourceStore, LiquibaseRunner, PostgresControlPlaneStore
 }
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -18,7 +13,6 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.sql.DriverManager
-import java.time.Instant
 import scala.sys.process._
 import scala.util.Try
 
@@ -27,7 +21,8 @@ import scala.util.Try
   * Layer B (always-runnable): exercised against a live local Postgres
   * (same one used by the rest of the suite). Cancelled cleanly when
   * Postgres is not reachable. Covers all three TenantDbKind variants
-  * (DuckLake, DuckDbFile, InMemory) and the ACL grant/revoke cycle.
+  * (DuckLake, DuckDbFile, InMemory). Federated grant matching is the node decider's
+  * (`AuthzDeciderSpec`, and end to end `AuthzEndToEndCases`).
   *
   * Layer A (gated): full DuckDB spawn. Requires `duckdb` and `psql` on
   * PATH and Postgres reachable. Skipped via `cancel` if either is
@@ -118,47 +113,6 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     )
 
   // -----------------------------------------------------------------------
-  // Layer-B helpers: ACL
-  // -----------------------------------------------------------------------
-
-  private val validator = new PostgresAclValidator()
-
-  private def mkEffective(
-      tenantId: String,
-      perms:    List[RolePermission]
-  ): EffectiveSet =
-    EffectiveSet(
-      user        = RbacUser(id = "u-1", tenant = Some(tenantId), username = "alice", kind = "analyst",
-                             createdAt = Some(Instant.now()), updatedAt = Some(Instant.now())),
-      roles       = List(RbacRole(id = "role-1", tenantId = tenantId, name = "analyst")),
-      groups      = Nil,
-      permissions = perms,
-      poolPerms   = Nil
-    )
-
-  private def mkCtx(sql: String, tenantId: String, eff: EffectiveSet): ValidationContext =
-    ValidationContext(
-      username        = "alice",
-      database        = s"$tenantId/td-1/pool-1",
-      statement       = sql,
-      peer            = "conn-1",
-      defaultDatabase = None,
-      defaultSchema   = None,
-      effectiveSet    = Some(eff)
-    )
-
-  private def perm(catalog: String, schema: String, table: String, verb: String): RolePermission =
-    RolePermission(
-      id          = s"rp-$catalog-$schema-$table-$verb",
-      roleId      = "role-1",
-      catalogName = catalog,
-      schemaName  = schema,
-      tableName   = table,
-      verb        = verb,
-      grantedAt   = Some(Instant.now())
-    )
-
-  // -----------------------------------------------------------------------
   // Layer B -- kind = InMemory
   // -----------------------------------------------------------------------
 
@@ -213,42 +167,6 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
       })
     }
 
-  it should "allow SELECT on fedpg.public.orders after grant, deny after revoke" in {
-    val tenantId = "t-acl-inmem"
-
-    // Grant SELECT on fedpg.public.orders.
-    val withGrant = mkEffective(tenantId, perms = List(perm("fedpg", "public", "orders", "RO")))
-    val ctxGrant  = mkCtx("SELECT * FROM fedpg.public.orders", tenantId, withGrant)
-    validator.validate(ctxGrant) shouldBe Allowed
-
-    // Revoke: empty permission set.
-    val withRevoke = mkEffective(tenantId, perms = Nil)
-    val ctxRevoke  = mkCtx("SELECT * FROM fedpg.public.orders", tenantId, withRevoke)
-    validator.validate(ctxRevoke) match
-      case Denied(msg, _, _) => msg should (include("fedpg") or include("orders"))
-      case other          => fail(s"expected Denied after revoke, got $other")
-  }
-
-  it should "allow a DuckLake-join query when both local and federated grants exist" in {
-    val tenantId = "t-acl-join-inmem"
-    val perms    = List(
-      perm("fedpg", "public",    "orders",   "RO"),
-      perm("tpch",  "main",      "lineitem", "RO")
-    )
-    val eff = mkEffective(tenantId, perms)
-    val sql = "SELECT o.id, l.qty FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id"
-    validator.validate(mkCtx(sql, tenantId, eff)) shouldBe Allowed
-  }
-
-  it should "deny the join when only the local-side grant is present" in {
-    val tenantId = "t-acl-join-deny"
-    val eff      = mkEffective(tenantId, perms = List(perm("tpch", "main", "lineitem", "RO")))
-    val sql      = "SELECT o.id FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id"
-    validator.validate(mkCtx(sql, tenantId, eff)) match
-      case Denied(msg, _, _) => msg should (include("fedpg") or include("orders"))
-      case other          => fail(s"expected Denied, got $other")
-  }
-
   // -----------------------------------------------------------------------
   // Layer B -- kind = DuckDbFile
   // -----------------------------------------------------------------------
@@ -279,20 +197,6 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
         blob should include("s3cr3t")
       })
     }
-
-  it should "allow SELECT on fedpg.public.orders for DuckDbFile tenant after grant" in {
-    val tenantId = "t-acl-file"
-    val eff      = mkEffective(tenantId, List(perm("fedpg", "public", "orders", "RO")))
-    validator.validate(mkCtx("SELECT * FROM fedpg.public.orders", tenantId, eff)) shouldBe Allowed
-  }
-
-  it should "deny SELECT on fedpg.public.orders for DuckDbFile tenant without grant" in {
-    val tenantId = "t-acl-file-deny"
-    val eff      = mkEffective(tenantId, Nil)
-    validator.validate(mkCtx("SELECT * FROM fedpg.public.orders", tenantId, eff)) match
-      case Denied(_, _, _) => succeed
-      case other        => fail(s"expected Denied, got $other")
-  }
 
   // -----------------------------------------------------------------------
   // Layer B -- kind = DuckLake
@@ -333,28 +237,6 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
         preview should not include "p4ssw0rd"
       })
     }
-
-  it should "allow SELECT joining DuckLake catalog + federated alias for DuckLake tenant" in {
-    val tenantId = "t-acl-lake-join"
-    val perms    = List(
-      perm("fedpg",   "public", "orders",   "RO"),
-      perm("tpch",    "main",   "customer", "RO")
-    )
-    val eff = mkEffective(tenantId, perms)
-    val sql =
-      "SELECT o.id, c.name FROM fedpg.public.orders o JOIN tpch.main.customer c ON o.cust_id = c.id"
-    validator.validate(mkCtx(sql, tenantId, eff)) shouldBe Allowed
-  }
-
-  it should "deny SELECT on DuckLake catalog table when only federated grant exists" in {
-    val tenantId = "t-acl-lake-partial"
-    val eff      = mkEffective(tenantId, List(perm("fedpg", "public", "orders", "RO")))
-    val sql      =
-      "SELECT o.id, c.name FROM fedpg.public.orders o JOIN tpch.main.customer c ON o.cust_id = c.id"
-    validator.validate(mkCtx(sql, tenantId, eff)) match
-      case Denied(msg, _, _) => msg should (include("tpch") or include("customer"))
-      case other          => fail(s"expected Denied for ungranted local table, got $other")
-  }
 
   // -----------------------------------------------------------------------
   // Layer B -- blob markers and multi-source ordering

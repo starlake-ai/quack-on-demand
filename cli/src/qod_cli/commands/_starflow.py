@@ -69,7 +69,6 @@ class StarflowPlan:
     home: Path
     port: int
     url: str
-    api_key: str
     secret: str
     file_env: dict
     java_home: str
@@ -107,7 +106,7 @@ def request(with_starflow, home, version, port, url, env_file) -> StarflowReques
 
 def prepare(req: StarflowRequest, base_env: dict, java: str) -> StarflowPlan:
     """Everything that can fail before the manager boots: env file, port/URL,
-    install, shared secrets (persisted before boot so a restart keeps SSO)."""
+    install, the shared session secret (persisted before boot so a restart keeps SSO)."""
     echo = lambda line: typer.echo(line, err=True)
     proc_env = dict(os.environ)
     raw_file = req.env_file or base_env.get("STARFLOW_ENV_FILE")
@@ -128,19 +127,18 @@ def prepare(req: StarflowRequest, base_env: dict, java: str) -> StarflowPlan:
     except (starflow.StarflowError, OSError, httpx.HTTPError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
-    generated = [k for k in ("QOD_API_KEY", "QOD_SESSION_JWT_SECRET") if not base_env.get(k)]
-    api_key, secret = starflow.ensure_shared_secrets(base_env, save_start_env)
+    generated = not base_env.get("QOD_SESSION_JWT_SECRET")
+    secret = starflow.ensure_shared_secrets(base_env, save_start_env)
     if generated:
-        # Names only: the values never reach the terminal.
+        # The name only: the value never reaches the terminal.
         echo(
-            f"generated {'/'.join(generated)} for the Starflow pairing "
+            "generated QOD_SESSION_JWT_SECRET for the Starflow pairing "
             f"(stored in {config_path()})"
         )
     return StarflowPlan(
         home=home,
         port=port,
         url=url,
-        api_key=api_key,
         secret=secret,
         file_env=file_env,
         java_home=java_home,
@@ -167,7 +165,6 @@ def start_after_ready(
         mgr_env,
         port=plan.port,
         url=plan.url,
-        api_key=plan.api_key,
         secret=plan.secret,
         pg=pg,
         java_home=plan.java_home,

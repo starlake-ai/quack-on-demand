@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id"],"kind":"table","name":"t","schema":"main","via":null}],"settings":[],"statement":"EXPLAIN","v":1}

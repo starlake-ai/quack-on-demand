@@ -1,14 +1,6 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{
-  Allowed,
-  Denied,
-  NodeSettingScreen,
-  StatementValidator,
-  ValidationContext,
-  ValidationResult
-}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -38,6 +30,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   private val poolKey: PoolKey = PoolKey("acme", "acme_default", "sales")
 
+  /** The metadata filter as `Main` mounts it: every router here is built with it. */
+  private def mountedFilter = new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true)
+
   private val mmReg = new SimpleMeterRegistry
   private val si    = new StatementInstruments(mmReg)
 
@@ -49,7 +44,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   private def setup(
       stub: () => QuackResponse = defaultStub,
       events: ManagerEventSink = ManagerEventSink.noop,
-      lockdownFor: PoolKey => Boolean = _ => false,
       adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
   ) =
     val backend = new QuackBackend:
@@ -88,9 +82,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // fresh reader from `stub`. The stub function is used (not a single value)
     // because ArrowReader is single-use.
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(stub())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
     val sessions = new SessionRegistry
     val router   =
@@ -101,8 +101,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         adapter,
         stmtInstruments = si,
         events = events,
-        lockdownFor = lockdownFor,
-        adminExecutor = adminExecutor
+        adminExecutor = adminExecutor,
+        metadataFilterRewriter = mountedFilter,
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     (router, sessions, node)
 
@@ -115,7 +116,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     // no effectiveSet: claimed, parsed, then denied by the executor - never forwarded
     val out = withAdmin.execute("c-adm", "alice", poolKey, "CREATE ROLE r1").unsafeRunSync()
@@ -132,7 +135,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     withAdmin
       .execute("c-adm2", "alice", poolKey, "GRANT FROBNICATE ON t TO ROLE r")
@@ -152,7 +157,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     // SHOW TABLES is not an admin form: routed to the node stub, returns Right
     withAdmin.execute("c-2", "alice", poolKey, "SHOW TABLES").unsafeRunSync() shouldBe
@@ -171,7 +178,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     withAdmin
       .execute(
@@ -192,7 +201,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val tenantId = router.supervisor.getTenant(poolKey.tenant).get.id
     router.supervisor.createRole(tenantId, "analyst").unsafeRunSync()
@@ -224,7 +235,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
       ai.starlake.quack.ondemand.state.RbacUser("u-root", None, "root", kind = "admin"),
@@ -258,7 +271,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     // No effectiveSet: claimed, parsed, then denied by the executor (admin_required).
     withAdmin
@@ -279,7 +294,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     withAdmin
       .execute("c-adm-hist-malformed", "alice", poolKey, "GRANT FROBNICATE ON t TO ROLE r")
@@ -295,29 +312,26 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "redact a claim-shaped statement's sql on the routed path when denied" in:
     // No adminExecutor wired: the claimed CREATE USER ... PASSWORD statement falls through to
     // the routed path exactly like an unwired dialect or an adminDispatch=false caller (MCP/
-    // preview) would, and gets denied there by the validator. Requirement 3: `record` must
-    // never let the password literal reach StatementHistoryStore on that path either.
-    val denyAll = new StatementValidator:
-      def validate(context: ValidationContext): ValidationResult = Denied("test-deny", Set.empty)
-    val (router, _, _) = setup()
-    val denying        = new FlightSqlRouter(
-      router.supervisor,
-      router.sessions,
-      router.tracker,
-      router.adapter,
-      validator = denyAll,
-      stmtInstruments = si
-    )
-    denying
+    // preview) would, and the node refuses it there. Requirement 3: `record` must never let the
+    // password literal reach StatementHistoryStore on that path either.
+    val refusal = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: statement uses CREATE USER, which QoD does not support"
+        ),
+        1L
+      )
+    val (router, _, _) = setup(stub = refusal)
+    router
       .execute("c-routed-redact", "alice", poolKey, "CREATE USER bob PASSWORD 'topsecret'")
       .unsafeRunSync() shouldBe a[Left[?, ?]]
-    val latest = denying.history.snapshot(1).head
+    val latest = router.history.snapshot(1).head
     latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
     latest.sql should not include "topsecret"
     latest.status shouldBe "denied"
 
   it should "redact both sql and a node's quoted-statement error for an admitted statement" in:
-    // Default validator (allowAll): the claimed statement is admitted and forwarded to the
+    // The claimed statement is forwarded to the
     // node, whose own parser error quotes the offending line back verbatim - exactly how
     // DuckDB reports a syntax error, and exactly how a password literal could otherwise leak
     // through the `error` field even though `sql` is redacted.
@@ -360,7 +374,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.adapter,
       stmtInstruments = si,
       refsConfigFor = _ => ai.starlake.acl.model.Config.forDuckDB(Some("db"), Some("main")),
-      routingInstruments = ri
+      routingInstruments = ri,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     // Same SELECT twice on the single-node pool: the table is new on the first pass and a
     // repeat (staying on the same node) on the second.
@@ -451,29 +467,117 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.swap.toOption.get shouldBe a[RouterFailure.NotFound]
 
-  it should "tag a StatementValidator deny as RouterFailure.AccessDenied" in:
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult = Denied("you can't read this")
-    // Reuse setup() to get a wired supervisor/adapter, then rebuild the
-    // router with the denying validator. We pull the existing router's
-    // collaborators rather than re-stand-up the whole stack.
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      validator = denying,
-      stmtInstruments = si
-    )
-    val out = router.execute("c-deny", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-
   it should "tag a permanent backend error as RouterFailure.BadRequest" in:
     val perm = () => QuackResponse.Failed(QuackError.Permanent("Parser Error: syntax"), 1L)
     val (router, _, _) = setup(stub = perm)
     val out            = router.execute("c-bad", "alice", poolKey, "SELECTT 1").unsafeRunSync()
     out.swap.toOption.get shouldBe a[RouterFailure.BadRequest]
+
+  it should "tag the node's refusal for an unavailable decision as RouterFailure.Unavailable" in:
+    val perm = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: authorization unavailable, retry: cannot connect to 127.0.0.1:1"
+        ),
+        1L
+      )
+    val (router, _, _) = setup(stub = perm)
+    val out            = router.execute("c-unavail", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
+    // Any other node refusal is a denial (the next case).
+    val refusal        = QuackError.Permanent("Permission Error: QoD: user:alice lacks")
+    val (denied, _, _) = setup(stub = () => QuackResponse.Failed(refusal, 1L))
+    denied
+      .execute("c-refused", "alice", poolKey, "SELECT 1")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.AccessDenied]
+    // The parse screen's form of the same refusal is retryable too; a user's own text quoting the
+    // marker is not.
+    FlightSqlRouter.isNodeAuthzUnavailable(
+      "Invalid Input Error: Authorization callback failed: Permission Error: " +
+        "QoD: authorization unavailable, retry: timed out"
+    ) shouldBe true
+    List(
+      "Invalid Input Error: QoD: authorization unavailable, retry",
+      "Catalog Error: Table with name QoD: authorization unavailable, retry does not exist!",
+      "Binder Error: Permission Error: QoD: authorization unavailable, retry"
+    ).foreach(m => FlightSqlRouter.isNodeAuthzUnavailable(m) shouldBe false)
+    val user =
+      QuackError.Permanent("Invalid Input Error: QoD: authorization unavailable, retry")
+    val (mine, _, _) = setup(stub = () => QuackResponse.Failed(user, 1L))
+    mine
+      .execute("c-user", "alice", poolKey, "SELECT error('QoD: authorization unavailable, retry')")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.BadRequest]
+
+  it should "not mark that refusal retryable for a multi-statement submission" in:
+    // In `SELECT 1; SELECT 2` the first statement may have run (each autocommits) before the node
+    // refused the second for want of a verdict: a client retry would run it twice (D-m5).
+    val perm = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent("Permission Error: QoD: authorization unavailable, retry: timed out"),
+        1L
+      )
+    val (router, _, _) = setup(stub = perm)
+    router.execute("c-batch", "alice", poolKey, "SELECT 1; SELECT 2").unsafeRunSync() match
+      case Left(RouterFailure.BadRequest(reason)) =>
+        reason should startWith("permanent failure: Permission Error: QoD: authorization")
+        reason should endWith(s"(${FlightSqlRouter.BatchNotRetried})")
+      case other => fail(s"expected BadRequest, got $other")
+    // The nearest admitted case: one statement, a trailing separator and a comment included.
+    router
+      .execute("c-one", "alice", poolKey, "SELECT 1; -- done")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.Unavailable]
+    FlightSqlRouter.isMultiStatement("SELECT ';'; ") shouldBe false
+    FlightSqlRouter.isMultiStatement("SELECT 1;SELECT 2") shouldBe true
+
+  it should "book a node's authorization refusal as a denial, in either shape the node raises it" in:
+    List(
+      "Permission Error: QoD: user:alice lacks grants on memory.main.t:read",
+      "Invalid Input Error: Authorization callback failed: Permission Error: QoD: function " +
+        "getenv is superuser-only"
+    ).foreach { m =>
+      withClue(m) {
+        val (router, _, node) =
+          setup(stub = () => QuackResponse.Failed(QuackError.Permanent(m), 1L))
+        router.execute("c-node-denied", "alice", poolKey, "SELECT * FROM t").unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(reason)) => reason shouldBe s"access denied: $m"
+          case o                                        => fail(s"expected AccessDenied, got $o")
+        val latest = router.history.snapshot(1).head
+        latest.status shouldBe "denied"
+        latest.nodeId shouldBe node.nodeId
+        latest.error shouldBe Some(m)
+      }
+    }
+    // A user's text quoting the marker, and every other node error, stay permanent failures.
+    List(
+      "Invalid Input Error: QoD: user:alice lacks",
+      "Binder Error: Permission Error: QoD: user:alice lacks",
+      "Parser Error: syntax error at or near \"QoD\""
+    ).foreach { m =>
+      withClue(m) {
+        FlightSqlRouter.isNodeRefusal(m) shouldBe false
+        val (router, _, _) =
+          setup(stub = () => QuackResponse.Failed(QuackError.Permanent(m), 1L))
+        router
+          .execute("c-node-error", "alice", poolKey, "SELECT 1")
+          .unsafeRunSync()
+          .swap
+          .toOption
+          .get shouldBe a[RouterFailure.BadRequest]
+        router.history.snapshot(1).head.status shouldBe "permanent"
+      }
+    }
+    FlightSqlRouter.isNodeRefusal(
+      s"Permission Error: ${FlightSqlRouter.NodeAuthzUnavailable}: timed out"
+    ) shouldBe false
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
@@ -501,14 +605,51 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Left[_, _]]
     sessions.get("c-5").flatMap(_.pinnedNodeId) shouldBe None
 
+  it should "fence a front door's transaction when its pinned node leaves the pool" in:
+    // The native front door holds the client's transaction on its own node connection: the router
+    // must end it there too (D-m8). FlightSQL passes no fence and gets the same failure.
+    val (router, sessions, _) = setup()
+    val fenced                = scala.collection.mutable.ListBuffer.empty[String]
+    val relay: FlightSqlRouter.NodeSend[Unit] = (node, wrappedSql, _, _, principal) =>
+      router.adapter.send(node, wrappedSql, principal, None).map {
+        case QuackResponse.Ok(_, ms, close) => NodeOutcome.Ok((), ms, close)
+        case QuackResponse.Failed(err, ms)  => NodeOutcome.Permanent(err.toString, ms)
+      }
+    def statement(sql: String) =
+      router
+        .executeWith(
+          "c-fence",
+          "alice",
+          poolKey,
+          sql,
+          None,
+          relay,
+          failInTransaction = Some(answer => IO(fenced += answer).void),
+          purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+        )
+        .unsafeRunSync()
+    statement("BEGIN").foreach(_.close())
+    sessions.get("c-fence").exists(_.txOpen) shouldBe true
+    fenced.toList shouldBe Nil
+    router.supervisor.stopPool(poolKey, force = true).unsafeRunSync()
+    statement("SELECT 1").left.map(_.reason) shouldBe
+      Left("pinned node disappeared; transaction lost")
+    fenced.toList shouldBe List(FlightSqlRouter.PinLostAnswer)
+    sessions.get("c-fence").flatMap(_.pinnedNodeId) shouldBe None
+
   // ---- defaultDatabase / defaultSchema precedence tests ----
 
-  /** Validator that captures the last ValidationContext it receives. */
-  private final class CapturingValidator extends StatementValidator:
-    @volatile var lastCtx: ValidationContext               = null
-    def validate(ctx: ValidationContext): ValidationResult =
-      lastCtx = ctx
-      Allowed
+  /** A router over `sup` whose parser defaults the cases below read; its node is never called. */
+  private def defaultsRouter(sup: PoolSupervisor): FlightSqlRouter =
+    val tracker = new NodeLoadTracker
+    new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
 
   private def freshSupervisorAndBackend(): PoolSupervisor =
     val backend = new QuackBackend:
@@ -551,21 +692,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    val capturer = new CapturingValidator
-    val client   = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
-        IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
-    val router  = new FlightSqlRouter(
-      sup,
-      new SessionRegistry,
-      new NodeLoadTracker,
-      adapter,
-      validator = capturer
-    )
-    router.execute("d-1", "alice", key, "SELECT 1").unsafeRunSync()
-    capturer.lastCtx.defaultDatabase shouldBe Some("fedpg")
-    capturer.lastCtx.defaultSchema shouldBe Some("public")
+    defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("fedpg"), Some("public")))
 
   it should "fall back to memory/main for InMemory kind when no override" in:
     val sup = freshSupervisorAndBackend()
@@ -581,40 +708,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    val capturer = new CapturingValidator
-    val client   = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
-        IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
-    val router  = new FlightSqlRouter(
-      sup,
-      new SessionRegistry,
-      new NodeLoadTracker,
-      adapter,
-      validator = capturer
-    )
-    router.execute("d-2", "alice", key, "SELECT 1").unsafeRunSync()
-    capturer.lastCtx.defaultDatabase shouldBe Some("memory")
-    capturer.lastCtx.defaultSchema shouldBe Some("main")
-
-  it should "pass the pool's attached catalogs into the validation context" in:
-    var seen: Set[String] = Set.empty
-    val capturing         = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        seen = ctx.attachedCatalogs
-        Allowed
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      validator = capturing,
-      stmtInstruments = si,
-      attachedCatalogsOf = _ => Set("acme_tpch", "fedx", "memory", "system", "temp")
-    )
-    router.execute("attach-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    seen shouldBe Set("acme_tpch", "fedx", "memory", "system", "temp")
+    defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("memory"), Some("main")))
 
   // ---- preferredNode (soft pin) tests ----
 
@@ -653,11 +747,25 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .createPool(key, RoleDistribution(0, 0, replicas), maxConcurrentPerNode = maxConcurrent)
       .unsafeRunSync()
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
-    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
+    val router   = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
     (router, sessions, sup.get(key).get.nodes, key)
 
   it should "honor preferredNode when no transaction pin overrides" in:
@@ -778,50 +886,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         succeed
       case Some(_) =>
         sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-        val capturer = new CapturingValidator
-        val client   = new QuackHttpClient(TestArrow.sharedAllocator):
-          override def query(
-              endpoint: String,
-              token: String,
-              sql: String,
-              session: Option[String]
-          ) =
-            IO.pure(TestArrow.okResponse())
-        val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
-        val router  = new FlightSqlRouter(
-          sup,
-          new SessionRegistry,
-          new NodeLoadTracker,
-          adapter,
-          validator = capturer
-        )
-        router.execute("d-3", "alice", key, "SELECT 1").unsafeRunSync()
-        capturer.lastCtx.defaultDatabase shouldBe Some("delta_lake")
-        capturer.lastCtx.defaultSchema shouldBe Some("myschema")
+        defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("delta_lake"), Some("myschema")))
 
-  // KNOWN GAP (ignored below): validator-vs-engine default-schema skew.
-  //
-  // FlightSqlRouter.execute builds ValidationContext.defaultSchema from
-  // maybeState.defaultDatabase/defaultSchema (the tenant-db's own override
-  // fields, see PoolSupervisor.scala lines ~240-241), but
-  // wrapWithDefaultSchema (FlightSqlRouter.scala lines ~483-499) prepends
-  // `USE <metastore("dbName")>.<metastore("schemaName")>` unconditionally
-  // from the pool metastore map, NEVER consulting state.defaultSchema.
-  //
-  // The demo manifests set defaultSchema=tpch1 on the tenant-db while the
-  // metastore carries schemaName=main (the DuckLake default schema DuckLake
-  // itself created). When those two diverge, the ACL/statement validator
-  // qualifies unqualified table refs against tpch1 while the engine actually
-  // executes the statement `USE <db>.main`, i.e. the two components of the
-  // router disagree about which schema is "current" for the same statement.
-  //
-  // This test builds exactly that shape (defaultSchema=tpch1,
-  // metastore.schemaName=main), captures the ValidationContext the validator
-  // saw and the actual SQL sent to the node, and asserts the USE statement's
-  // schema equals ctx.defaultSchema. As of this writing it fails with
-  // "main" != "tpch1" (see .superpowers/sdd/pin-tests-report.md for the
-  // captured run output). Un-ignore when fixing.
-  it should "keep the USE-statement schema in sync with ValidationContext.defaultSchema" in:
+  // Issue #112: the gateway's parser default (`defaultsOf`, the tenant-db's own defaultSchema
+  // override) and the schema of the USE prelude wrapWithDefaultSchema sends must agree, or the
+  // policy rewriters qualify unqualified table refs against one schema while the engine runs the
+  // statement under another. The demo manifests set defaultSchema=tpch1 on the tenant-db while the
+  // metastore carries schemaName=main; this test builds exactly that shape.
+  it should "keep the USE-statement schema in sync with the parser's default schema" in:
     val sup   = freshSupervisorAndBackend()
     val key   = PoolKey("epsilon", "epsilon_lake", "p4")
     val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
@@ -877,33 +949,37 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
 
-    val capturer    = new CapturingValidator
     var capturedSql = ""
     val client      = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         capturedSql = sql
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup2,
       new SessionRegistry,
       new NodeLoadTracker,
       adapter,
-      validator = capturer
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     router.execute("skew-1", "alice", key, "SELECT 1 FROM t").unsafeRunSync()
 
-    // The validator saw defaultSchema=tpch1 (tenant-db override wins).
-    capturer.lastCtx.defaultSchema shouldBe Some("tpch1")
-    // The engine actually runs under whatever schema wrapWithDefaultSchema
-    // put in the USE statement. Extract it and compare against what the
-    // validator used - they MUST be the same schema for the ACL check to
-    // mean anything.
+    // The parser default is tpch1 (tenant-db override wins). The engine actually runs under
+    // whatever schema wrapWithDefaultSchema put in the USE statement; the two MUST be the same
+    // schema for the policy rewriters' qualification to mean anything.
+    router.defaultsOf(key)._2 shouldBe Some("tpch1")
     val useSchema = """USE\s+\S+?\.(\S+?);""".r
       .findFirstMatchIn(capturedSql)
       .map(_.group(1))
       .getOrElse(fail(s"no USE statement found in sent SQL: $capturedSql"))
-    useSchema shouldBe capturer.lastCtx.defaultSchema.get
+    useSchema shouldBe "tpch1"
 
     // The other half of the precedence chain: with no tenant-db `defaultSchema`, BOTH sides must
     // fall back to the metastore's `schemaName`. Without this the two could agree only in the
@@ -927,12 +1003,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup2.createPool(key2, RoleDistribution(0, 0, 1)).unsafeRunSync()
     router.execute("skew-2", "alice", key2, "SELECT 1 FROM t").unsafeRunSync()
 
-    capturer.lastCtx.defaultSchema shouldBe Some("curated")
+    router.defaultsOf(key2)._2 shouldBe Some("curated")
     val useSchema2 = """USE\s+\S+?\.(\S+?);""".r
       .findFirstMatchIn(capturedSql)
       .map(_.group(1))
       .getOrElse(fail(s"no USE statement found in sent SQL: $capturedSql"))
-    useSchema2 shouldBe capturer.lastCtx.defaultSchema.get
+    useSchema2 shouldBe "curated"
 
   // ---- ColumnPolicyRewriter integration tests ----
 
@@ -949,22 +1025,19 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, ps)
 
   /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter. Returns
-    * (router, lastSqlSentToBackend ref, node). `metadataFilter` and `validator` default to today's
-    * router defaults, so the CLS call sites below are unaffected.
+    * (router, lastSqlSentToBackend ref, node). `metadataFilter` is the mounted filter, as `Main`
+    * mounts it.
     */
   private def setupWithRewriter(
       rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
         new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
           new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
         ),
-      metadataFilter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-        new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
-      validator: StatementValidator = StatementValidator.allowAll,
+      metadataFilter: ai.starlake.quack.edge.meta.MetadataFilterRewriter = mountedFilter,
       readers: Int = 1,
       stub: () => QuackResponse = defaultStub,
       protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
         ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
-      lockdownFor: PoolKey => Boolean = _ => false,
       attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
@@ -1005,22 +1078,26 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // so a retried statement overwrites the first attempt's text.
     var capturedSql: String = ""
     val client              = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         capturedSql = sql
         IO.pure(stub())
 
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
       sessions,
       tracker,
       adapter,
-      validator = validator,
       columnPolicyRewriter = rewriter,
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard = protectedWriteGuard,
-      lockdownFor = lockdownFor,
       attachedCatalogsOf = attachedCatalogsOf
     )
     (router, () => capturedSql, node)
@@ -1184,128 +1261,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.left.get.reason should include("memory.main.secret")
     capturedSql() shouldBe ""
 
-  it should "be re-validated for the same principal" in:
-    // A validator that admits only statements free of the masked literal: the original passes,
-    // the rewrite does not, so the router must ask again.
-    val validator = new StatementValidator:
-      def validate(c: ValidationContext): ValidationResult =
-        if c.statement.contains("'***'") then Denied("no masked literal", Set.empty)
-        else Allowed
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_email"))
-        ),
-        enabled = true
-      ),
-      validator = validator
-    )
-    router
-      .execute(
-        "cls-cte-2",
-        "alice",
-        poolKey,
-        "SELECT c_email FROM customer",
-        Some(effWithPolicies(List(maskCustomerEmailCls)))
-      )
-      .unsafeRunSync() shouldBe a[Left[?, ?]]
-    capturedSql() shouldBe ""
-
-  /** A validator that admits only statements free of `marker`: the original passes, a rewrite
-    * introducing the marker does not, so only the re-validation can refuse.
-    */
-  private def refusing(marker: String) = new StatementValidator:
-    def validate(c: ValidationContext): ValidationResult =
-      if c.statement.contains(marker) then Denied(s"no $marker", Set.empty) else Allowed
-
-  it should "re-validate the row policy wrap" in:
-    val (router, capturedSql, _) = setupWithRewriter(validator = refusing("c_region = 'X'"))
-    val out                      = router
-      .execute(
-        "rls-reval",
-        "alice",
-        poolKey,
-        "SELECT c_id FROM customer",
-        Some(effWithRowPolicies(List(rowPolicyCustomer)))
-      )
-      .unsafeRunSync()
-    out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.left.toOption.get.reason should include("policy rewrite")
-    capturedSql() shouldBe ""
-
-  it should "re-validate the metadata filter's rewrite" in:
-    val (router, capturedSql, _) = setupWithRewriter(
-      metadataFilter = metaFilterOn,
-      validator = refusing("table_schema = 'tpch1'")
-    )
-    val out = router
-      .execute(
-        "meta-reval",
-        "alice",
-        poolKey,
-        "SELECT table_name FROM information_schema.tables",
-        effectiveSet = customerOnly
-      )
-      .unsafeRunSync()
-    out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.left.toOption.get.reason should include("policy rewrite")
-    capturedSql() shouldBe ""
-
-  it should "re-validate a rewrite with the tenant's OPA in OPA mode" in:
-    // The policy refuses any statement text holding the masked literal: the original is
-    // allowed, only the rewrite carries it.
-    val bodies = scala.collection.mutable.ListBuffer.empty[String]
-    val auth   = new ai.starlake.quack.edge.opa.OpaAuthorizer(
-      ai.starlake.quack.edge.config.OpaConfig.default,
-      new ai.starlake.quack.edge.opa.OpaClient(
-        1000,
-        (_, body, _) =>
-          bodies += body
-          Right((200, s"""{"result":{"allow":${!body.contains("'***'")}}}"""))
-      ),
-      new ai.starlake.quack.edge.opa.OpaDecisionCache(0),
-      ai.starlake.quack.observability.metrics.OpaInstruments.noop
-    )
-    val tenant = ai.starlake.quack.model.Tenant(
-      poolKey.tenant,
-      acl = ai.starlake.quack.model.TenantAcl(
-        Some("opa"),
-        Some("http://opa"),
-        sendStatementText = true
-      )
-    )
-    val opa = new ai.starlake.quack.edge.opa.OpaValidator(
-      auth,
-      t => Option.when(t == poolKey.tenant)(tenant),
-      _ => Nil,
-      "memory",
-      "main",
-      "duckdb",
-      false
-    )
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_email"))
-        ),
-        enabled = true
-      ),
-      validator = opa
-    )
-    val out = router
-      .execute(
-        "opa-reval",
-        "alice",
-        poolKey,
-        "SELECT c_email FROM customer",
-        Some(effWithPolicies(List(maskCustomerEmailCls)))
-      )
-      .unsafeRunSync()
-    out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    capturedSql() shouldBe ""
-    bodies.exists(_.contains("'***'")) shouldBe true
-    bodies.exists(b => b.contains("SELECT c_email FROM customer")) shouldBe true
-
   it should "run an ordinary CTE query of a policy holder, the CTE reference left unqualified" in:
     val (router, capturedSql, _) = setupWithRewriter(
       new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
@@ -1329,21 +1284,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     capturedSql() should not include "main.t"
 
   // The star expansion quotes a catalog column the screen would refuse as a caller-written name
-  // (`c."a@b"`, `c."x]"`): the caller wrote no such token, so the re-validation admits the rewrite.
-  "a star expansion over an unusual column name" should "pass the re-validation" in:
-    // QoD grants: the re-validation goes through the validator too, not only the gate compare.
-    val acl = new ai.starlake.quack.edge.sql.PostgresAclValidator(
-      tenantCatalogs = _ => Set("memory"),
-      filteredMetadata = true
-    )
+  // (`c."a@b"`, `c."x]"`): the caller wrote no such token, so the rewrite scope admits the rewrite.
+  "a star expansion over an unusual column name" should "pass the rewrite scope check" in:
     val (router, capturedSql, _) = setupWithRewriter(
       new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
         new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
           Map(("memory", "main", "customer") -> List("c_id", "c_email", "a@b", "x]"))
         ),
         enabled = true
-      ),
-      validator = acl
+      )
     )
     val granted = effWithPolicies(List(maskCustomerEmailCls)).copy(permissions =
       List(ai.starlake.quack.ondemand.state.RolePermission("p-1", "r-1", "*", "*", "*", "RO"))
@@ -1593,7 +1542,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
 
-  it should "deny a two-part name headed by the pool's catalog alias with the ACL off (audit F20)" in:
+  it should "deny a two-part name headed by the pool's catalog alias (audit F20)" in:
     // DuckDB binds `memory.customer` catalog-first, under the USE prelude, to main.customer;
     // read schema-first it matched no policy keyed on schema main, so a write copied the masked
     // or filtered rows out and an RLS-only principal's plain SELECT went out unfiltered (F22).
@@ -1644,8 +1593,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "SELECT 1 WHERE EXISTS (SELECT 1 FROM (PIVOT customer ON c_region USING count(*)))",
       "EXPLAIN ANALYZE SELECT error(string_agg(c_email, ',')) FROM customer",
       "EXPLAIN SELECT * FROM customer",
-      "PIVOT customer ON c_region USING count(*)",
-      "SUMMARIZE customer"
+      "PIVOT customer ON c_region USING count(*)"
     ).foreach { sql =>
       val (router, capturedSql, _) =
         setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
@@ -1658,39 +1606,38 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "refuse EXPORT DATABASE to a local path under lockdown with the ACL off (audit F23)" in:
-    // No policy, allow-all validator: lockdown is the only screen standing, as in the default
-    // posture with lockdown turned on. COPY ... TO the same directory was refused; EXPORT was not.
-    List(
-      "EXPORT DATABASE '/tmp/dump' (FORMAT CSV)",
-      "EXPLAIN ANALYZE EXPORT DATABASE '/tmp/dump'"
-    ).foreach { sql =>
-      val (router, capturedSql, _) = setupWithRewriter(lockdownFor = _ => true)
-      val out = router
-        .execute("ld-f23", "alice", poolKey, sql, Some(effWithPolicies(Nil)))
-        .unsafeRunSync()
-      withClue(sql) {
-        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-        capturedSql() shouldBe ""
-      }
-    }
-
-  it should "refuse a string-named PREPARE of COPY ... TO under lockdown (audit F24)" in:
-    // The prepare skip took identifier names only, so with `'p'` the screens judged the word
-    // `prepare`, and the EXECUTE in the same batch wrote the file on the node.
-    List(
-      "PREPARE 'p' AS COPY (SELECT 1) TO '/tmp/leak.csv'; EXECUTE p",
-      "PREPARE $$p$$ AS COPY (SELECT 1) TO '/tmp/leak.csv'; EXECUTE p"
-    ).foreach { sql =>
-      val (router, capturedSql, _) = setupWithRewriter(lockdownFor = _ => true)
-      val out = router
-        .execute("ld-f24", "alice", poolKey, sql, Some(effWithPolicies(Nil)))
-        .unsafeRunSync()
-      withClue(sql) {
-        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-        capturedSql() shouldBe ""
-      }
-    }
+  it should "summarize an RLS table through its row filter: SUMMARIZE is a SELECT now (Task 19)" in:
+    // The gateway once refused SUMMARIZE over an RLS table (F21): the row rewrite had no slot
+    // for it. Task 19 sends a tenant's SUMMARIZE as its column listing, then DuckDB's own
+    // aggregate SELECT, which the row rewrite filters like any read.
+    val calls   = new java.util.concurrent.atomic.AtomicInteger(0)
+    val columns = () =>
+      if calls.getAndIncrement() == 0 then
+        QuackResponse.Ok(
+          TestArrow.readerFor(
+            "SELECT * FROM (VALUES ('c_id', 'INTEGER'), ('c_region', 'VARCHAR')) " +
+              "AS c(column_name, column_type)"
+          ),
+          1L,
+          () => ()
+        )
+      else TestArrow.okResponse()
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer, stub = columns)
+    val out = router
+      .execute(
+        "rls-t19",
+        "alice",
+        poolKey,
+        "SUMMARIZE customer",
+        Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      .unsafeRunSync()
+    out.foreach(_.close())
+    out shouldBe a[Right[?, ?]]
+    calls.get() shouldBe 2
+    capturedSql() should include("unnest(list_value('c_id', 'c_region'))")
+    capturedSql() should include("c_region = 'X'")
 
   it should "deny a SELECT that reaches an RLS table through query_table / query end-to-end" in:
     // The row rewriter wraps base tables; a table named in a string is invisible to it, so
@@ -1717,73 +1664,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "refuse a quoted URL table name to an RLS principal holding a wildcard read grant" in:
-    // DuckDB replacement-scans `"s3://..."` as a file: every row of the table's data files, raw,
-    // while `FROM customer` is wrapped in the row filter.
-    val acl = new ai.starlake.quack.edge.sql.PostgresAclValidator(
-      tenantCatalogs = _ => Set("memory"),
-      filteredMetadata = true
-    )
-    val wildcardRo = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser,
-      Nil,
-      Nil,
-      List(ai.starlake.quack.ondemand.state.RolePermission("p-1", "r-1", "*", "*", "*", "RO")),
-      Nil,
-      rowPolicies = List(rowPolicyCustomer)
-    )
-    val (router, capturedSql, _) = setupWithRewriter(validator = acl)
-    List(
-      "SELECT * FROM \"s3://bucket/*/main/customer/*.parquet\"",
-      "SELECT * FROM `file:///data/main/customer/x.parquet`"
-    ).foreach { sql =>
-      withClue(sql) {
-        val out = router
-          .execute("rls-url", "alice", poolKey, sql, effectiveSet = Some(wildcardRo))
-          .unsafeRunSync()
-        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-        capturedSql() shouldBe ""
-      }
-    }
-    router
-      .execute("rls-url", "alice", poolKey, "SELECT c_id FROM customer", Some(wildcardRo))
-      .unsafeRunSync() shouldBe a[Right[?, ?]]
-    capturedSql() should include("c_region = 'X'")
-
-  it should "deny a tenant wildcard-ALL principal reading a sibling catalog via query_table" in:
-    val acl = new ai.starlake.quack.edge.sql.PostgresAclValidator(tenantCatalogs =
-      t => if t == "acme" then Set("memory") else Set.empty
-    )
-    val wildcardAll = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser,
-      Nil,
-      Nil,
-      List(
-        ai.starlake.quack.ondemand.state.RolePermission("p-1", "r-1", "*", "*", "*", "ALL")
-      ),
-      Nil
-    )
-    val (router, capturedSql, _) = setupWithRewriter(validator = acl)
-    List(
-      "SELECT * FROM globex_db.main.secret",
-      "SELECT * FROM query_table('globex_db.main.secret')",
-      "SELECT * FROM query('SELECT * FROM globex_db.main.secret')"
-    ).foreach { sql =>
-      val out = router
-        .execute("acl-qt", "alice", poolKey, sql, effectiveSet = Some(wildcardAll))
-        .unsafeRunSync()
-      withClue(sql) {
-        out shouldBe a[Left[?, ?]]
-        out.left.get shouldBe a[RouterFailure.AccessDenied]
-      }
-    }
-    capturedSql() shouldBe ""
-
-  // ---- DuckLake catalog internals (superuser-only, every ACL mode, never wildcard-coverable) ----
-
-  private val metadataRead =
-    "SELECT data_file_id, encryption_key FROM __ducklake_metadata_lake.ducklake_data_file"
-
   private val superuserSet = ai.starlake.quack.ondemand.rbac.EffectiveSet(
     tenantUser.copy(tenant = None, kind = "admin"),
     Nil,
@@ -1800,396 +1680,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     Nil
   )
 
-  private def wildcardAcl = new ai.starlake.quack.edge.sql.PostgresAclValidator(tenantCatalogs =
-    t => if t == "acme" then Set("memory") else Set.empty
-  )
-
-  /** An OPA tenant whose policy allows everything: only the pre-gate screen can refuse. */
-  private def allowAllOpa =
-    val auth = new ai.starlake.quack.edge.opa.OpaAuthorizer(
-      ai.starlake.quack.edge.config.OpaConfig.default,
-      new ai.starlake.quack.edge.opa.OpaClient(
-        1000,
-        (_, _, _) => Right((200, """{"result":{"allow":true}}"""))
-      ),
-      new ai.starlake.quack.edge.opa.OpaDecisionCache(0),
-      ai.starlake.quack.observability.metrics.OpaInstruments.noop
-    )
-    val tenant = ai.starlake.quack.model.Tenant(
-      poolKey.tenant,
-      acl = ai.starlake.quack.model.TenantAcl(Some("opa"), Some("http://opa"))
-    )
-    new ai.starlake.quack.edge.opa.OpaValidator(
-      auth,
-      t => Option.when(t == poolKey.tenant)(tenant),
-      _ => Nil,
-      "memory",
-      "main",
-      "duckdb",
-      false
-    )
-
-  private def catalogDenied(
-      out: Either[RouterFailure, ?],
-      captured: () => String
-  ): Unit =
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason shouldBe
-      s"access denied: catalog: ${ai.starlake.quack.edge.sql.CatalogInternalsScreen.MetadataRefusal}"
-    captured() shouldBe ""
-
-  "the DuckLake metadata catalog" should "be admitted for a superuser, lockdown off" in:
-    val (router, captured, _) = setupWithRewriter()
-    val out                   = router
-      .execute("dlm-1", "alice", poolKey, metadataRead, effectiveSet = Some(superuserSet))
-      .unsafeRunSync()
-    out.isRight shouldBe true
-    captured() should include("__ducklake_metadata_lake")
-
-  it should "be refused to a tenant user holding *.*.* ALL under QoD grants" in:
-    val (router, captured, _) = setupWithRewriter(validator = wildcardAcl)
-    val out                   = router
-      .execute("dlm-2", "alice", poolKey, metadataRead, effectiveSet = Some(wildcardAllSet))
-      .unsafeRunSync()
-    catalogDenied(out, captured)
-
-  it should "be refused to a tenant user under OPA, even with an allow-all policy" in:
-    val (router, captured, _) = setupWithRewriter(validator = allowAllOpa)
-    val out                   = router
-      .execute("dlm-3", "alice", poolKey, metadataRead, effectiveSet = Some(wildcardAllSet))
-      .unsafeRunSync()
-    catalogDenied(out, captured)
-
-  it should "be refused to a non-superuser with the ACL off, and with no principal bound" in:
-    val (router, captured, _) = setupWithRewriter() // validator = allowAll: ACL off
-    catalogDenied(
-      router
-        .execute("dlm-4", "alice", poolKey, metadataRead, effectiveSet = Some(wildcardAllSet))
-        .unsafeRunSync(),
-      captured
-    )
-    catalogDenied(
-      router.execute("dlm-5", "alice", poolKey, metadataRead, effectiveSet = None).unsafeRunSync(),
-      captured
-    )
-    val keys = router
-      .execute(
-        "dlm-6",
-        "alice",
-        poolKey,
-        "SELECT * FROM ducklake_list_files('lake', 't')",
-        effectiveSet = Some(wildcardAllSet)
-      )
-      .unsafeRunSync()
-    keys.swap.toOption.get.reason should include("ducklake_list_files")
-
-  it should "be refused to a superuser on a pool under lockdown" in:
-    val (router, captured, _) = setupWithRewriter(lockdownFor = _ => true)
-    val out                   = router
-      .execute("dlm-7", "alice", poolKey, metadataRead, effectiveSet = Some(superuserSet))
-      .unsafeRunSync()
-    catalogDenied(out, captured)
-
-  it should "leave the DuckLake data tables readable with an ordinary grant" in:
-    val reader = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser,
-      Nil,
-      Nil,
-      List(
-        ai.starlake.quack.ondemand.state.RolePermission("p-2", "r-2", "memory", "main", "t", "RO")
-      ),
-      Nil
-    )
-    val (router, captured, _) = setupWithRewriter(validator = wildcardAcl)
-    val out                   = router
-      .execute(
-        "dlm-8",
-        "alice",
-        poolKey,
-        "SELECT * FROM memory.main.t",
-        effectiveSet = Some(reader)
-      )
-      .unsafeRunSync()
-    out.isRight shouldBe true
-    captured() should include("memory.main.t")
-
-  it should "be refused through the string-named carriers to every non-superuser" in:
-    val carriers = Seq(
-      "SELECT * FROM query_table('__ducklake_metadata_lake.ducklake_data_file')",
-      "SELECT * FROM duckdb_table_sample('__ducklake_metadata_lake.ducklake_data_file')",
-      "SELECT * FROM query('SELECT * FROM __ducklake_metadata_lake.ducklake_data_file')"
-    )
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      carriers.foreach { sql =>
-        withClue(sql)(
-          catalogDenied(
-            router
-              .execute("dlm-9", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-              .unsafeRunSync(),
-            captured
-          )
-        )
-      }
-      val computed = router
-        .execute(
-          "dlm-10",
-          "alice",
-          poolKey,
-          "SELECT * FROM duckdb_table_sample('__duck' || 'lake_metadata_lake.ducklake_data_file')",
-          effectiveSet = Some(wildcardAllSet)
-        )
-        .unsafeRunSync()
-      computed.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    }
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    carriers.foreach { sql =>
-      catalogDenied(
-        locked.execute("dlm-11", "alice", poolKey, sql, Some(superuserSet)).unsafeRunSync(),
-        lockedCaptured
-      )
-    }
-    val (open, openCaptured, _) = setupWithRewriter()
-    open
-      .execute("dlm-12", "alice", poolKey, carriers.head, Some(superuserSet))
-      .unsafeRunSync()
-      .isRight shouldBe true
-    openCaptured() should include("__ducklake_metadata_lake")
-
-  it should "refuse json_execute_serialized_sql to every non-superuser, never to a superuser" in:
-    val plan    = "SELECT * FROM json_execute_serialized_sql(json_serialize_sql('SELECT 1'))"
-    val refusal = ai.starlake.quack.edge.sql.CatalogInternalsScreen.SerializedPlanRefusal
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      val out                   = router
-        .execute("dlm-13", "alice", poolKey, plan, effectiveSet = Some(wildcardAllSet))
-        .unsafeRunSync()
-      out.swap.toOption.get.reason shouldBe s"access denied: catalog: $refusal"
-      captured() shouldBe ""
-    }
-    val (open, openCaptured, _) = setupWithRewriter()
-    val admitted                = open.execute("dlm-14", "alice", poolKey, plan, Some(superuserSet))
-    admitted.unsafeRunSync().isRight shouldBe true
-    openCaptured() should include("json_execute_serialized_sql")
-
-  it should "refuse a computed PRAGMA search_path batch to every non-superuser" in:
-    val batch =
-      "PRAGMA search_path = '__duck' || 'lake_metadata_lake'; " +
-        "SELECT encryption_key FROM ducklake_data_file"
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      val out                   = router
-        .execute("dlm-15", "alice", poolKey, batch, effectiveSet = Some(wildcardAllSet))
-        .unsafeRunSync()
-      withClue(v.getClass.getSimpleName)(out.swap.toOption.get.reason should include("computed"))
-      captured() shouldBe ""
-    }
-
-  it should "refuse a metadata-catalog name split across a newline to every non-superuser" in:
-    val split = Seq(
-      "SELECT encryption_key FROM query_table('__duck'\n'lake_metadata_lake.ducklake_data_file')",
-      "SET search_path = '__duck'\n'lake_metadata_lake'; " +
-        "SELECT encryption_key FROM ducklake_data_file"
-    )
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      split.foreach { sql =>
-        withClue(sql)(
-          catalogDenied(
-            router
-              .execute("dlm-16", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-              .unsafeRunSync(),
-            captured
-          )
-        )
-      }
-    }
-
-  "the Iceberg catalog functions" should "be refused to *.*.* ALL under QoD and OPA, not su" in:
-    val calls = Seq(
-      "SELECT * FROM duckdb_table_sample('memory.main.t')",
-      "SELECT * FROM iceberg_rollback_to_snapshot('ice.db.t', 1)",
-      "SELECT * FROM set_iceberg_table_properties('ice.db.t', {'k': 'v'})"
-    )
-    Seq(wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      calls.foreach { sql =>
-        val out = router
-          .execute("ice-1", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-          .unsafeRunSync()
-        withClue(sql)(out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied])
-      }
-      captured() shouldBe ""
-      val su = router
-        .execute("ice-2", "alice", poolKey, calls(1), effectiveSet = Some(superuserSet))
-        .unsafeRunSync()
-      su.isRight shouldBe true
-    }
-
-  // ---- node-wide settings (superuser-only, every ACL mode, never wildcard-coverable) ----
-
-  private val nodeWideRefusal =
-    s"access denied: node: ${ai.starlake.quack.edge.sql.NodeSettingScreen.NodeWideRefusal}"
-
-  "a node-wide setting" should "be admitted for a superuser, lockdown off" in:
-    val (router, captured, _) = setupWithRewriter()
-    val out                   = router
-      .execute("nw-1", "alice", poolKey, "SET threads = 2", effectiveSet = Some(superuserSet))
-      .unsafeRunSync()
-    out.isRight shouldBe true
-    captured() should include("threads")
-
-  it should "be refused to a tenant user holding *.*.* ALL, under QoD grants and under OPA" in:
-    Seq(wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      Seq("SET memory_limit = '500GB'", "SET quack_debug_send_delay_ms = 60000").foreach { sql =>
-        val out = router
-          .execute("nw-2", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-          .unsafeRunSync()
-        withClue(sql)(out.swap.toOption.get.reason shouldBe nodeWideRefusal)
-      }
-      captured() shouldBe ""
-    }
-
-  it should "be refused to a non-superuser with the ACL off" in:
-    val (router, captured, _) = setupWithRewriter()
-    val out                   = router
-      .execute("nw-3", "alice", poolKey, "PRAGMA threads = 64", effectiveSet = Some(wildcardAllSet))
-      .unsafeRunSync()
-    out.swap.toOption.get.reason shouldBe nodeWideRefusal
-    val stop = router
-      .execute(
-        "nw-4",
-        "alice",
-        poolKey,
-        "SELECT * FROM quack_stop('quack:0.0.0.0:21900')",
-        effectiveSet = Some(wildcardAllSet)
-      )
-      .unsafeRunSync()
-    stop.swap.toOption.get.reason should include("quack_stop")
-    captured() shouldBe ""
-
-  it should "be refused to a superuser on a pool under lockdown" in:
-    val (router, captured, _) = setupWithRewriter(lockdownFor = _ => true)
-    val out                   = router
-      .execute("nw-5", "alice", poolKey, "SET threads = 64", effectiveSet = Some(superuserSet))
-      .unsafeRunSync()
-    out.swap.toOption.get.reason shouldBe nodeWideRefusal
-    captured() shouldBe ""
-
-  "quack_serve and quack_stop" should "be refused to non-superusers and under lockdown" in:
-    val calls = Seq(
-      "SELECT * FROM quack_stop('quack:0.0.0.0:21900')",
-      "CALL quack_serve('quack:0.0.0.0:9999', token := 'x', disable_ssl := true)"
-    )
-    def refusedIn(router: FlightSqlRouter, eff: ai.starlake.quack.ondemand.rbac.EffectiveSet) =
-      calls.foreach { sql =>
-        val out = router.execute("qs-1", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
-        withClue(sql)(out.swap.toOption.get.reason should include("reserved to superusers"))
-      }
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      refusedIn(router, wildcardAllSet)
-      captured() shouldBe ""
-    }
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    refusedIn(locked, superuserSet)
-    lockedCaptured() shouldBe ""
-    val (open, _, _) = setupWithRewriter()
-    open
-      .execute("qs-2", "alice", poolKey, calls.head, Some(superuserSet))
-      .unsafeRunSync()
-      .isRight shouldBe true
-
-  "quack session calls" should "be refused to non-superusers and under lockdown" in:
-    // quack_active_connections() returns every session's running query text and connection id,
-    // the id quack_cancel takes (2.0 CLI).
-    val calls = Seq(
-      "SELECT query FROM quack_active_connections()",
-      "SELECT * FROM quack_server_list()",
-      "SELECT * FROM quack_cancel('qod', '42')"
-    )
-    def refusedIn(router: FlightSqlRouter, eff: ai.starlake.quack.ondemand.rbac.EffectiveSet) =
-      calls.foreach { sql =>
-        val out = router.execute("qa-1", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
-        withClue(sql)(out.swap.toOption.get.reason should include("reserved to superusers"))
-      }
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      refusedIn(router, wildcardAllSet)
-      captured() shouldBe ""
-    }
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    refusedIn(locked, superuserSet)
-    lockedCaptured() shouldBe ""
-    val (open, _, _) = setupWithRewriter()
-    open
-      .execute("qa-2", "alice", poolKey, calls.head, Some(superuserSet))
-      .unsafeRunSync()
-      .isRight shouldBe true
-
-  it should "leave the allowlisted session settings to a non-superuser, ACL on or off" in:
-    Seq(StatementValidator.allowAll, wildcardAcl).foreach { v =>
-      val (router, _, _) = setupWithRewriter(validator = v)
-      Seq(
-        "SET search_path = 'memory.main'",
-        "SET TimeZone = 'UTC'",
-        "SET http_timeout = 300",
-        "SET SESSION preserve_insertion_order = false",
-        "SET enable_progress_bar = false",
-        "SET errors_as_json = true",
-        "SET SESSION default_order = 'DESC'",
-        "SET VARIABLE x = 42"
-      ).foreach { sql =>
-        val out = router
-          .execute("nw-6", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-          .unsafeRunSync()
-        withClue(sql)(out.isRight shouldBe true)
-      }
-    }
-
-  // DuckDB 2.0 runs an unscoped SET of a GLOBAL-default setting at GLOBAL scope (physical_set.cpp),
-  // so the bare form is as node-wide as SET GLOBAL; an unknown name is refused fail-closed.
-  it should "refuse a bare SET of a GLOBAL-default setting or an unknown one, in every mode" in:
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      Seq(
-        "SET default_collation = 'nocase'" ->
-          NodeSettingScreen.unscopedRefusal("default_collation"),
-        "SET preserve_insertion_order = false" ->
-          NodeSettingScreen.unscopedRefusal("preserve_insertion_order"),
-        "SET extra_http_headers = MAP {'a': 'b'}" ->
-          NodeSettingScreen.unscopedRefusal("extra_http_headers"),
-        "SET ducklake_retry_wait_ms = 86400000" ->
-          NodeSettingScreen.unscopedRefusal("ducklake_retry_wait_ms"),
-        "PRAGMA null_order = 'nulls_first'" -> NodeSettingScreen.unscopedRefusal("null_order"),
-        "SET force_mbedtls_unsafe = true"   -> NodeSettingScreen.NodeWideRefusal,
-        "SET hnsw_ef_search = 10" -> NodeSettingScreen.unknownSettingRefusal("hnsw_ef_search")
-      ).foreach { (sql, reason) =>
-        val out = router
-          .execute("nw-7", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-          .unsafeRunSync()
-        withClue(sql)(out.swap.toOption.get.reason shouldBe s"access denied: node: $reason")
-      }
-      captured() shouldBe ""
-    }
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    locked
-      .execute("nw-8", "alice", poolKey, "SET default_order = 'DESC'", Some(superuserSet))
-      .unsafeRunSync()
-      .swap
-      .toOption
-      .get
-      .reason shouldBe s"access denied: node: ${NodeSettingScreen.unscopedRefusal("default_order")}"
-    lockedCaptured() shouldBe ""
-    val (open, openCaptured, _) = setupWithRewriter()
-    open
-      .execute("nw-9", "alice", poolKey, "SET default_collation = 'nocase'", Some(superuserSet))
-      .unsafeRunSync()
-      .isRight shouldBe true
-    openCaptured() should include("default_collation")
-
-  it should "deny (not forward) a plain read when a stored row policy fails to apply at rewrite time" in:
+  "the routed path" should "deny (not forward) a plain read when a stored row policy fails to apply at rewrite time" in:
     // Simulates a row policy stored before RowPredicateValidator rejected splice-unsafe
     // predicates: a trailing line comment that comments out the rewriter's own closing paren at
     // splice time, throwing on re-parse. The router must deny, never forward the statement
@@ -2231,7 +1722,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      registry = registry
+      registry = registry,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val result = router.execute("reg-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
     val qr     = result.toOption.get
@@ -2248,7 +1741,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      registry = registry
+      registry = registry,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val result = router
       .execute("reg-pat", "alice", poolKey, "SELECT 1", patId = Some("pat-abc"))
@@ -2267,7 +1762,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      registry = registry
+      registry = registry,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     router.execute("reg-2", "alice", poolKey, "SELECT boom").unsafeRunSync().isLeft shouldBe true
     registry.list() shouldBe Nil
@@ -2314,12 +1811,26 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val client2 =
       new QuackHttpClient(TestArrow.sharedAllocator):
-        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
           IO.pure(stub())
-    val adapter2  = new QuackHttpAdapter(client2, tkr)
+    val adapter2  = new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions2 = new SessionRegistry
     val registry2 = new ActiveStatementRegistry()
-    val router2   = new FlightSqlRouter(sup2, sessions2, tkr, adapter2, registry = registry2)
+    val router2   = new FlightSqlRouter(
+      sup2,
+      sessions2,
+      tkr,
+      adapter2,
+      registry = registry2,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
 
     val result =
       router2
@@ -2332,6 +1843,71 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     result.toOption.get.close()
     // After close the entry must be gone.
     registry2.list() shouldBe Nil
+
+  it should "keep the retry node's authorization-unavailable answer retryable" in:
+    // The first node fails transiently; the fallback answers that it could get no verdict, which
+    // a client may retry: the "retry failed" context must not make it a bad request.
+    val callCount                 = new java.util.concurrent.atomic.AtomicInteger(0)
+    val stub: () => QuackResponse = () =>
+      if callCount.getAndIncrement() == 0 then
+        QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
+      else
+        QuackResponse.Failed(
+          QuackError.Permanent("Permission Error: QoD: authorization unavailable, retry"),
+          1L
+        )
+    val bknd = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          26100 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
+    val tkr  = new NodeLoadTracker
+    val sup2 = new PoolSupervisor(bknd, tkr, new InMemoryControlPlaneStore())
+    val pk2  = PoolKey("acme", "acme_default", "sales")
+    sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
+    sup2
+      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+    sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val client2 =
+      new QuackHttpClient(TestArrow.sharedAllocator):
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
+          IO.pure(stub())
+    val router2 =
+      new FlightSqlRouter(
+        sup2,
+        new SessionRegistry,
+        tkr,
+        new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+        metadataFilterRewriter = mountedFilter,
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    router2.execute("retry-authz", "alice", pk2, "SELECT 1").unsafeRunSync() match
+      case Left(f: RouterFailure.Unavailable) => f.reason should include("retry failed")
+      case other                              => fail(s"expected Unavailable, got $other")
+    callCount.get() shouldBe 2
 
   // ---------- EPIC P1: author stamping ----------
 
@@ -2394,11 +1970,23 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val calls  = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
     val client =
       new QuackHttpClient(TestArrow.sharedAllocator):
-        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
           IO { calls += ((None, sql)); TestArrow.okResponse() }
-        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+        override def queryStamped(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
           IO { calls += ((Some(prelude), sql)); TestArrow.okResponse() }
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2406,7 +1994,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       stmtInstruments = si,
-      stampWrites = stampWrites
+      stampWrites = stampWrites,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, sessions, sup, calls)
 
@@ -2548,9 +2138,21 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val client =
       new QuackHttpClient(TestArrow.sharedAllocator):
-        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
           IO { calls += ((None, sql)); TestArrow.okResponse() }
-        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+        override def queryStamped(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
           IO {
             calls += ((Some(prelude), sql))
             if callCount.getAndIncrement() == 0 then
@@ -2558,7 +2160,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             else TestArrow.okResponse()
           }
 
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2566,7 +2168,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       stmtInstruments = si,
-      stampWrites = true
+      stampWrites = true,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
 
     val result =
@@ -2608,21 +2212,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected StatementExecuted, got $other")
 
   it should "emit StatementExecuted with ok=false when execution fails" in:
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult = Denied("you can't read this")
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
     val sink: ManagerEventSink = e => { received.add(e); () }
-    val (base, _, _)           = setup()
-    val router                 = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      validator = denying,
-      stmtInstruments = si,
+    val (router, _, _)         = setup(
+      stub = () => QuackResponse.Failed(QuackError.Permanent("Parser Error: syntax"), 1L),
       events = sink
     )
-    val out = router.execute("evt-2", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    val out = router.execute("evt-2", "alice", poolKey, "SELECTT 1").unsafeRunSync()
     out shouldBe a[Left[_, _]]
 
     val executed = received.toArray.toList.collect { case e: ManagerEvent.StatementExecuted => e }
@@ -2686,9 +2282,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     if failResumeStarts then failStart.set(true)
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup,
       new SessionRegistry,
@@ -2696,7 +2298,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       adapter,
       stmtInstruments = si,
       resumeHoldTimeout = resumeHoldTimeout,
-      resumePollInterval = resumePollInterval
+      resumePollInterval = resumePollInterval,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, sup)
 
@@ -2746,587 +2350,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     r.isLeft shouldBe true
     // The existing "pool is empty" error must surface immediately - no 60s hold.
     (System.nanoTime() - t0) should be < 2_000_000_000L
-
-  // ---- trigger DDL (DuckDB 2.0) ----
-
-  private val createTrigger =
-    "CREATE TRIGGER t AFTER INSERT ON a FOR EACH STATEMENT INSERT INTO b VALUES (1)"
-
-  "trigger DDL" should "be refused for a regular tenant user, lockdown off" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val out = router
-      .execute("trg-1", "alice", poolKey, createTrigger, effectiveSet = Some(effWithPolicies(Nil)))
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should include(
-      ai.starlake.quack.edge.sql.TriggerScreen.RefusalMessage
-    )
-
-  it should "be refused when the effective set is missing" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val out = router
-      .execute("trg-2", "alice", poolKey, "DROP TRIGGER t", effectiveSet = None)
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-
-  it should "be admitted for an admin of the pool's own tenant" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val admin = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute("trg-3", "alice", poolKey, createTrigger, effectiveSet = Some(admin))
-      .unsafeRunSync()
-    out.isRight shouldBe true
-
-  it should "be admitted for a superuser" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val superuser = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None, kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute("trg-4", "alice", poolKey, createTrigger, effectiveSet = Some(superuser))
-      .unsafeRunSync()
-    out.isRight shouldBe true
-
-  it should "be refused for an admin of another tenant" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val foreignAdmin = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = Some("globex"), kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute("trg-5", "alice", poolKey, createTrigger, effectiveSet = Some(foreignAdmin))
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should include(
-      ai.starlake.quack.edge.sql.TriggerScreen.RefusalMessage
-    )
-
-  it should "yield to lockdown when both screens refuse the same batch" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => true
-    )
-    val out = router
-      .execute(
-        "trg-6",
-        "alice",
-        poolKey,
-        s"ATTACH 'x.db' AS y; $createTrigger",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should startWith("access denied: lockdown:")
-
-  // ---- the node CLI's shell history holds its init SQL, credentials included ----
-
-  "shell_history()" should "be refused to a superuser and to a *.*.* ALL tenant, both edges" in:
-    Seq(superuserSet, wildcardAllSet).foreach { eff =>
-      val (router, captured, _) = setupWithRewriter(validator = wildcardAcl)
-      withClue(eff.user.kind) {
-        router
-          .execute("hist-1", "alice", poolKey, "SELECT * FROM shell_history()", Some(eff))
-          .unsafeRunSync()
-          .swap
-          .toOption
-          .get
-          .reason should include(
-          ai.starlake.quack.edge.sql.NodeSettingScreen.SecretCallRefusalMessage
-        )
-        router
-          .executeWith(
-            "hist-2",
-            "alice",
-            poolKey,
-            "SELECT * FROM shell_history()",
-            Some(eff),
-            okSend,
-            source = "quack",
-            clientDataScans = true
-          )
-          .unsafeRunSync() shouldBe a[Left[?, ?]]
-        captured() shouldBe ""
-      }
-    }
-
-  "SET file_search_path" should "be refused to a tenant user, ACL off or on, and open to a superuser" in:
-    Seq(StatementValidator.allowAll, wildcardAcl).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      withClue(v.toString) {
-        router
-          .execute("fsp-1", "alice", poolKey, "SET file_search_path = '/etc'", Some(wildcardAllSet))
-          .unsafeRunSync()
-          .swap
-          .toOption
-          .get shouldBe a[RouterFailure.AccessDenied]
-        captured() shouldBe ""
-        router
-          .execute("fsp-2", "alice", poolKey, "SET file_search_path = '/etc'", Some(superuserSet))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-      }
-    }
-
-  "INSTALL" should "be refused to a tenant user, ACL off or on, and open to a superuser" in:
-    Seq(StatementValidator.allowAll, wildcardAcl).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      withClue(v.toString) {
-        router
-          .execute("inst-1", "alice", poolKey, "INSTALL httpfs", Some(wildcardAllSet))
-          .unsafeRunSync()
-          .swap
-          .toOption
-          .get shouldBe a[RouterFailure.AccessDenied]
-        captured() shouldBe ""
-        router
-          .execute("inst-2", "alice", poolKey, "LOAD httpfs", Some(wildcardAllSet))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-        router
-          .execute("inst-3", "alice", poolKey, "INSTALL httpfs", Some(superuserSet))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-      }
-    }
-
-  // ---- parser settings (DuckDB 2.0) ----
-
-  "a parser setting" should "be refused for a regular user with acl disabled, lockdown off" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val out = router
-      .execute(
-        "psr-1",
-        "alice",
-        poolKey,
-        "SET GLOBAL dialect_compatibility_mode = 'spark'",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason shouldBe
-      s"access denied: node: ${ai.starlake.quack.edge.sql.NodeSettingScreen.RefusalMessage}"
-
-  it should "be refused for a superuser too, lockdown off" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val superuser = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None, kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute(
-        "psr-2",
-        "alice",
-        poolKey,
-        "SELECT 1; RESET show_behavior",
-        effectiveSet = Some(superuser)
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should include(
-      ai.starlake.quack.edge.sql.NodeSettingScreen.RefusalMessage
-    )
-
-  it should "be refused when the effective set is missing, and leave other settings alone" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val refused = router
-      .execute("psr-3", "alice", poolKey, "IMPORT DATABASE 'x'", effectiveSet = None)
-      .unsafeRunSync()
-    refused.swap.toOption.get.reason should include(
-      ai.starlake.quack.edge.sql.NodeSettingScreen.ImportRefusalMessage
-    )
-    val admitted = router
-      .execute("psr-4", "alice", poolKey, "SET http_timeout = 300", effectiveSet = None)
-      .unsafeRunSync()
-    admitted.isRight shouldBe true
-
-  it should "refuse redact_http_logs to a superuser too, lockdown off" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val superuser = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None, kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute(
-        "psr-5",
-        "alice",
-        poolKey,
-        "SET GLOBAL\"redact_http_logs\" = false",
-        effectiveSet = Some(superuser)
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get.reason shouldBe
-      s"access denied: node: ${NodeSettingScreen.SecretRefusalMessage}"
-
-  it should "refuse PRAGMA import_database for a superuser, lockdown off" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val superuser = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None, kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val imp = router
-      .execute("psr-6", "alice", poolKey, "PRAGMA import_database('/tmp/x')", Some(superuser))
-      .unsafeRunSync()
-    imp.swap.toOption.get.reason shouldBe
-      s"access denied: node: ${NodeSettingScreen.ImportRefusalMessage}"
-
-  it should "admit postgres_execute with the ACL off and lockdown off (owner ruling)" in:
-    // The raw federation passthrough is blocked only for tenant-scoped principals when the ACL
-    // validates (CatalogReachingCalls, unit-tested in AccessGateSpec / PostgresAclValidatorSpec)
-    // and for every non-superuser under lockdown (below). The default validator here is allowAll.
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si
-    )
-    val superuser = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None, kind = "admin"),
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute(
-        "psr-7",
-        "alice",
-        poolKey,
-        "SELECT * FROM postgres_query('c', 'SELECT 1')",
-        Some(superuser)
-      )
-      .unsafeRunSync()
-    out.isRight shouldBe true
-    // A SQL-valued setting is refused only to tenant principals under the ACL and under lockdown.
-    // Session scope: the bare form of this GLOBAL-default option is node-wide (superuser-only).
-    val set = router
-      .execute("psr-8", "alice", poolKey, "SET SESSION pg_staleness_query = 'SELECT 1'", None)
-      .unsafeRunSync()
-    set.isRight shouldBe true
-
-  // ---- node lockdown (QOD_NODE_LOCKDOWN) ----
-
-  "lockdown" should "deny ATTACH for a tenant caller when enabled" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => true
-    )
-    val out = router
-      .execute(
-        "lockdown-1",
-        "alice",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should startWith("access denied: lockdown:")
-
-  it should "deny ATTACH when effectiveSet is missing (no handshake state screens as non-superuser)" in:
-    // Pins the fail-closed comment in FlightSqlRouter ("effectiveSet = None
-    // (no handshake state attached) screens as non-superuser -- fail
-    // closed"): `!effectiveSet.exists(_.user.tenant.isEmpty)` is true when
-    // effectiveSet is None, so a missing EffectiveSet must never be treated
-    // as the superuser bypass.
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => true
-    )
-    val out = router
-      .execute(
-        "lockdown-1b",
-        "alice",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = None
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should startWith("access denied: lockdown:")
-
-  it should "admit ATTACH for a superuser caller" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => true
-    )
-    // Quarantine the only node so a statement that clears the lockdown screen
-    // proceeds to routing and fails there (Unavailable) rather than being
-    // denied by the screen -- proof the screen was never consulted.
-    val nodeId = router.supervisor.list().head.nodes.head.nodeId
-    router.tracker.setHealthy(nodeId, false)
-    val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None),
-      Nil,
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute(
-        "lockdown-2",
-        "root",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(superuserEff)
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
-
-  it should "deny reads on a denied DuckLake bucket only when lockdown is on" in:
-    val (base, _, _) = setup()
-    val sql          = "SELECT * FROM read_parquet('s3://lakebucket/x.parquet')"
-    val locked       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => true,
-      deniedBuckets = () => Set("lakebucket")
-    )
-    val denied = locked
-      .execute("lockdown-b1", "alice", poolKey, sql, effectiveSet = Some(effWithPolicies(Nil)))
-      .unsafeRunSync()
-    denied.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    denied.swap.toOption.get.reason should include("'lakebucket'")
-
-    val unlocked = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => false,
-      deniedBuckets = () => Set("lakebucket")
-    )
-    unlocked
-      .execute("lockdown-b2", "alice", poolKey, sql, effectiveSet = Some(effWithPolicies(Nil)))
-      .unsafeRunSync()
-      .isRight shouldBe true
-
-  it should "not consult the screen when disabled" in:
-    val (router, _, _) = setup() // lockdownFor defaults to `_ => false`
-    val out            = router
-      .execute(
-        "lockdown-3",
-        "alice",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    // ATTACH isn't a real DuckDB statement against the stub node, but the point of
-    // this test is only that it is NOT denied by the lockdown screen: today's
-    // behavior (routes to the stub node and gets an Ok/whatever the stub returns)
-    // is unchanged.
-    out.swap.toOption.foreach(_ shouldNot be(a[RouterFailure.AccessDenied]))
-
-  it should "resolve lockdown per pool: sibling pool with the override off is admitted" in:
-    // lockdownFor answers true only for a pool this session does NOT target,
-    // so the ATTACH that the locked-pool test sees denied must pass the
-    // lockdown screen here (it may still fail later for other reasons; the
-    // assertion is only "not a lockdown denial").
-    val (router, _, _) = setup(lockdownFor = k => k.pool == "some-other-pool")
-    val out            = router
-      .execute(
-        "lockdown-4",
-        "alice",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    out.swap.toOption.map(_.reason).getOrElse("") should not startWith "access denied: lockdown:"
-
-  // ---- per-catalog read-only screen wiring (CatalogWriteScreen via `readOnlyCatalogsOf`) ----
-  // Pinning I1: `readOnlyCatalogsOf` defaults to `_ => Set.empty`, so with no test exercising a
-  // non-empty value here every one of these would still pass with the whole `catalogDenial` block
-  // (FlightSqlRouter.scala) and its `Main` wiring deleted outright.
-
-  it should "deny a fully-qualified write to a read-only catalog and record it distinctly" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      readOnlyCatalogsOf = _ => Set("sales_lake"),
-      attachedCatalogsOf = _ => Set("sales_lake")
-    )
-    val out = router
-      .execute("ro-1", "alice", poolKey, "INSERT INTO sales_lake.main.t VALUES (1)")
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    val latest = router.history.snapshot(1).head
-    latest.status shouldBe "denied"
-    latest.error.get should startWith("read_only_catalog:")
-
-  it should "let an ACL denial win over the read-only screen, with the ACL reason reported" in:
-    // Proves the `catalogDenial = aclCheck.flatMap { ... }` ordering: when the ACL gate itself
-    // denies, the screen must never run, and the reason the caller sees must be the ACL one, not
-    // "read_only_catalog: ...". Reverting either the wiring or the flatMap ordering (e.g. running
-    // the screen independently of aclCheck) would let this statement's read-only reason leak
-    // through, or would report the wrong reason, and this test would fail.
-    val (base, _, _) = setup()
-    val aclValidator = new StatementValidator:
-      def validate(context: ValidationContext): ValidationResult =
-        Denied("acl: no grant on sales_lake.main.t")
-    val router = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      validator = aclValidator,
-      readOnlyCatalogsOf = _ => Set("sales_lake"),
-      attachedCatalogsOf = _ => Set("sales_lake")
-    )
-    val out = router
-      .execute(
-        "ro-2",
-        "alice",
-        poolKey,
-        "INSERT INTO sales_lake.main.t VALUES (1)",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should include("acl: no grant on sales_lake.main.t")
-    out.swap.toOption.get.reason should not include "read_only_catalog"
-
-  it should "deny an ambiguous two-part write against a read-only catalog (C1 regression)" in:
-    // `sales_lake.orders` cannot be qualified (AmbiguousCatalogRef, TableQualifier.qualify drops
-    // it from `accesses`); before the C1 fix CatalogWriteScreen only looked at `accesses` and
-    // admitted this by omission. Reverting the qualificationErrors check in CatalogWriteScreen
-    // reproduces that gap and this test fails (isRight becomes true).
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      readOnlyCatalogsOf = _ => Set("sales_lake"),
-      attachedCatalogsOf = _ => Set("sales_lake")
-    )
-    val out = router
-      .execute("ro-3", "alice", poolKey, "INSERT INTO sales_lake.orders VALUES (1)")
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    out.swap.toOption.get.reason should include("could not be fully resolved")
 
   // ---- cache-aware placement (milestone-2 edge integration) ----
 
@@ -3387,9 +2410,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val reg     = new SimpleMeterRegistry
     val ri      = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
     val dir     = new ai.starlake.quack.route.PlacementDirectory()
@@ -3402,7 +2431,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       refsConfigFor = _ => ai.starlake.acl.model.Config.forDuckDB(Some("db"), Some("main")),
       routingInstruments = ri,
       placement = dir,
-      cacheAwareRouting = cacheAware
+      cacheAwareRouting = cacheAware,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, reg, dir, sup.get(poolKey).get.nodes)
 
@@ -3521,21 +2552,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
 
-  it should "leave the statement untouched when the filter is disabled" in:
-    val (router, capturedSql, _) = setupWithRewriter()
-    val out                      = router
-      .execute(
-        "meta-2",
-        "alice",
-        poolKey,
-        "SELECT table_name FROM information_schema.tables",
-        effectiveSet = customerOnly
-      )
-      .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    capturedSql() should include("FROM information_schema.tables")
-    capturedSql() should not include "table_schema = 'tpch1'"
-
   it should "leave a superuser's information_schema read unfiltered" in:
     val root = ai.starlake.quack.ondemand.state.RbacUser("u-0", None, "root", "admin")
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
@@ -3552,14 +2568,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     capturedSql() should include("FROM information_schema.tables")
     capturedSql() should not include "qod_meta"
 
-  it should "replace a plain SHOW TABLES with the filtered listing" in:
+  it should "narrow a plain SHOW TABLES, rewritten to a catalog function listing (Task 19)" in:
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
     val out                      = router
       .execute("meta-4", "alice", poolKey, "SHOW TABLES", effectiveSet = customerOnly)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_name AS name")
-    capturedSql() should include("table_schema = 'main'")
+    capturedSql() should include("lower(schema_name) = lower('main')")
+    capturedSql() should include("duckdb_tables() WHERE (lower(database_name) = 'memory'")
 
   it should "deny a SHOW TABLES variant without ever reaching a node" in:
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
@@ -3592,38 +2609,87 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // capturedSql holds the LAST wire text, i.e. the retry's.
     capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
 
-  // The validator and the rewriter mount from the same flag, so the pair must agree:
-  // what the validator implicitly admits is exactly what the rewriter then filters.
-
-  private val filteredMetaValidator = new ai.starlake.quack.edge.sql.PostgresAclValidator(
-    defaultDatabase = "memory",
-    defaultSchema = "main",
-    filteredMetadata = true,
-    tenantCatalogs = _ => Set("memory")
+  // Task 12 review I1: a COPY to an authorized location must not carry a listing the edge filter
+  // would have narrowed (the filter cannot read a COPY).
+  private val tableGrants = Some(
+    effWithGrants(
+      List(grant("memory", "main", "t", "RO"), grant("memory", "tpch1", "customer", "RO"))
+    )
   )
 
-  it should "admit and filter an ungranted metadata read under the real validator" in:
-    val (router, capturedSql, _) =
-      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
+  it should "refuse a COPY writing a filtered listing to an authorized location" in:
+    val (router, capturedSql, _) = setupWithRewriter(
+      metadataFilter = metaFilterOn
+    )
+    List(
+      "COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SHOW TABLES FROM tpch1) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SELECT table_name, column_name FROM information_schema./**/columns) TO " +
+        "'s3://acme-etl/out/c.csv'",
+      "COPY information_schema./**/tables TO 's3://acme-etl/out/t.csv'"
+    ).zipWithIndex.foreach { (sql, i) =>
+      withClue(sql) {
+        val out = router
+          .execute(s"copy-meta-$i", "alice", poolKey, sql, effectiveSet = tableGrants)
+          .unsafeRunSync()
+        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "send an ordinary COPY to an authorized location" in:
+    val (router, capturedSql, _) = setupWithRewriter(
+      metadataFilter = metaFilterOn
+    )
+    val sql = "COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'"
     val out = router
-      .execute(
-        "meta-7",
-        "alice",
-        poolKey,
-        "SELECT table_name FROM information_schema.tables",
-        effectiveSet = customerOnly
-      )
+      .execute("copy-ok", "alice", poolKey, sql, effectiveSet = tableGrants)
       .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
+    out match
+      case Right(r) => r.close()
+      case Left(f)  => fail(s"refused: $f")
+    capturedSql() should include("COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'")
+
+  it should "refuse a COPY the gateway cannot read to a principal the filter narrows, only" in:
+    val unread = List(
+      "SELECT 1; COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'",
+      "EXPLAIN ANALYZE COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "PREPARE p AS COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (DESCRIBE customer) TO 's3://acme-etl/out/t.csv'"
+    )
+    val (narrowing, narrowingCaptured, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    unread.zipWithIndex.foreach { (sql, i) =>
+      withClue(sql) {
+        narrowing
+          .execute(s"copy-unread-$i", "alice", poolKey, sql, effectiveSet = tableGrants)
+          .unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(m)) => m should include("COPY")
+          case other                               => fail(s"expected AccessDenied, got $other")
+        narrowingCaptured() shouldBe ""
+      }
+    }
+    // The filter leaves these listings alone (a superuser; a *.*.* ALL holder), so the COPY is
+    // the node's to judge.
+    val everyTable = Some(effWithGrants(List(grant("*", "*", "*", "ALL"))))
+    unread.foreach { sql =>
+      withClue(sql) {
+        narrowing
+          .execute("copy-unread-su", "alice", poolKey, sql, Some(superuserSet))
+          .unsafeRunSync() shouldBe a[Right[?, ?]]
+        narrowing
+          .execute("copy-unread-all", "alice", poolKey, sql, effectiveSet = everyTable)
+          .unsafeRunSync() shouldBe a[Right[?, ?]]
+      }
+    }
+    narrowingCaptured() should include("COPY")
 
   it should "filter a metadata read hiding behind the first statement of a read batch" in:
     // A single parse reads only the first statement, so the second used to reach the node
-    // untouched while the validator admitted the batch as a pure read: a zero-grant principal
+    // untouched: a zero-grant principal
     // got the full catalog. Either outcome is safe, but the wire text must never carry an
     // unfiltered catalog read.
     val (router, capturedSql, _) =
-      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
+      setupWithRewriter(metadataFilter = metaFilterOn)
     val out = router
       .execute(
         "meta-9",
@@ -3642,13 +2708,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           .findAllMatchIn(capturedSql())
           .size shouldBe 0
 
-  it should "still deny a metadata read riding inside a multi-statement write batch" in:
-    // The implicit admit is pure-read only: the rewriter passes non-Select statements
-    // through untouched, so admitting this batch would let RW on `mine` materialize an
-    // UNFILTERED catalog copy. Flat-set rule, pinned end to end.
-    val (router, capturedSql, _) =
-      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
-    val out = router
+  it should "never send an unfiltered metadata read riding inside a multi-statement write batch" in:
+    // The filter rewrites the batch's SELECT and keeps the INSERT as written, or refuses the batch:
+    // either is safe, but the wire text must never carry an unfiltered catalog read.
+    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val out                      = router
       .execute(
         "meta-8",
         "alice",
@@ -3657,15 +2721,22 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         effectiveSet = Some(effWithGrants(List(grant("memory", "main", "mine", "RW"))))
       )
       .unsafeRunSync()
-    out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-    capturedSql() shouldBe ""
+    out match
+      case Left(f) =>
+        f shouldBe a[RouterFailure.AccessDenied]
+        capturedSql() shouldBe ""
+      case Right(r) =>
+        r.close()
+        """(?i)FROM\s+information_schema\.tables(?!\s+WHERE\s+\()""".r
+          .findAllMatchIn(capturedSql())
+          .size shouldBe 0
 
   // ---- escape hygiene of this file's own I1 trivia test literals ----
   //
   // The NBSP characters exercised by the two I1 regression tests above must stay literal `\u00A0`
   // escapes, never a raw invisible byte pasted into the source -- see the identical (whole-file)
-  // guard in `StatementClassifierSpec`, `LockdownScreenSpec`, `CatalogWriteScreenSpec`,
-  // `PrepareStrategySpec` and `SqlTriviaSpec` for why this matters: an editor or an "helpful"
+  // guard in `StatementClassifierSpec`, `PrepareStrategySpec` and `SqlTriviaSpec` for why this
+  // matters: an editor or an "helpful"
   // formatting pass can silently decode the escape back into a raw invisible character, at which
   // point the file still compiles and every assertion above still passes, with no way for the
   // next reader to tell. Scoped to a substring search rather than a whole-file scan (the pattern
@@ -3709,11 +2780,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   )
 
   private def okSend: FlightSqlRouter.NodeSend[String] =
-    (_, _, _, _) => IO.pure(NodeOutcome.Ok("count", 1L, () => ()))
+    (_, _, _, _, _) => IO.pure(NodeOutcome.Ok("count", 1L, () => ()))
 
   it should "refuse a client-fed INSERT on the FlightSQL path (the scan would wait forever)" in:
     val (router, _, _) =
-      setupWithRewriter(validator = new ai.starlake.quack.edge.sql.PostgresAclValidator())
+      setupWithRewriter()
     router
       .execute("cds-1", "alice", poolKey, ClientFedInsert, effectiveSet = Some(ordersWriter))
       .unsafeRunSync() match
@@ -3728,13 +2799,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         ClientFedInsert,
         Some(ordersWriter),
         okSend,
-        source = "quack"
+        source = "quack",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync() shouldBe a[Left[?, ?]]
 
   it should "admit the same client-fed INSERT, same principal and grants, from the front door" in:
     val (router, _, _) =
-      setupWithRewriter(validator = new ai.starlake.quack.edge.sql.PostgresAclValidator())
+      setupWithRewriter()
     router
       .executeWith(
         "cds-3",
@@ -3744,33 +2816,52 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         Some(ordersWriter),
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
       .map(_.value) shouldBe Right("count")
 
-  it should "carry the client-data-scan flag into validation only when the caller sets it" in:
-    val capturer       = new CapturingValidator
-    val (router, _, _) = setupWithRewriter(validator = capturer)
-    router.execute("cds-4", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    capturer.lastCtx.clientDataScans shouldBe false
-    router
-      .executeWith("cds-5", "alice", poolKey, "SELECT 1", None, okSend, source = "quack")
-      .unsafeRunSync()
-    capturer.lastCtx.clientDataScans shouldBe false
+  it should "refuse a client data scan off the native front door, superusers included" in:
+    val (router, captured, _) = setupWithRewriter()
+    List(Some(ordersWriter), Some(superuserSet), None).foreach { eff =>
+      withClue(eff.map(_.user.username)) {
+        router
+          .execute("cds-x1", "alice", poolKey, ClientFedInsert, effectiveSet = eff)
+          .unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(m)) =>
+            m should include("scan_data_from_quack_client")
+          case other => fail(s"expected AccessDenied, got $other")
+        router
+          .executeWith(
+            "cds-x2",
+            "alice",
+            poolKey,
+            ClientFedInsert,
+            eff,
+            okSend,
+            source = "quack",
+            purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+          )
+          .unsafeRunSync() shouldBe a[Left[?, ?]]
+      }
+    }
+    captured() shouldBe ""
+    // the front door feeds the scan: admitted there, for the same principal
     router
       .executeWith(
-        "cds-6",
+        "cds-x3",
         "alice",
         poolKey,
-        "SELECT 1",
-        None,
+        ClientFedInsert,
+        Some(ordersWriter),
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
-    capturer.lastCtx.clientDataScans shouldBe true
+      .map(_.value) shouldBe Right("count")
 
   it should "let the protected-write guard admit a client-fed INSERT only from the front door" in:
     val guard = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
@@ -3788,7 +2879,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     )
     val (router, _, _) = setupWithRewriter(protectedWriteGuard = guard)
     router
-      .executeWith("cds-7", "alice", poolKey, ClientFedInsert, Some(withRowPolicy), okSend)
+      .executeWith(
+        "cds-7",
+        "alice",
+        poolKey,
+        ClientFedInsert,
+        Some(withRowPolicy),
+        okSend,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync() shouldBe a[Left[?, ?]]
     router
       .executeWith(
@@ -3799,98 +2898,21 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         Some(withRowPolicy),
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
       .map(_.value) shouldBe Right("count")
 
-  // ---- direct file access: superusers only (owner ruling 2026-10-11) ----
-
-  private val fileReads = List(
-    "SELECT * FROM read_parquet('s3://bucket/main/customer/x.parquet')",
-    "SELECT * FROM 's3://bucket/main/customer/x.parquet'",
-    "COPY (SELECT 1) TO '/tmp/x.csv'",
-    // parseable: a keyword-named alias before a comma join; unparseable: the bare `set` alias
-    "SELECT * FROM range(1) AS values, '/etc/x.csv'",
-    "SELECT * FROM range(1) set, '/etc/x.csv'",
-    "SELECT * FROM (SELECT 1 AS \"order\") r JOIN (SELECT 1 AS \"order\") s " +
-      "ON r.order = s.order, '/etc/x.csv'",
-    // a quoted glob name: every matching file
-    "SELECT * FROM \"*\".csv"
-  )
-
-  "a direct file read or write" should "be refused to a *.*.* ALL tenant principal, QoD and OPA" in:
-    Seq(wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      fileReads.foreach { sql =>
-        withClue(s"$v: $sql") {
-          router
-            .execute("file-1", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-            .unsafeRunSync()
-            .left
-            .toOption
-            .get shouldBe a[RouterFailure.AccessDenied]
-          // the native front door, client data scans on
-          router
-            .executeWith(
-              "file-2",
-              "alice",
-              poolKey,
-              sql,
-              Some(wildcardAllSet),
-              okSend,
-              source = "quack",
-              clientDataScans = true
-            )
-            .unsafeRunSync()
-            .left
-            .toOption
-            .get shouldBe a[RouterFailure.AccessDenied]
-          captured() shouldBe ""
-        }
-      }
-    }
-
-  it should "stay open to a superuser" in:
-    val (router, captured, _) = setupWithRewriter(validator = wildcardAcl)
-    fileReads.foreach { sql =>
-      withClue(sql) {
-        router
-          .execute("file-3", "alice", poolKey, sql, effectiveSet = Some(superuserSet))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-        captured() should include(sql)
-      }
-    }
-
-  it should "leave the front door's client data scan to a *.*.* ALL principal" in:
-    Seq(wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, _, _) = setupWithRewriter(validator = v)
-      withClue(v.toString) {
-        router
-          .executeWith(
-            "file-4",
-            "alice",
-            poolKey,
-            ClientFedInsert,
-            Some(wildcardAllSet),
-            okSend,
-            source = "quack",
-            clientDataScans = true
-          )
-          .unsafeRunSync()
-          .map(_.value) shouldBe Right("count")
-      }
-    }
-
-  it should "leave a row policy holding IS DISTINCT FROM a literal to its re-validation" in:
-    // `IS DISTINCT FROM 'X'` takes a value; the re-validated wrap carries the policy's SQL.
+  "a row policy holding IS DISTINCT FROM a literal" should "pass the rewrite scope check" in:
+    // `IS DISTINCT FROM 'X'` takes a value; the wrap carries the policy's SQL.
     val withRows = wildcardAllSet.copy(rowPolicies =
       List(
         ai.starlake.quack.ondemand.state
           .RoleRowPolicy("rp-d", "r-1", "*", "main", "customer", "c_region IS DISTINCT FROM 'X'")
       )
     )
-    val (router, captured, _) = setupWithRewriter(validator = wildcardAcl)
+    val (router, captured, _) = setupWithRewriter()
     router
       .execute("file-5", "alice", poolKey, "SELECT c_id FROM customer", Some(withRows))
       .unsafeRunSync() shouldBe a[Right[?, ?]]
@@ -3905,145 +2927,27 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync() shouldBe a[Right[?, ?]]
 
-  "a lockdown pool with the ACL off" should "refuse a file after a keyword-named alias, both edges" in:
-    val (router, captured, _) = setupWithRewriter(lockdownFor = _ => true)
+  // `histogram` / `histogram_values` are 2.0 table macros whose body reads `query_table(source)`.
+  "a query_table-reading table macro" should "never reach the node for a row-policy principal" in:
+    // histogram_values runs query_table on its string argument: the row rewriter never sees the
+    // table, so the protected-write guard refuses the call (CatalogReachingCalls.readingTableMacro)
+    val rls                   = Some(effWithRowPolicies(List(rowPolicyCustomer)))
+    val (router, captured, _) = setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
     List(
-      "SELECT * FROM range(1) AS values, '/etc/x.csv'",
-      "SELECT * FROM range(1) set, '/etc/x.csv'",
-      "SELECT * FROM \"*\".csv"
+      "SELECT * FROM histogram('customer', c_email)",
+      "SELECT * FROM histogram_values('main.customer', c_region)"
     ).foreach { sql =>
       withClue(sql) {
-        router
-          .execute("lock-1", "alice", poolKey, sql, Some(wildcardAllSet))
-          .unsafeRunSync()
-          .swap
-          .toOption
-          .get shouldBe a[RouterFailure.AccessDenied]
-        router
-          .executeWith(
-            "lock-2",
-            "alice",
-            poolKey,
-            sql,
-            Some(wildcardAllSet),
-            okSend,
-            source = "quack"
-          )
-          .unsafeRunSync() shouldBe a[Left[?, ?]]
-        captured() shouldBe ""
+        router.execute("hist-m4", "alice", poolKey, sql, rls).unsafeRunSync() shouldBe
+          a[Left[?, ?]]
       }
     }
+    captured() shouldBe ""
+    // the aggregate of that name is a value, left to the row rewriter
     router
-      .execute(
-        "lock-3",
-        "alice",
-        poolKey,
-        "SELECT * FROM range(1) AS values, 's3://staging/x.csv'",
-        Some(wildcardAllSet)
-      )
+      .execute("hist-m5", "alice", poolKey, "SELECT histogram(c_region) FROM customer", rls)
       .unsafeRunSync() shouldBe a[Right[?, ?]]
-
-  "node-state introspection" should "be refused to a tenant user, ACL off or on, and open to a superuser" in:
-    Seq(StatementValidator.allowAll, wildcardAcl).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      List(
-        "SELECT * FROM duckdb_secrets()",
-        "SELECT name, value FROM duckdb_settings()",
-        "SELECT current_setting('s3_secret_access_key')",
-        "SELECT * FROM duckdb_external_file_cache()",
-        "PRAGMA database_list"
-      ).foreach { sql =>
-        withClue(s"$v: $sql") {
-          router
-            .execute("ns-1", "alice", poolKey, sql, Some(wildcardAllSet))
-            .unsafeRunSync()
-            .swap
-            .toOption
-            .get
-            .reason should include("shows node state")
-          captured() should not include sql
-          router
-            .execute("ns-2", "alice", poolKey, sql, Some(superuserSet))
-            .unsafeRunSync() shouldBe a[Right[?, ?]]
-        }
-      }
-      router
-        .execute(
-          "ns-3",
-          "alice",
-          poolKey,
-          "SELECT current_setting('TimeZone')",
-          Some(wildcardAllSet)
-        )
-        .unsafeRunSync() shouldBe a[Right[?, ?]]
-    }
-
-  // `histogram` / `histogram_values` are 2.0 table macros whose body reads `query_table(source)`.
-  "a query_table-reading table macro" should "never reach the node for a tenant, lockdown or RLS" in:
-    val sql = "SELECT * FROM histogram('/etc/x.csv', b)"
-    // QoD grants, *.*.* ALL, both edges
-    val (acl, aclCaptured, _) = setupWithRewriter(validator = wildcardAcl)
-    acl
-      .execute("hist-m1", "alice", poolKey, sql, Some(wildcardAllSet))
-      .unsafeRunSync() shouldBe a[Left[?, ?]]
-    acl
-      .executeWith(
-        "hist-m2",
-        "alice",
-        poolKey,
-        sql,
-        Some(wildcardAllSet),
-        okSend,
-        source = "quack",
-        clientDataScans = true
-      )
-      .unsafeRunSync() shouldBe a[Left[?, ?]]
-    aclCaptured() shouldBe ""
-    // lockdown with the ACL off
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    locked
-      .execute("hist-m3", "alice", poolKey, sql, Some(wildcardAllSet))
-      .unsafeRunSync() shouldBe a[Left[?, ?]]
-    lockedCaptured() shouldBe ""
-    // a row-policy principal: it read the protected table unfiltered
-    val (rls, rlsCaptured, _) = setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
-    rls
-      .execute(
-        "hist-m4",
-        "alice",
-        poolKey,
-        "SELECT * FROM histogram('customer', c_email)",
-        Some(effWithRowPolicies(List(rowPolicyCustomer)))
-      )
-      .unsafeRunSync() shouldBe a[Left[?, ?]]
-    rlsCaptured() shouldBe ""
-    // the aggregate of that name is a value
-    val (agg, aggCaptured, _) = setupWithRewriter(validator = wildcardAcl)
-    agg
-      .execute(
-        "hist-m5",
-        "alice",
-        poolKey,
-        "SELECT histogram(o_total) FROM orders",
-        Some(wildcardAllSet)
-      )
-      .unsafeRunSync() shouldBe a[Right[?, ?]]
-    aggCaptured() should include("histogram(o_total)")
-
-  "pg_get_viewdef / pg_get_constraintdef" should "need the unrestricted *.*.* ALL grant" in:
-    val (router, captured, _) = setupWithRewriter(validator = wildcardAcl)
-    List("SELECT pg_get_viewdef(o_id) FROM orders", "SELECT pg_get_constraintdef(1)").foreach {
-      sql =>
-        withClue(sql) {
-          router
-            .execute("pgdef-1", "alice", poolKey, sql, Some(ordersWriter))
-            .unsafeRunSync() shouldBe a[Left[?, ?]]
-          captured() should not include sql
-          router
-            .execute("pgdef-2", "alice", poolKey, sql, Some(wildcardAllSet))
-            .unsafeRunSync() shouldBe a[Right[?, ?]]
-        }
-    }
+    captured() should include("histogram(c_region)")
 
   // ---- F07: a backtick-quoted identifier meets the same row filter and column mask ----
 
@@ -4065,7 +2969,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       enabled = true
     )
 
-  "a backtick-quoted table or column" should "be filtered and masked in every ACL mode" in:
+  "a backtick-quoted table or column" should "be filtered and masked" in:
     val twins = List(
       "SELECT c_id, c_email, c_region FROM `customer`" ->
         "SELECT c_id, c_email, c_region FROM \"customer\"",
@@ -4075,26 +2979,24 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         "SELECT c_id FROM customer WHERE \"c_email\" LIKE '%a%'",
       "SELECT `c` FROM customer c" -> "SELECT \"c\" FROM customer c"
     )
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(rewriter = clsKnowingCustomer, validator = v)
-      def run(sql: String)      =
-        val out = router.execute("bt-1", "alice", poolKey, sql, Some(maskedAndFiltered))
-        val res = out.unsafeRunSync().map(_ => captured())
-        res
-      twins.foreach { (backtick, twin) =>
-        withClue(s"${v.getClass.getSimpleName}: $backtick") {
-          val b = run(backtick)
-          b.map(_.contains("`")) should not be Right(true)
-          b.map(_.toLowerCase) shouldBe run(twin).map(_.toLowerCase)
-          b.foreach { sent =>
-            sent should include("c_region = 'X'")
-            sent should not include "c_email LIKE"
-          }
+    val (router, captured, _) = setupWithRewriter(rewriter = clsKnowingCustomer)
+    def run(sql: String)      =
+      val out = router.execute("bt-1", "alice", poolKey, sql, Some(maskedAndFiltered))
+      val res = out.unsafeRunSync().map(_ => captured())
+      res
+    twins.foreach { (backtick, twin) =>
+      withClue(backtick) {
+        val b = run(backtick)
+        b.map(_.contains("`")) should not be Right(true)
+        b.map(_.toLowerCase) shouldBe run(twin).map(_.toLowerCase)
+        b.foreach { sent =>
+          sent should include("c_region = 'X'")
+          sent should not include "c_email LIKE"
         }
       }
-      val table = run(twins.head._1)
-      table.toOption.get should (include("'***'") and include("c_region = 'X'"))
     }
+    val table = run(twins.head._1)
+    table.toOption.get should (include("'***'") and include("c_region = 'X'"))
 
   it should "not launder a masked column into a table through CTAS" in:
     val (router, captured, _) = setupWithRewriter(
@@ -4114,86 +3016,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  // ---- F08: histogram()/histogram_values() over a computed metadata-catalog source ----
-
-  "a reading table macro over a computed source" should "be refused to every non-superuser" in:
-    val leaks = Seq(
-      "SELECT * FROM histogram('__duck' || 'lake_metadata_lake.ducklake_data_file', encryption_key)",
-      "SELECT * FROM histogram_values(concat('__duck', 'lake_metadata_lake.ducklake_data_file'), " +
-        "encryption_key)",
-      "SELECT * FROM histogram_values(chr(95) || '_ducklake_metadata_lake.ducklake_data_file', " +
-        "path)",
-      "SELECT * FROM histogram(source := '__duck' || 'lake_metadata_lake.ducklake_data_file', " +
-        "col_name := encryption_key)",
-      "SELECT * FROM histogram('__ducklake_metadata_lake.ducklake_data_file', encryption_key)"
-    )
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      leaks.foreach { sql =>
-        withClue(s"${v.getClass.getSimpleName}: $sql") {
-          val out = router
-            .execute("hist-c1", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-            .unsafeRunSync()
-          out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-          out.swap.toOption.get.reason should startWith("access denied: catalog: ")
-          captured() shouldBe ""
-        }
-      }
-    }
-    val (open, openCaptured, _) = setupWithRewriter()
-    open
-      .execute("hist-c2", "alice", poolKey, leaks.head, Some(superuserSet))
-      .unsafeRunSync()
-      .isRight shouldBe true
-    openCaptured() should include("histogram(")
-
-  it should "leave the aggregate and a constant source admitted with the ACL off" in:
-    val (router, captured, _) = setupWithRewriter()
-    Seq(
-      "SELECT histogram(c_region) FROM customer",
-      "SELECT * FROM histogram('customer', c_region)"
-    ).foreach { sql =>
-      withClue(sql) {
-        router
-          .execute("hist-c3", "alice", poolKey, sql, Some(wildcardAllSet))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-        captured() should include("histogram")
-      }
-    }
-
   // ---- F09: CHECKPOINT and DuckLake's per-schema macros ----
 
-  private val checkpointRefusal =
-    s"access denied: catalog: ${ai.starlake.quack.edge.sql.CheckpointScreen.Refusal}"
-
-  private val checkpoints = Seq(
-    "CHECKPOINT",
-    "CHECKPOINT lake",
-    "CALL checkpoint('lake')",
-    "SELECT * FROM checkpoint('lake')",
-    "FROM checkpoint()",
-    "EXPLAIN ANALYZE CHECKPOINT",
-    "PREPARE p AS CHECKPOINT",
-    "SELECT 1; CHECKPOINT"
-  )
-
-  "CHECKPOINT" should "be refused to every non-superuser in every ACL mode, lockdown or not" in:
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      Seq(false, true).foreach { locked =>
-        val (router, captured, _) = setupWithRewriter(validator = v, lockdownFor = _ => locked)
-        checkpoints.foreach { sql =>
-          withClue(s"${v.getClass.getSimpleName} lockdown=$locked: $sql") {
-            val out = router
-              .execute("ckpt-1", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-              .unsafeRunSync()
-            out.swap.toOption.get.reason shouldBe checkpointRefusal
-            captured() shouldBe ""
-          }
-        }
-      }
-    }
-
-  it should "run for a superuser, routed and classified as DDL, and not under lockdown" in:
+  "CHECKPOINT" should "run for a superuser, routed and classified as DDL" in:
     val (router, captured, _) = setupWithRewriter()
     router
       .execute("ckpt-2", "alice", poolKey, "CHECKPOINT", Some(superuserSet))
@@ -4201,56 +3026,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .isRight shouldBe true
     captured() should include("CHECKPOINT")
     router.classifier.classify("CHECKPOINT") shouldBe ai.starlake.quack.model.StatementKind.Ddl
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    locked
-      .execute("ckpt-3", "alice", poolKey, "CHECKPOINT", Some(superuserSet))
-      .unsafeRunSync()
-      .swap
-      .toOption
-      .get
-      .reason shouldBe checkpointRefusal
-    lockedCaptured() shouldBe ""
-
-  "DuckLake's bare per-schema macros" should "be refused like ducklake_* when the ACL validates" in:
-    val pairs = Seq(
-      "FROM merge_adjacent_files()" -> "FROM ducklake_merge_adjacent_files('lake')",
-      "FROM lake.set_option('delete_older_than', '1 second')" ->
-        "FROM ducklake_set_option('lake', 'delete_older_than', '1 second')",
-      "SELECT * FROM snapshots()" -> "SELECT * FROM ducklake_snapshots('lake')"
-    )
-    Seq(wildcardAcl, allowAllOpa).foreach { v =>
-      val (router, captured, _) = setupWithRewriter(validator = v)
-      pairs.foreach { (bare, explicit) =>
-        withClue(s"${v.getClass.getSimpleName}: $bare") {
-          Seq(bare, explicit).foreach { sql =>
-            router
-              .execute("dlm-m1", "alice", poolKey, sql, Some(wildcardAllSet))
-              .unsafeRunSync()
-              .swap
-              .toOption
-              .get shouldBe a[RouterFailure.AccessDenied]
-          }
-          captured() shouldBe ""
-        }
-      }
-    }
-    // With the ACL off the read-only family is admitted (owner ruling 2026-10-11), bare or
-    // explicit; the maintenance and option-setting ones are refused in every mode (below).
-    val (open, openCaptured, _) = setupWithRewriter()
-    Seq(
-      "SELECT * FROM snapshots()",
-      "SELECT * FROM ducklake_snapshots('lake')",
-      "FROM lake.table_info()",
-      "FROM table_changes('t', 0, 3)",
-      "CALL set_commit_message('a', 'b')"
-    ).foreach { sql =>
-      withClue(sql) {
-        open
-          .execute("dlm-m2", "alice", poolKey, sql, Some(wildcardAllSet))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-        openCaptured() should include(sql)
-      }
-    }
 
   private val maintenanceCalls = Seq(
     "FROM merge_adjacent_files()",
@@ -4269,27 +3044,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     "SELECT 1; FROM lake.set_option('delete_older_than', '1 second')"
   )
 
-  "DuckLake's maintenance and option-setting calls" should "be refused to every non-superuser" in:
-    Seq(StatementValidator.allowAll, wildcardAcl, allowAllOpa).foreach { v =>
-      Seq(false, true).foreach { locked =>
-        val (router, captured, _) = setupWithRewriter(validator = v, lockdownFor = _ => locked)
-        maintenanceCalls.foreach { sql =>
-          withClue(s"${v.getClass.getSimpleName} lockdown=$locked: $sql") {
-            val out = router
-              .execute("dlm-mt1", "alice", poolKey, sql, effectiveSet = Some(wildcardAllSet))
-              .unsafeRunSync()
-            out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
-            // under lockdown the lockdown screen, which runs first, may refuse it for its own reason
-            if !locked then
-              out.swap.toOption.get.reason should (startWith("access denied: catalog: ") and
-                include("reserved to superusers"))
-            captured() shouldBe ""
-          }
-        }
-      }
-    }
-
-  it should "run for a superuser, and not under lockdown" in:
+  "DuckLake's maintenance and option-setting calls" should "run for a superuser" in:
     val (open, openCaptured, _) = setupWithRewriter()
     maintenanceCalls.foreach { sql =>
       withClue(sql) {
@@ -4299,15 +3054,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         openCaptured() should not be ""
       }
     }
-    val (locked, lockedCaptured, _) = setupWithRewriter(lockdownFor = _ => true)
-    locked
-      .execute("dlm-mt3", "alice", poolKey, maintenanceCalls.head, Some(superuserSet))
-      .unsafeRunSync()
-      .swap
-      .toOption
-      .get
-      .reason should include("reserved to superusers")
-    lockedCaptured() shouldBe ""
 
   // Audit F13: a StackOverflowError is fatal to cats-effect, so one too-deep statement that
   // escapes a walk halts the whole manager. Run on a 1 MiB stack, a production worker's default.
@@ -4328,23 +3074,23 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // Under RoutingRefs.MaxSqlLength, so the placement walk parses it.
   private val tooDeep = "SELECT " + List.fill(45000)("1").mkString("+")
 
-  "a too-deep statement" should "be forwarded, not crash the router, with the ACL off" in:
+  "a too-deep statement" should "be forwarded, not crash the router" in:
     val (router, _, _) = setup()
     onWorkerStack(router.execute("deep-1", "alice", poolKey, tooDeep).unsafeRunSync()) match
       case Right(out) => out shouldBe a[Right[?, ?]]
       case Left(e)    => fail(s"escaped ${e.getClass.getName}", e)
 
   it should "be denied, not crash the router, when a pipeline step overflows" in:
-    val overflowing = new StatementValidator:
-      def validate(context: ValidationContext): ValidationResult = throw new StackOverflowError()
     val (base, _, _) = setup()
     val router       = new FlightSqlRouter(
       base.supervisor,
       base.sessions,
       base.tracker,
       base.adapter,
-      validator = overflowing,
-      stmtInstruments = si
+      stmtInstruments = si,
+      attachedCatalogsOf = _ => throw new StackOverflowError(),
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     onWorkerStack(router.execute("deep-2", "alice", poolKey, "SELECT 1").unsafeRunSync()) match
       case Right(out) =>

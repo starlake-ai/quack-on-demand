@@ -32,7 +32,7 @@ object FleetEndpoints:
       .in(extractFromRequest(_.connectionInfo.remote))
       .out(jsonBody[FleetHeartbeatResponse])
 
-  // Admin surface: superuser session or static key only (checked in the handler).
+  // Admin surface: superuser only, by session or personal access token (checked in the handler).
   val listServers: PublicEndpoint[
     Option[String],
     (sttp.model.StatusCode, ErrorResponse),

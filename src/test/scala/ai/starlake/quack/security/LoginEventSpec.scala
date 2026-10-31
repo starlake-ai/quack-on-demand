@@ -12,7 +12,7 @@ class LoginEventSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   "REST login" should "emit SessionOpened via=rest" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None, events = sink)
+    val h   = ManagerServerHarness.boot(fix.store, events = sink)
     try
       val body =
         s"""{"username":"${SecurityFixtures.RootUsername}","password":"${SecurityFixtures.RootPassword}"}"""

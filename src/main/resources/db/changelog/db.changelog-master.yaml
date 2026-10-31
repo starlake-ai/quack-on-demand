@@ -97,3 +97,21 @@ databaseChangeLog:
       file: db/changelog/0045-user-kind-builtin-rbac.yaml
   - include:
       file: db/changelog/0046-fleet-heartbeat-node-action.yaml
+  - include:
+      file: db/changelog/0047-node-authz-key-secret.yaml
+  - include:
+      file: db/changelog/0048-tenant-auth-client-secret.yaml
+  - include:
+      file: db/changelog/0049-boot-secret.yaml
+  - include:
+      file: db/changelog/0050-policy-version.yaml
+  - include:
+      file: db/changelog/0051-tenant-location.yaml
+  - include:
+      file: db/changelog/0052-user-s3-credential.yaml
+  - include:
+      file: db/changelog/0053-init-sql-trust.yaml
+  - include:
+      file: db/changelog/0054-data-path-policy-version.yaml
+  - include:
+      file: db/changelog/0055-drop-pool-lockdown.yaml

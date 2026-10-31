@@ -1,13 +1,12 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ManifestImporter.scala
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.ondemand.initsql.InitSqlTrust
 import ai.starlake.quack.model.{
   AutoscaleBand,
   FederatedSecret,
   FederatedSource,
   FederatedSourceType,
-  InitSqlScreen,
-  LockdownTriState,
   Names,
   NodePlacement,
   NodeToleration,
@@ -20,6 +19,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.EncryptionKeyGen
+import ai.starlake.quack.ondemand.auth.TenantSignInWrite
 import ai.starlake.quack.ondemand.federation.FederatedSourceRules
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
@@ -45,7 +45,11 @@ object ManifestImporter extends LazyLogging:
   // validate
   // ------------------------------------------------------------------
 
-  def validate(m: ConfigManifest, store: ControlPlaneStore): ValidationResult =
+  def validate(
+      m: ConfigManifest,
+      store: ControlPlaneStore,
+      tenantFilesRoot: Option[String] = None
+  ): ValidationResult =
     val errs = scala.collection.mutable.ListBuffer.empty[String]
 
     if m.apiVersion != ConfigManifest.ApiVersion then
@@ -76,6 +80,16 @@ object ManifestImporter extends LazyLogging:
       }
     }
 
+    // Sign-in secret: pure checks too, for the same reason. A client secret together with a
+    // clientSecretRef, a redacted clientSecret with no stored value to keep or with an issuerUrl the
+    // stored value was not saved with, and an authConfig carrying a clientSecret key all fail the
+    // import before apply() writes a single row.
+    m.tenants.foreach { t =>
+      val existing = storedTenants.find(x => x.id == t.name || x.displayName == t.name)
+      clientSecretInConfigError(t).foreach(err => errs += err)
+      importClientSecret(t, existing).left.foreach(err => errs += err)
+    }
+
     // Dup detection
     def dup[A, K](xs: List[A], key: A => K, label: String): Unit =
       xs.groupBy(key).collect {
@@ -92,6 +106,9 @@ object ManifestImporter extends LazyLogging:
       dup(t.tenantDbs, _.name, s"tenant-db within ${t.name}")
       dup(t.pools, _.name, s"pool within ${t.name}")
     }
+
+    // Metastore keys, like database/create: before apply() writes a single row.
+    errs ++= metastoreKeyErrors(m)
 
     // Cross-references
     m.users.foreach { u =>
@@ -148,23 +165,26 @@ object ManifestImporter extends LazyLogging:
           "built-ins, and a built-in group carries no roles"
     }
 
+    // The line the node launchers write around a tenant's initSql section (InitSqlTrust).
+    m.tenants.foreach { t =>
+      t.tenantDbs.foreach { d =>
+        ai.starlake.quack.ondemand.initsql.InitSqlTrust
+          .markerRefusal(d.initSql)
+          .foreach(msg => errs += s"tenant '${t.name}' tenant-db '${d.name}': $msg")
+      }
+      t.pools.foreach { p =>
+        ai.starlake.quack.ondemand.initsql.InitSqlTrust
+          .markerRefusal(p.initSql)
+          .foreach(msg => errs += s"tenant '${t.name}' pool '${p.name}': $msg")
+      }
+    }
+
     // Pools reference their tenant-db by name (sibling check, no DB lookup needed)
     m.tenants.foreach { t =>
       val dbNames = t.tenantDbs.map(_.name).toSet
       t.pools.foreach { p =>
         if !dbNames.contains(p.tenantDb) then
           errs += s"tenant '${t.name}' pool '${p.name}': tenantDb '${p.tenantDb}' not declared under tenant"
-        // Reject an invalid lockdown tri-state the same way other enum-ish
-        // manifest fields are rejected: accumulate a validation error rather
-        // than throwing at apply time.
-        LockdownTriState.parse(p.lockdown).left.foreach { msg =>
-          errs += s"tenant '${t.name}' pool '${p.name}': $msg"
-        }
-        // The pool's boot SQL, refused here because apply writes pool rows straight to the store
-        // (a tenant-db's initSql goes through TenantDb.validateSafety at apply).
-        InitSqlScreen.error("initSql", p.initSql).foreach { msg =>
-          errs += s"tenant '${t.name}' pool '${p.name}': $msg"
-        }
         // Reject a malformed demand scale-out band (one-sided, inverted,
         // below the write-capable floor, over the hard cap, or outside the
         // declared size) the same way -- accumulate rather than throw. The
@@ -193,7 +213,38 @@ object ManifestImporter extends LazyLogging:
       }
     }
 
+    // Authorized locations: the add rules, before apply() writes a single row.
+    m.tenants.foreach { t =>
+      t.locations.foreach { ls =>
+        val tenantId = storedTenants
+          .find(x => x.id == t.name || x.displayName == t.name)
+          .map(_.id)
+          .getOrElse(t.name.toLowerCase(java.util.Locale.ROOT))
+        val resolved = ls.map(l => resolveLocation(t.name, tenantId, l, tenantFilesRoot))
+        resolved.foreach(_.left.foreach(errs += _))
+        // On the stored spelling: /srv/a and /srv/a/ are one location.
+        dup(
+          resolved.collect { case Right(a) => a.location },
+          identity,
+          s"location within ${t.name}"
+        )
+      }
+    }
+
     if errs.isEmpty then Right(()) else Left(errs.toList)
+
+  /** One error per manifest tenant-db whose metastore holds a key outside
+    * [[TenantDb.KnownMetastoreKeys]], naming the tenant, the tenant-db and every such key, never a
+    * value: the refusal `database/create` and `database/update` apply to a metastore, which feeds
+    * every node's launcher. [[validate]] refuses them; `ManifestHandlers` answers them
+    * `400 invalid_metastore_key`.
+    */
+  def metastoreKeyErrors(m: ConfigManifest): List[String] =
+    for
+      t   <- m.tenants
+      db  <- t.tenantDbs
+      err <- TenantDb.metastoreKeyError(db.metastore).toList
+    yield s"tenant '${t.name}' tenant-db '${db.name}': $err"
 
   /** A manifest role that names a built-in AND carries exactly its built-in content:
     * `qod_no_tables` holds nothing, `qod_all_tables` holds the single `* * * ALL` permission, and
@@ -243,9 +294,10 @@ object ManifestImporter extends LazyLogging:
       m: ConfigManifest,
       store: ControlPlaneStore,
       federatedStore: Option[FederatedSourceStore] = None,
-      requireEncryption: Boolean
+      requireEncryption: Boolean,
+      tenantFilesRoot: Option[String] = None
   ): ValidationResult =
-    validate(m, store).flatMap { _ =>
+    validate(m, store, tenantFilesRoot).flatMap { _ =>
       val errs = scala.collection.mutable.ListBuffer.empty[String]
 
       // 0. Snapshot the existing graph ONCE so the per-tenant loops below
@@ -334,12 +386,27 @@ object ManifestImporter extends LazyLogging:
         // resetting it to TenantAcl() defaults. validate() has already rejected every invalid or
         // unreusable acl before this loop runs at all, so the Left branch here is unreachable in
         // practice; existingAcl is the safe fallback rather than failing a second time.
-        val existingAcl: TenantAcl =
-          snap.tenants
-            .find(t => t.id == mt.name || t.displayName == mt.name)
-            .map(_.acl)
-            .getOrElse(TenantAcl())
+        val existingTenant: Option[Tenant] =
+          snap.tenants.find(t => t.id == mt.name || t.displayName == mt.name)
+        val existingAcl: TenantAcl = existingTenant.map(_.acl).getOrElse(TenantAcl())
         val resolvedAcl: TenantAcl = importAcl(mt.name, mt.acl, existingAcl).getOrElse(existingAcl)
+        // Same snapshot and same rules as validate(), which refused every unusable clientSecret
+        // before this loop runs. Should one still fail here, the tenant is written without a
+        // secret: a stored secret is never carried to an issuer it was not saved with.
+        val resolvedSecret: Option[String] =
+          importClientSecret(mt, existingTenant).toOption.flatten
+        // The auth config is stored as written, except the key changeset 0048 parked, which
+        // follows the rule of tenant/setAuth (one function, TenantSignInWrite.settleParkedKey):
+        // dropped once the tenant holds a secret source, when the manifest moves issuerUrl, and
+        // when the manifest adds or changes it; kept only by an unchanged round trip of a tenant
+        // that is still parked. A tenant the store does not hold yet has no stored key, so a key
+        // the manifest brings is an added one.
+        val storedAuthConfig: Map[String, String] =
+          TenantSignInWrite.settleParkedKey(
+            existingTenant.map(_.authConfig).getOrElse(Map.empty),
+            mt.authConfig,
+            resolvedSecret
+          )
 
         val tenantId = tenantIdFor(store, mt.name).getOrElse {
           // The tenant id IS the slug name; no opaque surrogate. displayName
@@ -351,8 +418,9 @@ object ManifestImporter extends LazyLogging:
               displayName = if mt.displayName.trim.nonEmpty then mt.displayName.trim else newId,
               disabled = mt.disabled,
               authProvider = mt.authProvider,
-              authConfig = mt.authConfig,
-              acl = resolvedAcl
+              authConfig = storedAuthConfig,
+              acl = resolvedAcl,
+              authClientSecret = resolvedSecret
             ),
             BuiltinRbac.rowsFor(newId)
           )
@@ -363,7 +431,9 @@ object ManifestImporter extends LazyLogging:
 
         // Existing tenant: refresh top-level fields. upsertTenant never touches an existing
         // row's acl, so a manifest that carries one writes it explicitly (column-scoped); an
-        // absent acl leaves the stored one as it is.
+        // absent acl leaves the stored one as it is. The client secret, by contrast, is written
+        // together with authConfig in the same statement (see ControlPlaneStore.upsertTenant), so
+        // the secret resolved against this manifest's issuerUrl lands with that issuerUrl.
         if tenantIdFor(store, mt.name).contains(tenantId) then
           store.upsertTenant(
             Tenant(
@@ -371,11 +441,16 @@ object ManifestImporter extends LazyLogging:
               displayName = if mt.displayName.trim.nonEmpty then mt.displayName.trim else mt.name,
               disabled = mt.disabled,
               authProvider = mt.authProvider,
-              authConfig = mt.authConfig,
-              acl = resolvedAcl
+              authConfig = storedAuthConfig,
+              acl = resolvedAcl,
+              authClientSecret = resolvedSecret
             )
           )
           if mt.acl.isDefined then store.updateTenantAcl(tenantId, resolvedAcl)
+
+        mt.locations.foreach(ls =>
+          applyLocations(store, mt.name, tenantId, ls, tenantFilesRoot, errs)
+        )
 
         // ---- TenantDbs: delete-then-upsert.
         val keepDbNames = mt.tenantDbs.map(_.name).toSet
@@ -479,6 +554,13 @@ object ManifestImporter extends LazyLogging:
                   defaultDatabase = mtd.defaultDatabase,
                   defaultSchema = mtd.defaultSchema,
                   initSql = mtd.initSql,
+                  // Only a superuser imports a manifest (and the boot hook, as the manager); an
+                  // exported row says who wrote its SQL, so an export and import trusts nothing.
+                  initSqlTrusted = InitSqlTrust.onImport(
+                    mtd.initSql,
+                    mtd.initSqlTrusted,
+                    existing.map(e => (e.initSql, e.initSqlTrusted))
+                  ),
                   encrypted = mtd.encrypted
                 )
                 // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
@@ -556,12 +638,15 @@ object ManifestImporter extends LazyLogging:
               suspended = mp.suspended,
               cohorts = cohorts,
               initSql = mp.initSql,
+              // See the tenant-db's: the manifest's flag, else trusted unless unchanged.
+              initSqlTrusted = InitSqlTrust.onImport(
+                mp.initSql,
+                mp.initSqlTrusted,
+                existing.map(e => (e.initSql, e.initSqlTrusted))
+              ),
               cpu = mp.cpu,
               memory = mp.memory,
               podTemplateYaml = mp.podTemplateYaml,
-              // validate() already rejected any non-tri-state value, so this
-              // parse cannot fail here; None (inherit) on the impossible miss.
-              lockdown = LockdownTriState.parse(mp.lockdown).getOrElse(None),
               minNodes = mp.minNodes,
               maxNodes = mp.maxNodes
             )
@@ -793,6 +878,61 @@ object ManifestImporter extends LazyLogging:
   private def tenantIdFor(store: ControlPlaneStore, name: String): Option[String] =
     store.listTenants().find(t => t.id == name || t.displayName == name).map(_.id)
 
+  /** A manifest location as it would be stored: the add rules (TenantLocationRules). */
+  private def resolveLocation(
+      tenantName: String,
+      tenantId: String,
+      ml: ManifestTenantLocation,
+      filesRoot: Option[String]
+  ): Either[String, ai.starlake.quack.model.TenantLocationRules.Accepted] =
+    ai.starlake.quack.model.TenantLocationRules
+      .validate(tenantId, ml.location, filesRoot)
+      .left
+      .map((code, msg) => s"tenant '$tenantName' location '${ml.location.trim}': $code: $msg")
+
+  /** Make `tenantId`'s stored locations equal `incoming` (validated by validate()): a stored
+    * location the manifest no longer lists is deleted, a listed one not stored is inserted under a
+    * fresh id, an unchanged one keeps its id. Nothing reaches running nodes: a local folder needs
+    * no node secret.
+    */
+  private def applyLocations(
+      store: ControlPlaneStore,
+      tenantName: String,
+      tenantId: String,
+      incoming: List[ManifestTenantLocation],
+      filesRoot: Option[String],
+      errs: scala.collection.mutable.ListBuffer[String]
+  ): Unit =
+    val wanted = incoming.flatMap { ml =>
+      resolveLocation(tenantName, tenantId, ml, filesRoot) match
+        case Left(err) =>
+          errs += err
+          None
+        case Right(accepted) => Some(accepted.location -> accepted)
+    }.toMap
+    val (kept, dropped) =
+      store.listTenantLocations(tenantId).partition(s => wanted.contains(s.location))
+    dropped.foreach(s => store.deleteTenantLocation(tenantId, s.id))
+    val keptLocations = kept.map(_.location).toSet
+    wanted.values.toList
+      .filterNot(a => keptLocations.contains(a.location))
+      .sortBy(_.location)
+      .foldLeft(kept.map(_.id)) { (taken, a) =>
+        val id = ai.starlake.quack.model.TenantLocationRules.newId(taken)
+        store.insertTenantLocation(
+          ai.starlake.quack.model.TenantLocation(
+            id,
+            tenantId,
+            a.kind,
+            a.location,
+            System.currentTimeMillis(),
+            Some("manifest")
+          )
+        )
+        id :: taken
+      }
+    ()
+
   /** Resolve a manifest tenant's `acl` block against the tenant's existing stored acl. Pure (no
     * store access), so it can run unchanged from both `validate()` (before any write) and `apply()`
     * (to compute the row to persist).
@@ -861,6 +1001,86 @@ object ManifestImporter extends LazyLogging:
             Left(s"tenant '$tenantName': invalid opaPolicyPath '${acl.opaPolicyPath.get}'")
           else Right(acl)
         }
+
+  /** The command that stores a tenant's own client secret after an import left it out. `set-auth`
+    * replaces the tenant's whole auth config map, so the advice says every other key is repeated.
+    * Placeholders stand for the tenant and its provider: the manifest's own values are untrusted
+    * text, and this is a command line to paste.
+    */
+  private val SetSecretCommand: String =
+    "qod tenant set-auth <tenant> --auth-provider <provider> --auth-config ... " +
+      "--client-secret-prompt (the save replaces the whole auth config map, so repeat every " +
+      "other key of the tenant's authConfig, such as issuerUrl and clientId, with one " +
+      "--auth-config key=value each)"
+
+  /** Resolve a manifest tenant's `clientSecret` against the tenant's stored row (`existing`, None
+    * for a tenant the store does not hold yet). Pure (no store access), so it runs unchanged from
+    * `validate()` (before any write) and `apply()` (to compute the row to persist).
+    *
+    * One secret source per tenant, as on `tenant/setAuth` (`secret_conflict`): a client secret (a
+    * value or the marker) together with a `clientSecretRef` in `authConfig` is refused. What counts
+    * as a reference is `TenantSignInWrite.refOf`'s answer: trimmed, a blank one is none. Otherwise,
+    * since the exporter writes a stored secret as `FederatedSecret.RedactedMarker`, the import
+    * follows the `opaToken` rules of `importAcl`:
+    *   - the marker + a stored value + the same issuer -> keep the stored value (the
+    *     re-import-without-editing case). Issuers compare through `TenantSignInWrite.issuerOf`, the
+    *     comparison `tenant/setAuth` makes.
+    *   - the marker + a stored value + a changed issuer -> refused: a stored secret is only ever
+    *     sent to the issuer it was saved with, so it never follows an issuer change.
+    *   - the marker + no stored value -> refused: there is nothing to restore.
+    *   - `""` -> no secret, as `""` clears it on `tenant/setAuth`; a whitespace-only value ->
+    *     refused, as `tenant/setAuth` refuses it.
+    *   - any other value -> stored as given; an absent field -> no secret.
+    *
+    * A `clientSecretRef` alone imports as written, whatever the issuer: manifest import is
+    * superuser-only, and on `tenant/setAuth` only a superuser may set a reference too. No message
+    * echoes a value.
+    */
+  private def importClientSecret(
+      mt: ManifestTenant,
+      existing: Option[Tenant]
+  ): Either[String, Option[String]] =
+    val carriesSecret = mt.clientSecret.exists(_.trim.nonEmpty)
+    if carriesSecret && TenantSignInWrite.refOf(mt.authConfig).isDefined then
+      Left(
+        s"tenant '${mt.name}': a tenant holds a client secret or a clientSecretRef, not both; " +
+          "drop clientSecret or authConfig.clientSecretRef"
+      )
+    else
+      (mt.clientSecret, existing) match
+        case (Some(FederatedSecret.RedactedMarker), Some(t)) if t.authClientSecret.isDefined =>
+          val sameIssuer =
+            TenantSignInWrite.issuerOf(t.authConfig) == TenantSignInWrite.issuerOf(mt.authConfig)
+          if sameIssuer then Right(t.authClientSecret)
+          else
+            Left(
+              s"tenant '${mt.name}': clientSecret is redacted in the manifest but issuerUrl " +
+                "changed; the stored secret is not carried to a new issuer: provide the secret " +
+                "for the new issuerUrl, or omit clientSecret"
+            )
+        case (Some(FederatedSecret.RedactedMarker), _) =>
+          Left(
+            s"tenant '${mt.name}': clientSecret is redacted in the manifest and no existing " +
+              "secret to reuse; provide the value, or import without clientSecret and set the " +
+              s"secret afterwards with: $SetSecretCommand"
+          )
+        case (Some(v), _) if v.isEmpty      => Right(None)
+        case (Some(v), _) if v.trim.isEmpty =>
+          Left(
+            s"tenant '${mt.name}': clientSecret is blank; provide the value, or omit clientSecret"
+          )
+        case (other, _) => Right(other)
+
+  /** `authConfig` may not carry a `clientSecret` key, the rule `tenant/setAuth` applies: a secret
+    * value only ever arrives through the write-only `clientSecret` field, while `authConfig` is
+    * returned by every tenant response and exported in the clear. The message never echoes the
+    * value.
+    */
+  private def clientSecretInConfigError(mt: ManifestTenant): Option[String] =
+    Option.when(mt.authConfig.contains(TenantSignInWrite.SecretKey))(
+      s"tenant '${mt.name}': authConfig may not carry a ${TenantSignInWrite.SecretKey} key; " +
+        s"move the value to the tenant's ${TenantSignInWrite.SecretKey} field"
+    )
 
   /** Apply federated sources from a manifest tenant-db into the federated source store.
     * Replace-by-alias semantics, but only when the manifest declares at least one source: a
@@ -1011,7 +1231,13 @@ object ManifestImporter extends LazyLogging:
             // the loss of the edge screen.
             sourceType = FederatedSourceType.fromWireOrSql(msrc.sourceType),
             config = msrc.config,
-            readOnly = msrc.readOnly
+            readOnly = msrc.readOnly,
+            // Who wrote the setupSql, by the same rule as a tenant-db's initSql.
+            setupSqlTrusted = InitSqlTrust.onImport(
+              msrc.setupSql,
+              msrc.setupSqlTrusted,
+              sourceByAlias.get(fold(alias)).map(e => (e.setupSql, e.setupSqlTrusted))
+            )
           )
 
           val reserved =

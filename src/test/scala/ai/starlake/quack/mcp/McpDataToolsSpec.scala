@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
   RunningNode,
   TenantDbKind
 }
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
@@ -26,6 +27,7 @@ import ai.starlake.quack.ondemand.api.{
   IcebergCatalogHandlers,
   ProfileHandlers,
   RestCaller,
+  SessionTokenStore,
   TagHandlers,
   TenantDbHandlers
 }
@@ -124,7 +126,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
 
   private def fixture(
       executor: CatalogPreviewHandlers.PreviewExecutor,
-      cfg: McpConfig = McpConfig()
+      cfg: McpConfig = McpConfig(),
+      sessionOf: String => Option[SessionTokenStore.Session] = _ => None,
+      stmtHistory: StatementHistoryStore = new StatementHistoryStore()
   ): McpDataTools =
     val store   = new InMemoryControlPlaneStore()
     val backend = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
@@ -139,10 +143,11 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
 
-    val scopeOf: String => Option[SessionScope] =
+    val scopeOf: SessionScope.Resolver =
       t =>
-        if t == patToken then Some(SessionScope(superuser = false, manageableTenants = Set(Tenant)))
-        else None
+        if t.contains(patToken) then
+          SessionScope(superuser = false, manageableTenants = Set(Tenant))
+        else McpSuperuserPat.scopeOf(t)
 
     val catalog = new CatalogHandlers((_, _) => stubReader, sup, store)
     val history = new CatalogHistoryHandlers((_, _) => stubReader, sup)
@@ -155,10 +160,12 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
     val profile = new ProfileHandlers(
-      _ => None,
+      sessionOf,
       NoopTelemetryStore,
-      new StatementHistoryStore(),
-      _ => None
+      stmtHistory,
+      _ => None,
+      sup,
+      RestCaller()
     )
     new McpDataTools(cfg, executor, sup, catalog, history, tags, tenantDbs, profile, scopeOf)
 
@@ -327,17 +334,17 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       sourcesOf = id => sources.getOrElse(id, Nil),
       meta = icebergMeta(metaSqls),
       executor = previewExec,
-      callerOf = RestCaller.staticOnly,
+      callerOf = RestCaller(),
       cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
     )
 
-    // Fail-closed like Main's mcpScopeOf: only the static key (none here) is "unrestricted";
-    // every other token resolves to its own scope, or to NoAccess when unknown.
-    val scopeOf: String => Option[SessionScope] = SessionScope.failClosed(
-      None,
+    // Total like Main's resolver: every token resolves to its own scope, or to NoAccess when
+    // unknown or absent.
+    val scopeOf: SessionScope.Resolver = SessionScope.resolver(
       Map(
-        patToken       -> SessionScope(superuser = false, manageableTenants = Set(Tenant)),
-        NonAdminPatTok -> SessionScope.NoAccess
+        patToken              -> SessionScope(superuser = false, manageableTenants = Set(Tenant)),
+        NonAdminPatTok        -> SessionScope.NoAccess,
+        McpSuperuserPat.Token -> SessionScope.Superuser
       ).get
     )
     val catalog = new CatalogHandlers((_, _) => stubReader, sup, store)
@@ -354,7 +361,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       _ => None,
       NoopTelemetryStore,
       new StatementHistoryStore(),
-      _ => None
+      _ => None,
+      sup,
+      RestCaller()
     )
     new McpDataTools(
       McpConfig(),
@@ -391,7 +400,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("SELECT * FROM t"),
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant)
@@ -408,7 +417,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("SELECT * FROM t"),
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant),
@@ -427,7 +436,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("DELETE FROM region"),
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant)
@@ -443,7 +452,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("SELECT 1"),
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant)
@@ -459,7 +468,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("SELECT 1"),
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant)
@@ -475,7 +484,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("SELECT 1"),
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant)
@@ -514,19 +523,96 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     captured.map(_.patId).toList shouldBe List(Some("pat-1"))
   }
 
-  it should "leave ExecCaller.patId at None for the static key" in {
-    val captured =
-      scala.collection.mutable.ListBuffer.empty[ai.starlake.quack.ondemand.api.ExecCaller]
-    val tools = fixture(capturingExecutor(captured))
-    call(
-      tools,
-      "run_sql",
-      McpPrincipal.StaticKey,
-      "sql"      -> Json.fromString("SELECT 1"),
-      "database" -> Json.fromString(TenantDb),
-      "tenant"   -> Json.fromString(Tenant)
+  "my_usage" should "return the usage and statements of a PAT principal's owner" in {
+    val session = SessionTokenStore.Session(
+      AuthenticatedProfile(
+        McpSuperuserPat.Owner.username,
+        "admin",
+        Set.empty,
+        Map.empty,
+        "pat",
+        None
+      ),
+      SessionScope.Superuser,
+      java.time.Instant.now()
     )
-    captured.map(_.patId).toList shouldBe List(None)
+    val tools = fixture(
+      rangeExecutor(1),
+      sessionOf = t => Option.when(t == McpSuperuserPat.Token)(session)
+    )
+    val out = call(tools, "my_usage", McpSuperuserPat.principal)
+    withClue(out)(out.isRight shouldBe true)
+    val keys = out.toOption.get.hcursor.keys.map(_.toSet)
+    keys shouldBe Some(Set("usage", "statements"))
+  }
+
+  it should "scope a tenant user's PAT to that user's own statements in its own tenant" in {
+    // What PatAuthenticator.sessionOf builds for a tenant user's PAT: the owner, its tenant, no
+    // admin scope.
+    val session = SessionTokenStore.Session(
+      AuthenticatedProfile("alice", "user", Set.empty, Map.empty, "pat", Some(Tenant)),
+      SessionScope(superuser = false, manageableTenants = Set.empty),
+      java.time.Instant.now()
+    )
+    val history = new StatementHistoryStore()
+    List(("alice", Tenant), ("bob", Tenant), ("alice", "globex")).foreach { (user, tenant) =>
+      history.record(
+        ai.starlake.quack.edge.StatementRecord(
+          ts = java.time.Instant.now(),
+          user = user,
+          tenant = tenant,
+          pool = "sales",
+          nodeId = "n1",
+          sql = s"SELECT '$user@$tenant'",
+          durationMs = 1L,
+          status = "ok",
+          error = None
+        )
+      )
+    }
+    val tools = fixture(
+      rangeExecutor(1),
+      sessionOf = t => Option.when(t == patToken)(session),
+      stmtHistory = history
+    )
+    val out = call(tools, "my_usage", patFor(Some(Tenant), admin = false))
+    withClue(out)(out.isRight shouldBe true)
+    val statements = out.toOption.get.hcursor.downField("statements").downField("statements")
+    val seen       = statements.values.toList.flatten.map { s =>
+      (s.hcursor.get[String]("user").toOption, s.hcursor.get[String]("tenant").toOption)
+    }
+    // bob's statement in the same tenant and alice's namesake in another tenant stay out.
+    seen shouldBe List((Some("alice"), Some(Tenant)))
+  }
+
+  it should "carry the PAT owner's realm as superuserAdmissible: true only for a tenant-less owner" in {
+    val captured = ListBuffer.empty[ExecCaller]
+    val tools    = fixture(capturingExecutor(captured))
+    List(
+      patFor(Some(Tenant), admin = false),
+      patFor(Some(Tenant), admin = true),
+      patFor(None, admin = true),
+      // A tenant-less owner whose token carries no superuser scope: the realm is the row's.
+      patFor(None, admin = false),
+      // The superuser PAT: its owner (a superuser row), not the system caller.
+      McpSuperuserPat.principal
+    ).foreach { principal =>
+      call(
+        tools,
+        "run_sql",
+        principal,
+        "sql"      -> Json.fromString("SELECT 1"),
+        "database" -> Json.fromString(TenantDb),
+        "tenant"   -> Json.fromString(Tenant)
+      )
+    }
+    captured.toList.map(c => (c.identity, c.superuserAdmissible, c.system)) shouldBe List(
+      ("alice", false, false),
+      ("alice", false, false),
+      ("alice", true, false),
+      ("alice", true, false),
+      (McpSuperuserPat.Owner.username, true, false)
+    )
   }
 
   // ------------------------------------------------------------------
@@ -735,12 +821,12 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get should include(Tenant)
   }
 
-  it should "require an explicit tenant for the static key, naming the argument" in {
+  it should "require an explicit tenant for a superuser PAT, naming the argument" in {
     val tools = fixture(rangeExecutor(1))
     val out   = call(
       tools,
       "run_sql",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "sql"      -> Json.fromString("SELECT 1"),
       "database" -> Json.fromString(TenantDb)
     )
@@ -756,7 +842,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "describe_table",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString("tpch1"),
       "table"    -> Json.fromString("region"),
@@ -779,7 +865,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "table_history",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString(IcebergSchema),
       "table"    -> Json.fromString(IcebergTable),
@@ -800,7 +886,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "table_history",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString("tpch1"),
       "table"    -> Json.fromString("region"),
@@ -823,7 +909,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "describe_table",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString(IcebergSchema),
       "table"    -> Json.fromString(IcebergTable),
@@ -855,7 +941,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
   private def describeIcebergIO(tools: McpDataTools, principal: McpPrincipal) =
     // Only a superuser credential names the tenant; a PAT infers it.
     val tenantArg =
-      if principal == McpPrincipal.StaticKey then List("tenant" -> Json.fromString(Tenant))
+      if principal == McpSuperuserPat.principal then List("tenant" -> Json.fromString(Tenant))
       else Nil
     val args = List(
       "database" -> Json.fromString(TenantDb),
@@ -896,7 +982,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       (_, _, _) => IO.pure(Left(RouterFailure.AccessDenied("no grant on ice.probe.t")))
     val boom: CatalogPreviewHandlers.PreviewExecutor =
       (_, _, _) => IO.raiseError(new java.util.concurrent.TimeoutException("slow node"))
-    for exec <- List(denied, boom); principal <- List(McpPrincipal.StaticKey, icebergPat) do
+    for exec <- List(denied, boom); principal <- List(McpSuperuserPat.principal, icebergPat) do
       val out  = describeIceberg(icebergFixture(exec), principal)
       val json = out.toOption.getOrElse(fail(s"expected Right, got $out"))
       json.hcursor.downField("table").downField("alias").as[String].toOption shouldBe
@@ -953,7 +1039,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val out   = call(
       tools,
       "describe_table",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString(IcebergSchema),
       "table"    -> Json.fromString(IcebergTable),
@@ -961,14 +1047,4 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       "iceberg"  -> Json.fromString(IcebergAlias)
     )
     out shouldBe Left("iceberg catalogs are not available on this manager")
-  }
-
-  // ------------------------------------------------------------------
-  // my_usage
-  // ------------------------------------------------------------------
-
-  "my_usage" should "refuse the static key (no identity to scope by)" in {
-    val tools = fixture(rangeExecutor(1))
-    val out   = call(tools, "my_usage", McpPrincipal.StaticKey)
-    out.swap.toOption.get should include("PAT")
   }

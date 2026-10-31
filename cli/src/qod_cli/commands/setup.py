@@ -19,12 +19,12 @@ import sys
 import typer
 
 from .. import admin_password as admin_pw
-from ..config import config_path, load_start_env, save_start_env
+from ..config import REMOVED_API_KEY, config_path, load_start_env, save_start_env
 from ..output import render
 
 # (env var, CLI flag label, prompt text, default) - the knobs `qod start`
 # actually reads today (_pg_coords in commands/start.py, plus the
-# QOD_ADMIN_USERNAME/QOD_API_KEY/QOD_AUTH_DB_ENABLED/PROXY_TLS_ENABLED vars that
+# QOD_ADMIN_USERNAME/QOD_AUTH_DB_ENABLED/PROXY_TLS_ENABLED vars that
 # application.conf honors - see CLAUDE.md "Every scalar ... accepts a QOD_*
 # env-var override"). --set covers anything not on this short list.
 _PROMPTS: tuple[tuple[str, str, str], ...] = (
@@ -34,11 +34,12 @@ _PROMPTS: tuple[tuple[str, str, str], ...] = (
     ("QOD_PG_PASSWORD", "Postgres password", "azizam"),
     ("QOD_PG_DBNAME", "Control-plane database", "qod"),
     ("QOD_ADMIN_USERNAME", "Admin username", "admin@localhost.local,admin"),
-    ("QOD_API_KEY", "Static REST API key (blank = none)", ""),
-    ("QOD_AUTH_DB_ENABLED", "Enable DB-backed auth (true/false)", "true"),
+    ("QOD_AUTH_DB_ENABLED", "Enable DB-backed auth (true/false; false needs another "
+     "authenticator)", "true"),
     ("PROXY_TLS_ENABLED", "Enable FlightSQL edge TLS (true/false)", "true"),
 )
-_SECRET_KEYS = {"QOD_PG_PASSWORD", admin_pw.KEY, "QOD_API_KEY", "QOD_SESSION_JWT_SECRET"}
+# REMOVED_API_KEY stays masked: an earlier CLI may have stored one in [start].
+_SECRET_KEYS = {"QOD_PG_PASSWORD", admin_pw.KEY, REMOVED_API_KEY, "QOD_SESSION_JWT_SECRET"}
 
 
 def _redact(key: str, value: str) -> str:
@@ -97,6 +98,18 @@ def _check_connection(merged: dict[str, str]) -> tuple[bool, str]:
     return True, f"connection check ok ({host}:{port})"
 
 
+# Saved with QOD_AUTH_DB_ENABLED=false: the manager boots only when something else can
+# authenticate FlightSQL clients and create a session (BootPreflight).
+_NO_DB_AUTH_NOTE = (
+    "note: QOD_AUTH_DB_ENABLED=false: the manager refuses to boot unless another "
+    "authenticator is configured: a Keycloak or Azure password backend "
+    "(QOD_AUTH_KEYCLOAK_ENABLED / QOD_AUTH_AZURE_ENABLED), or a bearer provider "
+    "(JWT_SECRET_KEY / JWT_PUBLIC_KEY_PATH, QOD_AUTH_GOOGLE_ENABLED, QOD_AUTH_AWS_ENABLED) "
+    "together with system-scope OIDC sign-in (QOD_MGMT_IDENTITY_SOURCE=oidc with "
+    "QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID)."
+)
+
+
 def _is_interactive() -> bool:
     """Split out from the call site so tests can force the prompt branch
     without fighting CliRunner's stdin substitution (sys.stdin is rebound to
@@ -119,11 +132,11 @@ def setup(
     admin_username: str = typer.Option(
         None, "--admin-username", help="Seeded admin username (QOD_ADMIN_USERNAME)."
     ),
-    api_key: str = typer.Option(
-        None, "--api-key", help="Static REST API key; blank disables it (QOD_API_KEY)."
-    ),
     auth: bool = typer.Option(
-        None, "--auth/--no-auth", help="DB-backed auth (QOD_AUTH_DB_ENABLED)."
+        None, "--auth/--no-auth",
+        help="DB-backed auth (QOD_AUTH_DB_ENABLED). --no-auth needs another authenticator "
+        "(a Keycloak or Azure password backend, or a bearer provider with system-scope "
+        "OIDC sign-in), or the manager refuses to boot.",
     ),
     tls: bool = typer.Option(
         None, "--tls/--no-tls", help="FlightSQL edge TLS (PROXY_TLS_ENABLED)."
@@ -150,8 +163,8 @@ def setup(
     """Configure `qod start` once so you can run it bare afterwards.
 
     With no flags on a terminal, prompts for Postgres coordinates, the admin
-    username, the static API key, and the auth/TLS toggles (current
-    stored value, else the built-in default, as the prompt default - blank
+    username, and the auth/TLS toggles (current stored value, else the
+    built-in default, as the prompt default - blank
     input keeps it). Any flag, or --set/--unset, skips the prompts and
     applies just what you passed - pair with --non-interactive for scripted/
     CI setup. `qod start` picks this up automatically; nothing here is
@@ -178,7 +191,6 @@ def setup(
         "QOD_PG_PASSWORD": pg_password,
         "QOD_PG_DBNAME": pg_dbname,
         "QOD_ADMIN_USERNAME": admin_username,
-        "QOD_API_KEY": api_key,
         "QOD_AUTH_DB_ENABLED": None if auth is None else str(auth).lower(),
         "PROXY_TLS_ENABLED": None if tls is None else str(tls).lower(),
     }
@@ -207,6 +219,15 @@ def setup(
             f"error: {admin_pw.KEY} is no longer stored. The admin password is set at the "
             "first qod start / qod serve; change it with qod auth change-password, or "
             "recover it with qod admin reset-password.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if REMOVED_API_KEY in set_values:
+        typer.echo(
+            f"error: {REMOVED_API_KEY} was removed: there is no static API key any more, and "
+            "qod start / qod serve refuse to launch with one. Use qod login, or a personal "
+            "access token (qod auth pat create) in QOD_TOKEN.",
             err=True,
         )
         raise typer.Exit(1)
@@ -277,3 +298,5 @@ def setup(
     if not ctx.obj.json_output:
         typer.echo(f"saved to {config_path()}")
         typer.echo("run: qod start")
+    if values.get("QOD_AUTH_DB_ENABLED", "").strip().lower() == "false":
+        typer.echo(_NO_DB_AUTH_NOTE, err=True)

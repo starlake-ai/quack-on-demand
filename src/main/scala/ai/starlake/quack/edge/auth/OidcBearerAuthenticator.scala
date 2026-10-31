@@ -67,37 +67,63 @@ class OidcBearerAuthenticator(
       val exp = Option(claims.getExpirationTime)
       if exp.exists(_.before(new Date())) then return Left(s"$providerName: token has expired")
 
-      val username = extractUsername(claims)
-      val role     = RoleExtractor.extract(claims, roleClaim)
-      var groups   = RoleExtractor.extractGroups(claims, "groups")
+      // A token naming no one is refused rather than named "unknown", which a row could hold.
+      extractUsername(claims) match
+        case None =>
+          Left(s"$providerName: the token names no user (no preferred_username, email or sub)")
+        case Some(username) =>
+          val role   = RoleExtractor.extract(claims, roleClaim)
+          var groups = RoleExtractor.extractGroups(claims, "groups")
 
-      // Enrich groups from external lookup (e.g., Google Directory API)
-      groupsLookup.foreach { lookup =>
-        val email          = Option(claims.getStringClaim("email")).getOrElse(username)
-        val externalGroups = lookup(email)
-        if externalGroups.nonEmpty then
-          logger.debug(s"Enriched groups for $email from $providerName directory: $externalGroups")
-          groups = groups ++ externalGroups
-      }
+          // Enrich groups from external lookup (e.g., Google Directory API)
+          groupsLookup.foreach { lookup =>
+            val email          = Option(claims.getStringClaim("email")).getOrElse(username)
+            val externalGroups = lookup(email)
+            if externalGroups.nonEmpty then
+              logger.debug(
+                s"Enriched groups for $email from $providerName directory: $externalGroups"
+              )
+              groups = groups ++ externalGroups
+          }
 
-      Right(
-        AuthenticatedProfile(
-          username = username,
-          role = role,
-          groups = groups + role,
-          claims = flattenClaims(claims),
-          authMethod = providerName
-        )
-      )
+          Right(
+            AuthenticatedProfile(
+              username = username,
+              role = role,
+              groups = groups + role,
+              claims = flattenClaims(claims),
+              authMethod = providerName
+            )
+          )
     catch
       case e: Exception =>
         Left(s"$providerName token validation failed: ${e.getMessage}")
 
-  private def extractUsername(claims: JWTClaimsSet): String =
+  private def extractUsername(claims: JWTClaimsSet): Option[String] =
     Option(claims.getStringClaim("preferred_username"))
       .orElse(Option(claims.getStringClaim("email")))
       .orElse(Option(claims.getSubject))
-      .getOrElse("unknown")
+
+  private val closes = new java.util.concurrent.atomic.AtomicInteger(0)
+
+  /** Releases the JWK source (its refresh-ahead cache owns an executor). Idempotent: only the first
+    * call closes it. The [[TenantOidcRegistry]] closes a per-tenant authenticator once a newer one
+    * replaced it or its tenant lost its override.
+    */
+  override def close(): Unit =
+    if closes.getAndIncrement() == 0 then
+      jwkSource match
+        case c: java.io.Closeable =>
+          try c.close()
+          catch
+            case e: Exception => logger.debug(s"$providerName: JWK source close: ${e.getMessage}")
+        case _ => ()
+
+  /** True once [[close]] ran. */
+  def isClosed: Boolean = closes.get() > 0
+
+  /** Visible for tests: how many times [[close]] was called (the registry must call it once). */
+  private[auth] def closeCount: Int = closes.get()
 
   private def flattenClaims(claims: JWTClaimsSet): Map[String, String] =
     import scala.jdk.CollectionConverters.*

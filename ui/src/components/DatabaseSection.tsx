@@ -9,6 +9,7 @@ import DataPathEditor, {
   type StoreType,
 } from './DataPathEditor';
 import FederationSection from './FederationSection';
+import { initSqlToSend } from '../api/initSql';
 
 /** Databases page for one tenant (`/t/:tenant/databases`). Lists tenant databases,
   * lets you add a new one (name + dataPath + structured metastore +
@@ -18,6 +19,8 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
 
   const [dbs, setDbs]         = useState<TenantDbResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
+  // A write's initSqlWarning (this manager could not check a tenant admin's init SQL).
+  const [notice, setNotice]   = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
   // null = show the list; otherwise the name of the database being
   // browsed inline via <CatalogBrowser>. Clicking "Back" returns to
@@ -60,6 +63,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [editDefaultDb, setEditDefaultDb]     = useState('');
   const [editDefaultSchema, setEditDefaultSchema] = useState('');
   const [editInitSql, setEditInitSql]         = useState('');
+  // Sent only once touched, and as typed: resending an untouched (or merely re-trimmed) text would
+  // vouch for it as the writer (a superuser) or demote it (a tenant admin).
+  const [editInitSqlDirty, setEditInitSqlDirty] = useState(false);
   const [editMetastore, setEditMetastore]     = useState('');
   const [editObjectStore, setEditObjectStore] = useState('');
   const [metastoreDirty, setMetastoreDirty]   = useState(false);
@@ -197,7 +203,8 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           reqBody.encryptionKey = encryptionKey.trim();
         }
       }
-      await api.createTenantDb(reqBody);
+      const created = await api.createTenantDb(reqBody);
+      setNotice(created.initSqlWarning ?? null);
       resetForm();
       setAdding(false);
       await reload();
@@ -229,6 +236,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setEditDefaultDb(d.defaultDatabase ?? '');
     setEditDefaultSchema(d.defaultSchema ?? '');
     setEditInitSql(d.initSql ?? '');
+    setEditInitSqlDirty(false);
     setEditMetastore(Object.entries(d.metastore).map(([k, v]) => `${k}=${v}`).join('\n'));
     setEditObjectStore(Object.entries(d.objectStore).map(([k, v]) => `${k}=${v}`).join('\n'));
     setMetastoreDirty(false);
@@ -237,7 +245,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
 
   function nodeAffectingDirty(): boolean {
     if (editingDb == null) return false;
-    return metastoreDirty || objectStoreDirty || editInitSql.trim() !== (editingDb.initSql ?? '');
+    return metastoreDirty || objectStoreDirty || initSqlChanged();
+  }
+
+  function initSqlChanged(): boolean {
+    return editingDb != null &&
+      initSqlToSend(editingDb.initSql, editInitSql, editInitSqlDirty) !== undefined;
   }
 
   async function handleUpdate(e: React.FormEvent) {
@@ -252,10 +265,11 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       const req: UpdateTenantDbRequest = { tenant, name: editingDb.name };
       if (editDefaultDb.trim() !== (editingDb.defaultDatabase ?? '')) req.defaultDatabase = editDefaultDb.trim();
       if (editDefaultSchema.trim() !== (editingDb.defaultSchema ?? '')) req.defaultSchema = editDefaultSchema.trim();
-      if (editInitSql.trim() !== (editingDb.initSql ?? '')) req.initSql = editInitSql.trim();
+      if (initSqlChanged()) req.initSql = editInitSql;
       if (metastoreDirty) req.metastore = parseStoreExtras(editMetastore, new Set());
       if (objectStoreDirty) req.objectStore = parseStoreExtras(editObjectStore, new Set());
       const out = await api.updateTenantDb(req);
+      setNotice(out.db.initSqlWarning ?? null);
       if (out.failedRestarts.length > 0) {
         setError(`${out.failedRestarts.length} node restart(s) failed: ` +
           out.failedRestarts.map(f => `${f.nodeId}: ${f.message}`).join('; '));
@@ -316,6 +330,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
         <code>{` ${tenant}_tpch1`}</code> when this is the seed tenant.
       </p>
       {error && <div className="login-err">Error: {error}</div>}
+      {notice && <div className="subtle" role="status">Init SQL not checked: {notice}</div>}
       {dbs.length === 0 ? (
         <div className="empty">(none)</div>
       ) : (
@@ -358,6 +373,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                          : '#6b21a8',
                   }}>{d.kind ?? 'ducklake'}</span>
                   {d.encrypted && <span className="subtle" style={{ marginLeft: 6 }}>encrypted</span>}
+                {d.initSql && d.initSqlTrusted === false && (
+                  <span className="subtle" style={{ marginLeft: 6 }}
+                    title="Written by a tenant admin: nodes run only its allowlisted statements">
+                    init SQL: allowlisted
+                  </span>
+                )}
                 </td>
                 <td><code>{d.metastore.schemaName || d.defaultSchema || '-'}</code></td>
                 <td>
@@ -416,9 +437,21 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             <label>Init SQL
               <p className="subtle" style={{ marginBottom: 4 }}>
                 Runs at node boot before the quack extension loads and before the pool's own init SQL.
-                Engine defaults only, never credentials: secrets belong in federation sources, not here.
+                Engine defaults only, never credentials: secrets belong in federation sources, not here.{' '}
+                A tenant admin&rsquo;s init SQL runs only <code>SET</code>/<code>RESET</code> of
+                allowlisted settings to a literal, read-only <code>PRAGMA</code>s and{' '}
+                <code>INSTALL</code>/<code>LOAD</code> of allowlisted extensions; a superuser&rsquo;s
+                runs as written.
               </p>
-              <textarea value={editInitSql} onChange={ev => setEditInitSql(ev.target.value)} rows={5} />
+              {editingDb.initSql && (
+                <p className="subtle" style={{ marginBottom: 4 }}>
+                  Stored init SQL: {editingDb.initSqlTrusted
+                    ? 'written by a superuser, runs as written.'
+                    : 'written by a tenant admin, runs under the allowlist.'}
+                </p>
+              )}
+              <textarea value={editInitSql} rows={5}
+                onChange={ev => { setEditInitSql(ev.target.value); setEditInitSqlDirty(true); }} />
             </label>
             <label>Metastore (key=value per line)
               <p className="subtle" style={{ marginBottom: 4 }}>
@@ -526,13 +559,15 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <details style={{ marginTop: '0.25rem' }}>
                 <summary style={{ cursor: 'pointer', color: 'var(--text-mute)' }}>Advanced metastore keys</summary>
                 <p className="subtle" style={{ marginBottom: 4 }}>
-                  Extra <code>key=value</code> pairs, one per line. Use for non-standard metastore options.
+                  Extra <code>key=value</code> pairs, one per line, for metastore keys the form does not
+                  set, such as <code>dbName</code> (required for a DuckDB file) or{' '}
+                  <code>catalogAlias</code>. A key a metastore does not hold is refused.
                 </p>
                 <textarea
                   value={extrasText}
                   onChange={ev => setExtrasText(ev.target.value)}
                   rows={6}
-                  placeholder={"# example:\n# applicationName=quack-prod"}
+                  placeholder={"# example:\n# dbName=sales"}
                 />
               </details>
             )}

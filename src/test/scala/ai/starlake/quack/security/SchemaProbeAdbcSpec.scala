@@ -1,6 +1,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.{QuackResponse, TestArrow}
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import org.duckdb.DuckDBConnection
 import org.scalatest.flatspec.AnyFlatSpec
@@ -71,7 +72,12 @@ class SchemaProbeAdbcSpec extends AnyFlatSpec with Matchers:
       val fix = SecurityFixtures.freshStore()
       val h   = FlightEdgeHarness.boot(
         fix.store,
-        wiring = FlightEdgeHarness.RouterWiring(nodeQuery = node, spawnNodes = true)
+        wiring = FlightEdgeHarness.RouterWiring(
+          nodeQuery = node,
+          spawnNodes = true,
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+        )
       )
       try
         val (rc, out, err) = python(

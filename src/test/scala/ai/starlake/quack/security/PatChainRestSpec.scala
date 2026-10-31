@@ -61,14 +61,12 @@ class PatChainRestSpec
     ()
 
   private def withHarness(
-      staticApiKey: Option[String] = None,
       env: Map[String, String] = Map.empty
   )(body: ManagerServerHarness.Harness => Unit): Unit =
     TestPostgres.ensureReachable()
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),

@@ -1,0 +1,1 @@
+INSERT INTO chk VALUES (1)

@@ -39,6 +39,52 @@ object NodeSecretFiles extends LazyLogging:
   /** File holding the bearer token the manager presents to the node. */
   val TokenKey: String = "QOD_NODE_TOKEN"
 
+  /** File holding the node's key (64 lowercase hex digits), derived from the manager's node-key
+    * secret and the node id ([[ai.starlake.quack.edge.authz.NodeKeys]]): every session handle the
+    * node accepts is signed with it. qod-node reads it itself.
+    */
+  val AuthzKey: String = "QOD_NODE_AUTHZ_KEY"
+
+  /** Env var naming the node's id, which qod-node checks every session handle against. Not a
+    * secret.
+    */
+  val NodeIdEnv: String = "QOD_NODE_ID"
+
+  /** Files holding the tenant-db's and the pool's initSql, secrets like the federation SQL (a
+    * tenant's init SQL may carry credentials). The file's name says who wrote it: the spawn scripts
+    * run a `...Trusted` file (a superuser's or the manager's) as written and hand any other to
+    * qod-node in a marked section, under its tenant initSql allowlist. The trust rides the same
+    * object as the SQL on every backend, so no node can pair one value with the other's trust (a
+    * Kubernetes pod projects only the key its spec holds, from a Secret every spawn rewrites).
+    */
+  val TenantDbInitKey: String          = "tenantDbInitSql"
+  val TenantDbInitTrustedKey: String   = "tenantDbInitSqlTrusted"
+  val TenantPoolInitKey: String        = "tenantPoolInitSql"
+  val TenantPoolInitTrustedKey: String = "tenantPoolInitSqlTrusted"
+
+  /** The file of this spawn's init marker nonce (32 lowercase hex digits, fresh per start): the
+    * spawn script writes it into both lines marking a tenant's section, and qod-node, which reads
+    * it with the token, honours only marker lines carrying it. Nothing a tenant writes can know it.
+    */
+  val InitNonceKey: String = "QOD_INIT_NONCE"
+
+  /** A fresh [[InitNonceKey]] value. */
+  def newInitNonce(): String =
+    val bytes = new Array[Byte](16)
+    new java.security.SecureRandom().nextBytes(bytes)
+    bytes.map(b => f"${b & 0xff}%02x").mkString
+
+  /** The tenant initSql files of `spec`, each under the key its trust names, the empty ones left
+    * out.
+    */
+  def tenantInitFiles(spec: ai.starlake.quack.model.NodeSpec): Map[String, String] =
+    Map(
+      (if spec.tenantDbInitTrusted then TenantDbInitTrustedKey else TenantDbInitKey) ->
+        spec.tenantDbInitSql,
+      (if spec.tenantPoolInitTrusted then TenantPoolInitTrustedKey else TenantPoolInitKey) ->
+        spec.tenantPoolInitSql
+    ).filter(_._2.nonEmpty)
+
   /** Object-store credentials the spawn script turns into a global `CREATE SECRET` for a remote
     * `dataPath`. Read from the manager's (or fleet join process's) own environment, never forwarded
     * as env.
@@ -56,8 +102,19 @@ object NodeSecretFiles extends LazyLogging:
     * `scripts/spawn-quack-node.sh` / `.ps1` and `_SECRET_KEYS` in `qod_cli/fleet_join.py`.
     */
   val Keys: Seq[String] =
-    Seq("pgPassword", TenantDb.EncryptionKeyName, "extraSetupSql", "objectStoreSql", TokenKey) ++
-      CloudCredKeys
+    Seq(
+      "pgPassword",
+      TenantDb.EncryptionKeyName,
+      "extraSetupSql",
+      "objectStoreSql",
+      TokenKey,
+      AuthzKey,
+      TenantDbInitKey,
+      TenantDbInitTrustedKey,
+      TenantPoolInitKey,
+      TenantPoolInitTrustedKey,
+      InitNonceKey
+    ) ++ CloudCredKeys
 
   require(
     TenantDb.NodeSecretEnvKeys.subsetOf(Keys.toSet),
@@ -78,34 +135,44 @@ object NodeSecretFiles extends LazyLogging:
     "(?i).*(PASSWORD|PASSWD|PASSFILE|SECRET|TOKEN|PASSPHRASE|CREDENTIAL|PRIVATE|API_?KEY|ACCESS_KEY|CONNECTION_STRING|JWT).*".r
 
   /** True for an inherited manager environment variable that must not reach a node process: the
-    * manager's own credentials (`QOD_API_KEY`, `QOD_SESSION_JWT_SECRET`, `QOD_ADMIN_PASSWORD`,
-    * control-plane and SMTP passwords, a module's payment key...) are readable by any node user
-    * through `getenv()` otherwise. Cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) are kept:
-    * an operator may rely on DuckDB's credential chain reading them.
+    * manager's own credentials (`QOD_SESSION_JWT_SECRET`, `QOD_ADMIN_PASSWORD`, control-plane and
+    * SMTP passwords, a module's payment key...) are readable by any node user through `getenv()`
+    * otherwise. Cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) are kept: an operator may rely
+    * on DuckDB's credential chain reading them.
     */
   def isInheritedSecret(name: String): Boolean =
     !SdkPrefixes.exists(p => name.toUpperCase(java.util.Locale.ROOT).startsWith(p)) &&
       SecretNamePattern.matches(name)
 
-  /** The values to deliver by file, keyed by canonical name. A metastore entry wins over an
-    * inherited cloud credential of the same name; among metastore spellings of one key, the exact
-    * canonical spelling wins.
+  /** The values to deliver by file, keyed by canonical name. The metastore (tenant-admin input)
+    * supplies only its own secrets ([[NodeMetastore.secrets]]: `pgPassword`, `encryptionKey`), the
+    * exact canonical spelling winning among spellings of one key; the cloud credentials, the SQL
+    * (`tenantInit`: [[tenantInitFiles]]), the token, the node key and a fresh [[InitNonceKey]] all
+    * come from the manager.
     */
   def collect(
       metastore: Map[String, String],
       extraSetupSql: String,
       objectStoreSql: String,
+      tenantInit: Map[String, String] = Map.empty,
       token: String,
+      authzKey: String,
       inheritedEnv: Map[String, String]
   ): Map[String, String] =
     val inherited = CloudCredKeys.flatMap(k => inheritedEnv.get(k).filter(_.nonEmpty).map(k -> _))
-    val fromMetastore = metastore.toSeq
+    val fromMetastore = NodeMetastore
+      .secrets(metastore)
+      .toSeq
       .flatMap { case (k, v) => canonical(k).map(c => (c, k == c, v)) }
       .groupBy(_._1)
       .map { case (c, entries) => c -> entries.sortBy(e => !e._2).head._3 }
-    val sql = Seq("extraSetupSql" -> extraSetupSql, "objectStoreSql" -> objectStoreSql)
-      .filter(_._2.nonEmpty)
-    (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token)).filter(_._2.nonEmpty)
+    val sql = (Seq("extraSetupSql" -> extraSetupSql, "objectStoreSql" -> objectStoreSql) ++
+      tenantInit.toSeq.filter { case (k, _) =>
+        Set(TenantDbInitKey, TenantDbInitTrustedKey, TenantPoolInitKey, TenantPoolInitTrustedKey)
+          .contains(k)
+      }).filter(_._2.nonEmpty)
+    (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token) + (AuthzKey -> authzKey) +
+      (InitNonceKey                                      -> newInitNonce())).filter(_._2.nonEmpty)
 
   /** Prefix of every secrets directory a launcher creates under the JVM temp dir. */
   val DirPrefix: String = "qod-node-secrets-"

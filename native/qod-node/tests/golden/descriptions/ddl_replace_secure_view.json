@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"secure_view","name":"sv","schema":"main","via":null},{"access":"drop","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"secure_view","name":"sv","schema":"main","via":null}],"settings":[],"statement":"CREATE_VIEW","v":1}

@@ -105,7 +105,7 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
       authConfig = Map("clientId" -> "x")
     )
 
-  private val noGrants: GrantsLookup = (_, _) => List.empty[UserGrant]
+  private val noGrants: GrantsLookup = (_, _, _) => List.empty[UserGrant]
 
   private def handlers(
       tenants: Map[String, Tenant],
@@ -116,7 +116,8 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
       tokens = new SessionTokenStore,
       identitySource = ManagementIdentitySource.Db,
       grantsForIdentity = noGrants,
-      authModeResolver = new ManagementAuthModeResolver(tenants.get, systemMode)
+      authModeResolver = new ManagementAuthModeResolver(tenants.get, systemMode),
+      patSessionOf = _ => None
     )
 
   private def run(h: AuthHandlers, tenant: Option[String]) =
@@ -134,6 +135,21 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
 
   it should "resolve a fully-configured oidc tenant to oidc" in {
     run(handlers(Map("acme" -> acmeSso), ManagementAuthMode.Db), Some("acme")) shouldBe
+      Right(AuthModeResponse("oidc", ""))
+  }
+
+  it should "trim and lowercase the tenant first: ACME and '  acme ' answer what acme answers" in {
+    // Tenant ids are lowercase slugs, so a typed or followed ?tenant=ACME must reach tenant acme
+    // here too, or the SPA would fall back to the password form of an SSO tenant.
+    val h        = handlers(Map("acme" -> acmeSso), ManagementAuthMode.Db)
+    val expected = run(h, Some("acme"))
+    expected shouldBe Right(AuthModeResponse("oidc", ""))
+    run(h, Some("ACME")) shouldBe expected
+    run(h, Some("  acme ")) shouldBe expected
+  }
+
+  it should "still treat a blank tenant as the system scope" in {
+    run(handlers(Map.empty, ManagementAuthMode.Oidc), Some("   ")) shouldBe
       Right(AuthModeResponse("oidc", ""))
   }
 

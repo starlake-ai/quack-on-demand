@@ -1,10 +1,11 @@
 package ai.starlake.quack.boot
 
-import java.util.Locale
-import ai.starlake.quack.{FleetConfig, ManagerConfig}
-import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
-import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaValidator}
-import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator, TenantRoutingValidator}
+import java.nio.file.Path
+import ai.starlake.quack.{ManagerConfig, RuntimeType}
+import ai.starlake.quack.edge.authz.AuthzDecider
+import ai.starlake.quack.edge.authz.location.LocationRulesSource
+import ai.starlake.quack.edge.config.OpaConfig
+import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
@@ -30,9 +31,31 @@ import com.typesafe.scalalogging.LazyLogging
   */
 object BootFactories extends LazyLogging:
 
-  def quackBackend(mgrCfg: ManagerConfig, fleetStore: => FleetServerStore): QuackBackend =
-    mgrCfg.runtimeType.toLowerCase(Locale.ROOT) match
-      case "local" =>
+  /** True when this manager starts nodes on its own host, which then run qod-node
+    * ([[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]): the local runtime, or fleet mode with
+    * QOD_FLEET_EPHEMERAL=local for its maintenance and branch-merge nodes.
+    */
+  def runsLocalNodes(mgrCfg: ManagerConfig): Boolean =
+    RuntimeType.isLocal(mgrCfg.runtimeType) ||
+      (RuntimeType.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal)
+
+  /** @param nodeBin
+    *   the qod-node local nodes run; Main resolves it whenever [[runsLocalNodes]].
+    * @param nodeKeys
+    *   the manager's node keys: every node the local and Kubernetes backends start gets the key
+    *   derived for its id. The fleet backend does not use them: a fleet node's key is derived per
+    *   heartbeat by `FleetHandlers`, which Main builds with the same keys. The local and Kubernetes
+    *   backends hand every node `mgrCfg.nodeExtensions` (spec decision 17); fleet nodes get it from
+    *   `FleetHandlers`, per heartbeat.
+    */
+  def quackBackend(
+      mgrCfg: ManagerConfig,
+      fleetStore: => FleetServerStore,
+      nodeBin: Option[Path],
+      nodeKeys: ai.starlake.quack.edge.authz.NodeKeys
+  ): QuackBackend =
+    mgrCfg.runtimeType match
+      case rt if RuntimeType.isLocal(rt) =>
         new LocalQuackBackend(
           mgrCfg.minPort,
           mgrCfg.maxPort,
@@ -40,9 +63,13 @@ object BootFactories extends LazyLogging:
             mgrCfg.spawnScript,
             mgrCfg.spawnScriptWindows,
             LocalQuackBackend.managerMarker(mgrCfg.port)
-          )
+          ),
+          nodeBin = nodeBin,
+          nodeKeys = nodeKeys,
+          nodeExtensions = mgrCfg.nodeExtensions,
+          nodeAuthzLimits = mgrCfg.nodeAuthzLimits
         )
-      case "kubernetes" | "k8s" =>
+      case rt if RuntimeType.isKubernetes(rt) =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
         new KubernetesQuackBackend(
           k8s,
@@ -55,9 +82,12 @@ object BootFactories extends LazyLogging:
           serviceAccount = mgrCfg.k8s.serviceAccount,
           serviceType = mgrCfg.k8s.serviceType,
           runAsUser = mgrCfg.k8s.runAsUser,
-          stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec
+          stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec,
+          nodeKeys = nodeKeys,
+          nodeExtensions = mgrCfg.nodeExtensions,
+          nodeAuthzLimits = mgrCfg.nodeAuthzLimits
         )
-      case "fleet" =>
+      case rt if RuntimeType.isFleet(rt) =>
         val proxies =
           val p = mgrCfg.fleet.trustedProxyCidrs
           if p.isEmpty then "none" else p.mkString(",")
@@ -82,8 +112,13 @@ object BootFactories extends LazyLogging:
   /** Backend for maintenance and branch-merge nodes. Same as `main` unless fleet mode asks for them
     * to run on the manager host (QOD_FLEET_EPHEMERAL=local).
     */
-  def ephemeralBackend(mgrCfg: ManagerConfig, main: QuackBackend): QuackBackend =
-    if FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
+  def ephemeralBackend(
+      mgrCfg: ManagerConfig,
+      main: QuackBackend,
+      nodeBin: Option[Path],
+      nodeKeys: ai.starlake.quack.edge.authz.NodeKeys
+  ): QuackBackend =
+    if RuntimeType.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
       logger.info(
         "fleet: ephemeral maintenance/merge nodes run on the manager host (local backend)"
       )
@@ -94,7 +129,11 @@ object BootFactories extends LazyLogging:
           mgrCfg.spawnScript,
           mgrCfg.spawnScriptWindows,
           LocalQuackBackend.managerMarker(mgrCfg.port)
-        )
+        ),
+        nodeBin = nodeBin,
+        nodeKeys = nodeKeys,
+        nodeExtensions = mgrCfg.nodeExtensions,
+        nodeAuthzLimits = mgrCfg.nodeAuthzLimits
       )
     else main
 
@@ -131,88 +170,54 @@ object BootFactories extends LazyLogging:
         )
       case other => sys.error(s"unknown federation.secretStore: '$other'")
 
-  /** Whether the edge's system-catalog filter is mounted. ONE value decides both the filter mount
-    * (Main) and every validator arm's implicit metadata admit: an admit is only safe while the
-    * filter that narrows those rows is mounted, so the two must never be able to disagree. With ACL
-    * off nothing is filtered (there is no principal to filter for), so the conjunction.
+  /** The live location rules of the decision pipeline (spec decisions 15, 18 and 23): the
+    * supervisor's data paths, tenant locations and users' S3 credential scopes, the store's
+    * unpurged managed prefixes, the operator's files root. Real-path resolution only on the local
+    * runtime, the one whose nodes share this host's filesystem and working directory.
     */
-  def metadataFilterMounted(aclCfg: AclConfig): Boolean =
-    aclCfg.enabled && aclCfg.filteredMetadata
-
-  /** The edge's system-catalog filter, mounted from [[metadataFilterMounted]]. */
-  def metadataFilterRewriter(
-      aclCfg: AclConfig
-  ): ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-    new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = metadataFilterMounted(aclCfg))
-
-  /** SQL ACL validator, routed per tenant. A `qod`-mode tenant goes to the RBAC-backed
-    * PostgresAclValidator (reading the cached EffectiveSet pinned on ConnectionContext at handshake
-    * time), or to allow-all when acl.enabled=false (local-dev workflows). An `opa`-mode tenant goes
-    * to the OpaValidator REGARDLESS of acl.enabled: a tenant that configured Rego is never silently
-    * unenforced.
-    */
-  def aclValidator(
-      aclCfg: AclConfig,
+  def locationRules(
       mgrCfg: ManagerConfig,
       sup: PoolSupervisor,
-      opaCfg: OpaConfig,
-      opa: OpaAuthorizer
-  ): StatementValidator =
-    val defaultDb     = mgrCfg.defaultMetastore.dbName
-    val defaultSchema =
-      if mgrCfg.defaultMetastore.schemaName.nonEmpty then mgrCfg.defaultMetastore.schemaName
-      else "main"
-    // ONE value for every arm's implicit metadata admit and the filter mount (Main).
-    val filterMounted              = metadataFilterMounted(aclCfg)
-    val qodArm: StatementValidator =
-      if !aclCfg.enabled then
-        logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
-        StatementValidator.allowAll
-      else
-        logger.info(
-          s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema, " +
-            s"filteredMetadata=${aclCfg.filteredMetadata})"
-        )
-        new PostgresAclValidator(
-          defaultDatabase = defaultDb,
-          defaultSchema = defaultSchema,
-          dialect = aclCfg.dialect,
-          // Scope wildcard catalog grants to the session's tenant. Maps
-          // qodstate_tenant.id -> the set of tenant_db.name's the tenant
-          // owns; the validator's `catalogMatch` consults this to decide
-          // whether `*.*.*` admits a referenced catalog. Empty set = no
-          // catalog matches via wildcard (fail-closed). Explicit named
-          // grants bypass this and still cross tenants on purpose.
-          tenantCatalogs = tenantId =>
-            sup
-              .getTenantById(tenantId)
-              .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
-              .getOrElse(Set.empty),
-          // Same value that mounts the edge metadata rewriter, so the validator can never
-          // admit an information_schema read the rewriter would then leave unfiltered.
-          filteredMetadata = filterMounted
-        )
-    val opaArm = new OpaValidator(
-      opa,
-      tenantOf = sup.getTenantById,
-      parentPoolsOf = sup.parentPoolNamesOf,
-      defaultDatabase = defaultDb,
-      defaultSchema = defaultSchema,
-      dialect = aclCfg.dialect,
-      // NOT aclCfg.filteredMetadata: on acl.enabled=false the filter is not mounted, and an
-      // implicit admit there would let an opa tenant read the whole catalog with no decision.
-      filteredMetadata = filterMounted
+      store: ai.starlake.quack.ondemand.state.ControlPlaneStore
+  ): ai.starlake.quack.edge.authz.location.LiveLocationRules =
+    new ai.starlake.quack.edge.authz.location.LiveLocationRules(
+      dataPaths = () => sup.dataPaths(),
+      unpurgedPrefixes = () => store.unpurgedManagedPrefixes().map(_.prefix),
+      tenantLocations = sup.tenantLocations,
+      userScopes = userId => sup.userS3.current(userId).map(_.map(_.scope)),
+      filesRoot = mgrCfg.tenantFiles.rootOpt,
+      sameHost = RuntimeType.isLocal(mgrCfg.runtimeType),
+      owners = sup.dataPathOwners
     )
-    new TenantRoutingValidator(
-      qodArm,
-      opaArm,
-      // An unknown tenant id (deleted mid-session) follows the manager default mode, so under
-      // QOD_ACL_MODE=opa it reaches the OPA arm, which denies it, instead of a possibly allow-all
-      // QoD arm.
-      tenantId =>
-        sup
-          .getTenantById(tenantId)
-          .map(_.acl)
-          .getOrElse(ai.starlake.quack.model.TenantAcl())
-          .isOpa(opaCfg.defaultMode)
+
+  /** qodstate_tenant.id -> the tenant_db names the tenant owns: the catalogs a wildcard catalog
+    * grant admits for its sessions (AuthzDecider). Unknown tenant: none.
+    */
+  private def tenantCatalogsOf(sup: PoolSupervisor): String => Set[String] =
+    tenantId =>
+      sup
+        .getTenantById(tenantId)
+        .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
+        .getOrElse(Set.empty)
+
+  /** The node decision pipeline (spec Section 6). Always enforced (decision 5); an opa tenant is
+    * judged by its OPA policy.
+    */
+  def authzDecider(
+      sup: PoolSupervisor,
+      opaCfg: OpaConfig,
+      opa: OpaAuthorizer,
+      locationRules: LocationRulesSource
+  ): AuthzDecider =
+    new AuthzDecider(
+      tenantOf = sup.getTenantById,
+      tenantCatalogs = tenantCatalogsOf(sup),
+      // The catalog the pool's node attaches (memory, a catalogAlias or dbName): a wildcard
+      // catalog grant covers it on that pool only.
+      poolCatalog = key =>
+        sup.get(key).flatMap(st => AuthzDecider.attachedCatalog(st.kindWire, st.metastore)),
+      parentPoolsOf = sup.parentPoolNamesOf,
+      locations = locationRules,
+      opa = opa,
+      opaCfg = opaCfg
     )

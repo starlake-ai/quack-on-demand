@@ -52,14 +52,12 @@ object BranchNames:
   private val BranchPathRe =
     s"""^(.*)${java.util.regex.Pattern.quote(DbSuffixMarker)}[0-9a-f]{8}/?$$""".r
 
-  /** The object-store secret scope for a data path: for a branch prefix, the parent's prefix
-    * WITHOUT its trailing separator, which is the longest string that is a prefix of both the
-    * parent's files (`<parent>/...`) and every sibling branch prefix (`<parent>__br_<id8>/...`). A
-    * branch node reads the parent's Parquet through the copied absolute paths, so its secret must
-    * cover both. Non-branch paths come back unchanged.
+  /** The parent's prefix of a branch data path (`<parent>__br_<id8>/`), without its separator; None
+    * for any other path. A branch node reads the parent's Parquet through the copied absolute
+    * paths, so the branch's object-store secret covers both (ObjectStoreSecret.dataScopes).
     */
-  def secretScope(dataPath: String): String = dataPath match
-    case BranchPathRe(parent) => parent
-    case other                => other
+  def parentPrefix(dataPath: String): Option[String] = dataPath match
+    case BranchPathRe(parent) => Some(parent)
+    case _                    => None
 
   def isBranchDataPath(dataPath: String): Boolean = BranchPathRe.matches(dataPath)

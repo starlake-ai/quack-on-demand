@@ -15,13 +15,6 @@ data:
   QOD_PG_SCHEMA:           {{ .Values.postgres.schema | quote }}
   QOD_DUCKLAKE_DATA_PATH:  {{ .Values.storage.dataPath | quote }}
 
-  # ---- Tenant SQL screening -------------------------------------------------
-  # Lockdown keeps tenant users away from the node's mounted secrets
-  # (values.yaml, security.nodeLockdown). dig keeps the defaults when an
-  # upgrade with --reuse-values carries a release made before these values.
-  QOD_NODE_LOCKDOWN:       {{ dig "nodeLockdown" true (.Values.security | default dict) | quote }}
-  QOD_ACL_ENABLED:         {{ dig "aclEnabled" false (.Values.security | default dict) | quote }}
-
   # ---- K8s backend ----------------------------------------------------------
   # QOD_K8S_NAMESPACE is injected via fieldRef in the Deployment so it
   # always tracks the manager pod's own namespace.
@@ -92,9 +85,9 @@ data:
   # env; KubernetesQuackBackend forwards these settings into every spawned
   # node pod (the access key id and secret go through the per-pool node-env
   # Secret, mounted as files, never as env vars), where spawn-quack-node.sh
-  # consumes them to emit `CREATE SECRET quack_s3 (...)`. Same contract as
-  # docker-compose, where LocalQuackBackend moves the credentials into the
-  # node's private secrets directory.
+  # consumes them to emit `CREATE SECRET qod_data_s3 (...)`, scoped to the
+  # data path. Same contract as docker-compose, where LocalQuackBackend moves
+  # the credentials into the node's private secrets directory.
   QOD_S3_ENDPOINT:    {{ .Values.s3.endpoint  | quote }}
   QOD_S3_REGION:      {{ .Values.s3.region    | quote }}
   QOD_S3_URL_STYLE:   {{ .Values.s3.urlStyle  | quote }}

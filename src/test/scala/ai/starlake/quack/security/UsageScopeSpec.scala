@@ -32,13 +32,12 @@ import java.time.Instant
   *   4. Tenant admin (alice) pinned to acme: sees only acme; cross-tenant ?tenant= silently
   *      narrowed.
   *   5. Tenant admin groupBy=user: acme users only.
-  *   6. Static-key caller: sees both tenants.
-  *   7. Validation: invalid groupBy -> 400 invalid_group_by; invalid from -> 400 invalid_time.
-  *   8. Month defaults: no from/to/groupBy -> 200; groupBy=="tenant"; from/to match first-of-month
+  *   6. Validation: invalid groupBy -> 400 invalid_group_by; invalid from -> 400 invalid_time.
+  *   7. Month defaults: no from/to/groupBy -> 200; groupBy=="tenant"; from/to match first-of-month
   *      regex.
-  *   9. dataStart + empty period: range outside data -> groups=[]; dataStart==d01 (superuser +
+  *   8. dataStart + empty period: range outside data -> groups=[]; dataStart==d01 (superuser +
   *      alice).
-  *   10. Ordering: engineMs descending across all groups in test 1.
+  *   9. Ordering: engineMs descending across all groups in test 1.
   */
 class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers {
 
@@ -147,13 +146,12 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers 
   private def daysOf(g: io.circe.Json): List[io.circe.Json] =
     g.hcursor.downField("days").as[List[io.circe.Json]].getOrElse(Nil)
 
-  private def bootHarness(staticApiKey: Option[String] = None) = {
+  private def bootHarness() = {
     val ts  = new RecordingTelemetryStore
     val fix = SecurityFixtures.freshStore()
     SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       telemetryStore = ts
     )
     seedAll(ts)
@@ -330,28 +328,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers 
   }
 
   // -------------------------------------------------------------------------
-  // Test 6: Static-key caller sees both tenants
-  // -------------------------------------------------------------------------
-
-  it should "return both tenants for a static-key caller" in {
-    val (h, _, _) = bootHarness(staticApiKey = Some("test-static-key"))
-    try {
-      val resp = get(
-        h.httpClient,
-        s"${h.baseUrl}/api/usage?from=$QueryFrom&to=$QueryTo",
-        apiKey = Some("test-static-key")
-      )
-      withClue(s"static-key body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        val tenants = groupsOf(resp.body()).flatMap(tenantOf).toSet
-        tenants should contain(AcmeTenantId)
-        tenants should contain(GlobexTenantId)
-      }
-    } finally h.shutdown()
-  }
-
-  // -------------------------------------------------------------------------
-  // Test 7: Validation
+  // Test 6: Validation
   // -------------------------------------------------------------------------
 
   it should "return 400 invalid_group_by for an unknown groupBy value" in {
@@ -387,7 +364,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers 
   }
 
   // -------------------------------------------------------------------------
-  // Test 8: Month defaults (no from/to/groupBy)
+  // Test 7: Month defaults (no from/to/groupBy)
   // -------------------------------------------------------------------------
 
   it should "default groupBy to tenant and from/to to the current calendar month (UTC)" in {
@@ -415,7 +392,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers 
   }
 
   // -------------------------------------------------------------------------
-  // Test 9: dataStart and empty period
+  // Test 8: dataStart and empty period
   // -------------------------------------------------------------------------
 
   it should "return empty groups but dataStart for a query period with no data (superuser)" in {
@@ -457,7 +434,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers 
   }
 
   // -------------------------------------------------------------------------
-  // Test 10: Ordering (engineMs descending)
+  // Test 9: Ordering (engineMs descending)
   // -------------------------------------------------------------------------
 
   it should "return groups in non-increasing engineMs order" in {

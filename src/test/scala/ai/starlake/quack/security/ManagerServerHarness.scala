@@ -48,7 +48,6 @@ object ManagerServerHarness:
   private[security] def minimalManagerConfig(port: Int = 0): ManagerConfig = ManagerConfig(
     host = "127.0.0.1",
     port = port,
-    apiKey = None, // open REST namespace
     runtimeType = "local",
     minPort = 40000,
     maxPort = 41000,
@@ -138,7 +137,8 @@ object ManagerServerHarness:
   // back.  DuckDB supports ON CONFLICT and NOW() so UserStore.upsertUser
   // compiles without changes.
   // ------------------------------------------------------------------
-  private def makeDuckDbUserStore(): UserStore =
+  // private[security]: TenantSignInIsolationSpec builds the SSO user directory it hands to boot.
+  private[security] def makeDuckDbUserStore(): UserStore =
     Class.forName("org.duckdb.DuckDBDriver")
     // Open a persistent in-memory connection (the shared DB lives as
     // long as this connection is open).  We create the table then hand
@@ -221,23 +221,56 @@ object ManagerServerHarness:
         .map(_.group(1))
         .getOrElse(throw new RuntimeException(s"no token in response: $bodyStr"))
 
+    /** A session for the fixture superuser (`SecurityFixtures.RootUsername`, which
+      * `SecurityFixtures.freshStore()` seeds), minted by a real login. Every call logs in again.
+      */
+    def superuserSession(): String =
+      mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+
+    /** A personal access token owned by the fixture superuser, minted through the real
+      * `POST /api/auth/pat/create` with a [[superuserSession]]. Needs a harness booted with the PAT
+      * routes: `patStore`, a `patUserOf` that resolves the superuser to its row in that store (the
+      * `qodstate_pat` FK), and `patAuth` so the guard admits the token. Throws otherwise.
+      * `dropAdmin` mints it restricted to the profile-only scope.
+      */
+    def superuserPat(dropAdmin: Boolean = false): String =
+      val req = HttpRequest
+        .newBuilder(URI.create(s"$baseUrl/api/auth/pat/create"))
+        .header("Content-Type", "application/json")
+        .header("X-API-Key", superuserSession())
+        .POST(
+          HttpRequest.BodyPublishers
+            .ofString(
+              s"""{"name":"harness-superuser","dropAdmin":$dropAdmin}""",
+              StandardCharsets.UTF_8
+            )
+        )
+        .build()
+      val resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString())
+      if resp.statusCode() != 200 then
+        throw new RuntimeException(
+          s"superuser PAT mint failed (${resp.statusCode()}): ${resp.body()} -- boot the " +
+            "harness with patStore, patUserOf and patAuth"
+        )
+      val tokenRe = """"token"\s*:\s*"([^"]+)"""".r
+      tokenRe
+        .findFirstMatchIn(resp.body())
+        .map(_.group(1))
+        .getOrElse(throw new RuntimeException("no token field in the PAT create response"))
+
   /** Boot a ManagerServer on an ephemeral port backed by the supplied
     * [[InMemoryControlPlaneStore]].
     *
     * The returned [[Harness]] holds `baseUrl`, `tokens` (for direct test introspection), and
     * `shutdown()` to stop the server.
     *
-    *   - `staticApiKey` flows into [[ManagerConfig.apiKey]] so the [[ManagerServer.apiKeyGuard]]
-    *     enforces it (`Some("...")` enables the static-key path; `None`, the default, leaves the
-    *     REST namespace open).
-    *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]] report `false`,
-    *     driving the `auth_disabled` 503 branch in [[AuthHandlers.login]].
+    *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]] report `false`: the
+    *     basic chain then verifies no password.
     *
     * Call [[Harness.shutdown]] in `afterAll` / `afterEach` to release the port.
     */
   def boot(
       store: InMemoryControlPlaneStore,
-      staticApiKey: Option[String] = None,
       enableProviders: Boolean = true,
       audit: AuditRecorder = AuditRecorder.noop,
       auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
@@ -254,6 +287,10 @@ object ManagerServerHarness:
       // how tags are wired. kindOf defaults to always-DuckLake so stub
       // readers are reached even though the fixture tenant-dbs are InMemory.
       catalogReader: Option[(String, String) => DuckLakeCatalogReader] = None,
+      // The restore handler's reader. None keeps the harness's own stub, under which no table is
+      // live (404 not_found before the executor); a spec driving a restore to the executor passes
+      // a reader that reports the table live.
+      restoreCatalogReader: Option[DuckLakeCatalogReader] = None,
       auditCatalogReads: Boolean = false,
       // Preview executor stub (Spec 00 Task 5). Defaults to a non-denied RouterFailure so
       // authz specs that never intend to exercise a real query still get a deterministic,
@@ -283,7 +320,7 @@ object ManagerServerHarness:
         (Option[String], String) => Option[ai.starlake.quack.ondemand.state.RbacUser]
       ] = None,
       // PAT admission on /api (guard + profile handlers). None keeps the guard
-      // session-and-static-key only, exactly like a Main boot without Postgres.
+      // session-only, exactly like a Main boot without Postgres.
       patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
       // Mount POST /mcp wired over the harness handlers, mirroring Main's
       // mcp.enabled gate. Off by default so pre-existing specs see no new route.
@@ -301,10 +338,36 @@ object ManagerServerHarness:
       icebergSourcesOf: Option[String => List[ai.starlake.quack.model.FederatedSource]] = None,
       // The OPA authorizer behind POST /api/tenant/opaTest. Defaults to a real one with a short
       // timeout and no decision cache, so a dry run against an unreachable OPA fails fast.
-      opa: Option[ai.starlake.quack.edge.opa.OpaAuthorizer] = Some(defaultOpaAuthorizer)
+      opa: Option[ai.starlake.quack.edge.opa.OpaAuthorizer] = Some(defaultOpaAuthorizer),
+      // The OPA dry run's node path (statement form of POST /api/tenant/opaTest). None answers
+      // dry_run_not_wired, as no harness runs nodes; a spec passes its own to drive the handler.
+      opaNodeRun: Option[ai.starlake.quack.ondemand.api.OpaDryRun.NodeRun] = None,
+      // The management user directory behind the REST user handlers, password reset, SCIM and the
+      // grants of an admin-console SSO login (Main binds AuthHandlers.grantsForIdentity to
+      // UserStore.grantsForIdentity on the same store). None keeps a fresh, empty DuckDB
+      // directory, so an SSO login finds no grant.
+      users: Option[UserStore] = None,
+      // Builds the admin-console SSO service (AuthHandlers.oidc) from this harness's own
+      // supervisor, the way Main builds it from the supervisor that serves REST (its tenant
+      // loader is sup.getTenantById). Main wires it whatever identitySource is (identitySource
+      // only governs the bare /ui/ login), so the harness keeps Db. None leaves the
+      // /api/auth/oidc routes answering auth_mode_disabled.
+      oidcOf: Option[PoolSupervisor => ai.starlake.quack.edge.auth.OidcSsoService] = None,
+      // Builds AuthHandlers.resolveTenant (the typed tenant of a login, an SSO start or a
+      // password change, resolved to a tenant id) from this harness's own supervisor, the way
+      // Main wires it. None keeps AuthHandlers' own default (`_ => None`, nothing resolved), so
+      // every other spec boots as before.
+      resolveTenantOf: Option[PoolSupervisor => String => Option[String]] = None,
+      // Builds the statement executor from this harness's own supervisor, the way Main binds
+      // RoutedExecutor to the supervisor that serves REST. When set it replaces previewExecutor
+      // on every surface the harness wires (preview, undrop, restore, MCP, Iceberg).
+      executorOf: Option[PoolSupervisor => CatalogPreviewHandlers.PreviewExecutor] = None,
+      // The authentication service behind POST /api/auth/login. None keeps the in-memory one (the
+      // database authenticator's stand-in over `store`); a spec that drives a real chain, such as
+      // the manager-wide password grant behind the database check, passes its own.
+      authService: Option[AuthenticationService] = None
   ): Harness =
-    val mgrCfg =
-      minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
+    val mgrCfg  = minimalManagerConfig(port = 0)
     val edgeCfg = minimalFlightConfig
     val tracker = new NodeLoadTracker
     val backend = stubBackend
@@ -313,7 +376,11 @@ object ManagerServerHarness:
     // Restore the in-memory store into the supervisor's caches.
     sup.restore()
 
-    val userStore = makeDuckDbUserStore()
+    // The executor every statement surface below shares (see `executorOf`).
+    val statementExecutor: CatalogPreviewHandlers.PreviewExecutor =
+      executorOf.fold(previewExecutor)(build => build(sup))
+
+    val userStore = users.getOrElse(makeDuckDbUserStore())
     // Composed bearer lookup (session JWT first, then PAT), mirroring Main's
     // wiring; needed by UserHandlers for the self-lock guard.
     val bearerSessionOf
@@ -327,20 +394,29 @@ object ManagerServerHarness:
     val columnPolicyHandlers = new RoleColumnPolicyHandlers(sup)
     val rowPolicyHandlers    = new RoleRowPolicyHandlers(sup)
 
-    val authSvc      = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    val authSvc: AuthenticationService =
+      authService.getOrElse(
+        new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+      )
     val authHandlers = new AuthHandlers(
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      // Mirror Main: an SSO login's grants come from the user directory, in its login realm.
+      grantsForIdentity = (realm, identity, email) =>
+        userStore.grantsForIdentity(realm, identity, email),
       // Mirror Main: resolve per-tenant login mode from the registry so a db
       // tenant login resolves to Db instead of the no-op default's TenantNotFound.
       authModeResolver = new ai.starlake.quack.ondemand.auth.ManagementAuthModeResolver(
         id => sup.getTenantById(id),
         ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
       ),
+      resolveTenant =
+        resolveTenantOf.fold[String => Option[String]](_ => None)(build => build(sup)),
+      oidc = oidcOf.map(build => build(sup)),
       audit = audit,
-      events = events
+      events = events,
+      patSessionOf = t => patAuth.flatMap(_.sessionOf(t))
     )
 
     // Public password-recovery handler over the harness's DuckDB UserStore. The
@@ -373,13 +449,6 @@ object ManagerServerHarness:
     val auditHandlers      = new AuditHandlers(telemetryStore)
     val historyApiHandlers = new HistoryHandlers(telemetryStore)
     val usageHandlers      = new UsageHandlers(telemetryStore)
-    val profileHandlers    = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      // Mirror Main: session JWT first, then PAT.
-      bearerSessionOf,
-      telemetryStore,
-      statementStore,
-      id => sup.getTenantById(id)
-    )
     val activeRegistry     = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeRegistry,
@@ -391,7 +460,15 @@ object ManagerServerHarness:
     val pools = new PoolHandlers(sup, tracker)
     val nodes =
       new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
-    val tenants   = new TenantHandlers(sup, opa = opa)
+    // audit: tenant/setAuth's refusal and success rows (and every other tenant action) reach the
+    // spec's recorder; the default noop recorder keeps every other spec's boot unchanged.
+    val tenants = new TenantHandlers(
+      sup,
+      onAuthChanged = _ => (),
+      audit = audit,
+      opa = opa,
+      nodeRun = opaNodeRun
+    )
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
     val health = new HealthHandler(sup)
@@ -469,24 +546,41 @@ object ManagerServerHarness:
         override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] = None
         override def latestTableSnapshot(schema: String, table: String): Option[Long]      = None
 
-    // Main's executor-identity resolver: static key, session, PAT (when wired), else 401.
+    // Main's executor-identity resolver: session, PAT (when wired), else 401.
     val restCaller = RestCaller(
-      staticKey = staticApiKey,
       sessionOf = sessions.get,
       patOf = t => patAuth.flatMap(_.resolve(t))
+    )
+    // Mirror Main: built after the executor-identity resolver, which the pool listing shares.
+    val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
+      // Mirror Main: session JWT first, then PAT.
+      bearerSessionOf,
+      telemetryStore,
+      statementStore,
+      id => sup.getTenantById(id),
+      sup,
+      restCaller
+    )
+    // Mirror Main: users' own S3 credentials; no data folder in this harness.
+    val s3CredentialHandlers = new ai.starlake.quack.ondemand.api.UserS3CredentialHandlers(
+      sup,
+      restCaller,
+      Nil,
+      _ => Right(None),
+      audit
     )
     val previewHandlers = new CatalogPreviewHandlers(
       sup,
       store,
       restCaller,
-      previewExecutor,
+      statementExecutor,
       previewReader,
       CatalogConfig(),
       audit = audit
     )
     val undropHandlers = new CatalogUndropHandlers(
       sup,
-      previewExecutor,
+      statementExecutor,
       previewReader,
       CatalogConfig(),
       restCaller,
@@ -495,9 +589,9 @@ object ManagerServerHarness:
     val restoreHandlers = new CatalogRestoreHandlers(
       sup,
       store,
-      previewExecutor,
-      previewExecutor,
-      (_, _) => restoreReader,
+      statementExecutor,
+      statementExecutor,
+      (_, _) => restoreCatalogReader.getOrElse(restoreReader),
       CatalogConfig(),
       restCaller,
       audit = audit
@@ -518,15 +612,14 @@ object ManagerServerHarness:
     val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
 
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
-    // Main's wiring (composed scopeOf; PAT resolution via patAuth; static key shared
-    // with the api-key guard).
+    // Main's wiring (total scopeOf; PAT resolution via patAuth).
+    val tenantLocationHandlers                       = new TenantLocationHandlers(sup, None)
     val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
       if !mcpEnabled then None
       else
-        val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-          ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-            staticApiKey,
-            t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+        val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+          ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+            sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
           )
         val mcpCatalog = catalogHandlers.getOrElse(
           new CatalogHandlers((_, _) => noSnapshotReader, sup, store)
@@ -536,7 +629,7 @@ object ManagerServerHarness:
         )
         val dataTools = new ai.starlake.quack.mcp.McpDataTools(
           ai.starlake.quack.McpConfig(),
-          previewExecutor,
+          statementExecutor,
           sup,
           mcpCatalog,
           mcpHistory,
@@ -561,7 +654,8 @@ object ManagerServerHarness:
           groupHandlers,
           roleHandlers,
           membershipHandlers,
-          mcpScopeOf
+          mcpScopeOf,
+          tenantLocationHandlers
         )
         val accessTools = new ai.starlake.quack.mcp.McpAccessTools(
           roleHandlers,
@@ -590,12 +684,12 @@ object ManagerServerHarness:
           )
           new ai.starlake.quack.mcp.McpRoutes(
             ai.starlake.quack.McpConfig(),
-            staticApiKey.filter(_.nonEmpty),
             patAuth.fold[String => Option[ai.starlake.quack.ondemand.auth.PatPrincipal]](_ => None)(
               pa => pa.resolve
             ),
             dataTools.tools ++ adminTools.tools ++ identityTools.tools ++
-              accessTools.tools ++ platformTools.tools,
+              accessTools.tools ++ platformTools.tools ++
+              new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
             serverVersion = "test-harness"
           ).routes
 
@@ -649,11 +743,15 @@ object ManagerServerHarness:
         new ai.starlake.quack.ondemand.api.FleetHandlers(
           new ai.starlake.quack.ondemand.state.InMemoryFleetServerStore(),
           mgrCfg.fleet,
-          backend = None
+          backend = None,
+          nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+          nodeAuthzLimits = mgrCfg.nodeAuthzLimits
         )
       ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
       mcpRoutes = mcpRoutes,
+      tenantLocations = Some(tenantLocationHandlers),
+      s3Credentials = Some(s3CredentialHandlers),
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>
         new IcebergCatalogHandlers(
           sup,
@@ -667,7 +765,7 @@ object ManagerServerHarness:
             timeoutSec = 5,
             maxRows = 100
           ),
-          executor = previewExecutor,
+          executor = statementExecutor,
           callerOf = restCaller,
           cfg = CatalogConfig(),
           audit = audit

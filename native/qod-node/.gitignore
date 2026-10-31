@@ -1,0 +1,3 @@
+# CMake build directories: build/ for development, build-release/ for the vendored binaries
+# (scripts/release/refresh-qod-node-binaries.sh).
+build*/

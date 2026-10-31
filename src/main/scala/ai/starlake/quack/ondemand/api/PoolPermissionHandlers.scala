@@ -22,7 +22,7 @@ final class PoolPermissionHandlers(
     HandlerResolvers.resolveTenantId(sup, raw)
 
   def grant(req: PoolPermissionGrantRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolPermissionResponse] =
     resolveTenantId(req.tenant) match
       case None =>
@@ -69,7 +69,7 @@ final class PoolPermissionHandlers(
             }
 
   def revoke(req: PoolPermissionRevokeRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val permTenant = sup.tenantForPoolPermission(req.id)
     TenantScopeCheck.rejectForResource(apiKey, permTenant)(scopeOf) match
@@ -111,26 +111,16 @@ final class PoolPermissionHandlers(
       groupId: Option[String],
       apiKey: Option[String]
   )(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolPermissionListResponse] = IO.blocking {
-    val tenantId                                  = tenant.flatMap(resolveTenantId)
-    val scope                                     = apiKey.flatMap(scopeOf)
-    val gate: Option[(StatusCode, ErrorResponse)] = (scope, tenantId) match
-      case (Some(s), Some(t)) if !s.superuser && !s.manageableTenants.contains(t) =>
-        Some(
-          StatusCode.Forbidden -> ErrorResponse(
-            "tenant_forbidden",
-            s"session has no admin grant on tenant '$t'"
-          )
-        )
-      case _ => None
-    gate match
+    val tenantId = tenant.flatMap(resolveTenantId)
+    val scope    = scopeOf(apiKey)
+    tenantId.flatMap(TenantScopeCheck.forScope(scope, _)) match
       case Some(err) => Left(err)
       case None      =>
         val perms    = sup.listPoolPermissions(tenantId, userId, groupId)
-        val filtered = scope match
-          case Some(s) if !s.superuser =>
-            perms.filter(p => s.manageableTenants.contains(p.tenantId))
-          case _ => perms
+        val filtered =
+          if scope.superuser then perms
+          else perms.filter(p => scope.manageableTenants.contains(p.tenantId))
         Right(PoolPermissionListResponse(filtered.map(mappers.toPoolPermissionResponse)))
   }

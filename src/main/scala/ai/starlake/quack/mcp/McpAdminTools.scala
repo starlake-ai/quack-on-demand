@@ -19,7 +19,7 @@ import ai.starlake.quack.ondemand.api.{
   SetMaxConcurrentRequest,
   SetPoolAutoscaleRequest,
   SetPoolDisabledRequest,
-  SetPoolLockdownRequest,
+  SetPoolInitSqlRequest,
   SetPoolResourcesRequest,
   SetPoolTemplateRequest,
   StopPoolRequest,
@@ -56,7 +56,7 @@ final class McpAdminTools(
     tags: TagHandlers,
     auditH: AuditHandlers,
     tenantDbs: TenantDbHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver
 ):
 
   import McpToolArgs._
@@ -86,8 +86,8 @@ final class McpAdminTools(
     stopPoolTool,
     setPoolDisabledTool,
     setPoolResourcesTool,
+    setPoolInitSqlTool,
     setPoolPodTemplateTool,
-    setPoolLockdownTool,
     setPoolAutoscaleTool,
     setNodeMaxConcurrentTool,
     createDatabaseTool,
@@ -98,6 +98,12 @@ final class McpAdminTools(
   )
 
   private def keyOf(principal: McpPrincipal): Option[String] = principal.rawToken
+
+  /** An init_sql property's help: who may write what (Task 20), the same rule as the REST call. */
+  private def initSqlHelp(what: String): String =
+    s"$what A tenant admin's runs only SET/RESET of allowlisted settings to literals, read-only " +
+      "PRAGMAs and INSTALL/LOAD of allowlisted extensions (else 400 init_sql_refused); a " +
+      "superuser's is not restricted."
 
   // ---------- pools ----------
 
@@ -601,10 +607,9 @@ final class McpAdminTools(
       "max_concurrent_per_node" -> intProp("Per-node statement cap (0 = unlimited)."),
       "disabled"                -> boolProp("Create disabled."),
       "start_suspended"         -> boolProp("Create suspended at zero nodes."),
-      "init_sql"                -> strProp("SQL run on each node at boot."),
+      "init_sql"                -> strProp(initSqlHelp("SQL run on each node at boot.")),
       "cpu"                     -> strProp("K8s CPU quantity, e.g. '500m'."),
       "memory"                  -> strProp("K8s memory quantity, e.g. '2Gi'."),
-      "lockdown"                -> strProp("inherit | on | off (default inherit)."),
       "min_nodes"               -> intProp("Autoscale floor."),
       "max_nodes"               -> intProp("Autoscale ceiling."),
       tenantProp
@@ -631,10 +636,9 @@ final class McpAdminTools(
                 maxConcurrentPerNode = int(args, "max_concurrent_per_node").getOrElse(0),
                 disabled = bool(args, "disabled").getOrElse(false),
                 startSuspended = bool(args, "start_suspended").getOrElse(false),
-                initSql = str(args, "init_sql"),
+                initSql = args("init_sql").flatMap(_.asString),
                 cpu = str(args, "cpu").getOrElse(""),
                 memory = str(args, "memory").getOrElse(""),
-                lockdown = str(args, "lockdown").getOrElse("inherit"),
                 minNodes = int(args, "min_nodes"),
                 maxNodes = int(args, "max_nodes")
               ),
@@ -716,6 +720,32 @@ final class McpAdminTools(
             .map(res => bridge(res).map(_.asJson))
   )
 
+  private val setPoolInitSqlTool = McpToolDef(
+    name = "set_pool_init_sql",
+    description = "Replace a pool's init SQL. Takes effect on the next node spawn.",
+    inputSchema = objectSchema(
+      required = List("database", "pool", "init_sql"),
+      props = "database" -> strProp("Database (tenant-db) name."),
+      "pool"     -> strProp("Pool name."),
+      "init_sql" -> strProp(initSqlHelp("The new init SQL (empty clears it).")),
+      tenantProp
+    ),
+    adminOnly = true,
+    run = (principal, args) =>
+      poolTarget(principal, args) match
+        case Left(err)                       => IO.pure(Left(err))
+        case Right((tenant, database, pool)) =>
+          // As sent, untrimmed (an empty one clears it): the text's own bytes decide its trust.
+          args("init_sql").flatMap(_.asString).toRight("the 'init_sql' argument is required") match
+            case Left(err)  => IO.pure(Left(err))
+            case Right(sql) =>
+              pools
+                .setInitSql(SetPoolInitSqlRequest(tenant, database, pool, sql), keyOf(principal))(
+                  scopeOf
+                )
+                .map(res => bridge(res).map(_.asJson))
+  )
+
   private val setPoolResourcesTool = McpToolDef(
     name = "set_pool_resources",
     description = "Set a pool's per-node CPU and memory (Kubernetes quantities). " +
@@ -768,32 +798,6 @@ final class McpAdminTools(
                 pool,
                 str(args, "pod_template_yaml").getOrElse("")
               ),
-              keyOf(principal)
-            )(scopeOf)
-            .map(res => bridge(res).map(_.asJson))
-  )
-
-  private val setPoolLockdownTool = McpToolDef(
-    name = "set_pool_lockdown",
-    description = "Set a pool's node-lockdown override: inherit | on | off (superuser only).",
-    inputSchema = objectSchema(
-      required = List("database", "pool", "lockdown"),
-      props = "database" -> strProp("Database (tenant-db) name."),
-      "pool"     -> strProp("Pool name."),
-      "lockdown" -> strProp("inherit | on | off."),
-      tenantProp
-    ),
-    adminOnly = true,
-    run = (principal, args) =>
-      (for
-        target   <- poolTarget(principal, args)
-        lockdown <- required(args, "lockdown")
-      yield (target, lockdown)) match
-        case Left(err)                                   => IO.pure(Left(err))
-        case Right(((tenant, database, pool), lockdown)) =>
-          pools
-            .setLockdown(
-              SetPoolLockdownRequest(tenant, database, pool, lockdown),
               keyOf(principal)
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))
@@ -876,7 +880,7 @@ final class McpAdminTools(
       "object_store"     -> objProp("Object-store credentials config."),
       "default_database" -> strProp("Default catalog name presented to clients."),
       "default_schema"   -> strProp("Default schema presented to clients."),
-      "init_sql"         -> strProp("SQL run on each node at attach."),
+      "init_sql"         -> strProp(initSqlHelp("SQL run on each node at attach.")),
       "managed_storage"  -> boolProp("Let the manager provision metastore + storage."),
       "encrypted"        -> boolProp(
         "Encrypt this database's data at rest. Create-time only: it cannot be changed later."
@@ -906,7 +910,7 @@ final class McpAdminTools(
                 objectStore = mapArg(args, "object_store"),
                 defaultDatabase = str(args, "default_database"),
                 defaultSchema = str(args, "default_schema"),
-                initSql = str(args, "init_sql").getOrElse(""),
+                initSql = args("init_sql").flatMap(_.asString).getOrElse(""),
                 managedStorage = bool(args, "managed_storage").getOrElse(false),
                 encrypted = bool(args, "encrypted").getOrElse(false),
                 encryptionKey = str(args, "encryption_key").filter(_.nonEmpty)
@@ -942,7 +946,7 @@ final class McpAdminTools(
       "object_store"     -> objProp("Replacement object-store config (omit = unchanged)."),
       "default_database" -> strProp("New default catalog (omit = unchanged)."),
       "default_schema"   -> strProp("New default schema (omit = unchanged)."),
-      "init_sql"         -> strProp("New init SQL (omit = unchanged)."),
+      "init_sql"         -> strProp(initSqlHelp("New init SQL (omit = unchanged).")),
       tenantProp
     ),
     adminOnly = true,
@@ -962,7 +966,7 @@ final class McpAdminTools(
                 objectStore = mapArgOpt(args, "object_store"),
                 defaultDatabase = str(args, "default_database"),
                 defaultSchema = str(args, "default_schema"),
-                initSql = str(args, "init_sql")
+                initSql = args("init_sql").flatMap(_.asString)
               ),
               keyOf(principal)
             )(scopeOf)

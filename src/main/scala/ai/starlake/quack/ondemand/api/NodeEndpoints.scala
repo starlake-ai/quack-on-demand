@@ -63,8 +63,8 @@ object NodeEndpoints:
 
   // Recent statement history (newest first), bounded by `limit` (default 50).
   // Tenant-scoped: the handler clamps the response to rows whose tenant is in
-  // the calling session's `manageableTenants` (superuser / static-key / open
-  // mode return the unfiltered window).
+  // the calling session's `manageableTenants` (a superuser gets the unfiltered
+  // window).
   val statementHistory: PublicEndpoint[
     (Option[Int], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),

@@ -86,11 +86,13 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/pool/scale"                   -> "scale_pool",
     "POST /api/pool/setAutoscale"            -> "set_pool_autoscale",
     "POST /api/pool/setDisabled"             -> "set_pool_disabled",
-    "POST /api/pool/setLockdown"             -> "set_pool_lockdown",
     "POST /api/pool/setPodTemplate"          -> "set_pool_pod_template",
     "POST /api/pool/setResources"            -> "set_pool_resources",
+    "POST /api/pool/setInitSql"              -> "set_pool_init_sql",
     "POST /api/pool/stop"                    -> "stop_pool",
     "POST /api/pool/suspend"                 -> "suspend_pool",
+    "POST /api/profile/s3/list"              -> "list_my_s3_credentials",
+    "POST /api/profile/s3/remove"            -> "remove_my_s3_credential",
     "POST /api/role/column-policy/create"    -> "create_column_policy",
     "POST /api/role/column-policy/delete"    -> "delete_column_policy",
     "POST /api/role/column-policy/update"    -> "update_column_policy",
@@ -104,6 +106,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/statement/kill"               -> "kill_statement",
     "POST /api/tenant/create"                -> "create_tenant",
     "POST /api/tenant/delete"                -> "delete_tenant",
+    "POST /api/tenant/location/add"          -> "add_tenant_location",
+    "POST /api/tenant/location/list"         -> "list_tenant_locations",
+    "POST /api/tenant/location/remove"       -> "remove_tenant_location",
     "POST /api/tenant/setAcl"                -> "set_tenant_acl",
     "POST /api/tenant/setAuth"               -> "set_tenant_auth",
     "POST /api/tenant/setDisabled"           -> "set_tenant_disabled",
@@ -135,6 +140,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/branch/merge",
     "POST /api/tenant/opaTest", // dry-run diagnostic for policy authors; CLI/REST only
     "POST /api/fleet/",         // fleet servers are operator infrastructure, no agent tool
+    "POST /api/internal/",      // node-to-manager calls (CredentialsRoute, DecideRoute), never REST
+    "POST /api/profile/s3/add", // a secret must not pass through an agent (decision 23)
+    "POST /api/user/s3/",       // an admin's view of a user's S3 credentials: REST, CLI and UI
     "POST /api/scim/",          // IdP wire protocol
     "PUT /api/scim/",
     "PATCH /api/scim/",
@@ -204,7 +212,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     finally c.close()
     new UserStore(jdbcUrl, "", "")
 
-  private val noScope: String => Option[SessionScope] = _ => None
+  private val superuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   /** identity/access/admin tools, built exactly as McpIdentityToolsSpec / McpAccessToolsSpec /
     * McpAdminToolsSpec's own Fixtures build them.
@@ -217,11 +225,12 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     val userStore   = makeDuckDbUserStore("qod-mcp-coverage-identity-users")
     val users       = new UserHandlers(sup, userStore)
-    val tenants     = new TenantHandlers(sup)
+    val tenants     = new TenantHandlers(sup, onAuthChanged = _ => ())
     val groups      = new GroupHandlers(sup, users)
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
-    new McpIdentityTools(tenants, users, groups, roles, memberships, noScope)
+    val locations   = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(sup, None)
+    new McpIdentityTools(tenants, users, groups, roles, memberships, superuserScope, locations)
 
   private def accessTools: McpAccessTools =
     val store   = new InMemoryControlPlaneStore()
@@ -236,7 +245,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     val columnPolicies  = new RoleColumnPolicyHandlers(sup)
     val rowPolicies     = new RoleRowPolicyHandlers(sup)
     val poolPermissions = new PoolPermissionHandlers(sup, users)
-    new McpAccessTools(roleHandlers, columnPolicies, rowPolicies, poolPermissions, noScope)
+    new McpAccessTools(roleHandlers, columnPolicies, rowPolicies, poolPermissions, superuserScope)
 
   private def adminTools: McpAdminTools =
     val store    = new InMemoryControlPlaneStore()
@@ -285,7 +294,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     )
     val audit     = new AuditHandlers(NoopTelemetryStore)
     val tenantDbs = new TenantDbHandlers(sup, requireEncryption = false)
-    new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, noScope)
+    new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, superuserScope)
 
   /** Builds a bare McpPlatformTools over a fresh throwaway (migrated) Postgres database: `pats` is
     * a real handler backed by that database (PatStore's Hikari pool fails fast at CONSTRUCTION
@@ -340,7 +349,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
         boom,
         reader,
         cfg,
-        ai.starlake.quack.ondemand.api.RestCaller.staticOnly
+        ai.starlake.quack.ondemand.api.RestCaller()
       )
       val undropH =
         new ai.starlake.quack.ondemand.api.CatalogUndropHandlers(
@@ -348,7 +357,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
           boom,
           reader,
           cfg,
-          ai.starlake.quack.ondemand.api.RestCaller.staticOnly
+          ai.starlake.quack.ondemand.api.RestCaller()
         )
       val manifest = new ManifestHandlers(
         store,
@@ -370,7 +379,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
         cfgH,
         historyH,
         usageH,
-        noScope
+        superuserScope
       )
       test(tools)
     finally
@@ -387,10 +396,11 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     withPlatformTools { platformTools =>
       // Branch tools only touch their handlers inside `run`, so a null handler is enough to
       // enumerate the registered names.
-      val branchTools             = new McpBranchTools(null, noScope)
+      val branchTools             = new McpBranchTools(null, superuserScope)
+      val profileTools            = new McpProfileTools(null)
       val registered: Set[String] =
         (identityTools.tools ++ accessTools.tools ++ adminTools.tools ++ platformTools.tools ++
-          branchTools.tools)
+          branchTools.tools ++ profileTools.tools)
           .map(_.name)
           .toSet
       val referenced = covered.map(_._2).toSet

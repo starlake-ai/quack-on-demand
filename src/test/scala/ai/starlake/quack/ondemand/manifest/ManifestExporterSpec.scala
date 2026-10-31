@@ -2,6 +2,8 @@ package ai.starlake.quack.ondemand.manifest
 
 import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
+import io.circe.syntax.*
+import io.circe.yaml.v12.Printer
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -120,4 +122,33 @@ class ManifestExporterSpec extends AnyFlatSpec with Matchers:
     store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
     val m = exportOk(ManifestExporter.build(store, Instant.EPOCH, "0.2.0", "test"))
     m.tenants.find(_.name == "acme").flatMap(_.acl) shouldBe None
+  }
+
+  // The printer ManifestHandlers and ManifestCli use: null keys are dropped.
+  private val Yaml = Printer.builder.withDropNullKeys(true).build()
+
+  it should "export a stored tenant client secret as the redaction marker, never the value" in {
+    val store = new InMemoryControlPlaneStore()
+    store.upsertTenant(
+      Tenant(
+        id = "acme",
+        displayName = "acme",
+        authProvider = "keycloak",
+        authConfig =
+          Map("issuerUrl" -> "https://idp.example/realms/acme", "clientId" -> "qod-admin"),
+        authClientSecret = Some("cs-s3cr3t")
+      )
+    )
+    val m = exportOk(ManifestExporter.build(store, Instant.EPOCH, "0.2.0", "test"))
+    m.tenants.find(_.name == "acme").get.clientSecret shouldBe
+      Some(ai.starlake.quack.model.FederatedSecret.RedactedMarker)
+    Yaml.pretty(m.asJson) should not include "cs-s3cr3t"
+  }
+
+  it should "export no clientSecret for a tenant without a stored secret" in {
+    val store = new InMemoryControlPlaneStore()
+    store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+    val m = exportOk(ManifestExporter.build(store, Instant.EPOCH, "0.2.0", "test"))
+    m.tenants.find(_.name == "acme").get.clientSecret shouldBe None
+    Yaml.pretty(m.asJson) should not include "clientSecret"
   }

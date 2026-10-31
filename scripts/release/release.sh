@@ -45,6 +45,10 @@ libq="$(libquackwire_version)"
 verify_quackwire_binaries \
   || die "vendored libquackwire binaries are stale or missing for $libq. Run ./scripts/release/refresh-quackwire-binaries.sh first."
 
+# ---- Gate: vendored qod-node binaries match the pin ----------------------
+verify_qod_node_binaries \
+  || die "vendored qod-node binaries are stale or missing. Run ./scripts/release/refresh-qod-node-binaries.sh first."
+
 # ---- Resolve versions ----------------------------------------------------
 current="$(manager_version)"
 if [[ "$current" == *-SNAPSHOT ]]; then

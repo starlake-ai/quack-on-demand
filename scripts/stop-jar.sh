@@ -30,13 +30,14 @@ FORCE_AFTER="${FORCE_AFTER:-10}"
 # Manager owns BOTH the REST port and the FlightSQL edge port (same JVM).
 # Spawned quack nodes listen on their own ports (21900+), but the easiest
 # handle is the spawn-quack-node.sh PID - killing the script trips its
-# trap which terminates the duckdb child.
+# trap which terminates the qod-node child.
 mgr_pid=$(lsof -nP -iTCP:"$MGR_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)
 edge_pid=$(lsof -nP -iTCP:"$EDGE_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)
 # This manager's wrappers (`spawn-quack-node.sh <node-port> <rest-port>-<boot id>`) and nodes
-# (`.../duckdb -init <tmp>/quack-node.<rest-port>-<boot id>.XXXXXX/init`).
+# (`.../qod-node ... --secret-directory <tmp>/quack-node.<rest-port>-<boot id>.XXXXXX/secrets/...`;
+# an earlier release's `.../duckdb -init <tmp>/quack-node.<rest-port>-<boot id>.XXXXXX/init`).
 SPAWN_RE="spawn-quack-node\.sh [0-9]+ ${MGR_PORT}-[0-9a-f]+"
-DUCK_RE="duckdb .*-init .*quack-node\.${MGR_PORT}-[0-9a-f]+\."
+NODE_RE="(qod-node .*--secret-directory|duckdb .*-init) .*quack-node\.${MGR_PORT}-[0-9a-f]+\."
 spawn_pids=$(pgrep -f "$SPAWN_RE" 2>/dev/null || true)
 # pgrep exits 1 when nothing matches, which pipefail + set -e would turn into a silent abort here.
 unmarked=$( (pgrep -f 'spawn-quack-node\.sh [0-9]+$' 2>/dev/null || true) | wc -l | tr -d ' ')
@@ -57,7 +58,7 @@ fi
 # ---- Graceful: SIGTERM ----
 # The manager's IOApp + cats-effect supervises children; SIGTERM hits the
 # .guarantee block which stops the edge and cancels the health probe.
-# Spawned quack scripts trap TERM and tear down their duckdb child.
+# Spawned quack scripts trap TERM and tear down their qod-node child.
 all_pids=$(echo "$mgr_pid $edge_pid $spawn_pids" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 for pid in $all_pids; do
   [[ -z "$pid" ]] && continue
@@ -83,10 +84,11 @@ done
 
 # Re-discover (PIDs may have died but spawned new replacements unlikely)
 remaining_spawn=$(pgrep -f "$SPAWN_RE" 2>/dev/null || true)
-# Nodes run as `<abs path>/duckdb -init <tmp>/quack-node.<marker>.XXX/init`; match that argv with
-# this manager's marker, not a bare `^duckdb` (which the absolute path never matches).
-remaining_duck=$(pgrep -f "$DUCK_RE" 2>/dev/null || true)
-for pid in $remaining_spawn $remaining_duck; do
+# Nodes run as `<abs path>/qod-node ... --secret-directory <tmp>/quack-node.<marker>.XXX/secrets/...`;
+# match that argv with this manager's marker, not a bare `^qod-node` (which the absolute path never
+# matches).
+remaining_nodes=$(pgrep -f "$NODE_RE" 2>/dev/null || true)
+for pid in $remaining_spawn $remaining_nodes; do
   kill -9 "$pid" 2>/dev/null || true
 done
 

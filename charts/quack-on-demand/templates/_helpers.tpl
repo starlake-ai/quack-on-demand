@@ -93,14 +93,6 @@ secret name+key the user provided, or the chart-managed one.
 {{- end -}}
 {{- end -}}
 
-{{- define "qod.apiKeySecretName" -}}
-{{- if .Values.apiKey.existingSecret -}}
-{{- .Values.apiKey.existingSecret -}}
-{{- else -}}
-{{- include "qod.fullname" . }}-apikey
-{{- end -}}
-{{- end -}}
-
 {{- define "qod.s3SecretName" -}}
 {{- if .Values.s3.existingSecret -}}
 {{- .Values.s3.existingSecret -}}
@@ -126,15 +118,14 @@ secret name+key the user provided, or the chart-managed one.
 {{- end -}}
 
 {{/*
-Session JWT secret name; fails when HA is on without a configured secret.
+Session JWT secret name; empty when none is configured (the manager then uses
+the one stored in its control-plane database).
 */}}
 {{- define "qod.sessionJwtSecretName" -}}
 {{- if .Values.existingSessionJwtSecret -}}
 {{- .Values.existingSessionJwtSecret -}}
 {{- else if .Values.sessionJwtSecret -}}
 {{- include "qod.fullname" . }}-session-jwt
-{{- else -}}
-{{- fail "replicaCount > 1 requires sessionJwtSecret or existingSessionJwtSecret (openssl rand -hex 32)" }}
 {{- end -}}
 {{- end -}}
 
@@ -148,4 +139,36 @@ remote-scheme (s3://, s3a://, r2://) AND credentials are available
 {{- $remote := or (hasPrefix "s3://" $p) (or (hasPrefix "s3a://" $p) (hasPrefix "r2://" $p)) -}}
 {{- $hasCreds := or .Values.s3.existingSecret (and .Values.s3.accessKey .Values.s3.secretKey) -}}
 {{- if and $remote $hasCreds -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Refusals checked on every render (deployment.yaml includes this first):
+- The chart passes no static API key any more. A value that carries a key is
+  refused: a non-empty apiKey.value or apiKey.existingSecret, or any other
+  non-empty apiKey. An all-empty block left in an older values file passes,
+  like an empty QOD_API_KEY on the manager.
+- An admin password is required: it seeds the admin on first boot, and
+  nobody can log in without one.
+- env.QOD_POD_IP is the chart's own (downward API): a user value would win
+  over it and name another address for the nodes' verdict calls.
+- env.QOD_INTERNAL_URL is refused with more than one replica: each replica
+  names itself through its pod IP, and one shared URL would not.
+*/}}
+{{- define "qod.validateValues" -}}
+{{- with .Values.apiKey }}
+{{- $key := . }}
+{{- if kindIs "map" $key }}
+{{- $key = printf "%s%s" (get $key "value" | default "" | toString | trim) (get $key "existingSecret" | default "" | toString | trim) }}
+{{- end }}
+{{- if trim (toString $key) }}
+{{- fail "apiKey was removed: the manager no longer accepts a static API key; use a personal access token" }}
+{{- end }}
+{{- end }}
+{{- $_ := required "admin.password or admin.existingSecret is required: it seeds the admin on first boot, and nobody can log in without one" (or .Values.admin.existingSecret .Values.admin.password) }}
+{{- if hasKey (.Values.env | default dict) "QOD_POD_IP" }}
+{{- fail "env.QOD_POD_IP must stay unset: the chart sets it from the downward API (status.podIP), and nodes call the address it names for their verdicts" }}
+{{- end }}
+{{- if and (gt (.Values.replicaCount | int) 1) (hasKey (.Values.env | default dict) "QOD_INTERNAL_URL") }}
+{{- fail "env.QOD_INTERNAL_URL must stay unset when replicaCount > 1: each replica's decide URL comes from its own pod IP (QOD_POD_IP), and one shared URL would send every node's verdict calls to a single replica" }}
+{{- end }}
 {{- end -}}

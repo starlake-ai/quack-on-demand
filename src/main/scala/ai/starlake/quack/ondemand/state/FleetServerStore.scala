@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.PoolKey
 import io.circe.Codec
+import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.generic.semiauto.deriveCodec
 import java.time.Instant
 
@@ -16,14 +17,23 @@ final case class FleetAssignment(
     token: String,
     kind: String,
     env: Map[String, String],
-    dbInitSql: String,
+    // The manager's own pre-attach SQL: the pool's cpu/memory as DuckDB SETs (NodeResourceSql).
+    resourceSql: String = "",
     objectStoreSql: String,
     extraSetupSql: String,
-    lockdownSql: String
+    // The tenant-db's and the pool's initSql, each with whether it runs as written (written by a
+    // superuser or the manager) or under qod-node's tenant initSql allowlist.
+    tenantDbInitSql: String = "",
+    tenantDbInitTrusted: Boolean = false,
+    tenantPoolInitSql: String = "",
+    tenantPoolInitTrusted: Boolean = false
 )
 object FleetAssignment:
-  given Codec[PoolKey]         = deriveCodec
-  given Codec[FleetAssignment] = deriveCodec
+  given Codec[PoolKey] = deriveCodec
+  // Defaults for a field a stored assignment lacks: one written before a field existed decodes,
+  // and an initSql it carried under an older field name (dbInitSql) is dropped, never trusted.
+  private given Configuration  = Configuration.default.withDefaults
+  given Codec[FleetAssignment] = ConfiguredCodec.derived
 
 /** The node block of a heartbeat. */
 final case class NodeReport(

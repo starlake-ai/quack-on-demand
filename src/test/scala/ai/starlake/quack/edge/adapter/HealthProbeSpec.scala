@@ -21,7 +21,8 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
     val probe   = new HealthProbe(
       tracker = tracker,
       pingFn = n => IO.pure(results(n.nodeId)),
-      interval = 50.millis
+      interval = 50.millis,
+      afterTick = _ => ()
     )
     val nodes = () => List(node("ok"), node("bad"))
     val fiber = probe.start(nodes).unsafeRunSync()
@@ -38,6 +39,7 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
       tracker = tracker,
       pingFn = n => IO.pure(results(n.nodeId)),
       interval = 50.millis,
+      afterTick = _ => (),
       onHealthy = n => IO.delay { seen.add(n.nodeId); () }
     )
     val fiber = probe.start(() => List(node("ok"), node("bad"))).unsafeRunSync()
@@ -52,9 +54,38 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
       tracker = tracker,
       pingFn = _ => IO.pure(true),
       interval = 50.millis,
+      afterTick = _ => (),
       onHealthy = _ => IO.raiseError(new RuntimeException("scrape blew up"))
     )
     val fiber = probe.start(() => List(node("ok"))).unsafeRunSync()
     Thread.sleep(200)
     fiber.cancel.unsafeRunSync()
     tracker.snapshot("ok").healthy shouldBe true
+
+  it should "hand afterTick the ids it listed, after pinging them, and survive its failure" in:
+    val tracker          = new NodeLoadTracker
+    val pinged           = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+    val ticks            = new java.util.concurrent.ConcurrentLinkedQueue[(Set[String], Boolean)]()
+    @volatile var listed = List(node("a"), node("b"))
+    val probe            = new HealthProbe(
+      tracker = tracker,
+      pingFn = n => IO.delay { pinged.add(n.nodeId); true },
+      interval = 50.millis,
+      afterTick = ids => {
+        // Every id handed over was pinged first in the same tick.
+        ticks.add((ids, ids.forall(pinged.contains)))
+        throw new RuntimeException("prune blew up")
+      }
+    )
+    val fiber = probe.start(() => listed).unsafeRunSync()
+    Thread.sleep(150)
+    listed = List(node("b"))
+    Thread.sleep(200)
+    fiber.cancel.unsafeRunSync()
+    import scala.jdk.CollectionConverters.*
+    val seen = ticks.asScala.toList
+    seen.map(_._1) should contain(Set("a", "b"))
+    seen.last._1 shouldBe Set("b")
+    seen.forall(_._2) shouldBe true
+    // The loop kept ticking although afterTick threw every time.
+    seen.size should be >= 3

@@ -1,0 +1,28 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0054-data-path-policy-version
+      author: qod
+      changes:
+        # The database data folders are a deny set every tenant's verdicts depend on (CONTRACT
+        # Addendum 4 item 23): a tenant-db created, deleted, or whose metastore or data path changed,
+        # and a managed prefix added, removed or purged, move every tenant's policy version, so a
+        # verdict a node holds (a prepared statement's included) cannot outlive a new data folder.
+        # Each tenant gets a fresh value of the 0050 sequence, so versions only ever move up.
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE OR REPLACE FUNCTION qod_bump_every_policy_version() RETURNS trigger
+              LANGUAGE plpgsql AS $$
+              BEGIN
+                UPDATE qodstate_tenant SET policy_version = nextval('qodstate_policy_version_seq');
+                RETURN NULL;
+              END;
+              $$
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_data_path_ins_del AFTER INSERT OR DELETE ON qodstate_tenant_db FOR EACH ROW EXECUTE FUNCTION qod_bump_every_policy_version()
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_data_path_upd AFTER UPDATE ON qodstate_tenant_db FOR EACH ROW WHEN (OLD.metastore_params IS DISTINCT FROM NEW.metastore_params OR OLD.data_path IS DISTINCT FROM NEW.data_path) EXECUTE FUNCTION qod_bump_every_policy_version()
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_data_path_ins_del AFTER INSERT OR DELETE ON qodstate_managed_prefix FOR EACH ROW EXECUTE FUNCTION qod_bump_every_policy_version()
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_data_path_purge AFTER UPDATE ON qodstate_managed_prefix FOR EACH ROW WHEN (OLD.purged_at IS DISTINCT FROM NEW.purged_at OR OLD.prefix IS DISTINCT FROM NEW.prefix) EXECUTE FUNCTION qod_bump_every_policy_version()

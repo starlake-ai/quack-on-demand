@@ -86,7 +86,7 @@ datasets/
 project/.bloop/
 project/project/
 
-# Local docker-compose overrides - may hold real PG_PASSWORD/ADMIN_PASSWORD/API_KEY.
+# Local docker-compose overrides - may hold real PG_PASSWORD/ADMIN_PASSWORD/SESSION_JWT_SECRET.
 # .env.example is the tracked template.
 .env
 .env.local

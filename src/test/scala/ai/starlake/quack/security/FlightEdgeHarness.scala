@@ -3,9 +3,9 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.policy.ProtectedWriteGuard
-import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -54,10 +54,11 @@ object FlightEdgeHarness:
           endpoint: String,
           token: String,
           sql: String,
-          session: Option[String]
+          session: Option[String],
+          authorize: () => String
       ): IO[QuackResponse] =
         IO(nodeQuery(sql))
-    new QuackHttpAdapter(client, tracker)
+    new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
   // ------------------------------------------------------------------
   // Find a free port on loopback by briefly binding a ServerSocket to
@@ -103,12 +104,9 @@ object FlightEdgeHarness:
       FlightClient.builder(allocator, loc).build()
 
   /** Optional statement-pipeline wiring for specs that run statements through the edge. Every
-    * default is the harness's historical behavior (allow-all validator, no OPA, inert guards, a
-    * one-row stub node, no spawned nodes), so callers that only exercise the handshake are
-    * unaffected.
+    * default is the harness's historical behavior (no OPA, inert guards, a one-row stub node, no
+    * spawned nodes), so callers that only exercise the handshake are unaffected.
     *
-    * @param validator
-    *   built from the harness's supervisor, e.g. `BootFactories.aclValidator(...)`.
     * @param opa
     *   wired into the supervisor through `wireOpa` before the server starts.
     * @param nodeQuery
@@ -117,19 +115,17 @@ object FlightEdgeHarness:
     *   run one reconcile pass after `restore()` so seeded pools get routable (stub) nodes.
     */
   final case class RouterWiring(
-      validator: PoolSupervisor => StatementValidator = _ => StatementValidator.allowAll,
       opa: Option[OpaPoolAccess] = None,
       nodeQuery: String => QuackResponse = _ => TestArrow.okResponse(),
       columnPolicyRewriter: ColumnPolicyRewriter = new ColumnPolicyRewriter(
         new ColumnCatalog.MapCatalog(Map.empty)
       ),
-      protectedWriteGuard: ProtectedWriteGuard = ProtectedWriteGuard.disabled,
-      lockdownFor: PoolSupervisor => PoolKey => Boolean = _ => _ => false,
-      deniedBuckets: PoolSupervisor => () => Set[String] = _ => () => Set.empty,
       journal: EventJournal = EventJournal.noop,
       spawnNodes: Boolean = false,
-      metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-        new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false)
+      /** Required, like the router's: a default would let a spec forget it and narrow nothing. */
+      metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter,
+      /** Required, like the router's: a default would let a spec forget it and screen nothing. */
+      protectedWriteGuard: ProtectedWriteGuard
   )
 
   /** Boot a [[FlightEdgeServer]] on an ephemeral loopback port.
@@ -138,18 +134,22 @@ object FlightEdgeHarness:
     *   Seeded in-memory control plane store (use [[SecurityFixtures.freshStore]]).
     * @param enableProviders
     *   When `true` (default), the [[InMemoryAuthService.Service]] validates credentials against
-    *   bcrypt hashes in the store. When `false`, the service reports `hasProviders = false` and
-    *   lets the Flight server fall through to the "trust-the-client" legacy path.
+    *   bcrypt hashes in the store. When `false`, the service reports `hasProviders = false`, and
+    *   the edge refuses every handshake.
     * @param tls
     *   When `true`, a self-signed cert is auto-generated into a unique per-invocation tempdir via
     *   [[FlightEdgeServer.ensureCertFiles]]. When `false` (default), the server listens on plain
     *   gRPC.
+    * @param authService
+    *   the authentication service the edge validates credentials with, in place of the in-memory
+    *   one `enableProviders` configures (e.g. a real chain over a stub identity provider).
     */
   def boot(
       store: InMemoryControlPlaneStore,
       enableProviders: Boolean = true,
       tls: Boolean = false,
-      wiring: RouterWiring = RouterWiring()
+      wiring: RouterWiring,
+      authService: Option[AuthenticationService] = None
   ): Harness =
     val port = ephemeralPort()
     val host = "127.0.0.1"
@@ -186,18 +186,17 @@ object FlightEdgeHarness:
       sessions = sessions,
       tracker = tracker,
       adapter = adapter,
-      validator = wiring.validator(sup),
       history = history,
       stmtInstruments = si,
       columnPolicyRewriter = wiring.columnPolicyRewriter,
       journal = wiring.journal,
-      lockdownFor = wiring.lockdownFor(sup),
-      deniedBuckets = wiring.deniedBuckets(sup),
       protectedWriteGuard = wiring.protectedWriteGuard,
       metadataFilterRewriter = wiring.metadataFilterRewriter
     )
 
-    val authSvc = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    val authSvc = authService.getOrElse(
+      new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    )
 
     val lookupPool: (String, String) => Either[String, String] =
       (tenant, pool) =>
@@ -227,7 +226,8 @@ object FlightEdgeHarness:
       authSvc,
       lookupPool,
       resolveTenant,
-      authorize
+      authorize,
+      sup.policyVersions
     )
     srv.start()
 

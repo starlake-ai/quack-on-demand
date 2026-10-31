@@ -1,0 +1,1 @@
+QoD: statement uses a temporary object inside a secure view, which QoD does not support

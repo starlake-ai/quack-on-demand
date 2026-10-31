@@ -34,6 +34,21 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
       rs.getString(1)
     finally c.close()
 
+  private def quiet: PrintStream = new PrintStream(new ByteArrayOutputStream())
+
+  private val ReEnabled = "was disabled and is now enabled; its personal access tokens work again"
+  private val LeftDisabled = "is disabled and was left disabled"
+
+  private def disable(url: String, username: String): Unit =
+    val c = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      c.createStatement()
+        .executeUpdate(
+          s"UPDATE qodstate_user SET enabled = FALSE WHERE tenant IS NULL AND username = '$username'"
+        )
+      ()
+    finally c.close()
+
   "reset" should "rehash, clear lockout and honor --must-change" in withFreshDb { url =>
     val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     try
@@ -45,7 +60,14 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
             "UPDATE qodstate_user SET failed_attempts = 7, locked_at = NOW() WHERE username = 'root'"
           )
       finally c.close()
-      AdminResetCli.reset(store, "root", "new-pw", mustChange = true) shouldBe 0
+      AdminResetCli.reset(
+        store,
+        "root",
+        "new-pw",
+        mustChange = true,
+        reenable = false,
+        quiet
+      ) shouldBe 0
       val hash = column(url, "SELECT password_hash FROM qodstate_user WHERE username = 'root'")
       BCrypt.verifyer().verify("new-pw".toCharArray, hash).verified shouldBe true
       column(url, "SELECT failed_attempts FROM qodstate_user WHERE username = 'root'") shouldBe "0"
@@ -64,9 +86,107 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
     val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     try
       store.upsertUser(Some("acme"), "alice", "pw", "user")
-      AdminResetCli.reset(store, "nobody", "x", mustChange = false) shouldBe 1
-      AdminResetCli.reset(store, "alice", "x", mustChange = false) shouldBe 1
+      AdminResetCli.reset(
+        store,
+        "nobody",
+        "x",
+        mustChange = false,
+        reenable = true,
+        quiet
+      ) shouldBe 1
+      AdminResetCli.reset(
+        store,
+        "alice",
+        "x",
+        mustChange = false,
+        reenable = true,
+        quiet
+      ) shouldBe 1
     finally store.close()
+  }
+
+  it should "re-enable a disabled superuser named explicitly, and say so" in withFreshDb { url =>
+    val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      store.upsertUser(None, "root", "old-pw", "admin")
+      disable(url, "root")
+      val out = new ByteArrayOutputStream()
+      AdminResetCli.reset(
+        store,
+        "root",
+        "new-pw",
+        mustChange = false,
+        reenable = true,
+        new PrintStream(out)
+      ) shouldBe 0
+      column(
+        url,
+        "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'root'"
+      ) shouldBe "t"
+      out.toString should include(s"superuser 'root' $ReEnabled")
+    finally store.close()
+  }
+
+  it should "reset a disabled superuser's password but leave it disabled without reenable" in
+    withFreshDb { url =>
+      val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        store.upsertUser(None, "root", "old-pw", "admin")
+        disable(url, "root")
+        val out = new ByteArrayOutputStream()
+        AdminResetCli.reset(
+          store,
+          "root",
+          "new-pw",
+          mustChange = false,
+          reenable = false,
+          new PrintStream(out)
+        ) shouldBe 0
+        column(
+          url,
+          "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'root'"
+        ) shouldBe "f"
+        out.toString should include(
+          s"superuser 'root' $LeftDisabled; rerun qod admin reset-password --username root " +
+            "to re-enable it"
+        )
+      finally store.close()
+    }
+
+  it should "leave a disabled tenant user of the same name disabled and untouched" in withFreshDb {
+    url =>
+      val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        store.upsertUser(None, "root", "old-pw", "admin")
+        store.upsertUser(Some("acme"), "root", "tenant-pw", "user")
+        val c = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
+        try
+          c.createStatement()
+            .executeUpdate("UPDATE qodstate_user SET enabled = FALSE WHERE username = 'root'")
+          ()
+        finally c.close()
+        AdminResetCli.reset(
+          store,
+          "root",
+          "new-pw",
+          mustChange = false,
+          reenable = true,
+          quiet
+        ) shouldBe 0
+        column(
+          url,
+          "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'root'"
+        ) shouldBe "t"
+        column(
+          url,
+          "SELECT enabled FROM qodstate_user WHERE tenant IS NOT NULL AND username = 'root'"
+        ) shouldBe "f"
+        val tenantHash = column(
+          url,
+          "SELECT password_hash FROM qodstate_user WHERE tenant IS NOT NULL AND username = 'root'"
+        )
+        BCrypt.verifyer().verify("tenant-pw".toCharArray, tenantHash).verified shouldBe true
+      finally store.close()
   }
 
   "run" should "refuse a missing username and an empty stdin password" in {
@@ -79,7 +199,9 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
         new PrintStream(err)
       )
     run(Nil, "pw\n") shouldBe 1
-    err.toString should include("usage: admin reset-password <username>... [--must-change]")
+    err.toString should include(
+      "usage: admin reset-password <username>... [--must-change] [--reenable]"
+    )
     run(List("root"), "\n") shouldBe 1
     err.toString should include("empty password")
   }
@@ -224,3 +346,47 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
       "if the first boot never created it, export QOD_ADMIN_PASSWORD and restart the manager once"
     )
   }
+
+  it should "re-enable a disabled superuser with --reenable, as qod admin reset-password " +
+    "--username runs it" in withFreshDb { url =>
+      val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try store.upsertUser(None, "root", "old-pw", "admin")
+      finally store.close()
+      disable(url, "root")
+      val (code, out, _) = runOnDb(url, List("root", "--reenable"))
+      code shouldBe 0
+      out should include("password reset for superuser 'root'")
+      out should include(s"superuser 'root' $ReEnabled")
+      column(
+        url,
+        "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'root'"
+      ) shouldBe "t"
+      verifies(url, "root", "new-pw") shouldBe true
+    }
+
+  it should "leave a disabled configured admin disabled without --reenable, still resetting " +
+    "its password" in withFreshDb { url =>
+      val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        store.upsertUser(None, "admin@localhost.local", "old-pw", "admin")
+        store.upsertUser(None, "admin", "old-pw", "admin")
+      finally store.close()
+      disable(url, "admin")
+      val (code, out, _) = runOnDb(url, List("admin@localhost.local", "admin"))
+      code shouldBe 0
+      out should include("password reset for superuser 'admin@localhost.local'")
+      out should include("password reset for superuser 'admin'")
+      out should include(
+        s"superuser 'admin' $LeftDisabled; rerun qod admin reset-password --username admin " +
+          "to re-enable it"
+      )
+      // An account that was already enabled gets only the password line.
+      out should not include "superuser 'admin@localhost.local' is disabled"
+      out should not include ReEnabled
+      column(
+        url,
+        "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'admin'"
+      ) shouldBe "f"
+      verifies(url, "admin", "new-pw") shouldBe true
+      verifies(url, "admin@localhost.local", "new-pw") shouldBe true
+    }

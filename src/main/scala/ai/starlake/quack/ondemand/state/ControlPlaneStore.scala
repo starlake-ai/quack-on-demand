@@ -12,7 +12,9 @@ import ai.starlake.quack.model.{
   SnapshotTag,
   Tenant,
   TenantAcl,
-  TenantDb
+  TenantDb,
+  TenantLocation,
+  UserS3Credential
 }
 
 /** Per-entity persistence for the normalized control plane (`qodstate_tenant`,
@@ -29,6 +31,11 @@ trait ControlPlaneStore:
     * on INSERT only: an existing row's acl changes ONLY through [[updateTenantAcl]], so a full-row
     * upsert built from a stale read (setTenantAuth, setTenantDisabled, manifest import) can never
     * revert a concurrent acl change.
+    *
+    * `authClientSecret` is the opposite: it is written in both arms, in the same statement as
+    * `auth_config`, and no method writes it on its own. The secret is bound to the `issuerUrl` it
+    * was saved with, so the two change together: a stale full row reverts both at once, and no
+    * reader ever sees a secret next to an issuer it was not saved for.
     */
   def upsertTenant(t: Tenant): Unit
 
@@ -37,6 +44,11 @@ trait ControlPlaneStore:
     */
   def updateTenantAcl(tenantId: String, acl: TenantAcl): Unit
   def listTenants(): List[Tenant]
+
+  /** Every tenant's policy version (tenant id -> version), which Liquibase 0050's triggers bump on
+    * every change to the tenant's RBAC rows and ACL settings. Session handles carry it.
+    */
+  def policyVersions(): Map[String, Long]
   def deleteTenant(id: String): Unit
 
   /** Bootstrap a new tenant atomically: the tenant row plus every [[BuiltinRbac]] row (roles,
@@ -131,6 +143,12 @@ trait ControlPlaneStore:
     */
   def dueManagedPrefixes(now: java.time.Instant): List[ManagedPrefixRow]
 
+  /** Every row whose objects are not purged yet, live or dropped, ordered by id. Feeds the location
+    * checker's data-folder deny set (edge.authz.location.LiveLocationRules): a dropped managed
+    * database's prefix stays a data folder for its whole retention window.
+    */
+  def unpurgedManagedPrefixes(): List[ManagedPrefixRow]
+
   /** Stamp `purgedAt` once the sweep has removed the underlying objects. No-op when `id` is
     * unknown.
     */
@@ -138,6 +156,42 @@ trait ControlPlaneStore:
 
   /** Look up a single tombstone row by id. */
   def managedPrefix(id: String): Option[ManagedPrefixRow]
+
+  // ---------------- Tenant authorized locations (Liquibase 0051) ----------------
+
+  /** Insert `l`. False, with nothing written, when its tenant already authorizes that location. */
+  def insertTenantLocation(l: TenantLocation): Boolean
+
+  /** Delete location `id` of tenant `tenantId` and return it; None when that tenant has no such
+    * location (an id of another tenant included: nothing is deleted).
+    */
+  def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation]
+
+  /** `tenantId`'s locations, by location. */
+  def listTenantLocations(tenantId: String): List[TenantLocation]
+
+  /** Every tenant's locations, by tenant then location. */
+  def listAllTenantLocations(): List[TenantLocation]
+
+  // ---------------- Users' own S3 credentials (Liquibase 0052) ----------------
+
+  /** Store `c` for its user and scope: a new row with `c`'s id, or, when the user already holds
+    * that scope, the existing row with `c`'s keys, its id and `createdAt` kept and its `updatedAt`
+    * moved strictly forward (at least 1 ms, so a session handle's digest always changes). Returns
+    * the stored row; `c`'s own times are ignored.
+    */
+  def putUserS3Credential(c: UserS3Credential): UserS3Credential
+
+  /** Delete credential `id` of user `userId` and return it; None when that user has no such
+    * credential (an id of another user included: nothing is deleted).
+    */
+  def deleteUserS3Credential(userId: String, id: String): Option[UserS3Credential]
+
+  /** `userId`'s credentials, by scope. */
+  def listUserS3Credentials(userId: String): List[UserS3Credential]
+
+  /** Every user's credentials, by user then scope. */
+  def listAllUserS3Credentials(): List[UserS3Credential]
 
   /** Insert/update a running node under the given pool surrogate id. `RunningNode.poolKey` is a
     * natural key (tenant/pool) carried by the runtime and does not always match a single Postgres

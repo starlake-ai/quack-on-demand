@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"alter","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"view","name":"pv","schema":"main","via":null}],"settings":[],"statement":"ALTER","v":1}

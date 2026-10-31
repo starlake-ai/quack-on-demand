@@ -1,0 +1,29 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0051-tenant-location
+      author: qod
+      changes:
+        # The local folders a tenant authorized for its non-superuser users' file access
+        # (in-engine authorization, decision 15), under the operator's root. location is stored
+        # normalized: an absolute folder ending in '/'. S3 is per user (decision 23, Liquibase 0052),
+        # never a tenant location: kind allows 'local' only.
+        - createTable:
+            tableName: qodstate_tenant_location
+            columns:
+              - column: { name: id,           type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_id,    type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_tenant_location_tenant, references: 'qodstate_tenant(id)', deleteCascade: true } }
+              - column: { name: kind,         type: TEXT, constraints: { nullable: false } }
+              - column: { name: location,     type: TEXT, constraints: { nullable: false } }
+              - column: { name: created_at,   type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+              - column: { name: created_by,   type: TEXT }
+        - sql:
+            sql: "ALTER TABLE qodstate_tenant_location ADD CONSTRAINT qodstate_tenant_location_kind_check CHECK (kind IN ('local'))"
+        - addUniqueConstraint:
+            tableName:      qodstate_tenant_location
+            columnNames:    tenant_id, location
+            constraintName: qodstate_tenant_location_tenant_location_unique
+        # A location change moves the tenant's policy version (Liquibase 0050's function).
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_tenant_location FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_tenant_location FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('tenant_id')

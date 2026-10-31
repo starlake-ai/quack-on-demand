@@ -23,12 +23,14 @@ def run_demo(ctx: typer.Context, version: str | None, jar: Path | None) -> None:
     try:
         duckdb_bin = launcher.ensure_duckdb_cli(app_home)
         libduckdb = launcher.ensure_libduckdb(app_home)
+        node_bin = launcher.node_binary(jar_path, app_home)
     except Exception as e:
-        typer.echo(f"could not provision duckdb: {e}", err=True)
+        typer.echo(f"could not provision the node runtime: {e}", err=True)
         raise typer.Exit(1)
     spawn_sh, spawn_ps1 = launcher.materialize_spawn_scripts(app_home / "scripts")
     env = launcher.runtime_env(
-        dict(os.environ), app_home, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb
+        dict(os.environ), duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb,
+        qod_node_bin=node_bin,
     )
 
     _exec(launcher.build_jar_command(java, str(jar_path), ["demo", *ctx.args]), env)

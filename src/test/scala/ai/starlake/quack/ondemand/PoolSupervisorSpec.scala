@@ -101,26 +101,22 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   /** Supervisor + tenant `acme` + tenant-db `acme_default` carrying the
     * test metastore. Pool tests can call `createPool(key, ...)` directly. */
-  private def freshSupervisor(lockdownEnabled: Boolean = false) =
+  private def freshSupervisor() =
     val sup = new PoolSupervisor(
       fakeBackend(),
       new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      lockdownEnabled = lockdownEnabled
+      new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
     sup
 
-  private def freshSupervisorWithBackend(
-      lockdownEnabled: Boolean = false
-  ): (PoolSupervisor, CapturingBackend) =
+  private def freshSupervisorWithBackend(): (PoolSupervisor, CapturingBackend) =
     val b   = new CapturingBackend
     val sup = new PoolSupervisor(
       b,
       new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      lockdownEnabled = lockdownEnabled
+      new InMemoryControlPlaneStore()
     )
     (sup, b)
 
@@ -130,65 +126,167 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       : (PoolSupervisor, CapturingBackend, InMemoryControlPlaneStore) =
     val b   = new CapturingBackend
     val st  = new InMemoryControlPlaneStore()
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, st, lockdownEnabled = false)
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, st)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
       .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
       .unsafeRunSync()
     (sup, b, st)
 
-  // ---------- duckLakeBuckets ----------
-
-  "PoolSupervisor.duckLakeBuckets" should "collect bucket keys from tenant-db dataPaths and the default metastore" in:
+  "PoolSupervisor.dataPaths" should "list tenant-db, metastore and default data paths, and drop a deleted one" in:
     val sup = new PoolSupervisor(
       fakeBackend(),
       new NodeLoadTracker,
       new InMemoryControlPlaneStore(),
-      defaultMetastore = Map("dataPath" -> "s3://root-lake/ducklake")
+      defaultMetastore = Map("dataPath" -> "./ducklake/tpch")
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    // DuckDbFile kind: carries a dataPath without the DuckLake Postgres provisioning
-    // this unit test cannot run; bucket derivation is kind-agnostic.
+    sup
+      .createTenantDb(
+        "acme",
+        "sales",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_sales", "schemaName" -> "main", "dataPath" -> "gs://ops-lake/x"),
+        dataPath = "/var/data/sales/duck.db"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sup.dataPaths().toSet shouldBe
+      Set(
+        "./ducklake/tpch",
+        "/var/data/sales/duck.db",
+        "/var/data/sales/duck.db" + ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker,
+        "gs://ops-lake/x"
+      )
+    val dbName =
+      sup.listTenantDbsByTenant("acme").find(_.dataPath.startsWith("/var/data")).get.name
+    sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
+    sup.dataPaths() shouldBe List("./ducklake/tpch")
+
+  /** A supervisor whose store holds tenant `acme` and the given tenant-db rows, hydrated through
+    * `restore()`: rows with no data path of their own reach the cache that way (manifest import, a
+    * legacy row), never through createTenantDb's validator. */
+  private def supWithRows(defaults: Map[String, String], rows: List[TenantDb]): PoolSupervisor =
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, st, defaultMetastore = defaults)
+    st.upsertTenant(Tenant("acme", "acme"))
+    rows.foreach(st.upsertTenantDb)
+    sup.restore()
+    sup
+
+  private def pathless(name: String, kind: TenantDbKind = TenantDbKind.DuckLake): TenantDb =
+    TenantDb(id = s"td-$name", tenantId = "acme", name = name, kind = kind,
+      metastore = Map.empty, dataPath = "")
+
+  /** The location rules `sup` feeds a user holding an S3 credential for `s3://lake/`, of a tenant
+    * that authorized the local folder `/srv/qod-files/acme/lake/`. */
+  private def rulesOf(sup: PoolSupervisor) =
+    val locs = List(
+      ai.starlake.quack.model.TenantLocation(
+        "tl-2", "acme", "local", "/srv/qod-files/acme/lake/", 0L, None)
+    )
+    new ai.starlake.quack.edge.authz.location.LiveLocationRules(
+      dataPaths = () => sup.dataPaths(),
+      unpurgedPrefixes = () => Nil,
+      tenantLocations = _ => locs,
+      userScopes = _ => Right(List("s3://lake/")),
+      filesRoot = Some("/srv/qod-files"),
+      sameHost = false
+    ).rulesFor("acme", "u-1").toOption.get
+
+  private def checked(path: String, rules: ai.starlake.quack.edge.authz.location.LocationRules) =
+    ai.starlake.quack.edge.authz.location.LocationChecker.check(path, rules)
+
+  it should "deny each default-path DuckLake database at its own folder beside the default" in:
+    val sup = supWithRows(Map("dataPath" -> "s3://lake/qod/tpch"), List(pathless("a"), pathless("b")))
+    sup.dataPaths().toSet shouldBe Set("s3://lake/qod/a", "s3://lake/qod/b", "s3://lake/qod/tpch")
+    val rules = rulesOf(sup)
+    val denied = ai.starlake.quack.edge.authz.location.LocationChecker.DataFolder
+    checked("s3://lake/qod/a/main/t/x.parquet", rules) shouldBe
+      Left(s"s3://lake/qod/a/main/t/x.parquet $denied")
+    checked("s3://lake/qod/b/main/t/x.parquet", rules) shouldBe
+      Left(s"s3://lake/qod/b/main/t/x.parquet $denied")
+    checked("s3://lake/qod/tpch/x.parquet", rules).isLeft shouldBe true
+    checked("s3://lake/qod/other-file.csv", rules) shouldBe Right(())
+
+  it should "deny each default-path DuckLake database beside a local default too" in:
+    val sup = supWithRows(
+      Map("dataPath" -> "/srv/qod-files/acme/lake/tpch"),
+      List(pathless("a"), pathless("b"))
+    )
+    val rules  = rulesOf(sup)
+    val denied = ai.starlake.quack.edge.authz.location.LocationChecker.DataFolder
+    checked("/srv/qod-files/acme/lake/a/main/t/x.parquet", rules) shouldBe
+      Left(s"/srv/qod-files/acme/lake/a/main/t/x.parquet $denied")
+    checked("/srv/qod-files/acme/lake/b/x.parquet", rules) shouldBe
+      Left(s"/srv/qod-files/acme/lake/b/x.parquet $denied")
+    checked("/srv/qod-files/acme/lake/other-file.csv", rules) shouldBe Right(())
+
+  it should "count a DuckLake or duckdb-file database whose nodes get no data path as unplaced" in:
+    val unplaced = ai.starlake.quack.edge.authz.location.DataFolders.Unplaced
+    val sup = supWithRows(
+      Map.empty,
+      List(pathless("a"), pathless("f", TenantDbKind.DuckDbFile), pathless("m", TenantDbKind.InMemory))
+    )
+    sup.dataPaths() shouldBe List(unplaced)
+    val rules = rulesOf(sup)
+    checked("/srv/qod-files/acme/lake/x.csv", rules) shouldBe
+      Left(
+        "/srv/qod-files/acme/lake/x.csv is a database data folder (a database whose data path " +
+          "this manager cannot place may lie there)"
+      )
+    checked("s3://lake/x.csv", rules) shouldBe Right(())
+    supWithRows(Map.empty, List(pathless("m", TenantDbKind.InMemory))).dataPaths() shouldBe Nil
+
+  it should "name each unplaced tenant-db in one WARN, however often the rules are read" in:
+    val (_, events) =
+      ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(classOf[PoolSupervisor].getName) {
+        val sup = supWithRows(Map.empty, List(pathless("a"), pathless("f", TenantDbKind.DuckDbFile)))
+        (1 to 3).foreach(_ => rulesOf(sup))
+        sup.restore()
+        (1 to 3).foreach(_ => rulesOf(sup))
+      }
+    val warned = events.filter(e =>
+      e.getLevel == ch.qos.logback.classic.Level.WARN &&
+        e.getFormattedMessage.startsWith("location rules: tenant-db ")
+    )
+    warned.size shouldBe 2
+    warned.map(_.getFormattedMessage).exists(_.contains("acme/a (td-a)")) shouldBe true
+    warned.map(_.getFormattedMessage).exists(_.contains("acme/f (td-f)")) shouldBe true
+
+  it should "name the owners of a data path as the deny set lists it" in:
+    // Phase C ledger T5C-2: the location rules' WARN for a path they cannot place names these.
+    val sup = supWithRows(
+      Map("dataPath" -> "./lake/qod/default"),
+      List(
+        pathless("a"),
+        pathless("f", TenantDbKind.DuckDbFile).copy(dataPath = "./files/f.duckdb")
+      )
+    )
+    sup.dataPathOwners("./lake/qod/a") shouldBe List("tenant-db acme/a (td-a)")
+    sup.dataPathOwners(" ./files/f.duckdb*") shouldBe List("tenant-db acme/f (td-f)")
+    sup.dataPathOwners("./lake/qod/default") shouldBe List("the default metastore")
+    sup.dataPathOwners("./elsewhere") shouldBe Nil
+
+  it should "derive the data paths once, and again only after a tenant-db change" in:
+    val sup   = supWithRows(Map("dataPath" -> "s3://lake/qod/tpch"), List(pathless("a")))
+    val first = sup.dataPaths()
+    sup.dataPaths() should be theSameInstanceAs first
     sup
       .createTenantDb(
         "acme",
         "sales",
         TenantDbKind.DuckDbFile,
         Map("dbName" -> "acme_sales", "schemaName" -> "main"),
-        dataPath = "s3://acme-lake/acme_sales-a1b2c3d4/duck.db"
+        dataPath = "/var/data/sales/duck.db"
       )
       .unsafeRunSync()
       .isRight shouldBe true
-    // Metastore-carried dataPath contributes too; the local file dataPath carries no bucket.
-    sup
-      .createTenantDb(
-        "acme",
-        "dev",
-        TenantDbKind.DuckDbFile,
-        Map("dbName" -> "acme_dev", "schemaName" -> "main", "dataPath" -> "gs://ops-lake/x"),
-        dataPath = "/var/data/dev/duck.db"
-      )
-      .unsafeRunSync()
-      .isRight shouldBe true
-    sup.duckLakeBuckets() shouldBe Set("acme-lake", "ops-lake", "root-lake")
-
-  it should "drop a bucket when its tenant-db is deleted" in:
-    val sup = freshSupervisor()
-    sup
-      .createTenantDb(
-        "acme",
-        "gone",
-        TenantDbKind.DuckDbFile,
-        Map("dbName" -> "acme_gone", "schemaName" -> "main"),
-        dataPath = "s3://gone-lake/acme_gone-ffffffff/duck.db"
-      )
-      .unsafeRunSync()
-      .isRight shouldBe true
-    sup.duckLakeBuckets() shouldBe Set("gone-lake")
-    val dbName =
-      sup.listTenantDbsByTenant("acme").find(_.dataPath.startsWith("s3://gone-lake")).get.name
-    sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
-    sup.duckLakeBuckets() shouldBe Set.empty
+    val second = sup.dataPaths()
+    second should not be theSameInstanceAs(first)
+    second should contain("/var/data/sales/duck.db")
+    sup.restore()
+    sup.dataPaths() should contain("/var/data/sales/duck.db")
 
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
 
@@ -218,62 +316,17 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     )
 
-  // ---- effectiveLockdown: per-pool tri-state override against the global flag ----
-
-  "PoolSupervisor.effectiveLockdown" should "resolve the tri-state against the global flag" in:
-    val supOn  = freshSupervisor(lockdownEnabled = true)
-    val supOff = freshSupervisor(lockdownEnabled = false)
-    supOn.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    supOff.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    supOn.effectiveLockdown(key) shouldBe true    // inherit + global on
-    supOff.effectiveLockdown(key) shouldBe false  // inherit + global off
-    supOn.setPoolLockdown(key, Some(false)).unsafeRunSync().isRight shouldBe true
-    supOff.setPoolLockdown(key, Some(true)).unsafeRunSync().isRight shouldBe true
-    supOn.effectiveLockdown(key) shouldBe false   // off override beats global on
-    supOff.effectiveLockdown(key) shouldBe true   // on override beats global off
-    // Unknown pool falls back to the global flag (maintenance-node path).
-    supOn.effectiveLockdown(PoolKey("acme", "acme_default", "nope")) shouldBe true
-
-  it should "persist under the per-pool advisory lock so it serializes with reconcile's respawn" in:
-    // Regression: setPoolLockdown used to call store.upsertPool directly,
-    // never going through `locks.withLock`. A real PgPoolLocker never
-    // serialized that write against reconcile's respawn pass (which reads
-    // effectiveLockdown while building the fresh NodeSpec under the SAME
-    // lock), so a respawn racing the REST call could register a node off the
-    // pre-update value. A true cross-process race needs a real Postgres
-    // PgPoolLocker (see TwoSupervisorConcurrencySpec for that pattern) --
-    // here we only assert the write now routes through whichever PoolLocker
-    // the supervisor is wired with, and that it still returns the updated
-    // Pool.
-    var lockCalls = 0
-    val locker = new PoolLocker:
-      def withLock[A](k: PoolKey)(io: IO[A]): IO[A] =
-        IO.delay { lockCalls += 1 } *> io
-    val sup = new PoolSupervisor(
-      fakeBackend(),
-      new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      locks = locker
-    )
+  "a spawned node" should "carry no engine lockdown block: qod-node enforces on every pool" in:
+    val (sup, backend) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-
-    val before = lockCalls
-    val result = sup.setPoolLockdown(key, Some(true)).unsafeRunSync()
-    result.isRight shouldBe true
-    result.toOption.get.lockdown shouldBe Some(true)
-    (lockCalls - before) shouldBe 1
-    sup.effectiveLockdown(key) shouldBe true
-
-  it should "stamp the per-pool effective value into spawned lockdownSql" in:
-    val (sup, backend) = freshSupervisorWithBackend(lockdownEnabled = false)
-    sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
-      .unsafeRunSync()
-    sup.createPool(key, RoleDistribution(0, 0, 1), lockdown = Some(true)).unsafeRunSync()
-    backend.specs.last.lockdownSql should include("SET autoinstall_known_extensions = false")
+    val spec = backend.specs.last
+    spec.productElementNames.toList should not contain "lockdownSql"
+    spec.productIterator
+      .collect { case s: String => s }
+      .exists(_.contains("disabled_filesystems")) shouldBe false
 
   // ---- autoscaleBand / setPoolAutoscale: owner-declared scale-out band ----
 
@@ -304,15 +357,15 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .isLeft shouldBe true
 
-  // ---- initSql: free-form per-pool SQL prepended to the federation blob ----
+  // ---- initSql: free-form per-pool SQL, on its own beside the federation blob ----
   //
   // Operators set things like `SET memory_limit='8GB';` or `INSTALL httpfs;`
-  // here. spawn-quack-node.sh just dumps $extraSetupSql into the init pipe, so
-  // the per-pool initSql rides the same env var; PoolSupervisor concatenates
-  // initSql FIRST then the resolved federation blob so PRAGMAs are in effect
-  // before any federation ATTACH runs.
+  // here. It travels as NodeSpec.tenantPoolInitSql with its trust flag, never
+  // inside extraSetupSql (the manager's own SQL), so qod-node can run a tenant
+  // admin's text under its tenant initSql allowlist; the spawn script still runs
+  // it before the federation blob.
 
-  it should "prepend initSql to NodeSpec.extraSetupSql when no federation blob is present" in:
+  it should "ship initSql as NodeSpec.tenantPoolInitSql, untrusted for a tenant admin's" in:
     val (sup, backend) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
@@ -320,7 +373,18 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val pragma = "SET memory_limit='8GB';"
     sup.createPool(key, RoleDistribution(0, 0, 1), initSql = pragma).unsafeRunSync()
     backend.specs.size shouldBe 1
-    backend.specs.head.extraSetupSql.trim shouldBe pragma
+    backend.specs.head.tenantPoolInitSql shouldBe pragma
+    backend.specs.head.tenantPoolInitTrusted shouldBe false
+    backend.specs.head.extraSetupSql shouldBe ""
+
+  it should "mark a superuser's pool initSql trusted on the NodeSpec" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1), initSql = "SET threads=2;", initSqlTrusted = true)
+      .unsafeRunSync()
+    backend.specs.head.tenantPoolInitTrusted shouldBe true
 
   it should "expose initSql on the PoolState so the UI can render it later" in:
     val (sup, _) = freshSupervisorWithBackend()
@@ -1695,7 +1759,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(objKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val spec = backend.specs.head
     spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
-    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+    spec.objectStoreSql should include("SCOPE ['s3://bucket/db']")
 
   it should "produce an empty objectStoreSql for a tenant-db with no objectStore" in:
     val (sup, backend) = freshSupervisorWithBackend()
@@ -1723,7 +1787,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(memKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val spec = backend.specs.head
     spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
-    spec.objectStoreSql should include("SCOPE 's3://bucket/mem/'")
+    spec.objectStoreSql should include("SCOPE ['s3://bucket/mem/', 's3://bucket/mem__br_']")
 
   // ---------- maintenanceNodeSpec: no-donor s3 fallback ----------
 
@@ -1747,7 +1811,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val spec = sup.maintenanceNodeSpec("acme", "acme_objmaint").get
     spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
     spec.objectStoreSql should include("SECRET 's'")
-    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+    spec.objectStoreSql should include("SCOPE ['s3://bucket/db']")
 
   // ---------- effectiveSetForUser: column policies ----------
 
@@ -2022,21 +2086,21 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     tracker.snapshot(nodeId).quarantined shouldBe true
   }
 
-  // ---------- per-database boot SQL (NodeSpec.dbInitSql) ----------
+  // ---------- per-database boot SQL (NodeSpec.tenantDbInitSql) ----------
   //
-  // The tenant-db initSql executes BEFORE the quack extension loads (and after
-  // the proxy http settings), so it must NOT be folded into extraSetupSql,
-  // which spawn-quack-node.sh runs after LOAD quack + the catalog ATTACH. It
-  // rides its own NodeSpec.dbInitSql field / dbInitSql env var instead.
+  // The tenant-db initSql executes BEFORE the catalog ATTACH (and after the
+  // proxy and resource settings), so it must NOT be folded into extraSetupSql,
+  // which spawn-quack-node.sh runs after the catalog ATTACH. It rides its own
+  // NodeSpec.tenantDbInitSql field (a secret file) with its trust flag instead.
 
-  "joinInitAndBlob" should "join pool initSql and federation blob, skipping blanks" in {
+  "joinInitAndBlob" should "join two fragments of the manager's SQL, skipping blanks" in {
     PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\nATTACH x;"
     PoolSupervisor.joinInitAndBlob("SET b=2;", "") shouldBe "SET b=2;"
     PoolSupervisor.joinInitAndBlob("", "ATTACH x;") shouldBe "ATTACH x;"
     PoolSupervisor.joinInitAndBlob("  ", "") shouldBe ""
   }
 
-  "createPool" should "ship the tenant-db initSql on NodeSpec.dbInitSql, not in extraSetupSql" in {
+  "createPool" should "ship each initSql on its own NodeSpec field, never in extraSetupSql" in {
     val b   = new CapturingBackend
     val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
@@ -2047,22 +2111,24 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val poolKey2 = PoolKey("acme", "acme_mem1", "bi")
     sup.createPool(poolKey2, RoleDistribution(0, 0, 1), initSql = "SET threads = 2;").unsafeRunSync()
     val spec = b.specs.head
-    spec.dbInitSql shouldBe "SET memory_limit = '2GB';"
-    spec.extraSetupSql should include("SET threads = 2;")
-    spec.extraSetupSql should not include "memory_limit"
+    spec.tenantDbInitSql shouldBe "SET memory_limit = '2GB';"
+    spec.tenantDbInitTrusted shouldBe false
+    spec.tenantPoolInitSql shouldBe "SET threads = 2;"
+    spec.extraSetupSql shouldBe ""
   }
 
-  "restore" should "carry the tenant-db initSql into PoolState.dbInitSql" in {
+  "restore" should "carry the tenant-db initSql and its trust into PoolState" in {
     val store2 = new InMemoryControlPlaneStore()
     val sup2   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store2)
     sup2.createTenant(Tenant("acme")).unsafeRunSync()
     sup2.createTenantDb(
       tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
-      metastore = Map.empty, dataPath = "", initSql = "SET x=1;"
+      metastore = Map.empty, dataPath = "", initSql = "SET x=1;", initSqlTrusted = true
     ).unsafeRunSync()
     sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup2.restore()
     sup2.get(key).get.dbInitSql shouldBe "SET x=1;"
+    sup2.get(key).get.dbInitSqlTrusted shouldBe true
   }
 
   it should "carry the tenant-db session defaults into PoolState (demo regression)" in {
@@ -2974,4 +3040,42 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     created.isRight shouldBe true
     sup.rbacResolver.role(created.toOption.get.id) shouldBe defined
     store.findRole(tenantId, "analyst") shouldBe defined
+  }
+
+  /** A peer commits between this replica's reads: it lands right after `snapshot()` returns, so
+    * the snapshot holds the state before it while every later read sees the commit (a new policy
+    * version, a new credential).
+    */
+  private final class PeerCommitsAfterSnapshot extends InMemoryControlPlaneStore:
+    @volatile var armed = false
+    override def snapshot(): ai.starlake.quack.ondemand.state.ControlPlaneSnapshot =
+      val snap = super.snapshot()
+      if armed then
+        armed = false
+        bumpPolicyVersion("acme")
+        putUserS3Credential(
+          ai.starlake.quack.model.UserS3Credential(
+            "0123456789abcdef0123456789abcdef", "u-1", "s3://acme-etl/", "AK", "SK", None, None,
+            None, None, 0L, 0L
+          )
+        )
+      snap
+
+  "restore" should "publish the policy versions and credentials it read before the snapshot" in {
+    val store = new PeerCommitsAfterSnapshot
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.restore()
+    val before = sup.policyVersions.current("acme")
+    before shouldBe store.policyVersions()("acme")
+    store.armed = true
+    sup.restore()
+    // A version must never vouch for state older than itself: the state restore loaded is from
+    // before the peer's commit, so the version it publishes is too. The commit's own NOTIFY runs
+    // the next restore, which moves both.
+    sup.policyVersions.current("acme") shouldBe before
+    sup.userS3.of("u-1") shouldBe Nil
+    sup.restore()
+    sup.policyVersions.current("acme") should be > before
+    sup.userS3.of("u-1").map(_.scope) shouldBe List("s3://acme-etl/")
   }

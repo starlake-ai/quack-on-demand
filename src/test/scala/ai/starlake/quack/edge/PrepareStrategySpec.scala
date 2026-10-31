@@ -150,8 +150,7 @@ class PrepareStrategySpec extends AnyFlatSpec with Matchers:
   //
   // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as a
   // raw invisible byte pasted into the source -- see the identical guard in
-  // `StatementClassifierSpec`, `LockdownScreenSpec`, `CatalogWriteScreenSpec` and `SqlTriviaSpec`
-  // for why this matters: an editor or an "helpful" formatting pass can silently decode the
+  // `StatementClassifierSpec` and `SqlTriviaSpec` for why this matters: an editor or an "helpful" formatting pass can silently decode the
   // escape back into a raw invisible character, at which point the file still compiles and every
   // assertion above still passes, with no way for the next reader to tell.
   it should "carry no raw non-ASCII codepoints in its own source file" in:

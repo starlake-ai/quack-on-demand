@@ -29,17 +29,39 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
   private val token    = "test-token"
   private val connId   = "conn-test-7"
 
+  /** The prelude a session handle rides on; the fakes answer it themselves and count it apart, so
+    * every other count below is of the statements alone.
+    */
+  private val prelude                               = "CALL system.main.qod_session('test.handle')"
+  private val authorize: () => String               = () => prelude
+  private def isPrelude(body: Array[Byte]): Boolean =
+    new String(body, java.nio.charset.StandardCharsets.ISO_8859_1)
+      .contains("CALL system.main.qod_session(")
+  private val preludeOk: Array[Byte] =
+    QuackTestFixtures.serializeSamplePrepareResponse(java.math.BigInteger.ONE, false, false)
+
   /** Records every POST in order, returns canned responses from a queue. Exhausting the queue
     * raises a [[NoSuchElementException]] straight from the iterator -- that signals an over-eager
     * round trip and is the right place for the test to fail.
     */
-  private final class FakeTransport(responses: Iterator[Array[Byte]]) extends QuackTransport:
+  private final class FakeTransport(
+      responses: Iterator[Array[Byte]],
+      refusePrelude: Option[String] = None
+  ) extends QuackTransport:
     val requests: ArrayBuffer[(URI, Array[Byte])]          = ArrayBuffer.empty
     val postCount: AtomicInteger                           = AtomicInteger(0)
+    val preludes: AtomicInteger                            = AtomicInteger(0)
+    val order: ArrayBuffer[String]                         = ArrayBuffer.empty
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
-      postCount.incrementAndGet()
-      requests += ((uri, body.clone()))
-      responses.next()
+      if isPrelude(body) then
+        preludes.incrementAndGet()
+        order += "prelude"
+        refusePrelude.map(QuackTestFixtures.serializeSampleErrorResponse).getOrElse(preludeOk)
+      else
+        postCount.incrementAndGet()
+        requests += ((uri, body.clone()))
+        order += s"message-${QuackNativeBridge.parseMessageType(body)}"
+        responses.next()
     }
 
   /** Always-failing transport for the permanent-error path. */
@@ -51,24 +73,75 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
     }
 
   /** Answers by message type and records every request type in arrival order. `onPrepare` gets the
-    * 1-based index of the PREPARE so a test can make one of them fail or block. CONNECT, DISCONNECT
-    * and HEARTBEAT always succeed.
+    * 1-based index of the PREPARE so a test can make one of them fail or block; `onPrelude` does
+    * the same for the session handles, which are counted apart. CONNECT, DISCONNECT and HEARTBEAT
+    * always succeed. `steps` lists the requests in order, handles included and heartbeats aside,
+    * and `handles` the handle each session handle carried.
     */
   private final class ScriptedTransport(
       onPrepare: Int => IO[Array[Byte]],
-      onConnect: IO[Array[Byte]] = IO(QuackTestFixtures.serializeSampleConnectionResponse(connId))
+      onConnect: IO[Array[Byte]] = IO(QuackTestFixtures.serializeSampleConnectionResponse(connId)),
+      onPrelude: Int => IO[Array[Byte]] = _ => IO(preludeOk)
   ) extends QuackTransport:
     val types: ConcurrentLinkedQueue[Int]                  = ConcurrentLinkedQueue[Int]()
     private val prepares                                   = AtomicInteger(0)
+    val preludes: AtomicInteger                            = AtomicInteger(0)
+    private val stepLog                                    = ConcurrentLinkedQueue[String]()
+    private val handleLog                                  = ConcurrentLinkedQueue[String]()
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO.defer {
       val t = QuackNativeBridge.parseMessageType(body)
-      types.add(t)
-      if t == MessageType.PrepareRequest.wireOrdinal then onPrepare(prepares.incrementAndGet())
-      else if t == MessageType.ConnectionRequest.wireOrdinal then onConnect
-      else IO(QuackTestFixtures.serializeSampleConnectionResponse(connId))
+      if t == MessageType.PrepareRequest.wireOrdinal && isPrelude(body) then
+        stepLog.add("handle")
+        handleOf(body).foreach(handleLog.add)
+        onPrelude(preludes.incrementAndGet())
+      else
+        types.add(t)
+        stepName(t).foreach(stepLog.add)
+        if t == MessageType.PrepareRequest.wireOrdinal then onPrepare(prepares.incrementAndGet())
+        else if t == MessageType.ConnectionRequest.wireOrdinal then onConnect
+        else IO(QuackTestFixtures.serializeSampleConnectionResponse(connId))
     }
     def seen: List[Int]       = types.asScala.toList
     def count(m: MessageType) = seen.count(_ == m.wireOrdinal)
+
+    /** `handle` for a session handle's PREPARE, else `connect`, `prepare`, `fetch` or `disconnect`,
+      * in arrival order.
+      */
+    def steps: List[String] = stepLog.asScala.toList
+
+    def handles: List[String] = handleLog.asScala.toList
+
+  /** How [[ScriptedTransport.steps]] names a request; a heartbeat is left out. */
+  private def stepName(t: Int): Option[String] = MessageType.fromWireOrdinal(t).collect {
+    case MessageType.ConnectionRequest => "connect"
+    case MessageType.PrepareRequest    => "prepare"
+    case MessageType.FetchRequest      => "fetch"
+    case MessageType.DisconnectMessage => "disconnect"
+  }
+
+  private val HandleArgument = """qod_session\('([^']*)'\)""".r
+
+  /** The handle a prelude PREPARE carries (the fakes' handles are plain words). */
+  private def handleOf(body: Array[Byte]): Option[String] =
+    HandleArgument
+      .findFirstMatchIn(new String(body, java.nio.charset.StandardCharsets.ISO_8859_1))
+      .map(_.group(1))
+
+  /** A prelude producer minting `h1`, `h2`, ...: a fresh handle per call, as the adapter's does, so
+    * a spec can tell which PREPARE followed which.
+    */
+  private def minting(): () => String =
+    val minted = AtomicInteger(0)
+    () => s"CALL system.main.qod_session('h${minted.incrementAndGet()}')"
+
+  /** Fails naming `resp`, closing it first when it holds a result: the buffer leak the allocator
+    * reports on close would otherwise hide why the test failed.
+    */
+  private def unexpected(resp: QuackResponse, expected: String): Nothing =
+    resp match
+      case ok: QuackResponse.Ok => ok.close()
+      case _                    => ()
+    fail(s"expected $expected, got $resp")
 
   /** Polls `cond` until it holds or `within` elapses; true iff it held. */
   private def eventually(within: FiniteDuration)(cond: => Boolean): Boolean =
@@ -108,7 +181,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
             new QuackProtocol(transport, alloc)
           }
         )
-        val resp = client.query(endpoint, token, "SELECT 1", None).unsafeRunSync()
+        val resp = client.query(endpoint, token, "SELECT 1", None, authorize).unsafeRunSync()
         resp shouldBe a[QuackResponse.Ok]
         resp.asInstanceOf[QuackResponse.Ok].close()
         built.get() shouldBe 1
@@ -136,7 +209,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
-        val resp   = client.query(endpoint, token, "SELECT 42", None).unsafeRunSync()
+        val resp   = client.query(endpoint, token, "SELECT 42", None, authorize).unsafeRunSync()
         resp match
           case QuackResponse.Ok(reader, _, close) =>
             try
@@ -156,6 +229,10 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
             ordinals(0) shouldBe MessageType.ConnectionRequest.wireOrdinal
             ordinals(1) shouldBe MessageType.PrepareRequest.wireOrdinal
             ordinals(2) shouldBe MessageType.DisconnectMessage.wireOrdinal
+            // The session handle went first: right after CONNECT, before the statement.
+            transport.preludes.get() shouldBe 1
+            transport.order.take(2) shouldBe
+              List(s"message-${MessageType.ConnectionRequest.wireOrdinal}", "prelude")
           case other => fail(s"expected QuackResponse.Ok, got $other")
       finally allocator.close()
     }
@@ -168,7 +245,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
-        val resp   = client.query(endpoint, token, "SELECT 1", None).unsafeRunSync()
+        val resp   = client.query(endpoint, token, "SELECT 1", None, authorize).unsafeRunSync()
         resp match
           case QuackResponse.Failed(QuackError.Permanent(msg), _) =>
             msg should include("bad token")
@@ -181,7 +258,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
-        val resp   = client.query(endpoint, token, "SELECT 1", None).unsafeRunSync()
+        val resp   = client.query(endpoint, token, "SELECT 1", None, authorize).unsafeRunSync()
         resp match
           case QuackResponse.Failed(QuackError.Transient(msg), _) =>
             msg should include("HTTP 503")
@@ -212,7 +289,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
-        val resp   = client.query(endpoint, token, "SELECT 1", None).unsafeRunSync()
+        val resp   = client.query(endpoint, token, "SELECT 1", None, authorize).unsafeRunSync()
         resp match
           case QuackResponse.Ok(reader, _, close) =>
             // Drain + close. Both `reader.close()` (which the
@@ -265,6 +342,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
           .queryStamped(
             endpoint,
             token,
+            authorize,
             "BEGIN; CALL stamp()",
             "USE db.main; INSERT INTO t VALUES (1)"
           )
@@ -273,9 +351,12 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         val ok = resp.asInstanceOf[QuackResponse.Ok]
         // Bracket so far: CONNECTION + PREPARE(prelude) + PREPARE(sql). COMMIT is lazy.
         transport.postCount.get() shouldBe 3
+        // A session handle came first for the stamp and for the statement.
+        transport.preludes.get() shouldBe 2
         drainCount(ok.rows) shouldBe 1
-        // Exhaustion fired the COMMIT PREPARE.
+        // Exhaustion fired the COMMIT PREPARE, behind a handle of its own.
         transport.postCount.get() shouldBe 4
+        transport.preludes.get() shouldBe 3
         ok.close()
         // Close cascades exactly one DISCONNECT.
         transport.postCount.get() shouldBe 5
@@ -298,7 +379,13 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         )
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         val ok     = client
-          .queryStamped(endpoint, token, "BEGIN; CALL stamp()", "INSERT INTO t VALUES (1)")
+          .queryStamped(
+            endpoint,
+            token,
+            authorize,
+            "BEGIN; CALL stamp()",
+            "INSERT INTO t VALUES (1)"
+          )
           .unsafeRunSync()
           .asInstanceOf[QuackResponse.Ok]
         ok.rows.loadNextBatch() shouldBe true // the Count row
@@ -328,7 +415,13 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         )
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         val ok     = client
-          .queryStamped(endpoint, token, "BEGIN; CALL stamp()", "INSERT INTO t VALUES (1)")
+          .queryStamped(
+            endpoint,
+            token,
+            authorize,
+            "BEGIN; CALL stamp()",
+            "INSERT INTO t VALUES (1)"
+          )
           .unsafeRunSync()
           .asInstanceOf[QuackResponse.Ok]
         ok.close() // no drain at all
@@ -355,7 +448,13 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         )
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         val resp   = client
-          .queryStamped(endpoint, token, "BEGIN; CALL stamp()", "INSERT INTO t VALUES (1)")
+          .queryStamped(
+            endpoint,
+            token,
+            authorize,
+            "BEGIN; CALL stamp()",
+            "INSERT INTO t VALUES (1)"
+          )
           .unsafeRunSync()
         resp shouldBe a[QuackResponse.Ok]
         val ok = resp.asInstanceOf[QuackResponse.Ok]
@@ -374,7 +473,8 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         // Lease 3 s: a beat every second, so a leaked heartbeat shows within the wait below.
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc, 3))
-        val resp   = client.query(endpoint, token, "SELECT * FROM missing", None).unsafeRunSync()
+        val resp   =
+          client.query(endpoint, token, "SELECT * FROM missing", None, authorize).unsafeRunSync()
         resp match
           case QuackResponse.Failed(QuackError.Permanent(msg), _) => msg should include("no such")
           case other => fail(s"expected Failed(Permanent), got $other")
@@ -391,7 +491,9 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         (1 to 50).foreach { _ =>
-          client.query(endpoint, token, "SELECT get_type(42)", None).unsafeRunSync() match
+          client
+            .query(endpoint, token, "SELECT get_type(42)", None, authorize)
+            .unsafeRunSync() match
             case QuackResponse.Failed(QuackError.Permanent(msg), _) => msg should include("VARCHAR")
             case other => fail(s"expected Failed(Permanent), got $other")
         }
@@ -412,7 +514,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         client
-          .queryStamped(endpoint, token, "BEGIN; CALL stamp()", "SELECT get_type(42)")
+          .queryStamped(endpoint, token, authorize, "BEGIN; CALL stamp()", "SELECT get_type(42)")
           .unsafeRunSync() match
           case QuackResponse.Failed(QuackError.Permanent(msg), _) => msg should include("VARCHAR")
           case other => fail(s"expected Failed(Permanent), got $other")
@@ -429,7 +531,8 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc, 3))
-        val got    = client.query(endpoint, token, "SELECT 42", None).timeout(100.millis).attempt
+        val got    =
+          client.query(endpoint, token, "SELECT 42", None, authorize).timeout(100.millis).attempt
         got.unsafeRunSync().left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
         eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
         val afterClose = transport.count(MessageType.HeartbeatRequest)
@@ -449,14 +552,42 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
-        val got    = client.query(endpoint, token, "DELETE FROM t", None).timeout(100.millis)
+        val got    =
+          client.query(endpoint, token, "DELETE FROM t", None, authorize).timeout(100.millis)
         got.attempt
           .unsafeRunSync()
           .left
           .toOption
           .get shouldBe a[java.util.concurrent.TimeoutException]
         eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
-        // A timed-out caller's statement is never sent.
+        // A timed-out caller's statement is never sent, nor its session handle.
+        transport.count(MessageType.PrepareRequest) shouldBe 0
+        transport.preludes.get() shouldBe 0
+      finally allocator.close()
+    }
+
+    it(
+      "closes the connection and never sends the statement when a cancel lands during its handle"
+    ) {
+      // The handle's PREPARE blocks uninterruptibly, like a JDK send: the cancel is observed once it
+      // returns, before the statement goes out.
+      val transport = ScriptedTransport(
+        _ => IO(prepareOk),
+        onPrelude = _ => IO.blocking { Thread.sleep(800); preludeOk }
+      )
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        client
+          .query(endpoint, token, "DELETE FROM t", None, authorize)
+          .timeout(100.millis)
+          .attempt
+          .unsafeRunSync()
+          .left
+          .toOption
+          .get shouldBe a[java.util.concurrent.TimeoutException]
+        eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        transport.steps shouldBe List("connect", "handle", "disconnect")
         transport.count(MessageType.PrepareRequest) shouldBe 0
       finally allocator.close()
     }
@@ -471,7 +602,13 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         val got    = client
-          .queryStamped(endpoint, token, "BEGIN; CALL stamp()", "INSERT INTO t VALUES (1)")
+          .queryStamped(
+            endpoint,
+            token,
+            authorize,
+            "BEGIN; CALL stamp()",
+            "INSERT INTO t VALUES (1)"
+          )
           .timeout(100.millis)
           .attempt
           .unsafeRunSync()
@@ -491,11 +628,218 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         val resp   = client
-          .queryStamped(endpoint, token, "BEGIN; CALL stamp()", "INSERT INTO t VALUES (1)")
+          .queryStamped(
+            endpoint,
+            token,
+            authorize,
+            "BEGIN; CALL stamp()",
+            "INSERT INTO t VALUES (1)"
+          )
           .unsafeRunSync()
         resp shouldBe a[QuackResponse.Failed]
         // Two connections (stamped bracket, plain fallback), both released.
         transport.count(MessageType.ConnectionRequest) shouldBe 2
         transport.count(MessageType.DisconnectMessage) shouldBe 2
+      finally allocator.close()
+    }
+
+  describe("session handles"):
+    it("never sends the statement when the node refuses its session handle, and fails Transient") {
+      val transport = FakeTransport(
+        Iterator(
+          QuackTestFixtures.serializeSampleConnectionResponse(connId),
+          QuackTestFixtures.serializeSampleConnectionResponse("disconnect-ack")
+        ),
+        refusePrelude = Some("qod-node: session handle refused: handle MAC does not verify")
+      )
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
+        client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
+          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+            msg should include("refused the statement's session handle")
+            msg should include("does not verify")
+            // What the health probe reads back to name the cause: the node's answer, as it is.
+            val answer = QuackHttpClient.HandleRefused.unapply(err)
+            answer.map(QuackHttpClient.HandleRefused.Prefix + _) shouldBe Some(msg)
+            answer.get should endWith(
+              "qod-node: session handle refused: handle MAC does not verify"
+            )
+          case other => fail(s"expected Failed(Transient), got $other")
+        // CONNECT, then DISCONNECT: the statement's PREPARE was never sent.
+        transport.postCount.get() shouldBe 2
+      finally allocator.close()
+    }
+
+    it("keeps a transport failure of the handle Transient, with its own error, not a refusal") {
+      val transport = ScriptedTransport(
+        _ => IO(prepareOk),
+        onPrelude = _ => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
+      )
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
+          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+            msg shouldBe "HTTP 503 from Quack node"
+            QuackHttpClient.HandleRefused.unapply(err) shouldBe None
+          case other => fail(s"expected Failed(Transient), got $other")
+        // The handle never reached the node, so the statement was not sent either.
+        transport.count(MessageType.PrepareRequest) shouldBe 0
+        transport.count(MessageType.DisconnectMessage) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("fails Permanent, sending no statement, when there is no principal to vouch for") {
+      val transport = ScriptedTransport(_ => IO(prepareOk))
+      val allocator = new RootAllocator()
+      try
+        val client             = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        val none: () => String =
+          () => throw new IllegalArgumentException("no principal is bound to this statement")
+        client.query(endpoint, token, "SELECT 1", None, none).unsafeRunSync() match
+          case QuackResponse.Failed(QuackError.Permanent(msg), _) =>
+            msg should include("no principal")
+          case other => fail(s"expected Failed(Permanent), got $other")
+        transport.count(MessageType.PrepareRequest) shouldBe 0
+        transport.count(MessageType.DisconnectMessage) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("sends no handle at all for the canary") {
+      val transport = ScriptedTransport(_ => IO(prepareOk))
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        client.queryWithoutHandle(endpoint, token, "SELECT 1").unsafeRunSync() match
+          case QuackResponse.Ok(_, _, close) => close()
+          case other                         => fail(s"expected Ok, got $other")
+        transport.preludes.get() shouldBe 0
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("drops DuckDB's excerpt of the statement from the node's refusal") {
+      // An excerpt would quote the prelude, handle and all, to whoever reads the failure.
+      val refusal = "Permission Error: qod-node: session handle refused: handle MAC does not verify"
+      val excerpt = "\n\nLINE 1: CALL system.main.qod_session('eyJ2IjoxfQ.0123abcd')\n  ^"
+      val transport = FakeTransport(
+        Iterator(
+          QuackTestFixtures.serializeSampleConnectionResponse(connId),
+          QuackTestFixtures.serializeSampleConnectionResponse("disconnect-ack")
+        ),
+        refusePrelude = Some(refusal + excerpt)
+      )
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
+        client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
+          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+            msg should endWith(refusal)
+            msg should not include "eyJ2IjoxfQ"
+            msg should not include "LINE 1"
+            QuackHttpClient.HandleRefused.unapply(err).get should endWith(refusal)
+          case other => unexpected(other, "Failed(Transient)")
+      finally allocator.close()
+    }
+
+  describe("session handles of a stamped write"):
+    val refusal =
+      QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")
+
+    /** A stamped write through `transport`, its handles minted `h1`, `h2`, ... in order. */
+    def stamped(transport: ScriptedTransport, allocator: RootAllocator): QuackResponse =
+      clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        .queryStamped(endpoint, token, minting(), "BEGIN; CALL stamp()", "INSERT INTO t VALUES (1)")
+        .unsafeRunSync()
+
+    it("sends the unstamped retry of a failed stamp after a fresh handle of its own") {
+      val transport = ScriptedTransport {
+        case 1 => IO(QuackTestFixtures.serializeSampleErrorResponse("no stamp function"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        stamped(transport, allocator) match
+          case ok: QuackResponse.Ok => ok.close()
+          case other                => fail(s"expected Ok, got $other")
+        // The stamp failed on the bracket's connection; the write went out alone on a fresh one,
+        // after a handle minted for it.
+        transport.steps shouldBe List(
+          "connect",
+          "handle",
+          "prepare",
+          "disconnect",
+          "connect",
+          "handle",
+          "prepare",
+          "disconnect"
+        )
+        transport.handles shouldBe List("h1", "h2")
+      finally allocator.close()
+    }
+
+    it("sends neither the stamp nor the write when the stamp's handle is refused") {
+      val transport = ScriptedTransport(_ => IO(prepareOk), onPrelude = _ => IO(refusal))
+      val allocator = new RootAllocator()
+      try
+        stamped(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Transient(msg), _) =>
+            msg should include("refused the statement's session handle")
+          case other => unexpected(other, "Failed(Transient)")
+        // Never fail-open: no unstamped retry on a fresh connection either.
+        transport.steps shouldBe List("connect", "handle", "disconnect")
+      finally allocator.close()
+    }
+
+    it("never sends the write when its own handle is refused after the stamp") {
+      val transport = ScriptedTransport(
+        _ => IO(prepareOk),
+        onPrelude = {
+          case 2 => IO(refusal)
+          case _ => IO(preludeOk)
+        }
+      )
+      val allocator = new RootAllocator()
+      try
+        stamped(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Transient(msg), _) =>
+            msg should include("refused the statement's session handle")
+          case other => unexpected(other, "Failed(Transient)")
+        // The stamp ran; the DISCONNECT rolls its BEGIN back, and nothing is retried.
+        transport.steps shouldBe List("connect", "handle", "prepare", "handle", "disconnect")
+      finally allocator.close()
+    }
+
+    it("never sends the COMMIT when its handle is refused, and fails the stream") {
+      val transport = ScriptedTransport(
+        _ => IO(prepareOk),
+        onPrelude = {
+          case 3 => IO(refusal)
+          case _ => IO(preludeOk)
+        }
+      )
+      val allocator = new RootAllocator()
+      try
+        stamped(transport, allocator) match
+          case ok: QuackResponse.Ok =>
+            try
+              ok.rows.loadNextBatch() shouldBe true
+              // Exhaustion fires the COMMIT, whose handle the node refuses: a stream error, never
+              // a silent success.
+              intercept[QuackHttpClient.HandleRefused](ok.rows.loadNextBatch()).getMessage should
+                include("session handle refused: expired")
+            finally ok.close()
+          case other => fail(s"expected Ok, got $other")
+        // The COMMIT never went out: the DISCONNECT rolls the write back.
+        transport.steps shouldBe List(
+          "connect",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "handle",
+          "disconnect"
+        )
       finally allocator.close()
     }

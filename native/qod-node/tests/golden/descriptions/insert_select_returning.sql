@@ -1,0 +1,1 @@
+INSERT INTO t SELECT id, v, tags FROM u RETURNING id

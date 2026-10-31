@@ -143,7 +143,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       val result = sup.authorizeHandshake(
         SecurityFixtures.TenantName,
         SecurityFixtures.PoolName,
-        SecurityFixtures.AliceUsername
+        SecurityFixtures.AliceUsername,
+        superuserAdmissible = true
       )
       result shouldBe a[Right[?, ?]]
       val hs = result.toOption.get
@@ -168,7 +169,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.AliceUsername
+      SecurityFixtures.AliceUsername,
+      superuserAdmissible = true
     )
     result shouldBe a[Left[?, ?]]
     result.left.toOption.get.toLowerCase should include("disabled")
@@ -182,7 +184,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.AliceUsername
+      SecurityFixtures.AliceUsername,
+      superuserAdmissible = true
     )
     result shouldBe a[Left[?, ?]]
     result.left.toOption.get.toLowerCase should include("disabled")
@@ -194,7 +197,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      "ghost"
+      "ghost",
+      superuserAdmissible = true
     )
     result shouldBe a[Left[?, ?]]
     result.left.toOption.get.toLowerCase should include("not registered")
@@ -233,7 +237,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      "carol"
+      "carol",
+      superuserAdmissible = true
     )
     // The user is rejected because findUserForLogin excludes cross-tenant users,
     // producing "not registered" rather than "not scoped".
@@ -247,7 +252,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.BobUsername
+      SecurityFixtures.BobUsername,
+      superuserAdmissible = true
     )
     result shouldBe a[Left[?, ?]]
     result.left.toOption.get.toLowerCase should include("no access to pool")
@@ -270,7 +276,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.AliceUsername
+      SecurityFixtures.AliceUsername,
+      superuserAdmissible = true
     )
     result shouldBe a[Left[?, ?]]
     result.left.toOption.get.toLowerCase should include("disabled")
@@ -279,7 +286,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val rootResult = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.RootUsername
+      SecurityFixtures.RootUsername,
+      superuserAdmissible = true
     )
     rootResult shouldBe a[Right[?, ?]]
   }
@@ -319,10 +327,15 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val onSales = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.AliceUsername
+      SecurityFixtures.AliceUsername,
+      superuserAdmissible = true
     )
-    val onSales2 =
-      sup.authorizeHandshake(SecurityFixtures.TenantName, "sales2", SecurityFixtures.AliceUsername)
+    val onSales2 = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      "sales2",
+      SecurityFixtures.AliceUsername,
+      superuserAdmissible = true
+    )
 
     withClue("alice on sales:")(onSales shouldBe a[Right[?, ?]])
     withClue("alice on sales2:")(onSales2 shouldBe a[Right[?, ?]])
@@ -335,7 +348,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
-      SecurityFixtures.RootUsername
+      SecurityFixtures.RootUsername,
+      superuserAdmissible = true
     )
     result shouldBe a[Right[?, ?]]
     withClue("superuser effective set should indicate bypass") {
@@ -367,7 +381,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       .authorizeHandshake(
         SecurityFixtures.TenantName,
         SecurityFixtures.PoolName,
-        SecurityFixtures.RootUsername
+        SecurityFixtures.RootUsername,
+        superuserAdmissible = true
       )
       .isRight shouldBe true
   }
@@ -385,7 +400,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
       SecurityFixtures.AliceUsername,
-      jwtRoles = Set("admin")
+      jwtRoles = Set("admin"),
+      superuserAdmissible = true
     )
     result shouldBe a[Right[?, ?]]
     val roleNames = result.toOption.get.effectiveSet.roles.map(_.name)
@@ -402,7 +418,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
       SecurityFixtures.AliceUsername,
-      jwtRoles = Set("ghostrole")
+      jwtRoles = Set("ghostrole"),
+      superuserAdmissible = true
     )
     result shouldBe a[Right[?, ?]]
     val roleNames = result.toOption.get.effectiveSet.roles.map(_.name)

@@ -20,17 +20,19 @@ export function useTenantScope(): TenantScopeValue {
   return v;
 }
 
-/** `!authEnabled` is the no-auth dev mode: the synthetic anonymous user is a superuser. */
+/** The signed-in principal, as scope routing sees it. */
 export function usePrincipal(): Principal {
-  const { authEnabled, superuser, tenant, manageableTenants } = useAuth();
+  const { superuser, tenant, manageableTenants } = useAuth();
   // An OIDC admin may hold admin grants on several tenants (whoami's manageableTenants) and may
   // switch among exactly those; a DB-login tenant admin has just their own.
   const allowed = manageableTenants.length > 0 ? [...manageableTenants] : tenant ? [tenant] : [];
   if (tenant && !allowed.includes(tenant)) allowed.unshift(tenant);
-  // whoami's superuser flag covers a superuser signed in through a tenant URL (OIDC ?tenant=),
-  // whose session still carries that tenant.
+  // A tenant sign-in, through the database or the tenant's own SSO, is never superuser, so the
+  // case whoami's flag used to cover (a superuser signed in through a tenant URL) is gone.
+  // `tenant === null` is a looser test than the flag: a multi-tenant admin session from the
+  // system login has no tenant either.
   return {
-    superuser: !authEnabled || superuser || tenant === null,
+    superuser: superuser || tenant === null,
     ownTenant: tenant,
     allowedTenants: allowed,
   };

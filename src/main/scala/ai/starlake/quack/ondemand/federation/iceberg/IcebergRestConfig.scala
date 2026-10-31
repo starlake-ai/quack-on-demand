@@ -118,6 +118,29 @@ final case class IcebergRestConfig(
     errs ++= IcebergRestConfig.strayBraceErrors("oauth2Scope", oauth2Scope)
     errs ++= IcebergRestConfig.strayBraceErrors("oauth2GrantType", oauth2GrantType)
 
+    // Every field is interpolated into the node's init SQL: a line break there could spread a value
+    // over lines of that SQL, which nothing a tenant writes should do (Task 20 review I1).
+    List(
+      "uri"                -> Some(uri),
+      "warehouse"          -> Some(warehouse),
+      "clientId"           -> clientId,
+      "clientSecret"       -> clientSecret,
+      "oauth2ServerUri"    -> oauth2ServerUri,
+      "oauth2Scope"        -> oauth2Scope,
+      "oauth2GrantType"    -> oauth2GrantType,
+      "token"              -> token,
+      "awsRegion"          -> awsRegion,
+      "awsKeyId"           -> awsKeyId,
+      "awsSecretAccessKey" -> awsSecretAccessKey,
+      "awsSessionToken"    -> awsSessionToken
+    ).foreach { (name, value) =>
+      if value.exists(v => v.contains('\n') || v.contains('\r')) then
+        errs += s"$name must not contain a line break"
+    }
+    awsScope.foreach { v =>
+      if v.contains('\n') || v.contains('\r') then errs += "awsScope must not contain a line break"
+    }
+
     if authType.isDefined == endpointType.isDefined then
       errs += "set exactly one of authType / endpointType (DuckDB refuses AUTHORIZATION_TYPE " +
         "combined with ENDPOINT_TYPE)"
@@ -218,15 +241,15 @@ final case class IcebergRestConfig(
               "an S3 Tables ARN (arn:aws:s3tables:<region>:<account>:bucket/<name>)"
           else "awsRegion is required for AWS credentials"
         )
-      // DuckDB picks the s3 secret for a path by longest matching scope and breaks ties on the
-      // secret NAME, alphabetically. An unscoped "qod_ice_<alias>" therefore ties with the node's
-      // own unscoped storage secret "quack_s3" and WINS ("qod" < "qua"), so it would sign every
-      // S3 read no longer scope covers, the tenant-db's own data included. Hence a scope is
-      // mandatory, and every entry must name a bucket: a bare "s3://" is the unscoped case again.
+      // DuckDB picks the s3 secret for a path by longest matching scope. An unscoped
+      // "qod_ice_<alias>" would sign every S3 read no longer scope covers on the node: a user URL
+      // no credential of theirs covers, and a data path whose own secret is missing. Hence a scope
+      // is mandatory, and every entry must name a bucket: a bare "s3://" is the unscoped case
+      // again.
       if awsCredentials.isDefined && awsScope.isEmpty then
         errs += "awsScope is required: list the S3 prefixes holding this catalog's table data " +
-          "(e.g. s3://my-lake/). An unscoped secret would outrank QoD's own storage secret on " +
-          "every S3 read"
+          "(e.g. s3://my-lake/). An unscoped secret would sign every S3 read on the node that no " +
+          "other secret's scope covers"
       awsScope.foreach { entry =>
         if !IcebergRestConfig.ScopeEntry.matches(entry.trim) then
           errs += s"awsScope entry '$entry' must be an s3:// prefix naming a bucket " +
@@ -335,9 +358,9 @@ object IcebergRestConfig:
     * DuckDB already holds, i.e. `Binder Error: Failed to attach database: database with name "name"
     * already exists`. A node's DuckDB CLI reads its init SQL through `-init` with `.bail off`, so
     * it does not bail on that error and the node comes up with a partly-failed federation blob and
-    * no loud signal. Comparison is
-    * case-insensitive (delegated to `validate`, which already lowercases via `equalsIgnoreCase`),
-    * so an entry in any case still blocks the normalized (lowercase) alias.
+    * no loud signal. Comparison is case-insensitive (delegated to `validate`, which already
+    * lowercases via `equalsIgnoreCase`), so an entry in any case still blocks the normalized
+    * (lowercase) alias.
     */
   def validated(
       cfg: IcebergRestConfig,

@@ -80,7 +80,6 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     }
 
   private def bootWithFixtures(
-      staticApiKey: Option[String] = None,
       previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _) =>
         IO.pure(Left(RouterFailure.Unavailable("no preview executor wired in this harness")))
   ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
@@ -89,7 +88,6 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     addDuckLakeTenantDb(fix)
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       previewExecutor = previewExecutor
     )
     (h, fix)
@@ -109,7 +107,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
   // ---------- Spec: preview -------------------------------------------------
 
   "preview endpoint" should "reject a credential-less GET with 401" in {
-    val (h, _) = bootWithFixtures(staticApiKey = Some("static-key-for-preview-authz"))
+    val (h, _) = bootWithFixtures()
     try
       val resp = get(
         h.httpClient,
@@ -229,7 +227,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
   // ---------- Spec: schema-diff (Task 6 stub) -------------------------------
 
   "schema-diff endpoint" should "reject a credential-less GET with 401" in {
-    val (h, _) = bootWithFixtures(staticApiKey = Some("static-key-for-schemadiff-authz"))
+    val (h, _) = bootWithFixtures()
     try
       val resp = get(
         h.httpClient,

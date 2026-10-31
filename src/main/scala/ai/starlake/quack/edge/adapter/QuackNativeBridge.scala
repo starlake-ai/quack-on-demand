@@ -176,6 +176,28 @@ object QuackNativeSupport extends com.typesafe.scalalogging.LazyLogging:
   def availableForThisPlatform: Boolean =
     scala.util.Try(NativeLoader.platformDir()).toOption.exists(available(_))
 
+  /** The `<os>-<arch>` name of a platform (`osx-aarch64`, `linux-x86_64`, `windows-x86_64`...), as
+    * the bundled natives are laid out; None for one no native is built for.
+    */
+  def platform(
+      osName: String = sys.props.getOrElse("os.name", "unknown"),
+      osArch: String = sys.props.getOrElse("os.arch", "unknown")
+  ): Option[String] =
+    scala.util.Try(NativeLoader.platformDir(osName, osArch)).toOption
+
+  /** The directory of the libduckdb this manager links: the one [[LibDuckDbPreload]] loaded, else
+    * the first one the launchers provisioned. None when libduckdb comes from the loader path (an
+    * image that installs it in /usr/local/lib).
+    */
+  def libDuckDbDir: Option[Path] =
+    LibDuckDbPreload.lastLoaded
+      .orElse(LibDuckDbPreload.bundledAbi.flatMap { abi =>
+        LibDuckDbPreload
+          .candidates(abi, sys.env, Path.of("").toAbsolutePath)
+          .find(Files.isRegularFile(_))
+      })
+      .map(_.toAbsolutePath.getParent)
+
   /** The boot gate: Right when the native client can run here, else a message naming the platform,
     * the `libquackwire/binaries/<platform>` binary the jar should have bundled and the
     * `DUCKDB_CACHE_DIR` hint. Main turns a Left into a boot failure.

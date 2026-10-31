@@ -12,8 +12,9 @@ import org.http4s.{Method, Request, Response, Status, Uri}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Route-level contract of the MCP endpoint: auth arms, the JSON-RPC envelope, and tool tiering. No
-  * server boot, no Postgres: `resolvePat` is an injected lookup and the tools are fakes.
+/** Route-level contract of the MCP endpoint: the one auth arm (a live PAT as Bearer), the JSON-RPC
+  * envelope, and tool tiering. No server boot, no Postgres: `resolvePat` is an injected lookup and
+  * the tools are fakes.
   */
 class McpProtocolSpec extends AnyFlatSpec with Matchers:
 
@@ -61,27 +62,23 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     run = (_, _) => IO.pure(Right(Json.obj("scaled" -> Json.True)))
   )
 
-  private def routes(staticKey: Option[String] = Some("sk")) =
+  private val routes =
     new McpRoutes(
       cfg = McpConfig(),
-      staticKey = staticKey,
       resolvePat = resolvePat,
       tools = List(echoTool, failTool, adminTool),
       serverVersion = "test"
     ).routes.orNotFound
 
-  private def post(
-      body: String,
-      bearer: Option[String],
-      staticKey: Option[String] = Some("sk")
-  ): Response[IO] =
+  private def postWith(body: String, authorization: Option[String]): Response[IO] =
     val base = Request[IO](Method.POST, Uri.unsafeFromString("/mcp")).withEntity(body)
-    val req  = bearer.fold(base)(t =>
-      base.putHeaders(
-        org.http4s.Header.Raw(org.typelevel.ci.CIString("Authorization"), s"Bearer $t")
-      )
+    val req  = authorization.fold(base)(v =>
+      base.putHeaders(org.http4s.Header.Raw(org.typelevel.ci.CIString("Authorization"), v))
     )
-    routes(staticKey).run(req).unsafeRunSync()
+    routes.run(req).unsafeRunSync()
+
+  private def post(body: String, bearer: Option[String]): Response[IO] =
+    postWith(body, bearer.map(t => s"Bearer $t"))
 
   private def bodyJson(resp: Response[IO]): Json =
     parse(new String(resp.body.compile.toVector.unsafeRunSync().toArray)).toOption
@@ -106,11 +103,15 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
       .flatMap(_.hcursor.get[String]("name").toOption)
 
   // ------------------------------------------------------------------
-  // auth arms
+  // auth: a live PAT as Bearer, nothing else
   // ------------------------------------------------------------------
 
   "POST /mcp" should "401 with no Authorization header" in {
     post(rpc("ping"), bearer = None).status shouldBe Status.Unauthorized
+  }
+
+  it should "401 a non-Bearer Authorization header" in {
+    postWith(rpc("ping"), Some(s"Basic $AdminPat")).status shouldBe Status.Unauthorized
   }
 
   it should "401 a session-JWT-looking bearer" in {
@@ -118,18 +119,19 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
       Status.Unauthorized
   }
 
-  it should "401 an empty bearer even with no static key configured" in {
-    post(rpc("ping"), bearer = Some(""), staticKey = None).status shouldBe Status.Unauthorized
+  it should "401 an empty bearer" in {
+    post(rpc("ping"), bearer = Some("")).status shouldBe Status.Unauthorized
   }
 
-  it should "401 the would-be static key when none is configured" in {
-    post(rpc("ping"), bearer = Some("sk"), staticKey = None).status shouldBe Status.Unauthorized
-  }
+  it should "401 any bearer that is not a live PAT" in
+    List("sk", "static-key-1", "qod_pat_revoked").foreach { t =>
+      withClue(s"bearer $t: ") {
+        post(rpc("tools/list"), bearer = Some(t)).status shouldBe Status.Unauthorized
+      }
+    }
 
-  it should "admit the static key as an admin principal" in {
-    val resp = post(rpc("tools/list"), bearer = Some("sk"))
-    resp.status shouldBe Status.Ok
-    toolNames(resp) should contain allOf ("echo", "always_fails", "scale_pool")
+  it should "admit a live PAT" in {
+    post(rpc("ping"), bearer = Some(UserPat)).status shouldBe Status.Ok
   }
 
   // ------------------------------------------------------------------
@@ -175,7 +177,7 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
 
   it should "405 a GET" in {
     val req = Request[IO](Method.GET, Uri.unsafeFromString("/mcp"))
-    routes().run(req).unsafeRunSync().status shouldBe Status.MethodNotAllowed
+    routes.run(req).unsafeRunSync().status shouldBe Status.MethodNotAllowed
   }
 
   // ------------------------------------------------------------------

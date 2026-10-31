@@ -3,18 +3,29 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.ondemand.auth.SessionScope
 import sttp.model.StatusCode
 
-/** Gate for operations on shared infrastructure (node quarantine / restart). Same admission rules
-  * as TenantScopeCheck: no key and static-key callers are admitted (the perimeter is apiKeyGuard's
-  * job); a resolved session is admitted only when it is a superuser session.
+/** Gate for operations on shared infrastructure (node quarantine / restart, tenant creation, fleet
+  * servers, manifests, the server config): admits exactly a superuser scope. Anyone else, a caller
+  * with no credential or an unresolvable one ([[SessionScope.NoAccess]]) included, gets
+  * `403 superuser_required`.
   */
 object SuperuserCheck:
+
+  /** The rule, on an already-resolved scope. The shared create paths call it directly with their
+    * caller's scope (`SessionScope.Superuser` for boot provisioning); [[reject]] resolves a REST or
+    * MCP credential first.
+    */
+  def forScope(
+      scope: SessionScope,
+      message: String = "this operation requires a superuser session"
+  ): Option[(StatusCode, ErrorResponse)] =
+    if scope.superuser then None
+    else Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", message))
+
+  /** [[forScope]] on the caller's credential, resolved by the total `scopeOf`. */
   def reject(
       apiKey: Option[String],
       message: String = "this operation requires a superuser session"
   )(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Option[(StatusCode, ErrorResponse)] =
-    apiKey.flatMap(scopeOf) match
-      case Some(s) if !s.superuser =>
-        Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", message))
-      case _ => None
+    forScope(scopeOf(apiKey), message)

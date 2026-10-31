@@ -11,11 +11,14 @@ enum HandshakeDenial(val message: String):
   case Unavailable(msg: String) extends HandshakeDenial(msg)
 
 /** Everything an edge knows about a handshake, for gate 4 and the OPA input. `superuserAdmissible`
-  * is false when the credential was validated by a TENANT realm; `edge` names the front door
-  * (`flightsql`, `quack`, `mcp`) and lands in the OPA input's `client.edge`. `restriction` is the
-  * caller's personal-access-token scope (the routed executor's); a tenant principal's effective set
-  * is attenuated by it BEFORE gate 4, so an opa tenant's connect decision sees only the token's
-  * roles. The FlightSQL / Quack wires have no token concept and leave it Unrestricted.
+  * says whether the credential may bind a superuser (`tenant IS NULL`) row: false when the
+  * credential was validated by a TENANT realm, and false for a REST or MCP caller that is not
+  * itself a superuser (`ExecCaller.superuserAdmissible`). It has no default, so every construction
+  * states the caller's realm. `edge` names the front door (`flightsql`, `quack`, `mcp`) and lands
+  * in the OPA input's `client.edge`. `restriction` is the caller's personal-access-token scope (the
+  * routed executor's); a tenant principal's effective set is attenuated by it BEFORE gate 4, so an
+  * opa tenant's connect decision sees only the token's roles. The FlightSQL / Quack wires have no
+  * token concept and leave it Unrestricted.
   */
 final case class AuthzRequest(
     tenant: String,
@@ -24,7 +27,7 @@ final case class AuthzRequest(
     jwtRoles: Set[String] = Set.empty,
     jwtGroups: Set[String] = Set.empty,
     jwtClaims: Map[String, String] = Map.empty,
-    superuserAdmissible: Boolean = true,
+    superuserAdmissible: Boolean,
     edge: String = "",
     restriction: ai.starlake.quack.ondemand.auth.TokenRestriction =
       ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted

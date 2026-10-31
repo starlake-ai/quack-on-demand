@@ -117,13 +117,10 @@ class SpawnScriptEncryptionSpec extends AnyFlatSpec with Matchers with SpawnScri
     sql.indexOf("INSTALL httpfs") should be < sql.indexOf("ENCRYPTION_KEY")
   }
 
-// PowerShell twin of the suite above. scripts/spawn-quack-node.ps1 runs on Windows only
-// (LocalQuackBackend.defaultCommand picks it via `powershell.exe -File` there); on any other
-// host these tests report CANCELED via `assume`, which is the correct, honest outcome - not a
-// pass to celebrate.
+// PowerShell twin of the suite above. scripts/spawn-quack-node.ps1 runs on Windows
+// (LocalQuackBackend.defaultCommand picks it via `powershell.exe -File` there); these dry runs run it
+// through pwsh elsewhere, and report CANCELED on a host with no PowerShell.
 class SpawnScriptEncryptionWindowsSpec extends AnyFlatSpec with Matchers with SpawnScriptTempDir:
-
-  private val isWindows = System.getProperty("os.name").toLowerCase.contains("win")
 
   // PORT is passed positionally, exactly as LocalQuackBackend.defaultCommand invokes the script in
   // production (no env fallback: an inherited PORT silently binding the wrong port is a worse
@@ -136,10 +133,13 @@ class SpawnScriptEncryptionWindowsSpec extends AnyFlatSpec with Matchers with Sp
       "catalogAlias"      -> "acme_lake",
       "dbName"            -> "acme_lake"
     )
-    runSpawn(Seq("powershell.exe", "-File", "scripts/spawn-quack-node.ps1", "21999"), base ++ env)
+    runSpawn(
+      PowerShell.command.get ++ Seq("-File", "scripts/spawn-quack-node.ps1", "21999"),
+      base ++ env
+    )
 
   "the PowerShell ducklake arm" should "omit ENCRYPTED when the flag is absent" in {
-    assume(isWindows, "spawn-quack-node.ps1 runs on Windows only")
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val dataPath = tempDir.resolve("lake").toString
     val sql      = initSql(
       "kind"       -> "ducklake",
@@ -154,7 +154,7 @@ class SpawnScriptEncryptionWindowsSpec extends AnyFlatSpec with Matchers with Sp
   }
 
   it should "carry ENCRYPTED and load httpfs when the flag is set" in {
-    assume(isWindows, "spawn-quack-node.ps1 runs on Windows only")
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val dataPath = tempDir.resolve("lake").toString
     val sql      = initSql(
       "kind"       -> "ducklake",
@@ -172,7 +172,7 @@ class SpawnScriptEncryptionWindowsSpec extends AnyFlatSpec with Matchers with Sp
   }
 
   "the PowerShell duckdb-file arm" should "attach plainly when the flag is absent" in {
-    assume(isWindows, "spawn-quack-node.ps1 runs on Windows only")
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val dataPath = tempDir.resolve("sales.duckdb").toString
     val sql      = initSql("kind" -> "duckdb-file", "dataPath" -> dataPath)
     sql should include(s"ATTACH '$dataPath' AS \"acme_lake\";")
@@ -180,7 +180,7 @@ class SpawnScriptEncryptionWindowsSpec extends AnyFlatSpec with Matchers with Sp
   }
 
   it should "carry ENCRYPTION_KEY and load httpfs when the flag is set" in {
-    assume(isWindows, "spawn-quack-node.ps1 runs on Windows only")
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val dataPath = tempDir.resolve("sales.duckdb").toString
     val sql      = initSql(
       "kind"          -> "duckdb-file",

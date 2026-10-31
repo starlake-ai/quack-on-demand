@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.admin
 
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.{FlightSqlRouter, SessionRegistry}
 import ai.starlake.quack.edge.adapter.{
   NodeLoadTracker,
@@ -40,10 +41,17 @@ class AdminSqlEndToEndSpec extends AnyFlatSpec with Matchers:
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
     val router = new FlightSqlRouter(
       sup,
@@ -51,7 +59,9 @@ class AdminSqlEndToEndSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       stmtInstruments = new StatementInstruments(new SimpleMeterRegistry),
-      adminExecutor = Some(new AdminStatementExecutor(sup))
+      adminExecutor = Some(new AdminStatementExecutor(sup)),
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (sup, store, router)
 

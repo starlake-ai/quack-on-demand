@@ -1,0 +1,2 @@
+CREATE VIEW main.pv_u AS SELECT id FROM u;
+CREATE SECURE VIEW sv_pvu AS SELECT id FROM main.pv_u;

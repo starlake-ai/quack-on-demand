@@ -27,6 +27,15 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    # Node pods asking for verdicts (POST /api/internal/authz/decide), whatever ingressFrom
+    # restricts: the route authenticates every call with the node's key.
+    - from:
+        - podSelector:
+            matchLabels:
+              managed-by: quack-on-demand
+      ports:
+        - protocol: TCP
+          port: 20900
   egress:
     # Spawned Quack node pods' HTTP endpoints. Tracks
     # manager.k8s.podLabel, see the nodes NetworkPolicy for details.

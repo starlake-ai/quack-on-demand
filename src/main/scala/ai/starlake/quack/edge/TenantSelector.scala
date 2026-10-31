@@ -3,20 +3,27 @@ package ai.starlake.quack.edge
 import ai.starlake.quack.model.PoolKey
 import io.circe.parser._
 
+import java.nio.charset.StandardCharsets
 import java.util.Base64
+import scala.util.Try
 
 final case class Resolved(poolKey: PoolKey, user: String)
 
 object TenantSelector:
 
   /** Decode a JWT body (no signature check - that's the auth module's job). Returns the named claim
-    * value if present.
+    * value if present. The bearer comes from an unauthenticated client and runs here before any
+    * provider validated it, so a body that is not base64url, or not JSON, names no claim instead of
+    * throwing.
     */
   private def claimFromJwt(token: String, claim: String): Option[String] =
     token.split('.') match
       case Array(_, payload, _) =>
-        val decoded = new String(Base64.getUrlDecoder.decode(padded(payload)))
-        parse(decoded).toOption.flatMap(_.hcursor.get[String](claim).toOption)
+        Try(
+          new String(Base64.getUrlDecoder.decode(padded(payload)), StandardCharsets.UTF_8)
+        ).toOption
+          .flatMap(decoded => parse(decoded).toOption)
+          .flatMap(_.hcursor.get[String](claim).toOption)
       case _ => None
 
   private def usernameFromJwt(token: String): Option[String] = claimFromJwt(token, "sub")
@@ -35,7 +42,8 @@ object TenantSelector:
     *   - JWT path: `tenant` + `pool` headers required (URL is authoritative; JWT claims are never
     *     trusted for routing). User is the validated `username` the auth module resolved (the JWT's
     *     `preferred_username`, which is what `qodstate_user.username` matches); it falls back to
-    *     the raw `sub` claim only when no validated username is available (trust-the-client mode).
+    *     the raw `sub` claim only when no validated username is available (the pre-resolution the
+    *     handshake runs before it validates the credential, to pick the tenant realm).
     *   - Basic path: bare username; `tenant` + `pool` headers required.
     *
     * Header names are plain (`tenant`, `pool`) so that Flight JDBC URL connection parameters route
@@ -64,7 +72,7 @@ object TenantSelector:
           // Prefer the username the auth module validated (the JWT's
           // preferred_username, matched against qodstate_user.username). Fall
           // back to the raw `sub` only when no validated username is available
-          // (e.g. trust-the-client mode with no providers configured).
+          // (the handshake's pre-resolution, before the credential is validated).
           val user = username.filter(_.nonEmpty).orElse(usernameFromJwt(token)).getOrElse("unknown")
           Resolved(key, user)
 

@@ -1,7 +1,8 @@
 package ai.starlake.quack.ondemand.bootstrap
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.edge.sql.{Allowed, Denied, PostgresAclValidator, ValidationContext}
+import ai.starlake.acl.parser.Verb
+import ai.starlake.quack.edge.sql.GrantMatch
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestImporter}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -20,8 +21,12 @@ import scala.util.Using
   * edit breaks a row, this spec fires before the docs go stale.
   *
   * Note: ManifestImporter stores RbacUser.tenant as the tenant surrogate id (resolved from the YAML
-  * tenant name), which is what the validator keys catalogs by. The tenantCatalogs function
+  * tenant name), which is what the decision pipeline keys catalogs by. The tenantCatalogs function
   * therefore matches on the id resolved from the imported store.
+  *
+  * Each row is judged by the node decision pipeline's grant match (`GrantMatch.covers`, as
+  * `AuthzDecider` applies it to every object the node describes), over the tables the statement of
+  * the row names.
   */
 class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
 
@@ -52,15 +57,10 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
   private val acmeId   = "acme"
   private val globexId = "globex"
 
-  private val validator = new PostgresAclValidator(
-    defaultDatabase = "acme_tpch",
-    defaultSchema = "tpch1",
-    tenantCatalogs = {
-      case `acmeId`   => Set("acme_tpch")
-      case `globexId` => Set("globex_tpcds")
-      case _          => Set.empty
-    }
-  )
+  private def tenantCatalogs(eff: EffectiveSet): Set[String] = eff.user.tenant match
+    case Some(`acmeId`)   => Set("acme_tpch")
+    case Some(`globexId`) => Set("globex_tpcds")
+    case _                => Set.empty
 
   private def effective(username: String, tenant: Option[String]): EffectiveSet =
     // Callers pass the tenant slug, which post-refactor IS the tenant id.
@@ -76,20 +76,18 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         fail(s"EffectiveSet missing for $username")
       )
 
-  private def ctx(
-      sql: String,
+  /** Whether `eff` may access `catalog.schema.table` with `verb`: a superuser always, anyone else
+    * on a covering role permission, a wildcard catalog covering the tenant's own tenant-dbs only.
+    */
+  private def allowed(
       eff: EffectiveSet,
-      defaultCatalog: String = "acme_tpch",
-      defaultSchema: String = "tpch1"
-  ): ValidationContext = ValidationContext(
-    username = eff.user.username,
-    database = s"${eff.user.tenant.getOrElse("?")}/${defaultCatalog}/bi",
-    statement = sql,
-    peer = "spec",
-    defaultDatabase = Some(defaultCatalog),
-    defaultSchema = Some(defaultSchema),
-    effectiveSet = Some(eff)
-  )
+      catalog: String,
+      schema: String,
+      table: String,
+      verb: Verb
+  ): Boolean =
+    eff.user.tenant.isEmpty ||
+      GrantMatch.covers(eff.permissions, tenantCatalogs(eff), catalog, schema, table, verb)
 
   // ---- the decision matrix (one row per test) -----------------------
 
@@ -97,122 +95,106 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
   // demo, tenant_admin so she can sign in to the admin UI at /ui/?tenant=acme.
   // Her effective grants are the union, so tenant_admin's *.*.* ALL covers Write.
   "alice (analyst + tenant_admin)" should "SELECT a covered table" in {
-    validator.validate(
-      ctx("SELECT * FROM customer", effective("alice", Some("acme")))
-    ) shouldBe Allowed
+    allowed(effective("alice", Some("acme")), "acme_tpch", "tpch1", "customer", Verb.Read) shouldBe
+      true
   }
 
   it should "be allowed INSERT via her tenant_admin role (ALL covers Write)" in {
-    validator.validate(
-      ctx("INSERT INTO customer VALUES (1)", effective("alice", Some("acme")))
-    ) shouldBe Allowed
+    allowed(effective("alice", Some("acme")), "acme_tpch", "tpch1", "customer", Verb.Write) shouldBe
+      true
   }
 
   it should "be denied cross-tenant SELECT against globex" in {
-    validator.validate(
-      ctx(
-        "SELECT * FROM globex_tpcds.tpcds1.store_sales",
-        effective("alice", Some("acme"))
-      )
-    ) shouldBe a[Denied]
+    allowed(
+      effective("alice", Some("acme")),
+      "globex_tpcds",
+      "tpcds1",
+      "store_sales",
+      Verb.Read
+    ) shouldBe false
   }
 
   "bob (data-eng group: etl + dba)" should "INSERT into lineitem (RW via etl role)" in {
-    validator.validate(
-      ctx("INSERT INTO lineitem VALUES (1)", effective("bob", Some("acme")))
-    ) shouldBe Allowed
+    allowed(effective("bob", Some("acme")), "acme_tpch", "tpch1", "lineitem", Verb.Write) shouldBe
+      true
   }
 
   it should "CREATE TABLE in tpch1 (DDL via dba role)" in {
-    validator.validate(
-      ctx("CREATE TABLE x (id INT)", effective("bob", Some("acme")))
-    ) shouldBe Allowed
+    allowed(effective("bob", Some("acme")), "acme_tpch", "tpch1", "x", Verb.Ddl) shouldBe true
   }
 
   "dave (dba only)" should "be denied SELECT (DDL does not cover Read)" in {
-    validator.validate(
-      ctx("SELECT * FROM customer", effective("dave", Some("acme")))
-    ) shouldBe a[Denied]
+    allowed(effective("dave", Some("acme")), "acme_tpch", "tpch1", "customer", Verb.Read) shouldBe
+      false
   }
 
   "acme-admin (tenant_admin)" should "SELECT inside acme" in {
-    validator.validate(
-      ctx("SELECT * FROM customer", effective("acme-admin", Some("acme")))
-    ) shouldBe Allowed
+    allowed(
+      effective("acme-admin", Some("acme")),
+      "acme_tpch",
+      "tpch1",
+      "customer",
+      Verb.Read
+    ) shouldBe true
   }
 
   it should "be denied SELECT against globex (catalog wildcard tenant-scoped)" in {
-    validator.validate(
-      ctx(
-        "SELECT * FROM globex_tpcds.tpcds1.store_sales",
-        effective("acme-admin", Some("acme"))
-      )
-    ) shouldBe a[Denied]
+    allowed(
+      effective("acme-admin", Some("acme")),
+      "globex_tpcds",
+      "tpcds1",
+      "store_sales",
+      Verb.Read
+    ) shouldBe false
   }
 
   "carol (globex analyst via group)" should "SELECT store_sales" in {
-    validator.validate(
-      ctx(
-        "SELECT * FROM store_sales",
-        effective("carol", Some("globex")),
-        defaultCatalog = "globex_tpcds",
-        defaultSchema = "tpcds1"
-      )
-    ) shouldBe Allowed
+    allowed(
+      effective("carol", Some("globex")),
+      "globex_tpcds",
+      "tpcds1",
+      "store_sales",
+      Verb.Read
+    ) shouldBe true
   }
 
   // RO does not cover Write: carol's globex `analyst` role is read-only, and
   // she holds no write grant on globex, so an INSERT is denied. (This row used
   // to be demonstrated by alice, before she gained the tenant_admin role.)
   it should "be denied INSERT into store_sales (RO does not cover Write)" in {
-    validator.validate(
-      ctx(
-        "INSERT INTO store_sales VALUES (1)",
-        effective("carol", Some("globex")),
-        defaultCatalog = "globex_tpcds",
-        defaultSchema = "tpcds1"
-      )
-    ) shouldBe a[Denied]
+    allowed(
+      effective("carol", Some("globex")),
+      "globex_tpcds",
+      "tpcds1",
+      "store_sales",
+      Verb.Write
+    ) shouldBe false
   }
 
   it should "SELECT from the federated acme_pg via cross_tenant_analyst role" in {
-    validator.validate(
-      ctx(
-        "SELECT * FROM acme_pg.tpch1.customer",
-        effective("carol", Some("globex")),
-        defaultCatalog = "globex_tpcds",
-        defaultSchema = "tpcds1"
-      )
-    ) shouldBe Allowed
+    allowed(effective("carol", Some("globex")), "acme_pg", "tpch1", "customer", Verb.Read) shouldBe
+      true
   }
 
   it should "be denied SELECT on a federated table she has no grant for" in {
-    validator.validate(
-      ctx(
-        "SELECT * FROM acme_pg.tpch1.lineitem",
-        effective("carol", Some("globex")),
-        defaultCatalog = "globex_tpcds",
-        defaultSchema = "tpcds1"
-      )
-    ) shouldBe a[Denied]
+    allowed(effective("carol", Some("globex")), "acme_pg", "tpch1", "lineitem", Verb.Read) shouldBe
+      false
   }
 
   "globex-admin (tenant_admin)" should "be denied federated SELECT (wildcard not in tenantCatalogs)" in {
     // tenantCatalogs returns only the tenant's own tenant-dbs, not the
     // federated catalog aliases registered on those tenant-dbs. So
     // *.*.* ALL does NOT reach `acme_pg` without an explicit named grant.
-    validator.validate(
-      ctx(
-        "SELECT * FROM acme_pg.tpch1.customer",
-        effective("globex-admin", Some("globex")),
-        defaultCatalog = "globex_tpcds",
-        defaultSchema = "tpcds1"
-      )
-    ) shouldBe a[Denied]
+    allowed(
+      effective("globex-admin", Some("globex")),
+      "acme_pg",
+      "tpch1",
+      "customer",
+      Verb.Read
+    ) shouldBe false
   }
 
   "root (superuser)" should "SELECT in any catalog" in {
-    validator.validate(
-      ctx("SELECT * FROM globex_tpcds.tpcds1.store_sales", effective("root", None))
-    ) shouldBe Allowed
+    allowed(effective("root", None), "globex_tpcds", "tpcds1", "store_sales", Verb.Read) shouldBe
+      true
   }

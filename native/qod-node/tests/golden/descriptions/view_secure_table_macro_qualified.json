@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id"],"kind":"table","name":"t","schema":"main","via":"memory.main.sv_tm"},{"access":"read","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"secure_view","name":"sv_tm","schema":"main","via":null}],"settings":[],"statement":"PROJECTION","v":1}

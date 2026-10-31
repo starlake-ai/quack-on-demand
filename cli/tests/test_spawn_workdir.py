@@ -1,8 +1,8 @@
-"""The bundled spawn script (what `qod fleet join` runs) starts duckdb in an empty private directory.
+"""The bundled spawn script (what `qod fleet join` runs) starts qod-node in an empty private directory.
 
 DuckDB 2.0 replacement-scans an unquoted dotted name as a file (`SELECT * FROM x.csv` reads ./x.csv),
 and an unquoted name cannot hold a path separator, so the node's working directory is the one place
-that form reaches. The script moves duckdb into a fresh 0700 directory of its own, makes the paths
+that form reaches. The script moves qod-node into a fresh 0700 directory of its own, makes the paths
 the node relies on absolute against the directory it started in, and removes the directory when the
 node stops.
 """
@@ -25,11 +25,12 @@ TEMP_DIR_RE = re.compile(r"^SET temp_directory = '([^']+)';$", re.M)
 
 def _env(tmp_path, **extra):
     from qod_cli.fleet_join import write_secrets_dir
-    d = write_secrets_dir(tmp_path / "secrets", {"QOD_NODE_TOKEN": "tok-file"})
+    d = write_secrets_dir(tmp_path / "secrets", {"QOD_NODE_TOKEN": "tok-file", "QOD_INIT_NONCE": "0f" * 16})
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir(exist_ok=True)
     env = {"PATH": os.environ["PATH"], "TMPDIR": str(tmpdir), "kind": "memory", "dbName": "m",
-           "schemaName": "main", "QOD_SECRETS_DIR": str(d), "QOD_SECRETS_DIR_EPHEMERAL": "1"}
+           "schemaName": "main", "QOD_SECRETS_DIR": str(d), "QOD_SECRETS_DIR_EPHEMERAL": "1",
+           "QOD_NODE_ID": "quack-workdir-1"}
     env.update(extra)
     return env, tmpdir
 
@@ -46,27 +47,25 @@ def test_a_relative_data_path_resolves_against_the_starting_directory(tmp_path):
     assert list(tmpdir.iterdir()) == []
 
 
-def test_duckdb_runs_in_an_empty_private_directory_removed_on_stop(tmp_path):
+def test_qod_node_runs_in_an_empty_private_directory_removed_on_stop(tmp_path):
     start = tmp_path / "start"
     start.mkdir()
     (start / "x.csv").write_text("a,b\n1,2\n")
     probe = tmp_path / "probe"
     probe.mkdir()
-    fake = tmp_path / "bin" / "duckdb"
+    fake = tmp_path / "bin" / "qod-node"
     fake.parent.mkdir()
     fake.write_text(
         "#!/bin/sh\n"
-        '[ "$1" = -no-init ] && { echo qod-shell-ok; exit 0; }\n'
         f"pwd -P > '{probe}/cwd.part'\n"
         f"ls -A | wc -l | tr -d ' ' > '{probe}/entries'\n"
         f"mv '{probe}/cwd.part' '{probe}/cwd'\n"
-        f"cat \"$2\" > '{probe}/init' & reader=$!\n"
-        "trap 'kill $reader 2>/dev/null; exit 143' TERM INT\n"
-        "wait $reader\n"
+        f"cat > '{probe}/init'\n"
+        "trap 'exit 143' TERM INT\n"
         "while :; do sleep 1; done\n"
     )
     fake.chmod(0o700)
-    env, tmpdir = _env(tmp_path, DUCKDB_BIN=str(fake))
+    env, tmpdir = _env(tmp_path, QOD_NODE_BIN=str(fake))
     proc = subprocess.Popen(["bash", str(SCRIPT), "23353"], cwd=start, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:

@@ -11,6 +11,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
@@ -42,16 +43,16 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
   "quarantineNode" should "mark the node quarantined" in:
     val (sup, tracker, h) = fixture
     val nodeId            = sup.list().head.nodes.head.nodeId
-    h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) =>
-      None
+    h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)(_ =>
+      SessionScope.Superuser
     ).unsafeRunSync() shouldBe Right(())
     tracker.snapshot(nodeId).quarantined shouldBe true
 
   it should "return NotFound for unknown node" in:
     val (sup, _, h) = fixture
     val out         = h
-      .quarantineNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)((_: String) =>
-        None
+      .quarantineNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
@@ -61,7 +62,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val nodeId      = sup.list().head.nodes.head.nodeId
     val out         = h
       .setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, 7), None)(
-        (_: String) => None
+        _ => SessionScope.Superuser
       )
       .unsafeRunSync()
     out shouldBe Right(())
@@ -78,7 +79,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val nodeId      = sup.list().head.nodes.head.nodeId
     val out         = h
       .setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, -1), None)(
-        (_: String) => None
+        _ => SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
@@ -87,7 +88,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val (sup, _, h) = fixture
     val out         = h
       .setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", "nope", 5), None)(
-        (_: String) => None
+        _ => SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
@@ -112,8 +113,8 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
       new NodeHandlers(sup, tracker, new InMemoryControlPlaneStore(), StateChangePublisher.noop)
     val nodeId = sup.list().head.nodes.head.nodeId
     val out    = h
-      .restartNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) =>
-        None
+      .restartNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)
@@ -122,8 +123,8 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
   it should "keep NotFound as 404 for an unknown node (never the raised arm)" in:
     val (sup, _, h) = fixture
     val out         = h
-      .restartNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)((_: String) =>
-        None
+      .restartNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
@@ -147,8 +148,8 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val h      = new NodeHandlers(sup, tracker, failing, StateChangePublisher.noop)
     val nodeId = sup.list().head.nodes.head.nodeId
     val out    = h
-      .quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) =>
-        None
+      .quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)
@@ -181,7 +182,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val nodeId = sup.list().head.nodes.head.nodeId
     val out    = h
       .setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, 7), None)(
-        (_: String) => None
+        _ => SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)

@@ -1,0 +1,1 @@
+QoD: statement uses a secure view whose definition reads the plain view main.pv_u, which QoD does not support

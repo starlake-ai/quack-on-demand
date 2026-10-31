@@ -15,6 +15,7 @@ object EndpointModules:
     AuthEndpoints,
     PatEndpoints,
     ProfileEndpoints,
+    S3CredentialEndpoints,
     TelemetryEndpoints,
     FederatedSourceEndpoints,
     CatalogEndpoints,

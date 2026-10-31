@@ -1,10 +1,10 @@
 package ai.starlake.quack.ondemand.telemetry
 
 import ai.starlake.quack.ondemand.api.SessionTokenStore
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine, Expiry}
 import com.typesafe.scalalogging.LazyLogging
 
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import scala.util.control.NonFatal
 
 /** Synchronous best-effort audit writer for the low-volume control-plane and auth event families
@@ -16,18 +16,18 @@ final class AuditRecorder(
     /** Resolves a bearer to the session it authenticates. The composed lookup wired at boot
       * (`Main.scala`) tries a session JWT first, then falls back to a PAT bearer resolved through
       * `PatAuthenticator.sessionOf`, so a PAT-authenticated REST/MCP call attributes to its real
-      * owner instead of falling through to the "unresolved token" `static-key` branch below.
+      * owner instead of to `anonymous`.
       */
     sessionLookup: String => Option[SessionTokenStore.Session],
     onDrop: Int => Unit = _ => (),
     /** Resolves a bearer to the `qodstate_pat` id it presented, when it is a PAT. `None` for a
-      * session token, the static key, or no token at all -- the default no-op keeps every
+      * session token, an unresolved token, or no token at all; the default no-op keeps every
       * pre-existing construction site (tests, `AuditRecorder.noop`) behaving exactly as before.
       * Appended AFTER `onDrop` deliberately, not inserted before it: every in-tree call site that
       * sets `onDrop` already does so by name, so this ordering is source-compatible with them, but
       * an out-of-tree SPI module built against the old (store, sessionLookup, patIdOf, onDrop)
       * positional order would silently swap the two on a naive rebuild if patIdOf had been inserted
-      * before onDrop instead -- appending avoids that trap entirely.
+      * before onDrop instead; appending avoids that trap entirely.
       */
     patIdOf: String => Option[String] = _ => None
 ) extends LazyLogging:
@@ -38,13 +38,14 @@ final class AuditRecorder(
     */
   def onDropCounter(f: Int => Unit): Unit = dropHook = f
 
-  /** (actor, realm) for a REST caller: session token wins; an unresolved non-empty token is the
-    * static QOD_API_KEY; no token at all is the open dev mode.
+  /** (actor, realm) for a REST caller: the user a session or PAT resolves to; a token that resolves
+    * to no one, or no token at all, is `anonymous`. The guard admits only sessions and PATs, so an
+    * admitted call always carries a user.
     */
   def actorOf(token: Option[String]): (String, String) =
     token.flatMap(sessionLookup) match
       case Some(s) => (s.profile.username, if s.scope.superuser then "system" else "tenant")
-      case None    => (if token.exists(_.nonEmpty) then "static-key" else "anonymous", "system")
+      case None    => ("anonymous", "system")
 
   def rest(
       token: Option[String],
@@ -78,7 +79,7 @@ final class AuditRecorder(
       /** The `qodstate_pat` id of the token that acted. `rest` resolves this automatically from the
         * bearer via `patIdOf` before delegating here; a caller that already has an actor/realm
         * resolved some other way (bypassing `rest`) passes it explicitly, and `None` is the correct
-        * value for session and static-key callers.
+        * value for session callers.
         */
       patId: Option[String] = None
   ): Unit =
@@ -111,16 +112,50 @@ object AuditRecorder:
 
 /** One event per key per interval; used to keep anonymous /api 401 bursts (port scans) from
   * flooding the audit table.
+  *
+  * A key's entry lives exactly one interval past the event that wrote it (an older entry can never
+  * refuse `allow` again), so the table holds only the keys seen within the last interval instead of
+  * every user and client address ever seen. The expiry derives from the stored event time, never
+  * from when the entry was last touched, so a refused `allow` does not extend it. No size cap: a
+  * cap would evict live keys and let a key through twice in one interval.
   */
 final class AuditRateLimiter(
     intervalMillis: Long = 60000,
     clock: () => Long = () => System.currentTimeMillis()
 ):
-  private val last                = new ConcurrentHashMap[String, java.lang.Long]()
+  private val NanosPerMilli = 1000000L
+
+  // Nanoseconds left before the interval that started at `stampMillis` ends.
+  private def left(stampMillis: Long, nowNanos: Long): Long =
+    math.max(0L, (stampMillis + intervalMillis) * NanosPerMilli - nowNanos)
+
+  private val last: Cache[String, java.lang.Long] = Caffeine
+    .newBuilder()
+    .ticker(() => clock() * NanosPerMilli)
+    .executor(_.run())
+    .expireAfter(new Expiry[String, java.lang.Long]:
+      def expireAfterCreate(k: String, v: java.lang.Long, now: Long): Long = left(v, now)
+      def expireAfterUpdate(k: String, v: java.lang.Long, now: Long, current: Long): Long =
+        left(v, now)
+      def expireAfterRead(k: String, v: java.lang.Long, now: Long, current: Long): Long = current)
+    .build[String, java.lang.Long]()
+
   def allow(key: String): Boolean =
-    val now  = clock()
-    val prev = last.get(key)
-    if prev == null || now - prev >= intervalMillis then
-      last.put(key, now)
-      true
-    else false
+    val now     = clock()
+    var allowed = false
+    last
+      .asMap()
+      .compute(
+        key,
+        (_, prev) =>
+          if prev == null || now - prev >= intervalMillis then
+            allowed = true
+            java.lang.Long.valueOf(now)
+          else prev
+      )
+    allowed
+
+  /** Visible for tests: keys still inside their interval. */
+  private[telemetry] def trackedKeys: Int =
+    last.cleanUp()
+    last.asMap().size()

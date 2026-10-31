@@ -1,0 +1,176 @@
+// Unit tests for authz: the prelude's exact form, the refresh rules and the parse screen's
+// per-connection book, without DuckDB. Built with -DQOD_NODE_TESTS=ON and run by CTest.
+
+#include "authz.hpp"
+#include "test_handles.hpp"
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+using qod_test::kKey;
+using qod_test::kNode;
+using qod_test::Mint;
+using qod_test::Prelude;
+
+int failures = 0;
+
+void Expect(bool condition, const std::string &what) {
+	if (!condition) {
+		std::cerr << "FAIL: " << what << std::endl;
+		failures++;
+	}
+}
+
+void ExpectMentions(const std::string &text, const std::string &needle, const std::string &what) {
+	if (text.find(needle) == std::string::npos) {
+		std::cerr << "FAIL: " << what << ": \"" << text << "\" does not mention \"" << needle << "\"" << std::endl;
+		failures++;
+	}
+}
+
+int64_t now_ms = 1761200000000;
+
+} // namespace
+
+int main() {
+	// ---- the prelude: exactly the manager's spelling
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('abc.0f')") == "abc.0f", "the prelude");
+	Expect(qod::PreludeHandle("CALL qod_session('abc.0f')").empty(), "unqualified, a macro could shadow it");
+	Expect(qod::PreludeHandle("call system.main.qod_session('abc.0f')").empty(), "another spelling is no prelude");
+	Expect(qod::PreludeHandle(" CALL system.main.qod_session('abc.0f')").empty(), "a leading blank");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('a'); SELECT 1").empty(), "a second statement");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('a''b')").empty(), "a quote inside the handle");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('')").empty(), "no handle");
+
+	// ---- refresh rules
+	qod::Handle next;
+	next.principal = {"u-1", "alice", "acme", false, false};
+	next.policy_version = 3;
+	Expect(qod::RefreshRefusal(nullptr, next).empty(), "the first handle installs");
+	qod::Installed current {next.principal, 3, now_ms + 60000, "n-1"};
+	Expect(qod::RefreshRefusal(&current, next).empty(), "the same principal refreshes");
+	auto other = next;
+	other.principal.id = "u-2";
+	ExpectMentions(qod::RefreshRefusal(&current, other), "another principal", "another principal");
+	auto promoted = next;
+	promoted.principal.superuser = true;
+	ExpectMentions(qod::RefreshRefusal(&current, promoted), "another principal", "a changed flag");
+	auto older = next;
+	older.policy_version = 2;
+	ExpectMentions(qod::RefreshRefusal(&current, older), "older policy version", "a lower policy version");
+	auto rescoped = next;
+	rescoped.ctx = std::string(64, 'b');
+	Expect(qod::RefreshRefusal(&current, rescoped).empty(), "a refresh may change the session context");
+
+	// ---- the parse screen
+	qod::NodeAuthz authz(kNode, kKey, [] { return now_ms; });
+	Expect(authz.Screen("c-1", "SELECT 1") == qod::kNoPrincipal, "nothing recorded yet");
+	auto first = Mint("u-1", now_ms + 60000);
+	Expect(authz.Screen("c-1", Prelude(first)).empty(), "the prelude is admitted");
+	Expect(authz.Screen("c-1", "SELECT 1").empty(), "then the connection's statements");
+	Expect(authz.Screen("c-2", "SELECT 1") == qod::kNoPrincipal, "a principal is recorded per connection");
+	ExpectMentions(authz.Screen("c-1", Prelude(Mint("u-2", now_ms + 60000))), "another principal",
+	               "another principal on c-1");
+	ExpectMentions(authz.Screen("c-3", Prelude("not-a-handle")), "session handle refused", "a malformed handle");
+	// The screen only peeks at the nonce: qod_session consumes it on the session.
+	Expect(authz.Consume(authz.Verify(first)), "the session consumes the nonce");
+	ExpectMentions(authz.Screen("c-4", Prelude(first)), "already used", "a consumed handle elsewhere");
+
+	// ---- the book keeps the handle that installed: the screen's decide calls carry it
+	auto fifth = Mint("u-5", now_ms + 60000);
+	Expect(authz.Screen("c-5", Prelude(fifth)).empty(), "u-5 installs");
+	qod::Installed recorded;
+	Expect(authz.Screen("c-5", "SELECT 1", &recorded).empty(), "u-5's statement is admitted");
+	Expect(recorded.handle == fifth && recorded.replica == "http://127.0.0.1:20900" && recorded.principal.id == "u-5" &&
+	           recorded.ctx == std::string(64, 'c'),
+	       "with the connection's record: handle, replica, principal, ctx");
+	qod::Installed untouched;
+	Expect(authz.Screen("c-5", Prelude(Mint("u-5", now_ms + 60000)), &untouched).empty() && untouched.handle.empty(),
+	       "a prelude fills no record: it has no content to screen");
+
+	// ---- decision 23: the S3 credential scopes qod_session installed, by the handle's nonce
+	authz.RecordCredentialScopes("n-scopes-1", {"s3://acme-etl/"}, now_ms + 60000);
+	Expect(authz.CredentialScopes("n-scopes-1") == std::vector<std::string> {"s3://acme-etl/"},
+	       "recorded scopes are read back");
+	Expect(authz.CredentialScopes("n-scopes-2").empty(), "an unknown nonce has none");
+	authz.RecordCredentialScopes("n-scopes-3", {"s3://b/"}, now_ms);
+	Expect(authz.CredentialScopes("n-scopes-3").empty(), "expired scopes are none");
+	now_ms += 61000;
+	Expect(authz.Screen("c-1", "SELECT 1") == qod::kNoPrincipal, "an expired record");
+	// The book is advisory: once a record expired it admits another principal's prelude; the
+	// session refuses it (authz_engine_test).
+	Expect(authz.Screen("c-1", Prelude(Mint("u-9", now_ms + 60000))).empty(),
+	       "after expiry the book admits another principal");
+
+	// ---- prepare finalization: a verdict, or a system principal
+	Expect(qod::FinalizeRefusal(true, false, true).empty(), "a statement with a verdict");
+	Expect(qod::FinalizeRefusal(true, true, false).empty(), "a superuser or system statement");
+	Expect(qod::FinalizeRefusal(true, false, false) == qod::kNoVerdict, "a statement without a verdict");
+	Expect(qod::FinalizeRefusal(false, false, true) == qod::kNoPrincipal, "a connection without a principal");
+
+	// ---- a prepared statement's verdict holds only for the session it was taken for
+	qod::Installed session;
+	session.principal.id = "u-1";
+	session.policy_version = 7;
+	session.ctx = std::string(64, 'a');
+	qod::Admitted stored {"f", "u-1", 7, std::string(64, 'a'), now_ms + 1000};
+	Expect(!qod::RebindRequired(&stored, session, now_ms), "the same principal, policy version and ctx");
+	Expect(qod::RebindRequired(nullptr, session, now_ms), "no verdict stored with the statement");
+	auto stale = stored;
+	stale.principal_id = "u-2";
+	Expect(qod::RebindRequired(&stale, session, now_ms), "another principal");
+	stale = stored;
+	stale.policy_version = 6;
+	Expect(qod::RebindRequired(&stale, session, now_ms), "an older policy version");
+	stale = stored;
+	stale.ctx = std::string(64, 'b');
+	Expect(qod::RebindRequired(&stale, session, now_ms), "another session context");
+	Expect(qod::RebindRequired(&stored, session, now_ms + 1000), "an expired verdict");
+	// T10-N2: a verdict of this session whose time ran out during planning is decided again.
+	Expect(qod::ExpiredInPlanning(&stored, session, now_ms + 1000), "a verdict that ran out");
+	Expect(!qod::ExpiredInPlanning(&stored, session, now_ms), "a verdict still valid");
+	Expect(!qod::ExpiredInPlanning(nullptr, session, now_ms + 1000), "no verdict at all");
+	stale = stored;
+	stale.principal_id = "u-2";
+	Expect(!qod::ExpiredInPlanning(&stale, session, now_ms + 1000), "another principal's verdict");
+	stale = stored;
+	stale.policy_version = 6;
+	Expect(!qod::ExpiredInPlanning(&stale, session, now_ms + 1000), "an older policy version's");
+	stale = stored;
+	stale.ctx = std::string(64, 'b');
+	Expect(!qod::ExpiredInPlanning(&stale, session, now_ms + 1000), "another session context's");
+	stale = stored;
+	stale.expires_at = qod::kNeverExpires;
+	Expect(!qod::RebindRequired(&stale, session, now_ms + 1000), "a local allow never expires");
+	// Decision 24: a statement prepared under other read-only catalogs is bound and checked again, a
+	// local allow included: an EXECUTE that is not rebound shows no plan to check.
+	stale.read_only = {"crm"};
+	Expect(qod::RebindRequired(&stale, session, now_ms), "a verdict taken under other read-only catalogs");
+	auto read_only_session = session;
+	read_only_session.read_only = {"crm"};
+	Expect(!qod::RebindRequired(&stale, read_only_session, now_ms), "the same read-only catalogs");
+	auto checked = stored;
+	checked.read_only = {"crm"};
+	Expect(!qod::ExpiredInPlanning(&checked, session, now_ms + 1000),
+	       "a verdict checked against other read-only catalogs is not this session's");
+
+	// ---- decision 24: the handle's read-only catalogs refuse a write into them
+	Expect(qod::ReadOnlyRefusal({"crm"}, {}).empty(), "nothing is read-only");
+	Expect(qod::ReadOnlyRefusal({}, {"crm"}).empty(), "a statement that writes nowhere");
+	Expect(qod::ReadOnlyRefusal({"memory"}, {"crm", "erp"}).empty(), "a write into a writable catalog");
+	Expect(qod::ReadOnlyRefusal({"crm2"}, {"crm"}).empty(), "a catalog whose name only starts the same");
+	Expect(qod::ReadOnlyRefusal({"crm"}, {"crm"}) == "QoD: catalog crm is read-only",
+	       "a write into a read-only catalog");
+	Expect(qod::ReadOnlyRefusal({"erp", "memory"}, {"crm", "erp"}) == "QoD: catalog erp is read-only",
+	       "one read-only catalog among the written ones");
+	Expect(qod::ReadOnlyRefusal({"crm", "erp"}, {"crm", "erp"}) == "QoD: catalog crm is read-only",
+	       "the first read-only catalog is named");
+
+	if (failures == 0) {
+		std::cout << "authz_test: all passed" << std::endl;
+	}
+	return failures == 0 ? 0 : 1;
+}

@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"insert","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"kv","schema":"main","via":null},{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["k"],"kind":"table","name":"kv","schema":"main","via":null}],"settings":[],"statement":"MERGE_INTO","v":1}

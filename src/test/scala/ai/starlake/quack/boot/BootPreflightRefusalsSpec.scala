@@ -1,0 +1,427 @@
+package ai.starlake.quack.boot
+
+import ai.starlake.quack.{
+  FlightConfig,
+  Main,
+  ManagementAuthConfig,
+  ManagementOidcConfig,
+  ManagerConfig
+}
+import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.edge.config.{AuthenticationConfig, AzureAuthConfig, OpaConfig}
+import ai.starlake.quack.observability.metrics.MetricsConfig
+import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
+import ai.starlake.quack.security.InMemoryAuthService.emptyAuthConfig
+import com.typesafe.config.ConfigFactory
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+import pureconfig.ConfigSource
+
+/** The boot refusals of the static API key removal:
+  *   - a non-empty `QOD_API_KEY` (environment) or `quack-on-demand.apiKey` (loaded configuration)
+  *     stops the boot with the removal message, before HA validation; an empty value passes;
+  *   - a FlightSQL edge with no authenticator at all (the handshake would refuse every client)
+  *     stops the boot, also before HA validation;
+  *   - a manager nobody can sign in to (no password provider and no system-scope OIDC sign-in, as
+  *     `ManagementAuthWiring` serves it) stops too, also before HA validation.
+  */
+class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
+  import Main.given
+
+  private val noEnv: String => Option[String]             = _ => None
+  private def keyEnv(v: String): String => Option[String] = Map("QOD_API_KEY" -> v).get
+
+  "checkRemovedApiKey" should "refuse a non-empty QOD_API_KEY in the environment" in {
+    BootPreflight.checkRemovedApiKey(keyEnv("k1"), ConfigFactory.empty()) shouldBe
+      Left(BootPreflight.RemovedApiKeyMessage)
+  }
+
+  it should "refuse a non-empty quack-on-demand.apiKey in the loaded configuration" in {
+    val raw = ConfigFactory.parseString("quack-on-demand.apiKey = \"k1\"")
+    BootPreflight.checkRemovedApiKey(noEnv, raw) shouldBe Left(BootPreflight.RemovedApiKeyMessage)
+  }
+
+  it should "accept an empty or blank value, and an absent one" in {
+    BootPreflight.checkRemovedApiKey(keyEnv(""), ConfigFactory.empty()) shouldBe Right(())
+    BootPreflight.checkRemovedApiKey(keyEnv("   "), ConfigFactory.empty()) shouldBe Right(())
+    val blank = ConfigFactory.parseString("quack-on-demand.apiKey = \" \"")
+    BootPreflight.checkRemovedApiKey(noEnv, blank) shouldBe Right(())
+    BootPreflight.checkRemovedApiKey(noEnv, ConfigFactory.empty()) shouldBe Right(())
+  }
+
+  it should "carry the removal message verbatim" in {
+    BootPreflight.RemovedApiKeyMessage shouldBe
+      "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static " +
+      "API key. Use a personal access token (qod auth pat create) or a qod login session, and " +
+      "unset QOD_API_KEY."
+  }
+
+  /** Boots with HA on over the local runtime, which HA validation always refuses: a boot that gets
+    * past the removed-key refusal stops there, before it opens any socket or reaches Postgres (no
+    * probe, no Liquibase).
+    */
+  private def bootUntilHaRefusal(env: String => Option[String], authOverlay: String = ""): Unit =
+    boot(
+      env,
+      "quack-on-demand { ha.enabled = true, runtimeType = local, embeddedPostgres.enabled = false }" +
+        "\n" + authOverlay
+    )
+
+  private def boot(env: String => Option[String], overlay: String): Unit =
+    val source = ConfigSource
+      .string(overlay)
+      .withFallback(ConfigSource.default)
+    val opa = OpaConfig
+      .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
+      .fold(e => fail(e), identity)
+    Main.bootManager(
+      source.at("quack-on-demand").loadOrThrow[ManagerConfig],
+      source.at("quack-flightsql").loadOrThrow[FlightConfig],
+      source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig],
+      source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
+      opa,
+      env = env,
+      rawConfig = ConfigFactory.empty()
+    )
+    ()
+
+  "Main.bootManager" should "refuse a set QOD_API_KEY before HA validation" in {
+    val err = intercept[RuntimeException](bootUntilHaRefusal(keyEnv("k1")))
+    err.getMessage shouldBe BootPreflight.RemovedApiKeyMessage
+  }
+
+  it should "go on to HA validation with an empty QOD_API_KEY" in {
+    val err = intercept[RuntimeException](bootUntilHaRefusal(keyEnv("")))
+    err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
+  }
+
+  /** HA over Kubernetes with no session secret configured: every replica reads the control plane's,
+    * so HA validation passes. Lockout on with no SMTP relay is the next refusal (after the native
+    * library check), still before the boot opens any socket or reaches Postgres, and stops it
+    * there.
+    */
+  it should "go past HA validation with no session secret configured" in {
+    val err = intercept[RuntimeException](
+      boot(
+        noEnv,
+        "quack-on-demand { ha.enabled = true, runtimeType = kubernetes, " +
+          "embeddedPostgres.enabled = false, auth.management.sessionJwtSecret = \"\", " +
+          "auth.lockout.enabled = true, smtp.host = \"\" }"
+      )
+    )
+    err.getMessage should startWith("auth.lockout.enabled is true but no SMTP relay")
+  }
+
+  /** Every `quack-flightsql.auth` provider off, whatever the test environment sets. */
+  private val NoEdgeAuth =
+    "quack-flightsql.auth { database.enabled = false, keycloak.enabled = false, " +
+      "google.enabled = false, azure.enabled = false, aws.enabled = false, " +
+      "jwt { secretKey = \"\", publicKeyPath = \"\" } }\n" +
+      // System-scope OIDC set: it gates the admin UI and REST only, so it must not admit the edge.
+      "quack-on-demand.auth.management { identitySource = oidc, " +
+      "oidc { issuerUrl = \"https://accounts.google.com\", clientId = \"c\" } }"
+
+  it should "refuse a FlightSQL edge with no authenticator before HA validation" in {
+    val err = intercept[RuntimeException](bootUntilHaRefusal(noEnv, NoEdgeAuth))
+    err.getMessage shouldBe BootPreflight.NoEdgeAuthMessage
+  }
+
+  /** A bearer provider only (Google has no password grant), and system-scope sign-in by password:
+    * the edge has an authenticator, but nothing could create a session.
+    */
+  private val NoLogin =
+    "quack-flightsql.auth { database.enabled = false, keycloak.enabled = false, " +
+      "google { enabled = true, clientId = \"c\" }, azure.enabled = false, aws.enabled = false, " +
+      "jwt { secretKey = \"\", publicKeyPath = \"\" } }\n" +
+      "quack-on-demand.auth.management { identitySource = db, " +
+      "oidc { issuerUrl = \"https://accounts.google.com\", clientId = \"c\" } }"
+
+  it should "refuse a manager nobody can sign in to before HA validation" in {
+    val err = intercept[RuntimeException](bootUntilHaRefusal(noEnv, NoLogin))
+    err.getMessage should startWith("nothing can sign in to this manager")
+  }
+
+  /** The management auth block with only the fields the login gate reads set. */
+  private def mgmt(
+      identitySource: String = "db",
+      issuerUrl: String = "",
+      clientId: String = ""
+  ): ManagementAuthConfig =
+    ManagementAuthConfig(
+      identitySource = identitySource,
+      sessionJwtSecret = "",
+      sessionCookieSecure = "auto",
+      sessionCookiePath = "/api",
+      oidc = ManagementOidcConfig(issuerUrl = issuerUrl, clientId = clientId)
+    )
+
+  private val google = "https://accounts.google.com"
+
+  "checkLoginAvailable" should "refuse with neither a password provider nor system-scope OIDC" in {
+    val out = BootPreflight.checkLoginAvailable(hasPasswordProvider = false, mgmt())
+    out.isLeft shouldBe true
+    out.left.toOption.get should include("QOD_AUTH_DB_ENABLED")
+    out.left.toOption.get should include("QOD_MGMT_OIDC_ISSUER_URL")
+    out.left.toOption.get should include("QOD_MGMT_IDENTITY_SOURCE=oidc")
+  }
+
+  it should "treat a blank issuer URL or client id as unset" in {
+    BootPreflight
+      .checkLoginAvailable(false, mgmt("oidc", issuerUrl = "  ", clientId = "c"))
+      .isLeft shouldBe true
+    BootPreflight
+      .checkLoginAvailable(false, mgmt("oidc", issuerUrl = google, clientId = " "))
+      .isLeft shouldBe true
+  }
+
+  it should "not count a configured issuer while the system scope signs in by password (db)" in {
+    // ManagementAuthWiring hands the system scope no OIDC client under identitySource=db, so the
+    // QOD_MGMT_OIDC_* values serve no sign-in there.
+    BootPreflight
+      .checkLoginAvailable(false, mgmt("db", issuerUrl = google, clientId = "c"))
+      .isLeft shouldBe true
+  }
+
+  it should "boot with a password provider alone" in {
+    BootPreflight.checkLoginAvailable(hasPasswordProvider = true, mgmt()) shouldBe Right(())
+  }
+
+  it should "boot with system-scope OIDC alone (identitySource=oidc, issuer and client id)" in {
+    BootPreflight.checkLoginAvailable(
+      hasPasswordProvider = false,
+      mgmt(" OIDC ", issuerUrl = google, clientId = "c")
+    ) shouldBe Right(())
+  }
+
+  "AuthenticationService.hasPasswordProvider" should "follow the basic chain, not the bearer one" in {
+    def has(cfg: AuthenticationConfig): Boolean =
+      val svc = new AuthenticationService(cfg, "")
+      try svc.hasPasswordProvider
+      finally svc.close()
+    // Every provider off: no basic chain at all.
+    has(emptyAuthConfig) shouldBe false
+    // Google is bearer-only (no password grant): still no password provider.
+    has(
+      emptyAuthConfig.copy(google = emptyAuthConfig.google.copy(enabled = true, clientId = "c"))
+    ) shouldBe
+      false
+    // Azure adds a resource-owner-password provider to the basic chain.
+    has(
+      emptyAuthConfig.copy(azure =
+        AzureAuthConfig(enabled = true, tenantId = "t", clientId = "c", clientSecret = "s")
+      )
+    ) shouldBe true
+  }
+
+  private val jwtSecret =
+    emptyAuthConfig.copy(jwt =
+      emptyAuthConfig.jwt.copy(secretKey = "edge-jwt-secret-of-at-least-256-bits-0123")
+    )
+  private val jwtPublicKey =
+    emptyAuthConfig.copy(jwt = emptyAuthConfig.jwt.copy(publicKeyPath = "/keys/issuer.pem"))
+  private val databaseAuth =
+    emptyAuthConfig.copy(database = emptyAuthConfig.database.copy(enabled = true))
+  private val keycloakAuth = emptyAuthConfig.copy(keycloak =
+    emptyAuthConfig.keycloak
+      .copy(enabled = true, baseUrl = "https://kc", realm = "r", clientId = "c")
+  )
+  private val googleAuth =
+    emptyAuthConfig.copy(google = emptyAuthConfig.google.copy(enabled = true, clientId = "c"))
+  private val azureAuth = emptyAuthConfig.copy(azure =
+    AzureAuthConfig(enabled = true, tenantId = "t", clientId = "c", clientSecret = "s")
+  )
+  private val awsAuth = emptyAuthConfig.copy(aws =
+    emptyAuthConfig.aws.copy(enabled = true, region = "eu-west-1", userPoolId = "p", clientId = "c")
+  )
+
+  "checkEdgeAuthAvailable" should "refuse a chain with no provider at all" in {
+    BootPreflight.checkEdgeAuthAvailable(emptyAuthConfig) shouldBe
+      Left(BootPreflight.NoEdgeAuthMessage)
+  }
+
+  it should "name what to set, and that system-scope OIDC does not count" in {
+    val msg = BootPreflight.NoEdgeAuthMessage
+    for env <- List(
+        "QOD_AUTH_DB_ENABLED=true",
+        "QOD_AUTH_KEYCLOAK_ENABLED",
+        "QOD_AUTH_AZURE_ENABLED",
+        "JWT_SECRET_KEY",
+        "JWT_PUBLIC_KEY_PATH",
+        "QOD_AUTH_GOOGLE_ENABLED",
+        "QOD_AUTH_AWS_ENABLED",
+        "QOD_MGMT_OIDC"
+      )
+    do msg should include(env)
+  }
+
+  it should "admit each provider kind on its own" in {
+    for (label, cfg) <- List(
+        "database"       -> databaseAuth,
+        "keycloak"       -> keycloakAuth,
+        "azure"          -> azureAuth,
+        "google"         -> googleAuth,
+        "aws"            -> awsAuth,
+        "jwt secret key" -> jwtSecret,
+        "jwt public key" -> jwtPublicKey
+      )
+    do withClue(label)(BootPreflight.checkEdgeAuthAvailable(cfg) shouldBe Right(()))
+  }
+
+  "AuthenticationService.configuresProvider" should "agree with the chains the service builds" in {
+    // The boot check reads the config at the top of bootManager, before any socket; the handshake
+    // reads the built chains. They must agree for every provider kind the service can build
+    // without a database or a key file.
+    for cfg <- List(emptyAuthConfig, keycloakAuth, azureAuth, googleAuth, awsAuth, jwtSecret) do
+      val svc = new AuthenticationService(cfg, "")
+      try AuthenticationService.configuresProvider(cfg) shouldBe svc.hasProviders
+      finally svc.close()
+  }
+
+  "AuthenticationService.configuresPasswordProvider" should "agree with the basic chain built" in {
+    // The login check reads the config at the top of the boot; the service builds the chain later.
+    for cfg <- List(emptyAuthConfig, keycloakAuth, azureAuth, googleAuth, awsAuth, jwtSecret) do
+      val svc = new AuthenticationService(cfg, "")
+      try AuthenticationService.configuresPasswordProvider(cfg) shouldBe svc.hasPasswordProvider
+      finally svc.close()
+    AuthenticationService.configuresPasswordProvider(databaseAuth) shouldBe true
+  }
+
+  /** A boot that gets past the lockout check reaches the decide-URL check before it probes
+    * Postgres: Kubernetes with neither QOD_INTERNAL_URL nor QOD_POD_IP stops there, and so does
+    * fleet mode without QOD_INTERNAL_URL.
+    */
+  "Main.bootManager" should "refuse a decide URL the runtime's nodes cannot reach, before reaching Postgres" in {
+    val urls =
+      "nodeAuthz { internalUrl = \"\", podIp = \"\" }, host = \"0.0.0.0\", auth.lockout.enabled = false"
+    // Both names of the Kubernetes runtime.
+    for runtime <- List("kubernetes", "k8s") do
+      val k8s = intercept[RuntimeException](
+        boot(
+          noEnv,
+          s"quack-on-demand { runtimeType = $runtime, embeddedPostgres.enabled = false, $urls }"
+        )
+      )
+      withClue(runtime)(k8s.getMessage should startWith("the node decide URL is http://127.0.0.1:"))
+    val fleet = intercept[RuntimeException](
+      boot(
+        noEnv,
+        "quack-on-demand { runtimeType = fleet, fleet.joinToken = \"x\", " +
+          s"embeddedPostgres.enabled = false, $urls }"
+      )
+    )
+    fleet.getMessage shouldBe BootPreflight.InternalUrlFleetMessage
+  }
+
+  private def switchEnv(name: String, v: String): String => Option[String] = Map(name -> v).get
+
+  /** Every removed enforcement switch: its environment variable, its configuration path, and the
+    * refusal naming the variable to unset.
+    */
+  private val removedSwitches = List(
+    ("QOD_ACL_ENABLED", "quack-flightsql.acl.enabled", BootPreflight.RemovedAclEnabledMessage),
+    (
+      "QOD_ACL_FILTERED_METADATA",
+      "quack-flightsql.acl.filteredMetadata",
+      BootPreflight.RemovedAclFilteredMetadataMessage
+    ),
+    ("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", BootPreflight.RemovedAclDialectMessage),
+    (
+      "QOD_NODE_LOCKDOWN",
+      "quack-flightsql.nodeLockdown",
+      BootPreflight.RemovedNodeLockdownMessage
+    )
+  )
+
+  "checkRemovedSwitches" should "refuse each removed variable set to any value, empty included" in {
+    for (name, _, message) <- removedSwitches; v <- List("true", "false", "duckdb", "", "  ") do
+      withClue(s"$name='$v' ")(
+        BootPreflight.checkRemovedSwitches(switchEnv(name, v), ConfigFactory.empty()) shouldBe
+          Left(message)
+      )
+  }
+
+  it should "refuse each removed path in the loaded configuration" in {
+    for (_, path, message) <- removedSwitches; v <- List("true", "false", "duckdb", "null") do
+      withClue(s"$path = $v ")(
+        BootPreflight.checkRemovedSwitches(
+          noEnv,
+          ConfigFactory.parseString(s"$path = $v")
+        ) shouldBe Left(message)
+      )
+  }
+
+  it should "accept the bundled configuration and the variables that remain" in {
+    BootPreflight.checkRemovedSwitches(noEnv, ConfigFactory.empty()) shouldBe Right(())
+    // The bundled application.conf must hold no removed key, or every default boot is refused.
+    BootPreflight.checkRemovedSwitches(noEnv, ConfigFactory.load()) shouldBe Right(())
+    // QOD_ACL_MODE (quack-flightsql.opa.defaultMode) picks a tenant's engine: not a removed switch.
+    BootPreflight.checkRemovedSwitches(
+      switchEnv("QOD_ACL_MODE", "opa"),
+      ConfigFactory.parseString("quack-flightsql.opa.defaultMode = opa")
+    ) shouldBe Right(())
+  }
+
+  it should "carry the removal messages verbatim, each naming the variable to unset" in {
+    BootPreflight.RemovedAclEnabledMessage shouldBe
+      "QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed: qod-node now checks every " +
+      "statement against the grants (or the tenant's OPA) always, and nothing switches that " +
+      "off. Unset QOD_ACL_ENABLED."
+    BootPreflight.RemovedAclFilteredMetadataMessage shouldBe
+      "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
+      "user's catalog listings are narrowed to the objects the user is granted. To give a " +
+      "principal unfiltered listings, grant it RO on information_schema. Unset " +
+      "QOD_ACL_FILTERED_METADATA."
+    BootPreflight.RemovedAclDialectMessage shouldBe
+      "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
+      "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
+  }
+
+  "Main.bootManager" should "refuse a set removed switch before HA validation" in {
+    for (name, _, message) <- removedSwitches do
+      val err = intercept[RuntimeException](bootUntilHaRefusal(switchEnv(name, "true")))
+      withClue(name)(err.getMessage shouldBe message)
+  }
+
+  it should "refuse QOD_NODE_LOCKDOWN set to any value, empty included" in
+    List("true", "false", "").foreach { v =>
+      withClue(s"QOD_NODE_LOCKDOWN='$v' ")(
+        BootPreflight.checkRemovedSwitches(
+          switchEnv("QOD_NODE_LOCKDOWN", v),
+          ConfigFactory.empty()
+        ) shouldBe
+          Left(BootPreflight.RemovedNodeLockdownMessage)
+      )
+    }
+
+  it should "refuse the quack-flightsql.nodeLockdown block in the loaded configuration" in
+    List("enabled = true", "enabled = false", "").foreach { body =>
+      val raw = ConfigFactory.parseString(s"quack-flightsql.nodeLockdown { $body }")
+      withClue(s"{ $body } ")(
+        BootPreflight.checkRemovedSwitches(noEnv, raw) shouldBe
+          Left(BootPreflight.RemovedNodeLockdownMessage)
+      )
+    }
+
+  it should "accept the extension policy variables that replaced lockdown's SETs" in
+    List(
+      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS",
+      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
+    ).foreach { name =>
+      BootPreflight.checkRemovedSwitches(switchEnv(name, "true"), ConfigFactory.empty()) shouldBe
+        Right(())
+    }
+
+  it should "carry the lockdown removal message verbatim" in {
+    BootPreflight.RemovedNodeLockdownMessage shouldBe
+      "QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed: qod-node now refuses ATTACH, " +
+      "INSTALL, LOAD, protected settings and unauthorized files to non-superusers on every pool, " +
+      "always, and the extension settings follow quack-on-demand.nodeExtensions. Unset " +
+      "QOD_NODE_LOCKDOWN."
+  }
+
+  "Main.bootManager" should "refuse a set QOD_NODE_LOCKDOWN before HA validation" in {
+    val err =
+      intercept[RuntimeException](bootUntilHaRefusal(switchEnv("QOD_NODE_LOCKDOWN", "false")))
+    err.getMessage shouldBe BootPreflight.RemovedNodeLockdownMessage
+  }

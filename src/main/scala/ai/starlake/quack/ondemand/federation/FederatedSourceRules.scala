@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.federation
 
-import ai.starlake.quack.model.{FederatedSource, FederatedSourceType, InitSqlScreen}
+import ai.starlake.quack.model.{FederatedSource, FederatedSourceType}
 import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind}
 
@@ -27,6 +27,22 @@ object FederatedSourceRules:
     */
   val ReservedSecretPrefixes: List[String] = List("qod_pg_", "qod_mysql_", "qod_ice_")
 
+  /** Why a `sql` source's `setupSql` may not be stored for its secret placeholders (CONTRACT
+    * Addendum 4 item 29, amended): one sits outside a single-quoted literal, where a tenant admin
+    * who writes the secret's value could end the literal, comment or identifier around it and write
+    * SQL the nodes run as the superuser's. Names the placeholders, never a value.
+    */
+  def unquotedSecretError(setupSql: String): Option[String] =
+    SecretPlaceholderScan.unquoted(setupSql) match
+      case Nil   => None
+      case names =>
+        Some(
+          s"setupSql holds ${names.map(n => s"{{secret.$n}}").mkString(", ")} outside a " +
+            "single-quoted literal: every secret placeholder of a sql source must sit inside " +
+            "'...', where its value stays a value (and no escape string E'...', dollar quoting " +
+            "or $ parameter may appear outside a literal)"
+        )
+
   /** Empty when `source` may be stored. `reserved` is the tenant-db's own catalog alias plus every
     * OTHER source's alias in it, as the blob builder reserves them at spawn.
     */
@@ -44,7 +60,7 @@ object FederatedSourceRules:
         val lower = source.setupSql.replace("{{alias}}", source.alias).toLowerCase(Locale.ROOT)
         ReservedSecretPrefixes.filter(lower.contains).map { p =>
           s"setupSql mentions '$p', a secret-name prefix reserved for QoD's typed sources"
-        } ++ InitSqlScreen.error("setupSql", source.setupSql)
+        } ++ unquotedSecretError(source.setupSql).toList
       case FederatedSourceType.IcebergRest =>
         config.toList.flatMap { json =>
           IcebergRestConfig.fromJson(json) match

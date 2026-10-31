@@ -1,16 +1,20 @@
 package ai.starlake.quack.ondemand.api
 
+import java.util.Locale
 import ai.starlake.quack.edge.auth.{
   AuthFailure,
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
+  DatabaseAuthenticator,
+  IdentityNaming,
   OidcScope,
   OidcSsoService,
   SqlTokenOidcService
 }
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
+  LoginRealm,
   ManagementAuthMode,
   ManagementAuthModeResolver,
   ManagementIdentitySource,
@@ -30,9 +34,12 @@ import sttp.model.headers.{Cookie, CookieValueWithMeta}
   *     accepted; the resulting session reflects exactly the grants the principal holds.
   *   - `SystemStrict`: superuser ONLY. Used by the OIDC bare `/ui/` (system IdP) login. A
   *     non-superuser tenant-admin must sign in through their tenant scope instead.
-  *   - `Tenant(id)`: the caller presented a tenant. The principal must be superuser OR an admin of
-  *     that specific tenant, or, for DB-mode logins only, any user with a grant on that tenant
-  *     (profile-only session).
+  *   - `Tenant(id)`: the caller presented a tenant. Whatever proved the identity, the grants of
+  *     such a login are that tenant's `qodstate_user` rows alone (`LoginRealm.Tenant`): the row the
+  *     database authenticator verified, or the realm's row lookup when an identity provider proved
+  *     the identity (the tenant's SSO callback, the manager-wide password grant). It never binds a
+  *     superuser row, so the principal must be an admin of that specific tenant or, for DB-mode
+  *     logins only, any user with a row on that tenant (profile-only session).
   */
 enum RequiredScope:
   case System
@@ -42,21 +49,40 @@ enum RequiredScope:
 /** REST endpoints driving the UI's login lifecycle.
   *
   * Authentication (who you are) goes through `AuthenticationService.authenticateBasic`.
-  * Authorization (what you may do) depends on `identitySource`:
-  *   - `Db`: the authenticating profile IS the grant. Single-tenant or superuser.
-  *   - `Oidc`: the JWT's `role` and any tenant claim are discarded; `grantsForIdentity` is
-  *     consulted with the JWT's `preferred_username` (and `email` as fallback).
+  * Authorization (what you may do) is never an identity provider's claim: it is read from
+  * `qodstate_user` rows, one of two ways. The login's mode, which `ManagementAuthModeResolver`
+  * resolves per scope (the system scope, with no tenant, follows `identitySource`; a tenant follows
+  * its own `authProvider`), and who proved the identity pick it:
+  *   - `Db`, with a profile the database authenticator produced: the profile IS the grant, the one
+  *     `(tenant, username)` row whose password it verified. Single-tenant or superuser.
+  *   - every other profile, which only proves who the user is: an SSO callback, a password login
+  *     answered by the manager-wide Keycloak or Azure password grant, and under
+  *     `identitySource=oidc` every system login (the database authenticator's too). The IdP's
+  *     `role` and any tenant claim are discarded; `grantsForIdentity` is consulted with the
+  *     profile's username (the JWT's `preferred_username`, else its `email` claim, else its
+  *     subject; a name that came from the email claim binds a row only when the IdP marks the
+  *     address verified; the `email` also as fallback for an SSO token whose IdP marks it verified,
+  *     never for a password login), in the realm the login was verified in: a tenant login reads
+  *     only that tenant's rows, the system login the rows of every realm
+  *     ([[ai.starlake.quack.ondemand.auth.LoginRealm LoginRealm]]).
   *
-  * Either path collapses to a [[ai.starlake.quack.ondemand.auth.SessionScope SessionScope]]
-  * carrying `superuser` and `manageableTenants`. Empty grants => `403 not_provisioned`. The admin
-  * console is admin-only, so a principal with no admin grant is still refused `403 admin_required`
-  * on the system login and on any tenant it does not hold a grant on; logging into a tenant it DOES
-  * hold a grant on mints a non-admin, profile-only session instead (`LoginResponse.admin = false`).
+  * Either way the grants collapse to a
+  * [[ai.starlake.quack.ondemand.auth.SessionScope SessionScope]] carrying `superuser` and
+  * `manageableTenants`. Empty grants => `403 not_provisioned`; on the row-lookup path that includes
+  * an identity with no row in the requested tenant, whatever rows it holds elsewhere (a tenant
+  * login reads that tenant's rows only). The admin console is admin-only, so a principal with no
+  * admin grant is still refused `403 admin_required` on the system login and on an SSO tenant
+  * login. In `Db` mode a principal logging into a tenant it holds a row on mints a non-admin,
+  * profile-only session instead (`LoginResponse.admin = false`); a database-authenticated one
+  * holding no row on that tenant is refused `403 admin_required`.
+  *
+  * A password login naming a tenant whose sign-in mode is OIDC answers `400 sso_required` before
+  * any password check: such a tenant signs in through its identity provider only.
   *
   * Transport: on successful login the handler sets a `qod_session` cookie carrying the same JWT
   * returned in `LoginResponse.token`. The browser auto-attaches the cookie on subsequent `/api/...`
-  * calls; CLI / static-key callers stay on the X-API-Key header path. Logout always clears the
-  * cookie and (process-locally) marks the jti revoked until its natural exp.
+  * calls; CLI callers stay on the X-API-Key header path. Logout always clears the cookie and
+  * (process-locally) marks the jti revoked until its natural exp.
   */
 final class AuthHandlers(
     authService: AuthenticationService,
@@ -74,8 +100,11 @@ final class AuthHandlers(
       * no-op (id-only) for callers that don't wire a registry (e.g. unit tests).
       */
     resolveTenant: String => Option[String] = _ => None,
-    /** Optional OIDC SSO service. `None` when SSO is not configured; present when
-      * `auth.management.oidc` is wired and `oidcStart`/`oidcCallback`/`oidcLogout` are active.
+    /** OIDC SSO service behind `oidcStart` / `oidcCallback` / `oidcLogout`. Main always wires one
+      * (`ManagementAuthWiring`), under either `identitySource`: a tenant's SSO follows its own
+      * `authProvider`; the System scope answers `oidc_not_configured` unless `identitySource=oidc`
+      * and the manager-wide client is set. `None` (tests, callers that wire no SSO) answers
+      * `404 auth_mode_disabled`.
       */
     oidc: Option[OidcSsoService] = None,
     /** Optional data-plane SQL-token service backing the `/api/auth/sql-token` routes. `None` when
@@ -103,7 +132,13 @@ final class AuthHandlers(
       * integration (tests, legacy code, `slIntegrationOn == false`) fire nothing; Main selects
       * [[HttpStarlakeNotifier]] only when the Starlake SSO integration is on.
       */
-    starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier
+    starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier,
+    /** The synthetic session of a personal access token (`PatAuthenticator.sessionOf`), which
+      * [[whoami]] answers for when no session JWT matches. Required, so the manager's wiring cannot
+      * silently drop it; a caller that wires no PAT store passes `_ => None` and answers whoami for
+      * session JWTs only.
+      */
+    patSessionOf: String => Option[SessionTokenStore.Session]
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -180,6 +215,13 @@ final class AuthHandlers(
   private def clearStateCookie(forwardedProto: Option[String]): CookieValueWithMeta =
     cookie("", 0L, forwardedProto)
 
+  /** A tenant's SSO is served only while the tenant itself signs in through its IdP. A tenant
+    * switched to `db` without clearing its auth config (or one whose sign-in is incomplete) keeps
+    * no SSO, so the leftover issuer and client are not a way in.
+    */
+  private def tenantSsoEnabled(tenantId: String): Boolean =
+    authModeResolver.modeFor(Some(tenantId)) == Right(ManagementAuthMode.Oidc)
+
   def oidcStart(
       tenant: Option[String],
       returnTo: Option[String],
@@ -192,18 +234,29 @@ final class AuthHandlers(
         val scope = tenant.map(_.trim).filter(_.nonEmpty) match
           case Some(t) => OidcScope.Tenant(resolveTenant(t).getOrElse(t))
           case None    => OidcScope.System
-        val seed = java.util.UUID.randomUUID().toString
-        svc.startAuth(scope, returnTo.getOrElse("/ui/"), seed) match
-          case Left(err) =>
-            Left((StatusCode.BadRequest, ErrorResponse(err.code, "OIDC start failed")))
-          case Right(req) =>
-            Right(
-              (
-                StatusCode.Found,
-                req.redirectLocation,
-                stateCookie(req.stateCookieValue, forwardedProto)
-              )
+        val allowed = scope match
+          case OidcScope.System    => true
+          case OidcScope.Tenant(t) => tenantSsoEnabled(t)
+        if !allowed then
+          Left(
+            (
+              StatusCode.BadRequest,
+              ErrorResponse("oidc_not_configured", "OIDC start failed")
             )
+          )
+        else
+          val seed = java.util.UUID.randomUUID().toString
+          svc.startAuth(scope, returnTo.getOrElse("/ui/"), seed) match
+            case Left(err) =>
+              Left((StatusCode.BadRequest, ErrorResponse(err.code, "OIDC start failed")))
+            case Right(req) =>
+              Right(
+                (
+                  StatusCode.Found,
+                  req.redirectLocation,
+                  stateCookie(req.stateCookieValue, forwardedProto)
+                )
+              )
   }
 
   def oidcCallback(
@@ -234,7 +287,18 @@ final class AuthHandlers(
               clearCookie(forwardedProto),
               clearStateCookie(forwardedProto)
             )
+          case Right(result) if result.scope match
+                case OidcScope.System    => false
+                case OidcScope.Tenant(t) => !tenantSsoEnabled(t)
+              =>
+            (
+              StatusCode.Found,
+              "/ui/?error=oidc_not_configured",
+              clearCookie(forwardedProto),
+              clearStateCookie(forwardedProto)
+            )
           case Right(result) =>
+            // mintSessionFor names a tenant-scope login's realm on the profile.
             val required = result.scope match
               case OidcScope.System    => RequiredScope.SystemStrict
               case OidcScope.Tenant(t) => RequiredScope.Tenant(t)
@@ -243,7 +307,8 @@ final class AuthHandlers(
               required,
               forwardedProto,
               ManagementAuthMode.Oidc,
-              "oidc"
+              "oidc",
+              lookupEmail = IdentityNaming.verifiedEmail(result.profile)
             ) match
               case Left((_, err)) =>
                 (
@@ -321,6 +386,15 @@ final class AuthHandlers(
     (html, clear)
   }
 
+  /** Password login. The tenant is named by its id, in any letter case (not by its display name).
+    *
+    * A tenant whose sign-in mode is OIDC takes no password: `400 sso_required`, answered before the
+    * authentication service is asked, so no password is checked and no lockout counter moves. The
+    * mode is no secret: the public `GET /api/auth/mode` tells any caller. An unknown or
+    * misconfigured tenant authenticates first and keeps its answers: `401 invalid_credentials`, or
+    * `400 tenant_oidc_misconfigured`. The system login (no tenant) is unchanged under either
+    * `identitySource`.
+    */
   def login(
       req: LoginRequest,
       forwardedProto: Option[String] = None
@@ -332,52 +406,85 @@ final class AuthHandlers(
           ErrorResponse("invalid_credentials", "username and password are required")
         )
       )
-    else if !authService.hasProviders then
-      Left(
-        (
-          StatusCode.ServiceUnavailable,
-          ErrorResponse(
-            "auth_disabled",
-            "no auth backends configured; set auth.database.enabled=true (or another)"
-          )
-        )
-      )
     else
-      val scope: AuthScope = req.tenant.map(_.trim).filter(_.nonEmpty) match
-        // Accept either the tenant id or its display name; normalize to the id
+      // The tenant as the caller typed it (trimmed): sso_required names it this way.
+      val named            = req.tenant.map(_.trim).filter(_.nonEmpty)
+      val scope: AuthScope = named match
+        // Accept the tenant id in any letter case; normalize to the id
         // the authenticator's tenant query matches. Unknown -> pass through so
         // auth fails as "user not found" rather than 500-ing.
         case Some(t) => AuthScope.Tenant(resolveTenant(t).getOrElse(t))
         case None    => AuthScope.System
-      authService.authenticateBasic(scope, req.username, req.password) match
-        case Left(err) =>
-          audit.restAs(
-            req.username,
-            "tenant",
-            "auth",
-            AuditActions.AuthLoginFailure,
-            "denied",
-            tenant = req.tenant,
-            detail = Map("username" -> req.username)
-          )
-          val code = err match
-            case AuthFailure.PasswordChangeRequired => "password_change_required"
-            case AuthFailure.AccountLocked          => "account_locked"
-            case _                                  => "invalid_credentials"
-          Left((StatusCode.Unauthorized, ErrorResponse(code, err.message)))
-        case Right(profile) =>
-          val tenantOpt = scope match
-            case AuthScope.System    => None
-            case AuthScope.Tenant(t) => Some(t)
-          val required = scope match
-            case AuthScope.System    => RequiredScope.System
-            case AuthScope.Tenant(t) => RequiredScope.Tenant(t)
-          authModeResolver.modeFor(tenantOpt) match
+      val tenantOpt = scope match
+        case AuthScope.System    => None
+        case AuthScope.Tenant(t) => Some(t)
+      val mode = authModeResolver.modeFor(tenantOpt)
+      (named, tenantOpt, mode) match
+        case (Some(typed), Some(id), Right(ManagementAuthMode.Oidc)) =>
+          ssoRequired(req, typed, id)
+        case _ =>
+          authService.authenticateBasic(scope, req.username, req.password) match
             case Left(err) =>
-              Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
-            case Right(mode) =>
-              mintSessionFor(profile, required, forwardedProto, mode, "rest")
+              audit.restAs(
+                req.username,
+                "tenant",
+                "auth",
+                AuditActions.AuthLoginFailure,
+                "denied",
+                tenant = req.tenant,
+                detail = Map("username" -> req.username)
+              )
+              val code = err match
+                case AuthFailure.PasswordChangeRequired => "password_change_required"
+                case AuthFailure.AccountLocked          => "account_locked"
+                case _                                  => "invalid_credentials"
+              Left((StatusCode.Unauthorized, ErrorResponse(code, err.message)))
+            case Right(profile) =>
+              val required = scope match
+                case AuthScope.System    => RequiredScope.System
+                case AuthScope.Tenant(t) => RequiredScope.Tenant(t)
+              mode match
+                case Left(err) =>
+                  Left(
+                    (StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved"))
+                  )
+                case Right(m) =>
+                  // A password login matches the authenticated user name alone: an IdP account's
+                  // email is whatever its holder typed, so it must not name a qodstate_user row.
+                  mintSessionFor(profile, required, forwardedProto, m, "rest", lookupEmail = None)
   }
+
+  /** The answer to a password login naming a tenant that signs in through its identity provider:
+    * `400 sso_required`, audited as a denied login with reason `sso_required` under the tenant id
+    * the login resolved (not the typed text). The message names the tenant as the caller typed it
+    * (`typed`, trimmed), but its link carries `id`, URL-encoded: the id is the one spelling the
+    * tenant-scoped endpoints (`GET /api/auth/mode`, the SSO start) are sure to take.
+    */
+  private def ssoRequired(
+      req: LoginRequest,
+      typed: String,
+      id: String
+  ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
+    audit.restAs(
+      req.username,
+      "tenant",
+      "auth",
+      AuditActions.AuthLoginFailure,
+      "denied",
+      tenant = Some(id),
+      detail = Map("username" -> req.username, "reason" -> "sso_required")
+    )
+    val link = java.net.URLEncoder.encode(id, java.nio.charset.StandardCharsets.UTF_8)
+    Left(
+      (
+        StatusCode.BadRequest,
+        ErrorResponse(
+          "sso_required",
+          s"tenant '$typed' signs in through its identity provider: open /ui/?tenant=$link, " +
+            "or use a personal access token"
+        )
+      )
+    )
 
   /** Pre-session self-service password change. Anti-enumeration: unknown user, wrong current
     * password, disabled account, and an over-long current password all answer the same 401
@@ -424,7 +531,7 @@ final class AuthHandlers(
             )
           )
         case Some(users) =>
-          // Same tenant resolution as login: id or display name; unknown values pass
+          // Same tenant resolution as login: the id, in any letter case; unknown values pass
           // through so the store answers invalid_credentials without a tenant oracle.
           val scopeTenant =
             req.tenant.map(_.trim).filter(_.nonEmpty).map(t => resolveTenant(t).getOrElse(t))
@@ -482,31 +589,83 @@ final class AuthHandlers(
     *
     * `required` expresses what the chosen login URL demands:
     *   - `System`: no tenant was specified; any admin (superuser or tenant-admin) is accepted.
-    *   - `Tenant(id)`: a specific tenant was requested; the principal must be superuser, admin of
-    *     that tenant, or a regular user holding a grant on it (which mints a non-admin,
-    *     profile-only session -- `LoginResponse.admin = false`) -- DB-mode logins additionally
-    *     admit any user with a grant on that tenant as a profile-only session.
+    *   - `Tenant(id)`: a specific tenant was requested; the grants are that tenant's rows alone, so
+    *     the principal must be an admin of that tenant. In `Db` mode only, a regular user holding a
+    *     row on that tenant is admitted too, with a non-admin, profile-only session
+    *     (`LoginResponse.admin = false`); an `Oidc` login never mints one.
     *
     * The grant computation and the not_provisioned / admin_required gates are shared by both entry
     * points, so they cannot drift.
     *
+    * Grants: only the profile of a `Db`-mode login that the database authenticator produced
+    * (`authMethod == DatabaseAuthenticator.AuthMethod`) is its own grant: its `(tenant, role)` is
+    * the `qodstate_user` row whose password was verified. Every other profile only proves who the
+    * user is, whatever it claims: the SSO callback's, a password login answered by the manager-wide
+    * Keycloak / Azure password grant (no tenant, the IdP's role claim), and under
+    * `identitySource=oidc` the database authenticator's own. Their grants come from
+    * `grantsForIdentity` in the realm of `required` (`RequiredScope.Tenant(t)` reads
+    * `LoginRealm.Tenant(t)`, `System` and `SystemStrict` read `LoginRealm.System`), kept to that
+    * realm's rows by `LoginRealm.admits`: a tenant login never binds a superuser row or another
+    * tenant's row, so it never yields `superuser = true` and manages at most its own tenant, and
+    * the IdP's role claim grants nothing. The minted profile of such a tenant login also carries
+    * the realm's tenant (the decision, not a tag on the profile: an SSO profile's `authMethod` is
+    * the issuer host, which a tenant admin picks), so the audit rows, the `SessionOpened` event,
+    * the token and a personal access token minted from the session all name the tenant the login
+    * was verified for. A database-authenticator profile already carries the verified row's.
+    *
+    * The user name of such a profile binds a row only when `IdentityNaming.userNameMayBindRow`
+    * allows it (the rule the data-plane handshake applies too): a name that fell back to the
+    * token's email claim (no `preferred_username`, the email equals the user name) counts only when
+    * the IdP marks the address verified, else nothing binds and the login is `403 not_provisioned`,
+    * with no lookup.
+    *
+    * `lookupEmail` is the email the lookup may fall back to when the user name matches no row. The
+    * entry point decides it, never this method: an email is whatever its account holder typed
+    * unless the IdP vouches for it. `login` hands none (a password login, answered by the
+    * manager-wide password grant, matches the authenticated user name alone, as the FlightSQL data
+    * plane does); `oidcCallback` hands the token's email only when the IdP marks it verified
+    * (`IdentityNaming.verifiedEmail`). It has no default, so a new entry point has to choose.
+    *
     * `via` identifies the calling entry point for the [[ManagerEvent.SessionOpened]] emission:
-    * `"rest"` from `login`, `"oidc"` from `oidcCallback`.
+    * `"rest"` from `login`, `"oidc"` from `oidcCallback`. `login` refuses a tenant whose mode is
+    * `Oidc` before authenticating (`sso_required`), so `Oidc` mode reaches here only from the SSO
+    * callback and from the system-realm password login under `identitySource=oidc`.
     */
   private def mintSessionFor(
-      profile: AuthenticatedProfile,
+      authenticated: AuthenticatedProfile,
       required: RequiredScope,
       forwardedProto: Option[String],
       mode: ManagementAuthMode,
-      via: String
+      via: String,
+      lookupEmail: Option[String]
   ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
-    val grants = mode match
-      case ManagementAuthMode.Db =>
-        // The DB authenticator already encoded the (tenant, role) from qodstate_user.
-        List(UserGrant(profile.tenant, profile.role))
-      case ManagementAuthMode.Oidc =>
-        // Identity from the IdP; qodstate_user is authoritative for role + tenants.
-        grantsForIdentity(profile.username, profile.claims.get("email"))
+    // The realm the login was verified in: it bounds the qodstate_user rows its rights may come
+    // from.
+    val loginRealm = required match
+      case RequiredScope.Tenant(t)                           => LoginRealm.Tenant(t)
+      case RequiredScope.System | RequiredScope.SystemStrict => LoginRealm.System
+    // Only a profile the database authenticator produced is its own grant: it verified exactly one
+    // (tenant, username) row and its (tenant, role) is that row. Any other profile only proves who
+    // the user is: its role is the IdP's claim, so qodstate_user is authoritative for role and
+    // tenants, read in the realm and kept to that realm's rows (a tenant login never binds a
+    // superuser row or another tenant's row, whatever the lookup answers).
+    val fromDatabase = authenticated.authMethod == DatabaseAuthenticator.AuthMethod
+    val verifiedRow  = mode == ManagementAuthMode.Db && fromDatabase
+    val grants       =
+      if verifiedRow then List(UserGrant(authenticated.tenant, authenticated.role))
+      else if !IdentityNaming.userNameMayBindRow(authenticated) then Nil
+      else
+        grantsForIdentity(loginRealm, authenticated.username, lookupEmail)
+          .filter(loginRealm.admits)
+    // The profile everything below names (audit rows, SessionOpened, the token). A tenant login
+    // whose rights were read from the realm's rows carries that realm's tenant, as a database login
+    // does: PAT minting resolves the owning row by (profile.tenant, username). Keyed on the
+    // decision (!verifiedRow), not on the profile's authMethod: an SSO profile's authMethod is the
+    // issuer host, which a tenant admin controls through issuerUrl, so a host called "database"
+    // must not leave the profile without its tenant (the PAT would then bind a superuser row).
+    val profile = loginRealm match
+      case LoginRealm.Tenant(t) if !verifiedRow => authenticated.copy(tenant = Some(t))
+      case _                                    => authenticated
 
     val superuser = grants.exists(g => g.tenant.isEmpty && g.kind.equalsIgnoreCase("admin"))
     val manageableTenants: Set[String] = grants.collect {
@@ -522,17 +681,18 @@ final class AuthHandlers(
     // superuser or tenant-admin. This preserves the original `login` behavior
     // where the absence of a tenant did not restrict which admins could proceed.
     // `SystemStrict` (OIDC bare /ui/ login) further restricts to superuser only.
-    // `Tenant(t)` scope admits a superuser, an admin of that specific tenant,
-    // or a regular user holding a grant on it (profile-only session).
+    // `Tenant(t)` scope admits an admin of that specific tenant or a regular user holding a row on
+    // it (profile-only session), and nothing else: a tenant login's grants are that tenant's rows,
+    // so a superuser grant never opens a tenant (it fails closed if a profile ever carried one).
     val scopeOk = required match
       case RequiredScope.System       => isAdminPrincipal
       case RequiredScope.SystemStrict => superuser
       case RequiredScope.Tenant(t)    =>
-        superuser || manageableTenants.contains(t) ||
-        // Profile-only sessions are a DB-login feature: in Db mode the single
-        // grant IS the authenticated (tenant, role) row, so role is qodstate's
-        // "user", never an IdP claim. The OIDC callback keeps its admin-only
-        // gate -- its profile.role is the IdP claim and must not reach a mint.
+        manageableTenants.contains(t) ||
+        // Profile-only sessions belong to the password logins: in Db mode every grant is a
+        // qodstate_user row (the one whose password the database authenticator verified, or the
+        // tenant's own row for a password answered by an IdP), so a "user" row is a real grant,
+        // never an IdP claim. The OIDC callback keeps its admin-only gate.
         (mode == ManagementAuthMode.Db && selfTenants.contains(t))
 
     val realm = if superuser then "system" else "tenant"
@@ -605,9 +765,11 @@ final class AuthHandlers(
       // claim: an admin principal (superuser or tenant admin) always mints
       // role=admin so isAdmin() and the guard admit them; a non-admin principal
       // whose profile claims admin is demoted to user so a profile-only session
-      // never carries role=admin. In Db mode this is a no-op (profile.role
-      // already equals the qodstate grant); it only bites the OIDC path, where
-      // RoleExtractor defaults to "user" when the IdP emits no known role.
+      // never carries role=admin. For a database-authenticator profile in Db
+      // mode this is a no-op (profile.role already equals the qodstate grant);
+      // it bites every profile whose rights were read from the rows, since the
+      // IdP's claim may be admin for a user row, or "user" (RoleExtractor's
+      // default when the IdP emits no known role) for an admin row.
       val mintProfile =
         if isAdminPrincipal then profile.copy(role = "admin")
         else if profile.role.equalsIgnoreCase("admin") then profile.copy(role = "user")
@@ -622,11 +784,12 @@ final class AuthHandlers(
         tenant = profile.tenant,
         detail = Map("authMethod" -> profile.authMethod, "admin" -> isAdminPrincipal.toString)
       )
-      // profile.tenant already mirrors the requested AuthScope.tenantId (see
-      // DatabaseAuthenticator/OIDC providers): None for a system/superuser scope,
-      // Some(id) for a tenant-scoped login. SessionScope itself carries only a
+      // profile.tenant is the tenant the login was verified for: the database authenticator sets
+      // it for a tenant password login, and a tenant login whose rights were read from the realm's
+      // rows (the tenant SSO callback, the manager-wide Keycloak / Azure password grant) has it
+      // stamped above. A system login carries None. SessionScope itself carries only a
       // superuser flag plus a set of manageable tenants (no single tenant id to
-      // read here), so profile.tenant is the reliable source for tenantOrEmpty.
+      // read here), so profile.tenant is the source for tenantOrEmpty.
       events.emit(
         ManagerEvent.SessionOpened(profile.tenant.getOrElse(""), profile.username, via)
       )
@@ -659,7 +822,11 @@ final class AuthHandlers(
     }.flatTap(_ => dispatchStarlakeLogout(tok))
       .as(Right(clearCookie(forwardedProto)))
 
-  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT.
+  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT, or a
+    * live personal access token, answered with its owner's identity and the token's own scope
+    * (`patSessionOf`; a token restricted with `dropAdmin` is no superuser here either). The JWT is
+    * tried first; a token that is not one, or not a live one, is tried as a PAT before the failure
+    * below is answered.
     *
     * The error body distinguishes WHY the lookup failed so the client (and operators reading the
     * network tab) can tell apart the four very different cases that previously all surfaced as
@@ -672,19 +839,34 @@ final class AuthHandlers(
     *   - `expired` -- the JWT's `exp` claim is in the past. Actually expired.
     *   - `revoked` -- the jti is on the in-process denylist (an explicit logout, not yet GC'd).
     */
-  def whoami(apiKey: Option[String], cookie: Option[String]): Out[WhoamiResponse] = IO.delay {
-    val token = apiKey.orElse(cookie).getOrElse("")
-    tokens.lookupResult(token) match
-      case SessionTokenStore.LookupResult.Ok(s) =>
-        Right(
-          WhoamiResponse(
-            username = s.profile.username,
-            role = s.profile.role,
-            tenant = s.profile.tenant,
-            superuser = s.scope.superuser,
-            manageableTenants = s.scope.manageableTenants.toList.sorted
-          )
-        )
+  def whoami(apiKey: Option[String], cookie: Option[String]): Out[WhoamiResponse] =
+    // Blocking: a PAT is verified against the control-plane database.
+    IO.blocking {
+      val token = apiKey.orElse(cookie).getOrElse("")
+      tokens.lookupResult(token) match
+        case SessionTokenStore.LookupResult.Ok(s) => Right(whoamiOf(s))
+        // No PAT is ever a JWT: a value without the PAT prefix costs no store call.
+        case failure =>
+          patSessionOf(token) match
+            case Some(s) => Right(whoamiOf(s))
+            case None    => whoamiAnswer(failure)
+    }
+
+  private def whoamiOf(s: SessionTokenStore.Session): WhoamiResponse =
+    WhoamiResponse(
+      username = s.profile.username,
+      role = s.profile.role,
+      tenant = s.profile.tenant,
+      superuser = s.scope.superuser,
+      manageableTenants = s.scope.manageableTenants.toList.sorted
+    )
+
+  /** Whoami's answer for a session lookup: the identity, or why there is none. */
+  private def whoamiAnswer(
+      lookup: SessionTokenStore.LookupResult
+  ): Either[(StatusCode, ErrorResponse), WhoamiResponse] =
+    lookup match
+      case SessionTokenStore.LookupResult.Ok(s)     => Right(whoamiOf(s))
       case SessionTokenStore.LookupResult.NoSession =>
         Left(
           (StatusCode.Unauthorized, ErrorResponse("no_session", "no session token presented"))
@@ -701,7 +883,6 @@ final class AuthHandlers(
         Left(
           (StatusCode.Unauthorized, ErrorResponse("revoked", "session token has been revoked"))
         )
-  }
 
   /** Mint a single-use Starlake SSO ticket carrying the caller's session grant. Session-authed
     * (token via header or cookie, [[Endpoints.authToken]]); any valid session may call this, admin
@@ -797,11 +978,13 @@ final class AuthHandlers(
 
   /** Resolve the admin-UI login mode for a scope. Unauthenticated: the SPA calls this before login
     * with the tenant from the URL (absent for the system scope) to decide whether to render the
-    * password form (`db`) or redirect to SSO (`oidc`). An unknown or misconfigured tenant returns
+    * password form (`db`) or redirect to SSO (`oidc`). The tenant is trimmed and lowercased first
+    * (tenant ids are lowercase slugs), so a typed `ACME` resolves to tenant `acme` as it does at
+    * login, instead of answering `tenant_not_found`. An unknown or misconfigured tenant returns
     * `400` with a stable error code so the UI can surface it instead of silently falling back.
     */
   def authMode(tenant: Option[String]): Out[AuthModeResponse] = IO.blocking {
-    authModeResolver.modeFor(tenant.map(_.trim).filter(_.nonEmpty)) match
+    authModeResolver.modeFor(tenant.map(_.trim.toLowerCase(Locale.ROOT)).filter(_.nonEmpty)) match
       case Left(err) =>
         Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
       case Right(ManagementAuthMode.Db) =>

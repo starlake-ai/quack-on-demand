@@ -47,7 +47,9 @@ class OpaRealServerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     Files.writeString(
       data,
       """{"qod":{"pool_grants":{"acme":{"analyst":["bi"]}},
-        |"table_grants":{"acme":{"analyst":[{"catalog":"tpch","schema":"*","table":"*","verb":"RO"}]}}}}""".stripMargin
+        |"table_grants":{"acme":{"analyst":[{"catalog":"tpch","schema":"*","table":"*","verb":"RO"},
+        |{"catalog":"lake","schema":"main","table":"v_secure","verb":"RO"}]}},
+        |"blocked_locations":{"acme":["s3://acme-etl/restricted/"]}}}""".stripMargin
     )
     proc = Some(
       Process(
@@ -103,3 +105,68 @@ class OpaRealServerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     val other = TableAccess(TableRef("sales", "main", "orders"), Verb.Read)
     authz.statement(tenant, tgt, alice, "u1", "flightsql", "READ", Set(other), "") shouldBe
       a[Decision.Deny]
+
+  // ---- node decisions (in-engine authorization): OpaAuthorizer.decide, client.edge "node" ----
+
+  it should "judge node accesses on their verbs, whatever their kinds and columns" in:
+    assume(opaPresent, "opa not on PATH")
+    val read  = OpaAccess("tpch", "main", "orders", "table", Verb.Read, List("o_orderkey"), None)
+    val write = read.copy(verb = Verb.Write, columns = Nil)
+    authz.decide(tenant, tgt, alice, "u1", "READ", List(read), Nil) shouldBe a[Decision.Allow]
+    authz.decide(tenant, tgt, alice, "u1", "WRITE", List(read, write), Nil) match
+      case Decision.Deny(_, denied, _) =>
+        denied shouldBe Set(TableAccess(TableRef("tpch", "main", "orders"), Verb.Write))
+      case other => fail(other.toString)
+    val schemaDdl = OpaAccess("tpch", "staging", "*", "schema", Verb.Ddl, Nil, None)
+    authz.decide(tenant, tgt, alice, "u1", "DDL", List(schemaDdl), Nil) shouldBe a[Decision.Deny]
+
+  it should "cover a read through a secure view by a read grant on the view alone" in:
+    assume(opaPresent, "opa not on PATH")
+    val base =
+      OpaAccess("lake", "main", "base", "table", Verb.Read, List("id"), Some("lake.main.v_secure"))
+    authz.decide(tenant, tgt, alice, "u1", "READ", List(base), Nil) shouldBe a[Decision.Allow]
+    authz.decide(
+      tenant,
+      tgt,
+      alice,
+      "u1",
+      "READ",
+      List(base.copy(via = Some("lake.main.v_other"))),
+      Nil
+    ) shouldBe
+      a[Decision.Deny]
+    authz.decide(tenant, tgt, alice, "u1", "READ", List(base.copy(via = None)), Nil) shouldBe
+      a[Decision.Deny]
+    authz.decide(
+      tenant,
+      tgt,
+      alice,
+      "u1",
+      "READ",
+      List(base.copy(via = Some("v_secure"))),
+      Nil
+    ) shouldBe
+      a[Decision.Deny]
+
+  it should "deny a statement naming a blocked location, and allow the others" in:
+    assume(opaPresent, "opa not on PATH")
+    val read    = OpaAccess("tpch", "main", "orders", "table", Verb.Read, Nil, None)
+    val open    = OpaLocation("read", "s3://acme-etl/in/x.csv", "s3://acme-etl/in/", "read_csv")
+    val blocked =
+      OpaLocation("write", "s3://acme-etl/restricted/out.parquet", "s3://acme-etl/", "copy_to")
+    authz
+      .decide(tenant, tgt, alice, "u1", "READ", List(read), List(open)) shouldBe a[Decision.Allow]
+    authz.decide(tenant, tgt, alice, "u1", "WRITE", List(read), List(open, blocked)) match
+      case Decision.Deny(reason, _, _) => reason shouldBe "location not allowed by policy"
+      case other                       => fail(other.toString)
+    authz.decide(tenant, tgt, alice, "u1", "WRITE", Nil, List(blocked)) shouldBe a[Decision.Deny]
+    authz.decide(tenant, tgt, alice, "u1", "READ", Nil, List(open)) shouldBe a[Decision.Allow]
+
+  it should "still judge the gateway's input, which has no via and no locations" in:
+    assume(opaPresent, "opa not on PATH")
+    val read = TableAccess(TableRef("lake", "main", "base"), Verb.Read)
+    authz.statement(tenant, tgt, alice, "u1", "flightsql", "READ", Set(read), "") shouldBe
+      a[Decision.Deny]
+    val view = TableAccess(TableRef("lake", "main", "v_secure"), Verb.Read)
+    authz.statement(tenant, tgt, alice, "u1", "flightsql", "READ", Set(view), "") shouldBe
+      a[Decision.Allow]

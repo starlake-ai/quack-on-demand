@@ -28,11 +28,11 @@ object CatalogPreviewHandlers:
     */
   type PreviewExecutor = (ExecCaller, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
 
-  /** The display label of a system caller ([[ExecCaller.system]]: the static key, the restore dry
-    * run, the branch change counter) in logs and statement history. It carries NO privilege: the
-    * routed executor decides on `ExecCaller.system` alone, because user names are not reserved and
-    * a tenant user may be called "superuser". Which credential is a system caller is decided in
-    * [[RestCaller]] (REST) and `McpDataTools.callerFor` (MCP).
+  /** The display label of a system caller ([[ExecCaller.system]]: the restore dry run, the branch
+    * change counter) in logs and statement history. It carries NO privilege: the routed executor
+    * decides on `ExecCaller.system` alone, because user names are not reserved and a tenant user
+    * may be called "superuser". No credential is a system caller: [[RestCaller]] (REST) and
+    * `McpDataTools.callerFor` (MCP) run a session or a PAT as its user.
     */
   val SuperuserIdentity = "superuser"
 
@@ -100,7 +100,7 @@ final class CatalogPreviewHandlers(
     * `invalid_kind` otherwise), unlike the catalog browser's kind-tolerant reads.
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(
       sup,
@@ -182,7 +182,7 @@ final class CatalogPreviewHandlers(
       from: String,
       to: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[SchemaDiffResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
@@ -257,7 +257,7 @@ final class CatalogPreviewHandlers(
       asOfTs: Option[Instant],
       limit: Option[Int],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[PreviewResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[PreviewResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogPreviewRead, "denied")
@@ -418,7 +418,7 @@ final class CatalogPreviewHandlers(
       cursor: Option[String],
       changeType: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[DataDiffResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogDataDiffRead, "denied")

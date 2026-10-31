@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -76,14 +77,34 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         queryResponse(sql)
-    val adapter  = new QuackHttpAdapter(client, tracker)
-    val router   = new FlightSqlRouter(sup, new SessionRegistry, tracker, adapter)
-    val producer = new FlightProducerImpl(router)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val router = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
+    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
     val peer = s"peer-${java.util.UUID.randomUUID()}"
-    ConnectionContext.bind(peer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "alice")
+    ConnectionContext.bind(
+      peer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "alice",
+      grants = None
+    )
     (producer, peer)
 
   private val emptyHeaders = new org.apache.arrow.flight.CallHeaders:

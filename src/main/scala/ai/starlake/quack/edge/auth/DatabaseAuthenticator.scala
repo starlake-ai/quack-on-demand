@@ -49,7 +49,7 @@ class DatabaseAuthenticator(
   // Lockout enforcement runs only when the operator turned it on AND a store seam is wired.
   private val lockoutActive: Boolean = lockout.enabled && lockoutStore.isDefined
 
-  val name = "database"
+  val name = DatabaseAuthenticator.AuthMethod
 
   private val dataSource: HikariDataSource =
     val hc = new HikariConfig()
@@ -154,8 +154,12 @@ class DatabaseAuthenticator(
                     username = username,
                     role = role,
                     groups = Set(role),
-                    claims = Map("sub" -> username, "role" -> role, "auth_method" -> "database"),
-                    authMethod = "database",
+                    claims = Map(
+                      "sub"         -> username,
+                      "role"        -> role,
+                      "auth_method" -> DatabaseAuthenticator.AuthMethod
+                    ),
+                    authMethod = DatabaseAuthenticator.AuthMethod,
                     tenant = scope.tenantId
                   )
                 )
@@ -180,3 +184,15 @@ class DatabaseAuthenticator(
 
   override def close(): Unit =
     dataSource.close()
+
+object DatabaseAuthenticator:
+
+  /** The provider name of this authenticator and the `authMethod` of every profile it produces.
+    *
+    * The management login (`AuthHandlers.mintSessionFor`) tests it to tell a profile that IS a
+    * `qodstate_user` row (the one `(tenant, username)` row whose password this authenticator just
+    * verified, its `kind` the role) from one whose identity was proven by something else, such as
+    * the manager-wide Keycloak or Azure password grant: that one only says who the user is, and its
+    * rights come from the rows of the realm the login names.
+    */
+  val AuthMethod: String = "database"

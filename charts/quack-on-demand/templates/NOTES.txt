@@ -12,28 +12,22 @@ Quack on Demand has been installed.
 
   Then open http://localhost:{{ .Values.service.rest.port }}/ui/
 
-{{- if .Values.admin.password }}
   Seeded admin user(s): {{ .Values.admin.username }}
-  Password: (chart-managed; from values.admin.password)
-  (used only when the admin row does not exist yet)
-{{- else if .Values.admin.existingSecret }}
-  Seeded admin user(s): {{ .Values.admin.username }}
+{{- if .Values.admin.existingSecret }}
   Password: (from {{ .Values.admin.existingSecret }}/{{ .Values.admin.existingSecretKey }})
-  (used only when the admin row does not exist yet)
 {{- else }}
-  WARNING: no admin password set, so no admin will be seeded. Set
-  admin.password or admin.existingSecret before first boot; the manager
-  logs an ERROR until an admin exists.
+  Password: (chart-managed; from values.admin.password)
 {{- end }}
-{{- $security := .Values.security | default dict }}
-{{- if and (not (dig "nodeLockdown" true $security)) (not (dig "aclEnabled" false $security)) }}
+  (used only when the admin row does not exist yet)
 
-  WARNING: security.nodeLockdown and security.aclEnabled are both off. Any
-  tenant user can read the node's mounted secrets, including the Postgres
-  password of postgres.user ({{ .Values.postgres.user }}), and with it the
-  control-plane database and every tenant's catalog. See "Tenant isolation"
-  in the chart README.
-{{- end }}
+  From a shell, with the qod CLI (pip install qod):
+
+    qod login --url http://localhost:{{ .Values.service.rest.port }} --username {{ splitList "," .Values.admin.username | first | trim }}
+
+  This chart sets no static API key: automation (CI, MCP clients, SCIM
+  connectors) uses a personal access token, minted once from a session:
+
+    qod auth pat create --name ci
 
 # Port-forward FlightSQL (gRPC)
 
@@ -63,8 +57,9 @@ Quack on Demand has been installed.
 # Notes
 
 - Replicas default to 1 (Recreate rollout). Set replicaCount > 1 to enable
-  active-active HA (QOD_HA_ENABLED); requires sessionJwtSecret or
-  existingSessionJwtSecret. See guides/RESILIENCE.md.
+  active-active HA (QOD_HA_ENABLED). Replicas share the session secret the
+  control plane stores unless sessionJwtSecret / existingSessionJwtSecret
+  pins one. See guides/RESILIENCE.md.
 - The manager calls the K8s API to create / delete pods + services in
   this namespace. RBAC scope is a Role, not a ClusterRole.
 - {{- if eq .Values.metrics.sink "prometheus" }} /metrics is exposed on the rest-ui port. {{- else }} metrics sink: {{ .Values.metrics.sink }} (the /metrics endpoint is NOT exposed in cloud-push mode). {{- end }}

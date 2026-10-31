@@ -3,10 +3,10 @@ package ai.starlake.sql
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Direct tests for `SqlCommentStripper`. Before this file, the stripper had three production
-  * consumers (`StatementClassifier`, `LockdownScreen`'s leading scan plus its interior scan added
-  * alongside this file, `CatalogWriteScreen`, `PrepareStrategy`) and zero tests of its own -- every
-  * assertion about it was indirect, through a gate that also has its own screening logic to test.
+/** Direct tests for `SqlCommentStripper`. Before this file, the stripper had several production
+  * consumers (`StatementClassifier`, `PrepareStrategy` and the gateway's statement screens of the
+  * time) and zero tests of its own -- every assertion about it was indirect, through a gate that
+  * also has its own screening logic to test.
   *
   * C1: a stripped comment must become a SEPARATOR, not a WELD. DuckDB's own parser treats a comment
   * as whitespace between the tokens on either side of it, confirmed executing against a real DuckDB
@@ -84,7 +84,7 @@ class SqlCommentStripperSpec extends AnyFlatSpec with Matchers:
   // `EXPLAIN /* a /* b */ c */ ANALYZE INSERT INTO t VALUES (1)` writes the row on DuckDB while
   // the classifier read the residue where ANALYZE should be and called the statement read-shaped
   // (C3), and `SELECT * FROM/* a /* b */ c */'/etc/passwd.parquet'` reads the file while the
-  // residue sat between FROM and its literal so no lockdown regex matched (I1).
+  // residue sat between FROM and its literal so no keyword screen matched (I1).
   "stripComments" should "close a nested block comment at its OUTER marker, leaving no residue" in:
     SqlCommentStripper.stripComments(
       "EXPLAIN /* a /* b */ c */ ANALYZE INSERT INTO t VALUES (1)"
@@ -106,7 +106,7 @@ class SqlCommentStripperSpec extends AnyFlatSpec with Matchers:
   // (each probed individually against a real DuckDB 1.5.4). Tracking only single quotes let a
   // `/*` in a column alias open a comment that never closed, truncating the statement before any
   // screen saw it: `SELECT 1 AS "x/*y", * FROM read_csv('/etc/passwd.csv')` executes on DuckDB
-  // and reached `LockdownScreen` as `select 1 as "x`, admitted (C1).
+  // and reached the gateway's screens as `select 1 as "x`, admitted (C1).
   it should "not open a comment inside a double-quoted identifier" in:
     SqlCommentStripper.stripComments(
       "SELECT 1 AS \"x/*y\", * FROM read_csv('/etc/passwd.csv')"
@@ -197,8 +197,7 @@ class SqlCommentStripperSpec extends AnyFlatSpec with Matchers:
   //
   // This file names no invisible/Unicode trivia characters at all (that is SqlTriviaSpec's job);
   // this test only pins that no raw non-ASCII codepoint crept in by accident, matching the
-  // identical guard in `SqlTriviaSpec`, `StatementClassifierSpec`, `LockdownScreenSpec` and
-  // `CatalogWriteScreenSpec`.
+  // identical guard in `SqlTriviaSpec` and `StatementClassifierSpec`.
   it should "carry no raw non-ASCII codepoints in its own source file" in:
     val path = "src/test/scala/ai/starlake/sql/SqlCommentStripperSpec.scala"
     val file = new java.io.File(path)

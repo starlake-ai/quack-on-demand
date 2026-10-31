@@ -9,7 +9,10 @@ class GenConfigDocsSpec extends AnyFunSuite:
     assert(md.startsWith("---"), "should emit Docusaurus front matter")
     assert(md.contains("QOD_ON_DEMAND_PORT"), "manager port env var missing")
     assert(md.contains("PROXY_PORT"), "flightsql port env var missing")
-    assert(md.contains("QOD_ACL_ENABLED"), "acl enable env var missing")
+    assert(md.contains("QOD_ACL_MODE"), "acl mode env var missing")
+    List("QOD_ACL_ENABLED", "QOD_ACL_FILTERED_METADATA", "QOD_ACL_DIALECT").foreach(v =>
+      assert(!md.contains(v), s"the removed variable $v is still documented")
+    )
     val entries = GenConfigDocs.entries
     assert(entries.nonEmpty)
     entries.foreach(e => assert(md.contains(e.envVar), s"missing row for ${e.envVar}"))
@@ -22,8 +25,14 @@ class GenConfigDocsSpec extends AnyFunSuite:
 
   test("groups flat top-level keys under a single section heading") {
     val md = GenConfigDocs.render
-    assert(md.contains("## `quack-on-demand.admin`"), "nested admin block should be its own section")
-    assert(!md.contains("## `quack-on-demand.port`"), "flat scalar should not get its own per-key heading")
+    assert(
+      md.contains("## `quack-on-demand.admin`"),
+      "nested admin block should be its own section"
+    )
+    assert(
+      !md.contains("## `quack-on-demand.port`"),
+      "flat scalar should not get its own per-key heading"
+    )
   }
 
   test("MDX-escapes curly braces in descriptions so Docusaurus does not parse them as JSX") {
@@ -31,6 +40,12 @@ class GenConfigDocsSpec extends AnyFunSuite:
     // Raw `{` and `}` would be parsed as JSX expression boundaries by MDX and
     // break the docs build. Every description that originally contained
     // braces must reach the page as HTML entities.
-    assert(!md.contains("{"), "rendered page must not contain raw '{'; descriptions must use &#123;")
-    assert(!md.contains("}"), "rendered page must not contain raw '}'; descriptions must use &#125;")
+    assert(
+      !md.contains("{"),
+      "rendered page must not contain raw '{'; descriptions must use &#123;"
+    )
+    assert(
+      !md.contains("}"),
+      "rendered page must not contain raw '}'; descriptions must use &#125;"
+    )
   }

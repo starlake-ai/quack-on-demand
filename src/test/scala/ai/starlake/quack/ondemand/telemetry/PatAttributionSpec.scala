@@ -9,9 +9,8 @@ import java.time.Instant
 import scala.util.Try
 
 /** Which credential acted, not only which human owns it (changelog 0034). `pat_id` is nullable and
-  * additive on both `qodstate_stmt_history` and `qodstate_audit`: session-authenticated and
-  * static-key callers keep writing NULL, and a PAT-authenticated caller's row carries the acting
-  * token id.
+  * additive on both `qodstate_stmt_history` and `qodstate_audit`: session-authenticated callers
+  * keep writing NULL, and a PAT-authenticated caller's row carries the acting token id.
   */
 class PatAttributionSpec extends AnyFlatSpec with Matchers:
 
@@ -94,9 +93,9 @@ class PatAttributionSpec extends AnyFlatSpec with Matchers:
       rows.map(_.event.patId) shouldBe List(Some("pat-3"))
     }
 
-  it should "leave pat_id NULL for a static-key-executed action" in
+  it should "leave pat_id NULL for a session-executed action, attributed to its user" in
     withFreshDb { store =>
-      store.appendAudit(List(audit("static-key", patId = None)))
+      store.appendAudit(List(audit("alice", patId = None)))
       val rows = store.listAudit(AuditQuery())
-      rows.map(_.event.patId) shouldBe List(None)
+      rows.map(r => (r.event.actor, r.event.patId)) shouldBe List(("alice", None))
     }

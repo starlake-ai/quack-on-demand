@@ -4,7 +4,8 @@ import ai.starlake.quack.edge.auth.{
   AuthFailure,
   AuthScope,
   AuthenticatedProfile,
-  AuthenticationService
+  AuthenticationService,
+  DatabaseAuthenticator
 }
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
@@ -17,6 +18,7 @@ import ai.starlake.quack.edge.config.{
 }
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
+  LoginRealm,
   ManagementAuthMode,
   ManagementAuthModeResolver,
   ManagementIdentitySource,
@@ -24,13 +26,22 @@ import ai.starlake.quack.ondemand.auth.{
 }
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.state.UserGrant
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
+import sttp.model.headers.CookieValueWithMeta
 
 /** Unit tests for [[AuthHandlers]]. */
 class AuthHandlersSpec extends AnyFlatSpec with Matchers:
+
+  // The authMethod of a profile the database authenticator produced: the only profile that is its
+  // own grant (the qodstate_user row whose password it verified). Any other authMethod only says
+  // who the user is.
+  private val DbAuthMethod = DatabaseAuthenticator.AuthMethod
 
   // Minimal config with all providers disabled so the parent constructor
   // builds empty chains (no I/O). The fake subclass overrides the
@@ -89,7 +100,15 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
       tokens: SessionTokenStore = new SessionTokenStore,
       cookieSecureOverride: Option[Boolean] = None,
-      resolveTenant: String => Option[String] = _ => None
+      resolveTenant: String => Option[String] = _ => None,
+      // Every tenant is a db tenant unless a test passes its own registry.
+      loadTenant: String => Option[Tenant] = id => Some(Tenant(id = id, authProvider = "db")),
+      audit: AuditRecorder = AuditRecorder.noop,
+      // The rows a profile that is not the database authenticator's is looked up in. No rows
+      // unless a test supplies a directory: a database-authenticator profile never reads it.
+      grantsForIdentity: GrantsLookup = (_, _, _) => Nil,
+      events: ManagerEventSink = ManagerEventSink.noop,
+      patSessionOf: String => Option[SessionTokenStore.Session] = _ => None
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -105,13 +124,13 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authService = fakeSvc,
       tokens = tokens,
       identitySource = ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil, // unused in Db mode
+      grantsForIdentity = grantsForIdentity,
       cookieSecureOverride = cookieSecureOverride,
-      authModeResolver = new ManagementAuthModeResolver(
-        id => Some(Tenant(id = id, authProvider = "db")),
-        ManagementAuthMode.Db
-      ),
-      resolveTenant = resolveTenant
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
+      resolveTenant = resolveTenant,
+      audit = audit,
+      events = events,
+      patSessionOf = patSessionOf
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -120,7 +139,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       role = "admin",
       groups = Set.empty,
       claims = Map.empty,
-      authMethod = "db",
+      authMethod = DbAuthMethod,
       tenant = Some("t-abc123")
     )
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
@@ -149,7 +168,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       role = "admin",
       groups = Set.empty,
       claims = Map.empty,
-      authMethod = "db",
+      authMethod = DbAuthMethod,
       tenant = None
     )
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
@@ -217,7 +236,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       role = "admin",
       groups = Set.empty,
       claims = Map.empty,
-      authMethod = "db",
+      authMethod = DbAuthMethod,
       tenant = Some("t-abc123")
     )
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
@@ -239,7 +258,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "accept the tenant id directly (resolver is identity on a known id)" in {
     val profile =
-      AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", Some("t-abc123"))
+      AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, Some("t-abc123"))
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h = makeHandlers(Right(profile), calls, resolveTenant = Map("t-abc123" -> "t-abc123").get)
 
@@ -249,9 +268,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "fall back to the raw tenant string when the resolver does not recognize it" in {
-    val profile = AuthenticatedProfile("bob", "admin", Set.empty, Map.empty, "db", Some("t-x"))
-    val calls   = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
-    val h       = makeHandlers(Right(profile), calls, resolveTenant = _ => None)
+    val profile =
+      AuthenticatedProfile("bob", "admin", Set.empty, Map.empty, DbAuthMethod, Some("t-x"))
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(profile), calls, resolveTenant = _ => None)
 
     h.login(LoginRequest("bob", "secret", tenant = Some("unknown-tenant"))).unsafeRunSync()
 
@@ -266,7 +286,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       role = "admin",
       groups = Set.empty,
       claims = Map.empty,
-      authMethod = "db",
+      authMethod = DbAuthMethod,
       tenant = None
     )
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
@@ -287,7 +307,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   // admin_required with the same message bytes.
 
   private val carolProfile =
-    AuthenticatedProfile("carol", "user", Set.empty, Map.empty, "db", Some("t1"))
+    AuthenticatedProfile("carol", "user", Set.empty, Map.empty, DbAuthMethod, Some("t1"))
 
   it should "mint a non-admin session for a tenant-scoped regular user" in {
     val tokens = new SessionTokenStore
@@ -330,7 +350,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "keep admin logins unchanged with admin=true" in {
-    val profile = AuthenticatedProfile("root", "admin", Set.empty, Map.empty, "db", None)
+    val profile = AuthenticatedProfile("root", "admin", Set.empty, Map.empty, DbAuthMethod, None)
     val calls   = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h       = makeHandlers(Right(profile), calls)
 
@@ -371,13 +391,795 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       case Left(e) => fail(s"expected the rotated login to succeed, got $e")
   }
 
+  // ----- tenants that sign in through their identity provider -----
+  //
+  // A tenant whose sign-in mode is OIDC takes no password: the login answers sso_required before
+  // the authentication service is asked, so no password is checked and no lockout counter moves.
+  // An unknown or misconfigured tenant still authenticates first and keeps its answers.
+
+  private val ssoTenant = Tenant(
+    id = "t-sso",
+    displayName = "Acme",
+    authProvider = "keycloak",
+    authConfig = Map(
+      "issuerUrl"       -> "https://idp.example/t-sso",
+      "clientId"        -> "qod-console",
+      "clientSecretRef" -> "env:T_SSO_CLIENT_SECRET"
+    )
+  )
+
+  private val ssoTenants: String => Option[Tenant] = Map(ssoTenant.id -> ssoTenant).get
+
+  // What the fake authentication service answers if it is asked: a valid admin of the tenant, so
+  // a session would follow if the password were checked.
+  private val ssoAdmin =
+    AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, Some("t-sso"))
+
+  it should "refuse a password login into an OIDC tenant with 400 sso_required before any password check" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(ssoAdmin), calls, loadTenant = ssoTenants)
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-sso"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err shouldBe ErrorResponse(
+          "sso_required",
+          "tenant 't-sso' signs in through its identity provider: open /ui/?tenant=t-sso, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+  }
+
+  it should "name the tenant as typed in the sso_required message but link its resolved id, checking the mode on that id" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      resolveTenant = { case "Acme" => Some("t-sso"); case _ => None },
+      loadTenant = ssoTenants
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("  Acme "))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+        err.message shouldBe (
+          "tenant 'Acme' signs in through its identity provider: open /ui/?tenant=t-sso, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+  }
+
+  // Tenant ids are lowercase slugs, and the login resolves a typed case variant to the id. The
+  // tenant below is `ssoTenant` under such an id.
+  private val acmeSso = ssoTenant.copy(id = "acme")
+
+  it should "link the exact tenant id in sso_required when the typed value is a case variant of it" in {
+    // The link must open a login the tenant-scoped endpoints resolve: it carries the id the login
+    // resolved ('acme'), not the typed 'ACME'.
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      resolveTenant = { case "ACME" => Some("acme"); case _ => None },
+      loadTenant = Map(acmeSso.id -> acmeSso).get
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("ACME"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+        err.message shouldBe (
+          "tenant 'ACME' signs in through its identity provider: open /ui/?tenant=acme, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+    // The id in the link is one the public mode endpoint answers oidc for.
+    h.authMode(Some("acme")).unsafeRunSync() shouldBe Right(AuthModeResponse("oidc", ""))
+  }
+
+  it should "URL-encode the resolved tenant id in the sso_required link" in {
+    // Ids are slugs in practice; the link is built so that no id can break out of the query.
+    val odd   = ssoTenant.copy(id = "t sso&x")
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(ssoAdmin), calls, loadTenant = Map(odd.id -> odd).get)
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t sso&x"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+        err.message shouldBe (
+          "tenant 't sso&x' signs in through its identity provider: open /ui/?tenant=t+sso%26x, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+  }
+
+  it should "audit the sso_required refusal as a denied login with reason sso_required, under the resolved tenant id" in {
+    // A padded, case-variant typed value still records the tenant id, not the typed text.
+    val telemetry = new RecordingTelemetryStore
+    val calls     = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h         = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      resolveTenant = { case "ACME" => Some("acme"); case _ => None },
+      loadTenant = Map(acmeSso.id -> acmeSso).get,
+      audit = new AuditRecorder(telemetry, _ => None)
+    )
+
+    h.login(LoginRequest("alice", "pw", tenant = Some("  ACME "))).unsafeRunSync()
+
+    telemetry.events should have size 1
+    val e = telemetry.events.head
+    e.family shouldBe "auth"
+    e.action shouldBe "auth.login.failure"
+    e.outcome shouldBe "denied"
+    e.actor shouldBe "alice"
+    e.tenant shouldBe Some("acme")
+    e.detail shouldBe Map("username" -> "alice", "reason" -> "sso_required")
+  }
+
+  it should "keep authenticating an unknown tenant first (401 invalid_credentials)" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Left(AuthFailure.InvalidCredentials("invalid credentials")),
+      calls,
+      loadTenant = _ => None
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-ghost"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.Unauthorized
+        err.error shouldBe "invalid_credentials"
+      case Right(_) => fail("expected 401 invalid_credentials")
+    calls.map(_._1).toList shouldBe List(AuthScope.Tenant("t-ghost"))
+  }
+
+  it should "keep authenticating a misconfigured OIDC tenant first (400 tenant_oidc_misconfigured)" in {
+    val misconfigured =
+      Tenant(id = "t-bad", authProvider = "keycloak", authConfig = Map("clientId" -> "c"))
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(
+        AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, Some("t-bad"))
+      ),
+      calls,
+      loadTenant = Map(misconfigured.id -> misconfigured).get
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-bad"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "tenant_oidc_misconfigured"
+      case Right(_) => fail("expected 400 tenant_oidc_misconfigured")
+    calls should have size 1
+  }
+
+  it should "keep the password login of a db tenant, whatever OIDC keys its config carries" in {
+    // The provider decides the mode, not leftover keys in the config.
+    val dbTenant = Tenant(
+      id = "t-db",
+      authProvider = "db",
+      authConfig = Map(
+        "issuerUrl"       -> "https://idp.example/t-db",
+        "clientId"        -> "c",
+        "clientSecretRef" -> "env:T_DB_CLIENT_SECRET"
+      )
+    )
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(
+        AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, Some("t-db"))
+      ),
+      calls,
+      loadTenant = Map(dbTenant.id -> dbTenant).get
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-db"))).unsafeRunSync()
+
+    out match
+      case Right((_, resp)) => resp.manageableTenants shouldBe List("t-db")
+      case Left(e)          => fail(s"expected the db tenant login to succeed, got $e")
+    calls should have size 1
+  }
+
+  // ----- a password login answered by an identity provider -----
+  //
+  // With the manager-wide Keycloak or Azure provider enabled, the basic chain also holds its
+  // password-grant authenticators. Their profile carries no tenant and the IdP's role claim, and it
+  // only proves who the user is: the rights come from the qodstate_user rows of the realm the login
+  // names (a tenant login: that tenant's rows; no tenant: every row of the identity, as the bare
+  // SSO login reads them), exactly as for an SSO login. The IdP's role claim grants nothing. Only a
+  // profile the database authenticator produced is its own grant.
+
+  private val AcmeId = "t-acme"
+
+  /** The profile of a manager-wide password-grant backend: no tenant, the IdP's role claim (admin
+    * unless a test says otherwise), and the claims `ResourceOwnerPasswordAuthenticator` carries
+    * when the token has them: the email, the `preferred_username` and `email_verified`.
+    */
+  private def passwordGrantProfile(
+      username: String = "alice",
+      authMethod: String = "keycloak-ropc",
+      role: String = "admin",
+      email: Option[String] = None,
+      preferredUsername: Option[String] = None,
+      emailVerified: Option[String] = None
+  ): AuthenticatedProfile =
+    AuthenticatedProfile(
+      username = username,
+      role = role,
+      groups = Set(role),
+      claims = Map("sub" -> username, "role" -> role, "auth_method" -> authMethod) ++
+        email.map("email" -> _) ++ preferredUsername.map("preferred_username" -> _) ++
+        emailVerified.map("email_verified" -> _),
+      authMethod = authMethod,
+      tenant = None
+    )
+
+  /** A user directory keyed by (realm, identity) that records every lookup it is asked (realm,
+    * identity, email claim). A key it does not hold answers no rows, like an identity with no row
+    * in that realm. Like `UserStore.grantsForIdentity` it falls back to the email it is handed only
+    * when the identity matches no row, so a handler that hands one over can be seen binding it.
+    */
+  private final class RecordingDirectory(rows: Map[(LoginRealm, String), List[UserGrant]]):
+    val asked: scala.collection.mutable.ListBuffer[(LoginRealm, String, Option[String])] =
+      scala.collection.mutable.ListBuffer.empty
+    val lookup: GrantsLookup = (realm, identity, email) =>
+      asked += ((realm, identity, email))
+      rows.getOrElse(
+        (realm, identity),
+        email.filter(_ != identity).flatMap(e => rows.get((realm, e))).getOrElse(Nil)
+      )
+
+  private type LoginOutcome =
+    Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)]
+
+  private def sessionOf(out: LoginOutcome): LoginResponse =
+    out match
+      case Right((_, resp))    => resp
+      case Left((status, err)) => fail(s"expected a session, got $status ${err.error}")
+
+  // A refusal is named by its status and error code only: a response can hold a token.
+  private def refusalOf(out: LoginOutcome): (StatusCode, String) =
+    out match
+      case Left((status, err)) => (status, err.error)
+      case Right((_, resp))    =>
+        fail(
+          s"expected a refusal, got a session (superuser=${resp.superuser}, " +
+            s"manages ${resp.manageableTenants})"
+        )
+
+  private def noCalls() = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+
+  "login (password grant)" should "refuse a tenant login with 403 not_provisioned when the identity has no row in the tenant, whatever the IdP role claim says" in
+    Seq("keycloak-ropc", "azure-ropc").foreach { method =>
+      withClue(s"[$method] ") {
+        val directory = new RecordingDirectory(Map.empty)
+        val h         = makeHandlers(
+          Right(passwordGrantProfile(authMethod = method)),
+          noCalls(),
+          grantsForIdentity = directory.lookup
+        )
+
+        val out = h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+        refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+      }
+    }
+
+  it should "never bind a superuser row on a tenant login: a superuser of the same name is still not_provisioned" in {
+    // The directory answers the superuser row to the tenant's realm as well, as a store that
+    // ignored the realm would: only the handler's own realm filter keeps it out.
+    val superuserRow = List(UserGrant(None, "admin"))
+    val directory    = new RecordingDirectory(
+      Map(
+        (LoginRealm.System, "alice")         -> superuserRow,
+        (LoginRealm.Tenant(AcmeId), "alice") -> superuserRow
+      )
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+  }
+
+  it should "not take an admin row of another tenant for a grant on the tenant it logs into" in {
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some("t-globex"), "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+  }
+
+  it should "mint a session managing exactly the tenant for an admin row of that tenant, and name the tenant on the session profile" in {
+    val tokens    = new SessionTokenStore
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      tokens,
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    resp.superuser shouldBe false
+    resp.admin shouldBe true
+    resp.manageableTenants shouldBe List(AcmeId)
+    val session = tokens.get(resp.token).getOrElse(fail("the minted token does not resolve"))
+    session.scope shouldBe SessionScope(superuser = false, manageableTenants = Set(AcmeId))
+    // A personal access token minted from this session resolves its owning row by
+    // (profile.tenant, username): the profile must name the realm the login was verified in.
+    session.profile.tenant shouldBe Some(AcmeId)
+  }
+
+  it should "keep the tenant's own row alone when the directory answers the rows of every realm" in {
+    val directory = new RecordingDirectory(
+      Map(
+        (LoginRealm.Tenant(AcmeId), "alice") -> List(
+          UserGrant(None, "admin"),
+          UserGrant(Some(AcmeId), "admin"),
+          UserGrant(Some("t-globex"), "admin")
+        )
+      )
+    )
+    val tokens = new SessionTokenStore
+    val h      = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      tokens,
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    tokens.scopeOf(resp.token) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set(AcmeId)))
+  }
+
+  it should "mint a profile-only session for a regular user's row of the tenant, and demote the IdP admin claim" in {
+    val tokens    = new SessionTokenStore
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "user")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      tokens,
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    resp.admin shouldBe false
+    resp.superuser shouldBe false
+    resp.manageableTenants shouldBe empty
+    tokens.isAdmin(resp.token) shouldBe false
+    val session = tokens.get(resp.token).getOrElse(fail("the minted token does not resolve"))
+    // The IdP said admin; the row says user.
+    session.profile.role shouldBe "user"
+    session.profile.tenant shouldBe Some(AcmeId)
+  }
+
+  it should "refuse a login without tenant with 403 not_provisioned when the identity has no row at all, whatever the IdP role claim says" in {
+    val directory = new RecordingDirectory(Map.empty)
+    val h         = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+  }
+
+  it should "mint a superuser session on a login without tenant only for a superuser row" in {
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.System, "alice") -> List(UserGrant(None, "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(role = "user")), // the IdP claim says user: the row decides
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync())
+
+    resp.superuser shouldBe true
+    resp.manageableTenants shouldBe empty
+  }
+
+  it should "build a multi-tenant admin session, not a superuser one, from tenant admin rows on a login without tenant" in {
+    val directory = new RecordingDirectory(
+      Map(
+        (LoginRealm.System, "alice") -> List(
+          UserGrant(Some("t-a"), "admin"),
+          UserGrant(Some("t-b"), "admin")
+        )
+      )
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync())
+
+    resp.superuser shouldBe false
+    resp.admin shouldBe true
+    resp.manageableTenants shouldBe List("t-a", "t-b")
+  }
+
+  it should "refuse a login without tenant with 403 admin_required when the identity holds regular user rows only" in {
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.System, "alice") -> List(UserGrant(Some(AcmeId), "user")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "admin_required"))
+  }
+
+  it should "keep a database-authenticator profile as its own grant and never read the directory" in {
+    val directory = new RecordingDirectory(Map.empty)
+    def login(profile: AuthenticatedProfile, tenant: Option[String]): LoginResponse =
+      sessionOf(
+        makeHandlers(Right(profile), noCalls(), grantsForIdentity = directory.lookup)
+          .login(LoginRequest(profile.username, "pw", tenant))
+          .unsafeRunSync()
+      )
+
+    val tenantAdmin = login(
+      AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, Some(AcmeId)),
+      Some(AcmeId)
+    )
+    val regularUser = login(
+      AuthenticatedProfile("carol", "user", Set.empty, Map.empty, DbAuthMethod, Some(AcmeId)),
+      Some(AcmeId)
+    )
+    val superuser = login(
+      AuthenticatedProfile("root", "admin", Set.empty, Map.empty, DbAuthMethod, None),
+      None
+    )
+
+    tenantAdmin.manageableTenants shouldBe List(AcmeId)
+    tenantAdmin.superuser shouldBe false
+    regularUser.admin shouldBe false
+    superuser.superuser shouldBe true
+    directory.asked shouldBe empty
+  }
+
+  it should "look the identity up by its user name alone, in the realm the login names: the tenant's for a tenant login, the system realm without one" in {
+    // The profile carries an email claim; a password login hands none to the lookup.
+    val directory = new RecordingDirectory(Map.empty)
+    val h         = makeHandlers(
+      Right(passwordGrantProfile(email = Some("alice@acme.example"))),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+    h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync()
+
+    directory.asked.toList shouldBe List(
+      (LoginRealm.Tenant(AcmeId), "alice", None),
+      (LoginRealm.System, "alice", None)
+    )
+  }
+
+  it should "not bind the superuser row that the email claim of the IdP account names on a login without tenant" in {
+    // The account's email is whatever its holder typed: it names the seeded superuser, the user
+    // name 'mallory' matches no row.
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.System, "admin@localhost.local") -> List(UserGrant(None, "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(username = "mallory", email = Some("admin@localhost.local"))),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("mallory", "pw", tenant = None)).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    directory.asked.toList shouldBe List((LoginRealm.System, "mallory", None))
+  }
+
+  it should "not bind the tenant row that the email claim of the IdP account names on a tenant login" in {
+    val directory = new RecordingDirectory(
+      Map(
+        (LoginRealm.Tenant(AcmeId), "boss@acme.example") -> List(UserGrant(Some(AcmeId), "admin"))
+      )
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(username = "mallory", email = Some("boss@acme.example"))),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("mallory", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    directory.asked.toList shouldBe List((LoginRealm.Tenant(AcmeId), "mallory", None))
+  }
+
+  it should "refuse a database-authenticator profile without tenant on a tenant login: a superuser grant never opens one" in {
+    // A database tenant login always carries the tenant row it verified. A profile that does not
+    // (it is not what the authenticator produces) fails closed instead of opening the tenant as a
+    // superuser.
+    val h = makeHandlers(
+      Right(AuthenticatedProfile("root", "admin", Set.empty, Map.empty, DbAuthMethod, None)),
+      noCalls()
+    )
+
+    val out = h.login(LoginRequest("root", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "admin_required"))
+  }
+
+  it should "look the identity up in the realm of the tenant id when the login named the tenant another way" in {
+    val directory = new RecordingDirectory(Map.empty)
+    val h         = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      resolveTenant = { case "Acme Corp" => Some(AcmeId); case _ => None },
+      grantsForIdentity = directory.lookup
+    )
+
+    h.login(LoginRequest("alice", "pw", tenant = Some("Acme Corp"))).unsafeRunSync()
+
+    directory.asked.toList.map(_._1) shouldBe List(LoginRealm.Tenant(AcmeId))
+  }
+
+  it should "name the tenant on the SessionOpened event and the audit row of a tenant login" in {
+    val telemetry              = new RecordingTelemetryStore
+    val opened                 = scala.collection.mutable.ListBuffer.empty[ManagerEvent]
+    val sink: ManagerEventSink = e => { opened += e; () }
+    val directory              = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      audit = new AuditRecorder(telemetry, _ => None),
+      grantsForIdentity = directory.lookup,
+      events = sink
+    )
+
+    h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    opened.toList should contain(ManagerEvent.SessionOpened(AcmeId, "alice", "rest"))
+    telemetry.events should have size 1
+    val e = telemetry.events.head
+    e.action shouldBe "auth.login"
+    e.outcome shouldBe "ok"
+    e.tenant shouldBe Some(AcmeId)
+    e.detail("authMethod") shouldBe "keycloak-ropc"
+  }
+
+  it should "audit a not_provisioned refusal of a tenant login under that tenant" in {
+    val telemetry = new RecordingTelemetryStore
+    val h         = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      audit = new AuditRecorder(telemetry, _ => None),
+      grantsForIdentity = new RecordingDirectory(Map.empty).lookup
+    )
+
+    h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    telemetry.events should have size 1
+    val e = telemetry.events.head
+    e.action shouldBe "auth.login.failure"
+    e.outcome shouldBe "denied"
+    e.tenant shouldBe Some(AcmeId)
+    e.detail shouldBe Map("reason" -> "not_provisioned")
+  }
+
+  it should "leave the session profile tenant empty on a login without tenant" in {
+    val tokens    = new SessionTokenStore
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.System, "alice") -> List(UserGrant(None, "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile()),
+      noCalls(),
+      tokens,
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync())
+
+    tokens.get(resp.token).map(_.profile.tenant) shouldBe Some(None)
+  }
+
+  // ----- a user name that is the email claim -----
+  //
+  // Both IdP authenticators name the user preferred_username, else the email claim, else the
+  // subject. A token without preferred_username is therefore named by its email, which its account
+  // holder may have typed: that name binds a row only when the IdP marks the address verified
+  // (email_verified true). The seeded superuser admin@localhost.local is the row to protect.
+
+  private val SeededSuperuser = "admin@localhost.local"
+
+  private def superuserRow = Map(
+    (LoginRealm.System, SeededSuperuser) -> List(UserGrant(None, "admin"))
+  )
+
+  it should "refuse a login without tenant whose user name is the email claim when the IdP does not mark it verified: the superuser row of that name stays unbound" in
+    Seq(None, Some("false")).foreach { verified =>
+      withClue(s"[email_verified=$verified] ") {
+        val directory = new RecordingDirectory(superuserRow)
+        val h         = makeHandlers(
+          Right(
+            passwordGrantProfile(
+              username = SeededSuperuser,
+              email = Some(SeededSuperuser),
+              emailVerified = verified
+            )
+          ),
+          noCalls(),
+          grantsForIdentity = directory.lookup
+        )
+
+        val out = h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync()
+
+        refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+        directory.asked shouldBe empty
+      }
+    }
+
+  it should "bind the superuser row of a user name that is the email claim once the IdP marks the address verified (email_verified true)" in {
+    val directory = new RecordingDirectory(superuserRow)
+    val h         = makeHandlers(
+      Right(
+        passwordGrantProfile(
+          username = SeededSuperuser,
+          email = Some(SeededSuperuser),
+          emailVerified = Some("true")
+        )
+      ),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp =
+      sessionOf(h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync())
+
+    resp.superuser shouldBe true
+    directory.asked.toList shouldBe List((LoginRealm.System, SeededSuperuser, None))
+  }
+
+  it should "refuse a tenant login whose user name is an unverified email claim, and bind the tenant's row once the address is verified" in {
+    val boss      = "boss@acme.example"
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), boss) -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    def login(verified: Option[String]): LoginOutcome =
+      makeHandlers(
+        Right(passwordGrantProfile(username = boss, email = Some(boss), emailVerified = verified)),
+        noCalls(),
+        grantsForIdentity = directory.lookup
+      ).login(LoginRequest(boss, "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(login(None)) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    refusalOf(login(Some("false"))) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    directory.asked shouldBe empty
+    sessionOf(login(Some("true"))).manageableTenants shouldBe List(AcmeId)
+  }
+
+  it should "count only the exact string true as verified: True, 1 and yes are not" in
+    Seq("True", "TRUE", "1", "yes", "").foreach { verified =>
+      withClue(s"[email_verified=$verified] ") {
+        val h = makeHandlers(
+          Right(
+            passwordGrantProfile(
+              username = SeededSuperuser,
+              email = Some(SeededSuperuser),
+              emailVerified = Some(verified)
+            )
+          ),
+          noCalls(),
+          grantsForIdentity = new RecordingDirectory(superuserRow).lookup
+        )
+
+        val out = h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync()
+
+        refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+      }
+    }
+
+  it should "leave a user name the IdP supplied as preferred_username alone, whatever its email claim says" in {
+    // preferred_username is the IdP account's name, assigned by an administrator: only a name that
+    // fell back to the email claim is a value its holder may have typed.
+    val boss      = "boss@acme.example"
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), boss) -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    val h = makeHandlers(
+      Right(
+        passwordGrantProfile(
+          username = boss,
+          email = Some(boss),
+          preferredUsername = Some(boss),
+          emailVerified = Some("false")
+        )
+      ),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest(boss, "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    resp.manageableTenants shouldBe List(AcmeId)
+  }
+
+  it should "leave a user name that is not the email claim alone: an email claim of another address does not matter" in {
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    val h = makeHandlers(
+      Right(
+        passwordGrantProfile(email = Some("alice@acme.example"), emailVerified = Some("false"))
+      ),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    resp.manageableTenants shouldBe List(AcmeId)
+  }
+
   "whoami" should "surface the tenant and scope from the stored session" in {
     val profile = AuthenticatedProfile(
       username = "alice",
       role = "admin",
       groups = Set.empty,
       claims = Map.empty,
-      authMethod = "db",
+      authMethod = DbAuthMethod,
       tenant = Some("t-abc123")
     )
     val store = new SessionTokenStore
@@ -403,7 +1205,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val store    = new SessionTokenStore
     val calls    = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val handlers = makeHandlers(
-      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)),
+      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, None)),
       calls,
       store
     )
@@ -418,7 +1220,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val store    = new SessionTokenStore
     val calls    = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val handlers = makeHandlers(
-      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)),
+      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, None)),
       calls,
       store
     )
@@ -433,13 +1235,13 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     // which used to surface as "expired" and mislead operators.
     val foreign = new SessionTokenStore(secret = "stranger-secret-padding-padding-padding-padding=")
     val token   = foreign.mintWithScope(
-      AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None),
+      AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, None),
       SessionScope(superuser = true, manageableTenants = Set.empty)
     )
     val store    = new SessionTokenStore
     val calls    = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val handlers = makeHandlers(
-      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)),
+      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, None)),
       calls,
       store
     )
@@ -449,7 +1251,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "return a revoked error when the jti is on the denylist" in {
     val store   = new SessionTokenStore
-    val profile = AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)
+    val profile = AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, None)
     val token   =
       store.mintWithScope(profile, SessionScope(superuser = true, manageableTenants = Set.empty))
     store.revoke(token)
@@ -457,6 +1259,45 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val handlers = makeHandlers(Right(profile), calls, store)
     val result   = handlers.whoami(Some(token), None).unsafeRunSync()
     result.swap.toOption.get._2.error shouldBe "revoked"
+  }
+
+  it should "answer a live personal access token with its owner's identity and scope" in {
+    val owner = AuthenticatedProfile("bob", "user", Set.empty, Map.empty, "pat", Some("t-abc123"))
+    val pat   = SessionTokenStore.Session(
+      owner,
+      SessionScope(superuser = false, manageableTenants = Set.empty),
+      java.time.Instant.now()
+    )
+    val asked    = scala.collection.mutable.Buffer.empty[String]
+    val handlers = makeHandlers(
+      Right(owner),
+      scala.collection.mutable.Buffer.empty,
+      patSessionOf = t => { asked += t; Option.when(t == "qod_pat_live")(pat) }
+    )
+    val resp = handlers.whoami(Some("qod_pat_live"), None).unsafeRunSync().toOption.get
+    (resp.username, resp.role, resp.tenant, resp.superuser, resp.manageableTenants) shouldBe
+      ("bob", "user", Some("t-abc123"), false, Nil)
+    // A token no PAT resolves keeps the session lookup's own reason.
+    handlers
+      .whoami(Some("qod_pat_revoked"), None)
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get
+      ._2
+      .error shouldBe
+      "invalid"
+    // A live session JWT is answered by the session: the PAT lookup is never asked for it.
+    val store   = new SessionTokenStore
+    val session = store.mintWithScope(owner, SessionScope(superuser = false, Set.empty))
+    val viaJwt  = makeHandlers(
+      Right(owner),
+      scala.collection.mutable.Buffer.empty,
+      store,
+      patSessionOf = t => { asked += t; None }
+    )
+    viaJwt.whoami(Some(session), None).unsafeRunSync().map(_.username) shouldBe Right("bob")
+    asked.toList shouldBe List("qod_pat_live", "qod_pat_revoked")
   }
 
   // ----- cookie Secure auto-derive from request scheme -----
@@ -467,8 +1308,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   // doesn't silently drop the Set-Cookie. This makes `run-jar.sh` on HTTP and helm behind a TLS
   // ingress both Just Work without an env var.
 
-  private val testProfile = AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)
-  private val testReq     = LoginRequest("alice", "secret", tenant = None)
+  private val testProfile =
+    AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, DbAuthMethod, None)
+  private val testReq = LoginRequest("alice", "secret", tenant = None)
 
   "login cookie Secure flag" should "derive secure=true from X-Forwarded-Proto: https when no override is set" in {
     val calls       = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
@@ -520,7 +1362,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         username = "alice@corp",
         role = "user", // claim role MUST be ignored
         groups = Set.empty,
-        claims = Map("email" -> "alice@corp"),
+        // The IdP names the account alice@corp (preferred_username), as Keycloak's tokens do.
+        claims = Map("preferred_username" -> "alice@corp", "email" -> "alice@corp"),
         authMethod = "keycloak-ropc",
         tenant = None
       ),
@@ -541,7 +1384,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
           password: String
       ): Either[AuthFailure, AuthenticatedProfile] = Right(profile)
 
-    val fakeDirectory: GrantsLookup = (identity, email) =>
+    val fakeDirectory: GrantsLookup = (_, identity, email) =>
       directory.getOrElse(
         identity,
         email.flatMap(directory.get).getOrElse(Nil)
@@ -552,7 +1395,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = fakeDirectory,
-      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc)
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc),
+      patSessionOf = _ => None
     )
 
   "login (oidc)" should "treat tenant=NULL admin row as superuser, ignoring JWT role" in {
@@ -579,7 +1423,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     r.manageableTenants.toSet shouldBe Set("t-a", "t-b")
   }
 
-  it should "fall back to the email claim when the primary identity does not match" in {
+  it should "not fall back to the email claim on a password login: only the authenticated user name is matched" in {
+    // The same shape as the SSO email fallback (AuthHandlersOidcSpec), but a password-grant account's
+    // email is not vouched for: the row the email names is not bound, the user name matches none.
     val profile = AuthenticatedProfile(
       username = "alice@corp",
       role = "user",
@@ -592,8 +1438,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       directory = Map("alice@corporate.example" -> List(UserGrant(None, "admin"))),
       profile = profile
     )
-    val (_, r) = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
-    r.superuser shouldBe true
+    val out = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync()
+    out.swap.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.Forbidden, "not_provisioned"))
   }
 
   it should "403 not_provisioned when the directory yields no grants" in {
@@ -620,7 +1467,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       username = "imposter",
       role = "admin",
       groups = Set("admin"),
-      claims = Map("email" -> "imposter"),
+      claims = Map("preferred_username" -> "imposter", "email" -> "imposter"),
       authMethod = "keycloak-ropc",
       tenant = None
     )
@@ -631,18 +1478,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     err.error shouldBe "not_provisioned"
   }
 
-  it should "keep the OIDC path admin-only for a tenant-scoped grant (no profile-only minting)" in {
-    // Pinning test for the selfTenants leak fix: a `role=user` grant on t-a would
-    // mint a profile-only session under Db mode, but OIDC's profile.role is an
-    // IdP claim with zero qodstate authority -- it must stay admin_required here.
-    val profile = AuthenticatedProfile(
-      username = "alice@corp",
-      role = "admin", // IdP claim -- decoupled from qodstate authority
-      groups = Set.empty,
-      claims = Map("email" -> "alice@corp"),
-      authMethod = "keycloak-ropc",
-      tenant = None
-    )
+  it should "refuse a tenant password login under identitySource=oidc when that tenant signs in through SSO (400 sso_required)" in {
+    // The tenant's own authProvider decides before any grant is read: an admin row of the tenant
+    // does not reopen the password path. The admin-only rule of the tenant SSO login itself is
+    // pinned in AuthHandlersOidcSpec.
     val oidcTenant = Tenant(
       id = "t-a",
       authProvider = "keycloak",
@@ -650,14 +1489,15 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         Map("issuerUrl" -> "https://idp.example/t-a", "clientId" -> "c", "clientSecretRef" -> "s")
     )
     val h = oidcHandlers(
-      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "user"))),
-      profile = profile,
+      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "admin"))),
       loadTenant = { case "t-a" => Some(oidcTenant); case _ => None }
     )
-    val out         = h.login(LoginRequest("alice@corp", "p", tenant = Some("t-a"))).unsafeRunSync()
-    val (code, err) = out.swap.toOption.get
-    code shouldBe StatusCode.Forbidden
-    err.error shouldBe "admin_required"
+    val out = h.login(LoginRequest("alice@corp", "p", tenant = Some("t-a"))).unsafeRunSync()
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+      case Right(_) => fail("expected 400 sso_required, got a session")
   }
 
   it should "mint role=admin for an admin principal whose IdP role claim says user" in {
@@ -669,7 +1509,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       username = "alice@corp",
       role = "user", // IdP claim, no authority
       groups = Set.empty,
-      claims = Map("email" -> "alice@corp"),
+      claims = Map("preferred_username" -> "alice@corp", "email" -> "alice@corp"),
       authMethod = "keycloak-ropc",
       tenant = None
     )
@@ -685,4 +1525,45 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     r.admin shouldBe true
     r.manageableTenants shouldBe List("t-a")
     tokens.isAdmin(r.token) shouldBe true
+  }
+
+  it should "read the directory for a database-authenticator profile too: identitySource=oidc never takes the password row as the grant" in {
+    // The database authenticator verified the system row 'root' (kind admin). Under
+    // identitySource=oidc the grant is still the directory's, as before: here two tenant rows.
+    val profile = AuthenticatedProfile("root", "admin", Set.empty, Map.empty, DbAuthMethod, None)
+    val h       = oidcHandlers(
+      directory =
+        Map("root" -> List(UserGrant(Some("t-a"), "admin"), UserGrant(Some("t-b"), "admin"))),
+      profile = profile
+    )
+
+    val (_, r) = h.login(LoginRequest("root", "p")).unsafeRunSync().toOption.get
+
+    r.superuser shouldBe false
+    r.manageableTenants shouldBe List("t-a", "t-b")
+  }
+
+  it should "keep the email-shaped name of a database-authenticator profile: the seeded admin@localhost.local still signs in under identitySource=oidc" in {
+    // The name was verified by QoD's own password check, not read from a token's email claim, so the
+    // verified-email rule of the IdP logins does not touch it (its claims carry no email).
+    val profile = AuthenticatedProfile(
+      username = "admin@localhost.local",
+      role = "admin",
+      groups = Set("admin"),
+      claims = Map(
+        "sub"         -> "admin@localhost.local",
+        "role"        -> "admin",
+        "auth_method" -> DbAuthMethod
+      ),
+      authMethod = DbAuthMethod,
+      tenant = None
+    )
+    val h = oidcHandlers(
+      directory = Map("admin@localhost.local" -> List(UserGrant(None, "admin"))),
+      profile = profile
+    )
+
+    val (_, r) = h.login(LoginRequest("admin@localhost.local", "p")).unsafeRunSync().toOption.get
+
+    r.superuser shouldBe true
   }

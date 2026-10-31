@@ -24,12 +24,10 @@ class TagAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
       errorCode(resp.body()) shouldBe Some("tenant_forbidden")
     }
 
-  private def bootWithTwoTenants(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def bootWithTwoTenants(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addTenantB(fix)
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey)
+    val h = ManagerServerHarness.boot(fix.store)
     (h, fix)
 
   private def createBody(tenant: String, tenantDb: String): String =
@@ -38,8 +36,8 @@ class TagAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
   // ---------- Spec ----------------------------------------------------------
 
   "tag endpoints" should "reject a credential-less GET list with 401" in {
-    // Static key configured -> apiKeyGuard enforces; no X-API-Key, no cookie -> 401.
-    val (h, _) = bootWithTwoTenants(staticApiKey = Some("static-key-for-tag-authz"))
+    // No X-API-Key, no cookie -> apiKeyGuard answers 401.
+    val (h, _) = bootWithTwoTenants()
     try
       val resp = get(
         h.httpClient,

@@ -1,3 +1,4 @@
+{{- include "qod.validateValues" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -86,26 +87,25 @@ spec:
                 secretKeyRef:
                   name: {{ include "qod.postgresPasswordSecretName" . | quote }}
                   key:  {{ include "qod.postgresPasswordSecretKey" . | quote }}
-            {{- if or .Values.admin.existingSecret .Values.admin.password }}
+            # Always set: qod.validateValues requires admin.password or admin.existingSecret.
             - name: QOD_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.adminPasswordSecretName" . | quote }}
                   key:  {{ include "qod.adminPasswordSecretKey" . | quote }}
-            {{- end }}
-            {{- if or .Values.apiKey.existingSecret .Values.apiKey.value }}
-            - name: QOD_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "qod.apiKeySecretName" . | quote }}
-                  key:  {{ .Values.apiKey.existingSecretKey | default "apiKey" | quote }}
-            {{- end }}
             # Pod injects its own namespace + name so the K8s backend can scope
             # pod create/list calls correctly even when default-ns differs.
             - name: QOD_K8S_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # This replica's own address: with QOD_INTERNAL_URL unset the manager tells its nodes to
+            # call http://<pod IP>:20900 for verdicts (IPv6 in brackets), so the replica that minted
+            # a handle, not the Service, answers.
+            - name: QOD_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             {{- if and .Values.auth.keycloak.enabled .Values.auth.keycloak.existingSecret }}
             - name: QOD_AUTH_KEYCLOAK_CLIENT_SECRET
               valueFrom:
@@ -141,10 +141,12 @@ spec:
             {{- if gt (.Values.replicaCount | int) 1 }}
             - name: QOD_HA_ENABLED
               value: "true"
+            {{- end }}
+            {{- with include "qod.sessionJwtSecretName" . }}
             - name: QOD_SESSION_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "qod.sessionJwtSecretName" . | quote }}
+                  name: {{ . | quote }}
                   key: sessionJwtSecret
             {{- end }}
           lifecycle:

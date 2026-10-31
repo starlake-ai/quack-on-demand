@@ -219,6 +219,19 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     err.status shouldBe 503
   }
 
+  it should "bind a non-admin actor to the parent tenant's own row, never a same-named superuser row" in {
+    val f     = new Fixture
+    val carol = BranchActor("carol", isAdmin = false)
+    // A superuser row named carol; the tenant holds no carol row yet.
+    f.store.upsertUserIdentity(
+      RbacUser(id = "u-su-carol", tenant = None, username = "carol", kind = "admin")
+    )
+    f.create("x", actor = carol).left.map(_.code) shouldBe Left("acl_denied")
+    // The tenant's own row binds once it exists and holds the connect grant.
+    f.grantConnect("carol")
+    f.create("x", actor = carol).map(_.ownerUser) shouldBe Right("carol")
+  }
+
   it should "roll back the database when the clone fails and leave no rows behind" in {
     val f = new Fixture
     f.cloneFails = true

@@ -5,7 +5,9 @@ name: release
 # pushes; every publish channel lives here. One trigger fans out to:
 #   1. build-jar       - sbt assembly (all 5 libquackwire platforms bundled
 #                        from the vendored git binaries), sha256, artifact
-#   2. github-release  - the canonical jar channel: jar + .sha256 + notes
+#   2. github-release  - the canonical jar channel: jar + .sha256 + notes, and
+#                        the Windows qod-node-windows-<arch>.exe the launchers
+#                        download (qod-node: the qod-node workflow, called)
 #   3. pypi            - qod + qod-cli shim
 #   4. docker          - multi-arch manager image (matrix build + digest
 #                        merge), lifted from snapshot.yml and retagged for
@@ -116,6 +118,12 @@ jobs:
           source scripts/release/release-lib.sh
           verify_quackwire_binaries
 
+      - name: Verify vendored qod-node binaries match the pin
+        run: |
+          set -euo pipefail
+          source scripts/release/release-lib.sh
+          verify_qod_node_binaries
+
       - name: sbt assembly
         env:
           SBT_OPTS: "-Xss8M -Xmx5g -XX:+UseG1GC"
@@ -143,10 +151,25 @@ jobs:
           retention-days: 7
 
   # -----------------------------------------------------------------------
+  # 1b. qod-node, built and tested on its six platforms from the tag. The
+  #     Linux and macOS binaries ride in the jar (vendored); the Windows
+  #     qod-node.exe is too large to bundle and becomes a release asset.
+  # -----------------------------------------------------------------------
+  qod-node:
+    needs: prepare
+    # Its snapshot-assets job asks for contents: write (skipped here, but a called workflow may not
+    # ask for more than its caller grants).
+    permissions:
+      contents: write
+    uses: ./.github/workflows/qod-node.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+
+  # -----------------------------------------------------------------------
   # 2. GitHub release - the canonical jar channel (idempotent).
   # -----------------------------------------------------------------------
   github-release:
-    needs: [prepare, build-jar]
+    needs: [prepare, build-jar, qod-node]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,6 +184,12 @@ jobs:
           name: release-jar
           path: distrib
 
+      - name: Download the Windows qod-node
+        uses: actions/download-artifact@v8
+        with:
+          pattern: qod-node-windows-*
+          path: qod-node
+
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -169,14 +198,21 @@ jobs:
           tag="${{ needs.prepare.outputs.tag }}"
           version="${{ needs.prepare.outputs.version }}"
           jar="distrib/quack-on-demand-assembly-${version}.jar"
+          assets=("$jar" "$jar.sha256")
+          for arch in x86_64 aarch64; do
+            exe="qod-node-windows-$arch.exe"
+            cp "qod-node/qod-node-windows-$arch/qod-node.exe" "$exe"
+            shasum -a 256 "$exe" > "$exe.sha256"
+            assets+=("$exe" "$exe.sha256")
+          done
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag exists; (re)uploading assets."
-            gh release upload "$tag" "$jar" "$jar.sha256" --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
             gh release create "$tag" \
               --title "$tag" \
               --generate-notes \
-              "$jar" "$jar.sha256"
+              "${assets[@]}"
           fi
 
   # -----------------------------------------------------------------------

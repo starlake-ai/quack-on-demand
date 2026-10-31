@@ -1,8 +1,7 @@
 """One httpx client for the manager REST plane.
 
-Auth: X-API-Key carries either the static api_key or the session JWT written
-by `qod login` (api_key wins when both are set, matching apiKeyGuard which
-accepts either).
+Auth: X-API-Key carries the settings token, the CLI's only credential: the
+session `qod login` writes, or a personal access token in QOD_TOKEN.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from .config import Settings
 
 
 # Endpoints that check a credential carried in the body. Their 401 means that credential is
-# wrong, so the server's message passes through instead of the "session expired" hint.
+# wrong, so the server's message passes through instead of the login hint below.
 _CREDENTIAL_PATHS = frozenset(
     {
         "/api/auth/login",
@@ -24,6 +23,9 @@ _CREDENTIAL_PATHS = frozenset(
         "/api/auth/reset-password",
     }
 )
+
+# Every other 401: no token, an expired or revoked session, or a revoked PAT.
+LOGIN_HINT = "run qod login, or set QOD_TOKEN to a personal access token"
 
 
 class ApiError(Exception):
@@ -53,9 +55,8 @@ class RestClient:
     ) -> Any:
         settings = self._settings
         headers = {}
-        key = settings.api_key or settings.token
-        if key:
-            headers["X-API-Key"] = key
+        if settings.token:
+            headers["X-API-Key"] = settings.token
         query = {}
         for name, value in (params or {}).items():
             if value is None:
@@ -88,10 +89,6 @@ class RestClient:
                 error, message = "error", response.text
         except ValueError:
             error, message = "error", response.text or response.reason_phrase
-        if (
-            response.status_code == 401
-            and not settings.api_key
-            and path not in _CREDENTIAL_PATHS
-        ):
-            message, actions = "session expired or invalid, run qod login", None
+        if response.status_code == 401 and path not in _CREDENTIAL_PATHS:
+            message, actions = LOGIN_HINT, None
         raise ApiError(response.status_code, error, message, details, actions, retryable)

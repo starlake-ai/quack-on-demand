@@ -1,0 +1,1 @@
+CREATE SECURE VIEW m1.main.sv_m1 AS SELECT id FROM main.u;

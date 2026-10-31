@@ -46,7 +46,7 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers with SecurityHt
       maxConcurrent = 0
     )
     fix.store.upsertNode(node, SecurityFixtures.PoolId)
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h = ManagerServerHarness.boot(fix.store)
     (h, TestNodeId)
 
   "node/quarantine" should "reject a tenant admin with 403 superuser_required" in {
@@ -289,7 +289,7 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers with SecurityHt
 
   "pool/setPodTemplate via session cookie" should "reject a tenant-admin with 403 superuser_required" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.AliceUsername,

@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":[],"catalog":"system","name":"abs","schema":"main","type":"scalar","via":null}],"objects":[{"access":"insert","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"chk","schema":"main","via":null}],"settings":[],"statement":"INSERT","v":1}

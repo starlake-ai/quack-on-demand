@@ -1,0 +1,15 @@
+calendar
+checkpoint_threshold
+default_collation
+default_null_order
+default_order
+errors_as_json
+max_memory
+max_temp_directory_size
+memory_limit
+ordered_aggregate_threshold
+preserve_insertion_order
+threads
+timezone
+wal_autocheckpoint
+worker_threads

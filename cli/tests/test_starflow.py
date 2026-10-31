@@ -104,25 +104,24 @@ def test_port_and_url_rejects_garbage(bad):
         starflow.resolve_port_and_url(None, None, bad, {})
 
 
-def test_shared_secrets_generated_once_and_persisted():
+def test_shared_secret_generated_once_and_persisted():
     saved = {}
-    key, secret = starflow.ensure_shared_secrets({}, saved.update, token=lambda n: f"t{n}")
-    assert (key, secret) == ("t32", "t48")
-    assert saved == {"QOD_API_KEY": "t32", "QOD_SESSION_JWT_SECRET": "t48"}
+    secret = starflow.ensure_shared_secrets({}, saved.update, token=lambda n: f"t{n}")
+    assert secret == "t48"
+    assert saved == {"QOD_SESSION_JWT_SECRET": "t48"}
 
 
-def test_shared_secrets_reuse_existing_and_save_nothing():
+def test_shared_secret_reuses_the_stored_one_and_never_mints_a_key():
     saved = {}
-    env = {"QOD_API_KEY": "k", "QOD_SESSION_JWT_SECRET": "s"}
-    assert starflow.ensure_shared_secrets(env, saved.update) == ("k", "s")
+    env = {"QOD_API_KEY": "stale", "QOD_SESSION_JWT_SECRET": "s"}
+    assert starflow.ensure_shared_secrets(env, saved.update, token=lambda n: f"t{n}") == "s"
     assert saved == {}
 
 
 def test_manager_env():
-    assert starflow.manager_env("http://sf:9000", "k", "s") == {
+    assert starflow.manager_env("http://sf:9000", "s") == {
         "SL_ENABLED": "true",
         "SL_URL": "http://sf:9000",
-        "QOD_API_KEY": "k",
         "QOD_SESSION_JWT_SECRET": "s",
         "JWT_SECRET_KEY": "s",
     }
@@ -135,7 +134,6 @@ def _sf_env(proc_env=None, file_env=None, mgr_env=None, url="http://localhost:99
         mgr_env or {},
         port=9900,
         url=url,
-        api_key="k",
         secret="s",
         pg=PG,
         java_home="/jdk",
@@ -149,7 +147,7 @@ def test_starflow_env_defaults():
     assert env["QOD_FLIGHT_URL"] == "https://localhost:31338"
     assert env["QOD_TLS_INSECURE"] == "true"
     assert env["QOD_UI_URL"] == "http://localhost:20900/ui"
-    assert env["QOD_API_KEY"] == "k"
+    assert "QOD_API_KEY" not in env
     assert env["JWT_SECRET_KEY"] == "s"
     assert env["SL_API_HTTP_PORT"] == "9900"
     assert env["SL_API_HTTP_FRONT_URL"] == "http://localhost:9900"
@@ -186,7 +184,7 @@ def test_starflow_env_precedence_and_java_opts_drop():
     assert "JAVA_OPTS" not in env
     assert env["PATH"] == "/bin"
     assert env["SL_API_MODE"] == "ALL"  # env file beats process env
-    assert env["QOD_API_KEY"] == "k"  # injected beats env file
+    assert "QOD_API_KEY" not in env  # not even the env file's
     assert env["SL_API_JDBC_URL"] == "jdbc:postgresql://localhost:25432/starlake"
 
 
@@ -204,6 +202,15 @@ def test_starflow_env_user_orchestrator_url_wins(where):
 def test_starflow_env_file_may_set_java_opts():
     env = _sf_env(proc_env={"JAVA_OPTS": "-Xmx8g"}, file_env={"JAVA_OPTS": "-Xmx2g"})
     assert env["JAVA_OPTS"] == "-Xmx2g"
+
+
+@pytest.mark.parametrize("where", ["proc_env", "file_env"])
+def test_starflow_env_never_carries_qod_api_key(where):
+    # The pairing holds no static key, and an older Starflow holding one sends it
+    # instead of falling back to the user's own QoD session.
+    env = _sf_env(**{where: {"QOD_API_KEY": "stale", "SL_API_MODE": "ALL"}})
+    assert "QOD_API_KEY" not in env
+    assert env["SL_API_MODE"] == "ALL"  # the rest of that source still applies
 
 
 import os

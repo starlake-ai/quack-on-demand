@@ -1,6 +1,8 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ConfigManifest.scala
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.model.FederatedSecret
+import ai.starlake.quack.ondemand.auth.TenantSignInWrite
 import io.circe.{Codec, Decoder, DecodingFailure}
 import io.circe.derivation.{Configuration, ConfiguredCodec}
 
@@ -72,7 +74,12 @@ final case class ManifestFederatedSource(
     // matters: losing a `true` here would attach the catalog WRITABLE at the next node spawn
     // (the flag is threaded onto the rendered Iceberg ATTACH as READ_ONLY), so the exporter
     // always writes the stored value and the importer always applies it.
-    readOnly: Boolean = false
+    readOnly: Boolean = false,
+    // Round-tripped from the row's trust flag (who wrote the SQL: a superuser or the manager, or a
+    // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
+    // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
+    // (InitSqlTrust.onImport).
+    setupSqlTrusted: Option[Boolean] = None
 )
 
 final case class ManifestTenantDb(
@@ -88,7 +95,12 @@ final case class ManifestTenantDb(
     // Round-tripped verbatim from TenantDb.encrypted. Not a live toggle: the underlying
     // database is never re-encrypted by an import, this only keeps the stored row's flag in
     // sync with the manifest (matching how every other field here is applied).
-    encrypted: Boolean = false
+    encrypted: Boolean = false,
+    // Round-tripped from the row's trust flag (who wrote the SQL: a superuser or the manager, or a
+    // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
+    // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
+    // (InitSqlTrust.onImport).
+    initSqlTrusted: Option[Boolean] = None
 )
 
 final case class ManifestPool(
@@ -119,17 +131,20 @@ final case class ManifestPool(
     cpu: String = "",
     memory: String = "",
     podTemplateYaml: String = "",
-    // Per-pool node-lockdown override, tri-state STRING encoding: "inherit"
-    // (default) | "on" | "off". Decoded to Pool.lockdown (Option[Boolean]) via
-    // LockdownTriState.parse on import. Defaulted so pre-lockdown YAMLs decode
-    // unchanged as "inherit" (= no override).
-    lockdown: String = "inherit",
+    // `lockdown` (the per-pool node-lockdown override) was removed with in-engine authorization
+    // Phase D: an earlier export's member decodes and is ignored (this codec does not decode
+    // strictly).
     // Owner-declared demand scale-out band, round-tripped verbatim from
     // Pool.minNodes/maxNodes. Both None (the default) decode as a fixed-size
     // pool, so pre-autoscale YAMLs decode unchanged. Set together or not at
     // all; AutoscaleBand.validate enforces that on import.
     minNodes: Option[Int] = None,
-    maxNodes: Option[Int] = None
+    maxNodes: Option[Int] = None,
+    // Round-tripped from the row's trust flag (who wrote the SQL: a superuser or the manager, or a
+    // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
+    // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
+    // (InitSqlTrust.onImport).
+    initSqlTrusted: Option[Boolean] = None
 )
 
 /** Round-tripped from [[ai.starlake.quack.model.TenantAcl]]. `opaToken` is exported redacted
@@ -151,6 +166,12 @@ final case class ManifestTenantAcl(
     s"ManifestTenantAcl(mode=$mode,opaUrl=$opaUrl,opaPolicyPath=$opaPolicyPath,opaToken=${opaToken
         .map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)},sendStatementText=$sendStatementText)"
 
+/** One authorized local folder of a tenant (TenantLocation). Users' own S3 credentials are never in
+  * a manifest (decision 23): users enter them again after an import. A row an earlier export wrote
+  * with an `objectStore` still decodes (the member is ignored) and its `s3://` location is refused.
+  */
+final case class ManifestTenantLocation(location: String)
+
 final case class ManifestTenant(
     // The tenant slug key (e.g. "acme").
     name: String,
@@ -158,14 +179,42 @@ final case class ManifestTenant(
     displayName: String = "",
     disabled: Boolean = false,
     authProvider: String = "db",
+    // Stored as written, except the key changeset 0048 parked (ParkedSecretRefs.ParkedKey), which
+    // follows the rule of tenant/setAuth (TenantSignInWrite.settleParkedKey): a manifest never adds
+    // or changes it, and it survives only while the tenant holds no secret source and keeps its
+    // issuerUrl.
     authConfig: Map[String, String] = Map.empty,
+    // Round-tripped from Tenant.authClientSecret. Exported as FederatedSecret.RedactedMarker when a
+    // secret is stored, never in the clear. On import the marker keeps the stored value only while
+    // authConfig.issuerUrl is unchanged, a plain value is stored, and an absent field stores none;
+    // a tenant carries this or authConfig.clientSecretRef, never both (see
+    // ManifestImporter.importClientSecret). Defaulted so a manifest without it decodes.
+    clientSecret: Option[String] = None,
     tenantDbs: List[ManifestTenantDb] = Nil,
     pools: List[ManifestPool] = Nil,
     // None means "not present in the manifest" and leaves an existing tenant's stored ACL
     // untouched on import (see ManifestImporter.importAcl); it is NOT the same as an explicit
     // default-valued ManifestTenantAcl, which would reset the ACL to manager defaults.
-    acl: Option[ManifestTenantAcl] = None
-)
+    acl: Option[ManifestTenantAcl] = None,
+    // None: not in the manifest, the stored locations stay as they are. Some(list): the tenant's
+    // locations become exactly `list` (Some(Nil) removes them all). Exported only when the tenant
+    // has some.
+    locations: Option[List[ManifestTenantLocation]] = None
+):
+  /** Prints `clientSecret`, and the value of a `clientSecret` key inside `authConfig` (which the
+    * importer refuses), as [[FederatedSecret.RedactedMarker]], the way
+    * [[ManifestTenantAcl.toString]] redacts `opaToken` (`acl` prints through it). Nothing else is
+    * redacted: `tenantDbs` and `pools` print as their own case classes do.
+    */
+  override def toString: String =
+    val shownAuthConfig = authConfig.map {
+      case (key, _) if key == TenantSignInWrite.SecretKey => key -> FederatedSecret.RedactedMarker
+      case entry                                          => entry
+    }
+    s"ManifestTenant(name=$name,displayName=$displayName,disabled=$disabled," +
+      s"authProvider=$authProvider,authConfig=$shownAuthConfig," +
+      s"clientSecret=${clientSecret.map(_ => FederatedSecret.RedactedMarker)}," +
+      s"tenantDbs=$tenantDbs,pools=$pools,acl=$acl,locations=$locations)"
 
 final case class ManifestTablePermission(
     catalog: String,
@@ -283,6 +332,7 @@ object ConfigManifest:
   given Codec[ManifestTenantDb]         = ConfiguredCodec.derived
   given Codec[ManifestPool]             = ConfiguredCodec.derived
   given Codec[ManifestTenantAcl]        = ConfiguredCodec.derived
+  given Codec[ManifestTenantLocation]   = ConfiguredCodec.derived
   given Codec[ManifestTenant]           = ConfiguredCodec.derived
   given Codec[ManifestRole]             = ConfiguredCodec.derived
   given Codec[ManifestGroup]            = ConfiguredCodec.derived

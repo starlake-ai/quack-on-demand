@@ -33,7 +33,7 @@ This:
 2. Resolves the manager + Quack-node images. With the default `BUILD=0` it reuses local `:local`-tagged images, pulling `starlakeai/quack-on-demand{,-node}:latest-snapshot` from Docker Hub and retagging as `:local` if absent. `BUILD=1` runs `docker build` for both from the source tree first.
 3. Loads both images into the kind cluster.
 4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)), Grafana ([`grafana.yaml`](grafana.yaml)) and Keycloak ([`keycloak.yaml`](keycloak.yaml)) - one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard-k8s.json`](../../../observability/grafana-dashboard-k8s.json) (the Kubernetes variant, which adds the Pool Occupancy, Node Health, and Routing Locality rows on top of the single-node panels) and the Keycloak realm ConfigMap from [`keycloak-realm-qod.json`](keycloak-realm-qod.json) so both repo files stay authoritative. Grafana / Prometheus / Keycloak are configured for sub-path operation (`GF_SERVER_ROOT_URL=/grafana/`, `--web.route-prefix=/prometheus/`, `KC_HTTP_RELATIVE_PATH=/auth`) so they slot in behind the Traefik ingress applied in step 5. **Not production-grade** - that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
-5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
+5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and the admin password `ADMIN_PASSWORD` (default `admin`), which the chart requires.
 6. `helm install`s Traefik v3 as a single-replica DaemonSet on the control-plane node, then applies [`ingress.yaml`](ingress.yaml) - one `Ingress` that routes `/grafana`, `/prometheus`, `/auth` and `/` (catch-all → manager) to the right Services. Combined with the kind `extraPortMappings` from [`kind-config.yaml`](kind-config.yaml) (host `:20900` → container `:80`), every HTTP UI in the rig becomes reachable at a single `http://localhost:20900/...` URL.
 7. Waits for the manager pod to be `Ready` and `/health` to return OK.
 8. Verifies the manager spawned the bootstrap Quack node pods (3 by default - one each of WriteOnly / ReadOnly / Dual).
@@ -84,7 +84,7 @@ flowchart TB
         subgraph manager_block["Manager"]
             manager["Pod: qod-quack-on-demand<br/>REST :20900 · FlightSQL :31338<br/>(image: starlakeai/quack-on-demand:local)"]
             cfg["ConfigMap<br/>QOD_* / PROXY_* env"]
-            sec["Secrets<br/>postgres / admin / [apiKey] / [s3]"]
+            sec["Secrets<br/>postgres / admin / [s3]"]
         end
 
         nodes["Quack node pods<br/>quack-tpch-tpch1-sales-{1,2,3}<br/>(image: starlakeai/quack-on-demand-node:local)<br/>HTTP :8080 → quack_serve"]
@@ -154,6 +154,7 @@ The pieces, one per row of the diagram:
 | `RELEASE` | `qod` | helm release name |
 | `BUILD` | `0` | `0` reuses local `:local`-tagged images (falling back to `:latest-snapshot` from Docker Hub if absent); `1` runs `docker build` first. Same convention as `scripts/run-jar.sh`. |
 | `NUKE` | `0` | `1` deletes the namespace before reinstalling - wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
+| `ADMIN_PASSWORD` | `admin` | Password of the chart-seeded superusers (`admin@localhost.local`, `admin`), applied on the first install only. The script logs in with it to configure acme's OIDC (step 5b). |
 | `LOAD_TPC` | unset | Demo seed. Unset = skip; positive integer = scale factor. Seeds acme_tpch (TPC-H, `LOAD_TPC=1` approx 6M lineitem rows), globex_tpcds (TPC-DS, `LOAD_TPC=1` approx 2.8M store_sales rows), and the SSB star schema (acme_tpch schema `ssb1`, derived from TPC-H dbgen) inside the manager pod via the bundled loader scripts. `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` opt in per benchmark and override it. No host duckdb required. |
 
 ```bash
@@ -177,9 +178,11 @@ Every HTTP UI is reachable on host `:20900` via the Traefik ingress - no per-ser
 # Landing page with links to every UI (nginx-served, ConfigMap-mounted)
 open http://localhost:20900/
 
-# Admin UI / REST
-open http://localhost:20900/ui/                           # login admin / admin
-curl -s -u admin:admin http://localhost:20900/api/tenants
+# Admin UI (OIDC SSO: Keycloak user admin / admin)
+open http://localhost:20900/ui/
+# REST through the qod CLI: the chart-seeded superuser admin, password ADMIN_PASSWORD (admin)
+qod login --url http://localhost:20900 --username admin
+qod tenant list
 
 # Grafana -- /grafana prefix, anonymous Admin, dashboard pre-loaded
 open http://localhost:20900/grafana/
@@ -247,8 +250,11 @@ print(cur.fetchall())
 No port-forward needed - the rig's Traefik ingress sits on host `:20900` and the catch-all rule routes `/` → manager.
 
 ```bash
-# Open http://localhost:20900/ui/  (login admin / admin)
-curl -s -u admin:admin http://localhost:20900/api/tenants
+# Open http://localhost:20900/ui/  (OIDC SSO: Keycloak user admin / admin)
+# The REST API takes a session or a personal access token in X-API-Key (no Basic auth):
+TOKEN=$(curl -s -X POST http://localhost:20900/api/auth/login \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin"}' | jq -r .token)
+curl -s -H "X-API-Key: $TOKEN" http://localhost:20900/api/tenant/list
 ```
 
 The `tenant` / `pool` headers are mandatory on FlightSQL - the edge's tenant selector rejects sessions that don't carry them. Defaults shipped by the chart are `tpch` / `sales`; if you changed `bootstrap.tenant` / `bootstrap.pool`, match those.
@@ -267,12 +273,9 @@ TOKEN=$(curl -s -X POST \
   -d client_secret=qod-flightsql-secret \
   -d username=admin -d password=admin \
   | jq -r .access_token)
-
-curl -s -H "Authorization: Bearer $TOKEN" \
-  http://localhost:20900/api/tenants
 ```
 
-For FlightSQL, the manager's `AuthenticationService` chain accepts the same bearer (the Keycloak provider runs alongside Basic auth, so `admin/admin` over Basic still works for clients that don't speak OIDC).
+The token is a FlightSQL credential: the manager's `AuthenticationService` chain accepts it as a bearer on the FlightSQL edge (ADBC option `adbc.flight.sql.authorization_header` = `Bearer $TOKEN`), and the Keycloak provider runs alongside Basic auth, so `admin/admin` over Basic still works for clients that don't speak OIDC. The REST API does not take IdP tokens: use a `qod login` session or a personal access token there.
 
 Swap `username=admin password=admin` for `reader/reader` to exercise the non-superuser path - `reader` lands in `qodstate_user` on first auth and starts with zero RBAC grants, so SELECTs return `permission denied` until you grant a role via the admin UI or `/api/rbac/*`.
 

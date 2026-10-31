@@ -1,0 +1,139 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0050-policy-version-column
+      author: qod
+      changes:
+        # A tenant's policy version (in-engine authorization): every session handle carries it and
+        # nodes cache verdicts by it, so it moves whenever anything a verdict depends on changes.
+        # Every value comes from one sequence, the column default included, so a version only ever
+        # moves up, and a tenant row (a recreated id too) starts above every version ever issued,
+        # so a cache still holding a deleted tenant's last version sees the recreated row pass it.
+        # The volatile default gives each existing row its own value when the column is added.
+        # Written by the default and the triggers of the next changeset only, never by
+        # application code.
+        - sql:
+            sql: CREATE SEQUENCE qodstate_policy_version_seq AS BIGINT
+        - sql:
+            sql: >
+              ALTER TABLE qodstate_tenant ADD COLUMN policy_version BIGINT NOT NULL
+              DEFAULT nextval('qodstate_policy_version_seq')
+  - changeSet:
+      id: 0050-policy-version-triggers
+      author: qod
+      changes:
+        # One function for every RBAC table. Its argument names how a row reaches its tenant: the
+        # row's own tenant_id, qodstate_user.tenant, or the tenant of the role / group it points
+        # at. An UPDATE bumps the old row's tenant and the new row's (a row moved between tenants),
+        # each once, to a fresh value of the sequence. An unknown argument raises (CASE without
+        # ELSE): never a silent no-bump.
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE OR REPLACE FUNCTION qod_bump_policy_version() RETURNS trigger
+              LANGUAGE plpgsql AS $$
+              DECLARE
+                images JSONB[] := '{}';
+                image JSONB;
+                tenants TEXT[] := '{}';
+                t TEXT;
+              BEGIN
+                IF TG_OP IN ('UPDATE', 'DELETE') THEN
+                  images := array_append(images, to_jsonb(OLD));
+                END IF;
+                IF TG_OP IN ('INSERT', 'UPDATE') THEN
+                  images := array_append(images, to_jsonb(NEW));
+                END IF;
+                FOREACH image IN ARRAY images LOOP
+                  CASE TG_ARGV[0]
+                    WHEN 'tenant_id' THEN
+                      t := image ->> 'tenant_id';
+                    WHEN 'tenant' THEN
+                      t := image ->> 'tenant';
+                    WHEN 'role_id' THEN
+                      SELECT tenant_id INTO t FROM qodstate_role WHERE id = image ->> 'role_id';
+                    WHEN 'group_id' THEN
+                      SELECT tenant_id INTO t FROM qodstate_group WHERE id = image ->> 'group_id';
+                  END CASE;
+                  IF t IS NOT NULL THEN
+                    tenants := array_append(tenants, t);
+                  END IF;
+                END LOOP;
+                UPDATE qodstate_tenant SET policy_version = nextval('qodstate_policy_version_seq')
+                WHERE id = ANY(tenants);
+                RETURN NULL;
+              END;
+              $$
+        # The tenant's own ACL and OPA settings. BEFORE UPDATE on the row itself: an AFTER trigger
+        # updating the same row would fire again. The WHEN clause keeps the RBAC trigger's own
+        # policy_version update from firing it.
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE OR REPLACE FUNCTION qod_bump_tenant_policy_version() RETURNS trigger
+              LANGUAGE plpgsql AS $$
+              BEGIN
+                NEW.policy_version := nextval('qodstate_policy_version_seq');
+                RETURN NEW;
+              END;
+              $$
+        - sql:
+            sql: >
+              CREATE TRIGGER qod_policy_version_acl BEFORE UPDATE ON qodstate_tenant FOR EACH ROW
+              WHEN (OLD.acl_mode IS DISTINCT FROM NEW.acl_mode
+                OR OLD.opa_url IS DISTINCT FROM NEW.opa_url
+                OR OLD.opa_policy_path IS DISTINCT FROM NEW.opa_policy_path
+                OR OLD.opa_token IS DISTINCT FROM NEW.opa_token
+                OR OLD.opa_send_statement_text IS DISTINCT FROM NEW.opa_send_statement_text)
+              EXECUTE FUNCTION qod_bump_tenant_policy_version()
+        # Tables keyed by the tenant directly.
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_role FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_role FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_group FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_group FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_pool_permission FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_pool_permission FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('tenant_id')
+        # Tables reached through their role.
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_role_permission FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_role_permission FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_role_column_policy FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_role_column_policy FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_role_row_policy FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_role_row_policy FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_user_role FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_user_role FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('role_id')
+        # Tables reached through their group.
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_group_role FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('group_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_group_role FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('group_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_user_group FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('group_id')
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_user_group FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION qod_bump_policy_version('group_id')
+        # Users, through their tenant column. An update counts only when it changes who the user
+        # is or whether they may act: failed_attempts / locked_at move on every failed login, and
+        # bumping on them would let anyone knowing a username flush the tenant's verdicts at will.
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_ins_del AFTER INSERT OR DELETE ON qodstate_user FOR EACH ROW EXECUTE FUNCTION qod_bump_policy_version('tenant')
+        - sql:
+            sql: >
+              CREATE TRIGGER qod_policy_version_upd AFTER UPDATE ON qodstate_user FOR EACH ROW
+              WHEN (OLD.tenant IS DISTINCT FROM NEW.tenant
+                OR OLD.username IS DISTINCT FROM NEW.username
+                OR OLD.kind IS DISTINCT FROM NEW.kind
+                OR OLD.enabled IS DISTINCT FROM NEW.enabled)
+              EXECUTE FUNCTION qod_bump_policy_version('tenant')

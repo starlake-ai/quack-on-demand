@@ -1,0 +1,11 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0055-qodstate-pool-drop-lockdown
+      author: qod
+      changes:
+        # Per-pool node lockdown is gone (in-engine authorization Phase D): every node enforces on
+        # every pool, so the override 0024 added has nothing left to override. One-way: a manager of
+        # an earlier release reads this column and fails once it is dropped, so every replica is
+        # upgraded together.
+        - sql:
+            sql: ALTER TABLE qodstate_pool DROP COLUMN IF EXISTS lockdown

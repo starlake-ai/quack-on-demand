@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.opa
 
+import ai.starlake.acl.model.TableRef
 import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.model.{PoolKey, Tenant}
@@ -26,7 +27,8 @@ final class OpaAuthorizer(
   override def isOpa(tenant: Tenant): Boolean = tenant.acl.isOpa(cfg.defaultMode)
 
   /** Handshake gate 4 for an opa tenant: a Deny is a permission refusal, an Error (OPA unreachable,
-    * malformed answer, no URL) is `Unavailable` so the edges answer a retryable UNAVAILABLE.
+    * malformed answer, no URL) is `Unavailable` so the edges answer a retryable UNAVAILABLE. The
+    * Error's cause is logged by `run`; the client gets [[OpaAuthorizer.UnavailableMessage]] only.
     */
   override def connect(
       tenant: Tenant,
@@ -42,7 +44,7 @@ final class OpaAuthorizer(
       case Decision.Allow(_)           => Right(())
       case Decision.Deny(reason, _, _) =>
         Left(HandshakeDenial.Denied(s"pool access denied by policy: $reason"))
-      case Decision.Error(cause) => Left(HandshakeDenial.Unavailable(cause))
+      case Decision.Error(_) => Left(HandshakeDenial.Unavailable(OpaAuthorizer.UnavailableMessage))
 
   def connect(
       tenant: Tenant,
@@ -95,6 +97,51 @@ final class OpaAuthorizer(
       Some(text)
     )
 
+  /** A node decision (in-engine authorization): the `statement` rule over what DuckDB resolved. The
+    * cache key covers the whole input, so two plans that differ only in the columns, a secure view
+    * or a location never share an answer.
+    */
+  def decide(
+      tenant: Tenant,
+      target: OpaTarget,
+      user: OpaUser,
+      userId: String,
+      statementClass: String,
+      accesses: List[OpaAccess],
+      locations: List[OpaLocation]
+  ): Decision =
+    val input = OpaInput.decide(target, user, statementClass, accesses, locations)
+    run(
+      tenant,
+      "statement",
+      input,
+      tablesOf(accesses),
+      target,
+      user,
+      userId,
+      OpaInput.NodeEdge,
+      statementClass,
+      text = None,
+      detail = sha256Hex(input.noSpaces)
+    )
+
+  /** [[decide]] for the OPA dry run (decision 25): the same input, sent through [[dryRun]] (never
+    * cached, never counted), returned with OPA's answer.
+    */
+  def decideDryRun(
+      tenant: Tenant,
+      target: OpaTarget,
+      user: OpaUser,
+      statementClass: String,
+      accesses: List[OpaAccess],
+      locations: List[OpaLocation]
+  ): (Json, Decision) =
+    val input = OpaInput.decide(target, user, statementClass, accesses, locations)
+    (input, dryRun(tenant, input, "statement", tablesOf(accesses)))
+
+  private def tablesOf(accesses: List[OpaAccess]): Set[TableAccess] =
+    accesses.map(a => TableAccess(TableRef(a.catalog, a.schema, a.table), a.verb)).toSet
+
   /** Admin dry-run: same transport and parsing, never cached, never counted. */
   def dryRun(tenant: Tenant, input: Json, rule: String, accesses: Set[TableAccess]): Decision =
     tenant.acl.effectiveUrl(cfg.url) match
@@ -125,7 +172,8 @@ final class OpaAuthorizer(
       userId: String,
       edge: String,
       statementClass: String,
-      text: Option[String]
+      text: Option[String],
+      detail: String = ""
   ): Decision =
     tenant.acl.effectiveUrl(cfg.url) match
       case None =>
@@ -148,7 +196,8 @@ final class OpaAuthorizer(
           accesses = OpaInput
             .sorted(accesses)
             .map(a => s"${a.table.canonical}:${OpaInput.verbName(a.verb)}"),
-          textHash = if tenant.acl.sendStatementText then sha256Hex(text.getOrElse("")) else ""
+          textHash = if tenant.acl.sendStatementText then sha256Hex(text.getOrElse("")) else "",
+          detail = detail
         )
         val started         = System.nanoTime()
         val (decision, hit) = cache.getOrCompute(key) {
@@ -172,3 +221,12 @@ final class OpaAuthorizer(
             logger.warn(s"OPA $kind error for tenant=${tenant.id}: $cause")
           case d => logger.debug(s"OPA $kind tenant=${tenant.id} user=${user.name} -> $d")
         decision
+
+object OpaAuthorizer:
+
+  /** What a client sees when OPA cannot decide (unreachable, timed out, a non-2xx status, a body
+    * over 1 MiB, no URL configured). The tenant admin chooses the OPA URL, so the transport detail
+    * (exception class, host, port, status) would turn every outage into a network probe of whatever
+    * the manager can reach; that detail goes to the manager log only.
+    */
+  val UnavailableMessage: String = "OPA unreachable or returned an error (see the manager log)"

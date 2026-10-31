@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{Denied, StatementValidator, ValidationContext, ValidationResult}
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -72,26 +72,33 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     * searchStatements.
     */
   private def setupWithJournal(
-      stub: () => QuackResponse = defaultStub,
-      validator: StatementValidator = StatementValidator.allowAll
+      stub: () => QuackResponse = defaultStub
   ): (FlightSqlRouter, EventJournal, RecordingTelemetryStore) = {
     val sup     = buildSupervisor()
     val store   = new RecordingTelemetryStore
     val journal = new EventJournal(store)
     val tracker = new NodeLoadTracker
     val client  = new QuackHttpClient(TestArrow.sharedAllocator) {
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(stub())
     }
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
       sessions,
       tracker,
       adapter,
-      validator = validator,
-      journal = journal
+      journal = journal,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, journal, store)
   }
@@ -112,23 +119,6 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
       e.durationMs should be >= 0L
     }
 
-  it should "persist a denied statement with status denied and nodeId '-'" in {
-    val denying = new StatementValidator {
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("insufficient grants", Set.empty)
-    }
-    val (router, journal, store) = setupWithJournal(validator = denying)
-    router.execute("hist-2", "alice", poolKey, "SELECT secret FROM forbidden").unsafeRunSync()
-    journal.drainNow()
-    val rows = store.searchStatements(StatementQuery())
-    rows should have size 1
-    val e = rows.head.event
-    e.status shouldBe "denied"
-    e.nodeId shouldBe "-"
-    e.username shouldBe "alice"
-    e.tenant shouldBe "acme"
-  }
-
   it should "persist a transient node failure with status transient and the error text" in {
     val transientStub: () => QuackResponse =
       () => QuackResponse.Failed(QuackError.Transient("disk full"), 10L)
@@ -144,17 +134,48 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     e.error shouldBe Some("disk full")
   }
 
+  it should "persist a node's authorization refusal with status denied and the node's id" in {
+    val refusal: () => QuackResponse = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent("Permission Error: QoD: user:alice lacks grants"),
+        4L
+      )
+    val (router, journal, store) = setupWithJournal(stub = refusal)
+    router.execute("hist-5", "alice", poolKey, "SELECT secret FROM forbidden").unsafeRunSync()
+    journal.drainNow()
+    val rows = store.searchStatements(StatementQuery())
+    rows should have size 1
+    val e = rows.head.event
+    e.status shouldBe "denied"
+    e.nodeId should not be "-"
+    e.error shouldBe Some("Permission Error: QoD: user:alice lacks grants")
+  }
+
   it should "record nothing and throw nothing with the default noop journal" in {
     val sup     = buildSupervisor()
     val tracker = new NodeLoadTracker
     val client  = new QuackHttpClient(TestArrow.sharedAllocator) {
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(defaultStub())
     }
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     // No journal param -> defaults to EventJournal.noop backed by NoopTelemetryStore
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter)
+    val router = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
     val result = router.execute("hist-4", "alice", poolKey, "SELECT 1").unsafeRunSync()
     result shouldBe a[Right[?, ?]]
   }
@@ -168,7 +189,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     rows.head.event.patId shouldBe Some("pat-9")
   }
 
-  it should "leave patId at None when execute() is called without one (session/static-key)" in {
+  it should "leave patId at None when execute() is called without one (a session)" in {
     val (router, journal, store) = setupWithJournal()
     router.execute("hist-7", "alice", poolKey, "SELECT 1").unsafeRunSync()
     journal.drainNow()

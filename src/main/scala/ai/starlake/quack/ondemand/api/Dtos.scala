@@ -76,8 +76,6 @@ final case class CreatePoolRequest(
     cpu: String = "",
     memory: String = "",
     podTemplateYaml: String = "",
-    // Per-pool node-lockdown override: "inherit" (default) | "on" | "off". See LockdownTriState.
-    lockdown: String = "inherit",
     /** Owner-declared demand scale-out band. Both bounds must be set together (one-sided is refused
       * with 400 `invalid_band`); both absent = fixed size, the pool never autoscales. Validated by
       * [[ai.starlake.quack.model.AutoscaleBand.validate]] against the requested distribution/size
@@ -151,8 +149,6 @@ final case class PoolResponse(
     initSql: String = "",               // operator-authored init SQL; empty when none was supplied
     cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
     memory: String = "",                // Kubernetes memory request=limit; empty when unset
-    lockdown: String = "inherit",       // stored tri-state override
-    lockdownEffective: Boolean = false, // tri-state resolved against the global flag
     // Owner-declared demand scale-out band; both None on a fixed-size pool.
     minNodes: Option[Int] = None,
     maxNodes: Option[Int] = None,
@@ -167,7 +163,23 @@ final case class PoolResponse(
     pending: Int = 0,
     pendingReason: Option[String] = None,
     // The sentence behind pendingReason: servers by state and the next command. Replica-local too.
-    pendingDetail: Option[String] = None
+    pendingDetail: Option[String] = None,
+    // Read-only: whether initSql was written by a superuser or the manager (nodes run it as
+    // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
+    initSqlTrusted: Boolean = false,
+    // Set on a create whose tenant-admin initSql this manager could not check (see TenantDbResponse).
+    initSqlWarning: Option[String] = None
+)
+
+/** POST /api/pool/setInitSql: replace a pool's initSql (CONTRACT Addendum 4 item 27). A tenant
+  * admin's is judged by the tenant initSql allowlist (400 init_sql_refused); a superuser's is
+  * trusted. Takes effect on the next node spawn.
+  */
+final case class SetPoolInitSqlRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    initSql: String
 )
 
 final case class SetPoolResourcesRequest(
@@ -183,14 +195,6 @@ final case class SetPoolTemplateRequest(
     tenantDb: String,
     pool: String,
     podTemplateYaml: String
-)
-
-final case class SetPoolLockdownRequest(
-    tenant: String,
-    tenantDb: String,
-    pool: String,
-    // "inherit" | "on" | "off" - see [[ai.starlake.quack.model.LockdownTriState]]
-    lockdown: String
 )
 
 /** Sets or clears the pool's demand scale-out band. Both bounds Some = set (validated against the
@@ -232,6 +236,12 @@ final case class SuspendPoolRequest(tenant: String, tenantDb: String, pool: Stri
 final case class ResumePoolRequest(tenant: String, tenantDb: String, pool: String)
 
 final case class PoolListResponse(pools: List[PoolResponse])
+
+/** One pool of `GET /api/profile/pools`: the identifying fields and the `status` values of
+  * `/api/pool/list`, and nothing else (no nodes, sizes, settings or flags).
+  */
+final case class ProfilePool(tenant: String, tenantDb: String, pool: String, status: String)
+final case class ProfilePoolsResponse(pools: List[ProfilePool])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
 
 final case class ClientConfigResponse(
@@ -326,18 +336,38 @@ final case class FleetHeartbeatRequest(
     node: FleetNodeReportDto
 )
 final case class FleetPoolKeyDto(tenant: String, tenantDb: String, pool: String)
+
+/** The manager's extension policy for the node (spec decision 17), as the join process hands it to
+  * the spawn script. Derived per heartbeat from `quack-on-demand.nodeExtensions`, never stored.
+  */
+final case class FleetNodeExtensionsDto(
+    allowCommunity: Boolean,
+    allowUnsigned: Boolean,
+    autoinstallKnown: Boolean
+)
+
+/** The manager's decide limits for the node, as the join process hands them to qod-node. Derived
+  * per heartbeat from `quack-on-demand.nodeAuthzLimits`, never stored.
+  */
+final case class FleetNodeAuthzLimitsDto(decideTimeoutMs: Int, cacheEntries: Int)
 final case class FleetAssignmentDto(
     epoch: Long,
     nodeId: String,
     poolKey: FleetPoolKeyDto,
     port: Int,
     token: String,
+    authzKey: String,
     kind: String,
     env: Map[String, String],
-    dbInitSql: String,
+    resourceSql: String,
     objectStoreSql: String,
     extraSetupSql: String,
-    lockdownSql: String
+    nodeExtensions: FleetNodeExtensionsDto,
+    authzLimits: FleetNodeAuthzLimitsDto,
+    tenantDbInitSql: String,
+    tenantDbInitTrusted: Boolean,
+    tenantPoolInitSql: String,
+    tenantPoolInitTrusted: Boolean
 )
 
 /** `approval` is approved | pending: a pending server gets no assignment until it is approved (`qod
@@ -451,17 +481,30 @@ final case class TenantResponse(
     opaUrl: Option[String] = None,
     opaPolicyPath: Option[String] = None,
     opaTokenSet: Boolean = false,
-    opaSendStatementText: Boolean = false
+    opaSendStatementText: Boolean = false,
+    // The tenant's OIDC client secret is write-only: only whether one is stored is exposed.
+    clientSecretSet: Boolean = false
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
 final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
+
+/** A tenant's sign-in configuration. `authConfig` replaces the stored map whole. `clientSecret` is
+  * the write-only OIDC client secret: omitted keeps the stored one only while `issuerUrl` is
+  * unchanged, `""` removes it, a value replaces it (whitespace-only is refused). Every rule is in
+  * [[ai.starlake.quack.ondemand.auth.TenantSignInWrite]]; `toString` redacts the secret.
+  */
 final case class SetTenantAuthRequest(
     name: String,
     authProvider: String,
-    authConfig: Map[String, String] = Map.empty
-)
+    authConfig: Map[String, String] = Map.empty,
+    clientSecret: Option[String] = None
+):
+  override def toString: String =
+    val secret = clientSecret.map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)
+    s"SetTenantAuthRequest(name=$name,authProvider=$authProvider,authConfig=$authConfig," +
+      s"clientSecret=$secret)"
 
 /** Patch of a tenant's data-access authorization. An omitted field keeps the stored value; `""`
   * clears it (mode `""` = the manager default, opaToken `""` = no token). `mode` must be exactly
@@ -476,9 +519,85 @@ final case class SetTenantAclRequest(
     sendStatementText: Option[Boolean] = None
 )
 
-/** OPA dry run: builds the exact input the edge would send for `user` on `pool` (a `connect`
-  * decision without `sql`, a `statement` decision with it) and evaluates it against the tenant's
-  * OPA. Nothing is executed and the decision cache is not touched.
+/** One authorized local folder of a tenant (`POST /api/tenant/location/{list,add,remove}`).
+  * `createdAt` is epoch milliseconds. S3 is per user (`/api/profile/s3/{list,add,remove}`).
+  */
+final case class TenantLocationDto(
+    id: String,
+    tenant: String,
+    kind: String,
+    location: String,
+    createdAt: Long,
+    createdBy: Option[String]
+)
+
+final case class TenantLocationListRequest(tenant: String)
+
+final case class TenantLocationListResponse(locations: List[TenantLocationDto])
+
+/** Authorize `location`, an absolute folder under `<QOD_TENANT_FILES_ROOT>/<tenant>/`, for
+  * `tenant`.
+  */
+final case class AddTenantLocationRequest(tenant: String, location: String)
+
+final case class RemoveTenantLocationRequest(tenant: String, id: String)
+
+/** The location added or removed. A local folder needs nothing pushed to running nodes. */
+final case class TenantLocationChangeResponse(location: TenantLocationDto)
+
+/** One of a user's own S3 credentials (`POST /api/profile/s3/{list,add,remove}`,
+  * `POST /api/user/s3/{list,remove}`). Never the secret or the session token: `secretSet` is always
+  * true (a credential without a secret is never stored), `sessionTokenSet` says whether a token is.
+  * `endpoint` as stored (`host[:port]` TLS, `http://host[:port]` plain), None for AWS's own. Times
+  * are epoch milliseconds.
+  */
+final case class S3CredentialDto(
+    id: String,
+    userId: String,
+    scope: String,
+    accessKeyId: String,
+    secretSet: Boolean,
+    sessionTokenSet: Boolean,
+    region: Option[String],
+    endpoint: Option[String],
+    urlStyle: Option[String],
+    createdAt: Long,
+    updatedAt: Long
+)
+
+final case class S3CredentialListResponse(credentials: List[S3CredentialDto])
+
+/** `POST /api/profile/s3/list`: the caller's own credentials; no field. */
+final case class ProfileS3ListRequest()
+
+/** One credential of the caller's own (`POST /api/profile/s3/add`); a scope the caller already
+  * holds is replaced. The secret and the session token are write-only.
+  */
+final case class ProfileS3AddRequest(
+    scope: String,
+    accessKeyId: String,
+    secretAccessKey: String,
+    sessionToken: Option[String] = None,
+    region: Option[String] = None,
+    endpoint: Option[String] = None,
+    urlStyle: Option[String] = None
+):
+  override def toString: String =
+    s"ProfileS3AddRequest(scope=$scope,accessKeyId=$accessKeyId," +
+      s"secretAccessKey=${ai.starlake.quack.model.FederatedSecret.RedactedMarker}," +
+      s"sessionToken=${sessionToken.map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)}," +
+      s"region=$region,endpoint=$endpoint,urlStyle=$urlStyle)"
+
+final case class ProfileS3RemoveRequest(id: String)
+
+final case class UserS3ListRequest(userId: String)
+
+final case class UserS3RemoveRequest(userId: String, id: String)
+
+/** OPA dry run for `user` on `pool`: without `sql`, the `connect` decision the edge would send;
+  * with it, the statement run through a node of the (running) pool as the user, its `statement`
+  * decision evaluated against the tenant's OPA. Nothing is executed and the decision cache is not
+  * touched.
   */
 final case class OpaTestRequest(
     tenant: String,
@@ -553,7 +672,13 @@ final case class TenantDbResponse(
     // Tables across all schemas via the DuckLake catalog reader; None for
     // non-DuckLake kinds or when the catalog is unreachable.
     tableCount: Option[Int] = None,
-    encrypted: Boolean = false
+    encrypted: Boolean = false,
+    // Read-only: whether initSql was written by a superuser or the manager (nodes run it as
+    // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
+    initSqlTrusted: Boolean = false,
+    // Set on a write whose tenant-admin initSql this manager could not check (no local qod-node):
+    // the nodes still run only its allowlisted statements.
+    initSqlWarning: Option[String] = None
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 
@@ -965,7 +1090,9 @@ final case class UserUpdateRequest(
     // upsert, which resets the account-lockout counters (failed_attempts,
     // locked_at) like every other admin write to the row. And unlike a DELETED
     // seeded admin (re-created at restart), a LOCKED one stays locked across
-    // restarts: recovery is another admin, the static API key, or SQL.
+    // restarts: recovery is another admin, or for a superuser
+    // qod admin reset-password --username <name> (only a name given with
+    // --username is re-enabled).
     enabled: Option[Boolean] = None
 )
 final case class UserDeleteRequest(id: String)
@@ -1622,49 +1749,66 @@ object Dtos:
   // drift from its case class. DtosWireContractSpec pins the wire contract.
   private given Configuration = Configuration.default.withDefaults
 
-  given Codec[RoleDistribution]         = deriveCodec
-  given Codec[NodeTolerationDto]        = ConfiguredCodec.derived
-  given Codec[NodePlacementDto]         = ConfiguredCodec.derived
-  given Codec[PoolCohortDto]            = ConfiguredCodec.derived
-  given Codec[CreatePoolRequest]        = ConfiguredCodec.derived
-  given Codec[ScalePoolRequest]         = ConfiguredCodec.derived
-  given Codec[StopPoolRequest]          = ConfiguredCodec.derived
-  given Codec[DeletePoolRequest]        = ConfiguredCodec.derived
-  given Codec[SuspendPoolRequest]       = deriveCodec
-  given Codec[ResumePoolRequest]        = deriveCodec
-  given Codec[CatalogAttachFailureDto]  = deriveCodec
-  given Codec[NodeInfo]                 = ConfiguredCodec.derived
-  given Codec[PoolResponse]             = deriveCodec
-  given Codec[SetPoolResourcesRequest]  = deriveCodec
-  given Codec[SetPoolTemplateRequest]   = deriveCodec
-  given Codec[SetPoolLockdownRequest]   = deriveCodec
-  given Codec[SetPoolAutoscaleRequest]  = ConfiguredCodec.derived
-  given Codec[PoolListResponse]         = deriveCodec
-  given Codec[HealthResponse]           = deriveCodec
-  given Codec[SetMaxConcurrentRequest]  = deriveCodec
-  given Codec[NodeOpRequest]            = deriveCodec
-  given Codec[FleetNodeReportDto]       = deriveCodec
-  given Codec[FleetHeartbeatRequest]    = deriveCodec
-  given Codec[FleetPoolKeyDto]          = deriveCodec
-  given Codec[FleetAssignmentDto]       = deriveCodec
-  given Codec[FleetHeartbeatResponse]   = deriveCodec
-  given Codec[FleetServerDto]           = deriveCodec
-  given Codec[FleetServerListResponse]  = deriveCodec
-  given Codec[FleetServerOpRequest]     = deriveCodec
-  given Codec[TenantRequest]            = ConfiguredCodec.derived
-  given Codec[TenantResponse]           = deriveCodec
-  given Codec[TenantListResponse]       = deriveCodec
-  given Codec[TenantOpRequest]          = deriveCodec
-  given Codec[SetTenantDisabledRequest] = deriveCodec
-  given Codec[SetTenantAuthRequest]     = ConfiguredCodec.derived
-  given Codec[SetTenantAclRequest]      = ConfiguredCodec.derived
-  given Codec[OpaTestRequest]           = ConfiguredCodec.derived
-  given Codec[OpaTestResponse]          = deriveCodec
-  given Codec[SetPoolDisabledRequest]   = deriveCodec
-  given Codec[ClientConfigResponse]     = deriveCodec
-  given Codec[ConfigEntryView]          = deriveCodec
-  given Codec[ConfigListResponse]       = deriveCodec
-  given Codec[ManifestImportSummary]    = deriveCodec
+  given Codec[RoleDistribution]             = deriveCodec
+  given Codec[NodeTolerationDto]            = ConfiguredCodec.derived
+  given Codec[NodePlacementDto]             = ConfiguredCodec.derived
+  given Codec[PoolCohortDto]                = ConfiguredCodec.derived
+  given Codec[CreatePoolRequest]            = ConfiguredCodec.derived
+  given Codec[ScalePoolRequest]             = ConfiguredCodec.derived
+  given Codec[StopPoolRequest]              = ConfiguredCodec.derived
+  given Codec[DeletePoolRequest]            = ConfiguredCodec.derived
+  given Codec[SuspendPoolRequest]           = deriveCodec
+  given Codec[ResumePoolRequest]            = deriveCodec
+  given Codec[CatalogAttachFailureDto]      = deriveCodec
+  given Codec[NodeInfo]                     = ConfiguredCodec.derived
+  given Codec[PoolResponse]                 = deriveCodec
+  given Codec[SetPoolResourcesRequest]      = deriveCodec
+  given Codec[SetPoolInitSqlRequest]        = deriveCodec
+  given Codec[SetPoolTemplateRequest]       = deriveCodec
+  given Codec[SetPoolAutoscaleRequest]      = ConfiguredCodec.derived
+  given Codec[PoolListResponse]             = deriveCodec
+  given Codec[ProfilePool]                  = deriveCodec
+  given Codec[ProfilePoolsResponse]         = deriveCodec
+  given Codec[HealthResponse]               = deriveCodec
+  given Codec[SetMaxConcurrentRequest]      = deriveCodec
+  given Codec[NodeOpRequest]                = deriveCodec
+  given Codec[FleetNodeReportDto]           = deriveCodec
+  given Codec[FleetHeartbeatRequest]        = deriveCodec
+  given Codec[FleetPoolKeyDto]              = deriveCodec
+  given Codec[FleetNodeExtensionsDto]       = deriveCodec
+  given Codec[FleetNodeAuthzLimitsDto]      = deriveCodec
+  given Codec[FleetAssignmentDto]           = deriveCodec
+  given Codec[FleetHeartbeatResponse]       = deriveCodec
+  given Codec[FleetServerDto]               = deriveCodec
+  given Codec[FleetServerListResponse]      = deriveCodec
+  given Codec[FleetServerOpRequest]         = deriveCodec
+  given Codec[TenantRequest]                = ConfiguredCodec.derived
+  given Codec[TenantResponse]               = deriveCodec
+  given Codec[TenantListResponse]           = deriveCodec
+  given Codec[TenantOpRequest]              = deriveCodec
+  given Codec[SetTenantDisabledRequest]     = deriveCodec
+  given Codec[SetTenantAuthRequest]         = ConfiguredCodec.derived
+  given Codec[SetTenantAclRequest]          = ConfiguredCodec.derived
+  given Codec[OpaTestRequest]               = ConfiguredCodec.derived
+  given Codec[OpaTestResponse]              = deriveCodec
+  given Codec[TenantLocationDto]            = deriveCodec
+  given Codec[TenantLocationListRequest]    = deriveCodec
+  given Codec[TenantLocationListResponse]   = deriveCodec
+  given Codec[AddTenantLocationRequest]     = ConfiguredCodec.derived
+  given Codec[RemoveTenantLocationRequest]  = deriveCodec
+  given Codec[TenantLocationChangeResponse] = deriveCodec
+  given Codec[S3CredentialDto]              = deriveCodec
+  given Codec[S3CredentialListResponse]     = deriveCodec
+  given Codec[ProfileS3ListRequest]         = deriveCodec
+  given Codec[ProfileS3AddRequest]          = ConfiguredCodec.derived
+  given Codec[ProfileS3RemoveRequest]       = deriveCodec
+  given Codec[UserS3ListRequest]            = deriveCodec
+  given Codec[UserS3RemoveRequest]          = deriveCodec
+  given Codec[SetPoolDisabledRequest]       = deriveCodec
+  given Codec[ClientConfigResponse]         = deriveCodec
+  given Codec[ConfigEntryView]              = deriveCodec
+  given Codec[ConfigListResponse]           = deriveCodec
+  given Codec[ManifestImportSummary]        = deriveCodec
 
   given Codec[TenantDbRequest]           = ConfiguredCodec.derived
   given Codec[TenantDbResponse]          = deriveCodec

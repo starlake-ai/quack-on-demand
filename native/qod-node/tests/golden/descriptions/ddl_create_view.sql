@@ -1,0 +1,1 @@
+CREATE VIEW vw AS SELECT id FROM t

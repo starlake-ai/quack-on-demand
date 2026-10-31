@@ -37,7 +37,7 @@ final class McpPlatformTools(
     serverConfig: ConfigHandlers,
     history: HistoryHandlers,
     usage: UsageHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver
 ):
 
   import McpToolArgs._
@@ -251,8 +251,12 @@ final class McpPlatformTools(
       props = "database" -> strProp("Database (tenant-db) name."),
       "alias"       -> strProp("Source alias (stable key)."),
       "source_type" -> strProp("sql (default), iceberg_rest, postgres or mysql."),
-      "setup_sql"   -> strProp("ATTACH / CREATE SECRET setup SQL; required for a 'sql' source."),
-      "config"      -> objProp(
+      "setup_sql"   -> strProp(
+        "ATTACH / CREATE SECRET setup SQL; required for a 'sql' source, which only a " +
+          "superuser may create or change (it runs unrestricted on every node); every " +
+          "{{secret.NAME}} in it must sit inside a single-quoted literal ('...')."
+      ),
+      "config" -> objProp(
         "Iceberg REST catalog declaration; required for an 'iceberg_rest' source. Fields: uri, " +
           "warehouse, authType (none | oauth2 | token | sigv4), endpointType (glue | s3_tables), " +
           "clientId, clientSecret, oauth2ServerUri, oauth2Scope, oauth2GrantType, token; for " +

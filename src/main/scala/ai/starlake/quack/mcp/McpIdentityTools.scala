@@ -1,11 +1,13 @@
 package ai.starlake.quack.mcp
 
 import ai.starlake.quack.ondemand.api.{
+  AddTenantLocationRequest,
   GroupCreateRequest,
   GroupDeleteRequest,
   GroupHandlers,
   GroupRoleMembershipRequest,
   MembershipHandlers,
+  RemoveTenantLocationRequest,
   RoleCreateRequest,
   RoleDeleteRequest,
   RoleHandlers,
@@ -13,6 +15,8 @@ import ai.starlake.quack.ondemand.api.{
   SetTenantAuthRequest,
   SetTenantDisabledRequest,
   TenantHandlers,
+  TenantLocationHandlers,
+  TenantLocationListRequest,
   TenantOpRequest,
   TenantRequest,
   UserCreateRequest,
@@ -39,7 +43,8 @@ final class McpIdentityTools(
     groups: GroupHandlers,
     roles: RoleHandlers,
     memberships: MembershipHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver,
+    locations: TenantLocationHandlers
 ):
 
   import McpToolArgs._
@@ -49,6 +54,9 @@ final class McpIdentityTools(
     createTenantTool,
     deleteTenantTool,
     setTenantAclTool,
+    listTenantLocationsTool,
+    addTenantLocationTool,
+    removeTenantLocationTool,
     setTenantAuthTool,
     setTenantDisabledTool,
     listUsersTool,
@@ -130,8 +138,9 @@ final class McpIdentityTools(
   )
 
   /** `str` trims and drops a blank string to None, so it cannot express "clear this field" for an
-    * Option[String] patch field where "" is meaningful (see [[SetTenantAclRequest]]). Read the raw
-    * JSON value instead: absent -> None (keep), "" -> Some("") (clear), non-empty -> Some(value).
+    * Option[String] patch field where "" is meaningful (see [[SetTenantAclRequest]] and
+    * `SetTenantAuthRequest.clientSecret`). Read the raw JSON value instead: absent -> None (keep),
+    * "" -> Some("") (clear), non-empty -> Some(value).
     */
   private def rawStr(args: JsonObject, name: String): Option[String] =
     args(name).flatMap(_.asString)
@@ -148,7 +157,9 @@ final class McpIdentityTools(
       "opa_url"             -> strProp("OPA base URL."),
       "opa_policy_path"     -> strProp("Policy package path, default qod/authz."),
       "opa_token"           -> strProp("Bearer token for OPA (write-only)."),
-      "send_statement_text" -> boolProp("Include SQL text in the OPA input.")
+      "send_statement_text" -> boolProp(
+        "Kept for compatibility, no effect: the node never sends SQL text in the OPA input."
+      )
     ),
     adminOnly = true,
     run = (principal, args) =>
@@ -170,14 +181,87 @@ final class McpIdentityTools(
             .map(res => bridge(res).map(_.asJson))
   )
 
+  // ---------- tenant authorized locations ----------
+
+  private val listTenantLocationsTool = McpToolDef(
+    name = "list_tenant_locations",
+    description = "List the local folders a tenant authorized for its users' file access (S3 is " +
+      "per user: each user's own credentials, not a tenant location).",
+    inputSchema =
+      objectSchema(required = List("tenant"), props = "tenant" -> strProp("Tenant id.")),
+    adminOnly = true,
+    run = (principal, args) =>
+      required(args, "tenant") match
+        case Left(err)     => IO.pure(Left(err))
+        case Right(tenant) =>
+          locations
+            .list(TenantLocationListRequest(tenant), keyOf(principal))(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
+  )
+
+  private val addTenantLocationTool = McpToolDef(
+    name = "add_tenant_location",
+    description =
+      "Authorize a local folder for a tenant's non-superuser users: an absolute folder under " +
+        "<QOD_TENANT_FILES_ROOT>/<tenant>/. A database's data folder stays unreachable whatever is " +
+        "authorized. S3 is per user (the user's own credentials).",
+    inputSchema = objectSchema(
+      required = List("tenant", "location"),
+      props = "tenant" -> strProp("Tenant id."),
+      "location" -> strProp("An absolute local folder.")
+    ),
+    adminOnly = true,
+    run = (principal, args) =>
+      (for
+        tenant   <- required(args, "tenant")
+        location <- required(args, "location")
+      yield (tenant, location)) match
+        case Left(err)                 => IO.pure(Left(err))
+        case Right((tenant, location)) =>
+          locations
+            .add(
+              AddTenantLocationRequest(tenant, location),
+              keyOf(principal)
+            )(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
+  )
+
+  private val removeTenantLocationTool = McpToolDef(
+    name = "remove_tenant_location",
+    description = "Remove an authorized location of a tenant by id (from list_tenant_locations).",
+    inputSchema = objectSchema(
+      required = List("tenant", "id"),
+      props = "tenant" -> strProp("Tenant id."),
+      "id" -> strProp("Location id.")
+    ),
+    adminOnly = true,
+    run = (principal, args) =>
+      (for
+        tenant <- required(args, "tenant")
+        id     <- required(args, "id")
+      yield (tenant, id)) match
+        case Left(err)           => IO.pure(Left(err))
+        case Right((tenant, id)) =>
+          locations
+            .remove(RemoveTenantLocationRequest(tenant, id), keyOf(principal))(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
+  )
+
   private val setTenantAuthTool = McpToolDef(
     name = "set_tenant_auth",
-    description = "Set a tenant's auth provider and provider config.",
+    description = "Set a tenant's auth provider, provider config and OIDC client secret. " +
+      "auth_config replaces the stored config. client_secret is write-only: omitted keeps the " +
+      "stored secret while issuerUrl is unchanged, empty string removes it. Adding or changing " +
+      "clientSecretRef (a secret of the manager's environment) needs a superuser credential.",
     inputSchema = objectSchema(
       required = List("name", "auth_provider"),
       props = "name" -> strProp("Tenant id."),
       "auth_provider" -> strProp("One of db|keycloak|google|azure|aws."),
-      "auth_config"   -> objProp("Provider config object.")
+      "auth_config"   -> objProp("Provider config object; replaces the stored one."),
+      "client_secret" -> strProp(
+        "OIDC client secret (write-only). Omit to keep the stored one (dropped when issuerUrl " +
+          "changes); empty string removes it."
+      )
     ),
     adminOnly = true,
     run = (principal, args) =>
@@ -189,7 +273,12 @@ final class McpIdentityTools(
         case Right((name, provider)) =>
           tenants
             .setTenantAuth(
-              SetTenantAuthRequest(name, provider, mapArg(args, "auth_config")),
+              SetTenantAuthRequest(
+                name,
+                provider,
+                mapArg(args, "auth_config"),
+                rawStr(args, "client_secret")
+              ),
               keyOf(principal)
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))

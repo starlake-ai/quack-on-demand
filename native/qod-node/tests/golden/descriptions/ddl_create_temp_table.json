@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"create","catalog":"temp","catalogType":"duckdb","columns":[],"kind":"table","name":"tt","schema":"main","via":null}],"settings":[],"statement":"CREATE_TABLE","v":1}

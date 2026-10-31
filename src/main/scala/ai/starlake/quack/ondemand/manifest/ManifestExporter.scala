@@ -1,23 +1,25 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{FederatedSecret, LockdownTriState, TenantDb}
+import ai.starlake.quack.model.{FederatedSecret, TenantDb}
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
   ControlPlaneSnapshot,
   ControlPlaneStore,
   FederatedSourceStore
 }
+import com.typesafe.scalalogging.LazyLogging
 
 import java.time.Instant
 
 /** Read-only snapshot of the qodstate_* control plane in YAML-manifest shape. The output never
   * carries a plaintext user password (`ManifestUser.password` stays `None` -- plaintext is never
   * available once a user is created, only the bcrypt hash is stored) but DOES carry the real bcrypt
-  * hash in `ManifestUser.passwordHash` so a round-trip preserves the SAME credential. Tenant
-  * authProvider clientSecrets are carried verbatim since those are operator-supplied and cannot be
-  * recovered if lost.
+  * hash in `ManifestUser.passwordHash` so a round-trip preserves the SAME credential. A tenant's
+  * `authConfig` is carried verbatim, its `clientSecretRef` included (the name of a secret, not its
+  * value); a tenant's stored client secret is exported as `FederatedSecret.RedactedMarker`, like
+  * `opaToken`, never in the clear.
   */
-object ManifestExporter:
+object ManifestExporter extends LazyLogging:
 
   private val Redacted = FederatedSecret.RedactedMarker
 
@@ -72,7 +74,9 @@ object ManifestExporter:
       federatedStore: Option[FederatedSourceStore]
   ): ConfigManifest =
     val dbsByTenant = snap.tenantDbs.groupBy(_.tenantId)
-    val poolsByDb   = snap.pools.groupBy(_.tenantDbId)
+    // Authorized locations are not part of the snapshot.
+    val locationsByTenant = store.listAllTenantLocations().groupBy(_.tenantId)
+    val poolsByDb         = snap.pools.groupBy(_.tenantDbId)
     // Global pool -> (owning tenant addressing-name, pool name) index, used to
     // resolve pool grants regardless of which tenant loop iteration is
     // running. Pool carries its own tenantId directly (denormalized from its
@@ -127,6 +131,7 @@ object ManifestExporter:
               sourceType = src.sourceType.wire,
               config = src.config,
               readOnly = src.readOnly,
+              setupSqlTrusted = Some(src.setupSqlTrusted),
               secrets = fs.listSecrets(src.id).map { sec =>
                 ManifestFederatedSecret(
                   name = sec.name,
@@ -148,14 +153,24 @@ object ManifestExporter:
           // comment does not depend on that.) Unlike `pgPassword` (also a SecretKeys member but
           // carried verbatim here so a manifest replay can still connect), this key is minted or
           // caller-supplied per database and has no legitimate reason to travel with a backup.
-          metastore = d.metastore - TenantDb.EncryptionKeyName,
+          // Removed in every spelling, silently: a row stored before the API compared names
+          // exactly may hold `EncryptionKey`, which its nodes use as the key
+          // (`NodeMetastore.secrets`), and an export never carries an encryption key, whatever
+          // its spelling. No line is logged for one: the API offers no way to change an
+          // encryption key, so the line would have no remedy.
+          metastore = knownMetastore(
+            t.id,
+            d.name,
+            d.metastore.filterNot { case (k, _) => k.equalsIgnoreCase(TenantDb.EncryptionKeyName) }
+          ),
           dataPath = d.dataPath,
           objectStore = d.objectStore,
           defaultDatabase = d.defaultDatabase,
           defaultSchema = d.defaultSchema,
           initSql = d.initSql,
           federatedSources = fedSources,
-          encrypted = d.encrypted
+          encrypted = d.encrypted,
+          initSqlTrusted = Some(d.initSqlTrusted)
         )
       }
 
@@ -191,9 +206,9 @@ object ManifestExporter:
           cpu = p.cpu,
           memory = p.memory,
           podTemplateYaml = p.podTemplateYaml,
-          lockdown = LockdownTriState.render(p.lockdown),
           minNodes = p.minNodes,
-          maxNodes = p.maxNodes
+          maxNodes = p.maxNodes,
+          initSqlTrusted = Some(p.initSqlTrusted)
         )
       }
 
@@ -292,6 +307,8 @@ object ManifestExporter:
           disabled = t.disabled,
           authProvider = t.authProvider,
           authConfig = t.authConfig,
+          // Never the value: the marker only says a secret is stored (see ManifestTenant).
+          clientSecret = t.authClientSecret.map(_ => Redacted),
           tenantDbs = manifestDbs,
           pools = manifestPools,
           acl = Option.when(t.acl != ai.starlake.quack.model.TenantAcl())(
@@ -302,7 +319,11 @@ object ManifestExporter:
               opaToken = t.acl.opaToken.map(_ => Redacted),
               sendStatementText = t.acl.sendStatementText
             )
-          )
+          ),
+          // Local folders only: S3 access is per user (decision 23) and never in a manifest.
+          locations = locationsByTenant
+            .get(t.id)
+            .map(_.sortBy(_.location).map(l => ManifestTenantLocation(l.location)))
         ),
         manifestRoles,
         manifestGroups,
@@ -345,6 +366,43 @@ object ManifestExporter:
       groups = tenants.flatMap(_._3),
       users = superusers ++ tenants.flatMap(_._4)
     )
+
+  /** `metastore` (of `tenant`'s `database`) without its keys outside
+    * [[TenantDb.KnownMetastoreKeys]], which a manifest import refuses as `database/create` does:
+    * one of them would make the whole manifest unimportable. A row holds one when it was stored
+    * before the API refused them (the admin UI once suggested `applicationName`) or compared their
+    * names exactly (`PgPassword`); the row itself keeps it. Each key left out is logged by name,
+    * never by value, at ERROR (the default root level, logback.xml, drops a WARN), with how to fix
+    * the row: every export repeats the line until then.
+    */
+  private def knownMetastore(
+      tenant: String,
+      database: String,
+      metastore: Map[String, String]
+  ): Map[String, String] =
+    val (known, other) =
+      metastore.partition { case (k, _) => TenantDb.KnownMetastoreKeys.contains(k) }
+    other.keys.toList.sorted.foreach { k =>
+      logger.error(
+        s"manifest export: tenant '$tenant' database '$database': left out metastore key " +
+          s"'${TenantDb.printableKey(k)}', which a manifest import refuses " +
+          s"(${TenantDb.MetastoreHoldsOnly}). ${leftOutAdvice(k)}"
+      )
+    }
+    known
+
+  /** What the line for a left-out `key` advises. A password stored under another spelling
+    * (`PgPassword`) is no leftover: the database's nodes use it as the catalog password
+    * (`NodeMetastore.secrets` matches any spelling), so removing it would cut them off, and storing
+    * it under its own name replaces every spelling (`PoolSupervisor.mergeSecretKeys`). Any other
+    * key is removed ([[TenantDb.metastoreKeyRemoval]], the advice a node's dropped-key line gives).
+    */
+  private def leftOutAdvice(key: String): String =
+    if key.equalsIgnoreCase("pgPassword") then
+      "The database's nodes use it as the catalog password, so a replay of this export runs " +
+        "without it. Fix the row: send the database's full metastore through database/update " +
+        "with 'pgPassword' set to the password (that replaces every spelling), then export again."
+    else TenantDb.metastoreKeyRemoval(key)
 
   /** Resolve a single [[ai.starlake.quack.ondemand.state.PoolPermission]] into a
     * [[ManifestPoolGrant]]. `pool = None` when the permission has no pool id (a tenant-wide

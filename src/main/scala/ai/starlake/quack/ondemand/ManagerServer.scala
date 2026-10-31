@@ -80,7 +80,7 @@ final class ManagerServer(
     fleet: Option[FleetHandlers] = None,
     // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
     // header) is accepted wherever its owner's session JWT would be. None (tests /
-    // callers without Postgres) keeps the guard session-and-static-key only.
+    // callers without Postgres) keeps the guard session-only.
     patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
     // SCIM 2.0 provisioning surface (/api/scim/v2/{tenant}). None leaves the routes
     // unmounted; Main always wires it. SCIM clients authenticate with Authorization:
@@ -91,16 +91,28 @@ final class ManagerServer(
     // display name, and manageableTenants holds ids. None = unknown, compare raw.
     canonicalTenantIdOf: String => Option[String] = _ => None,
     // The MCP endpoint (POST /mcp), pre-built by Main when quack-on-demand.mcp.enabled.
-    // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (PAT or
-    // static key, never sessions), and the guard's path filter ignores non-/api paths
-    // anyway -- mounting it here keeps that invariant explicit.
+    // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (a PAT,
+    // never sessions), and the guard's path filter ignores non-/api paths anyway:
+    // mounting it here keeps that invariant explicit.
     mcpRoutes: Option[HttpRoutes[IO]] = None,
     // The native Quack front door's listener config, surfaced to the UI's connection card.
     quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None,
     // Read-only views over an external Iceberg REST catalog (history, preview, diff, files).
     // None (no federation store) leaves the six /iceberg routes unmounted. Last, not next to
     // `preview`: Main passes it by name (`icebergCatalog = ...`), so its position doesn't matter.
-    icebergCatalog: Option[IcebergCatalogHandlers] = None
+    icebergCatalog: Option[IcebergCatalogHandlers] = None,
+    // A tenant's authorized locations (tenant/location/*). None leaves the routes unmounted; Main
+    // always wires it. Session-gated per request via TenantScopeCheck inside the handler.
+    tenantLocations: Option[TenantLocationHandlers] = None,
+    // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
+    // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
+    s3Credentials: Option[UserS3CredentialHandlers] = None,
+    // The node-to-manager calls (POST /api/internal/authz/*: CredentialsRoute here, Task 6's
+    // DecideRoute): mounted IN FRONT of apiKeyGuard, since a node has no session; each route
+    // authenticates every call itself (the node-key MAC of the body, then the handle). Empty (tests)
+    // leaves them unmounted, so a node's call is refused (fail closed). Never Tapir endpoints: they
+    // stay out of the OpenAPI contract, CLI parity and McpCoverageSpec.
+    internalRoutes: List[HttpRoutes[IO]] = Nil
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -108,27 +120,16 @@ final class ManagerServer(
   // without the qod_pat_ prefix before touching the store, so the composition
   // costs a session caller nothing and a PAT caller one prefix check.
   //
-  // `scopeOfToken` is what every handler gate receives. It is fail-closed: `None` only for the
-  // static key, never for a token that stopped resolving between the guard and the handler (see
-  // SessionScope.failClosed). The guard itself does not use it; it resolves once through
+  // `scopeOfToken` is what every handler gate receives. It is total: no credential, or one that
+  // stopped resolving between the guard and the handler, is `SessionScope.NoAccess` (see
+  // SessionScope.resolver). The guard itself does not use it; it resolves once through
   // `sessionOfToken`.
-  private val scopeOfToken: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-    ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-      cfg.apiKey,
-      t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+  private val scopeOfToken: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+    ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+      sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
     )
   private val sessionOfToken: String => Option[SessionTokenStore.Session] =
     t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
-
-  /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
-    * does not short-circuit on the first differing byte, closing the timing side-channel that
-    * `String.equals` (via `Option.contains`) opens. Length is not treated as secret.
-    */
-  private def constantTimeEq(a: String, b: String): Boolean =
-    java.security.MessageDigest.isEqual(
-      a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-      b.getBytes(java.nio.charset.StandardCharsets.UTF_8)
-    )
 
   /** Best-effort host of an OIDC issuer URL, for a cosmetic provider label in the client config. */
   private def issuerHost(issuerUrl: String): String =
@@ -166,6 +167,10 @@ final class ManagerServer(
   private def isProfileApi(path: String): Boolean =
     path == "/api/auth/whoami" || path == "/api/auth/logout" ||
       path == "/api/profile/usage" || path == "/api/profile/statements" ||
+      path == "/api/profile/pools" ||
+      // A user's own S3 credentials: the handlers act on the caller's own user row only.
+      path == "/api/profile/s3/list" || path == "/api/profile/s3/add" ||
+      path == "/api/profile/s3/remove" ||
       // Personal access tokens are self-service for every principal, admin or
       // not: the handlers scope every call to the session's own user id, so
       // there is nothing here a regular user could reach beyond its own tokens.
@@ -180,12 +185,9 @@ final class ManagerServer(
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
-    * session token, a live personal access token (admitted with exactly its owner's scope, admin or
-    * profile-only), or -- when `cfg.apiKey` is set -- the static key via `X-API-Key`.
-    *
-    * An unset (or empty) `cfg.apiKey` only disables the static-key arm; it never opens the
-    * namespace. The former open mode is gone: a keyless dev workflow logs in through
-    * `/api/auth/login` (or sets `QOD_API_KEY`).
+    * session token or a live personal access token, admitted with exactly its owner's scope (admin
+    * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
+    * logs in through `/api/auth/login`.
     *
     * Sessions come in two flavors since the regular-user profile feature: admin sessions (JWT
     * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
@@ -198,19 +200,31 @@ final class ManagerServer(
     * `/api/config/client`, `/health`, `/ready`, and everything outside `/api/...` (incl.
     * `/ui/...`).
     */
-  private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
-    // Treat an empty string the same as unset. Compose / k8s configs routinely
-    // pass `QOD_API_KEY=${API_KEY:-}` with `.env API_KEY=` empty; pureconfig
-    // then materializes `Some("")`, which would otherwise enable the guard
-    // with a key no client ever sends.
-    val staticConfigured = cfg.apiKey.filter(_.nonEmpty)
-    if staticConfigured.isEmpty then
-      logger.info(
-        "QOD_API_KEY unset: static-key auth disabled; only session and PAT " +
-          "credentials are accepted on /api"
-      )
-    else logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
+  /** The largest request body a refusal reads and discards before answering. */
+  private val RefusalDrainBytes: Long = 1L << 20
 
+  /** `resp`, after reading the rest of `req`'s body. Ember answers a request whose body the app
+    * left partly unread as keep-alive and then closes the connection, so a client that reuses it
+    * for its next request finds it closed (the JDK client does not retry a POST: "header parser
+    * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
+    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read. Any
+    * other body (chunked, longer, awaiting a go-ahead) is left unread, and the answer then says
+    * `Connection: close`, so a pooling client opens a new connection instead of reusing the one
+    * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
+    * neither.
+    */
+  private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
+    val drain =
+      req.contentLength
+        .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
+    val bodyless = req.contentLength.isEmpty && !req.isChunked
+    OptionT.liftF(
+      if drain then req.body.compile.drain.attempt.void.as(resp)
+      else if bodyless then IO.pure(resp)
+      else IO.pure(resp.putHeaders(org.http4s.headers.Connection.close))
+    )
+
+  private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     Kleisli { req =>
       // Router parity: tapir segments the path as
       // renderString.dropWhile(_ == '/').split("/").map(decode), i.e. every
@@ -228,12 +242,11 @@ final class ManagerServer(
       else
         // Admit on X-API-Key header OR on the qod_session cookie. The cookie
         // is the browser path (HttpOnly so JS can't read it; SameSite=Lax so
-        // it doesn't leak cross-origin); the header is the CLI / static-key
-        // path. A request can present either; the static key only ever
-        // matches via the header.
+        // it doesn't leak cross-origin); the header is the CLI path (a session
+        // or a personal access token). A request can present either.
         // SCIM clients (Okta, Entra) can only send Authorization: Bearer, so for the
         // SCIM prefix the bearer value is admitted exactly like an X-API-Key header
-        // (static key or PAT). Scoped to /api/scim/ on purpose: nothing else should
+        // (a session or a PAT). Scoped to /api/scim/ on purpose: nothing else should
         // gain a third credential transport.
         val bearerToken =
           if path.startsWith("/api/scim/") then
@@ -246,12 +259,6 @@ final class ManagerServer(
           req.headers.get(CIString("X-API-Key")).map(_.head.value).orElse(bearerToken)
         val cookieToken = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
         val provided    = headerToken.orElse(cookieToken)
-        // Constant-time compare so a caller can't recover the static key byte by
-        // byte from response timing. `Option.contains` uses String.equals, which
-        // short-circuits on the first mismatched char.
-        val staticMatch = (staticConfigured, headerToken) match
-          case (Some(expected), Some(actual)) => constantTimeEq(actual, expected)
-          case _                              => false
         // Resolved ONCE: the admin decision, the non-admin demotion below and the
         // per-request tenant scope check further down all read this one lookup. Separate
         // lookups race a session expiring between them: admitted as admin by the first,
@@ -262,8 +269,7 @@ final class ManagerServer(
         val tokenScope      = resolved.map(_.scope)
         val nonAdminSession = resolved.isDefined && !sessionAdmin
 
-        val admitted =
-          staticMatch || sessionAdmin || (nonAdminSession && isProfileApi(path))
+        val admitted = sessionAdmin || (nonAdminSession && isProfileApi(path))
         // Strip control characters -- jsonb rejects NUL (0x00); cap length so
         // detail stays bounded. An unsanitized `%00` in the path would make
         // the insert throw and the attacker would erase their own trail.
@@ -296,7 +302,8 @@ final class ManagerServer(
                 tenant = caller.flatMap(_.tenant),
                 detail = Map("path" -> safePath)
               )
-            OptionT.pure[IO](
+            refuse(
+              req,
               Response[IO](Status.Forbidden)
                 .withEntity(
                   """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
@@ -316,11 +323,10 @@ final class ManagerServer(
                 "denied",
                 detail = Map("path" -> safePath, "source" -> source)
               )
-            OptionT.pure[IO](Response[IO](Status.Unauthorized))
+            refuse(req, Response[IO](Status.Unauthorized))
         else
-          // Per-request tenant scope check. Only applies when there is a known
-          // session (not the static key). Body-tenant endpoints
-          // do their own check via TenantScopeCheck.reject.
+          // Per-request tenant scope check on the admitted credential's scope.
+          // Body-tenant endpoints do their own check via TenantScopeCheck.reject.
           val queryTenant = req.uri.query.params.get("tenant")
           val pathTenant  = TenantScopeGuard
             .extractTenant(path, queryTenant)
@@ -328,7 +334,8 @@ final class ManagerServer(
           (tokenScope, pathTenant) match
             case (Some(scope), Some(t))
                 if !scope.superuser && !scope.manageableTenants.contains(t) =>
-              OptionT.pure[IO](
+              refuse(
+                req,
                 Response[IO](Status.Forbidden)
                   .withEntity(
                     s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""
@@ -538,6 +545,38 @@ final class ManagerServer(
       )
     }
 
+    val tenantLocationEndpoints: List[ServerEndpoint[Any, IO]] =
+      tenantLocations.toList.flatMap { h =>
+        List[ServerEndpoint[Any, IO]](
+          TenantEndpoints.listTenantLocations.serverLogic { case (req, token) =>
+            h.list(req, token)(scopeOfToken)
+          },
+          TenantEndpoints.addTenantLocation.serverLogic { case (req, token) =>
+            h.add(req, token)(scopeOfToken)
+          },
+          TenantEndpoints.removeTenantLocation.serverLogic { case (req, token) =>
+            h.remove(req, token)(scopeOfToken)
+          }
+        )
+      }
+
+    val s3CredentialEndpoints: List[ServerEndpoint[Any, IO]] =
+      s3Credentials.toList.flatMap { h =>
+        List[ServerEndpoint[Any, IO]](
+          S3CredentialEndpoints.listMine.serverLogic { case (_, token) => h.listMine(token) },
+          S3CredentialEndpoints.addMine.serverLogic { case (req, token) => h.addMine(req, token) },
+          S3CredentialEndpoints.removeMine.serverLogic { case (req, token) =>
+            h.removeMine(req, token)
+          },
+          S3CredentialEndpoints.listForUser.serverLogic { case (req, token) =>
+            h.listForUser(req, token)(scopeOfToken)
+          },
+          S3CredentialEndpoints.removeForUser.serverLogic { case (req, token) =>
+            h.removeForUser(req, token)(scopeOfToken)
+          }
+        )
+      }
+
     // Branches (Epic 1). Session-gated per request via TenantScopeCheck inside the handler.
     val branchEndpoints: List[ServerEndpoint[Any, IO]] = branches.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
@@ -633,6 +672,7 @@ final class ManagerServer(
       ProfileEndpoints.statements.serverLogic { case (limit, token) =>
         profile.statements(limit, token)
       },
+      ProfileEndpoints.pools.serverLogic(token => profile.pools(token)),
       NodeEndpoints.statementHistory.serverLogic { case (limit, token) =>
         statementHistory.recent(limit, token)(scopeOfToken)
       },
@@ -693,9 +733,9 @@ final class ManagerServer(
         )
       else Nil
 
-    // Mounted only when a handler is wired (Main always wires one). Session-only by
-    // construction: the handler refuses a PAT presented as the credential, so these
-    // routes cannot be driven by the very tokens they manage.
+    // Mounted only when a handler is wired (Main always wires one). A session reaches all
+    // of its user's tokens; a PAT only the subtree it roots (it may mint a child of
+    // itself, never touch a sibling, its parent or itself): see PatHandlers.
     val patEndpoints: List[ServerEndpoint[Any, IO]] = pat.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         PatEndpoints.create.serverLogic { case (token, req) => h.create(token, req) },
@@ -918,14 +958,14 @@ final class ManagerServer(
       PoolEndpoints.setPoolDisabled.serverLogic { case (req, token) =>
         pools.setPoolDisabled(req, token)(scopeOfToken)
       },
+      PoolEndpoints.setPoolInitSql.serverLogic { case (req, token) =>
+        pools.setInitSql(req, token)(scopeOfToken)
+      },
       PoolEndpoints.setPoolResources.serverLogic { case (req, token) =>
         pools.setResources(req, token)(scopeOfToken)
       },
       PoolEndpoints.setPoolTemplate.serverLogic { case (req, token) =>
         pools.setPodTemplate(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.setPoolLockdown.serverLogic { case (req, token) =>
-        pools.setLockdown(req, token)(scopeOfToken)
       },
       PoolEndpoints.setPoolAutoscale.serverLogic { case (req, token) =>
         pools.setPoolAutoscale(req, token)(scopeOfToken)
@@ -1016,7 +1056,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ tenantLocationEndpoints ++ s3CredentialEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then
@@ -1155,8 +1195,8 @@ final class ManagerServer(
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
       .withHttpApp(
-        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(
-          HttpRoutes.empty[IO]
-        ) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
+        (internalRoutes.foldLeft(HttpRoutes.empty[IO])(_ <+> _) <+> apiKeyGuard(apiRoutes) <+>
+          mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+> moduleStatic <+>
+          rootRedirect).orNotFound
       )
       .build

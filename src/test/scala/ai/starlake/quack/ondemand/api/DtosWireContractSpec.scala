@@ -152,6 +152,23 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
     decode[SetTenantAuthRequest]("""{"name":"acme","authProvider":"db"}""") shouldBe
       Right(SetTenantAuthRequest("acme", "db"))
 
+  it should "decode clientSecret absent as keep, empty as clear, a value as replace" in:
+    def secretOf(json: String) = decode[SetTenantAuthRequest](json).map(_.clientSecret)
+    secretOf("""{"name":"acme","authProvider":"keycloak"}""") shouldBe Right(None)
+    secretOf("""{"name":"acme","authProvider":"keycloak","clientSecret":""}""") shouldBe
+      Right(Some(""))
+    secretOf("""{"name":"acme","authProvider":"keycloak","clientSecret":"s3cr3t"}""") shouldBe
+      Right(Some("s3cr3t"))
+
+  it should "redact clientSecret in toString" in:
+    SetTenantAuthRequest("acme", "keycloak", clientSecret = Some("s3cr3t")).toString should
+      not include "s3cr3t"
+
+  "TenantResponse" should "carry clientSecretSet and never a clientSecret field" in:
+    val j = TenantResponse("acme", "acme", "Acme", Nil, clientSecretSet = true).asJson.hcursor
+    j.get[Boolean]("clientSecretSet") shouldBe Right(true)
+    j.downField("clientSecret").succeeded shouldBe false
+
   "TenantDbRequest" should "default every optional field when absent" in:
     decode[TenantDbRequest]("""{"tenant":"acme","name":"acme_x"}""") shouldBe
       Right(TenantDbRequest("acme", "acme_x"))

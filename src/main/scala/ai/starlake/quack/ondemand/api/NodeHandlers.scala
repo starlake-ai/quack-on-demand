@@ -36,7 +36,7 @@ final class NodeHandlers(
       case Some(_) => f.map(Right(_))
 
   def setMaxConcurrent(req: SetMaxConcurrentRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
@@ -70,7 +70,7 @@ final class NodeHandlers(
           }
 
   private def setQuarantine(req: NodeOpRequest, apiKey: Option[String], quarantined: Boolean)(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val action = if quarantined then AuditActions.NodeQuarantine else AuditActions.NodeUnquarantine
     SuperuserCheck.reject(apiKey)(scopeOf) match
@@ -94,15 +94,15 @@ final class NodeHandlers(
         }
 
   def quarantineNode(req: NodeOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] = setQuarantine(req, apiKey, quarantined = true)(scopeOf)
 
   def unquarantineNode(req: NodeOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] = setQuarantine(req, apiKey, quarantined = false)(scopeOf)
 
   def restartNode(req: NodeOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) =>

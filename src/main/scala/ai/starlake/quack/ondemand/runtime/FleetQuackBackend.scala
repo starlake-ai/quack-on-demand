@@ -72,7 +72,11 @@ final class FleetQuackBackend(
     */
   var nodeRowExists: String => Boolean = _ => true
 
+  // Metastore keys that reach no fleet server, named once per pool and key.
+  private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
+
   private def assignmentFor(spec: NodeSpec, token: String): FleetAssignment =
+    droppedKeys.report(spec.poolKey, spec.metastore)
     FleetAssignment(
       epoch = 0L, // the store bumps and writes the real epoch
       nodeId = spec.nodeId,
@@ -80,21 +84,27 @@ final class FleetQuackBackend(
       port = 0, // the store stamps the claimed server's node_port
       token = token,
       kind = spec.kindWire,
+      // Only TenantDb.NodeEnvKeys of the metastore and its own secrets (NodeMetastore), which the
+      // join process lays over the spawn script's environment and writes to files: the metastore
+      // is tenant-admin input, and any other name would reach the fleet server's node launcher.
       // The managed Postgres as servers reach it (QOD_FLEET_NODE_PG_HOST), never the manager's
       // own connection.
       env = NodePgAddress.rewrite(
-        spec.metastore,
+        NodeMetastore.env(spec.metastore) ++ NodeMetastore.secrets(spec.metastore),
         defaultPgHost,
         defaultPgPort,
         cfg.nodePgHost,
         cfg.nodePgPort
       ),
-      // Pool cpu/memory as DuckDB SETs, ahead of the tenant-db's own dbInitSql so an explicit
-      // operator SET there still wins (later SET overrides).
-      dbInitSql = NodeResourceSql.render(spec.cpu, spec.memory) + spec.dbInitSql,
+      // Pool cpu/memory as DuckDB SETs, which the spawn script runs ahead of the tenant-db's own
+      // initSql, so an explicit operator SET there still wins (later SET overrides).
+      resourceSql = NodeResourceSql.render(spec.cpu, spec.memory),
       objectStoreSql = spec.objectStoreSql,
       extraSetupSql = spec.extraSetupSql,
-      lockdownSql = spec.lockdownSql
+      tenantDbInitSql = spec.tenantDbInitSql,
+      tenantDbInitTrusted = spec.tenantDbInitTrusted,
+      tenantPoolInitSql = spec.tenantPoolInitSql,
+      tenantPoolInitTrusted = spec.tenantPoolInitTrusted
     )
 
   private def requiredMemoryBytes(spec: NodeSpec): Option[Long] =
@@ -108,9 +118,6 @@ final class FleetQuackBackend(
     }
 
   def start(spec: NodeSpec): IO[RunningNode] =
-    QuackBackend.screenBootSql(spec) *> startScreened(spec)
-
-  private def startScreened(spec: NodeSpec): IO[RunningNode] =
     val token = LocalQuackBackend.randomToken()
     // The supervisor only starts a node id it believes has no live node, so any server still
     // holding this id is stale: a dead or drained server, a crash orphan (claimed and running, but

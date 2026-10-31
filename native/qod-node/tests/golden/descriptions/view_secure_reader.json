@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":["@DIR@/in.csv"],"catalog":"system","name":"read_csv","schema":"main","type":"table","via":"memory.main.sv_csv"}],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"secure_view","name":"sv_csv","schema":"main","via":null}],"settings":[],"statement":"PROJECTION","v":1}

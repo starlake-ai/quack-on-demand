@@ -157,3 +157,24 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
+
+  // A three-part bearer is anything with two dots: an unauthenticated client controls it, so a
+  // body that is not base64 (or not JSON) must name no user, never throw.
+  it should "name no user, never throw, for a three-part bearer whose body is not base64" in:
+    val out = TenantSelector.resolve(
+      bearer = Some("a.!!not-base64!!.c"),
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
+      username = None,
+      lookupPool = lookup
+    )
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "unknown"))
+
+  it should "name no user for a three-part bearer whose body is not JSON" in:
+    // "bm90IGpzb24" is base64url for "not json".
+    val out = TenantSelector.resolve(
+      bearer = Some("a.bm90IGpzb24.c"),
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
+      username = None,
+      lookupPool = lookup
+    )
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "unknown"))

@@ -37,9 +37,9 @@ object TokenRestriction:
   val Unrestricted: TokenRestriction =
     TokenRestriction(None, None, None, None, None, dropAdmin = false, None, None, None)
 
-  /** Collapsed verbs a canonical grant verb covers, mirroring `PostgresAclValidator.verbCovers`.
-    * This is a lattice ordered by subset, NOT a chain: `DDL` does not cover `Read`, so there is no
-    * valid `DDL > RW > RO` ranking and none must be introduced.
+  /** Collapsed verbs a canonical grant verb covers, mirroring `GrantMatch.verbCovers`. This is a
+    * lattice ordered by subset, NOT a chain: `DDL` does not cover `Read`, so there is no valid
+    * `DDL > RW > RO` ranking and none must be introduced.
     */
   def covers(verb: String): Set[String] = verb.toUpperCase(Locale.ROOT) match
     case "RO"  => Set("Read")

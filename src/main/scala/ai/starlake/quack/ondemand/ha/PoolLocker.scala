@@ -23,17 +23,51 @@ object PoolLocker:
     * [[PgPoolLocker]] without a database (and the same no-nesting rule: a second `withLock` on the
     * same key from inside the first waits forever). Wired for every non-HA manager: a scale-down's
     * stop takes seconds on any backend (agent confirmation, pod deletion, process wait), and an
-    * unserialized reconcile pass in that window reads the node as dead and respawns it on the
-    * stale target.
+    * unserialized reconcile pass in that window reads the node as dead and respawns it on the stale
+    * target.
     */
-  def inProcess(): PoolLocker = new PoolLocker:
-    private val permits = new ConcurrentHashMap[PoolKey, Semaphore[IO]]()
-    def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
-      IO.defer {
-        val permit =
-          permits.computeIfAbsent(key, _ => Semaphore.in[SyncIO, IO](1).unsafeRunSync())
-        permit.permit.surround(io)
-      }
+  def inProcess(): InProcessPoolLocker = new InProcessPoolLocker
+
+/** [[PoolLocker.inProcess]]. A pool's permit lives only while someone holds or waits for it: each
+  * `withLock` counts itself in before waiting and out once done (failed or cancelled included), and
+  * the last one out removes the permit. Counting in and out run under the map's per-key lock, so
+  * every caller that overlaps another one of the same key shares its permit, and a caller that
+  * finds none makes a fresh one that nobody else can be holding. The map therefore holds only the
+  * pools being mutated right now, not every pool this manager ever locked (a deleted pool
+  * included).
+  */
+final class InProcessPoolLocker extends PoolLocker:
+
+  private final class Permit(val semaphore: Semaphore[IO], var users: Int)
+
+  private val permits = new ConcurrentHashMap[PoolKey, Permit]()
+
+  private def enter(key: PoolKey): Semaphore[IO] =
+    permits
+      .compute(
+        key,
+        (_, current) =>
+          if current == null then new Permit(Semaphore.in[SyncIO, IO](1).unsafeRunSync(), 1)
+          else
+            current.users += 1
+            current
+      )
+      .semaphore
+
+  private def leave(key: PoolKey): Unit =
+    permits.computeIfPresent(
+      key,
+      (_, current) =>
+        current.users -= 1
+        if current.users == 0 then null else current
+    )
+    ()
+
+  def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
+    IO.delay(enter(key)).bracket(_.permit.surround(io))(_ => IO.delay(leave(key)))
+
+  /** Visible for tests: pools with a holder or a waiter. */
+  private[ha] def permitKeys: Int = permits.size
 
 /** Session advisory lock on a dedicated connection per acquisition (mirrors DuckLakeInitializer).
   * Session scope means a crashed holder's lock frees as soon as Postgres notices the dead session -

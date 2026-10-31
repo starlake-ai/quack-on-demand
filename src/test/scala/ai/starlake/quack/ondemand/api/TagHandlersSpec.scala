@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore}
 import cats.effect.unsafe.implicits.global
@@ -20,7 +21,7 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
       def createDatabase(name: String): Either[String, Unit] = Right(())
       def dropDatabase(name: String): Either[String, Unit]   = Right(())
     val backend = new StubQuackBackend()
-    val sup = new PoolSupervisor(
+    val sup     = new PoolSupervisor(
       backend,
       new NodeLoadTracker,
       store,
@@ -55,8 +56,9 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
     (handlers, store)
 
   private def create(h: TagHandlers, name: String, snap: Long = 42L, prot: Boolean = false) =
-    h.create(TagCreateRequest("acme", tenantDbName, name, snap, prot), None)(_ => None)
-      .unsafeRunSync()
+    h.create(TagCreateRequest("acme", tenantDbName, name, snap, prot), None)(_ =>
+      SessionScope.Superuser
+    ).unsafeRunSync()
 
   "create" should "persist a valid tag and return it with exists=true" in {
     val (h, _) = setup()
@@ -83,14 +85,14 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
 
   "delete" should "404 on a missing tag and succeed on an existing one" in {
     val (h, _) = setup()
-    h.delete(TagDeleteRequest("acme", tenantDbName, "nope"), None)(_ => None)
+    h.delete(TagDeleteRequest("acme", tenantDbName, "nope"), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .left
       .toOption
       .get
       ._1 shouldBe StatusCode.NotFound
     create(h, "gone").isRight shouldBe true
-    h.delete(TagDeleteRequest("acme", tenantDbName, "gone"), None)(_ => None)
+    h.delete(TagDeleteRequest("acme", tenantDbName, "gone"), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .isRight shouldBe true
   }
@@ -98,12 +100,13 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
   "protect" should "toggle and list reflects it" in {
     val (h, _) = setup()
     create(h, "hold").isRight shouldBe true
-    h.protect(TagProtectRequest("acme", tenantDbName, "hold", true), None)(_ => None)
-      .unsafeRunSync()
+    h.protect(TagProtectRequest("acme", tenantDbName, "hold", true), None)(_ =>
+      SessionScope.Superuser
+    ).unsafeRunSync()
       .toOption
       .get
       .isProtected shouldBe true
-    h.list("acme", tenantDbName, None)(_ => None)
+    h.list("acme", tenantDbName, None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get

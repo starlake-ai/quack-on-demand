@@ -1,0 +1,1 @@
+QoD: information_schema.columns is filtered to your grants only when the statement itself names it information_schema.columns

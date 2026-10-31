@@ -30,6 +30,25 @@ CASES = [
         {"id": "okta1", "displayName": "", "authProvider": "keycloak", "authConfig": {"issuer": "https://kc", "realm": "r1"}},
     ),
     (["tenant", "delete", "acme"], "POST", "/api/tenant/delete", {}, {"name": "acme"}),
+    (["tenant", "location", "list", "acme"], "POST", "/api/tenant/location/list", {}, {"tenant": "acme"}),
+    (
+        ["tenant", "location", "add", "acme", "/srv/qod/acme/in/"],
+        "POST",
+        "/api/tenant/location/add",
+        {},
+        {"tenant": "acme", "location": "/srv/qod/acme/in/"},
+    ),
+    (
+        ["tenant", "location", "remove", "acme", "0123abcd"],
+        "POST",
+        "/api/tenant/location/remove",
+        {},
+        {"tenant": "acme", "id": "0123abcd"},
+    ),
+    (["profile", "s3", "list"], "POST", "/api/profile/s3/list", {}, {}),
+    (["profile", "s3", "remove", "0123abcd"], "POST", "/api/profile/s3/remove", {}, {"id": "0123abcd"}),
+    (["user", "s3", "list", "u-1"], "POST", "/api/user/s3/list", {}, {"userId": "u-1"}),
+    (["user", "s3", "remove", "u-1", "0123abcd"], "POST", "/api/user/s3/remove", {}, {"userId": "u-1", "id": "0123abcd"}),
     (
         ["tenant", "set-disabled", "acme", "--disabled"],
         "POST",
@@ -43,6 +62,13 @@ CASES = [
         "/api/tenant/setAuth",
         {},
         {"name": "acme", "authProvider": "google", "authConfig": {"hd": "acme.com"}},
+    ),
+    (
+        ["tenant", "set-auth", "acme", "--auth-provider", "keycloak", "--auth-config", "issuerUrl=https://kc", "--clear-client-secret"],
+        "POST",
+        "/api/tenant/setAuth",
+        {},
+        {"name": "acme", "authProvider": "keycloak", "authConfig": {"issuerUrl": "https://kc"}, "clientSecret": ""},
     ),
     (["database", "list", "--tenant", "acme"], "GET", "/api/database/list", {"tenant": "acme"}, None),
     (
@@ -108,7 +134,6 @@ CASES = [
             "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
             "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
-            "lockdown": "inherit",
         },
     ),
     (
@@ -128,20 +153,6 @@ CASES = [
             "cohorts": [
                 {"placement": {"nodeSelector": {}, "tolerations": []}, "distribution": {"writeonly": 1, "readonly": 1, "dual": 0}},
             ],
-            "lockdown": "inherit",
-        },
-    ),
-    (
-        ["pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--size", "2", "--lockdown", "off"],
-        "POST",
-        "/api/pool/create",
-        {},
-        {
-            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
-            "roleDistribution": {"writeonly": 0, "readonly": 0, "dual": 0},
-            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
-            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
-            "lockdown": "off",
         },
     ),
     (
@@ -157,7 +168,7 @@ CASES = [
             "roleDistribution": {"writeonly": 0, "readonly": 0, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
             "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
-            "lockdown": "inherit", "minNodes": 1, "maxNodes": 4,
+            "minNodes": 1, "maxNodes": 4,
         },
     ),
     (
@@ -203,11 +214,6 @@ CASES = [
         ["pool", "set-resources", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--cpu", "2", "--memory", "4Gi"],
         "POST", "/api/pool/setResources", {},
         {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "cpu": "2", "memory": "4Gi"},
-    ),
-    (
-        ["pool", "set-lockdown", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--lockdown", "on"],
-        "POST", "/api/pool/setLockdown", {},
-        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "lockdown": "on"},
     ),
     (
         ["pool", "set-autoscale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--min-nodes", "1", "--max-nodes", "4"],
@@ -601,6 +607,10 @@ CASES = [
         "GET", "/api/profile/statements", {"limit": "10"}, None,
     ),
     (
+        ["profile", "pools"],
+        "GET", "/api/profile/pools", {}, None,
+    ),
+    (
         ["tenant", "set-acl", "acme", "--mode", "opa", "--opa-url", "http://opa:8181", "--opa-token", "tok"],
         "POST",
         "/api/tenant/setAcl",
@@ -665,3 +675,138 @@ def test_pool_create_cohort_malformed(runner):
     assert result.exit_code != 0
     assert "cohort must be three integers: writeonly,readonly,dual" in result.output
     assert "1,x,0" in result.output
+
+
+SET_AUTH = [
+    "tenant", "set-auth", "acme", "--auth-provider", "keycloak",
+    "--auth-config", "issuerUrl=https://kc", "--auth-config", "clientId=qod",
+]
+
+
+def _set_auth_route():
+    return respx.route(method="POST", url=f"{BASE}/api/tenant/setAuth").mock(
+        return_value=httpx.Response(200, json={"name": "acme", "clientSecretSet": True})
+    )
+
+
+@respx.mock
+def test_tenant_set_auth_sends_the_client_secret_read_from_stdin(runner):
+    route = _set_auth_route()
+    result = runner.invoke(app, ["--json"] + SET_AUTH + ["--client-secret-stdin"], input="kc-s3cr3t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content) == {
+        "name": "acme",
+        "authProvider": "keycloak",
+        "authConfig": {"issuerUrl": "https://kc", "clientId": "qod"},
+        "clientSecret": "kc-s3cr3t",
+    }
+    assert "kc-s3cr3t" not in result.output
+
+
+@respx.mock
+def test_tenant_set_auth_sends_the_client_secret_read_from_a_confirmed_prompt(runner):
+    route = _set_auth_route()
+    result = runner.invoke(
+        app, ["--json"] + SET_AUTH + ["--client-secret-prompt"], input="kc-s3cr3t\nkc-s3cr3t\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content)["clientSecret"] == "kc-s3cr3t"
+    assert "kc-s3cr3t" not in result.output
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--client-secret-stdin", "--client-secret-prompt"],
+        ["--client-secret-stdin", "--clear-client-secret"],
+        ["--client-secret-prompt", "--clear-client-secret"],
+    ],
+)
+@respx.mock
+def test_tenant_set_auth_refuses_more_than_one_client_secret_flag(runner, flags):
+    route = _set_auth_route()
+    result = runner.invoke(app, SET_AUTH + flags, input="kc-s3cr3t\nkc-s3cr3t\n")
+    assert result.exit_code != 0
+    assert "at most one of" in result.output
+    assert not route.called
+
+
+@respx.mock
+def test_tenant_set_auth_refuses_a_blank_client_secret(runner):
+    route = _set_auth_route()
+    result = runner.invoke(app, SET_AUTH + ["--client-secret-stdin"], input="   \n")
+    assert result.exit_code != 0
+    assert "blank" in result.output
+    assert not route.called
+
+S3_ADD = ["profile", "s3", "add", "s3://acme-etl/", "--access-key-id", "AKIAEXAMPLE"]
+
+
+def _s3_add_route():
+    return respx.route(method="POST", url=f"{BASE}/api/profile/s3/add").mock(
+        return_value=httpx.Response(200, json={"id": "0123abcd", "scope": "s3://acme-etl/", "secretSet": True})
+    )
+
+
+@respx.mock
+def test_profile_s3_add_reads_the_secret_from_stdin(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, ["--json"] + S3_ADD + ["--secret-stdin", "--endpoint", "http://127.0.0.1:9000"], input="s3-s3cr3t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content) == {
+        "scope": "s3://acme-etl/", "accessKeyId": "AKIAEXAMPLE", "secretAccessKey": "s3-s3cr3t", "endpoint": "http://127.0.0.1:9000",
+    }
+    assert "s3-s3cr3t" not in result.output
+
+
+@respx.mock
+def test_profile_s3_add_reads_the_secret_and_the_token_from_stdin_lines(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, ["--json"] + S3_ADD + ["--secret-stdin", "--session-token-stdin"], input="s3-s3cr3t\ns3-t0ken\n")
+    assert result.exit_code == 0, result.output
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["secretAccessKey"] == "s3-s3cr3t" and sent["sessionToken"] == "s3-t0ken"
+    assert "s3-t0ken" not in result.output
+
+
+@respx.mock
+def test_profile_s3_add_prompts_for_the_secret(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, ["--json"] + S3_ADD + ["--secret-prompt"], input="s3-s3cr3t\ns3-s3cr3t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content)["secretAccessKey"] == "s3-s3cr3t"
+
+
+@respx.mock
+def test_profile_s3_add_takes_no_secret_on_the_command_line(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, S3_ADD + ["--secret-access-key", "s3-s3cr3t"])
+    assert result.exit_code != 0
+    assert not route.called
+
+
+@respx.mock
+def test_profile_s3_add_needs_exactly_one_secret_source_and_no_blank(runner):
+    route = _s3_add_route()
+    none = runner.invoke(app, S3_ADD)
+    assert none.exit_code != 0 and "exactly one of" in none.output
+    both = runner.invoke(app, S3_ADD + ["--secret-stdin", "--secret-prompt"], input="x\nx\n")
+    assert both.exit_code != 0 and "exactly one of" in both.output
+    blank = runner.invoke(app, S3_ADD + ["--secret-stdin"], input="  \n")
+    assert blank.exit_code != 0 and "blank" in blank.output
+    assert not route.called
+
+
+@respx.mock
+def test_pool_lockdown_is_gone(runner):
+    # Phase D: every node enforces on every pool. The per-pool override's flag and command are gone,
+    # and neither reaches the manager.
+    create = respx.post(f"{BASE}/api/pool/create").mock(return_value=httpx.Response(200, json={}))
+    gone = respx.post(f"{BASE}/api/pool/setLockdown").mock(return_value=httpx.Response(200, json={}))
+    flag = runner.invoke(app, ["pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+                               "--size", "1", "--dual", "1", "--lockdown", "off"])
+    assert flag.exit_code == 2
+    cmd = runner.invoke(app, ["pool", "set-lockdown", "--tenant", "acme", "--db", "tpch1", "--pool",
+                              "bi", "--lockdown", "on"])
+    assert cmd.exit_code == 2
+    assert not create.called and not gone.called

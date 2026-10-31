@@ -1,5 +1,6 @@
 import AuthProviderSection from '../components/AuthProviderSection';
 import { AccessControlSection } from '../components/AccessControlSection';
+import { AuthorizedLocationsSection } from '../components/AuthorizedLocationsSection';
 import BranchPanel from '../components/BranchPanel';
 import DatabaseSection from '../components/DatabaseSection';
 import DuckLakeDbSection from '../components/DuckLakeDbSection';
@@ -69,7 +70,14 @@ export function BranchesPage() {
 
 export function AuthProviderPage() {
   const tenant = useScopedTenant();
-  return <><TenantHeader title="Auth Provider" /><AuthProviderSection tenantName={tenant} /></>;
+  // Keyed on the tenant: the editor holds a typed client secret, which must never survive a
+  // change of tenant and be saved into another one.
+  return (
+    <>
+      <TenantHeader title="Auth Provider" />
+      <AuthProviderSection key={tenant} tenantName={tenant} />
+    </>
+  );
 }
 
 export function AccessControlPage() {
@@ -84,6 +92,8 @@ export function AccessControlPage() {
         : error
           ? <div className="login-err">Error: {error}</div>
           : <div className="loading">Loading...</div>}
+      {/* Keyed on the tenant: a half-typed folder must never survive a change of tenant. */}
+      <AuthorizedLocationsSection key={tenant} tenant={tenant} />
     </>
   );
 }

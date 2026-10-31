@@ -27,15 +27,21 @@ final class FlightEdgeServer(
     // display-name space) AND to recover the id for the Basic auth chain
     // (which queries `qodstate_user.tenant`, which stores the id).
     resolveTenant: String => Option[Tenant],
-    // Post-authentication authorize callback. Runs once per handshake
-    // after the auth chain validated the credentials. It performs the
-    // user-scope and pool-access gates, computes the EffectiveSet
+    // Post-authentication authorize callback. Runs at the handshake, after
+    // the auth chain validated the credentials, and again on a session's
+    // first statement after its tenant's policy version moved. It performs
+    // the user-scope and pool-access gates, computes the EffectiveSet
     // (union-merging any JWT-claimed role / group names), and returns
-    // an AuthorizedHandshake. The result is pinned onto
-    // ConnectionContext so the per-statement ACL gate can read it
-    // without further joins. See EdgeHandshake for the argument contract;
-    // HandshakeDenial.Unavailable (OPA unreachable) surfaces as UNAVAILABLE.
+    // an AuthorizedHandshake. The session's grants are pinned onto
+    // ConnectionContext so each statement's session handle carries them
+    // without further joins until a grant changes. See EdgeHandshake for the
+    // argument contract; HandshakeDenial.Unavailable (OPA unreachable)
+    // surfaces as UNAVAILABLE.
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
+    // Each tenant's policy version and the replica's policy generation: a bound session's grants
+    // are resolved again through `authorize` once either moves (SessionGrants), so a revoke reaches
+    // an open connection on its next statement. Required: see EdgeHandshake.
+    versions: ai.starlake.quack.edge.authz.PolicyClock,
     // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
     // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
     // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
@@ -49,23 +55,34 @@ final class FlightEdgeServer(
 
   /** The transport-agnostic handshake shared with the Quack front door. */
   private val handshake =
-    new EdgeHandshake(authService, lookupPool, resolveTenant, authorize, edge = "flightsql")
+    new EdgeHandshake(
+      authService,
+      lookupPool,
+      resolveTenant,
+      authorize,
+      versions,
+      edge = "flightsql"
+    )
 
   /** Sweeps expired [[ConnectionContext]] entries so a departed client's session state (the context
-    * entry and the router's session row) does not linger until the peer id happens to be presented
-    * again, which for a gone client is never.
+    * entry, the router's session row and its prepared handles) does not linger until the peer id
+    * happens to be presented again, which for a gone client is never; then drops prepared handles
+    * left idle for the session TTL.
     */
   private var sweeper: ScheduledExecutorService = null.asInstanceOf[ScheduledExecutorService]
 
   def start(): Unit =
-    val producer = new FlightProducerImpl(router)
-    ConnectionContext.onEvict(router.sessions.close)
+    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = cfg.sessionTtlSec)
+    ConnectionContext.onEvict(FlightEdgeServer.sessionEvicted(router, producer))
     sweeper = Executors.newSingleThreadScheduledExecutor { r =>
       val t = new Thread(r, "flight-session-sweeper"); t.setDaemon(true); t
     }
     sweeper.scheduleAtFixedRate(
       () =>
-        try ConnectionContext.evictExpired()
+        try
+          ConnectionContext.evictExpired()
+          producer.expireIdlePrepared()
+          ()
         catch case t: Throwable => logger.warn(s"Flight session sweep failed: ${t.getMessage}"),
       FlightEdgeServer.SweepSec,
       FlightEdgeServer.SweepSec,
@@ -85,9 +102,11 @@ final class FlightEdgeServer(
 
     server = builder.build()
     server.start()
+    // A booted manager always has a provider (BootPreflight.checkEdgeAuthAvailable); with none the
+    // handshake refuses every client.
     val authMode =
       if authService.hasProviders then "providers configured"
-      else "OPEN (trust-the-client; configure auth.* in application.conf for prod)"
+      else "none configured, every connection refused"
     logger.info(
       s"FlightSQL edge listening on ${cfg.host}:${cfg.port} (TLS=${cfg.tlsEnabled}, auth: $authMode)"
     )
@@ -99,9 +118,8 @@ final class FlightEdgeServer(
     * every subsequent RPC, and we look the peerId up in the ConnectionContext to recover (tenant,
     * pool, user).
     *
-    * Credential validation lives in [[EdgeHandshake]]: when providers are configured every fresh
-    * handshake is validated against the chain; otherwise the manager falls back to the v1 "trust
-    * the client" path (username from Basic header, no credential check).
+    * Credential validation lives in [[EdgeHandshake]]: every fresh handshake is validated against
+    * the configured chain, and with no provider configured every handshake is refused.
     */
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
@@ -116,16 +134,8 @@ final class FlightEdgeServer(
         // (`Basic <base64>` or `Bearer <token>`).
         val authHeader = Option(headers.get("Authorization"))
           .orElse(Option(headers.get("x-qod-authorization")))
-        val bearer = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
-        val basic  = authHeader
-          .filter(_.startsWith("Basic "))
-          .map(_.stripPrefix("Basic "))
-          .map(b64 => new String(java.util.Base64.getDecoder.decode(b64)))
-        val basicPair = basic.flatMap { creds =>
-          creds.split(":", 2) match
-            case Array(u, p) => Some((u, p))
-            case _           => None
-        }
+        val bearer        = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
+        val basicPair     = FlightEdgeServer.basicPairOf(authHeader)
         val basicUsername = basicPair.map(_._1)
         // Diagnostic: per-RPC header summary at DEBUG. Enables operators to
         // see exactly what credentials each Flight call carries when a driver
@@ -241,7 +251,7 @@ final class FlightEdgeServer(
                     key = targetKey,
                     connectionId = connId,
                     user = bound.user,
-                    effectiveSet = Some(bound.effectiveSet),
+                    grants = Some(bound.grants),
                     ttlSec = cfg.sessionTtlSec
                   )
                   authResult(peerId)
@@ -264,5 +274,29 @@ final class FlightEdgeServer(
       server = null.asInstanceOf[FlightServer]
 
 object FlightEdgeServer:
+
+  /** What the edge installs as [[ConnectionContext]]'s evict hook: a dropped session takes its
+    * router session row and its prepared handles with it.
+    */
+  def sessionEvicted(router: FlightSqlRouter, producer: FlightProducerImpl): String => Unit =
+    connId =>
+      try router.sessions.close(connId)
+      finally producer.dropSession(connId)
+
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
+
+  /** The `(user, password)` of a `Basic <base64>` authorization value, or None when it is not one.
+    * The value comes from an unauthenticated client: one that is not base64 gives no pair (the
+    * request then carries no basic credential), never an exception.
+    */
+  def basicPairOf(authHeader: Option[String]): Option[(String, String)] =
+    authHeader
+      .filter(_.startsWith("Basic "))
+      .map(_.stripPrefix("Basic "))
+      .flatMap(b64 => scala.util.Try(new String(java.util.Base64.getDecoder.decode(b64))).toOption)
+      .flatMap { creds =>
+        creds.split(":", 2) match
+          case Array(u, p) => Some((u, p))
+          case _           => None
+      }

@@ -1,15 +1,20 @@
 package ai.starlake.quack.boot
 
-import java.nio.file.{Files, Path}
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
-import ai.starlake.quack.ManagerConfig
-import ai.starlake.quack.edge.auth.AuthQueryPreconditions
-import ai.starlake.quack.edge.config.DatabaseAuthConfig
+import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig, NodeAuthzConfig, RuntimeType}
+import ai.starlake.quack.edge.auth.{AuthQueryPreconditions, AuthenticationService}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, DatabaseAuthConfig}
 import ai.starlake.quack.model.{FederatedAlias, Names}
-import ai.starlake.quack.ondemand.api.SessionTokenStore
-import ai.starlake.quack.ondemand.state.{EmailFormat, FederatedSourceOps, UserStore}
+import ai.starlake.quack.ondemand.state.{
+  EmailFormat,
+  FederatedSourceOps,
+  SessionSecretStore,
+  UserStore
+}
 import com.typesafe.scalalogging.LazyLogging
+
+import javax.sql.DataSource
 
 /** Boot-time gates and seeding that must run before the manager wires its components. Extracted
   * from Main.bootManager; every check keeps its original fail-fast behavior (sys.error aborts the
@@ -17,58 +22,166 @@ import com.typesafe.scalalogging.LazyLogging
   */
 object BootPreflight extends LazyLogging:
 
-  /** Resolve the two boot secrets an operator may leave unset: the session JWT signing secret and
-    * the static admin API key. Outside HA, an unset (or empty) value is replaced with a fresh
-    * random one for this boot, and the generated values are printed to stdout -- deliberately NOT
-    * through the logger, whose default ERROR root level would swallow an info line -- so a
-    * first-run operator cannot miss them. Under HA the config is returned unchanged: a per-replica
-    * random secret cannot verify sessions minted by other replicas (HaPreconditions refuses the
-    * empty secret), and a per-replica API key behind one load balancer would authenticate on only
-    * the replica that minted it.
-    */
-  def withGeneratedBootSecrets(cfg: ManagerConfig): ManagerConfig =
-    if cfg.ha.enabled then cfg
-    else
-      val genSecret = Option.when(cfg.auth.management.sessionJwtSecret.trim.isEmpty)(
-        SessionTokenStore.randomSecret()
-      )
-      val genKey = Option.when(cfg.apiKey.forall(_.trim.isEmpty))(randomApiKey())
-      if genSecret.isEmpty && genKey.isEmpty then cfg
-      else
-        val lines =
-          genSecret.map(s => s"  QOD_SESSION_JWT_SECRET=$s").toList ++
-            genKey.map(k => s"  QOD_API_KEY=$k").toList
-        println(
-          s"""
-             |================================================================================
-             |  GENERATED BOOT SECRETS
-             |
-             |  The following were not configured, so fresh random values were minted for
-             |  this boot only:
-             |
-             |${lines.mkString("\n")}
-             |
-             |  They change on every restart: UI/CLI sessions and API-key callers die with
-             |  the process. Pin both env vars to stable values for production.
-             |================================================================================
-             |""".stripMargin
-        )
-        cfg.copy(
-          apiKey = genKey.orElse(cfg.apiKey),
-          auth = cfg.auth.copy(
-            management = cfg.auth.management.copy(
-              sessionJwtSecret = genSecret.getOrElse(cfg.auth.management.sessionJwtSecret)
-            )
-          )
-        )
+  /** The refusal for a removed static API key, verbatim in the boot error. */
+  val RemovedApiKeyMessage: String =
+    "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static " +
+      "API key. Use a personal access token (qod auth pat create) or a qod login session, and " +
+      "unset QOD_API_KEY."
 
-  /** 32 random bytes, url-safe base64 without padding, `qod_`-prefixed so a leaked value is
-    * recognizable in config dumps the way `qod_pat_` tokens are.
+  /** Pure gate: the static API key was removed. Refuses when the environment holds a non-empty
+    * (after trimming) `QOD_API_KEY`, or when the loaded configuration holds a non-empty
+    * `quack-on-demand.apiKey` (an operator's own config file, or a `-D` system property). An empty
+    * value passes: older Compose files render `API_KEY=` as one. Both are read directly because,
+    * with the field gone, pureconfig would ignore the key silently and the manager would boot
+    * without the credential its operator relies on. `Main.bootManager` runs it first, before HA
+    * validation and before any I/O.
     */
-  private def randomApiKey(): String =
-    val bytes = new Array[Byte](32)
-    new java.security.SecureRandom().nextBytes(bytes)
-    "qod_" + java.util.Base64.getUrlEncoder.withoutPadding.encodeToString(bytes)
+  def checkRemovedApiKey(
+      env: String => Option[String],
+      raw: com.typesafe.config.Config
+  ): Either[String, Unit] =
+    val path     = "quack-on-demand.apiKey"
+    val inEnv    = env("QOD_API_KEY").exists(_.trim.nonEmpty)
+    val inConfig = raw.hasPath(path) && raw.getValue(path).unwrapped().toString.trim.nonEmpty
+    if inEnv || inConfig then Left(RemovedApiKeyMessage) else Right(())
+
+  /** The refusal for the removed SQL ACL switch, verbatim in the boot error. */
+  val RemovedAclEnabledMessage: String =
+    "QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed: qod-node now checks every " +
+      "statement against the grants (or the tenant's OPA) always, and nothing switches that " +
+      "off. Unset QOD_ACL_ENABLED."
+
+  /** The refusal for the removed metadata filter switch, verbatim in the boot error. */
+  val RemovedAclFilteredMetadataMessage: String =
+    "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
+      "user's catalog listings are narrowed to the objects the user is granted. To give a " +
+      "principal unfiltered listings, grant it RO on information_schema. Unset " +
+      "QOD_ACL_FILTERED_METADATA."
+
+  /** The refusal for the removed parser dialect knob, verbatim in the boot error. */
+  val RemovedAclDialectMessage: String =
+    "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
+      "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
+
+  /** The refusal for the removed node lockdown switch, verbatim in the boot error. */
+  val RemovedNodeLockdownMessage: String =
+    "QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed: qod-node now refuses ATTACH, " +
+      "INSTALL, LOAD, protected settings and unauthorized files to non-superusers on every pool, " +
+      "always, and the extension settings follow quack-on-demand.nodeExtensions. Unset " +
+      "QOD_NODE_LOCKDOWN."
+
+  /** A removed enforcement switch: its environment variable, its configuration path, the refusal.
+    */
+  private final case class RemovedSwitch(envVar: String, path: String, message: String)
+
+  private val RemovedSwitches: List[RemovedSwitch] = List(
+    RemovedSwitch("QOD_ACL_ENABLED", "quack-flightsql.acl.enabled", RemovedAclEnabledMessage),
+    RemovedSwitch(
+      "QOD_ACL_FILTERED_METADATA",
+      "quack-flightsql.acl.filteredMetadata",
+      RemovedAclFilteredMetadataMessage
+    ),
+    RemovedSwitch("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", RemovedAclDialectMessage),
+    RemovedSwitch("QOD_NODE_LOCKDOWN", "quack-flightsql.nodeLockdown", RemovedNodeLockdownMessage)
+  )
+
+  /** Pure gate (Phase D decisions 28 and 31): the switches the node made obsolete. Refuses when the
+    * environment holds one's variable at all, whatever its value, the empty string included, or
+    * when the loaded configuration holds its path (an operator's own config file, or a `-D` system
+    * property): with the `quack-flightsql.acl` and `quack-flightsql.nodeLockdown` blocks gone,
+    * pureconfig would ignore either silently, and an operator who turned enforcement or the listing
+    * filter off, or lockdown on, would believe it still so. The first switch found wins.
+    * `Main.bootManager` runs it right after [[checkRemovedApiKey]], before any I/O.
+    */
+  def checkRemovedSwitches(
+      env: String => Option[String],
+      raw: com.typesafe.config.Config
+  ): Either[String, Unit] =
+    RemovedSwitches
+      .find(s => env(s.envVar).isDefined || raw.hasPathOrNull(s.path))
+      .fold[Either[String, Unit]](Right(()))(s => Left(s.message))
+
+  /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
+  val NoEdgeAuthMessage: String =
+    "the FlightSQL edge and the Quack front door have no authenticator: QOD_AUTH_DB_ENABLED=false " +
+      "and no other quack-flightsql.auth provider is configured, so no FlightSQL or Quack client " +
+      "could ever connect. " +
+      "System-scope OIDC (QOD_MGMT_OIDC_*) signs in to the admin UI and REST only, never to " +
+      "FlightSQL. Set QOD_AUTH_DB_ENABLED=true, or a Keycloak or Azure password backend " +
+      "(QOD_AUTH_KEYCLOAK_ENABLED=true or QOD_AUTH_AZURE_ENABLED=true, with their settings), or " +
+      "a bearer provider: an external JWT issuer (JWT_SECRET_KEY or JWT_PUBLIC_KEY_PATH), " +
+      "QOD_AUTH_GOOGLE_ENABLED=true or QOD_AUTH_AWS_ENABLED=true."
+
+  /** Pure gate: the FlightSQL edge needs an authenticator. With an empty `quack-flightsql.auth`
+    * chain (no basic and no bearer provider) the edge handshake refuses every client, so no
+    * FlightSQL or Quack client could connect; system-scope OIDC adds no edge provider, so it does
+    * not count. The FlightSQL edge has no enable switch and always starts, so the check holds
+    * whether or not the Quack front door (`QOD_QUACK_ENABLED`) runs too. It reads the
+    * configuration, not a built [[AuthenticationService]], so `Main.bootManager` runs it right
+    * after the removed-key refusal, at the top of `bootManager`, before it opens any socket and
+    * before HA validation.
+    */
+  def checkEdgeAuthAvailable(auth: AuthenticationConfig): Either[String, Unit] =
+    if AuthenticationService.configuresProvider(auth) then Right(()) else Left(NoEdgeAuthMessage)
+
+  /** Pure gate: something must be able to create a session. Refuses when the authentication service
+    * has no password provider (its basic chain is empty, as with `QOD_AUTH_DB_ENABLED=false` and no
+    * Keycloak or Azure password backend) AND system-scope OIDC sign-in is not served: nothing could
+    * create a session, a personal access token is minted with one, and `/api` would be unreachable.
+    * `Main.bootManager` runs it right after the edge check, from the configuration alone
+    * (`AuthenticationService.configuresPasswordProvider`). System-scope OIDC counts exactly as
+    * `ManagementAuthWiring` serves it: `identitySource=oidc` with the issuer URL and the client id
+    * set (under `db` the system scope gets no OIDC client, whatever `QOD_MGMT_OIDC_*` hold). Tenant
+    * OIDC does not count: it is configured through `/api` and never yields a superuser.
+    */
+  def checkLoginAvailable(
+      hasPasswordProvider: Boolean,
+      mgmt: ManagementAuthConfig
+  ): Either[String, Unit] =
+    val systemOidc =
+      mgmt.identitySource.trim.toLowerCase(Locale.ROOT) == "oidc" &&
+        mgmt.oidc.issuerUrl.trim.nonEmpty && mgmt.oidc.clientId.trim.nonEmpty
+    if !hasPasswordProvider && !systemOidc then
+      Left(
+        "nothing can sign in to this manager: the authentication service has no password " +
+          "provider (QOD_AUTH_DB_ENABLED=false and no Keycloak or Azure password backend) and " +
+          "system-scope OIDC sign-in is not configured (it needs QOD_MGMT_IDENTITY_SOURCE=oidc " +
+          "with QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID set). Without a session no " +
+          "personal access token can be minted, so /api would be unreachable. Set " +
+          "QOD_AUTH_DB_ENABLED=true, or set QOD_MGMT_IDENTITY_SOURCE=oidc with " +
+          "QOD_MGMT_OIDC_ISSUER_URL, QOD_MGMT_OIDC_CLIENT_ID and QOD_MGMT_OIDC_CLIENT_SECRET."
+      )
+    else Right(())
+
+  /** Resolve the session JWT signing secret ([[SessionSecretStore]]): a configured
+    * `QOD_SESSION_JWT_SECRET` wins and `controlPlane` is not touched; an unset (or blank) one is
+    * the control plane's, created by the first boot, so sessions survive a restart and every HA
+    * replica signs with the same value. `Main.bootManager` runs it right after the Liquibase apply
+    * (the table must exist) and before anything reads the secret. Prints one line naming the
+    * source, never the value, deliberately NOT through the logger, whose default ERROR root level
+    * would swallow an info line.
+    */
+  def withSessionSecret(cfg: ManagerConfig, controlPlane: => DataSource): ManagerConfig =
+    val resolved =
+      SessionSecretStore.resolve(cfg.auth.management.sessionJwtSecret, controlPlane)
+    println(sessionSecretLine(resolved.source))
+    if resolved.source == SessionSecretStore.Source.Configured then cfg
+    else
+      cfg.copy(
+        auth = cfg.auth.copy(
+          management = cfg.auth.management.copy(sessionJwtSecret = resolved.secret)
+        )
+      )
+
+  /** The boot line naming where the session secret came from. */
+  def sessionSecretLine(source: SessionSecretStore.Source): String = source match
+    case SessionSecretStore.Source.Configured =>
+      "session secret: from QOD_SESSION_JWT_SECRET (quack-on-demand.auth.management.sessionJwtSecret)"
+    case SessionSecretStore.Source.Created =>
+      "session secret: generated and stored in the control plane (set QOD_SESSION_JWT_SECRET " +
+        "to pin one)"
+    case SessionSecretStore.Source.Stored =>
+      "session secret: stored in the control plane (set QOD_SESSION_JWT_SECRET to pin one)"
 
   /** Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery must each project
     * (password_hash, kind, enabled, must_change_password) -- exactly the shape
@@ -184,6 +297,168 @@ object BootPreflight extends LazyLogging:
           "QOD_SMTP_PASSWORD as needed) or set QOD_AUTH_LOCKOUT_ENABLED=false."
       )
     else Right(())
+
+  val InternalUrlFormatMessage: String =
+    "QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl) is not a plain http:// URL with " +
+      "a host and no user info, query or fragment: nodes call this replica's decision endpoint " +
+      "on it, and qod-node speaks plain HTTP only"
+
+  /** The format refusal when QOD_INTERNAL_URL is unset and the URL came from QOD_POD_IP. */
+  val InternalUrlPodIpFormatMessage: String =
+    "QOD_POD_IP (quack-on-demand.nodeAuthz.podIp) does not make a plain http:// URL with a host: " +
+      "with QOD_INTERNAL_URL unset, nodes call this replica's decision endpoint on " +
+      "http://<pod IP>:<manager port>. Set QOD_POD_IP to this pod's IP (the downward API's " +
+      "status.podIP, as the Helm chart does), or set QOD_INTERNAL_URL"
+
+  /** The format refusal when neither is set and the URL came from the bind address. */
+  val InternalUrlBindHostFormatMessage: String =
+    "QOD_ON_DEMAND_HOST (quack-on-demand.host) does not make a plain http:// URL with a host: " +
+      "with QOD_INTERNAL_URL and QOD_POD_IP unset, nodes call this replica's decision endpoint " +
+      "on http://<bind address>:<manager port>. Set QOD_INTERNAL_URL"
+
+  def internalUrlKubernetesMessage(url: String): String =
+    s"the node decide URL is $url, a loopback address no node pod can reach on the kubernetes " +
+      "runtime: leave QOD_INTERNAL_URL unset and set QOD_POD_IP from the downward API (the Helm " +
+      "chart does), or set QOD_INTERNAL_URL to this replica's own pod address"
+
+  val InternalUrlFleetMessage: String =
+    "fleet mode requires QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl): this " +
+      "replica's own plain http:// address on the private network the fleet servers share, one " +
+      "per replica (never a load balancer or an address several replicas share, which would " +
+      "send a node's verdict calls to a replica that did not mint its handle); every node calls " +
+      "it for its statements' verdicts"
+
+  /** The boot line naming the URL nodes call (never a secret: user info and queries are refused).
+    */
+  def decideUrlLine(url: String): String = s"node decide URL: $url"
+
+  /** Pure gate on the decide URL (`NodeAuthzConfig.replicaUrl`): every node calls it for its
+    * statements' verdicts, so a boot whose nodes could not reach it would answer every user
+    * statement "authorization unavailable". In fleet mode set explicitly (a loopback one is fine on
+    * a single-host fleet); on every runtime a URL qod-node accepts ([[nodeUrlHost]]); on Kubernetes
+    * never a loopback or unspecified host (the default included: the chart sets QOD_POD_IP). Right
+    * carries the URL; a format refusal never echoes it, since it could carry credentials, and names
+    * the setting it came from. Reads configuration only: no name is ever looked up.
+    */
+  def checkInternalUrl(
+      runtimeType: String,
+      nodeAuthz: NodeAuthzConfig,
+      bindHost: String,
+      restPort: Int
+  ): Either[String, String] =
+    val url = nodeAuthz.replicaUrl(bindHost, restPort)
+    if RuntimeType.isFleet(runtimeType) && nodeAuthz.internalUrl.trim.isEmpty then
+      Left(InternalUrlFleetMessage)
+    else
+      nodeUrlHost(url) match
+        case None =>
+          Left(
+            if nodeAuthz.internalUrl.trim.nonEmpty then InternalUrlFormatMessage
+            else if nodeAuthz.podIp.trim.nonEmpty then InternalUrlPodIpFormatMessage
+            else InternalUrlBindHostFormatMessage
+          )
+        case Some(host) if RuntimeType.isKubernetes(runtimeType) && unreachableHost(host) =>
+          Left(internalUrlKubernetesMessage(url))
+        case Some(_) => Right(url)
+
+  private val HttpScheme = "http://"
+
+  /** The host of `url` when qod-node's URL parser (`ParseHttpUrl`, native/qod-node/src/
+    * http_post.cpp) accepts it and the host can name a machine: `http://` in lower case, an
+    * authority with no user info, a port of 1 to 5 digits in 1-65535 when one is given, no query or
+    * fragment, no space or control character in the path. The host is a bracketed IPv6 literal, or
+    * a name or IPv4 address of letters, digits, `.`, `-` and `_` (a Compose service such as
+    * `qod_manager` included).
+    */
+  private[boot] def nodeUrlHost(url: String): Option[String] =
+    Option.when(url.startsWith(HttpScheme))(url.substring(HttpScheme.length)).flatMap { rest =>
+      val (authority, path) = rest.span(_ != '/')
+      val pathOk            = path.forall(c => c > ' ' && c != '\u007f' && c != '?' && c != '#')
+      if authority.isEmpty || authority.contains('@') || !pathOk then None
+      else
+        splitAuthority(authority)
+          .filter((host, port) => validHost(host) && port.forall(validPort))
+          .map(_._1)
+    }
+
+  /** host (brackets kept for IPv6) and the port text after its colon, as qod-node splits them. */
+  private def splitAuthority(authority: String): Option[(String, Option[String])] =
+    if authority.startsWith("[") then
+      val close = authority.indexOf(']')
+      if close < 0 then None
+      else
+        val after = authority.substring(close + 1)
+        if after.isEmpty then Some((authority.substring(0, close + 1), None))
+        else if after.head == ':' then Some((authority.substring(0, close + 1), Some(after.tail)))
+        else None
+    else
+      val colon = authority.lastIndexOf(':')
+      if colon < 0 then Some((authority, None))
+      else Some((authority.substring(0, colon), Some(authority.substring(colon + 1))))
+
+  private def asciiDigit(c: Char): Boolean = c >= '0' && c <= '9'
+
+  /** qod-node's rule: digits only, at most 5 of them, 1-65535 (`08080` is 8080, `020900` too long).
+    */
+  private def validPort(port: String): Boolean =
+    port.nonEmpty && port.length <= 5 && port.forall(asciiDigit) &&
+      port.toInt >= 1 && port.toInt <= 65535
+
+  private def validHost(host: String): Boolean =
+    if host.startsWith("[") then ipv6Literal(host).isDefined
+    else
+      host.nonEmpty && host.forall(c =>
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || asciiDigit(c) || c == '.' || c == '-' ||
+          c == '_'
+      )
+
+  /** A bracketed IPv6 literal's address. `InetAddress` takes a bracketed string as a literal only,
+    * so it never looks a name up: anything else throws.
+    */
+  private def ipv6Literal(bracketed: String): Option[java.net.InetAddress] =
+    if !bracketed.contains(':') then None
+    else
+      try Some(java.net.InetAddress.getByName(bracketed))
+      catch case _: java.net.UnknownHostException => None
+
+  /** A host no other machine reaches: a `localhost` name, or a loopback or unspecified address in
+    * any form qod-node's resolver (getaddrinfo, with inet_aton's IPv4 forms) reads as one:
+    * `127.0.0.1`, `127.1`, `2130706433`, `0x7f.1`, `0177.0.0.1`, `0`, `[::1]`, `[::]`.
+    */
+  private def unreachableHost(host: String): Boolean =
+    if host.startsWith("[") then
+      ipv6Literal(host).forall(a => a.isLoopbackAddress || a.isAnyLocalAddress)
+    else
+      val h = host.stripSuffix(".").toLowerCase(Locale.ROOT)
+      h == "localhost" || h.endsWith(".localhost") ||
+      inetAton(h).exists(a => (a >>> 24) == 127L || a == 0L)
+
+  /** inet_aton's reading of an IPv4 address: one to four parts, each decimal, octal (leading `0`)
+    * or hex (`0x`); the last part fills the bits the others leave. None when `host` is not one.
+    */
+  private[boot] def inetAton(host: String): Option[Long] =
+    val parts = host.split("\\.", -1).toList
+    if parts.length > 4 then None
+    else
+      val numbers = parts.map(atonPart)
+      if numbers.exists(_.isEmpty) then None
+      else
+        val ns       = numbers.flatten
+        val lastBits = 8 * (5 - ns.length)
+        if ns.init.exists(_ > 255) || ns.last >= (1L << lastBits) then None
+        else Some((ns.init.foldLeft(0L)((acc, n) => (acc << 8) | n) << lastBits) | ns.last)
+
+  private def atonPart(part: String): Option[Long] =
+    val lower           = part.toLowerCase(Locale.ROOT)
+    val (digits, radix) =
+      if lower.startsWith("0x") then (lower.drop(2), 16)
+      else if lower.length > 1 && lower.startsWith("0") then (lower.drop(1), 8)
+      else (lower, 10)
+    val legal = (c: Char) => Character.digit(c, radix) >= 0 && c.isLetterOrDigit && c < 128
+    if part.isEmpty || !digits.forall(legal) then None
+    else
+      val value = if digits.isEmpty then BigInt(0) else BigInt(digits, radix)
+      Option.when(value <= BigInt(0xffffffffL))(value.toLong)
 
   /** Bootstrap admin users at startup so the DB auth backend has at least one credential. Seeds
     * each name in QOD_ADMIN_USERNAME (comma-separated) ONLY when its superuser row is missing: an
@@ -306,46 +581,3 @@ object BootPreflight extends LazyLogging:
             "since DuckDB treats catalog names case-insensitively."
       logger.error(s"tenant-db '$tenantDbId': federated source alias '$alias' $detail")
     }
-
-  /** True when a `duckdb` binary is usable on the manager host: `DUCKDB_BIN` naming an executable
-    * file, or `duckdb` resolving on `PATH`. Backs `QOD_FLEET_EPHEMERAL=local`, which runs
-    * maintenance and branch-merge nodes through the local backend instead of claiming a fleet
-    * server for them.
-    *
-    * Mirrors `scripts/spawn-quack-node.sh`'s `DUCKDB="${DUCKDB_BIN:-duckdb}"; command -v
-    * "$DUCKDB"`: a blank `DUCKDB_BIN` (unset, or set to only whitespace) is treated the same as
-    * unset, and a `DUCKDB_BIN` value with no path separator is resolved on `PATH` like a bare
-    * command name rather than relative to this JVM's working directory -- only a value that already
-    * contains a separator (an absolute or relative path) is checked directly. Takes `env` so tests
-    * can supply a fake `DUCKDB_BIN` / `PATH` instead of the real process environment; the zero-arg
-    * call at every production call site defaults to `sys.env`.
-    */
-  def duckdbOnHost(env: Map[String, String] = sys.env): Boolean =
-    val exeName =
-      if sys.props.getOrElse("os.name", "").toLowerCase(Locale.ROOT).contains("win") then
-        "duckdb.exe"
-      else "duckdb"
-    env.get("DUCKDB_BIN").map(_.trim).filter(_.nonEmpty) match
-      case Some(bin) if bin.contains('/') || bin.contains(java.io.File.separatorChar) =>
-        isExecutableSafe(bin)
-      case Some(bin) => onPath(bin, env)
-      case None      => onPath(exeName, env)
-
-  private def onPath(name: String, env: Map[String, String]): Boolean =
-    env
-      .get("PATH")
-      .toList
-      .flatMap(_.split(java.io.File.pathSeparatorChar))
-      .exists(dir => isExecutableSafe(dir, name))
-
-  /** `Files.isExecutable` guarded against a malformed path (e.g. a stray `PATH` entry, or an
-    * operator typo in `DUCKDB_BIN`): `Path.of` throws `InvalidPathException` rather than returning
-    * false, and one bad entry must not abort the whole lookup.
-    */
-  private def isExecutableSafe(path: String): Boolean =
-    try Files.isExecutable(Path.of(path))
-    catch case _: java.nio.file.InvalidPathException => false
-
-  private def isExecutableSafe(dir: String, name: String): Boolean =
-    try Files.isExecutable(Path.of(dir, name))
-    catch case _: java.nio.file.InvalidPathException => false

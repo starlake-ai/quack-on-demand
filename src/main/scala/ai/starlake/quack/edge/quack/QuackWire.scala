@@ -316,20 +316,33 @@ object QuackWire:
     * bytes verbatim, so the manager only needs the text for its own logs and history.
     */
   def decodeErrorMessage(bytes: Array[Byte]): Either[DecodeError, String] =
+    decodeError(bytes).map(_._2)
+
+  /** An ERROR_RESPONSE as DuckDB words the error (`ErrorData::Message`): `<type> Error: <message>`,
+    * the exception type (field 2) before the message (field 1), or the message alone when the
+    * response carries no type. The text the node's other transport answers with, so the router
+    * reads a node's refusal the same way from both (`FlightSqlRouter.isNodeRefusal`).
+    */
+  def decodeErrorText(bytes: Array[Byte]): Either[DecodeError, String] =
+    decodeError(bytes).map((tpe, msg) => if tpe.isEmpty then msg else s"$tpe Error: $msg")
+
+  /** The exception type (field 2, empty when absent) and message (field 1) of an ERROR_RESPONSE. */
+  private def decodeError(bytes: Array[Byte]): Either[DecodeError, (String, String)] =
     frame(bytes).flatMap { f =>
       attempt("ERROR_RESPONSE") {
         val r    = bodyReader(f)
         var msg  = ""
+        var tpe  = ""
         var done = false
         while !done do
           r.u16() match
             case Terminator => done = true
             case 1          => msg = r.string()
-            case 2          => r.string()
+            case 2          => tpe = r.string()
             case 3          => r.skipStringMap()
             case 4          => r.bool()
             case other      => throw DecodeError(s"unknown field $other in ERROR_RESPONSE")
-        msg
+        (tpe, msg)
       }
     }
 

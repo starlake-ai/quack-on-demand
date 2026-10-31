@@ -7,10 +7,11 @@ import org.scalatest.matchers.should.Matchers
 /** Regression tests for the ACL parser fail-open cluster (security-audit-2026-07-02, finding
   * #3/#4).
   *
-  * Each case is a statement that USED to slip past the validator by yielding an empty (or
-  * incomplete) access set. The parser must now either extract the smuggled table reference or flag
-  * the construct as `unsupported` so [[ai.starlake.quack.edge.sql.PostgresAclValidator]] fails
-  * closed.
+  * Each case is a statement that USED to slip past the gateway's validator (deleted with spec
+  * decision 29) by yielding an empty (or incomplete) access set. The parser must still either
+  * extract the smuggled table reference or flag the construct as `unsupported`, because its
+  * remaining readers (the protected-write guard, `RewriteScope`, the metadata filter) fail closed
+  * on it.
   */
 class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
 
@@ -430,7 +431,7 @@ class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
     )
   }
 
-  // QOD_ACL_DIALECT=generic maps names through the ANSI mapper: the guard must hold there too, or
+  // The generic dialect maps names through the ANSI mapper: the guard must hold there too, or
   // a four-part name qualifies as some three-part ref the grants may cover.
   private val genericConfig = Config.forGeneric("db", "main")
 

@@ -4,12 +4,9 @@ package ai.starlake.sql
   * characters, `--` line comments and (nested) `/* ... */` block comments -- so none of it can hide
   * the statement's real first token from a keyword-based check.
   *
-  * Extracted from `ai.starlake.quack.edge.sql.LockdownScreen`, which lives under `quack.edge.sql`
-  * and originally kept this scanner `private[sql]` for `CatalogWriteScreen`'s reuse. Moved here, to
-  * the shared `ai.starlake.sql` package that already hosts `SqlCommentStripper`, so
-  * `ai.starlake.quack.route.StatementClassifier` -- a different package tree entirely -- can reuse
-  * the exact same scanner instead of growing a sibling hand-rolled one that would inevitably drift
-  * from it. `LockdownScreen` and `CatalogWriteScreen` now call this object directly.
+  * Lives in the shared `ai.starlake.sql` package beside `SqlCommentStripper` so
+  * `ai.starlake.quack.route.StatementClassifier` and the gateway's statement splitter reuse the
+  * exact same scanner instead of growing sibling hand-rolled ones that would drift from it.
   */
 object SqlTrivia:
 
@@ -84,11 +81,11 @@ object SqlTrivia:
   /** The first token of `sql` as the ENGINE sees it: `--`/`/* */` comments and leading trivia
     * removed, remaining (interior) trivia normalized to ASCII spaces, then read up to the first
     * remaining whitespace character. Every first-token decision in the manager -- the router's
-    * classifier, the two write-screens, the prepare-strategy chooser -- must go through this one
-    * primitive, so the manager and DuckDB can never again disagree about where a statement's verb
-    * ends: that disagreement, reproduced independently at each hand-rolled reader, is the exact
-    * defect this arc closed three times over (BOM+ZWSP by name, then U+2060, then the whole `Cf`
-    * category) and left open a fourth and fifth time in two readers this normalization never
+    * classifier, the protected-write guard, the prepare-strategy chooser -- must go through this
+    * one primitive, so the manager and DuckDB can never again disagree about where a statement's
+    * verb ends: that disagreement, reproduced independently at each hand-rolled reader, is the
+    * exact defect this arc closed three times over (BOM+ZWSP by name, then U+2060, then the whole
+    * `Cf` category) and left open a fourth and fifth time in two readers this normalization never
     * reached (`FlightSqlRouter.stampPrelude`'s audit verb, `PrepareStrategy.choose`'s own reader).
     *
     * Deliberately minimal: it does NOT drop a leading `(`, does NOT stop at `;`, and does NOT

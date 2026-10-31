@@ -58,21 +58,18 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
     )
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = Some(Key),
       catalogReader = Some((_, _) => stub.reader)
     )
     try test(h, stub)
     finally h.shutdown()
 
-  // This spec pins selector RESOLUTION, not authz, so every call rides the
-  // static key; the guard itself is pinned by CatalogAuthzSpec.
-  private val Key = "catalog-asoftag-key"
-
   private def tableUrl(h: ManagerServerHarness.Harness, params: String): String =
     s"${h.baseUrl}/api/catalog/tenant/$Tenant/database/$TenantDb/schemas/tpch1/tables/region$params"
 
+  // This spec pins selector RESOLUTION, not authz, so every call rides the fixture
+  // superuser's session; the guard itself is pinned by CatalogAuthzSpec.
   private def fetch(h: ManagerServerHarness.Harness, params: String) =
-    get(h.httpClient, tableUrl(h, params), apiKey = Some(Key))
+    get(h.httpClient, tableUrl(h, params), apiKey = Some(h.superuserSession()))
 
   "the catalog table endpoint" should "resolve asOfTag to the tag's snapshot id" in withHarness {
     (h, stub) =>

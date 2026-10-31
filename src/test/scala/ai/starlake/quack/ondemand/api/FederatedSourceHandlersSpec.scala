@@ -78,7 +78,17 @@ class FederatedSourceHandlersSpec
 
   private def withHandlers(test: (FederatedSourceHandlers, String) => Unit): Unit =
     withEnv((fs, resolver, tdId) =>
-      test(new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None), tdId)
+      test(
+        new FederatedSourceHandlers(
+          fs,
+          resolver,
+          scopeOf = _ => SessionScope.Superuser,
+          invalidateSources = _ => (),
+          publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+          catalogAliasOf = _ => None
+        ),
+        tdId
+      )
     )
 
   // 1. POST source -> 200, GET it back, alias matches
@@ -189,23 +199,33 @@ class FederatedSourceHandlersSpec
   // resolves from the MANAGER's own trust domain at spawn), while a superuser
   // and a value-backed tenant secret both stay allowed.
 
-  private val AdminTok                               = "admin-token"
-  private val SuperTok                               = "super-token"
-  private val scopes: String => Option[SessionScope] = {
-    case `AdminTok` => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
-    case `SuperTok` => Some(SessionScope.Superuser)
-    case _          => None
-  }
+  private val AdminTok = "admin-token"
+  private val SuperTok = "super-token"
+  // Through the production resolver, so an absent or unknown credential is NoAccess.
+  private val scopes: SessionScope.Resolver = SessionScope.resolver(
+    Map(
+      AdminTok -> SessionScope(superuser = false, manageableTenants = Set("acme")),
+      SuperTok -> SessionScope.Superuser
+    ).get
+  )
 
   private def seedSource(fs: FederatedSourceStore, resolver: (String, String) => Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): FederatedSourceHandlers =
-    val h = new FederatedSourceHandlers(fs, resolver, scopeOf = scopeOf, catalogAliasOf = _ => None)
+    val h = new FederatedSourceHandlers(
+      fs,
+      resolver,
+      scopeOf = scopeOf,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+      catalogAliasOf = _ => None
+    )
     h.createSource(
       "acme",
       "acme_prod",
       FederatedSourceCreateRequest(alias = "fedpg", setupSql = Some("INSTALL postgres;")),
-      Some(AdminTok)
+      // A sql source is a superuser's to write (CONTRACT Addendum 4 item 26).
+      Some(SuperTok)
     ).unsafeRunSync()
       .isRight shouldBe true
     h
@@ -268,10 +288,11 @@ class FederatedSourceHandlersSpec
       r.isRight shouldBe true
     }
 
-  it should "allow an externalRef secret for a static-key / open-mode caller (no resolvable scope)" in
+  it should "refuse every secret from a caller with no credential (no trusted arm)" in
     withEnv { (fs, resolver, _) =>
-      // Default scopeOf resolves nothing -> perimeter is the gate, handler admits.
-      val h = seedSource(fs, resolver)(_ => None)
+      // No credential resolves to NoAccess, never to an operator: the tenant gate refuses it
+      // before the externalRef rule is reached, and nothing is written.
+      val h = seedSource(fs, resolver)(scopes)
       val r = h
         .upsertSecret(
           "acme",
@@ -281,7 +302,13 @@ class FederatedSourceHandlersSpec
           None
         )
         .unsafeRunSync()
-      r.isRight shouldBe true
+      r.left.toOption.map((code, err) => (code.code, err.error)) shouldBe
+        Some((403, "tenant_forbidden"))
+      h.listSecrets("acme", "acme_prod", "fedpg")
+        .unsafeRunSync()
+        .toOption
+        .value
+        .secrets shouldBe empty
     }
 
   it should "reject a blank inline value with a 400 naming the secret" in withHandlers { (h, _) =>
@@ -396,6 +423,9 @@ class FederatedSourceHandlersSpec
       val h = new FederatedSourceHandlers(
         fedStore = fs,
         resolver = resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => Some("acme_db")
       )
       val (code, err) = h
@@ -489,7 +519,14 @@ class FederatedSourceHandlersSpec
 
   it should "rewrite a legacy mixed-case row in place when re-POSTed under its own alias" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-1",
@@ -515,7 +552,14 @@ class FederatedSourceHandlersSpec
 
   it should "rewrite a legacy mixed-case row in place when re-POSTed under a DIFFERENT case" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-2",
@@ -551,7 +595,14 @@ class FederatedSourceHandlersSpec
 
   it should "update a legacy hyphenated row in place, keeping its stored alias" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-hyphen",
@@ -582,7 +633,14 @@ class FederatedSourceHandlersSpec
 
   it should "keep the STORED spelling when a legacy invalid alias is re-POSTed in another case" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-hyphen-2",
@@ -609,7 +667,14 @@ class FederatedSourceHandlersSpec
     withEnv { (fs, resolver, _) =>
       // The sibling of the iceberg case above, on the `sql` path this branch changed for
       // everybody: the grandfather clause must not have reopened the rule for new rows.
-      val h             = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       val (code, error) = h
         .createSource(
           "acme",
@@ -634,7 +699,14 @@ class FederatedSourceHandlersSpec
       // behaviour is deliberate (declarative replacement) and is pinned here rather than left to
       // be discovered; the handler WARNs on this exact transition, which is the audit line the
       // manifest path already had for its own version of the same downgrade.
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-ro",
@@ -660,7 +732,14 @@ class FederatedSourceHandlersSpec
 
   it should "keep readOnly when the upsert passes it explicitly" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-ro-2",
@@ -688,7 +767,14 @@ class FederatedSourceHandlersSpec
 
   it should "400 naming the sourceType clash (not the reserved-alias rule) for a legacy row" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-3",
@@ -716,7 +802,14 @@ class FederatedSourceHandlersSpec
     "upsert a legacy mixed-case iceberg_rest row in place under its own alias " +
     "(self-reservation by id, not by alias)" in
     withEnv { (fs, resolver, tdId) =>
-      val h   = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
       val cfg = IcebergRestConfig(
         uri = "https://catalog.example.com/api/catalog",
         warehouse = "sales",
@@ -773,6 +866,9 @@ class FederatedSourceHandlersSpec
       val h = new FederatedSourceHandlers(
         fedStore = fs,
         resolver = resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None,
         attachStatusOf = (tenantDbId, alias) =>
           if tenantDbId == tdId && alias == "sales_lake" then Some("failed on 1 of 2 nodes")
@@ -791,6 +887,9 @@ class FederatedSourceHandlersSpec
       val h = new FederatedSourceHandlers(
         fedStore = fs,
         resolver = resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None,
         attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
       )
@@ -926,7 +1025,14 @@ class FederatedSourceHandlersSpec
 
   it should "400 on an alias that collides with a sibling or the tenant-db's own alias" in
     withEnv { (fs, resolver, _) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => Some("acme_db"))
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => Some("acme_db")
+      )
       h.createSource("acme", "acme_prod", pgReq(alias = "acme_db"), None)
         .unsafeRunSync()
         .left
@@ -955,6 +1061,9 @@ class FederatedSourceHandlersSpec
     val h = new FederatedSourceHandlers(
       fedStore = fs,
       resolver = resolver,
+      scopeOf = _ => SessionScope.Superuser,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
       catalogAliasOf = _ => None,
       attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
     )
@@ -987,3 +1096,113 @@ class FederatedSourceHandlersSpec
     h.createSource("acme", "acme_prod", req, None).unsafeRunSync().left.value._2.message should
       include("reserved for QoD's typed sources")
   }
+
+  // CONTRACT Addendum 4 item 26 (Task 20 review C1): a sql source's setupSql runs unrestricted on
+  // every node, so only a superuser creates or changes one; a typed source stays a tenant admin's.
+  "a sql federated source" should "be refused to a tenant admin on create and on change (403)" in
+    withEnv { (fs, resolver, tdId) =>
+      val h =
+        new FederatedSourceHandlers(
+          fs,
+          resolver,
+          scopeOf = scopes,
+          invalidateSources = _ => (),
+          publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+          catalogAliasOf = _ => None
+        )
+      val sql = FederatedSourceCreateRequest(
+        alias = "leak",
+        setupSql = Some("CREATE SECURE VIEW v AS SELECT * FROM read_text('/etc/passwd');")
+      )
+      val created = h.createSource("acme", "acme_prod", sql, Some(AdminTok)).unsafeRunSync()
+      created.left.value._1 shouldBe StatusCode.Forbidden
+      created.left.value._2.error shouldBe "superuser_required"
+      // An explicit sourceType 'sql' is the same.
+      h.createSource("acme", "acme_prod", sql.copy(sourceType = Some(" SQL ")), Some(AdminTok))
+        .unsafeRunSync()
+        .left
+        .value
+        ._2
+        .error shouldBe "superuser_required"
+      fs.getSource(tdId, "leak") shouldBe None
+      // A superuser's is stored, with a known author; a tenant admin's change of it is refused.
+      h.createSource(
+        "acme",
+        "acme_prod",
+        sql.copy(setupSql = Some("INSTALL postgres;")),
+        Some(SuperTok)
+      ).unsafeRunSync()
+        .isRight shouldBe true
+      fs.getSource(tdId, "leak").value.setupSqlTrusted shouldBe true
+      h.createSource("acme", "acme_prod", sql.copy(disabled = true), Some(AdminTok))
+        .unsafeRunSync()
+        .left
+        .value
+        ._2
+        .error shouldBe "superuser_required"
+      fs.getSource(tdId, "leak").value.setupSql shouldBe "INSTALL postgres;"
+      // A typed source is still a tenant admin's to write.
+      h.createSource("acme", "acme_prod", pgReq(), Some(AdminTok)).unsafeRunSync().isRight shouldBe
+        true
+    }
+
+  "the boot report" should "name each sql source with no known author, never its SQL" in
+    withEnv { (fs, _, tdId) =>
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-old",
+          tenantDbId = tdId,
+          alias = "legacy",
+          setupSql = "ATTACH 'host=h password=AKIAQODFEDMARKER' AS legacy (TYPE postgres);"
+        )
+      )
+      fs.upsertSource(
+        FederatedSource(id = "fs-new", tenantDbId = tdId, alias = "vouched", setupSql = "SELECT 1;")
+          .copy(setupSqlTrusted = true)
+      )
+      val td = TenantDb(
+        id = tdId,
+        tenantId = "acme",
+        name = "acme_prod",
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+      val lines = ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
+        .federationLines(fs.listSources(tdId).map(td -> _))
+      lines should have size 1
+      lines.head should include("tenant 'acme' database 'acme_prod' federated source 'legacy'")
+      lines.head should not include "AKIAQODFEDMARKER"
+    }
+
+  // CONTRACT Addendum 4 item 29 (amended): a secret placeholder of a sql source sits inside a
+  // single-quoted literal, or the save is refused, naming the placeholder (whoever saves).
+  "a sql source" should "be refused at save with a secret placeholder outside a literal" in
+    withEnv { (fs, resolver, tdId) =>
+      val h =
+        new FederatedSourceHandlers(
+          fs,
+          resolver,
+          scopeOf = scopes,
+          invalidateSources = _ => (),
+          publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+          catalogAliasOf = _ => None
+        )
+      val req = FederatedSourceCreateRequest(
+        alias = "legacy",
+        setupSql = Some("ATTACH 'host=h' AS {{alias}} (TYPE postgres, PORT {{secret.PORT}});")
+      )
+      val out = h.createSource("acme", "acme_prod", req, Some(SuperTok)).unsafeRunSync()
+      out.left.value._1 shouldBe StatusCode.BadRequest
+      out.left.value._2.message should include("{{secret.PORT}} outside a single-quoted literal")
+      fs.getSource(tdId, "legacy") shouldBe None
+      h.createSource(
+        "acme",
+        "acme_prod",
+        req.copy(setupSql =
+          Some("ATTACH 'host=h port={{secret.PORT}}' AS {{alias}} (TYPE postgres);")
+        ),
+        Some(SuperTok)
+      ).unsafeRunSync()
+        .isRight shouldBe true
+    }

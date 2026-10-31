@@ -71,13 +71,11 @@ def test_setup_show_redacts_secrets(runner, monkeypatch):
     from qod_cli.main import app
 
     _stub_check_ok(monkeypatch)
-    runner.invoke(
-        app, ["setup", "--pg-password", "s3cret-value", "--api-key", "topsecret", "--non-interactive"]
-    )
+    runner.invoke(app, ["setup", "--pg-password", "s3cret-value", "--non-interactive"])
     result = runner.invoke(app, ["setup", "--show"])
     assert result.exit_code == 0, result.output
+    assert "QOD_PG_PASSWORD" in result.output
     assert "s3cret-value" not in result.output
-    assert "topsecret" not in result.output
 
 
 def test_setup_show_redacts_the_session_secret(runner):
@@ -128,7 +126,6 @@ def test_setup_interactive_prompts_and_saves(runner, monkeypatch):
             "s3cret",  # password
             "",  # dbname -> default qod
             "",  # admin username -> default
-            "",  # api key -> default blank
             "",  # auth -> default true
             "",  # tls -> default true
         ]
@@ -296,3 +293,80 @@ def test_setup_show_masks_a_legacy_admin_password_without_migrating(runner):
     assert "QOD_ADMIN_PASSWORD" in result.output
     assert "legacy-secret" not in result.output
     assert "QOD_ADMIN_PASSWORD" in load_start_env()
+
+
+def test_setup_has_no_api_key_flag(runner):
+    from qod_cli.main import app
+
+    result = runner.invoke(app, ["setup", "--api-key", "x", "-y", "--skip-checks"])
+    assert result.exit_code != 0
+    assert "No such option" in result.output
+    assert load_start_env() == {}
+
+
+def test_setup_interactive_never_asks_for_an_api_key(runner, monkeypatch):
+    from qod_cli.commands import setup as setup_cmd
+    from qod_cli.main import app
+
+    monkeypatch.setattr(setup_cmd, "_is_interactive", lambda: True)
+    _stub_check_ok(monkeypatch)
+    result = runner.invoke(app, ["setup"], input="\n" * len(setup_cmd._PROMPTS))
+    assert result.exit_code == 0, result.output
+    assert "API key" not in result.output
+    assert "QOD_API_KEY" not in load_start_env()
+
+
+def test_setup_refuses_to_store_the_removed_api_key_via_set(runner):
+    from qod_cli.main import app
+
+    result = runner.invoke(
+        app, ["setup", "--set", "QOD_API_KEY=stale-key-value", "-y", "--skip-checks"]
+    )
+    assert result.exit_code == 1
+    assert "QOD_API_KEY was removed" in result.output
+    assert "qod auth pat create" in result.output
+    assert "stale-key-value" not in result.output
+    assert "QOD_API_KEY" not in load_start_env()
+
+
+def test_setup_show_masks_a_stale_api_key(runner):
+    # An earlier CLI stored QOD_API_KEY in [start] (qod setup, the Starflow pairing):
+    # --show still masks it, so the value never reaches the terminal.
+    from qod_cli.config import save_start_env
+    from qod_cli.main import app
+
+    save_start_env({"QOD_API_KEY": "stale-key-value"})
+    result = runner.invoke(app, ["setup", "--show"])
+    assert result.exit_code == 0, result.output
+    assert "QOD_API_KEY" in result.output
+    assert "stale-key-value" not in result.output
+
+
+def test_setup_no_auth_warns_that_the_manager_needs_another_authenticator(runner):
+    from qod_cli.main import app
+
+    result = runner.invoke(app, ["setup", "--no-auth", "--non-interactive"])
+    assert result.exit_code == 0, result.output
+    assert load_start_env()["QOD_AUTH_DB_ENABLED"] == "false"
+    assert "QOD_AUTH_DB_ENABLED=false" in result.output
+    assert "refuses to boot" in result.output
+    # Saved through --set too; a true value warns about nothing.
+    result = runner.invoke(
+        app, ["setup", "--set", "QOD_AUTH_DB_ENABLED=False", "--non-interactive"]
+    )
+    assert "refuses to boot" in result.output
+    result = runner.invoke(app, ["setup", "--auth", "--non-interactive"])
+    assert result.exit_code == 0, result.output
+    assert "refuses to boot" not in result.output
+
+
+def test_setup_auth_help_and_prompt_say_what_no_auth_needs():
+    import inspect
+
+    from qod_cli.commands import setup as setup_mod
+
+    option = inspect.signature(setup_mod.setup).parameters["auth"].default
+    assert "--no-auth needs another authenticator" in option.help
+    assert "refuses to boot" in option.help
+    label = dict((k, v) for k, v, _ in setup_mod._PROMPTS)["QOD_AUTH_DB_ENABLED"]
+    assert "false needs another authenticator" in label

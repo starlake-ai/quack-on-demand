@@ -2,7 +2,7 @@ package ai.starlake.quack.mcp
 
 import ai.starlake.quack.{CatalogConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, ValidationConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, ValidationConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
@@ -72,8 +72,8 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       (_, _) => throw new UnsupportedOperationException("not exercised")
     val cfg      = CatalogConfig()
     val restoreH =
-      new CatalogRestoreHandlers(sup, store, boom, boom, reader, cfg, RestCaller.staticOnly)
-    val undropH = new CatalogUndropHandlers(sup, boom, reader, cfg, RestCaller.staticOnly)
+      new CatalogRestoreHandlers(sup, store, boom, boom, reader, cfg, RestCaller())
+    val undropH = new CatalogUndropHandlers(sup, boom, reader, cfg, RestCaller())
     (restoreH, undropH)
 
   private def liveConfigEntries = ConfigRegistry.collect(
@@ -81,7 +81,6 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       managerCls = classOf[ManagerConfig],
       flightCls = classOf[FlightConfig],
       authCls = classOf[AuthenticationConfig],
-      aclCls = classOf[AclConfig],
       validationCls = classOf[ValidationConfig],
       metricsCls = classOf[MetricsConfig]
     )
@@ -117,12 +116,13 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
 
       // Shared by McpPlatformTools' own scopeOf and FederatedSourceHandlers' own scopeOf below,
       // so the PAT-aware gates (SuperuserCheck, TenantScopeCheck) inside FederatedSourceHandlers
-      // see the same principal MCP resolved.
-      val scopeOf: String => Option[SessionScope] =
+      // see the same principal MCP resolved. Total, like the resolver Main gives both: an unknown
+      // or absent token is NoAccess.
+      val scopeOf: SessionScope.Resolver =
         t =>
-          if t == patToken then
-            Some(SessionScope(superuser = false, manageableTenants = Set(Tenant0)))
-          else None
+          if t.contains(patToken) then
+            SessionScope(superuser = false, manageableTenants = Set(Tenant0))
+          else McpSuperuserPat.scopeOf(t)
 
       val federated =
         if withFederation then
@@ -162,6 +162,8 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
               fedStore,
               resolver,
               scopeOf = scopeOf,
+              invalidateSources = _ => (),
+              publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
               catalogAliasOf = _ => None
             )
           )
@@ -245,7 +247,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val created = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"    -> Json.fromString(Tenant0),
         "database"  -> Json.fromString(TenantDb),
         "alias"     -> Json.fromString("fedpg"),
@@ -256,7 +258,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val secreted = call(
         tools,
         "set_federated_secret",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"   -> Json.fromString(Tenant0),
         "database" -> Json.fromString(TenantDb),
         "alias"    -> Json.fromString("fedpg"),
@@ -268,7 +270,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val listed = call(
         tools,
         "list_federated_sources",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"   -> Json.fromString(Tenant0),
         "database" -> Json.fromString(TenantDb)
       )
@@ -277,7 +279,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       call(
         tools,
         "delete_federated_secret",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"   -> Json.fromString(Tenant0),
         "database" -> Json.fromString(TenantDb),
         "alias"    -> Json.fromString("fedpg"),
@@ -287,7 +289,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       call(
         tools,
         "delete_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"   -> Json.fromString(Tenant0),
         "database" -> Json.fromString(TenantDb),
         "alias"    -> Json.fromString("fedpg")
@@ -311,7 +313,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
     val listed = call(
       tools,
       "list_federated_sources",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb)
     )
@@ -325,7 +327,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val created = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         icebergArgs("sales_lake", "read_only" -> Json.fromBoolean(true))*
       )
       withClue(created)(created.isRight shouldBe true)
@@ -354,7 +356,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val created = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         icebergArgs("sales_lake", "read_only" -> Json.fromBoolean(false))*
       )
       withClue(created)(created.isRight shouldBe true)
@@ -366,7 +368,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val out = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"      -> Json.fromString(Tenant0),
         "database"    -> Json.fromString(TenantDb),
         "alias"       -> Json.fromString("sales_lake"),
@@ -388,7 +390,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val created = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"      -> Json.fromString(Tenant0),
         "database"    -> Json.fromString(TenantDb),
         "alias"       -> Json.fromString("shop_pg"),
@@ -418,7 +420,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val out = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"      -> Json.fromString(Tenant0),
         "database"    -> Json.fromString(TenantDb),
         "alias"       -> Json.fromString("shop_pg"),
@@ -438,7 +440,12 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
   it should "normalize a mixed-case alias on the MCP path" in
     withTools(withFederation = true) { (tools, _) =>
       val created =
-        call(tools, "upsert_federated_source", McpPrincipal.StaticKey, icebergArgs("Sales_Lake")*)
+        call(
+          tools,
+          "upsert_federated_source",
+          McpSuperuserPat.principal,
+          icebergArgs("Sales_Lake")*
+        )
       withClue(created)(created.isRight shouldBe true)
       created.toOption.get.hcursor.get[String]("alias").toOption shouldBe Some("sales_lake")
       onlySource(tools).get[String]("alias").toOption shouldBe Some("sales_lake")
@@ -448,7 +455,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val updated = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         icebergArgs("sales_lake", "description" -> Json.fromString("the lake"))*
       )
       withClue(updated)(updated.isRight shouldBe true)
@@ -468,7 +475,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
         val out = call(
           tools,
           name,
-          McpPrincipal.StaticKey,
+          McpSuperuserPat.principal,
           "tenant"    -> Json.fromString(Tenant0),
           "database"  -> Json.fromString(TenantDb),
           "alias"     -> Json.fromString("x"),
@@ -493,7 +500,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val created = call(
         tools,
         "upsert_federated_source",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "tenant"    -> Json.fromString(Tenant0),
         "database"  -> Json.fromString(TenantDb),
         "alias"     -> Json.fromString("fedpg"),
@@ -510,6 +517,23 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
         "alias"        -> Json.fromString("fedpg"),
         "name"         -> Json.fromString("X"),
         "external_ref" -> Json.fromString("env:QOD_SESSION_JWT_SECRET")
+      )
+      withClue(out)(out.isLeft shouldBe true)
+      out.swap.toOption.get should include("superuser_required")
+    }
+
+  // CONTRACT Addendum 4 item 26: the tool goes through the REST handler, so a tenant admin's sql
+  // source is refused there too.
+  "upsert_federated_source" should "refuse a sql source to a tenant-scoped admin PAT" in
+    withTools(withFederation = true) { (tools, _) =>
+      val out = call(
+        tools,
+        "upsert_federated_source",
+        tenantPat,
+        "tenant"    -> Json.fromString(Tenant0),
+        "database"  -> Json.fromString(TenantDb),
+        "alias"     -> Json.fromString("fedpg"),
+        "setup_sql" -> Json.fromString("INSTALL postgres;")
       )
       withClue(out)(out.isLeft shouldBe true)
       out.swap.toOption.get should include("superuser_required")
@@ -533,7 +557,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
 
   "manifest_export" should "return YAML as a string result" in
     withTools() { (tools, _) =>
-      val out = call(tools, "manifest_export", McpPrincipal.StaticKey)
+      val out = call(tools, "manifest_export", McpSuperuserPat.principal)
       withClue(out)(out.isRight shouldBe true)
       val yaml =
         out.toOption.get.asString.getOrElse(fail("manifest_export did not return a string"))
@@ -552,7 +576,7 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
           |  - name: imported_demo
           |""".stripMargin
       val out =
-        call(tools, "manifest_import", McpPrincipal.StaticKey, "yaml" -> Json.fromString(yaml))
+        call(tools, "manifest_import", McpSuperuserPat.principal, "yaml" -> Json.fromString(yaml))
       withClue(out)(out.isRight shouldBe true)
     }
 
@@ -580,20 +604,9 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       call(tools, "delete_pat", principal, "id" -> Json.fromString(childId)).isRight shouldBe true
     }
 
-  it should "fail for the static key (no PAT identity)" in
+  "get_config" should "list server config entries for a superuser PAT" in
     withTools() { (tools, _) =>
-      val out = call(
-        tools,
-        "create_pat",
-        McpPrincipal.StaticKey,
-        "name" -> Json.fromString("agent-child")
-      )
-      out.isLeft shouldBe true
-    }
-
-  "get_config" should "list server config entries for the static key" in
-    withTools() { (tools, _) =>
-      val out = call(tools, "get_config", McpPrincipal.StaticKey)
+      val out = call(tools, "get_config", McpSuperuserPat.principal)
       withClue(out)(out.isRight shouldBe true)
       val entries = out.toOption.get.hcursor.downField("entries").values.get
       entries.nonEmpty shouldBe true
@@ -606,20 +619,20 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
 
   "statement_history / usage_trends / usage_report" should "return empty results on a noop store" in
     withTools() { (tools, _) =>
-      val history = call(tools, "statement_history", McpPrincipal.StaticKey)
+      val history = call(tools, "statement_history", McpSuperuserPat.principal)
       withClue(history)(history.isRight shouldBe true)
       history.toOption.get.hcursor.downField("statements").values.get shouldBe empty
 
       val trends = call(
         tools,
         "usage_trends",
-        McpPrincipal.StaticKey,
+        McpSuperuserPat.principal,
         "granularity" -> Json.fromString("day")
       )
       withClue(trends)(trends.isRight shouldBe true)
       trends.toOption.get.hcursor.downField("buckets").values.get shouldBe empty
 
-      val usage = call(tools, "usage_report", McpPrincipal.StaticKey)
+      val usage = call(tools, "usage_report", McpSuperuserPat.principal)
       withClue(usage)(usage.isRight shouldBe true)
       usage.toOption.get.hcursor.downField("groups").values.get shouldBe empty
     }

@@ -181,8 +181,8 @@ class UserMembershipsSpec extends AnyFlatSpec with Matchers:
 
   "REST user/create" should "answer 500 with a generic message when attaching fails" in withSup(
     (sup, store, users) =>
-      val scopeOf: String => Option[SessionScope] = _ => None
-      val res                                     = new UserHandlers(sup, users)
+      val scopeOf: SessionScope.Resolver = _ => SessionScope.Superuser
+      val res                            = new UserHandlers(sup, users)
         .createUser(UserCreateRequest(Some("acme"), "bob", "pw"), None)(scopeOf)
         .unsafeRunSync()
       val (status, body) = res.left.toOption.get

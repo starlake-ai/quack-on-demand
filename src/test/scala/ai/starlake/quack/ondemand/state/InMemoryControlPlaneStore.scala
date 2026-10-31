@@ -12,7 +12,9 @@ import ai.starlake.quack.model.{
   SnapshotTag,
   Tenant,
   TenantAcl,
-  TenantDb
+  TenantDb,
+  TenantLocation,
+  UserS3Credential
 }
 
 import java.time.Instant
@@ -34,20 +36,101 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   private val pools     = TrieMap.empty[String, Pool]
   private val nodes     = TrieMap.empty[String, RunningNode]
 
-  // Mirrors Postgres: an existing row's acl changes only through updateTenantAcl.
+  // Mirrors Postgres: an existing row's acl changes only through updateTenantAcl, while
+  // authClientSecret is written with authConfig (both taken from `t`).
   def upsertTenant(t: Tenant): Unit =
     tenants.updateWith(t.id) {
       case Some(old) => Some(t.copy(acl = old.acl))
-      case None      => Some(t)
+      case None      =>
+        bumpPolicyVersion(t.id)
+        Some(t)
     }
 
   def updateTenantAcl(tenantId: String, acl: TenantAcl): Unit =
     tenants.updateWith(tenantId)(_.map(_.copy(acl = acl)))
 
+  // Mirrors Liquibase 0050's sequence: a new tenant row and every bump take the next value of one
+  // shared counter. No trigger here: a test that needs a version moves it with bumpPolicyVersion.
+  private val policyVersionSeq = new AtomicLong(0L)
+  private val policyVersionsOf = TrieMap.empty[String, Long]
+
+  def policyVersions(): Map[String, Long] =
+    tenants.keys.map(t => t -> policyVersionsOf.getOrElse(t, 0L)).toMap
+
+  def bumpPolicyVersion(tenantId: String): Unit =
+    policyVersionsOf.put(tenantId, policyVersionSeq.incrementAndGet())
+
+  // Mirrors Postgres: UNIQUE (tenant_id, location), a delete scoped to its tenant, and the
+  // policy-version bump Liquibase 0051's trigger makes.
+  private val tenantLocations = TrieMap.empty[String, TenantLocation]
+
+  def insertTenantLocation(l: TenantLocation): Boolean = synchronized {
+    if tenantLocations.values.exists(x => x.tenantId == l.tenantId && x.location == l.location)
+    then false
+    else
+      tenantLocations.put(l.id, l)
+      bumpPolicyVersion(l.tenantId)
+      true
+  }
+
+  def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation] = synchronized {
+    tenantLocations.get(id).filter(_.tenantId == tenantId).map { l =>
+      tenantLocations.remove(id)
+      bumpPolicyVersion(tenantId)
+      l
+    }
+  }
+
+  def listTenantLocations(tenantId: String): List[TenantLocation] =
+    tenantLocations.values.filter(_.tenantId == tenantId).toList.sortBy(_.location)
+
+  def listAllTenantLocations(): List[TenantLocation] =
+    tenantLocations.values.toList.sortBy(l => (l.tenantId, l.location))
+
+  // Mirrors Postgres: UNIQUE (user_id, scope) with a replace that keeps the id and moves
+  // updatedAt strictly forward, a delete scoped to its user, the cascade of deleteUser, and the
+  // tenant policy-version bump Liquibase 0052's trigger makes (none for a superuser's row).
+  private val userS3      = TrieMap.empty[String, UserS3Credential]
+  private val userS3Clock = new java.util.concurrent.atomic.AtomicLong(0L)
+
+  private def userS3Now(): Long =
+    userS3Clock.updateAndGet(last => math.max(System.currentTimeMillis(), last + 1))
+
+  private def bumpUserTenant(userId: String): Unit =
+    users.get(userId).flatMap(_.tenant).foreach(bumpPolicyVersion)
+
+  def putUserS3Credential(c: UserS3Credential): UserS3Credential = synchronized {
+    val now    = userS3Now()
+    val stored = userS3.values.find(x => x.userId == c.userId && x.scope == c.scope) match
+      case Some(old) => c.copy(id = old.id, createdAt = old.createdAt, updatedAt = now)
+      case None      =>
+        if !c.id.matches("[0-9a-f]{32}") then
+          throw new java.sql.SQLException(s"credential id must be 32 lowercase hex digits")
+        c.copy(createdAt = now, updatedAt = now)
+    userS3.put(stored.id, stored)
+    bumpUserTenant(stored.userId)
+    stored
+  }
+
+  def deleteUserS3Credential(userId: String, id: String): Option[UserS3Credential] = synchronized {
+    userS3.get(id).filter(_.userId == userId).map { c =>
+      userS3.remove(id)
+      bumpUserTenant(userId)
+      c
+    }
+  }
+
+  def listUserS3Credentials(userId: String): List[UserS3Credential] =
+    userS3.values.filter(_.userId == userId).toList.sortBy(_.scope)
+
+  def listAllUserS3Credentials(): List[UserS3Credential] =
+    userS3.values.toList.sortBy(c => (c.userId, c.scope))
+
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit =
     if tenants.contains(tenant.id) then
       throw new java.sql.SQLException(s"tenant id ${tenant.id} already exists")
     tenants.put(tenant.id, tenant)
+    bumpPolicyVersion(tenant.id)
     builtins.roles.foreach(putRole)
     builtins.groups.foreach(putGroup)
     builtins.permissions.foreach(insertRolePermission)
@@ -124,10 +207,12 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
     if tenantDbs.values.exists(_.tenantId == id) then
       throw new java.sql.SQLException(s"tenant $id has tenant-db children")
     tenants.remove(id)
+    policyVersionsOf.remove(id)
     // CASCADE the RBAC subgraph.
     roles.values.filter(_.tenantId == id).foreach(r => deleteRole(r.id))
     groups.values.filter(_.tenantId == id).foreach(g => deleteGroup(g.id))
     poolPermissions.values.filter(_.tenantId == id).foreach(p => poolPermissions.remove(p.id))
+    tenantLocations.values.filter(_.tenantId == id).foreach(l => tenantLocations.remove(l.id))
 
   def upsertTenantDb(t: TenantDb): Unit               = tenantDbs.put(t.id, t)
   def listTenantDbs(tenantId: String): List[TenantDb] =
@@ -292,6 +377,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   def deleteUser(id: String): Unit =
     users.remove(id)
+    userS3.values.filter(_.userId == id).foreach(c => userS3.remove(c.id))
     passwordHashes.remove(id)
     userGroups.filterInPlace((u, _) => u != id)
     userRoles.filterInPlace((u, _) => u != id)
@@ -787,6 +873,9 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       .filter(r => r.purgeEligibleAt.exists(!_.isAfter(now)) && r.purgedAt.isEmpty)
       .toList
       .sortBy(_.purgeEligibleAt.get)
+
+  def unpurgedManagedPrefixes(): List[ManagedPrefixRow] =
+    managedPrefixes.values.filter(_.purgedAt.isEmpty).toList.sortBy(_.id)
 
   def markManagedPrefixPurged(id: String, purgedAt: Instant): Unit =
     managedPrefixes

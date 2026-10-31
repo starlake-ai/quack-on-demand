@@ -26,18 +26,24 @@ import java.time.Instant
 import scala.util.Try
 
 /** Fleet surface. The heartbeat (from `qod fleet join`) is machine-to-machine: `X-Fleet-Token` is
-  * the credential (constant-time compare against the join token), never a session or API key. No
-  * clock here: every timestamp is the store's.
+  * the credential (constant-time compare against the join token), never a session or a personal
+  * access token. No clock here: every timestamp is the store's.
   *
-  * The admin server endpoints (list / drain / undrain / remove / approve) are superuser or static
-  * key only and answer `400 fleet_disabled` when `backend` is None (runtimeType is not fleet).
+  * The admin server endpoints (list / drain / undrain / remove / approve) are superuser only and
+  * answer `400 fleet_disabled` when `backend` is None (runtimeType is not fleet).
   */
 final class FleetHandlers(
     store: FleetServerStore,
     cfg: FleetConfig,
     backend: Option[FleetQuackBackend] = None,
     publish: StateChangePublisher = StateChangePublisher.noop,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    // Required: the keys each assignment's node key derives from (the manager's).
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
+    nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
+      ai.starlake.quack.NodeExtensionsConfig(),
+    // Required (Main passes the manager's): a default would silently run qod-node's own limits.
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
 ) extends LazyLogging:
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -83,7 +89,7 @@ final class FleetHandlers(
   ): Out[FleetHeartbeatResponse] =
     val startedAt = req.node.startedAt.map(s => Try(Instant.parse(s)).toOption)
     // Not a fleet manager: no server rows may be written, whoever the caller (on a local or K8s
-    // manager the route sits behind the API-key guard, so a static-key caller reaches it).
+    // manager the route sits behind the API-key guard, so any admitted caller reaches it).
     if backend.isEmpty then IO.pure(Left(disabled))
     else if !tokenOk(token) then IO.pure(Left(FleetErrors.unauthorized))
     else if !ValidStates.contains(req.node.state) then
@@ -158,17 +164,21 @@ final class FleetHandlers(
                 FleetHeartbeatResponse(
                   cfg.heartbeatSec,
                   // Only an approved server is ever handed its assignment (which carries the
-                  // node token and pgPassword). A pending row should hold none, but a row can be
-                  // reset to pending while it still holds one (e.g. a re-address racing a
-                  // drain); the reply must not leak it then. Likewise only to the source the
-                  // approval is bound to: the row is read afresh here, after the store's check,
-                  // so a concurrent rebind must not hand the assignment to the old source.
+                  // node token, the node key and pgPassword). A pending row should hold none,
+                  // but a row can be reset to pending while it still holds one (e.g. a
+                  // re-address racing a drain); the reply must not leak it then. Likewise only
+                  // to the source the approval is bound to: the row is read afresh here, after
+                  // the store's check, so a concurrent rebind must not hand the assignment to
+                  // the old source.
                   row
                     .filter(r =>
                       r.approved && r.approvedSource.forall(b => hb.sourceAddr.contains(b))
                     )
                     .flatMap(_.assignment)
-                    .map(FleetHandlers.toDto),
+                    .map(a =>
+                      FleetHandlers
+                        .toDto(a, nodeKeys.keyHex(a.nodeId), nodeExtensions, nodeAuthzLimits)
+                    ),
                   approval
                 )
               )
@@ -214,7 +224,7 @@ final class FleetHandlers(
     )
 
   def listServers(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[FleetServerListResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
@@ -231,7 +241,7 @@ final class FleetHandlers(
     * audit row.
     */
   private def serverOp(req: FleetServerOpRequest, apiKey: Option[String], action: String)(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   )(f: (FleetQuackBackend, FleetServerRow) => Out[Unit]): Out[Unit] =
     def auditAs(outcome: String): Unit =
       audit.rest(apiKey, "control-plane", action, outcome, target = Some(req.name))
@@ -256,7 +266,7 @@ final class FleetHandlers(
     * reconcile tick drops it (up to `reconcileIntervalSec`).
     */
   def drain(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetDrain)(scopeOf) { (_, row) =>
       IO.blocking {
@@ -269,7 +279,7 @@ final class FleetHandlers(
     }
 
   def undrain(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetUndrain)(scopeOf) { (_, row) =>
       // Published like drain: the server is schedulable again, peers should see it.
@@ -277,12 +287,13 @@ final class FleetHandlers(
         IO.delay(publish.topologyChanged()).as(Right(()))
     }
 
-  /** Let a pending server take nodes. Idempotent; the first approver and time are kept. The next
-    * reconcile pass fills pending slots onto it. Refused (409 source_unknown) while the server's
-    * latest heartbeat has no known source address: the approval is bound to that source.
+  /** Let a pending server take nodes. Idempotent; the first approver (the calling user, as the
+    * audit row names it) and time are kept. The next reconcile pass fills pending slots onto it.
+    * Refused (409 source_unknown) while the server's latest heartbeat has no known source address:
+    * the approval is bound to that source.
     */
   def approve(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetApprove)(scopeOf) { (_, row) =>
       IO.blocking(store.approve(row.name, audit.actorOf(apiKey)._1)).flatMap {
@@ -301,7 +312,7 @@ final class FleetHandlers(
     * it is stopped).
     */
   def remove(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetRemove)(scopeOf) { (b, row) =>
       if row.approved && b.livenessOf(row) == ServerLiveness.Reachable && !row.unschedulable
@@ -323,17 +334,35 @@ object FleetHandlers:
     case ServerLiveness.Unreachable(_) => "unreachable"
     case ServerLiveness.Dead           => "dead"
 
-  def toDto(a: FleetAssignment): FleetAssignmentDto =
+  /** The heartbeat's assignment, with the node key derived for its node id, the manager's extension
+    * policy and its decide limits (none stored).
+    */
+  def toDto(
+      a: FleetAssignment,
+      authzKey: String,
+      extensions: ai.starlake.quack.NodeExtensionsConfig,
+      limits: ai.starlake.quack.NodeAuthzLimitsConfig
+  ): FleetAssignmentDto =
     FleetAssignmentDto(
       a.epoch,
       a.nodeId,
       FleetPoolKeyDto(a.poolKey.tenant, a.poolKey.tenantDb, a.poolKey.pool),
       a.port,
       a.token,
+      authzKey,
       a.kind,
       a.env,
-      a.dbInitSql,
+      a.resourceSql,
       a.objectStoreSql,
       a.extraSetupSql,
-      a.lockdownSql
+      FleetNodeExtensionsDto(
+        extensions.allowCommunity,
+        extensions.allowUnsigned,
+        extensions.autoinstallKnown
+      ),
+      FleetNodeAuthzLimitsDto(limits.decideTimeoutMs, limits.cacheEntries),
+      a.tenantDbInitSql,
+      a.tenantDbInitTrusted,
+      a.tenantPoolInitSql,
+      a.tenantPoolInitTrusted
     )

@@ -197,6 +197,107 @@ private[quack] object FunctionCalls:
       else None
     }
 
+  /** The value of `t`, a token of `view`, when it is one VARCHAR string literal (plain `'...'`,
+    * national `n'...'`, escape `e'...'` or dollar-quoted), decoded as DuckDB decodes it. None for
+    * any other token: a quoted identifier, a blob or bit-string literal, a word, a parameter.
+    */
+  def varcharValue(view: String, t: SqlLexer.Token): Option[String] =
+    if t.kind == SqlLexer.Kind.Literal && "'$eEnN".indexOf(view.charAt(t.start).toInt) >= 0 then
+      stringBody(SqlLexer.keptSpacesRestored(view), t)
+    else None
+
+  /** The locations a file reader `call` names, when its argument list has the one shape the gateway
+    * admits (Task 12, [[FileLocations]]): a first argument that is one VARCHAR string literal
+    * ([[varcharValue]]) or a `[...]` list of them, then only named options (`name = v`,
+    * `name := v`, `name => v`) whose values are constants ([[constantEnd]]). None for anything
+    * else: a second positional argument, a column, a cast, a concatenation, a nested call, a
+    * parameter, a blob literal, a literal continued on the next line (another literal follows it),
+    * an empty list, an unterminated list. A caller treating None as "refuse" fails closed on every
+    * form it cannot read.
+    */
+  def locationArguments(call: Call): Option[List[String]] =
+    val text = call.text
+    val toks = SqlLexer.tokens(text).filter(t => !t.isTrivia && t.start >= call.argsFrom)
+    def punct(i: Int, c: Char): Boolean =
+      i < toks.length && toks(i).kind == SqlLexer.Kind.Punct && text.charAt(toks(i).start) == c
+    def value(i: Int): Option[String] =
+      if i < toks.length then varcharValue(text, toks(i)) else None
+    // `[ literal (, literal)* ]` from the `[` at `from`: its values and the index past its `]`.
+    def list(from: Int): Option[(List[String], Int)] =
+      val values = List.newBuilder[String]
+      var i      = from + 1
+      var ok     = true
+      var closed = false
+      while ok && !closed && i < toks.length do
+        value(i) match
+          case Some(v) =>
+            values += v
+            if punct(i + 1, ',') then i += 2
+            else if punct(i + 1, ']') then
+              closed = true
+              i += 2
+            else ok = false
+          case None => ok = false
+      val found = values.result()
+      Option.when(ok && closed && found.nonEmpty)((found, i))
+    val first = if punct(0, '[') then list(0) else value(0).map(v => (List(v), 1))
+    first.collect { case (locations, next) if namedConstants(text, toks, next) => locations }
+
+  private val NamedOperators = Set("=", ":=", "=>")
+
+  /** True when the tokens from `from` are `)`, or a run of `, name <op> <constant>` ended by `)`.
+    */
+  private def namedConstants(text: String, toks: Vector[SqlLexer.Token], from: Int): Boolean =
+    def punct(i: Int, c: Char): Boolean =
+      i < toks.length && toks(i).kind == SqlLexer.Kind.Punct && text.charAt(toks(i).start) == c
+    def named(i: Int): Boolean =
+      i + 2 < toks.length && toks(i + 1).kind == SqlLexer.Kind.Word &&
+        toks(i + 2).kind == SqlLexer.Kind.Operator &&
+        NamedOperators(text.substring(toks(i + 2).start, toks(i + 2).end))
+    var i    = from
+    var ok   = true
+    var done = false
+    while ok && !done do
+      if punct(i, ')') then done = true
+      else if punct(i, ',') && named(i) then
+        constantEnd(text, toks, i + 3) match
+          case Some(end) => i = end
+          case None      => ok = false
+      else ok = false
+    ok
+
+  /** The index of the `,` or `)` that ends the constant starting at `from`: a VARCHAR or other
+    * value literal (never a quoted identifier), a number, `-` before a number, `true` / `false` /
+    * `null`, or a `[...]` list or `{...}` struct of those, a struct field name being a word right
+    * before `:`. None when anything else appears, or nothing does.
+    */
+  private def constantEnd(text: String, toks: Vector[SqlLexer.Token], from: Int): Option[Int] =
+    def tokText(i: Int): String             = text.substring(toks(i).start, toks(i).end)
+    def isPunct(i: Int, s: String): Boolean =
+      i < toks.length && toks(i).kind == SqlLexer.Kind.Punct && tokText(i) == s
+    var i     = from
+    var depth = 0
+    var ok    = true
+    var end   = -1
+    while ok && end < 0 && i < toks.length do
+      val t = toks(i)
+      if depth == 0 && i > from && (isPunct(i, ",") || isPunct(i, ")")) then end = i
+      else if isPunct(i, "[") || isPunct(i, "{") then depth += 1
+      else if isPunct(i, "]") || isPunct(i, "}") then
+        ok = depth > 0
+        depth -= 1
+      else if isPunct(i, ",") || isPunct(i, ":") then ok = depth > 0 && i > from
+      else if t.kind == SqlLexer.Kind.Number then ()
+      else if t.kind == SqlLexer.Kind.Literal then ok = quotedIdentifier(text, t).isEmpty
+      else if t.kind == SqlLexer.Kind.Word then
+        ok =
+          ConstantWords(tokText(i).toLowerCase(Locale.ROOT)) || (depth > 0 && isPunct(i + 1, ":"))
+      else if t.kind == SqlLexer.Kind.Operator && tokText(i) == "-" then
+        ok = toks.lift(i + 1).exists(_.kind == SqlLexer.Kind.Number)
+      else ok = false
+      i += 1
+    Option.when(ok && end > from)(end)
+
   private def isOpenParen(view: String, t: SqlLexer.Token): Boolean =
     t.kind == SqlLexer.Kind.Punct && view.charAt(t.start) == '('
 

@@ -27,8 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]                   = None
-  private val NoScope: String => Option[SessionScope] = _ => None
+  private val RootKey: Option[String]               = Some(IdentityFixtures.RootSessionTok)
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private def emptyReader(): org.apache.arrow.vector.ipc.ArrowReader =
     val allocator = new RootAllocator()
@@ -123,7 +123,7 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         executor,
         (_, _) => readerOverride,
         cfgOverride,
-        RestCaller(Some(IdentityFixtures.StaticKey), sessionsOverride, patsOverride),
+        IdentityFixtures.restCaller(sessionsOverride, patsOverride),
         audit = audit
       )
 
@@ -135,29 +135,30 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         table: String = "doomed",
         asName: Option[String] = None,
         fromSnapshot: Option[Long] = None,
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.undrop(UndropRequest(tenant, tenantDb, schema, table, asName, fromSnapshot), apiKey)(
-        NoScope
+        SuperuserScope
       ).unsafeRunSync()
 
   "recoverable" should "return the reader's dropped tables" in new Stubs:
-    val out = handlers().recoverable("acme", "acme_tpch1", None, NoKey)(NoScope).unsafeRunSync()
-    val r   = out.toOption.get
+    val out =
+      handlers().recoverable("acme", "acme_tpch1", None, RootKey)(SuperuserScope).unsafeRunSync()
+    val r = out.toOption.get
     r.tables.map(_.table) shouldBe List("doomed")
     r.tables.head.lastLiveSnapshot shouldBe 39L
     r.tables.head.recoverable shouldBe true
 
   it should "404 an unknown tenant and 403 a cross-tenant caller" in new Stubs:
     val h = handlers()
-    h.recoverable("nope", "acme_tpch1", None, NoKey)(NoScope)
+    h.recoverable("nope", "acme_tpch1", None, RootKey)(SuperuserScope)
       .unsafeRunSync()
       .left
       .toOption
       .get
       ._1 shouldBe StatusCode.NotFound
-    val foreign: String => Option[SessionScope] =
-      _ => Some(SessionScope(superuser = false, manageableTenants = Set("other")))
+    val foreign: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("other"))
     h.recoverable("acme", "acme_tpch1", None, Some("tok"))(foreign)
       .unsafeRunSync()
       .left
@@ -272,17 +273,17 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
   "recoverable limit" should "clamp into [1, 200]" in new Stubs:
     val sink = new AtomicInteger(-1)
     val h    = handlers(readerOverride = stubReader(limitSink = sink))
-    h.recoverable("acme", "acme_tpch1", Some(500), NoKey)(NoScope).unsafeRunSync()
+    h.recoverable("acme", "acme_tpch1", Some(500), RootKey)(SuperuserScope).unsafeRunSync()
     sink.get shouldBe 200
-    h.recoverable("acme", "acme_tpch1", Some(0), NoKey)(NoScope).unsafeRunSync()
+    h.recoverable("acme", "acme_tpch1", Some(0), RootKey)(SuperuserScope).unsafeRunSync()
     sink.get shouldBe 1
 
   // ---------- executor identity (PAT regression) ----------
 
-  "undrop's CTAS" should "run the static key as the unrestricted superuser" in new Stubs:
-    undrop(handlers(), apiKey = Some(IdentityFixtures.StaticKey)).isRight shouldBe true
-    seenCallers.map(c => (c.identity, c.restriction, c.patId)) shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None))
+  "undrop's CTAS" should "run a superuser session as its user, never as a system caller" in new Stubs:
+    undrop(handlers(), apiKey = Some(IdentityFixtures.RootSessionTok)).isRight shouldBe true
+    seenCallers.map(c => (c.identity, c.restriction, c.patId, c.system)) shouldBe
+      List((IdentityFixtures.RootUsername, TokenRestriction.Unrestricted, None, false))
 
   it should "run a session as its user, unrestricted" in new Stubs:
     val h = handlers(sessionsOverride = IdentityFixtures.sessionOf)
@@ -302,6 +303,16 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
       patsOverride = IdentityFixtures.patOf
     )
     val out = undrop(h, apiKey = Some("qod_pat_unknown"))
+    out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.Unauthorized, "unauthorized"))
+    seenCallers shouldBe Nil
+
+  it should "401 an absent credential without calling the executor" in new Stubs:
+    val h = handlers(
+      sessionsOverride = IdentityFixtures.sessionOf,
+      patsOverride = IdentityFixtures.patOf
+    )
+    val out = undrop(h, apiKey = None)
     out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
       Some((StatusCode.Unauthorized, "unauthorized"))
     seenCallers shouldBe Nil

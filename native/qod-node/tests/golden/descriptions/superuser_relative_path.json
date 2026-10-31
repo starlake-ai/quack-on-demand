@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":["rel/x.csv"],"catalog":"system","name":"glob","schema":"main","type":"table","via":null}],"objects":[],"settings":[],"statement":"PROJECTION","v":1}

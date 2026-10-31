@@ -1,0 +1,1 @@
+CREATE SECURE VIEW sv_tp AS SELECT id FROM memory.u;

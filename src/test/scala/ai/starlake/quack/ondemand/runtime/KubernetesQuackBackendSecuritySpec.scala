@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, TenantDb}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import io.fabric8.kubernetes.api.model.EnvVar
 import io.fabric8.kubernetes.client.server.mock.KubernetesServer
 import org.scalatest.{BeforeAndAfterEach, OptionValues}
@@ -39,7 +41,9 @@ class KubernetesQuackBackendSecuritySpec
       readPodReady = _ => true,
       // Deterministic: the test JVM's own QOD_S3_* must not leak into the node-env Secret.
       readEnv = _ => None,
-      podTemplateEnabled = podTemplateEnabled
+      podTemplateEnabled = podTemplateEnabled,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
 
   private val baseSpec = NodeSpec(
@@ -77,7 +81,9 @@ class KubernetesQuackBackendSecuritySpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      runAsUser = 5000L
+      runAsUser = 5000L,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     backend.start(baseSpec.copy(nodeId = "quack-sec-runasuser")).unsafeRunSync()
     val pod = server.getClient.pods.inNamespace(ns).withName("quack-sec-runasuser").get()
@@ -238,14 +244,66 @@ class KubernetesQuackBackendSecuritySpec
           "quack-nodeenv-noenv",
           lakeMeta ++ Map("pgPassword" -> "p", "encryptionKey" -> "k")
         )
-          .copy(extraSetupSql = "SELECT 1;", objectStoreSql = "SELECT 2;")
+          .copy(
+            extraSetupSql = "SELECT 1;",
+            objectStoreSql = "SELECT 2;",
+            tenantDbInitSql = "SET threads = 2;",
+            tenantPoolInitSql = "SET threads = 3;",
+            tenantPoolInitTrusted = true
+          )
       )
       .unsafeRunSync()
     val env = podEnv("quack-nodeenv-noenv")
     env.filter(_.getValueFrom != null) shouldBe empty
     env.map(_.getName).filter(NodeSecretFiles.isKey) shouldBe empty
     secretRefs("quack-nodeenv-noenv").keySet shouldBe
-      Set("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "QOD_NODE_TOKEN")
+      Set(
+        "pgPassword",
+        "encryptionKey",
+        "extraSetupSql",
+        "objectStoreSql",
+        "QOD_NODE_TOKEN",
+        "QOD_NODE_AUTHZ_KEY",
+        NodeSecretFiles.InitNonceKey,
+        NodeSecretFiles.TenantDbInitKey,
+        NodeSecretFiles.TenantPoolInitTrustedKey
+      )
+    // Task 20 (review I2): the tenant initSql shares the pool's init SQL Secret, each text under the
+    // key its trust names, and the pod projects only the keys its spec holds: no env flag.
+    env.map(_.getName).filter(_.startsWith("QOD_INIT_")) shouldBe empty
+    secretPayload("qod-fedsql-acme-acme-lake-bi").value shouldBe Map(
+      "extraSetupSql"                          -> "SELECT 1;",
+      NodeSecretFiles.TenantDbInitKey          -> "SET threads = 2;",
+      NodeSecretFiles.TenantPoolInitTrustedKey -> "SET threads = 3;"
+    )
+    // The init marker nonce rides the per-pod token Secret, fresh at every start.
+    val nonce = secretPayload("qod-token-quack-nodeenv-noenv").value(
+      KubernetesQuackBackend.InitNonceSecretKey
+    )
+    nonce should fullyMatch regex "[0-9a-f]{32}"
+
+  // Review I2: a pod started for a trusted text never reads a later untrusted one as trusted. The
+  // spawn rewrites the shared Secret with the untrusted key only; the earlier pod's projection names
+  // the trusted key, which the Secret no longer holds.
+  it should "never pair a later untrusted initSql with an earlier pod's trust" in:
+    val backend = makeBackend()
+    val base    = nodeEnvSpec("quack-trust-a", lakeMeta + ("pgPassword" -> "p"))
+    backend
+      .start(base.copy(tenantDbInitSql = "SET threads = 2;", tenantDbInitTrusted = true))
+      .unsafeRunSync()
+    backend
+      .start(
+        base.copy(nodeId = "quack-trust-b", tenantDbInitSql = "CREATE SECRET s (TYPE s3);")
+      )
+      .unsafeRunSync()
+    secretRefs("quack-trust-a").get(NodeSecretFiles.TenantDbInitTrustedKey).map(_._2) shouldBe
+      Some(NodeSecretFiles.TenantDbInitTrustedKey)
+    secretRefs("quack-trust-b").get(NodeSecretFiles.TenantDbInitKey).map(_._2) shouldBe
+      Some(NodeSecretFiles.TenantDbInitKey)
+    secretRefs("quack-trust-b").keySet should not contain NodeSecretFiles.TenantDbInitTrustedKey
+    val payload = secretPayload("qod-fedsql-acme-acme-lake-bi").value
+    payload.get(NodeSecretFiles.TenantDbInitTrustedKey) shouldBe None
+    payload.get(NodeSecretFiles.TenantDbInitKey) shouldBe Some("CREATE SECRET s (TYPE s3);")
 
   it should "leave non-secret metastore keys as plain env vars" in:
     val backend = makeBackend()
@@ -253,6 +311,65 @@ class KubernetesQuackBackendSecuritySpec
     val plain = plainEnv("quack-nodeenv-4").map(_.getName)
     plain should contain("pgHost")
     plain should contain("dbName")
+
+  // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may
+  // become pod env: BASH_ENV (bash expands it before running the spawn script), PATH, LD_PRELOAD
+  // or QOD_NODE_BIN would run commands inside the pod before the node starts, and a name the
+  // manager sets itself would give the pod a second value of it.
+  it should "carry only TenantDb.NodeEnvKeys of the metastore, plus what the manager sets" in:
+    val backend = makeBackend()
+    val allowed = lakeMeta ++ Map(
+      "catalogAlias" -> "acme_lake",
+      "schemaName"   -> "main",
+      "dataPath"     -> "s3://lake/acme",
+      "encrypted"    -> "true"
+    )
+    val hostile = Map(
+      "BASH_ENV"                 -> "/nonexistent/sec1-marker-bash-env",
+      "PATH"                     -> "/nonexistent/sec1-marker-path",
+      "LD_PRELOAD"               -> "/nonexistent/sec1-marker-preload.so",
+      "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
+      "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
+      "dbInitSql"                -> "SELECT 'sec1-marker-db-init';",
+      "tenantDbInitSql"          -> "SELECT 'sec1-marker-tenant-db-init';",
+      "QOD_INIT_TRUSTED_DB"      -> "sec1-marker-trusted",
+      "kind"                     -> "sec1-marker-kind",
+      "QOD_SECRETS_DIR"          -> "/nonexistent/sec1-marker-secrets",
+      "QOD_NODE_PORT"            -> "1",
+      "QOD_S3_ENDPOINT"          -> "sec1-marker-endpoint",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
+      "sec1Unknown"              -> "sec1-marker-unknown"
+    )
+    val (_, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
+      backend
+        .start(nodeEnvSpec("quack-nodeenv-sec1", allowed ++ hostile + ("pgPassword" -> "p")))
+        .unsafeRunSync()
+    )
+    // Each dropped key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      hostile.keys.toList.sorted.map((Level.ERROR, nodeEnvKey.toString, _))
+    withClue("a metastore marker in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
+    )
+    val env   = podEnv("quack-nodeenv-sec1")
+    val names = env.map(_.getName)
+    // One value per name: kubelet lets the last duplicate win, a reader of the first sees another.
+    names.distinct shouldBe names
+    names.toSet shouldBe allowed.keySet ++
+      Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
+      ai.starlake.quack.NodeExtensionsConfig.EnvNames ++
+      ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
+    val values = env.map(e => e.getName -> e.getValue).toMap
+    allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
+    values.get("kind") shouldBe Some("ducklake")
+    values.get(NodeSecretFiles.DirEnv) shouldBe Some(KubernetesQuackBackend.SecretsMountPath)
+    values.get("QOD_NODE_PORT") shouldBe Some("8080")
+    values.get(NodeSecretFiles.NodeIdEnv) shouldBe Some("quack-nodeenv-sec1")
+    withClue("a metastore marker in the pod env: ")(
+      env.exists(e => Option(e.getValue).exists(_.contains("sec1-marker"))) shouldBe false
+    )
+    // The node-env Secret holds the metastore's own secret only: no metastore cloud credential.
+    secretPayload(nodeEnvSecretName).value shouldBe Map("pgPassword" -> "p")
 
   "the node-env Secret" should "hold exactly the keys the pod references, with their values" in:
     val backend = makeBackend()
@@ -314,6 +431,115 @@ class KubernetesQuackBackendSecuritySpec
     backend.stop(nodeEnvKey, "quack-nodeenv-8a").unsafeRunSync()
     secretPayload(nodeEnvSecretName) should not be empty
 
+  "the token Secret" should "carry the node's key, and the pod its id" in:
+    val keys    = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeKeys = keys,
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    // A metastore entry named like the id env var must not give the pod a second one: kubelet
+    // lets the last duplicate win, and a reader taking the first would see the spoofed value.
+    val (_, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
+      backend
+        .start(nodeEnvSpec("quack-nodeenv-key", lakeMeta + ("QOD_NODE_ID" -> "spoof")))
+        .unsafeRunSync()
+    )
+    // The spoofed key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      List((Level.ERROR, nodeEnvKey.toString, "QOD_NODE_ID"))
+    withClue("a spoofed value in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("spoof")) shouldBe false
+    )
+    secretRefs("quack-nodeenv-key").get("QOD_NODE_AUTHZ_KEY") shouldBe
+      Some(("qod-token-quack-nodeenv-key", KubernetesQuackBackend.AuthzKeySecretKey))
+    secretPayload("qod-token-quack-nodeenv-key").value
+      .get(KubernetesQuackBackend.AuthzKeySecretKey) shouldBe Some(keys.keyHex("quack-nodeenv-key"))
+    podEnv("quack-nodeenv-key").filter(_.getName == "QOD_NODE_ID").map(_.getValue) shouldBe
+      List("quack-nodeenv-key")
+    // The key travels in the Secret only: no plain env value of the pod holds it (the check does
+    // not echo it).
+    withClue("a plain env value of the pod holds the node's key")(
+      plainEnv("quack-nodeenv-key").exists(_.getValue == keys.keyHex("quack-nodeenv-key")) shouldBe
+        false
+    )
+
+  "a node pod" should "carry the manager's extension policy as plain env, once each" in:
+    val names = ai.starlake.quack.NodeExtensionsConfig.EnvNames
+    def extensionEnv(nodeId: String): List[(String, String)] =
+      podEnv(nodeId).filter(e => names.contains(e.getName)).map(e => e.getName -> e.getValue).sorted
+    makeBackend().start(nodeEnvSpec("quack-nodeenv-ext-off", lakeMeta)).unsafeRunSync()
+    extensionEnv("quack-nodeenv-ext-off") shouldBe List(
+      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "false",
+      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "false",
+      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "false"
+    )
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    // A metastore entry spelled like one of them is not a TenantDb.NodeEnvKeys key: it reaches no
+    // pod, so the pod has each name once, from the config.
+    backend
+      .start(
+        nodeEnvSpec(
+          "quack-nodeenv-ext-on",
+          lakeMeta + ("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS" -> "true")
+        )
+      )
+      .unsafeRunSync()
+    extensionEnv("quack-nodeenv-ext-on") shouldBe List(
+      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "false",
+      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "false",
+      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "true"
+    )
+
+  it should "carry the manager's decide limits as plain env, once each" in:
+    val names = ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
+    def limitEnv(nodeId: String): List[(String, String)] =
+      podEnv(nodeId).filter(e => names.contains(e.getName)).map(e => e.getName -> e.getValue).sorted
+    makeBackend().start(nodeEnvSpec("quack-nodeenv-lim-def", lakeMeta)).unsafeRunSync()
+    limitEnv("quack-nodeenv-lim-def") shouldBe List(
+      "QOD_AUTHZ_CACHE_ENTRIES"     -> "10000",
+      "QOD_AUTHZ_DECIDE_TIMEOUT_MS" -> "2000"
+    )
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0)
+    )
+    // A metastore entry spelled like one reaches no pod: the pod has each name once, from config.
+    backend
+      .start(nodeEnvSpec("quack-nodeenv-lim-set", lakeMeta + ("QOD_AUTHZ_CACHE_ENTRIES" -> "1")))
+      .unsafeRunSync()
+    limitEnv("quack-nodeenv-lim-set") shouldBe List(
+      "QOD_AUTHZ_CACHE_ENTRIES"     -> "0",
+      "QOD_AUTHZ_DECIDE_TIMEOUT_MS" -> "750"
+    )
+
   // No back-compat shape is emitted (owner decision 2026-09-21: operators restart their nodes on
   // upgrade). These two pin that adoption of a pod from an EITHER shape is still lossless for
   // everything the manager actually tracks -- it never reads a credential back off a pod spec.
@@ -344,6 +570,3 @@ class KubernetesQuackBackendSecuritySpec
 
     val adopted = backend.discoverExisting().unsafeRunSync()
     adopted.map(_.nodeId) should contain("quack-nodeenv-orphan")
-
-  "NodeEnvSecretKeys" should "be exactly the model's list, so the strip and the Secret agree" in:
-    KubernetesQuackBackend.NodeEnvSecretKeys shouldBe TenantDb.NodeSecretEnvKeys

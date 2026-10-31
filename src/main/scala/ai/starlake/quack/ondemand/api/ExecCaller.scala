@@ -1,6 +1,8 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.TokenRestriction
+import ai.starlake.quack.ondemand.rbac.AuthzRequest
 
 /** Who is running a statement through the routed executor.
   *
@@ -9,6 +11,14 @@ import ai.starlake.quack.ondemand.auth.TokenRestriction
   * attenuated EffectiveSet on a connection context, which needs no signature change but makes the
   * security property rest on remembering to attenuate first. Here, omitting it does not compile.
   *
+  * `superuserAdmissible` is required for the same reason. It is the caller's realm, handed to the
+  * handshake gate as `AuthzRequest.superuserAdmissible`: true only for a caller that is itself a
+  * superuser, a superuser session (`SessionScope.superuser`, see [[RestCaller]]) or a PAT whose
+  * owning row is tenant-less ([[RestCaller]], `McpDataTools.callerFor`). Every other caller binds a
+  * row of the pool's own tenant, never a superuser row: the rule the FlightSQL handshake applies to
+  * a tenant-realm credential. The flag grants nothing by itself: it is not a privilege signal (see
+  * `system` below), it only lets the gate bind the superuser row the caller's own identity names.
+  *
   * `patId` is set for a PAT bearer by [[RestCaller]] (the catalog preview, data-diff, undrop and
   * restore REST endpoints) and by `McpDataTools.callerFor` (MCP). The routed executor
   * (`Main.routedExecutor`) threads it into `FlightSqlRouter.execute`, so the statement-history and
@@ -16,15 +26,19 @@ import ai.starlake.quack.ondemand.auth.TokenRestriction
   * token kill the statement. System and session callers carry `None`.
   *
   * `system` is the ONLY privilege signal: a system caller gets the synthetic superuser EffectiveSet
-  * in the routed executor (no ACL, no CLS/RLS, never attenuated). It is set only by
-  * [[ExecCaller.system]] at trusted internal sites (the static key, the restore dry run, the branch
-  * change counter). `identity` is a label for logs and history; user names are not reserved (a
-  * tenant may have a user called "superuser"), so nothing may decide privilege from it.
+  * in the routed executor (no ACL, no CLS/RLS, never attenuated) and runs on nodes as
+  * `NodePrincipal.System`, and `superuserAdmissible` is no route to it. It is set only by
+  * [[ExecCaller.system]], for the manager's own work: the restore dry run
+  * (`CatalogRestoreHandlers`) and the branch change counter (`BranchWiring`). No credential is a
+  * system caller: [[RestCaller]] and `McpDataTools.callerFor` run a session or a PAT as its user,
+  * through the handshake gate. `identity` is a label for logs and history; user names are not
+  * reserved (a tenant may have a user called "superuser"), so nothing may decide privilege from it.
   */
 final case class ExecCaller(
     connectionId: String,
     identity: String,
     restriction: TokenRestriction,
+    superuserAdmissible: Boolean,
     patId: Option[String] = None,
     system: Boolean = false
 ):
@@ -34,18 +48,51 @@ final case class ExecCaller(
   def effectiveMaxRows(serverCap: Int, requested: Int): Int =
     (List(serverCap, requested) ++ restriction.maxRows.toList).min.max(1)
 
+  /** The handshake request this caller connects to `poolKey` with: what the routed executor asks
+    * `PoolSupervisor.authorizeHandshakeDetailed` before it runs a statement, and what
+    * `GET /api/profile/pools` asks for each pool it lists, so "may connect" is one decision on
+    * both. It carries the caller's realm (`superuserAdmissible`: only a superuser caller may bind a
+    * superuser row). Edge `mcp` lands in the OPA input's `client.edge`; the token restriction
+    * attenuates the effective set before gate 4, so an opa tenant's connect decision sees only the
+    * token's roles.
+    */
+  def authzRequest(poolKey: PoolKey): AuthzRequest =
+    AuthzRequest(
+      poolKey.tenant,
+      poolKey.pool,
+      identity,
+      superuserAdmissible = superuserAdmissible,
+      edge = "mcp",
+      restriction = restriction
+    )
+
 object ExecCaller:
 
-  /** A trusted internal caller: the static key or a system leg. Labelled with
-    * [[CatalogPreviewHandlers.SuperuserIdentity]] for logs; the privilege is the flag.
+  /** The manager acting for itself (the restore dry run, the branch change counter), never a
+    * credential. Labelled with [[CatalogPreviewHandlers.SuperuserIdentity]] for logs; the privilege
+    * is the flag. It never reaches the handshake gate, so its `superuserAdmissible = true` decides
+    * nothing.
     */
   def system(connectionId: String): ExecCaller =
     ExecCaller(
       connectionId,
       CatalogPreviewHandlers.SuperuserIdentity,
       TokenRestriction.Unrestricted,
+      superuserAdmissible = true,
       system = true
     )
 
-  def unrestricted(connectionId: String, identity: String): ExecCaller =
-    ExecCaller(connectionId, identity, TokenRestriction.Unrestricted)
+  /** A caller with no token restriction: a login session. `superuserAdmissible` is the session's
+    * own `SessionScope.superuser`.
+    */
+  def unrestricted(
+      connectionId: String,
+      identity: String,
+      superuserAdmissible: Boolean
+  ): ExecCaller =
+    ExecCaller(
+      connectionId,
+      identity,
+      TokenRestriction.Unrestricted,
+      superuserAdmissible = superuserAdmissible
+    )

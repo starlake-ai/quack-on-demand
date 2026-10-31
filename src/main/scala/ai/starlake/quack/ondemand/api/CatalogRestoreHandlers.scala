@@ -56,7 +56,7 @@ final class CatalogRestoreHandlers(
     s.exists(c => c == '\'' || c == '"' || c == ';' || c == '\\' || c.isWhitespace || c.isControl)
 
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(
       sup,
@@ -111,7 +111,7 @@ final class CatalogRestoreHandlers(
           }
 
   def restore(req: RestoreRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RestoreResponse] =
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>

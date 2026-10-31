@@ -21,6 +21,11 @@ services:
       QOD_FLEET_JOIN_TOKEN: ${FLEET_JOIN_TOKEN:?set FLEET_JOIN_TOKEN in .env (openssl rand -hex 24)}
       # Maintenance and branch-merge nodes run inside this container, not on a worker.
       QOD_FLEET_EPHEMERAL: local
+      # Every fleet node calls this replica back for its statements' verdicts: this replica's own
+      # plain http:// address on the network the workers share, one per replica (never a load
+      # balancer or an address several replicas share). With one manager here it is the address
+      # the workers heartbeat to (their QOD_MANAGER_URL below).
+      QOD_INTERNAL_URL: http://host.docker.internal:${MANAGER_PORT:-20900}
       # Fleet needs object storage every server reaches: the bundled SeaweedFS.
       QOD_DUCKLAKE_DATA_PATH: s3://${S3_BUCKET:-ducklake}/fleet
       QOD_S3_ENDPOINT: seaweedfs:8333

@@ -34,7 +34,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
 
   import IdentityFixtures.*
 
-  private val NoScope: String => Option[SessionScope] = _ => None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private final class Fixture:
     val store = new InMemoryControlPlaneStore()
@@ -87,7 +87,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       purgeFiles = (_, _) => Right(()),
       audit = new AuditRecorder(serviceAudit, _ => None)
     )
-    val callers = RestCaller(Some(StaticKey), sessionOf, patOf)
+    val callers = restCaller(sessionOf, patOf)
     val preview = new CatalogPreviewHandlers(
       sup,
       store,
@@ -105,42 +105,45 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
 
     def merge(key: Option[String]) =
       handlers
-        .merge(BranchMergeRequest("acme", parent.name, "feature"), key)(NoScope)
+        .merge(BranchMergeRequest("acme", parent.name, "feature"), key)(SuperuserScope)
         .unsafeRunSync()
 
   private def unauthorized[A](r: Either[(StatusCode, ErrorResponse), A]) =
     r.left.toOption.map(e => (e._1, e._2.error)) shouldBe
       Some((StatusCode.Unauthorized, "unauthorized"))
 
-  "a branch mutation" should "refuse an unresolvable token with 401 before the service" in {
+  "a branch mutation" should "refuse an absent or unresolvable credential with 401 before the service" in {
     val f = new Fixture
+    unauthorized(f.merge(None))
     unauthorized(f.merge(Some("qod_pat_unknown")))
     unauthorized(
       f.handlers
-        .create(BranchCreateRequest("acme", f.parent.name, "feature"), Some("expired-jwt"))(NoScope)
+        .create(BranchCreateRequest("acme", f.parent.name, "feature"), Some("expired-jwt"))(
+          SuperuserScope
+        )
         .unsafeRunSync()
     )
     unauthorized(
       f.handlers
-        .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(NoScope)
+        .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(SuperuserScope)
         .unsafeRunSync()
     )
     unauthorized(
       f.handlers
-        .discard(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(NoScope)
+        .discard(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(SuperuserScope)
         .unsafeRunSync()
     )
     unauthorized(
       f.handlers
-        .changes("acme", f.parent.name, "feature", None, Some("garbage"))(NoScope)
+        .changes("acme", f.parent.name, "feature", None, Some("garbage"))(SuperuserScope)
         .unsafeRunSync()
     )
     f.serviceAudit.events shouldBe empty
     f.cloneCalls shouldBe empty
   }
 
-  it should "reach the service for the static key, a session, a PAT and the absent credential" in
-    List(Some(StaticKey), Some(SessionTok), Some(PatTok), None).foreach { key =>
+  it should "reach the service for a superuser session, a session and a PAT" in
+    List(Some(RootSessionTok), Some(SessionTok), Some(PatTok)).foreach { key =>
       val f   = new Fixture
       val out = f.merge(key)
       withClue(s"key=$key: ") {
@@ -148,17 +151,17 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
         f.serviceAudit.events should not be empty
       }
     }
-  "BranchHandlers.actorResolver" should "map each credential to its actor" in {
-    val resolve = BranchHandlers.actorResolver(RestCaller(Some(StaticKey), sessionOf, patOf))
-    resolve(None).map(a => (a.identity, a.isAdmin)) shouldBe
-      Right((CatalogPreviewHandlers.SuperuserIdentity, true))
-    resolve(Some(StaticKey)).map(a => (a.identity, a.isAdmin)) shouldBe
-      Right((CatalogPreviewHandlers.SuperuserIdentity, true))
+
+  "BranchHandlers.actorResolver" should "map each credential to its actor, and refuse the rest" in {
+    val resolve = BranchHandlers.actorResolver(restCaller(sessionOf, patOf))
+    resolve(Some(RootSessionTok)).map(a => (a.identity, a.isAdmin)) shouldBe
+      Right((RootUsername, true))
     resolve(Some(SessionTok)).map(a => (a.identity, a.isAdmin)) shouldBe Right(("alice", true))
     resolve(Some(PatTok)).map(a => (a.identity, a.isAdmin)) shouldBe Right(("alice", true))
+    resolve(None).left.toOption.map(_._1) shouldBe Some(StatusCode.Unauthorized)
     resolve(Some("qod_pat_unknown")).left.toOption.map(_._1) shouldBe
       Some(StatusCode.Unauthorized)
-    resolve(Some(StaticKey + "x")).isLeft shouldBe true
+    resolve(Some("static-key-1")).left.toOption.map(_._1) shouldBe Some(StatusCode.Unauthorized)
   }
 
   it should "carry a PAT's branchOnly restriction into the actor" in {
@@ -167,9 +170,9 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       if t == branchOnlyPat then
         patOf(PatTok).map(p => p.copy(restriction = p.restriction.copy(branchOnly = true)))
       else patOf(t)
-    val resolve = BranchHandlers.actorResolver(RestCaller(Some(StaticKey), sessionOf, patOf2))
+    val resolve = BranchHandlers.actorResolver(restCaller(sessionOf, patOf2))
     resolve(Some(branchOnlyPat)).map(_.branchOnly) shouldBe Right(true)
     resolve(Some(PatTok)).map(_.branchOnly) shouldBe Right(false)
     resolve(Some(SessionTok)).map(_.branchOnly) shouldBe Right(false)
-    resolve(Some(StaticKey)).map(_.branchOnly) shouldBe Right(false)
+    resolve(Some(RootSessionTok)).map(_.branchOnly) shouldBe Right(false)
   }

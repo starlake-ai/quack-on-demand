@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.runtime
 import ai.starlake.quack.FleetConfig
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.ondemand.state.{
   FleetAssignment,
   FleetServerRow,
@@ -13,6 +14,7 @@ import ai.starlake.quack.ondemand.state.{
 }
 import cats.effect.{IO, Ref}
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -129,16 +131,24 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     n.token should not be empty
   }
 
-  it should "prepend the pool's cpu/memory as DuckDB SETs to dbInitSql and pass memory to the claim" in {
+  it should "send the pool's cpu/memory as DuckDB SETs apart from the tenant's initSql" in {
     val (store, backend, _, _) = fixture()
     val small = new FakeAgent(store, "small", memoryBytes = Some(512L << 20)); small.beat()
     val big   = new FakeAgent(store, "big", memoryBytes = Some(64L << 30)); big.beat()
     val sized =
-      spec("n1").copy(cpu = Some("2"), memory = Some("1Gi"), dbInitSql = "SET threads = 8;")
+      spec("n1").copy(
+        cpu = Some("2"),
+        memory = Some("1Gi"),
+        tenantDbInitSql = "SET threads = 8;",
+        tenantPoolInitSql = "SET threads = 4;",
+        tenantPoolInitTrusted = true
+      )
     val n = withAgent(big)(backend.start(sized))
     n.serverName shouldBe Some("big")
-    store.get("big").get.assignment.map(_.dbInitSql) shouldBe
-      Some("SET threads = 2;\nSET memory_limit = '1024MiB';\nSET threads = 8;")
+    val a = store.get("big").get.assignment.get
+    a.resourceSql shouldBe "SET threads = 2;\nSET memory_limit = '1024MiB';\n"
+    (a.tenantDbInitSql, a.tenantDbInitTrusted) shouldBe ("SET threads = 8;", false)
+    (a.tenantPoolInitSql, a.tenantPoolInitTrusted) shouldBe ("SET threads = 4;", true)
   }
 
   it should "hand servers the node-facing Postgres address of the managed metastore" in {
@@ -167,6 +177,50 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     withAgent(agent)(backend.start(managed))
     store.get("srv-1").get.assignment.map(a => (a.env("pgHost"), a.env("pgPort"))) shouldBe
       Some(("host.docker.internal", "15432"))
+  }
+
+  // SEC-1: a tenant-db's metastore is tenant-admin input, and `qod fleet join` lays the
+  // assignment's env over the spawn script's environment. Only TenantDb.NodeEnvKeys and the
+  // metastore's own secrets (which the join process writes to files) travel; the SQL the manager
+  // sets keeps its own fields.
+  it should "hand servers only TenantDb.NodeEnvKeys and the metastore's own secrets" in {
+    val (store, backend, _, _) = fixture()
+    val agent                  = new FakeAgent(store, "srv-1"); agent.beat()
+    val allowed                = Map(
+      "pgHost"       -> "h",
+      "pgPort"       -> "5432",
+      "pgUser"       -> "u",
+      "dbName"       -> "lake",
+      "catalogAlias" -> "lake",
+      "schemaName"   -> "main",
+      "dataPath"     -> "s3://lake/acme",
+      "encrypted"    -> "true"
+    )
+    val hostile = Map(
+      "BASH_ENV"                 -> "/nonexistent/sec1-marker-bash-env",
+      "PATH"                     -> "/nonexistent/sec1-marker-path",
+      "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
+      "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
+      "extraSetupSql"            -> "SELECT 'sec1-marker-extra';",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
+      "QOD_NODE_TOKEN"           -> "sec1-marker-token",
+      "sec1Unknown"              -> "sec1-marker-unknown"
+    )
+    val sec1        = spec("n1").copy(metastore = allowed ++ hostile + ("PgPassword" -> "pw"))
+    val (_, logged) =
+      LogCapture.logged(classOf[FleetQuackBackend].getName)(withAgent(agent)(backend.start(sec1)))
+    // Each dropped key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      hostile.keys.toList.sorted.map((Level.ERROR, pk.toString, _))
+    withClue("a metastore marker in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
+    )
+    val a = store.get("srv-1").get.assignment.get
+    a.env shouldBe allowed + ("PgPassword" -> "pw")
+    // Nor does any other field of the assignment (its SQL, kind, identity) carry a hostile value.
+    withClue("a metastore marker in the assignment: ")(
+      a.productIterator.exists(_.toString.contains("sec1-marker")) shouldBe false
+    )
   }
 
   it should "raise NoFreeServer with a reason" in {
@@ -341,7 +395,7 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     val (store, backend, setNow, now) = fixture()
     val agent = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
     store.claim(
-      FleetAssignment(0, "orphan", pk, 21900, "t", "memory", Map.empty, "", "", "", ""),
+      FleetAssignment(0, "orphan", pk, 21900, "t", "memory", Map.empty, "", "", ""),
       30,
       None
     )
@@ -358,7 +412,7 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     val (store, _, setNow, now) = fixture()
     val agent = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
     store.claim(
-      FleetAssignment(0, "fresh", pk, 21900, "t", "memory", Map.empty, "", "", "", ""),
+      FleetAssignment(0, "fresh", pk, 21900, "t", "memory", Map.empty, "", "", ""),
       30,
       None
     )

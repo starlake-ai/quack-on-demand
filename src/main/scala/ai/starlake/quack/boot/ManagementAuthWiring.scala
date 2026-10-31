@@ -1,7 +1,7 @@
 package ai.starlake.quack.boot
 
 import java.util.Locale
-import ai.starlake.quack.ManagerConfig
+import ai.starlake.quack.{ManagementOidcConfig, ManagerConfig}
 import ai.starlake.quack.edge.auth.{
   OidcBearerAuthenticator,
   OidcDiscovery,
@@ -68,88 +68,100 @@ object ManagementAuthWiring extends LazyLogging:
       identitySource = identitySource,
       authModeResolver = authModeResolver,
       cookieSecureOverride = cookieSecureOverride,
-      oidcSso = buildOidcSso(mgrCfg, authCfg, identitySource, loadTenant),
+      oidcSso = Some(buildOidcSso(mgrCfg, authCfg, identitySource, loadTenant)),
       sqlToken = buildSqlTokenService(mgrCfg, authCfg)
     )
 
-  /** Build the admin-UI OIDC SSO service only in oidc mode. Discovery + token exchange use a shared
-    * java.net.http client; id_token validation reuses OidcBearerAuthenticator against the
-    * discovered jwks_uri. redirect_uri is built from the public base URL (must match the IdP
-    * client's registered redirect URI).
+  /** Build the admin-UI OIDC SSO service, under either `identitySource`. `identitySource` governs
+    * only the bare `/ui/` login (the system mode of `ManagementAuthModeResolver`); a tenant's own
+    * `authProvider` decides whether its `/ui/?tenant=` login is SSO, so tenant logins need the
+    * service whatever the manager-wide source is. The System scope keeps following
+    * `identitySource`: under `db` the service gets an empty `ManagementOidcConfig()`, so the bare
+    * SSO start, callback and logout never use the manager-wide client, even when `QOD_MGMT_OIDC_*`
+    * are set; under `oidc` it answers `oidc_not_configured` unless `QOD_MGMT_OIDC_ISSUER_URL` and
+    * `QOD_MGMT_OIDC_CLIENT_ID` are set. Nothing is fetched here: discovery runs on the first login
+    * of each issuer.
+    *
+    * Discovery + token exchange use a shared java.net.http client; id_token validation reuses
+    * OidcBearerAuthenticator against the discovered jwks_uri. redirect_uri is built from the public
+    * base URL (must match the IdP client's registered redirect URI).
     */
   private def buildOidcSso(
       mgrCfg: ManagerConfig,
       authCfg: AuthenticationConfig,
       identitySource: ManagementIdentitySource,
       loadTenant: String => Option[Tenant]
-  ): Option[OidcSsoService] =
-    if identitySource == ManagementIdentitySource.Oidc then
-      val httpClient = java.net.http.HttpClient
-        .newBuilder()
-        .connectTimeout(java.time.Duration.ofSeconds(10))
-        .build()
-      val discovery = new OidcDiscovery(httpGet =
-        url =>
-          try
-            val req = java.net.http.HttpRequest
-              .newBuilder()
-              .uri(java.net.URI.create(url))
-              .GET()
-              .timeout(java.time.Duration.ofSeconds(15))
-              .build()
-            val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-            if resp.statusCode() == 200 then Right(resp.body())
-            else Left(s"discovery HTTP ${resp.statusCode()}")
-          catch case e: Exception => Left(e.getMessage)
-      )
-      val resolver = new OidcEndpointResolver(
-        loadTenant = loadTenant,
-        secrets = SecretRefResolver.default,
-        discovery = discovery
-      )
-      val codec = new OidcStateCodec(mgrCfg.auth.management.sessionJwtSecret, 600000L)
-      if mgrCfg.auth.management.publicBaseUrl.trim.isEmpty then
-        logger.warn(
-          "identitySource=oidc but QOD_MGMT_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults " +
-            s"to http://localhost:${mgrCfg.port}, which must match the IdP client's registered " +
-            "redirect URI. Set QOD_MGMT_PUBLIC_BASE_URL for any non-localhost deploy."
-        )
-      val publicBaseUrlOf = () =>
-        val base = mgrCfg.auth.management.publicBaseUrl
-        if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
-      val httpExchange = (url: String, form: String) =>
+  ): OidcSsoService =
+    val httpClient = java.net.http.HttpClient
+      .newBuilder()
+      .connectTimeout(java.time.Duration.ofSeconds(10))
+      .build()
+    val discovery = new OidcDiscovery(httpGet =
+      url =>
         try
           val req = java.net.http.HttpRequest
             .newBuilder()
             .uri(java.net.URI.create(url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
+            .GET()
             .timeout(java.time.Duration.ofSeconds(15))
             .build()
           val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
           if resp.statusCode() == 200 then Right(resp.body())
-          else Left(s"token endpoint HTTP ${resp.statusCode()}")
+          else Left(s"discovery HTTP ${resp.statusCode()}")
         catch case e: Exception => Left(e.getMessage)
-      val buildValidator = (ep: OidcEndpoints) =>
-        new OidcBearerAuthenticator(
-          ep.provider,
-          ep.jwksUrl,
-          ep.issuer,
-          ep.clientId,
-          authCfg.roleClaim
-        )
-      Some(
-        new OidcSsoService(
-          resolver = resolver,
-          mgmt = mgrCfg.auth.management.oidc,
-          codec = codec,
-          roleClaim = authCfg.roleClaim,
-          publicBaseUrlOf = publicBaseUrlOf,
-          httpExchange = httpExchange,
-          buildValidator = buildValidator
-        )
+    )
+    val resolver = new OidcEndpointResolver(
+      loadTenant = loadTenant,
+      secrets = SecretRefResolver.default,
+      discovery = discovery
+    )
+    val codec = new OidcStateCodec(mgrCfg.auth.management.sessionJwtSecret, 600000L)
+    // Warn only where the bare /ui/ login is SSO, so a db-mode boot stays quiet.
+    val publicBaseUrlUnset = mgrCfg.auth.management.publicBaseUrl.trim.isEmpty
+    if identitySource == ManagementIdentitySource.Oidc && publicBaseUrlUnset then
+      logger.warn(
+        "identitySource=oidc but QOD_MGMT_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults " +
+          s"to http://localhost:${mgrCfg.port}, which must match the IdP client's registered " +
+          "redirect URI. Set QOD_MGMT_PUBLIC_BASE_URL for any non-localhost deploy."
       )
-    else None
+    val publicBaseUrlOf = () =>
+      val base = mgrCfg.auth.management.publicBaseUrl
+      if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
+    val httpExchange = (url: String, form: String) =>
+      try
+        val req = java.net.http.HttpRequest
+          .newBuilder()
+          .uri(java.net.URI.create(url))
+          .header("Content-Type", "application/x-www-form-urlencoded")
+          .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
+          .timeout(java.time.Duration.ofSeconds(15))
+          .build()
+        val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+        if resp.statusCode() == 200 then Right(resp.body())
+        else Left(s"token endpoint HTTP ${resp.statusCode()}")
+      catch case e: Exception => Left(e.getMessage)
+    val buildValidator = (ep: OidcEndpoints) =>
+      new OidcBearerAuthenticator(
+        ep.provider,
+        ep.jwksUrl,
+        ep.issuer,
+        ep.clientId,
+        authCfg.roleClaim
+      )
+    // The System scope (bare /ui/) follows identitySource: in db mode it gets no client, even when
+    // QOD_MGMT_OIDC_* are set, so its start, callback and logout never use the manager-wide one.
+    val systemClient =
+      if identitySource == ManagementIdentitySource.Oidc then mgrCfg.auth.management.oidc
+      else ManagementOidcConfig()
+    new OidcSsoService(
+      resolver = resolver,
+      mgmt = systemClient,
+      codec = codec,
+      roleClaim = authCfg.roleClaim,
+      publicBaseUrlOf = publicBaseUrlOf,
+      httpExchange = httpExchange,
+      buildValidator = buildValidator
+    )
 
   /** Data-plane SQL-token flow (/api/auth/sql-token): an auth-code login against the EDGE OIDC
     * provider (not the management one) that hands a JDBC client a bearer to paste into DBeaver's

@@ -4,6 +4,12 @@
 # manager's pre-existing state -- the demo's `bi` / `etl` pools live alongside
 # our temporary `smoke` pool.
 #
+# Every /api call carries a session: the script logs in as the seeded superuser
+# ADMIN_USER (default admin) with QOD_ADMIN_PASSWORD (default admin, the
+# development value ./scripts/run-jar.sh seeds on first boot) and sends the
+# token as X-API-Key. The password reaches curl on stdin and the token through
+# a private header file, never a command line.
+#
 # Run order:
 #   ./scripts/run-jar.sh   # in another shell
 #   ./test-api.sh
@@ -14,16 +20,38 @@ BASE="http://$HOST:$PORT/api"
 TENANT="${TENANT:-acme}"
 TENANT_DB="${TENANT_DB:-acme_tpch}"
 POOL="${POOL:-smoke}"
+ADMIN_USER="${ADMIN_USER:-admin}"
+QOD_ADMIN_PASSWORD="${QOD_ADMIN_PASSWORD:-admin}"
+
+# mktemp creates both files private (mode 0600); the trap removes them.
+LOGIN_OUT="$(mktemp)"
+AUTH_HEADER="$(mktemp)"
+trap 'rm -f "$LOGIN_OUT" "$AUTH_HEADER"' EXIT
 
 echo "==> health"
 curl -fsS "http://$HOST:$PORT/health"
+echo
+
+echo "==> login as $ADMIN_USER"
+HTTP=$(ADMIN_USER="$ADMIN_USER" QOD_ADMIN_PASSWORD="$QOD_ADMIN_PASSWORD" python3 -c \
+  'import json, os; print(json.dumps({"username": os.environ["ADMIN_USER"], "password": os.environ["QOD_ADMIN_PASSWORD"]}))' \
+  | curl -s -o "$LOGIN_OUT" -w '%{http_code}' -X POST "$BASE/auth/login" \
+    -H 'Content-Type: application/json' --data-binary @-) || true
+if [ "$HTTP" != "200" ]; then
+  # A refused login answers {"error":...,"message":...}, never a token.
+  echo "auth/login returned HTTP $HTTP: set ADMIN_USER / QOD_ADMIN_PASSWORD to the seeded admin's credentials"
+  cat "$LOGIN_OUT"; echo; exit 1
+fi
+python3 -c 'import json, sys; print("X-API-Key: " + json.load(open(sys.argv[1]))["token"])' \
+  "$LOGIN_OUT" > "$AUTH_HEADER"
+echo "logged in"
 echo
 
 echo "==> ensure tenant '$TENANT' exists (idempotent: 409 is OK; demo bootstrap usually pre-creates it)"
 # Tenants are first-class - pool creation requires the tenant to be registered.
 # `-f` would fail the script on 409, so use a plain curl and tolerate that case.
 HTTP=$(curl -s -o /tmp/test-api-tenant.out -w '%{http_code}' \
-  -X POST "$BASE/tenant/create" -H 'Content-Type: application/json' \
+  -X POST "$BASE/tenant/create" -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
   -d "{\"id\":\"$TENANT\",\"displayName\":\"$TENANT\",\"metastore\":{}}") || true
 if [ "$HTTP" != "200" ] && [ "$HTTP" != "409" ]; then
   echo "tenant/create returned HTTP $HTTP"; cat /tmp/test-api-tenant.out; exit 1
@@ -38,7 +66,7 @@ echo "==> create pool $TENANT/$TENANT_DB/$POOL (size=2: 1 RO, 1 DUAL, maxConcurr
 # Idempotent: 409 (already exists) is OK so the smoke test can be re-run
 # without first nuking the pool.
 HTTP=$(curl -s -o /tmp/test-api-pool.out -w '%{http_code}' \
-  -X POST "$BASE/pool/create" -H 'Content-Type: application/json' \
+  -X POST "$BASE/pool/create" -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
   -d "{
     \"tenant\":\"$TENANT\",\"tenantDb\":\"$TENANT_DB\",\"pool\":\"$POOL\",\"size\":2,
     \"roleDistribution\":{\"writeonly\":0,\"readonly\":1,\"dual\":1},
@@ -51,30 +79,30 @@ fi
 echo
 
 echo "==> list"
-curl -fsS "$BASE/pool/list"
+curl -fsS -H @"$AUTH_HEADER" "$BASE/pool/list"
 echo
 
 echo "==> status"
-curl -fsS "$BASE/pool/$TENANT/$TENANT_DB/$POOL/status"
+curl -fsS -H @"$AUTH_HEADER" "$BASE/pool/$TENANT/$TENANT_DB/$POOL/status"
 echo
 
 echo "==> bump one node's maxConcurrent"
-NODE_ID=$(curl -fsS "$BASE/pool/$TENANT/$TENANT_DB/$POOL/status" | \
+NODE_ID=$(curl -fsS -H @"$AUTH_HEADER" "$BASE/pool/$TENANT/$TENANT_DB/$POOL/status" | \
   python3 -c "import sys, json; print(json.load(sys.stdin)['nodes'][0]['nodeId'])")
-curl -fsS -X POST "$BASE/node/setMaxConcurrent" -H 'Content-Type: application/json' -d "{
+curl -fsS -X POST "$BASE/node/setMaxConcurrent" -H @"$AUTH_HEADER" -H 'Content-Type: application/json' -d "{
   \"tenant\":\"$TENANT\",\"tenantDb\":\"$TENANT_DB\",\"pool\":\"$POOL\",\"nodeId\":\"$NODE_ID\",\"max\":8
 }"
 echo
 
 echo "==> scale to 3 (add 1 DUAL)"
-curl -fsS -X POST "$BASE/pool/scale" -H 'Content-Type: application/json' -d "{
+curl -fsS -X POST "$BASE/pool/scale" -H @"$AUTH_HEADER" -H 'Content-Type: application/json' -d "{
   \"tenant\":\"$TENANT\",\"tenantDb\":\"$TENANT_DB\",\"pool\":\"$POOL\",\"targetSize\":3,
   \"roleDistribution\":{\"writeonly\":0,\"readonly\":1,\"dual\":2},\"force\":false
 }"
 echo
 
 echo "==> stop (force) -- cleans up the temporary smoke pool so the demo's bi/etl pools stay clean"
-curl -fsS -X POST "$BASE/pool/stop" -H 'Content-Type: application/json' -d "{
+curl -fsS -X POST "$BASE/pool/stop" -H @"$AUTH_HEADER" -H 'Content-Type: application/json' -d "{
   \"tenant\":\"$TENANT\",\"tenantDb\":\"$TENANT_DB\",\"pool\":\"$POOL\",\"force\":true
 }"
 echo

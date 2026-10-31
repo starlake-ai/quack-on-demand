@@ -1,10 +1,10 @@
 package ai.starlake.quack.ondemand
 
+import ai.starlake.quack.ondemand.initsql.InitSqlTrust
 import java.util.Locale
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   BranchStatus,
-  InitSqlScreen,
   Names,
   NodePlacement,
   NodeSpec,
@@ -17,13 +17,16 @@ import ai.starlake.quack.model.{
   SqlLiterals,
   Tenant,
   TenantDb,
-  TenantDbKind
+  TenantDbKind,
+  TenantLocation,
+  TenantLocationRules,
+  UserS3Credential,
+  UserS3CredentialRules
 }
 import ai.starlake.quack.ondemand.rbac.{RbacResolver, UserMemberships}
 import ai.starlake.quack.ondemand.fleet.MissingSlots
 import ai.starlake.quack.ondemand.runtime.{
   NoFreeServer,
-  NodeLockdown,
   NodePaths,
   NodeProcess,
   ObjectStoreSecret,
@@ -61,7 +64,10 @@ final case class TenantDbPatch(
     objectStore: Option[Map[String, String]] = None,
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
-    initSql: Option[String] = None
+    initSql: Option[String] = None,
+    // The writer is a superuser or the manager: a carried initSql is then trusted
+    // (InitSqlTrust.afterWrite).
+    initSqlWriterTrusted: Boolean = false
 )
 
 /** Result of [[PoolSupervisor.updateTenantDb]]: updated row, restarted node ids, and per-node
@@ -129,12 +135,6 @@ final class PoolSupervisor(
     locks: ai.starlake.quack.ondemand.ha.PoolLocker = ai.starlake.quack.ondemand.ha.PoolLocker.noop,
     publish: ai.starlake.quack.ondemand.ha.StateChangePublisher =
       ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
-    /** Engine lockdown gate (QOD_NODE_LOCKDOWN), from Main via `lockdownCfg.enabled`. Every
-      * NodeSpec build site stamps `effectiveLockdown(key)` into `lockdownSql`; this flag is the
-      * global default the per-pool tri-state inherits, so the query path and the maintenance path
-      * can never drift.
-      */
-    lockdownEnabled: Boolean = false,
     /** Managed object storage (QOD_MANAGED_STORE_*), from Main; `None` when the config block is
       * disabled. Present-and-enabled is the precondition for `createTenantDb(managedStorage =
       * true)`: it supplies the bucket the per-incarnation prefix is carved from, the credentials
@@ -149,13 +149,51 @@ final class PoolSupervisor(
       * reconcile tick in that gap respawns a node that is merely slow to come up. Past it, a node
       * that never listened (an init that hangs, a port taken by a stray) is respawned as before.
       */
-    nodeStartupGrace: scala.concurrent.duration.FiniteDuration = PoolSupervisor.NodeStartupGrace
+    nodeStartupGrace: scala.concurrent.duration.FiniteDuration = PoolSupervisor.NodeStartupGrace,
+    /** The policy-version cache Main shares with NodeKeys, which mints every session handle. None
+      * (tests) still keeps a real cache, over this supervisor's own store.
+      */
+    sharedPolicyVersions: Option[ai.starlake.quack.edge.authz.PolicyVersionCache] = None,
+    /** The user S3 credential cache Main shares with NodeKeys (handle digests) and the internal
+      * credentials endpoint. None (tests) still keeps a real cache, over this supervisor's store.
+      */
+    sharedUserS3: Option[ai.starlake.quack.edge.authz.UserS3CredentialCache] = None
 ) extends LazyLogging:
+
+  /** Each tenant's policy version (Liquibase 0050), refreshed after every local RBAC or ACL
+    * mutation and on every [[restore]].
+    */
+  val policyVersions: ai.starlake.quack.edge.authz.PolicyVersionCache =
+    sharedPolicyVersions.getOrElse(
+      new ai.starlake.quack.edge.authz.PolicyVersionCache(() => store.policyVersions())
+    )
+
+  /** Each user's own S3 credentials (Liquibase 0052), as this replica last read them: what session
+    * handles digest (`creds`), what the internal credentials endpoint serves a node, and the scopes
+    * the location rules admit a user's `s3://` URLs under. Refreshed with the policy versions.
+    */
+  val userS3: ai.starlake.quack.edge.authz.UserS3CredentialCache =
+    sharedUserS3.getOrElse(
+      new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
+    )
 
   // Surrogate-id-indexed caches of the persisted state.
   private val tenants   = TrieMap.empty[String, Tenant]   // id -> Tenant
   private val tenantDbs = TrieMap.empty[String, TenantDb] // id -> TenantDb
-  private val poolRows  = TrieMap.empty[String, Pool]     // id -> Pool
+
+  /** Moves on every change of [[tenantDbs]] (restore included): [[dataPaths]] derives the data
+    * paths again only after one.
+    */
+  private val tenantDbsVersion = new java.util.concurrent.atomic.AtomicLong(0L)
+
+  private def putTenantDbRow(td: TenantDb): Unit =
+    tenantDbs.put(td.id, td)
+    tenantDbsVersion.incrementAndGet()
+
+  private def removeTenantDbRow(id: String): Unit =
+    tenantDbs.remove(id)
+    tenantDbsVersion.incrementAndGet()
+  private val poolRows = TrieMap.empty[String, Pool] // id -> Pool
 
   // Runtime cache keyed by the natural PoolKey for fast routing.
   private val pools = TrieMap.empty[PoolKey, PoolState]
@@ -204,7 +242,7 @@ final class PoolSupervisor(
     mutationGates.set(gates)
 
   /** First Left wins. A throwing gate refuses (fail closed): a broken quota store must not grant
-    * unlimited provisioning. gateBypass short-circuits (superuser / static-key callers).
+    * unlimited provisioning. gateBypass short-circuits (superuser callers).
     */
   private def gateCheck(
       m: ai.starlake.quack.spi.StructureMutation,
@@ -246,23 +284,66 @@ final class PoolSupervisor(
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
 
+  /** A cached set and the policy generation (`policyVersions.generation`) read before it was
+    * computed.
+    */
+  private final case class CachedEffective(
+      generation: Long,
+      set: ai.starlake.quack.ondemand.rbac.EffectiveSet
+  )
+
   /** Caffeine-backed: `expireAfterWrite` handles the TTL, `maximumSize` bounds memory so
     * accumulated (userId, jwtRolesHash, jwtGroupsHash) keys can't leak.
     */
   private val effectiveCache: com.github.benmanes.caffeine.cache.Cache[
     EffectiveCacheKey,
-    ai.starlake.quack.ondemand.rbac.EffectiveSet
+    CachedEffective
   ] =
     com.github.benmanes.caffeine.cache.Caffeine
       .newBuilder()
       .expireAfterWrite(java.time.Duration.ofSeconds(EffectiveCacheTtl.toSeconds))
-      .maximumSize(10_000L)
-      .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
+      .maximumSize(PoolSupervisor.EffectiveCacheMaxEntries)
+      .recordStats()
+      .build[EffectiveCacheKey, CachedEffective]()
 
-  /** Drop every cached `EffectiveSet` without broadcasting. Used by [[restore]] and by peer
-    * notification handlers: broadcasting from those paths would echo forever across replicas.
+  /** The effective-set cache's size, hits, misses, evictions and capacity under
+    * `cache=qod_effective_sets`. A hit counts a lookup that found an entry, also one computed under
+    * an older policy generation and so not served.
     */
-  private def invalidateEffectiveCacheLocal(): Unit = effectiveCache.invalidateAll()
+  def bindEffectiveSetCacheMetrics(registry: io.micrometer.core.instrument.MeterRegistry): Unit =
+    ai.starlake.quack.observability.metrics.CacheMetrics.bind(
+      registry,
+      PoolSupervisor.EffectiveCacheMetricName,
+      effectiveCache,
+      PoolSupervisor.EffectiveCacheMaxEntries
+    )
+
+  /** Drop every cached `EffectiveSet` and reload the tenants' policy versions and the users' S3
+    * credentials, without broadcasting. Used by [[restore]] and by peer notification handlers:
+    * broadcasting from those paths would echo forever across replicas. Every RBAC mutator (the
+    * credential writes included) reaches it through [[invalidateEffectiveCache]], so handles minted
+    * after a change carry the new version and the new credential digest.
+    */
+  private def invalidateEffectiveCacheLocal(): Unit =
+    invalidateEffectiveCacheLocal(policyVersions.readAfterMutation(), userS3.read())
+
+  /** [[invalidateEffectiveCacheLocal]] publishing versions and credentials read earlier: restore()
+    * reads them before its snapshot, so neither vouches for state older than itself.
+    */
+  private def invalidateEffectiveCacheLocal(
+      versions: Option[Map[String, Long]],
+      credentials: ai.starlake.quack.edge.authz.UserS3CredentialCache.Loaded
+  ): Unit =
+    // The policy generation moves first, before the cache is dropped and the versions published.
+    // A set is served from the cache only under the generation it was computed in: one computed
+    // from grants read before an RBAC mutation, and written after that mutation's invalidation, is
+    // never served (a session resolving again under the mutation's new version would keep it until
+    // the next change). Open sessions follow the generation too (SessionGrants), so a mutation
+    // whose version read failed still reaches this replica's own sessions.
+    policyVersions.advance()
+    effectiveCache.invalidateAll()
+    policyVersions.publish(versions)
+    userS3.publish(credentials)
 
   /** Drop every cached `EffectiveSet` and notify peers, so a freshly-granted role or pool
     * permission takes effect on the next handshake, not after a TTL window.
@@ -270,6 +351,178 @@ final class PoolSupervisor(
   private def invalidateEffectiveCache(): Unit =
     invalidateEffectiveCacheLocal()
     publish.rbacChanged()
+
+  /** A tenant-db came, went, or changed its metastore or data path: the database data folders, a
+    * deny set every tenant's verdicts depend on, moved, and Liquibase 0054 bumped every tenant's
+    * policy version (CONTRACT Addendum 4 item 23). Reloaded here, so this replica's next handles
+    * carry the new versions and no node verdict taken before outlives the change. Local only: every
+    * caller then publishes `topologyChanged`, whose handler on a peer is [[restore]], which reloads
+    * the versions too. A tenant-db write is no RBAC mutation, so nothing goes out on `qod_rbac`.
+    */
+  private def dataFoldersChanged(): Unit = invalidateEffectiveCacheLocal()
+
+  // ---------- Tenant authorized locations (in-engine authorization) ----------
+
+  /** tenant id -> its authorized locations (Liquibase 0051), by location. Rebuilt by [[restore]]
+    * (peer NOTIFYs included), updated in place by this replica's own add and remove.
+    */
+  private val locationCache = TrieMap.empty[String, List[TenantLocation]]
+
+  /** The locations `tenantId` authorized, as this replica last read them: what local file access is
+    * checked against.
+    */
+  def tenantLocations(tenantId: String): List[TenantLocation] =
+    locationCache.getOrElse(tenantId, Nil)
+
+  /** Every running node of `tenantId`'s pools (branch pools included): where a location change is
+    * pushed.
+    */
+  def liveNodesOfTenant(tenantId: String): List[RunningNode] =
+    pools.values.filter(_.key.tenant == tenantId).flatMap(_.nodes).toList
+
+  /** Tenant `tenant`'s stored locations, read from the store so another replica's fresh change is
+    * listed too.
+    */
+  def listTenantLocations(tenant: String): Either[SupervisorError, List[TenantLocation]] =
+    getTenant(tenant) match
+      case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
+      case Some(t) => Right(store.listTenantLocations(t.id))
+
+  /** Authorize `location` for tenant `tenant` ([[TenantLocationRules]]; a refusal is an
+    * `InvalidArgument` whose message is `<code>: <text>`, a location already authorized
+    * `AlreadyExists`). The caller pushes the change to the tenant's running nodes.
+    */
+  def addTenantLocation(
+      tenant: String,
+      location: String,
+      filesRoot: Option[String],
+      createdBy: Option[String]
+  ): IO[Either[SupervisorError, TenantLocation]] = IO.blocking {
+    withCacheRecovery("addTenantLocation") {
+      getTenant(tenant) match
+        case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
+        case Some(t) =>
+          TenantLocationRules.validate(t.id, location, filesRoot) match
+            case Left((code, msg)) => Left(SupervisorError.InvalidArgument(s"$code: $msg"))
+            case Right(accepted)   =>
+              val row = TenantLocation(
+                id = TenantLocationRules.newId(store.listTenantLocations(t.id).map(_.id)),
+                tenantId = t.id,
+                kind = accepted.kind,
+                location = accepted.location,
+                createdAt = System.currentTimeMillis(),
+                createdBy = createdBy
+              )
+              if store.insertTenantLocation(row) then
+                locationCache.put(t.id, store.listTenantLocations(t.id))
+                // The insert bumped the tenant's policy version (Liquibase 0051); the rbac NOTIFY
+                // has peers restore(), which reloads the locations.
+                invalidateEffectiveCache()
+                Right(row)
+              else
+                Left(
+                  SupervisorError.AlreadyExists(
+                    s"tenant '${t.id}' already authorizes ${accepted.location}"
+                  )
+                )
+    }
+  }
+
+  /** Remove location `id` of tenant `tenant` and return it. An id of another tenant is `NotFound`:
+    * nothing is removed. The caller pushes the change to the tenant's running nodes.
+    */
+  def removeTenantLocation(
+      tenant: String,
+      id: String
+  ): IO[Either[SupervisorError, TenantLocation]] = IO.blocking {
+    withCacheRecovery("removeTenantLocation") {
+      getTenant(tenant) match
+        case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
+        case Some(t) =>
+          store.deleteTenantLocation(t.id, id) match
+            case None =>
+              Left(SupervisorError.NotFound(s"tenant '${t.id}' has no location $id"))
+            case Some(row) =>
+              locationCache.put(t.id, store.listTenantLocations(t.id))
+              invalidateEffectiveCache()
+              Right(row)
+    }
+  }
+
+  // ---------- Users' own S3 credentials (in-engine authorization, decision 23) ----------
+
+  /** User `userId`'s stored credentials, read from the store so another replica's fresh change is
+    * listed too.
+    */
+  def listUserS3Credentials(userId: String): Either[SupervisorError, List[UserS3Credential]] =
+    store.getUserById(userId) match
+      case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+      case Some(_) => Right(store.listUserS3Credentials(userId))
+
+  /** Store `accepted` for user `userId` ([[UserS3CredentialRules.validate]] made it, and the caller
+    * ran the data-folder check): a new credential, or the replacement of the one the user holds for
+    * that scope, which keeps its id. At most [[UserS3Credential.MaxPerUser]] per user: one more is
+    * `InvalidArgument("too_many_credentials: ...")`.
+    */
+  def putUserS3Credential(
+      userId: String,
+      accepted: UserS3CredentialRules.Accepted
+  ): IO[Either[SupervisorError, UserS3Credential]] = IO.blocking {
+    withCacheRecovery("putUserS3Credential") {
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(_) =>
+          val held = store.listUserS3Credentials(userId)
+          if !held.exists(_.scope == accepted.scope) && held.size >= UserS3Credential.MaxPerUser
+          then
+            Left(
+              SupervisorError.InvalidArgument(
+                s"too_many_credentials: a user holds at most ${UserS3Credential.MaxPerUser} " +
+                  "S3 credentials; remove one first"
+              )
+            )
+          else
+            val stored = store.putUserS3Credential(
+              UserS3Credential(
+                id = UserS3CredentialRules.newId(held.map(_.id)),
+                userId = userId,
+                scope = accepted.scope,
+                accessKeyId = accepted.accessKeyId,
+                secretAccessKey = accepted.secretAccessKey,
+                sessionToken = accepted.sessionToken,
+                region = accepted.region,
+                endpoint = accepted.endpoint,
+                urlStyle = accepted.urlStyle,
+                createdAt = 0L,
+                updatedAt = 0L
+              )
+            )
+            // The write bumped the user's tenant's policy version (Liquibase 0052); the rbac
+            // NOTIFY has peers restore(), which reloads the credentials.
+            invalidateEffectiveCache()
+            Right(stored)
+    }
+  }
+
+  /** Remove credential `id` of user `userId` and return it. An id of another user is `NotFound`:
+    * nothing is removed.
+    */
+  def removeUserS3Credential(
+      userId: String,
+      id: String
+  ): IO[Either[SupervisorError, UserS3Credential]] = IO.blocking {
+    withCacheRecovery("removeUserS3Credential") {
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(_) =>
+          store.deleteUserS3Credential(userId, id) match
+            case None =>
+              Left(SupervisorError.NotFound(s"user $userId has no S3 credential $id"))
+            case Some(c) =>
+              invalidateEffectiveCache()
+              Right(c)
+    }
+  }
 
   /** Broadcast both channels after a store mutation done OUTSIDE the supervisor's own mutators
     * (e.g. ManifestImporter). restore() never broadcasts, so external writers call this after
@@ -329,12 +582,13 @@ final class PoolSupervisor(
         else withDb.removed("dataPath")
 
     // `encrypted` reaches both spawn scripts as a plain env var through the metastore-to-env
-    // plumbing every backend already has (LocalQuackBackend.scala:55,
-    // KubernetesQuackBackend.buildPod), the same indirection `catalogAlias` uses. Emitted only
-    // when true, and never for InMemory, which has nothing at rest: the scripts treat an absent
-    // value as false.
-    if td.encrypted && td.kind != TenantDbKind.InMemory then perKind.updated("encrypted", "true")
-    else perKind.removed("encrypted")
+    // plumbing every backend has (it is one of TenantDb.NodeEnvKeys), the same indirection
+    // `catalogAlias` uses. Stamped from the row's flag, whatever the stored metastore says (no
+    // caller may store it: TenantDb.KnownMetastoreKeys). Emitted only when true, and never for
+    // InMemory, which has nothing at rest: the scripts treat an absent value as false.
+    if td.encrypted && td.kind != TenantDbKind.InMemory then
+      perKind.updated(TenantDb.EncryptedKey, "true")
+    else perKind.removed(TenantDb.EncryptedKey)
 
   /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
     * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a
@@ -359,8 +613,104 @@ final class PoolSupervisor(
   private[ondemand] def effectiveMetastoreForTest(td: TenantDb): Map[String, String] =
     effectiveMetastoreFor(td)
 
+  /** The versions lock (Phase C re-review I4-R1). A local mutation holds one permit across its
+    * store write, its cache update and the refresh that publishes the versions and credentials
+    * vouching for it ([[mutation]]); [[restore]] takes every permit across its read, snapshot,
+    * cache swap and publish, so it never swaps the caches to a snapshot read before a local commit
+    * while that commit's refresh publishes the newer version over them. Not fair: a mutation nested
+    * in another gets its permit at once even while a restore waits, so a waiting restore never
+    * deadlocks a mutation that already holds one.
+    */
+  private val versionsLock =
+    new java.util.concurrent.Semaphore(PoolSupervisor.VersionsLockPermits, false)
+
+  /** How many [[mutation]]s of this supervisor the current thread is inside. */
+  private val mutationDepth: ThreadLocal[Int] = ThreadLocal.withInitial(() => 0)
+
+  /** A [[restore]] was skipped (the lock not had in time) or deferred (asked for inside a
+    * mutation): the next local mutation to give its last permit back runs it.
+    */
+  private val restoreOwed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** `body` as one local mutation, holding one permit of [[versionsLock]]. Once the outermost
+    * mutation of this thread has given its permit back, it runs a [[restore]] still owed.
+    */
+  private def mutation[A](body: => A): A =
+    versionsLock.acquireUninterruptibly()
+    mutationDepth.set(mutationDepth.get() + 1)
+    try body
+    finally
+      mutationDepth.set(mutationDepth.get() - 1)
+      versionsLock.release()
+      if mutationDepth.get() == 0 && restoreOwed.compareAndSet(true, false) then
+        try restore()
+        catch
+          case scala.util.control.NonFatal(e) =>
+            logger.error(
+              s"restore: the restore owed to a local mutation failed: ${e.getMessage}",
+              e
+            )
+
+  /** Rebuild every cache from the store, under every permit of [[versionsLock]], and never without
+    * them (amendment A7): a restore never publishes a version over caches a local mutation is still
+    * changing. Asked for on a thread inside a mutation of this supervisor (a failing nested
+    * mutation's recovery, a NOTIFY handled on the writer's thread), it is deferred to the moment
+    * the outermost one gives its permit back, which waiting here would deadlock. One that cannot
+    * have every permit within [[PoolSupervisor.RestoreLockWaitMs]] (a local mutation running that
+    * long) is skipped with a WARN: the next NOTIFY, snapshot refresh or local mutation runs it. A
+    * stall is bounded, never a hang.
+    */
   def restore(): Unit =
-    val snap = store.snapshot()
+    if mutationDepth.get() > 0 then
+      restoreOwed.set(true)
+      logger.debug("restore: asked for inside a local mutation; runs once it is done")
+    else
+      val all  = PoolSupervisor.VersionsLockPermits
+      val held =
+        try
+          versionsLock.tryAcquire(
+            all,
+            PoolSupervisor.RestoreLockWaitMs,
+            java.util.concurrent.TimeUnit.MILLISECONDS
+          )
+        catch
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+            false
+      if held then
+        try restoreUnlocked()
+        finally versionsLock.release(all)
+      else
+        restoreOwed.set(true)
+        logger.warn(
+          "restore: a local mutation held the versions lock past " +
+            s"${PoolSupervisor.RestoreLockWaitMs} ms; skipped, the next NOTIFY, snapshot refresh " +
+            "or local mutation runs it"
+        )
+
+  /** Run at the end of every [[restore]], in registration order, a failing one logged and the rest
+    * still run: caches kept outside the supervisor that a peer's write can make stale, which the
+    * restore a `qod_topology` / `qod_rbac` NOTIFY or the periodic snapshot refresh runs must drop
+    * too (Main registers the federated-source caches, Task 11 addendum 7).
+    */
+  private val restoreHooks = new java.util.concurrent.CopyOnWriteArrayList[() => Unit]()
+
+  /** Runs `hook` at the end of every later [[restore]] ([[restoreHooks]]). */
+  def onRestore(hook: () => Unit): Unit = restoreHooks.add(hook)
+
+  private def restoreUnlocked(): Unit =
+    // Read before the snapshot and published once the caches are rebuilt: a version (and a
+    // credential digest) must never vouch for state older than itself. A peer's commit between the
+    // reads would otherwise publish its new version over the deny sets, ACL modes and grants of
+    // before it, and a node would cache that decision under the new version for 60 s; read first,
+    // the version is the older one, and the commit's own NOTIFY runs the restore that moves it.
+    // This replica's own commits stay out of that window through the versions lock.
+    val versions    = policyVersions.read()
+    val credentials = userS3.read()
+    // The tracker's write mark, also read before the snapshot: the trim below keeps every node
+    // written after it, which the snapshot may not list yet (a respawn re-applying a quarantine).
+    val trimMark = tracker.mark()
+    val snap     = store.snapshot()
 
     // Diff-aware rehydration: restore() is also driven by peer NOTIFY handlers, so a row a peer
     // DELETED must disappear from this mirror, not just get overwritten. Compute the snapshot key
@@ -382,7 +732,7 @@ final class PoolSupervisor(
     }.toSet
 
     tenants.keys.toList.filterNot(snapTenantIds).foreach(tenants.remove)
-    tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(tenantDbs.remove)
+    tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(removeTenantDbRow)
     poolRows.keys.toList.filterNot(snapPoolIds).foreach(poolRows.remove)
     // A pool a peer deleted directly in the store leaves this replica holding stale placement /
     // locality state (PlacementDirectory + LocalityTracker never auto-expire), so fire the teardown
@@ -400,7 +750,7 @@ final class PoolSupervisor(
     duckLakeInitPending.keys.toList.filterNot(snapTenantDbIds).foreach(duckLakeInitPending.remove)
 
     snap.tenants.foreach(t => tenants.put(t.id, t))
-    snap.tenantDbs.foreach(td => tenantDbs.put(td.id, td))
+    snap.tenantDbs.foreach(td => putTenantDbRow(td))
     snap.pools.foreach(p => poolRows.put(p.id, p))
     // Federation blob resolution, per tenant-db and cached for the duration of this restore()
     // call: createPool resolves it via federationBlobOf and stores it on PoolState.extraSetupSql,
@@ -484,7 +834,9 @@ final class PoolSupervisor(
             disabled = p.disabled,
             suspended = p.suspended,
             dbInitSql = td.initSql,
+            dbInitSqlTrusted = td.initSqlTrusted,
             initSql = p.initSql,
+            initSqlTrusted = p.initSqlTrusted,
             extraSetupSql = extraSetupSql,
             // Session defaults for SQL validation / policy-rewrite. Omitting these degraded every
             // restored pool to the metastore's schemaName ("main"), so schema-qualified refs
@@ -506,54 +858,67 @@ final class PoolSupervisor(
     pools.values.flatMap(_.nodes).foreach { n =>
       tracker.setQuarantined(n.nodeId, quarantinedIds.contains(n.nodeId))
     }
+    // Forget the load and latency ring of every node with no row, on every replica: the
+    // supervisor's own removal sites run only on the replica that removed the node, so a peer
+    // learns of it here. Nodes written since the mark or with statements in flight stay.
+    tracker.retain(snap.nodes.iterator.map(_.nodeId).toSet, trimMark)
+    // Authorized locations, diff-aware like the caches above: a tenant a peer emptied drops out.
+    val locationsByTenant = store.listAllTenantLocations().groupBy(_.tenantId)
+    locationCache.keys.toList.filterNot(locationsByTenant.contains).foreach(locationCache.remove)
+    locationsByTenant.foreach((t, ls) => locationCache.put(t, ls.sortBy(_.location)))
     // Local-only: restore() is called by peer-notification handlers; broadcasting here
     // would cause infinite echo across replicas.
-    invalidateEffectiveCacheLocal()
+    invalidateEffectiveCacheLocal(versions, credentials)
+    restoreHooks.forEach { hook =>
+      try hook()
+      catch
+        case scala.util.control.NonFatal(e) =>
+          logger.warn(s"restore: a restore hook failed: ${e.getMessage}", e)
+    }
 
   /** Wraps a mutator body so a failure after the store write leaves the caches consistent with the
     * store instead of half-applied. All caches (`tenants`, `tenantDbs`, `poolRows`, `pools`,
     * `poolIdByKey`, `rbacResolver`, tracker quarantine flags, effective-set cache) are DERIVED
-    * state, fully rebuildable from `store.snapshot()` via [[restore]]. On any exception this
-    * best-effort restore()s then rethrows the ORIGINAL exception unchanged (a rebuild failure is
-    * logged and swallowed). `restore()` acquires no lock and never spawns / calls `backend` /
+    * state, fully rebuildable from `store.snapshot()` via [[restore]]. The body is one local
+    * [[mutation]] (one permit of the versions lock). On any exception this best-effort restore()s,
+    * once the permit is given back, then rethrows the ORIGINAL exception unchanged (a rebuild
+    * failure is logged and swallowed); a mutation nested in another leaves that restore to the
+    * outermost one ([[restore]] defers it). `restore()` never spawns / calls `backend` /
     * broadcasts, so it is safe to run under a held `locks.withLock`.
     */
   private def withCacheRecovery[A](op: String)(body: => A): A =
-    try body
+    try mutation(body)
     catch
       case t: Throwable =>
-        try restore()
-        catch
-          case rebuildError: Throwable =>
-            logger.error(
-              s"withCacheRecovery[$op]: cache rebuild after failed mutation also failed: " +
-                s"${rebuildError.getMessage}",
-              rebuildError
-            )
-        logger.warn(
-          s"withCacheRecovery[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}"
-        )
+        recover("withCacheRecovery", op, t)
         throw t
 
   /** [[withCacheRecovery]] for an IO body: recovery runs in the same IO chain (under whatever lock
-    * the IO was built with, e.g. `locks.withLock`), then the original error is re-raised.
+    * the IO was built with, e.g. `locks.withLock`), then the original error is re-raised. The body
+    * holds no permit of the versions lock unless it takes one itself ([[mutation]]): the pool
+    * lifecycle bodies publish no version and can run for a node's whole start.
     */
   private def withCacheRecoveryIO[A](op: String)(io: IO[A]): IO[A] =
-    io.onError { case t =>
-      IO {
-        try restore()
-        catch
-          case rebuildError: Throwable =>
-            logger.error(
-              s"withCacheRecoveryIO[$op]: cache rebuild after failed mutation also failed: " +
-                s"${rebuildError.getMessage}",
-              rebuildError
-            )
-        logger.warn(
-          s"withCacheRecoveryIO[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}"
+    io.onError { case t => IO(recover("withCacheRecoveryIO", op, t)) }
+
+  /** The caches rebuilt from the store after `op` failed with `t`, and the WARN saying so. The
+    * operations of [[PoolSupervisor.SecretBearingOps]] are named by class and SQLState only (Phase
+    * C review C-m4): their failure's message can quote the row they wrote, a secret included.
+    */
+  private def recover(wrapper: String, op: String, t: Throwable): Unit =
+    try restore()
+    catch
+      case rebuildError: Throwable =>
+        logger.error(
+          s"$wrapper[$op]: cache rebuild after failed mutation also failed: " +
+            s"${rebuildError.getMessage}",
+          rebuildError
         )
-      }
-    }
+    val why =
+      if PoolSupervisor.SecretBearingOps.contains(op) then
+        ai.starlake.quack.edge.authz.FailureText.of(t)
+      else t.getMessage
+    logger.warn(s"$wrapper[$op]: mutation failed, caches rebuilt from store: $why")
 
   /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db, one controlled session
     * per tenant-db so concurrent node ATTACHes don't race on the `ducklake_metadata` CREATE TABLE.
@@ -741,8 +1106,9 @@ final class PoolSupervisor(
     * silent: with no blob a `sql` source is simply absent, no error anywhere.
     *
     * Re-resolving at the moment of use (rather than invalidating this cache when a federation
-    * mutation commits) is also the only placement that covers an HA replica which never saw the
-    * mutation: federation writes fire no `qod_topology` NOTIFY.
+    * mutation commits) also covers an HA replica that missed the mutation: federation writes do
+    * send `qod_topology` (`FederatedSourceHandlers`), but a NOTIFY can be missed and a restore
+    * skipped under the versions lock, and the fresh read does not depend on either.
     *
     * Fallback direction is deliberate: on ANY failure to produce a fresh blob the node spawns with
     * the last-known-good one, never with an empty one - a default that silently disables federation
@@ -787,11 +1153,16 @@ final class PoolSupervisor(
       s3 = state.s3,
       maxConcurrent = maxConcurrent,
       kindWire = state.kindWire,
-      extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
-      dbInitSql = state.dbInitSql,
-      lockdownSql =
-        NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), effectiveLockdown(key)),
-      objectStoreSql = ObjectStoreSecret.sql(state.s3, state.metastore.getOrElse("dataPath", "")),
+      extraSetupSql = state.extraSetupSql,
+      tenantDbInitSql = state.dbInitSql,
+      tenantDbInitTrusted = state.dbInitSqlTrusted,
+      tenantPoolInitSql = state.initSql,
+      tenantPoolInitTrusted = state.initSqlTrusted,
+      objectStoreSql = ObjectStoreSecret.sql(
+        state.s3,
+        state.metastore.getOrElse("dataPath", ""),
+        state.kindWire
+      ),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
@@ -901,6 +1272,7 @@ final class PoolSupervisor(
       val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
       val s3        = donor.map(_.s3).getOrElse(td.objectStore)
       val dataPath  = metastore.getOrElse("dataPath", "")
+      val kindWire  = donor.map(_.kindWire).getOrElse(td.kind.wireValue)
       NodeSpec(
         poolKey = key,
         nodeId = nodeId,
@@ -908,13 +1280,13 @@ final class PoolSupervisor(
         metastore = metastore,
         s3 = s3,
         maxConcurrent = 1,
-        kindWire = donor.map(_.kindWire).getOrElse(td.kind.wireValue),
-        extraSetupSql = donor
-          .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
-          .getOrElse(""),
-        dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
-        lockdownSql = NodeLockdown.sql(dataPath, effectiveLockdown(key)),
-        objectStoreSql = ObjectStoreSecret.sql(s3, dataPath)
+        kindWire = kindWire,
+        extraSetupSql = donor.map(_.extraSetupSql).getOrElse(""),
+        tenantDbInitSql = donor.map(_.dbInitSql).getOrElse(""),
+        tenantDbInitTrusted = donor.exists(_.dbInitSqlTrusted),
+        tenantPoolInitSql = donor.map(_.initSql).getOrElse(""),
+        tenantPoolInitTrusted = donor.exists(_.initSqlTrusted),
+        objectStoreSql = ObjectStoreSecret.sql(s3, dataPath, kindWire)
       )
     }
 
@@ -945,7 +1317,8 @@ final class PoolSupervisor(
             Left(SupervisorError.AlreadyExists(s"tenant-db '${td.name}' already exists"))
           else
             store.upsertTenantDb(td)
-            tenantDbs.put(td.id, td)
+            putTenantDbRow(td)
+            dataFoldersChanged()
             publish.topologyChanged()
             events.emit(ManagerEvent.TenantDbCreated(td.tenantId, td.name))
             Right(td)
@@ -978,7 +1351,7 @@ final class PoolSupervisor(
         .getOrElse(Nil)
 
   /** NodeSpec for the ephemeral merge node (design section 4.5): the parent's maintenance-node
-    * shape (same catalog ATTACH, secrets, lockdown) plus the branch catalog attached read-only as
+    * shape (same catalog ATTACH and secrets) plus the branch catalog attached read-only as
     * [[ai.starlake.quack.ondemand.branch.BranchMergeSql.BranchAlias]]. The object-store secret is
     * scoped to the common parent prefix so it covers the parent's files AND the branch's. Pool
     * segment `__merge`, never registered in the router.
@@ -1024,7 +1397,7 @@ final class PoolSupervisor(
         poolKey = key,
         nodeId = s"merge-${branchDbName.takeRight(8)}-${System.nanoTime()}",
         extraSetupSql = PoolSupervisor.joinInitAndBlob(base.extraSetupSql, attach),
-        objectStoreSql = ObjectStoreSecret.sql(base.s3, branchDataPath)
+        objectStoreSql = ObjectStoreSecret.sql(base.s3, branchDataPath, base.kindWire)
       )
     }
 
@@ -1417,17 +1790,91 @@ final class PoolSupervisor(
       .map(t => tenantDbs.values.filter(_.tenantId == t.id).toList.sortBy(_.name))
       .getOrElse(Nil)
 
-  /** Bucket keys of every DuckLake dataPath the control plane knows: all tenant-db dataPaths
-    * (explicit or metastore-carried) plus the default-metastore root. Feeds the edge
-    * LockdownScreen's bucket denial; Main unions in the managed-store root bucket. Derived on
-    * demand from the in-memory maps, so HA replicas stay fresh through the existing topology
-    * snapshot refresh.
+  /** Every data path a node of this control plane may hold data at. Per tenant-db: the data path
+    * its nodes get ([[effectiveMetastoreFor]], the spawn's own derivation, so a DuckLake row with
+    * no path of its own counts at `parent(default)/<name>`), plus its stored `dataPath` and
+    * metastore `dataPath` as written. A DuckLake or duckdb-file row whose nodes get none (the spawn
+    * scripts refuse to start such a node; an earlier one picked a folder of its own, where data may
+    * still lie), or one the derivation fails on, counts as
+    * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]], and is named once in a WARN. A
+    * duckdb-file row's path also comes with
+    * [[ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker]], which denies every
+    * name beginning with the file's. Then the default metastore's own path. Branch rows are
+    * tenant-db rows. Feeds the location checker's data-folder deny set
+    * (edge.authz.location.LiveLocationRules), which adds the managed prefixes still within their
+    * retention window. In memory, so HA replicas stay fresh through the topology refresh; derived
+    * again only after a tenant-db change (the same list until then).
     */
-  def duckLakeBuckets(): Set[String] =
-    val paths =
-      tenantDbs.values.flatMap(td => List(td.dataPath) ++ td.metastore.get("dataPath")) ++
-        defaultMetastore.get("dataPath")
-    paths.flatMap(ai.starlake.quack.model.BucketKeys.of).toSet
+  def dataPaths(): List[String] =
+    val version   = tenantDbsVersion.get()
+    val (at, got) = dataPathsMemo
+    if at == version then got
+    else
+      val fresh = deriveDataPaths()
+      dataPathsMemo = (version, fresh)
+      fresh
+
+  @volatile private var dataPathsMemo: (Long, List[String]) = (-1L, Nil)
+
+  /** The unplaced tenant-dbs already named in a WARN: once per row while it stays unplaced. */
+  private val unplacedWarned = TrieMap.empty[String, Unit]
+
+  private def deriveDataPaths(): List[String] =
+    val folders  = ai.starlake.quack.edge.authz.location.DataFolders
+    val unplaced = folders.Unplaced
+    val rows     = tenantDbs.values.toList
+    val perRow   = rows.map { td =>
+      val effective =
+        try
+          effectiveMetastoreFor(td).get("dataPath").map(_.trim).filter(_.nonEmpty) match
+            // A database file: every name beginning with its own is denied too, since its secret,
+            // scoped to the file's path, would sign them (DataFolders.NamePrefixMarker).
+            case Some(p) if td.kind == TenantDbKind.DuckDbFile =>
+              Right(List(p, p + folders.NamePrefixMarker))
+            case Some(p)                                  => Right(List(p))
+            case None if td.kind == TenantDbKind.InMemory => Right(Nil)
+            case None                                     =>
+              Left(
+                "its nodes get no data path (no dataPath of its own and none in the default " +
+                  "metastore), so they cannot start (an earlier spawn script gave such a node " +
+                  "a folder of its own, which may still hold data)"
+              )
+        catch
+          case scala.util.control.NonFatal(e) =>
+            Left(s"its data path cannot be derived (${e.getClass.getSimpleName})")
+      td -> effective
+    }
+    val unplacedNow = perRow.collect { case (td, Left(_)) => td.id }.toSet
+    unplacedWarned.filterInPlace((id, _) => unplacedNow.contains(id))
+    perRow.foreach {
+      case (td, Left(why)) if unplacedWarned.putIfAbsent(td.id, ()).isEmpty =>
+        logger.warn(
+          s"location rules: tenant-db ${td.tenantId}/${td.name} (${td.id}): $why. Every " +
+            "tenant's local file locations are refused until it gets a data path " +
+            s"(${folders.UnplacedReason})"
+        )
+      case _ => ()
+    }
+    val paths = perRow.flatMap { (td, effective) =>
+      effective.getOrElse(List(unplaced)) ++ (td.dataPath :: td.metastore.get("dataPath").toList)
+    }
+    (paths ++ defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
+
+  /** The databases whose data path is `path` as [[dataPaths]] lists it (a duckdb-file path's
+    * name-prefix entry included), and the default metastore when it is its path: what a log line
+    * about that path names.
+    */
+  def dataPathOwners(path: String): List[String] =
+    val p =
+      path.trim.stripSuffix(ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker)
+    val rows = tenantDbs.values.toList.filter { td =>
+      val effective =
+        try effectiveMetastoreFor(td).get("dataPath").toList
+        catch case scala.util.control.NonFatal(_) => Nil
+      (effective ++ (td.dataPath :: td.metastore.get("dataPath").toList)).map(_.trim).contains(p)
+    }
+    rows.map(td => s"tenant-db ${td.tenantId}/${td.name} (${td.id})") ++
+      Option.when(defaultMetastore.get("dataPath").map(_.trim).contains(p))("the default metastore")
 
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>
@@ -1553,13 +2000,17 @@ final class PoolSupervisor(
       }
     }
 
-  /** Swap the tenant's auth provider + provider config. Existing users/roles/groups unchanged.
-    * Config-shape validation lives in the REST handler so the supervisor stays storage-only.
+  /** Store the tenant's sign-in state as given: provider, provider config and client secret, the
+    * complete state [[ai.starlake.quack.ondemand.auth.TenantSignInWrite]] computed in the REST
+    * handler, which owns the write rules so the supervisor stays storage-only (the provider is
+    * still checked here). Existing users/roles/groups unchanged. `authClientSecret` has no default:
+    * a caller that forgot it would silently clear a stored secret.
     */
   def setTenantAuth(
       name: String,
       authProvider: String,
-      authConfig: Map[String, String]
+      authConfig: Map[String, String],
+      authClientSecret: Option[String]
   ): IO[Either[SupervisorError, Tenant]] = IO.blocking {
     withCacheRecovery("setTenantAuth") {
       if !Tenant.ValidAuthProviders.contains(authProvider) then
@@ -1572,7 +2023,11 @@ final class PoolSupervisor(
         getTenant(name) match
           case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
           case Some(t) =>
-            val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
+            val updated = t.copy(
+              authProvider = authProvider,
+              authConfig = authConfig,
+              authClientSecret = authClientSecret
+            )
             store.upsertTenant(updated)
             tenants.put(updated.id, updated)
             publish.topologyChanged()
@@ -1638,6 +2093,11 @@ final class PoolSupervisor(
               // (setTenantAuth / setTenantDisabled) can never revert each other.
               store.updateTenantAcl(updated.id, acl)
               tenants.put(updated.id, updated)
+              // The ACL columns bump the tenant's policy version (Liquibase 0050). The generation
+              // moves first: open sessions re-run their pool gate (QoD grants or OPA) even when
+              // the version read fails.
+              policyVersions.advance()
+              policyVersions.publish(policyVersions.readAfterMutation())
               publish.topologyChanged()
               Right(updated)
     }
@@ -1678,7 +2138,7 @@ final class PoolSupervisor(
               // Same tombstone stamp as deleteTenantDb: a cascaded delete must not strand a
               // managed prefix un-eligible, or its objects would be billed forever.
               stampManagedPrefixDeleted(td.id, td.name, purgeManagedData = false)
-              tenantDbs.remove(td.id)
+              removeTenantDbRow(td.id)
               try onTenantDbDeleted(name.toLowerCase(Locale.ROOT), td.name)
               catch case _: Throwable => ()
               dbAdmin.dropDatabase(td.name) match
@@ -1689,8 +2149,11 @@ final class PoolSupervisor(
                   )
               events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
+            if tdbs.nonEmpty then dataFoldersChanged()
             store.deleteTenant(t.id)
             tenants.remove(t.id)
+            // The store cascaded the tenant's locations away.
+            locationCache.remove(t.id)
             publish.topologyChanged()
             events.emit(ManagerEvent.TenantDeleted(name))
             Right(())
@@ -1709,6 +2172,11 @@ final class PoolSupervisor(
       defaultDatabase: Option[String] = None,
       defaultSchema: Option[String] = None,
       initSql: String = "",
+      /** Whether a superuser or the manager wrote `initSql` (nodes run it as written) rather than a
+        * tenant admin (nodes run it under the tenant initSql allowlist). An empty `initSql` is
+        * stored trusted whatever this says ([[InitSqlTrust.onCreate]]).
+        */
+      initSqlTrusted: Boolean = false,
       /** Carve this database's storage out of the operator-managed bucket: the caller supplies
         * neither `dataPath` nor `objectStore`, and both are resolved here from [[managedStore]]
         * (prefix keyed by the freshly minted surrogate id, credentials from the config block).
@@ -1811,6 +2279,7 @@ final class PoolSupervisor(
                       defaultDatabase = defaultDatabase,
                       defaultSchema = defaultSchema,
                       initSql = initSql,
+                      initSqlTrusted = InitSqlTrust.onCreate(initSql, initSqlTrusted),
                       encrypted = encrypted
                     )
 
@@ -1840,7 +2309,8 @@ final class PoolSupervisor(
                                   )
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()
-                                  tenantDbs.put(td.id, td)
+                                  putTenantDbRow(td)
+                                  dataFoldersChanged()
                                   publish.topologyChanged()
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                   Right(td)
@@ -1866,14 +2336,16 @@ final class PoolSupervisor(
                                       case _ => ()
                                     store.upsertTenantDb(td)
                                     recordManagedPrefix()
-                                    tenantDbs.put(td.id, td)
+                                    putTenantDbRow(td)
+                                    dataFoldersChanged()
                                     publish.topologyChanged()
                                     events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                     Right(td)
                           case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
                             store.upsertTenantDb(td)
                             recordManagedPrefix()
-                            tenantDbs.put(td.id, td)
+                            putTenantDbRow(td)
+                            dataFoldersChanged()
                             publish.topologyChanged()
                             events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                             Right(td)
@@ -1956,7 +2428,8 @@ final class PoolSupervisor(
                 else
                   store.deleteTenantDb(td.id)
                   stampManagedPrefixDeleted(td.id, tenantDbName, purgeManagedData)
-                  tenantDbs.remove(td.id)
+                  removeTenantDbRow(td.id)
+                  dataFoldersChanged()
                   dataPathBlocked.remove(td.id)
                   duckLakeInitPending.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
@@ -1995,7 +2468,13 @@ final class PoolSupervisor(
           objectStore = patch.objectStore.fold(td.objectStore)(mergeSecretKeys(td.objectStore, _)),
           defaultDatabase = patch.defaultDatabase.fold(td.defaultDatabase)(nonBlank),
           defaultSchema = patch.defaultSchema.fold(td.defaultSchema)(nonBlank),
-          initSql = patch.initSql.getOrElse(td.initSql)
+          initSql = patch.initSql.getOrElse(td.initSql),
+          initSqlTrusted = InitSqlTrust.afterWrite(
+            td.initSql,
+            td.initSqlTrusted,
+            patch.initSql,
+            patch.initSqlWriterTrusted
+          )
         )
         TenantDb.validateSafety(merged) match
           case Some(msg) => IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
@@ -2045,11 +2524,16 @@ final class PoolSupervisor(
               val nodeAffecting =
                 merged.metastore != td.metastore ||
                   merged.objectStore != td.objectStore ||
-                  merged.initSql != td.initSql
+                  merged.initSql != td.initSql ||
+                  merged.initSqlTrusted != td.initSqlTrusted
+              // The one IO mutator that changes a decision input (the data-folder deny set): its
+              // store block holds a permit of the versions lock, as every withCacheRecovery body.
               val refresh = withCacheRecoveryIO("updateTenantDb") {
-                IO.blocking {
+                IO.blocking(mutation {
                   store.upsertTenantDb(merged)
-                  tenantDbs.put(merged.id, merged)
+                  putTenantDbRow(merged)
+                  if merged.metastore != td.metastore || merged.dataPath != td.dataPath then
+                    dataFoldersChanged()
                   // Node-affecting edit is the documented remediation for a boot-time
                   // DataPathMismatchException, so clear any block rather than skipping this
                   // tenant-db's pools forever. Optimistic: a wrong fix re-blocks on the next boot.
@@ -2066,6 +2550,7 @@ final class PoolSupervisor(
                           metastore = effectiveMetastoreFor(merged),
                           s3 = merged.objectStore,
                           dbInitSql = merged.initSql,
+                          dbInitSqlTrusted = merged.initSqlTrusted,
                           defaultDatabase = merged.defaultDatabase,
                           defaultSchema = merged.defaultSchema
                         )
@@ -2075,7 +2560,7 @@ final class PoolSupervisor(
                     try onTenantDbChanged(tenantName.toLowerCase(Locale.ROOT), merged.name)
                     catch case _: Throwable => ()
                   publish.topologyChanged()
-                }
+                })
               }
               val restarts =
                 if !nodeAffecting then IO.pure((List.empty[String], List.empty[(String, String)]))
@@ -2156,14 +2641,14 @@ final class PoolSupervisor(
       // init still runs) and cold-starts on the first statement or explicit resume. Signup's
       // mass-provisioning depends on this being cheap.
       startSuspended: Boolean = false,
-      // Free-form per-pool SQL prepended to the federation blob, shipped via $extraSetupSql. Order
-      // matters: initSql runs FIRST so PRAGMAs are in effect before any federation source's ATTACH.
+      // Free-form per-pool SQL, shipped as NodeSpec.tenantPoolInitSql. It runs before any
+      // federation source's ATTACH, so PRAGMAs are in effect by then.
       initSql: String = "",
+      // Whether a superuser or the manager wrote `initSql` (see createTenantDb's initSqlTrusted).
+      initSqlTrusted: Boolean = false,
       cpu: String = "",
       memory: String = "",
       podTemplateYaml: String = "",
-      // Per-pool lockdown override persisted at create time. None = inherit.
-      lockdown: Option[Boolean] = None,
       // Owner-declared scale-out band, persisted at create time. Both None = fixed size.
       minNodes: Option[Int] = None,
       maxNodes: Option[Int] = None,
@@ -2189,10 +2674,6 @@ final class PoolSupervisor(
           )
           require(size > 0, s"role distribution must sum to at least 1: $dist")
           require(dist.isValidFor(size), s"role distribution does not sum to $size")
-          // Every create path (REST and MCP refuse it with a 400 first, the branch service, any
-          // module) lands here, so this is the choke point for the pool's own boot SQL.
-          val initSqlErr = InitSqlScreen.error("initSql", initSql)
-          require(initSqlErr.isEmpty, initSqlErr.getOrElse(""))
           // Cohorts are always persisted as authored so a local-defined pool can be exported and
           // replayed on K8s with placement intact. K8s reads `NodeSpec.placement`; local backends
           // ignore it (the UI warns before submit).
@@ -2243,12 +2724,9 @@ final class PoolSupervisor(
               val merged   = effectiveMetastoreFor(td)
               val kindWire = td.kind.wireValue
               federationBlobOf(td.id).flatMap { blobOpt =>
-                // initSql runs first so PRAGMAs/INSTALL land before the federation blob's ATTACHes;
-                // both ship via NodeSpec.extraSetupSql.
-                val fedBlob = blobOpt.getOrElse("")
-                // state.extraSetupSql keeps the federation blob ONLY, so a restart that re-projects
-                // PoolState still has initSql separately and respawn re-concatenates without
-                // double-prepending.
+                // The pool's initSql runs before the federation blob's ATTACHes, as its own value
+                // (NodeSpec.tenantPoolInitSql): state.extraSetupSql keeps the federation blob ONLY.
+                val fedBlob    = blobOpt.getOrElse("")
                 val poolEntity = Pool(
                   id = newId("p"),
                   tenantId = td.tenantId,
@@ -2261,10 +2739,10 @@ final class PoolSupervisor(
                   suspended = startSuspended,
                   cohorts = cohorts,
                   initSql = initSql,
+                  initSqlTrusted = InitSqlTrust.onCreate(initSql, initSqlTrusted),
                   cpu = cpu,
                   memory = memory,
                   podTemplateYaml = podTemplateYaml,
-                  lockdown = lockdown,
                   minNodes = minNodes,
                   maxNodes = maxNodes,
                   idleTimeoutSec = idleTimeoutSec
@@ -2273,9 +2751,8 @@ final class PoolSupervisor(
                   poolRows.put(poolEntity.id, poolEntity)
                   poolIdByKey.put(key, poolEntity.id)
                 } *> IO.defer {
-                  // Deferred: specFromState resolves effectiveLockdown(key) via poolRows, which the
-                  // IO.delay above only populates once this chain runs. A non-deferred block would
-                  // evaluate specs eagerly, before that put, and fall back to the global flag.
+                  // Deferred: the specs are built once the IO.delay above has put the pool row and
+                  // its id.
                   // Walk cohorts in order; empty `cohorts` falls back to one placement-less cohort
                   // carrying `dist`.
                   val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
@@ -2293,10 +2770,12 @@ final class PoolSupervisor(
                     disabled = disabled,
                     suspended = startSuspended,
                     kindWire = kindWire,
-                    // Federation blob only; respawn concatenates with initSql fresh.
+                    // Federation blob only: the pool's initSql travels on its own.
                     extraSetupSql = fedBlob,
                     dbInitSql = td.initSql,
+                    dbInitSqlTrusted = td.initSqlTrusted,
                     initSql = initSql,
+                    initSqlTrusted = poolEntity.initSqlTrusted,
                     defaultDatabase = td.defaultDatabase,
                     defaultSchema = td.defaultSchema,
                     cpu = cpu,
@@ -2356,18 +2835,8 @@ final class PoolSupervisor(
       }
     }
 
-  /** Single resolution point for the per-pool lockdown tri-state. None on the pool row (or no row
-    * at all: maintenance nodes, races during create) falls back to the manager-global flag. Feeds
-    * BOTH the edge screen (FlightSqlRouter.lockdownFor) and the spawn-time engine SQL.
-    */
-  def effectiveLockdown(key: PoolKey): Boolean =
-    poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
-
-  /** Pools whose effective lockdown is off, for the boot banner. */
-  def unlockedPoolCount: Int = poolRows.values.count(!_.lockdown.getOrElse(lockdownEnabled))
-
   /** The owner-declared scale-out band, resolved from the persisted row (the band stays out of
-    * PoolState on purpose, like lockdown). None = pool unknown OR fixed size.
+    * PoolState on purpose). None = pool unknown OR fixed size.
     */
   def autoscaleBand(key: PoolKey): Option[(Int, Int)] =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(p => p.minNodes.zip(p.maxNodes))
@@ -2380,9 +2849,9 @@ final class PoolSupervisor(
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.idleTimeoutSec)
 
   /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
-    * lock), mirroring [[setPoolLockdown]]. Does NOT validate the band shape (min < max, size inside
-    * the band, hardCap): that is the handler's job via `AutoscaleBand.validate`. Some sets the
-    * band, None clears it back to fixed size.
+    * lock). Does NOT validate the band shape (min < max, size inside the band, hardCap): that is
+    * the handler's job via `AutoscaleBand.validate`. Some sets the band, None clears it back to
+    * fixed size.
     */
   def setPoolAutoscale(
       key: PoolKey,
@@ -2403,39 +2872,6 @@ final class PoolSupervisor(
                   )
                 case Some(p) =>
                   val updated = p.copy(minNodes = band.map(_._1), maxNodes = band.map(_._2))
-                  store.upsertPool(updated)
-                  poolRows.put(updated.id, updated)
-                  publish.topologyChanged()
-                  Right(updated)
-        }
-      }
-    }
-
-  /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
-    * lock): either the persist lands before reconcile builds a NodeSpec off
-    * `effectiveLockdown(key)` (new node picks up the fresh value), or after (the caller's later
-    * restart loop, run by [[ai.starlake.quack.ondemand.api.PoolHandlers.setLockdown]] AFTER this
-    * IO, catches it up). No node is registered mid-write on a half-applied flag.
-    */
-  def setPoolLockdown(
-      key: PoolKey,
-      lockdown: Option[Boolean]
-  ): IO[Either[SupervisorError, Pool]] =
-    locks.withLock(key) {
-      IO.blocking {
-        withCacheRecovery("setPoolLockdown") {
-          pools.get(key) match
-            case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
-            case Some(_) =>
-              poolIdByKey.get(key).flatMap(poolRows.get) match
-                case None =>
-                  Left(
-                    SupervisorError.Internal(
-                      s"pool entity missing for $key (control-plane out of sync)"
-                    )
-                  )
-                case Some(p) =>
-                  val updated = p.copy(lockdown = lockdown)
                   store.upsertPool(updated)
                   poolRows.put(updated.id, updated)
                   publish.topologyChanged()
@@ -2486,6 +2922,41 @@ final class PoolSupervisor(
           }
         }
     }
+
+  /** Replace a pool's initSql (CONTRACT Addendum 4 item 27), its trust set by the writer
+    * ([[InitSqlTrust.afterWrite]]: a superuser's write is trusted, a tenant admin's change is not,
+    * a tenant admin's unchanged resend keeps the flag). Like every pool initSql edit, it takes
+    * effect on the next node spawn (scale-up, restart, crash recovery); running nodes keep their
+    * setup.
+    */
+  def setPoolInitSql(
+      key: PoolKey,
+      initSql: String,
+      writerTrusted: Boolean
+  ): IO[Either[SupervisorError, Pool]] =
+    locks.withLock(key)(IO.blocking {
+      withCacheRecovery("setPoolInitSql") {
+        pools.get(key) match
+          case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
+          case Some(state) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
+                )
+              case Some(p) =>
+                val trusted =
+                  InitSqlTrust.afterWrite(p.initSql, p.initSqlTrusted, Some(initSql), writerTrusted)
+                val updated = p.copy(initSql = initSql, initSqlTrusted = trusted)
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(initSql = initSql, initSqlTrusted = trusted))
+                publish.topologyChanged()
+                Right(updated)
+      }
+    })
 
   def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[SupervisorError, Pool]] =
     IO.blocking {
@@ -3789,14 +4260,17 @@ final class PoolSupervisor(
   def wireOpa(access: ai.starlake.quack.ondemand.rbac.OpaPoolAccess): Unit =
     opaAccess = Some(access)
 
-  /** Handshake gate with the legacy string-left contract; see [[authorizeHandshakeDetailed]]. */
+  /** Handshake gate with the legacy string-left contract; see [[authorizeHandshakeDetailed]].
+    * `superuserAdmissible` has no default: the caller states whether its credential may bind a
+    * superuser row (false for a credential validated in a tenant realm).
+    */
   def authorizeHandshake(
       tenantName: String,
       poolName: String,
       username: String,
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty,
-      superuserAdmissible: Boolean = true
+      superuserAdmissible: Boolean
   ): Either[String, ai.starlake.quack.ondemand.rbac.AuthorizedHandshake] =
     authorizeHandshakeDetailed(
       ai.starlake.quack.ondemand.rbac.AuthzRequest(
@@ -3806,8 +4280,8 @@ final class PoolSupervisor(
         jwtRoles,
         jwtGroups,
         Map.empty,
-        superuserAdmissible,
-        ""
+        superuserAdmissible = superuserAdmissible,
+        edge = ""
       )
     ).left.map(_.message)
 
@@ -3871,8 +4345,8 @@ final class PoolSupervisor(
                     // The credential was validated by a TENANT-scoped authority (per-tenant
                     // OIDC, or the tenant arm of the auth chain), which can only speak for
                     // that tenant's principals. Binding it to a tenant-IS-NULL superuser row
-                    // would hand out the empty EffectiveSet that bypasses ACL, RLS/CLS, the
-                    // protected-write guard and lockdown -- a tenant admin minting a token
+                    // would hand out the empty EffectiveSet that bypasses ACL, RLS/CLS and the
+                    // protected-write guard -- a tenant admin minting a token
                     // with the seeded superuser's email on an IdP they control must land
                     // here. Same message as an unknown user so the refusal is not an
                     // existence oracle; the real reason goes to the log.
@@ -3888,8 +4362,8 @@ final class PoolSupervisor(
                   case Some(user) if !user.enabled =>
                     Left(HandshakeDenial.Denied(s"user '$username' is disabled"))
                   case Some(user) =>
-                    // 3. Effective set. Superusers get an empty set; the per-statement validator
-                    //    bypasses them. Claims are copied in after the cache lookup (never part
+                    // 3. Effective set. Superusers get an empty set; the node allows their
+                    //    statements without a decision. Claims are copied in after the cache lookup (never part
                     //    of the effective-set cache key).
                     val eff =
                       if user.tenant.isEmpty then
@@ -3973,12 +4447,13 @@ final class PoolSupervisor(
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
-    val key    = EffectiveCacheKey(userId, jwtRoles, jwtGroups)
-    val cached = effectiveCache.getIfPresent(key)
-    if cached != null then Some(cached)
+    val key        = EffectiveCacheKey(userId, jwtRoles, jwtGroups)
+    val generation = policyVersions.generation
+    val cached     = effectiveCache.getIfPresent(key)
+    if cached != null && cached.generation == generation then Some(cached.set)
     else
       computeEffectiveSetForUser(userId, jwtRoles, jwtGroups).map { computed =>
-        effectiveCache.put(key, computed)
+        effectiveCache.put(key, CachedEffective(generation, computed))
         computed
       }
 
@@ -4069,17 +4544,31 @@ object PoolSupervisor:
   val NodeStartupGrace: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(120).seconds
 
-  /** Concatenate per-pool [[ai.starlake.quack.ondemand.PoolState.initSql]] with the federation blob
-    * for shipment as a single `extraSetupSql` to spawn-quack-node.sh. Order: `initSql` FIRST
-    * (PRAGMAs / SET / INSTALL before any federation ATTACH), blob SECOND, with a forced newline
-    * between the two non-empty fragments (spawn-quack-node.sh echoes the value into a `duckdb`
-    * pipe, which needs the statement terminator). Empty fragments are dropped. The tenant-db
-    * initSql is NOT joined here: it must run before the quack extension is loaded, so it rides
-    * [[ai.starlake.quack.model.NodeSpec.dbInitSql]] instead.
+  /** Effective sets kept at most, one per (user, JWT roles, JWT groups). */
+  val EffectiveCacheMaxEntries: Long = 10_000L
+
+  /** The `cache` tag of the effective-set cache's meters. */
+  val EffectiveCacheMetricName: String = "qod_effective_sets"
+
+  /** The permits of the versions lock: one per local mutation, every one for a restore. */
+  val VersionsLockPermits: Int = 1 << 20
+
+  /** How long a restore waits for running local mutations before it skips (amendment A7). */
+  val RestoreLockWaitMs: Long = 5_000L
+
+  /** The mutators whose failure's message can quote a secret they wrote (pgjdbc's "Failing row
+    * contains (...)"): their recovery WARN names the failure by class and SQLState only.
     */
-  def joinInitAndBlob(initSql: String, federationBlob: String): String =
-    val a = Option(initSql).getOrElse("").trim
-    val b = Option(federationBlob).getOrElse("").trim
+  val SecretBearingOps: Set[String] = Set("putUserS3Credential", "removeUserS3Credential")
+
+  /** Two fragments of the manager's own SQL as one `extraSetupSql` (a merge node's federation blob
+    * and its branch attach), `first` FIRST, with a forced newline between two non-empty fragments.
+    * Empty fragments are dropped. Never for a tenant's initSql, which travels on its own
+    * ([[ai.starlake.quack.model.NodeSpec.tenantPoolInitSql]]) so qod-node can tell it apart.
+    */
+  def joinInitAndBlob(first: String, second: String): String =
+    val a = Option(first).getOrElse("").trim
+    val b = Option(second).getOrElse("").trim
     (a, b) match
       case ("", "") => ""
       case (i, "")  => i

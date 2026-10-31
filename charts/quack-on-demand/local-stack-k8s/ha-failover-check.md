@@ -4,7 +4,7 @@ Manual end-to-end verification of manager HA. Prereq: the local-stack rig.
 
 1. Boot with 2 replicas:
    `BUILD=1 ./run-local-stack-k8s.sh` then
-   `helm upgrade qod ../.. -n qod --reuse-values --set replicaCount=2 --set sessionJwtSecret=$(openssl rand -hex 32)`
+   `helm upgrade qod ../.. -n qod --reuse-values --set replicaCount=2`
    Wait: `kubectl -n qod get pods -l app.kubernetes.io/name=quack-on-demand` shows 2/2 Ready.
 2. Find the leader: `kubectl -n qod logs <pod> | grep "ha: acquired leadership"` (exactly one pod).
 3. Start the load test (`scripts/bench/tpch-load-test/tpch-load-test.py --tenant acme

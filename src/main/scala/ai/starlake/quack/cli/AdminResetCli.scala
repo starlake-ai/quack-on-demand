@@ -10,19 +10,25 @@ import java.io.{BufferedReader, InputStream, InputStreamReader, PrintStream}
 import java.nio.charset.StandardCharsets
 import scala.util.control.NonFatal
 
-/** `java -jar qod.jar admin reset-password <username>... [--must-change]`, password on the first
-  * stdin line. Break-glass recovery of superuser passwords straight in the control-plane database,
-  * so it works with every login path blocked. It never starts Postgres: an external control plane
-  * is reached as configured (the manager may be down), the embedded one only while a running
-  * `qod serve` owns it (`EmbeddedControlPlane.attachRunning`). Every named superuser that exists is
-  * reset to the same password in one store session (the default admin names are seeded as one
-  * credential). Authority = reaching that database with the configured credentials. Exit 0 at least
-  * one updated, 1 none of the names is a superuser / usage / control plane not initialized, 2
-  * control plane unreachable.
+/** `java -jar qod.jar admin reset-password <username>... [--must-change] [--reenable]`, password on
+  * the first stdin line. Break-glass recovery of superusers straight in the control-plane database
+  * (a new password, the lockout cleared), so it works with every login path blocked. A disabled
+  * superuser is re-enabled only with `--reenable`, which `qod admin reset-password` passes only for
+  * a name given with `--username`: re-enabling one also revives its personal access tokens, so a
+  * reset of the configured admin names never undoes a deliberate disable. Each account's lines say
+  * which way it went.
+  *
+  * It never starts Postgres: an external control plane is reached as configured (the manager may be
+  * down), the embedded one only while a running `qod serve` owns it
+  * (`EmbeddedControlPlane.attachRunning`). Every named superuser that exists is reset to the same
+  * password in one store session (the default admin names are seeded as one credential). Authority
+  * is reaching that database with the configured credentials. Exit 0 at least one updated, 1 none
+  * of the names is a superuser / usage / control plane not initialized, 2 control plane
+  * unreachable.
   */
 object AdminResetCli:
 
-  private val Usage = "usage: admin reset-password <username>... [--must-change]"
+  private val Usage = "usage: admin reset-password <username>... [--must-change] [--reenable]"
 
   def run(args: List[String], in: InputStream, out: PrintStream, err: PrintStream): Int =
     runWith(args, in, out, err, loadConfig, EmbeddedControlPlane.attachRunning)
@@ -39,23 +45,45 @@ object AdminResetCli:
       attach: EmbeddedPostgresConfig => Either[String, EmbeddedControlPlane.Handle]
   ): Int =
     val mustChange = args.contains("--must-change")
-    args.filterNot(_ == "--must-change") match
+    val reenable   = args.contains("--reenable")
+    args.filterNot(a => a == "--must-change" || a == "--reenable") match
       case usernames @ (_ :: _) =>
         val reader   = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))
         val password = Option(reader.readLine()).getOrElse("")
         if password.isEmpty then
           err.println("error: empty password on stdin")
           1
-        else resetConfigured(usernames, password, mustChange, out, err, loadCfg, attach)
+        else resetConfigured(usernames, password, mustChange, reenable, out, err, loadCfg, attach)
       case _ =>
         err.println(Usage)
         1
 
-  /** The update itself, on an open store. Exit code per the object doc. */
-  def reset(store: UserStore, username: String, password: String, mustChange: Boolean): Int =
-    store.resetSuperuserPassword(username, password, mustChange) match
-      case Some(_) => 0
-      case None    => 1
+  /** The update itself, on an open store, printing what it did to `out`. Exit code per the object
+    * doc.
+    */
+  def reset(
+      store: UserStore,
+      username: String,
+      password: String,
+      mustChange: Boolean,
+      reenable: Boolean,
+      out: PrintStream
+  ): Int =
+    store.resetSuperuserPassword(username, password, mustChange, reenable) match
+      case Some(r) =>
+        out.println(s"password reset for superuser '$username'. Existing sessions are not revoked.")
+        if !r.enabled then
+          out.println(
+            s"superuser '$username' is disabled and was left disabled; rerun qod admin " +
+              s"reset-password --username $username to re-enable it"
+          )
+        else if !r.wasEnabled then
+          out.println(
+            s"superuser '$username' was disabled and is now enabled; its personal access tokens " +
+              "work again"
+          )
+        0
+      case None => 1
 
   private def sqlCause(t: Throwable): Option[java.sql.SQLException] =
     Iterator
@@ -70,6 +98,7 @@ object AdminResetCli:
       usernames: List[String],
       password: String,
       mustChange: Boolean,
+      reenable: Boolean,
       out: PrintStream,
       err: PrintStream,
       loadCfg: () => ManagerConfig,
@@ -99,13 +128,9 @@ object AdminResetCli:
           try
             val store = UserStore.fromDefaultMetastore(meta, mgrCfg.auth.lockout)
             try
-              val updated =
-                usernames.distinct.filter(u => reset(store, u, password, mustChange) == 0)
-              updated.foreach { u =>
-                out.println(
-                  s"password reset for superuser '$u'. Existing sessions are not revoked."
-                )
-              }
+              val updated = usernames.distinct.filter(u =>
+                reset(store, u, password, mustChange, reenable, out) == 0
+              )
               if updated.nonEmpty then 0
               else
                 val names = usernames.distinct.map(u => s"'$u'").mkString(", ")

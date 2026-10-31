@@ -1,0 +1,1 @@
+CREATE SECURE VIEW sv_outer AS SELECT id FROM main.sv;

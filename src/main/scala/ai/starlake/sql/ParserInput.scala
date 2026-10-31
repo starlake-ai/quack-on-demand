@@ -36,8 +36,7 @@ import SqlLexer.{Kind, Token}
   *     while every policy match unquoted double quotes only: a backtick-quoted table or column met
   *     no row filter and no column mask. Rendered once here, the gate, the policy rewriters and the
   *     protected-write guard read the one spelling, and a rewrite printed from it is still the
-  *     caller's statement on 2.0 (the engine pin; [[ai.starlake.quack.edge.sql.BacktickScreen]]
-  *     refuses a backtick on 1.x, where it is an operator);
+  *     caller's statement on the pinned engine (DuckDB 2.0, where a backtick quotes an identifier);
   *   - double-quoted identifiers keep their quoting, everything else is copied as is.
   *
   * JSqlParser then never extends a literal past the point where DuckDB closes it: every quote it
@@ -193,8 +192,7 @@ private[starlake] object ParserInput:
             error = Some("unterminated quoted identifier")
             s
           else if s.charAt(0) == '`' && !s.contains('"') then
-            // the same identifier only where a backtick quotes one (2.0 and later)
-            if ai.starlake.quack.edge.sql.BacktickScreen.active then exact = false
+            // the same identifier: a backtick quotes one on the pinned engine (DuckDB 2.0)
             QuotedIdentifier.doubleQuoted(QuotedIdentifier.unquote(s))
           else s
         case Kind.Word if !s.forall(isPlainWordChar) => QuotedIdentifier.doubleQuoted(s)

@@ -14,8 +14,8 @@ SOURCES = f"{BASE}/api/tenants/acme/tenant-dbs/db1/federated-sources"
 
 
 @pytest.fixture(autouse=True)
-def api_key(monkeypatch):
-    monkeypatch.setenv("QOD_API_KEY", "k")
+def token(monkeypatch):
+    monkeypatch.setenv("QOD_TOKEN", "k")
 
 
 def _routes(respx_mock, secret_status=200, existing_secrets=None):

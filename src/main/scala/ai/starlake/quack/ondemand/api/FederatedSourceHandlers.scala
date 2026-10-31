@@ -30,6 +30,15 @@ import sttp.model.StatusCode
   *   resolves a tenantDbId to the tenant-db's own DuckDB catalog alias, or None if not found. Fed
   *   into `extraReserved` so an iceberg_rest source cannot be aliased onto the tenant-db's own
   *   attached name.
+  * @param invalidateSources
+  *   run with the source's tenant-db id after every stored source create, update or delete, before
+  *   the handler answers: drops this replica's read-only and attached-catalog caches for that
+  *   tenant-db's pools ([[ai.starlake.quack.edge.authz.FederatedSourceCaches.sourcesChanged]]), so
+  *   the next statement carries a changed read-only flag and knows a new alias. Required: a no-op
+  *   would leave a source just flagged read-only writable for the caches' TTL (Task 11 addendum 7).
+  * @param publish
+  *   told `topologyChanged` after every stored source write, so every peer's restore drops the same
+  *   caches (`qod_topology`). Required for the same reason.
   * @param attachStatusOf
   *   keyed on (tenantDbId, alias): the live attach state of one federated source aggregated across
   *   its pool's nodes, from the in-memory AttachStatusRegistry (Task 7) -- `"attached"`,
@@ -45,8 +54,10 @@ final class FederatedSourceHandlers(
     resolver: (String, String) => Option[String],
     tenantIdResolver: String => Option[String] = _ => None,
     audit: AuditRecorder = AuditRecorder.noop,
-    scopeOf: String => Option[SessionScope] = _ => None,
+    scopeOf: SessionScope.Resolver,
     catalogAliasOf: String => Option[String],
+    invalidateSources: String => Unit,
+    publish: ai.starlake.quack.ondemand.ha.StateChangePublisher,
     attachStatusOf: (String, String) => Option[String] = (_, _) => None
 ) extends LazyLogging:
 
@@ -180,7 +191,10 @@ final class FederatedSourceHandlers(
               // An external catalog is one QoD does not own, so a new typed source is read-only
               // until an operator says otherwise. A sql source keeps today's behaviour, where
               // writes are governed by the ACL graph alone.
-              readOnly = req.readOnly.getOrElse(sourceType.rendered)
+              readOnly = req.readOnly.getOrElse(sourceType.rendered),
+              // Only a superuser reaches here with a `sql` source (createSource); a typed one is
+              // rendered by the manager.
+              setupSqlTrusted = true
             )
 
             val fieldErrors =
@@ -247,9 +261,8 @@ final class FederatedSourceHandlers(
       }
     }
 
-  /** True when a RESOLVED session is present and it is not a superuser. Mirrors
-    * [[SuperuserCheck.reject]]: static-key and open-mode callers (no resolvable scope) are admitted
-    * here -- the perimeter (apiKeyGuard) is their gate.
+  /** True when the caller is not a superuser: a tenant admin, or a caller with no resolvable
+    * credential. Same rule as [[SuperuserCheck.reject]].
     */
   private def superuserDenied(apiKey: Option[String]): Boolean =
     SuperuserCheck.reject(apiKey)(scopeOf).isDefined
@@ -265,6 +278,20 @@ final class FederatedSourceHandlers(
 
   // ---- FederatedSource CRUD -----------------------------------------------
 
+  /** After a stored source write: this replica's caches of the tenant-db's pools first, then the
+    * peers. No policy-version bump: the node refuses a write into a read-only catalog before it
+    * reuses any cached verdict, so a handle carrying the new set is enough.
+    */
+  private def sourcesChanged(tenantDbId: String): Unit =
+    invalidateSources(tenantDbId)
+    publish.topologyChanged()
+
+  /** Whether `req` writes a `sql` source: no sourceType (the default) or one naming `sql`. */
+  private def writesSqlSource(req: FederatedSourceCreateRequest): Boolean =
+    req.sourceType.map(_.trim).filter(_.nonEmpty) match
+      case None     => true
+      case Some(wr) => FederatedSourceType.fromWire(wr).contains(FederatedSourceType.Sql)
+
   def createSource(
       tenantName: String,
       tenantDbName: String,
@@ -274,7 +301,28 @@ final class FederatedSourceHandlers(
     IO.blocking {
       TenantScopeCheck.reject(apiKey, tenantName)(scopeOf) match
         case Some(e) => Left(e)
-        case None    =>
+        // A `sql` source's setupSql runs unrestricted on every node of the database (it is the
+        // manager's federation SQL to the node), so only a superuser writes one, create or change
+        // (CONTRACT Addendum 4 item 26). Typed sources are rendered by the manager from checked
+        // fields and stay open to tenant admins.
+        case None if writesSqlSource(req) && superuserDenied(apiKey) =>
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.FederationSourceUpsert,
+            "denied",
+            tenant = tenantIdResolver(tenantName),
+            target = Some(req.alias)
+          )
+          Left(
+            StatusCode.Forbidden -> ErrorResponse(
+              "superuser_required",
+              "a federated source of sourceType 'sql' runs its setupSql unrestricted on every " +
+                "node, so only a superuser may create or change one; tenant admins use a typed " +
+                "source (postgres, mysql, iceberg_rest)"
+            )
+          )
+        case None =>
           resolveTenantDbId(tenantName, tenantDbName) match
             case Left(e)           => Left(e)
             case Right(tenantDbId) =>
@@ -298,6 +346,7 @@ final class FederatedSourceHandlers(
                 case Left(e)       => Left(e)
                 case Right(source) =>
                   fedStore.upsertSource(source)
+                  sourcesChanged(tenantDbId)
                   // NEVER include setupSql or config in the audit detail.
                   audit.rest(
                     apiKey,
@@ -357,6 +406,7 @@ final class FederatedSourceHandlers(
                   )
                 case Some(s) =>
                   fedStore.deleteSource(s.id)
+                  sourcesChanged(tenantDbId)
                   audit.rest(
                     apiKey,
                     "control-plane",

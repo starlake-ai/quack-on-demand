@@ -1,0 +1,1 @@
+{"control":[{"op":"copy_to","target":"@DIR@/out.parquet","type":"parquet"}],"functions":[],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id"],"kind":"table","name":"t","schema":"main","via":null}],"settings":[],"statement":"COPY_TO_FILE","v":1}

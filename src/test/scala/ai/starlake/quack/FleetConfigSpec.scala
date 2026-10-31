@@ -1,5 +1,6 @@
 package ai.starlake.quack
 
+import ai.starlake.quack.boot.BootFactories
 import ai.starlake.quack.ondemand.api.ConfigRegistry
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -78,24 +79,26 @@ class FleetConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "expose validateForRuntime that refuses an empty join token in fleet mode only" in {
-    FleetConfig().validateForRuntime("fleet", duckdbOnHost = true) shouldBe
+    FleetConfig().validateForRuntime("fleet") shouldBe
       Left("QOD_FLEET_JOIN_TOKEN must be set when runtimeType=fleet")
-    FleetConfig().validateForRuntime("local", duckdbOnHost = false) shouldBe Right(())
-    FleetConfig(joinToken = "x").validateForRuntime("fleet", duckdbOnHost = false) shouldBe
-      Right(())
+    FleetConfig().validateForRuntime("local") shouldBe Right(())
+    FleetConfig(joinToken = "x").validateForRuntime("fleet") shouldBe Right(())
   }
 
+  // Ephemeral nodes on the manager host run qod-node, which Main resolves (and refuses to boot
+  // without) for every manager that runs local nodes.
   it should
-    "accept only fleet or local for ephemeral, and require duckdb on the host for local" in {
+    "accept only fleet or local for ephemeral, local running its nodes on the manager host" in {
       an[IllegalArgumentException] should be thrownBy FleetConfig(ephemeral = "k8s")
-      FleetConfig(joinToken = "x", ephemeral = "local")
-        .validateForRuntime("fleet", duckdbOnHost = false) shouldBe
-        Left(
-          "QOD_FLEET_EPHEMERAL=local needs a duckdb binary on the manager host (DUCKDB_BIN or PATH)"
-        )
-      FleetConfig(joinToken = "x", ephemeral = "local")
-        .validateForRuntime("fleet", duckdbOnHost = true) shouldBe Right(())
       FleetConfig(ephemeral = "local").ephemeralLocal shouldBe true
+      val base  = ConfigSource.default.at("quack-on-demand").loadOrThrow[ManagerConfig]
+      val fleet = base.copy(runtimeType = "fleet", fleet = FleetConfig(joinToken = "x"))
+      BootFactories.runsLocalNodes(fleet) shouldBe false
+      BootFactories.runsLocalNodes(
+        fleet.copy(fleet = FleetConfig(joinToken = "x", ephemeral = "local"))
+      ) shouldBe true
+      BootFactories.runsLocalNodes(base.copy(runtimeType = "local")) shouldBe true
+      BootFactories.runsLocalNodes(base.copy(runtimeType = "kubernetes")) shouldBe false
     }
 
   it should "read autoApprove and trustedProxies from an overlay" in {

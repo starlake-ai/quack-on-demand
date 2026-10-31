@@ -42,12 +42,12 @@ final class MembershipHandlers(
   }
 
   private def gateOnUser(apiKey: Option[String], userId: String)(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Option[(StatusCode, ErrorResponse)] =
     TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(userId))(scopeOf)
 
   private def gateOnGroup(apiKey: Option[String], groupId: String)(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Option[(StatusCode, ErrorResponse)] =
     TenantScopeCheck.rejectForResource(apiKey, sup.tenantForGroup(groupId))(scopeOf)
 
@@ -81,7 +81,7 @@ final class MembershipHandlers(
         }
 
   def addUserRole(req: UserRoleMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     membershipOp(
       AuditActions.MembershipUserRoleAdd,
@@ -93,7 +93,7 @@ final class MembershipHandlers(
     )
 
   def removeUserRole(req: UserRoleMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     membershipOp(
       AuditActions.MembershipUserRoleRemove,
@@ -105,7 +105,7 @@ final class MembershipHandlers(
     )
 
   def addUserGroup(req: UserGroupMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     membershipOp(
       AuditActions.MembershipUserGroupAdd,
@@ -117,7 +117,7 @@ final class MembershipHandlers(
     )
 
   def removeUserGroup(req: UserGroupMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     membershipOp(
       AuditActions.MembershipUserGroupRemove,
@@ -129,7 +129,7 @@ final class MembershipHandlers(
     )
 
   def addGroupRole(req: GroupRoleMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     membershipOp(
       AuditActions.MembershipGroupRoleAdd,
@@ -141,7 +141,7 @@ final class MembershipHandlers(
     )
 
   def removeGroupRole(req: GroupRoleMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     membershipOp(
       AuditActions.MembershipGroupRoleRemove,
@@ -153,7 +153,7 @@ final class MembershipHandlers(
     )
 
   def listGroupRoles(groupId: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RoleListResponse] = IO.blocking {
     gateOnGroup(apiKey, groupId)(scopeOf) match
       case Some(err) => Left(err)

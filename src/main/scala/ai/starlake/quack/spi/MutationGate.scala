@@ -32,7 +32,7 @@ enum StructureMutation:
 
 /** Module-contributed veto hook. `Left(reason)` refuses the mutation; the reason string travels to
   * the caller as an HTTP 429 body. Gates run on the request path: keep checks cheap (a cached read
-  * or one indexed SQL query). Superuser and static-key callers bypass gates entirely.
+  * or one indexed SQL query). Superuser callers bypass gates entirely.
   */
 trait MutationGate:
   def check(m: StructureMutation): IO[Either[String, Unit]]

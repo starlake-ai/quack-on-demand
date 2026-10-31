@@ -1,7 +1,6 @@
 package ai.starlake.quack.ondemand.demo
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
-import ai.starlake.quack.edge.config.AclConfig
 
 /** The effective demo configs produced by [[DemoConfig.overlay]]. */
 /** `adminPasswordLabel` is what the banner shows as the seeded admins' password: the literal demo
@@ -11,16 +10,15 @@ import ai.starlake.quack.edge.config.AclConfig
 final case class DemoConfigs(
     manager: ManagerConfig,
     flight: FlightConfig,
-    acl: AclConfig,
     adminPasswordLabel: String
 )
 
 /** Produces the demo posture by copying the base configs with demo overrides.
   *
-  * Guardrail 1: this overlay is the ONLY place the insecure demo settings (REST open, demo
-  * credentials) are produced, and it is called ONLY from [[DemoRunner.runDemo]]. `normalManagerRun`
-  * never invokes it, so a normal boot cannot acquire the demo posture. Case-class `copy` returns
-  * new instances; the base configs are never mutated.
+  * Guardrail 1: this overlay is the ONLY place the demo settings (the advertised demo admin
+  * password, the throwaway metastore) are produced, and it is called ONLY from
+  * [[DemoRunner.runDemo]]. `normalManagerRun` never invokes it, so a normal boot cannot acquire the
+  * demo posture. Case-class `copy` returns new instances; the base configs are never mutated.
   *
   * The FlightSQL edge keeps TLS ON: the edge auto-generates a self-signed cert at boot
   * (`FlightEdgeServer.ensureCertFiles`), pointed under the ephemeral demo home so `qod demo`
@@ -35,7 +33,6 @@ object DemoConfig:
   def overlay(
       baseManager: ManagerConfig,
       baseFlight: FlightConfig,
-      baseAcl: AclConfig,
       pg: PgCoords,
       home: DemoHome
   ): DemoConfigs =
@@ -54,7 +51,6 @@ object DemoConfig:
       admin =
         if passwordDefaulted then baseManager.admin.copy(password = DefaultAdminPassword)
         else baseManager.admin,
-      apiKey = None,
       defaultMetastore = metastore
     )
     val flight = baseFlight.copy(
@@ -63,11 +59,9 @@ object DemoConfig:
       tlsCertChain = home.root.resolve("certs/server-cert.pem").toString,
       tlsPrivateKey = home.root.resolve("certs/server-key.pem").toString
     )
-    val acl = baseAcl.copy(enabled = true)
     DemoConfigs(
       manager,
       flight,
-      acl,
       adminPasswordLabel =
         if passwordDefaulted then DefaultAdminPassword else ChosenAdminPasswordLabel
     )

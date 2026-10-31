@@ -19,11 +19,14 @@ helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand \
   --version <release, e.g. 0.8.1> \
   --set postgres.host=<your-postgres-host> \
   --set postgres.user=<a-non-superuser-role> \
-  --set postgres.password=<your-postgres-password>
+  --set postgres.password=<your-postgres-password> \
+  --set admin.password=<the-admin-password>
 ```
 
-(Exact value keys: see [values.yaml](values.yaml); an external Postgres is
-required, per the prerequisites above.) You can also install from a checkout:
+(Exact value keys: see [values.yaml](values.yaml); an external Postgres and an
+admin password (`admin.password`, or `admin.existingSecret` in production) are
+required, and the chart refuses to render without them.) You can also install
+from a checkout:
 
 ### Local kind cluster (recommended for first-run)
 
@@ -57,6 +60,10 @@ helm install qod charts/quack-on-demand \
   --set admin.existingSecret=qod-admin
 ```
 
+`qod-admin` is a Secret holding the admin password under the key `adminPassword`
+(`admin.existingSecretKey`), for example
+`kubectl -n qod create secret generic qod-admin --from-file=adminPassword=./admin-password.txt`.
+
 Or package it locally and host on your own OCI registry:
 
 ```bash
@@ -76,7 +83,7 @@ OCI publication to a public registry is a planned follow-up.
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
 | `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |
-| `Secret` | Chart-managed only when `postgres.password` / `admin.password` / `apiKey.value` are inline. Production deploys should use `existingSecret` references instead. |
+| `Secret` | Chart-managed only when `postgres.password` / `admin.password` are inline. Production deploys should use `existingSecret` references instead. |
 | `Ingress` | Optional. HTTP for REST/UI. FlightSQL is gRPC and not handled here - front it with a Gateway / Envoy / Istio. |
 | `ServiceMonitor` | Optional, for the Prometheus Operator. |
 | `PodDisruptionBudget` | Optional, only created when `replicaCount > 1`. |
@@ -89,14 +96,12 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 |---|---|---|
 | `image.repository` | `starlakeai/quack-on-demand` | |
 | `image.tag` | `""` (uses `Chart.AppVersion`) | |
-| `replicaCount` | `1` | Set to 2+ to enable HA mode (`QOD_HA_ENABLED`); requires `sessionJwtSecret` or `existingSessionJwtSecret` (the pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). |
+| `replicaCount` | `1` | Set to 2+ to enable HA mode (`QOD_HA_ENABLED`). Replicas share the session secret the control plane stores; `sessionJwtSecret` / `existingSessionJwtSecret` stay optional. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). |
+| `sessionJwtSecret` / `existingSessionJwtSecret` | `""` | Optional at any replica count (`QOD_SESSION_JWT_SECRET`). Empty: the first manager generates the secret and stores it in the control-plane database, and every restart and replica reads it. Set one only when another service must verify the sessions; a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`. |
 | `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
 | `postgres.user` | `""` (REQUIRED) | A dedicated non-superuser role with `CREATEDB` that owns the control-plane database. See [Tenant isolation](#tenant-isolation). |
-| `security.nodeLockdown` | `true` | `QOD_NODE_LOCKDOWN`. Keeps tenant users away from the node's mounted secrets. See [Tenant isolation](#tenant-isolation). |
-| `security.aclEnabled` | `false` | `QOD_ACL_ENABLED`: enforce per-table role grants. |
 | `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
-| `admin.existingSecret` | `""` | Recommended for prod. Inline `admin.password` is dev-only. |
-| `apiKey.value` | `""` | Static `X-API-Key` for `/api/*`. Optional - UI login still works without it. |
+| `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
 | `ingress.enabled` | `false` | REST/UI only. |
@@ -109,10 +114,19 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 The chart configures three independent auth axes. All are optional; the
 defaults give you database auth everywhere with the seeded admin user.
 
-**1. Admin credentials, API key, sessions** (always on): `admin.username` /
-`admin.password` (or `admin.existingSecret`) seed the superuser on first boot only (an existing admin row is never rewritten, so rotating the Secret does not change the password: use `qod auth change-password`, or `qod admin reset-password` with database access; with the default two admin names (`admin@localhost.local,admin`) both share the seeded password, so rotate each with `qod auth change-password --username <name>`, while `qod admin reset-password` resets every configured admin name by default);
-`apiKey.value` optionally enables the static `X-API-Key` arm for `/api/*`;
-`sessionJwtSecret` signs UI sessions and is REQUIRED when `replicaCount > 1`.
+**1. Admin credentials and sessions** (always on): `admin.username` /
+`admin.password` (or `admin.existingSecret`; one of the two is REQUIRED) seed the superuser on first boot only (an existing admin row is never rewritten, so rotating the Secret does not change the password: use `qod auth change-password`, or `qod admin reset-password` with database access; with the default two admin names (`admin@localhost.local,admin`) both share the seeded password, so rotate each with `qod auth change-password --username <name>`, while `qod admin reset-password` resets every configured admin name by default);
+`sessionJwtSecret` signs UI sessions and is optional: left empty, the first manager generates the
+secret and stores it in the control-plane database (`qodstate_boot_secret`), so sessions survive
+restarts and every replica verifies them. Rotate the stored one with
+`DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart of every replica (every
+session and password-reset link ends).
+The chart sets no static API key and refuses a non-empty `apiKey` (an all-empty
+block left in an older values file passes): people log in
+(`qod login`, the UI), and automation (CI, MCP clients, SCIM connectors) uses
+personal access tokens (`qod auth pat create`). Upgrading from a release that set
+`apiKey`: mint those tokens first, point the automation at them, then delete
+`apiKey` from your values.
 
 **2. FlightSQL data plane** (what SQL clients authenticate against): database
 auth (bcrypt rows in `qodstate_user`) is always in the chain. Layer a
@@ -176,12 +190,26 @@ helm upgrade qod charts/quack-on-demand \
 
 Each node pod mounts its secrets read-only at `/var/run/qod-secrets` for its whole life: the DuckLake catalog's Postgres password, the encryption key of an encrypted database, the object-store keys and the federation SQL. A DuckLake database created without its own metastore credentials uses `postgres.user` / `postgres.password`, which are also the control plane's login. So whoever reads that file from a node can connect to the control-plane database (every tenant's password hashes, tokens and catalog passwords) and to every other tenant's catalog, including the per-file encryption keys; if `postgres.user` is a Postgres superuser, they also reach the database server itself (`COPY ... TO PROGRAM`, `pg_read_file`).
 
-Two chart defaults bound that exposure:
+Two things bound that exposure:
 
-- **`security.nodeLockdown: true`.** Non-superuser SQL cannot read local files (`read_text`, `read_csv`, `glob`...), ATTACH, INSTALL, LOAD or change protected settings, so a tenant user cannot read the mounted files. The manager's own default is off; the chart turns it on. A pool can opt out with `POST /api/pool/setLockdown`; its tenant users can then read the files, unless the SQL ACL (`security.aclEnabled: true`) is on, which also refuses file reads to non-superusers. With both off, every tenant user can read the credential.
+- **Every node enforces.** Non-superuser SQL cannot read a local path outside the tenant's authorized folders (`read_text`, `read_csv`, `glob`...), ATTACH, INSTALL, LOAD or change protected settings, on every pool and whatever the configuration, so a tenant user cannot read the mounted files.
 - **`postgres.user` has no default.** Use a dedicated role that is not a Postgres superuser, for example `CREATE ROLE qod LOGIN CREATEDB PASSWORD '...'; CREATE DATABASE qod OWNER qod;`.
 
 QoD superusers are never screened and can always read the files. Isolating each node to its own catalog needs one Postgres role per catalog database, which is not implemented yet.
+
+There is no switch for that enforcement: the former `security.nodeLockdown` and `security.aclEnabled` values are gone (a release still carrying them renders nothing), and a `QOD_NODE_LOCKDOWN` or `QOD_ACL_ENABLED` set through `env` makes the manager refuse to start.
+
+## Node authorization tuning
+
+Set these through `env` (the chart has no dedicated value for them):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `QOD_AUTHZ_DECIDE_TIMEOUT_MS` | `2000` | How long a node waits for a manager replica's verdict (1 to 60000). The manager forwards it to every node pod; restart the nodes after a change. |
+| `QOD_AUTHZ_CACHE_ENTRIES` | `10000` | How many plan verdicts each node caches (0 to 10000000). Forwarded to every node pod like the timeout. |
+| `QOD_AUTHZ_HANDLE_CONTEXTS_MAX` | `200000` | How many session handle contexts each manager replica keeps, each for 360 s (at least 1000; a lower value refuses boot). Caps a replica at about this / 360 tenant statements per second. |
+
+The manager refuses to start on a value outside those ranges. Watch `cache_evictions_total{cache="qod_minted_handles"}` and `qod_node_authz_verdict_cache_evictions_total` (exported by the HA leader only) to size them.
 
 ## Manager ↔ Quack node TLS
 
@@ -195,7 +223,7 @@ When you need the wire encrypted (compliance such as SOC2 / HIPAA / PCI), run a 
 
 ## Operational notes
 
-- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Requires `sessionJwtSecret` or `existingSessionJwtSecret`; when using `existingSessionJwtSecret`, the pre-existing Secret MUST carry the value under the key `sessionJwtSecret`. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md).
+- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Replicas share the session secret stored in the control-plane database; `sessionJwtSecret` or `existingSessionJwtSecret` pins one instead (a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). Each replica passes its pod IP (`QOD_POD_IP`, downward API) so its nodes call that replica back for verdicts; leave `env.QOD_INTERNAL_URL` unset (the chart refuses it with `replicaCount > 1`).
 - **K8s API scope** - manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
 - **TLS** - leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
 - **Probes** - liveness targets `/health` (always 200 while the JVM is alive); readiness targets `/ready` (503 until Postgres is reachable). Readiness gates traffic until Postgres connectivity is confirmed, so a rolling restart doesn't briefly serve requests against an unavailable control plane.

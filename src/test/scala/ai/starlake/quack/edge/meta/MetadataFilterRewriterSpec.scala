@@ -78,7 +78,7 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Rewritten, got $other")
   }
 
-  it should "ignore grants on other catalogs and non-Read verbs" in {
+  it should "list another catalog's grant under that catalog only, and ignore non-Read verbs" in {
     go(
       "SELECT * FROM information_schema.tables",
       eff(
@@ -88,8 +88,11 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       )
     ) match
       case Rewritten(sql) =>
-        (sql should not).include("customer")
+        sql should include(
+          "lower(table_catalog) = 'other_db' AND ((table_schema = 'tpch1' AND table_name = 'customer'))"
+        )
         (sql should not).include("orders")
+        (sql should not).include("'acme_tpch'")
         sql should include("table_schema IN ('information_schema', 'pg_catalog')")
       case other => fail(s"expected Rewritten, got $other")
   }
@@ -337,8 +340,150 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Rewritten, got $other")
   }
 
-  it should "pass a cross-catalog filterable reference through (the validator gates it)" in {
-    go("SELECT * FROM other_db.information_schema.tables", eff(tenantUser)) shouldBe Passthrough
+  // DuckDB resolves `system.information_schema.tables` to the very view the filter narrows, and no
+  // other catalog has an information_schema: a filterable reference of any catalog but the
+  // session's is refused, never left to the node (C1).
+  it should "refuse a filterable reference of the system catalog or of another catalog" in {
+    val e = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    List(
+      "SELECT table_catalog, table_name FROM system.information_schema.tables",
+      "SELECT * FROM \"system\".\"information_schema\".\"columns\"",
+      "SELECT * FROM SYSTEM.INFORMATION_SCHEMA.VIEWS",
+      "SELECT * FROM other_db.information_schema.schemata",
+      "SELECT count(*) FROM tpch1.customer GROUP BY (SELECT count(*) FROM " +
+        "system.information_schema.tables)",
+      "SELECT * FROM information_schema.tables t JOIN system.information_schema.columns c " +
+        "USING (table_name)"
+    ).foreach(sql => withClue(sql)(go(sql, e) shouldBe a[Denied]))
+    // The nearest admitted: the session catalog's own, rewritten.
+    go("SELECT * FROM acme_tpch.information_schema.tables", e) shouldBe a[Rewritten]
+  }
+
+  // A statement jsqlparser cannot read (`^@`) comes back as an opaque statement whose text keeps
+  // the caller's comments, and a comment between `information_schema` and the dot hid the name
+  // from the serialized-text count: the node then read the listing unfiltered (re-review C1-a).
+  // Counted on DuckDB's own tokens, comments dropped, it is refused.
+  it should "refuse a commented listing name in a statement it cannot parse" in {
+    val e = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    for
+      view    <- List("tables", "columns", "views")
+      comment <- List("/**/", "--x\n", "/* a */ ")
+    do
+      val sql =
+        s"SELECT table_catalog, table_name FROM information_schema${comment}.$view " +
+          "WHERE table_name ^@ ''"
+      withClue(sql)(go(sql, e) shouldBe a[Denied])
+    go(
+      "SELECT table_name FROM information_schema --x\n . /* y */ \"schemata\" WHERE 1 ^@ 1",
+      e
+    ) shouldBe a[Denied]
+    go(
+      "SELECT table_catalog, table_name, view_definition FROM information_schema/**/.views " +
+        "WHERE table_name ^@ ''",
+      eff(tenantUser, grant("lake", "main", "events"))
+    ) shouldBe a[Denied]
+    // Text the gateway cannot even render (a quote or dollar string left open) is counted on its
+    // own text: there the comment hid the name, and the filter passed it through.
+    List(
+      "SELECT table_name FROM information_schema/**/.tables WHERE x = '''",
+      "SELECT table_name FROM information_schema--x\n.views WHERE x = E'\\\\''",
+      "SELECT table_name FROM information_schema/* y */.columns WHERE 1 ^@ 1 AND $$ = 'x'"
+    ).foreach(sql => withClue(sql)(go(sql, e) shouldBe a[Denied]))
+    // The nearest admitted: the same unreadable shape naming no listing passes untouched.
+    go("SELECT v FROM tpch1.customer WHERE v ^@ ''", e) shouldBe Passthrough
+  }
+
+  // Re-review I-a: the filtered information_schema rows named a schema and a table, never a
+  // catalog, so a grant on the session catalog's main.events also listed another attached
+  // catalog's main.events, view SQL included. Pinned to the session catalog, like duckdb_*().
+  it should "pin the filtered information_schema rows to the session catalog" in {
+    val one = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    val all = eff(tenantUser, grant("*", "*", "*", verb = "RO"))
+    for (meta, col) <- List(
+        "tables"   -> "table_catalog",
+        "columns"  -> "table_catalog",
+        "views"    -> "table_catalog",
+        "schemata" -> "catalog_name"
+      )
+    do
+      List(one, all).foreach { e =>
+        go(s"SELECT * FROM information_schema.$meta", e) match
+          case Rewritten(sql) =>
+            withClue(sql)(sql should include(s"lower($col) = 'acme_tpch'"))
+            // A wildcard grant no longer widens the listing to every catalog.
+            withClue(sql)(sql should not include "WHERE TRUE")
+          case other => fail(s"expected Rewritten for $meta, got $other")
+      }
+  }
+
+  // Re-review I-a2: one pin for every grant over-narrowed. A grant naming another catalog the pool
+  // attaches (a federated `pgsrc`) covers it on the node, so it is listed, under its own catalog;
+  // a wildcard catalog covers the session catalog only (the node's rule: the tenant's database
+  // catalogs, never a federated one), so it is listed under that one. No grant ever lists the
+  // DuckLake metadata catalog, the system catalog's own objects or temp.
+  it should "pin each grant's rows to the catalog that grant covers" in {
+    val fed =
+      eff(tenantUser, grant("pgsrc", "public", "*"), grant("acme_tpch", "tpch1", "customer"))
+    val all = eff(tenantUser, grant("*", "*", "*", verb = "RO"))
+    val odd = eff(
+      tenantUser,
+      grant("__ducklake_metadata_acme_tpch", "main", "*"),
+      grant("system", "main", "*"),
+      grant("temp", "main", "*")
+    )
+    List("tables", "columns", "views", "schemata").foreach { meta =>
+      val col = if meta == "schemata" then "catalog_name" else "table_catalog"
+      def sqlOf(e: EffectiveSet): String = go(s"SELECT * FROM information_schema.$meta", e) match
+        case Rewritten(sql) => sql
+        case other          => fail(s"expected Rewritten for $meta, got $other")
+      val f = sqlOf(fed)
+      withClue(f)(f should include(s"lower($col) = 'pgsrc'"))
+      withClue(f)(f should include(s"lower($col) = 'acme_tpch'"))
+      val a = sqlOf(all)
+      withClue(a)(a should include(s"lower($col) = 'acme_tpch'"))
+      withClue(a)((a should not).include("pgsrc"))
+      val o = sqlOf(odd).toLowerCase
+      withClue(o)((o should not).include("__ducklake_metadata"))
+      withClue(o)((o should not).include("'temp'"))
+      withClue(o)((o should not).include(s"lower($col) = 'system'"))
+    }
+    List("duckdb_tables", "duckdb_views", "duckdb_columns", "duckdb_schemas").foreach { fn =>
+      go(s"SELECT * FROM $fn()", fed) match
+        case Rewritten(sql) =>
+          withClue(sql)(sql should include("lower(database_name) = 'pgsrc'"))
+          withClue(sql)(sql should include("lower(database_name) = 'acme_tpch'"))
+        case other => fail(s"expected Rewritten for $fn, got $other")
+    }
+    // An information_schema grant on another catalog opens no unfiltered listing.
+    go(
+      "SELECT * FROM information_schema.tables",
+      eff(tenantUser, grant("pgsrc", "information_schema", "*"))
+    ) shouldBe a[Rewritten]
+  }
+
+  // A string names a listing to whatever parses it on the node (query(), query_table()): refused
+  // however the name is spelled inside it, a comment, an E-string escape or a nested literal
+  // included, where the serialized-text count alone saw no reference (C1).
+  it should "refuse a string literal that names a listing however it is spelled" in {
+    val e = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    List(
+      "SELECT * FROM query('SELECT table_name FROM information_schema./**/tables')",
+      "SELECT * FROM query('SELECT table_name FROM information_schema . /* x */ \"tables\"')",
+      "SELECT * FROM query('SELECT table_name FROM information_schema.--x\ntables')",
+      "SELECT * FROM query('SELECT ''--'', table_name FROM information_schema.--x\ntables')",
+      "SELECT * FROM query(E'SELECT table_name FROM information\\x5fschema.tables')",
+      "SELECT * FROM query('SELECT * FROM query(''SELECT 1 FROM information_schema./**/views'')')",
+      "SELECT * FROM query(E'SELECT * FROM \\x64uckdb_views()')",
+      "SELECT * FROM query_table('information_schema.\"columns\"')",
+      "SELECT * FROM query_table(['INFORMATION_SCHEMA.SCHEMATA'])"
+    ).foreach(sql => withClue(sql)(go(sql, e) shouldBe a[Denied]))
+    // The nearest admitted: a literal naming the schema, or a listing word, but not both.
+    go("SELECT * FROM tpch1.customer WHERE note = 'information_schema'", e) shouldBe Passthrough
+    go("SELECT * FROM tpch1.customer WHERE note = 'tables and views'", e) shouldBe Passthrough
+    go(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema <> 'information_schema'",
+      e
+    ) shouldBe a[Rewritten]
   }
 
   // Where the tripwire counts decides these two, and the answer has moved twice: it counted a
@@ -606,7 +751,7 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
     ) match
       case Rewritten(sql) =>
-        sql should include("FROM duckdb_tables() WHERE database_name = 'acme_tpch' AND (")
+        sql should include("FROM duckdb_tables() WHERE (lower(database_name) = 'acme_tpch' AND (")
         sql should include("schema_name = 'tpch1' AND table_name = 'customer'")
         sql should not include "table_schema"
       case other => fail(s"expected Rewritten, got $other")
@@ -619,8 +764,8 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, grant("acme_tpch", "tpch1", "customer"), grant("*", "sales", "*"))
     ) match
       case Rewritten(sql) =>
-        sql should include("FROM duckdb_tables() WHERE database_name = 'acme_tpch'")
-        sql should include("FROM duckdb_views() WHERE database_name = 'acme_tpch'")
+        sql should include("FROM duckdb_tables() WHERE (lower(database_name) = 'acme_tpch'")
+        sql should include("FROM duckdb_views() WHERE (lower(database_name) = 'acme_tpch'")
         sql should include("schema_name = 'tpch1' AND table_name = 'customer'")
         sql should include("schema_name = 'tpch1' AND view_name = 'customer'")
         sql should include("(schema_name = 'sales')")
@@ -635,13 +780,13 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
     ) match
       case Rewritten(sql) =>
-        sql should include("FROM duckdb_schemas() WHERE database_name = 'acme_tpch' AND (")
+        sql should include("FROM duckdb_schemas() WHERE (lower(database_name) = 'acme_tpch' AND (")
         sql should include("schema_name = 'tpch1'")
         sql should not include "table_name"
       case other => fail(s"expected Rewritten, got $other")
     go("SELECT * FROM duckdb_columns()", eff(tenantUser, grant("acme_tpch", "*", "orders"))) match
       case Rewritten(sql) =>
-        sql should include("FROM duckdb_columns() WHERE database_name = 'acme_tpch' AND (")
+        sql should include("FROM duckdb_columns() WHERE (lower(database_name) = 'acme_tpch' AND (")
         sql should include("(table_name = 'orders')")
       case other => fail(s"expected Rewritten, got $other")
   }
@@ -650,11 +795,11 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
     // jsqlparser re-serializes boolean literals in lowercase.
     go("SELECT * FROM duckdb_tables()", eff(tenantUser, grant("*", "*", "*", verb = "RO"))) match
       case Rewritten(sql) =>
-        sql.toUpperCase should include("WHERE DATABASE_NAME = 'ACME_TPCH' AND (TRUE)")
+        sql.toUpperCase should include("WHERE (LOWER(DATABASE_NAME) = 'ACME_TPCH'))")
       case other => fail(s"expected Rewritten, got $other")
     go("SELECT * FROM duckdb_tables()", eff(tenantUser)) match
       case Rewritten(sql) =>
-        sql.toUpperCase should include("WHERE DATABASE_NAME = 'ACME_TPCH' AND (FALSE)")
+        sql.toUpperCase should include("WHERE FALSE)")
       case other => fail(s"expected Rewritten, got $other")
   }
 
@@ -682,8 +827,8 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
     ) match
       case Rewritten(sql) =>
-        sql should include("FROM duckdb_tables() WHERE database_name = 'acme_tpch'")
-        sql should include("FROM duckdb_schemas() WHERE database_name = 'acme_tpch'")
+        sql should include("FROM duckdb_tables() WHERE (lower(database_name) = 'acme_tpch'")
+        sql should include("FROM duckdb_schemas() WHERE (lower(database_name) = 'acme_tpch'")
       case other => fail(s"expected Rewritten, got $other")
   }
 

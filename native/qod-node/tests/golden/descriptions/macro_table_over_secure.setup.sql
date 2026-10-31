@@ -1,0 +1,1 @@
+CREATE MACRO sv_ids() AS TABLE SELECT id FROM sv;

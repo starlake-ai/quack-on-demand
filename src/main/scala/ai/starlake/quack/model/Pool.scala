@@ -32,6 +32,9 @@ final case class Pool(
       * sources. Empty by default for backward compat.
       */
     initSql: String = "",
+    // Whether `initSql` was written by a superuser or the manager (run as written) or by a tenant
+    // admin (run under qod-node's tenant initSql allowlist); see `TenantDb.initSqlTrusted`.
+    initSqlTrusted: Boolean = false,
     // Kubernetes node-pod sizing. Each applied as BOTH request and limit on the
     // quack container. Empty = unset. Kubernetes-only; ignored by the local backend.
     cpu: String = "",
@@ -39,11 +42,6 @@ final case class Pool(
     // Full Pod-manifest YAML used as a base template when QOD_POD_TEMPLATE_ENABLED
     // is on; the manager overlays identity labels, the env contract, and resources.
     podTemplateYaml: String = "",
-    // Per-pool node-lockdown override. None = inherit the global
-    // QOD_NODE_LOCKDOWN flag; Some(b) forces lockdown on/off for this pool.
-    // Resolved once in PoolSupervisor.effectiveLockdown and fed to BOTH
-    // enforcement layers (edge screen + spawn-time engine SQL).
-    lockdown: Option[Boolean] = None,
     // Owner-declared demand scale-out band. Both None = fixed-size pool
     // (exact pre-0025 behavior). Set together or not at all; REST validates.
     minNodes: Option[Int] = None,

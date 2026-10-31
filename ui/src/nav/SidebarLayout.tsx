@@ -52,7 +52,7 @@ export default function SidebarLayout({ items, switcher, children }: {
   switcher: (collapsed: boolean, expand: () => void) => ReactNode;
   children: ReactNode;
 }) {
-  const { username, role, logout, authEnabled } = useAuth();
+  const { username, role, logout } = useAuth();
   const [collapsed, setCollapsed] = useState(() => readCollapsed());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const location = useLocation();
@@ -88,15 +88,9 @@ export default function SidebarLayout({ items, switcher, children }: {
           <NavTree items={items} depth={0} />
         </nav>
         <div className="sidebar-footer">
-          {authEnabled ? (
-            <span className="user-pill nav-label" title={username ?? ''}>
-              <span className="user-name">{username}</span> <span className="role">{role}</span>
-            </span>
-          ) : (
-            <span className="user-pill nav-label" title="Server has no auth providers configured">
-              anonymous <span className="role">no-auth</span>
-            </span>
-          )}
+          <span className="user-pill nav-label" title={username ?? ''}>
+            <span className="user-name">{username}</span> <span className="role">{role}</span>
+          </span>
           <div className="sidebar-actions">
             <button
               type="button" className="collapse-toggle"
@@ -106,12 +100,10 @@ export default function SidebarLayout({ items, switcher, children }: {
             >
               {collapsed ? '»' : '«'}
             </button>
-            {authEnabled && (
-              <button type="button" className="secondary" onClick={() => { void logout(); }}>
-                <span className="nav-label">Sign out</span>
-                <span className="signout-short" aria-hidden="true">⏻</span>
-              </button>
-            )}
+            <button type="button" className="secondary" onClick={() => { void logout(); }}>
+              <span className="nav-label">Sign out</span>
+              <span className="signout-short" aria-hidden="true">⏻</span>
+            </button>
           </div>
         </div>
       </aside>

@@ -53,12 +53,10 @@ class UndropAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers
       )
     )
 
-  private def boot(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def boot(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addFixtures(fix)
-    (ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey), fix)
+    (ManagerServerHarness.boot(fix.store), fix)
 
   private def recoverableUrl(tenant: String, tenantDb: String): String =
     s"/api/catalog/tenant/$tenant/database/$tenantDb/recoverable"
@@ -67,7 +65,7 @@ class UndropAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers
     s"""{"tenant":"$tenant","tenantDb":"$tenantDb","schema":"main","table":"region"}"""
 
   "recoverable endpoint" should "reject a credential-less GET with 401" in {
-    val (h, _) = boot(staticApiKey = Some("static-key-for-undrop-authz"))
+    val (h, _) = boot()
     try
       val resp =
         get(h.httpClient, h.baseUrl + recoverableUrl(SecurityFixtures.TenantId, DuckLakeTenantDb))
@@ -120,7 +118,7 @@ class UndropAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers
   }
 
   "undrop endpoint" should "reject a credential-less POST with 401" in {
-    val (h, _) = boot(staticApiKey = Some("static-key-for-undrop-authz"))
+    val (h, _) = boot()
     try
       val resp = post(
         h.httpClient,

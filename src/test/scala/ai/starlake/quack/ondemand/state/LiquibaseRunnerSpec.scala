@@ -51,6 +51,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
         rs.close()
         tables.toList shouldBe List(
           "qodstate_audit",
+          "qodstate_boot_secret",
           "qodstate_branch",
           "qodstate_branch_merge",
           "qodstate_federated_secret",
@@ -63,6 +64,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "qodstate_maintenance_run",
           "qodstate_managed_prefix",
           "qodstate_node",
+          "qodstate_node_authz",
           "qodstate_pat",
           "qodstate_pool",
           "qodstate_pool_activity",
@@ -79,9 +81,11 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "qodstate_stmt_rollup",
           "qodstate_tenant",
           "qodstate_tenant_db",
+          "qodstate_tenant_location",
           "qodstate_user",
           "qodstate_user_group",
-          "qodstate_user_role"
+          "qodstate_user_role",
+          "qodstate_user_s3_credential"
         )
       finally c.close()
   }
@@ -116,8 +120,12 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
       // 1 personal-access-token table (pat, Liquibase 0032) +
       // 1 hibernation-activity table (pool_activity, Liquibase 0035) +
       // 2 branching tables (branch + branch_merge, Liquibase 0037) +
-      // 2 fleet tables (fleet_server + fleet_heartbeat, Liquibase 0040).
+      // 2 fleet tables (fleet_server + fleet_heartbeat, Liquibase 0040) +
+      // 1 node-key secret table (node_authz, Liquibase 0047) +
+      // 1 boot-secret table (boot_secret, Liquibase 0049) +
+      // 1 tenant-location table (tenant_location, Liquibase 0051) +
+      // 1 user S3 credential table (user_s3_credential, Liquibase 0052).
       // qodstate_tenant_identity is gone -- auth provider is a tenant attribute now.
-      rs.getInt(1) shouldBe 32
+      rs.getInt(1) shouldBe 36
     finally c.close()
   }

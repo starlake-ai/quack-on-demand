@@ -1,0 +1,63 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0053-init-sql-trust
+      author: qod
+      # Changed before release (Task 20 reviews M2, N4, N5): a development control plane that ran an
+      # earlier version keeps its flags; only those two earlier texts pass besides this one.
+      validCheckSum:
+        - 9:5dbd4e88ca271bdc2f4df48c39da1461
+        - 9:382e9904bd7d0817561f8d27e9c38cd6
+      changes:
+        # Whether a database's or a pool's initSql was written by a superuser (or by the manager
+        # itself), which nodes run as written, or by a tenant admin, which nodes run only under the
+        # tenant initSql allowlist (qod-node's init policy). Set by every write from the writer.
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name: init_sql_trusted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name: init_sql_trusted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        # Nothing to judge in an empty initSql. A database `qod serve` provisioned was written by the
+        # manager's boot hook, whose audit rows carry the actor `system`. Every other row keeps
+        # false: an initSql a tenant admin wrote before this change falls under the allowlist.
+        - sql:
+            sql: UPDATE qodstate_tenant_db SET init_sql_trusted = true WHERE init_sql = ''
+        - sql:
+            sql: UPDATE qodstate_pool SET init_sql_trusted = true WHERE init_sql IS NULL OR init_sql = ''
+        # Only while no tenant-db create or update by anyone else is newer for that tenant and name:
+        # a database qod serve made and a tenant admin changed (or deleted and made again) since.
+        # Audit rows carry the request's own spelling; tenant ids and database names are lowercase,
+        # and the update path lowercases the name it is given, so both compare in lower case.
+        - sql:
+            sql: UPDATE qodstate_tenant_db td SET init_sql_trusted = true WHERE EXISTS (SELECT 1 FROM qodstate_audit a WHERE a.actor = 'system' AND a.actor_realm = 'system' AND a.action = 'database.create' AND a.outcome = 'ok' AND lower(a.tenant) = td.tenant_id AND lower(a.target) = td.name AND NOT EXISTS (SELECT 1 FROM qodstate_audit b WHERE b.action IN ('database.create', 'database.update') AND b.outcome = 'ok' AND lower(b.tenant) = lower(a.tenant) AND lower(b.target) = lower(a.target) AND b.ts > a.ts AND NOT (b.actor = 'system' AND b.actor_realm = 'system')))
+  - changeSet:
+      id: 0053-federated-sql-author
+      author: qod
+      changes:
+        # Whether a superuser (or the manager) wrote a federated source. A `sql` source runs its
+        # setupSql unrestricted on every node, so only superusers may write one from now on
+        # (CONTRACT Addendum 4 item 26); every row stored before has no known author and stays
+        # false, which boot reports once per row. Typed sources are rendered by the manager.
+        - addColumn:
+            tableName: qodstate_federated_source
+            columns:
+              - column:
+                  name: setup_sql_trusted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        - sql:
+            sql: UPDATE qodstate_federated_source SET setup_sql_trusted = true WHERE source_type <> 'sql'

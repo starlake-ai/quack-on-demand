@@ -13,8 +13,8 @@ import sttp.model.StatusCode
   * the display name today but could be the surrogate id in future router changes. A session's
   * `manageableTenants` carries tenant IDs. To stay agnostic to the on-record shape (mirroring the
   * FlightSQL handshake's "accept either form" convention), the filter builds an allow-set that
-  * contains BOTH the id and the display name of every manageable tenant. Superuser, static-key, and
-  * open-mode callers see the unfiltered window.
+  * contains BOTH the id and the display name of every manageable tenant. A superuser sees the
+  * unfiltered window; a caller with no resolvable credential sees nothing.
   *
   * Caveat: the filter runs AFTER the ring snapshot is taken, so an admin who happens to share the
   * buffer with a noisier tenant may see fewer than `limit` rows. This matches the same trade-off
@@ -29,23 +29,22 @@ final class StatementHistoryHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   def recent(limit: Option[Int], apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[StatementHistoryResponse] = IO.delay {
     val n      = limit.getOrElse(defaultLimit)
     val capped = math.max(1, math.min(maxLimit, n))
     val snap   = store.snapshot(capped)
+    val scope  = scopeOf(apiKey)
 
-    val filtered = apiKey.flatMap(scopeOf) match
-      // Open mode / static key: unknown token => admit, full window.
-      case None => snap
-      // Superuser session: unrestricted.
-      case Some(s) if s.superuser => snap
-      // Tenant-scoped admin: build a single allow-set carrying both the id
-      // and display-name for each manageable tenant. Records whose `tenant`
-      // resolves to neither (e.g. a tenant deleted after recording) are
-      // dropped to avoid silently leaking through the gap.
-      case Some(s) =>
-        val allowed: Set[String] = s.manageableTenants.flatMap { id =>
+    val filtered =
+      // Superuser: unrestricted.
+      if scope.superuser then snap
+      else
+        // Anyone else: a single allow-set carrying both the id and display-name for each
+        // manageable tenant (none for a caller with no resolvable credential). Records whose
+        // `tenant` resolves to neither (e.g. a tenant deleted after recording) are dropped to
+        // avoid silently leaking through the gap.
+        val allowed: Set[String] = scope.manageableTenants.flatMap { id =>
           supervisor.getTenantById(id) match
             case Some(t) => Set(t.id, t.displayName)
             case None    => Set(id)

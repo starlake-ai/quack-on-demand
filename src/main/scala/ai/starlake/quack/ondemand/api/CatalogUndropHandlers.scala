@@ -47,7 +47,7 @@ final class CatalogUndropHandlers(
     s.exists(c => c == '\'' || c == '"' || c == ';' || c == '\\' || c.isWhitespace || c.isControl)
 
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(
       sup,
@@ -64,7 +64,7 @@ final class CatalogUndropHandlers(
     PoolPicks.writePoolKey(sup, tenant, tenantDb)
 
   def recoverable(tenant: String, tenantDb: String, limit: Option[Int], apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RecoverableListResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
@@ -98,7 +98,7 @@ final class CatalogUndropHandlers(
         }
 
   def undrop(req: UndropRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[UndropResponse] =
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>

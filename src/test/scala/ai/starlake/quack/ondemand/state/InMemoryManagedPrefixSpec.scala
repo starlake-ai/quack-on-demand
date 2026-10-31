@@ -117,3 +117,15 @@ class InMemoryManagedPrefixSpec extends AnyFlatSpec with Matchers:
     row.createdAt shouldBe firstCreated
     row.prefix shouldBe "acme/acme_default/td-dup/"
   }
+
+  it should "list every prefix not yet purged, live or dropped" in {
+    val store     = new InMemoryControlPlaneStore()
+    val createdAt = Instant.parse("2026-08-12T10:00:00Z")
+    store.insertManagedPrefix("mp-b", tenant, tenantDbName, "s3://m/acme_b-2/", createdAt)
+    store.insertManagedPrefix("mp-a", tenant, tenantDbName, "s3://m/acme_a-1/", createdAt)
+    store.insertManagedPrefix("mp-c", tenant, tenantDbName, "s3://m/acme_c-3/", createdAt)
+    store.markManagedPrefixDeleted("mp-b", createdAt, createdAt.plusSeconds(60))
+    store.markManagedPrefixDeleted("mp-c", createdAt, createdAt)
+    store.markManagedPrefixPurged("mp-c", createdAt.plusSeconds(1))
+    store.unpurgedManagedPrefixes().map(_.id) shouldBe List("mp-a", "mp-b")
+  }

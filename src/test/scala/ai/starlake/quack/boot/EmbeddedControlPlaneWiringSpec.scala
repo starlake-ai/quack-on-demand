@@ -67,7 +67,6 @@ class EmbeddedControlPlaneWiringSpec extends AnyFlatSpec with Matchers:
     seenMgr.get.defaultMetastore.pgPort shouldBe port.toString
     seenMgr.get.defaultMetastore.pgHost shouldBe "localhost"
     // Posture guardrail: nothing outside the five pg coordinates moved.
-    seenMgr.get.apiKey shouldBe cfg.apiKey
     seenMgr.get.runtimeType shouldBe cfg.runtimeType
     seenMgr.get.defaultMetastore.dataPath shouldBe cfg.defaultMetastore.dataPath
     // The auth.database block is re-anchored to the same live server, keyed by the SAME
@@ -123,6 +122,20 @@ class EmbeddedControlPlaneWiringSpec extends AnyFlatSpec with Matchers:
         .withEmbeddedControlPlane(cfg, baseAuth)((_, _) =>
           cats.effect.IO.raiseError(new RuntimeException("boom"))
         )
+        .unsafeRunSync()
+    assertPortFree(port)
+
+  it should "stop the server when the boot body throws while it builds its IO" in:
+    // Main.bootManager runs its refusals (sys.error) eagerly, before it returns an IO: such a
+    // throw must still find the server's stop attached.
+    val dir  = Files.createTempDirectory("qod-embedded-wiring-eager-fail")
+    val port = freePort()
+    val cfg  = base.copy(embeddedPostgres =
+      EmbeddedPostgresConfig(enabled = true, port = port, dataDir = dir.toString)
+    )
+    an[RuntimeException] should be thrownBy
+      Main
+        .withEmbeddedControlPlane(cfg, baseAuth)((_, _) => sys.error("refused at boot"))
         .unsafeRunSync()
     assertPortFree(port)
 

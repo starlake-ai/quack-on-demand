@@ -208,7 +208,12 @@ def create(
     tenant: str = TENANT,
     db: str = DB,
     alias: str = typer.Option(..., "--alias"),
-    setup_sql: str = typer.Option(None, "--setup-sql", help="sql sources only."),
+    setup_sql: str = typer.Option(
+        None,
+        "--setup-sql",
+        help="sql sources only; a sql source is a superuser's to create or change, and every "
+        "{{secret.NAME}} in it must sit inside a single-quoted literal ('...').",
+    ),
     description: str = typer.Option(None, "--description"),
     disabled: bool = typer.Option(False, "--disabled"),
     source_type: str = typer.Option(

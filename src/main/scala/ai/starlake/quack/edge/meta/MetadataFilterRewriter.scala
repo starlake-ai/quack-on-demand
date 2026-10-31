@@ -53,11 +53,10 @@ enum MetadataFilterOutcome:
   * `duckdb_columns()` by one whose WHERE pins `database_name` to the session catalog and keeps the
   * granted rows (issue #114: the quack client's ATTACH syncs the remote catalog through
   * `duckdb_tables() UNION ALL duckdb_views()`). Runs for every non-superuser principal without an
-  * explicit information_schema grant; the ACL validator implicitly admits exactly the references
-  * this class filters (same flag, same
-  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables FilterableTables]] /
+  * explicit information_schema grant. What it narrows is named in one place each:
+  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables FilterableTables]] and
   * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableFunctions FilterableFunctions]]
-  * lists).
+  * (the ACL parser's own catalog-function list).
   *
   * Fail-closed, and DENIAL is how it stays that way: a filterable reference the substitution walk
   * cannot reach is refused, not filtered. The walk alone cannot promise this (SQL puts tables in
@@ -79,17 +78,35 @@ enum MetadataFilterOutcome:
   * Neither tier subsumes the other: the serialized text sees positions the traversal skips, the AST
   * sees quoting forms the regex cannot read through.
   *
-  * A count that cannot be taken is also a denial. Three consequences are accepted deliberately: a
-  * reference in an unsupported position is denied rather than filtered; a statement that merely
+  * A count that cannot be taken is also a denial. Two consequences are accepted deliberately: a
+  * reference in an unsupported position is denied rather than filtered; and a statement that merely
   * MENTIONS a filterable table inside a STRING LITERAL is denied on the phantom match (literals
-  * survive serialization, comments do not); and a CROSS-CATALOG filterable reference sitting in a
-  * traversal blind spot is denied even though the walk leaves cross-catalog metadata alone on
-  * purpose (rare, fail-closed, and the validator would have grant-gated that reference anyway).
+  * survive serialization, comments do not), the name read through any comment or E-string escape
+  * inside the literal ([[literalMentions]]), since query() and query_table() hand a string to
+  * DuckDB's parser.
+  *
+  * A filterable reference of any other catalog is refused, never left alone: DuckDB resolves
+  * `system.information_schema.tables` to the very view this filter narrows, and no other catalog
+  * has an information_schema. Neither these nor DuckDB's other built-in views (pg_catalog's,
+  * `sqlite_master`, the parenless `duckdb_tables`) reach a node unrefused: qod-node refuses a
+  * non-superuser's read of any built-in view but the four filtered ones, and of those any name but
+  * `information_schema.<view>` in the statement's own text (a search path through
+  * information_schema, a string, a view's body), which is the one spelling this filter rewrites.
   */
-final class MetadataFilterRewriter(enabled: Boolean = true):
+final class MetadataFilterRewriter(
+    /** False only in specs isolating the node: production (`Main`) always mounts it enabled. */
+    enabled: Boolean
+):
 
   import MetadataFilterOutcome._
   import MetadataFilterRewriter._
+
+  /** Whether the filter narrows `eff`'s catalog reads in `ctx` at all: off, for a superuser, for a
+    * principal holding `*.*.* ALL` or an explicit information_schema grant, it passes them through.
+    */
+  def narrows(eff: EffectiveSet, ctx: SchemaContext): Boolean =
+    enabled && eff.user.tenant.nonEmpty && !hasWildcardAll(eff) &&
+      !readGrants(eff, ctx).exists(_.schemaName.equalsIgnoreCase(InformationSchema))
 
   def rewrite(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
     if !enabled then Passthrough
@@ -99,30 +116,31 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
     else TooDeep.orElse(Denied(TooDeep.Reason))(filtered(sql, eff, ctx))
 
   private def filtered(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
-    val grants = readGrants(eff, ctx)
-    if grants.exists(_.schemaName.equalsIgnoreCase(InformationSchema)) then
+    if readGrants(eff, ctx).exists(_.schemaName.equalsIgnoreCase(InformationSchema)) then
       // Operator escape hatch: an EXPLICIT (schema named literally) information_schema
       // grant keeps today's unfiltered read.
       Passthrough
     else
+      val grants = listedGrants(eff)
       // Fast path for a bare SHOW TABLES, which never reaches the parse path below.
       ShowTables.replace(sql, grants, ctx) match
         case Some(outcome) => outcome
         case None          =>
           // parseStatements, NOT parse: parse truncates a batch to its first statement, so
-          // everything after the first semicolon reached the node untouched while the
-          // validator admitted the batch as a pure read. The parser is configured exactly as
-          // the ACL validator configures it (SqlParser.extract), so the two see the same
-          // statement list: a shape one of them splits and the other does not is a gap
-          // between them.
+          // everything after the first semicolon reached the node untouched. The parser is
+          // configured exactly as SqlParser.extract configures it (the protected-write guard's
+          // and RewriteScope's reader), so they see the same statement list: a shape one of them
+          // splits and the other does not is a gap between them.
           parseBatch(sql) match
             case None =>
-              // Unparseable. Forwarding it used to rest on the validator denying it upstream,
-              // which held only while the two parsers read the statement identically - the
-              // time-travel strip was the counterexample. The fail-closed reading is structural
+              // Unparseable. Forwarding it once rested on the gateway's validator (deleted in
+              // Phase D) denying it upstream, which held only while the two parsers read the
+              // statement identically - the time-travel strip was the counterexample. The fail-closed reading is structural
               // now: text this filter could not analyse, naming a filterable table, is refused
               // rather than forwarded on trust. Text naming none still passes, so an ordinary
-              // unsupported statement is unaffected.
+              // unsupported statement is unaffected. Counted on DuckDB's own tokens too: this is
+              // the caller's text, where a comment between the schema and the dot hides the name
+              // from the regex (re-review C1-a).
               if textualRefCount(sql) > 0 then Denied(AnalysisRefusal) else Passthrough
             case Some((stmts, exact)) =>
               val parts = stmts.asScala.toList.map(processOne(_, grants, ctx))
@@ -174,8 +192,8 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
         else StmtOutcome.Refused(ShowTables.VariantRefusal)
       case other =>
         // USE / SET / txn control / DDL / DML: left exactly as written, but a filterable
-        // reference anywhere in it is refused. The validator's pure-read gate should already
-        // have denied such a batch; this arm does not rely on that.
+        // reference anywhere in it is refused; nothing upstream screens such a batch for the
+        // filter.
         val text = other.toString
         if text.isBlank then
           // An unsupported statement that serializes to nothing has swallowed whatever
@@ -204,14 +222,16 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
         val normalized = sel.toString
         val walker     = new Walker(grants, ctx)
         walker.walkSelect(sel)
-        // Cross-catalog references are left alone on purpose (they stay grant-gated by the
-        // validator), so they are accounted for rather than counted as unfiltered leftovers.
-        val accounted = walker.substitutions + refs.crossCatalog
         walker.failure match
           case Some(reason) => StmtOutcome.Refused(reason)
           case None         =>
-            if refs.nodes > walker.substitutions || textualRefCount(normalized) > accounted then
-              StmtOutcome.Refused(UnsupportedPositionRefusal)
+            // Another catalog's reference (system.information_schema.tables lists every catalog
+            // unfiltered) is refused, wherever it sits: one the AST count missed still trips the
+            // textual count, which nothing but a substitution accounts for.
+            if refs.crossCatalog > 0 then StmtOutcome.Refused(CrossCatalogRefusal)
+            else if refs.nodes > walker.substitutions ||
+              textualRefCount(normalized) > walker.substitutions
+            then StmtOutcome.Refused(UnsupportedPositionRefusal)
             else if walker.substitutions > 0 then StmtOutcome.Changed(sel.toString)
             else StmtOutcome.Kept(normalized)
 
@@ -219,15 +239,15 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
     * grammar does not model (`USE db.schema`, dialect-specific forms) come back as opaque nodes
     * instead of failing the whole parse and blinding the filter. Mirrors `SqlParser.extract`
     * exactly - same time-travel strip, same lexer-canonical input, same feature configuration -
-    * because any difference in how the validator and this filter read a statement is a statement
-    * one of them admits and the other never sees. None when the input cannot be rendered or parsed;
-    * otherwise the statements and whether their re-serialization is the caller's statement
-    * (`ParserInput.Rendered.exact`).
+    * because any difference in how the policy screens and this filter read a statement is a
+    * statement one of them admits and the other never sees. None when the input cannot be rendered
+    * or parsed; otherwise the statements and whether their re-serialization is the caller's
+    * statement (`ParserInput.Rendered.exact`).
     */
   private def parseBatch(sql: String): Option[(net.sf.jsqlparser.statement.Statements, Boolean)] =
     // DuckLake's `AT (VERSION => n)` is not in the grammar, and a clause sitting AFTER a
     // filterable reference collapses the statement into an opaque tail that no longer mentions
-    // it - while the validator, parsing the stripped text, has already admitted the read.
+    // it - while a reader parsing the stripped text sees the read.
     ai.starlake.sql.ParserInput
       .renderWithoutTimeTravel(sql)
       .toOption
@@ -248,13 +268,25 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
       }
 
   /** Session-catalog Read-covering grants: verb RO/RW/ALL and catalog wildcard-or-equal to the
-    * session database.
+    * session database. What decides whether the filter narrows at all (an explicit
+    * information_schema grant among them opens the unfiltered listing).
     */
   private def readGrants(eff: EffectiveSet, ctx: SchemaContext): List[RolePermission] =
     val sessionCat = ctx.defaultDatabase.getOrElse("")
     eff.permissions.filter { p =>
       ReadCoveringVerbs.contains(p.verb.toUpperCase(Locale.ROOT)) &&
       (p.catalogName == RolePermission.Wildcard || p.catalogName.equalsIgnoreCase(sessionCat))
+    }
+
+  /** The Read-covering grants a filtered listing shows rows of: the wildcard catalog's and every
+    * named catalog's (a federated one the pool attaches included, re-review I-a2), but never the
+    * system catalog's, temp's or a DuckLake metadata catalog's, which the node never grants.
+    */
+  private def listedGrants(eff: EffectiveSet): List[RolePermission] =
+    eff.permissions.filter { p =>
+      val catalog = p.catalogName.toLowerCase(Locale.ROOT)
+      ReadCoveringVerbs.contains(p.verb.toUpperCase(Locale.ROOT)) &&
+      catalog != "system" && catalog != "temp" && !catalog.startsWith(DuckLakeMetadataPrefix)
     }
 
   /** How many filterable references the statement carries, counted as table OCCURRENCES on
@@ -378,7 +410,8 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
       */
     private def replacementFor(t: Table, meta: String): Option[FromItem] =
       derivedTable(
-        s"information_schema.$meta WHERE ${predicateFor(meta, grants)}",
+        s"information_schema.$meta WHERE " +
+          predicateFor(meta, grants, ctx.defaultDatabase.getOrElse("")),
         Option(t.getAlias).getOrElse(new Alias(t.getName, false))
       )
 
@@ -408,16 +441,17 @@ object MetadataFilterRewriter:
 
   val FilterableTables: Set[String] = Set("schemata", "tables", "columns", "views")
 
-  /** DuckDB catalog functions filtered here and admitted by the validator under the same flag. One
-    * list, owned by the ACL parser (which also marks the bare spelling unsupported).
+  /** DuckDB catalog functions filtered here. One list, owned by the ACL parser (which also marks
+    * the bare spelling unsupported).
     */
   val FilterableFunctions: Set[String] =
     ai.starlake.acl.parser.TableExtractor.DuckDbCatalogFunctions
 
-  private val InformationSchema   = "information_schema"
-  private val ReadCoveringVerbs   = Set("RO", "RW", "ALL")
-  private val SystemRowClauseTab  = "table_schema IN ('information_schema', 'pg_catalog')"
-  private val SystemRowClauseSchm = "schema_name IN ('information_schema', 'pg_catalog')"
+  private val InformationSchema      = "information_schema"
+  private val DuckLakeMetadataPrefix = "__ducklake_metadata_"
+  private val ReadCoveringVerbs      = Set("RO", "RW", "ALL")
+  private val SystemRowClauseTab     = "table_schema IN ('information_schema', 'pg_catalog')"
+  private val SystemRowClauseSchm    = "schema_name IN ('information_schema', 'pg_catalog')"
 
   private def lit(s: String): String = "'" + s.replace("'", "''") + "'"
 
@@ -426,6 +460,10 @@ object MetadataFilterRewriter:
     "system-catalog reference (information_schema or a duckdb_* catalog function) in a position " +
       "this filter cannot rewrite (or mentioned in a string literal); query it directly in the " +
       "FROM clause instead"
+
+  private[meta] val CrossCatalogRefusal: String =
+    "information_schema is filtered only as the session catalog's (information_schema.tables, " +
+      "...); system.information_schema and other catalogs' are refused"
 
   private[meta] val AnalysisRefusal: String =
     "cannot analyse the system-catalog references in this statement"
@@ -528,9 +566,8 @@ object MetadataFilterRewriter:
       if filterableFunction(tf).isDefined then fnSeen.add(tf)
       super.visit(tf, context)
 
-  /** A filterable information_schema table of some OTHER catalog. The substitution walk leaves
-    * these alone by design (cross-catalog metadata stays grant-gated by the validator rather than
-    * filtered), so the textual tripwire must not read them as unfiltered leftovers.
+  /** A filterable information_schema table of some OTHER catalog (`system.` included): refused,
+    * since the substitution walk rewrites the session catalog's only.
     */
   private def crossCatalogFilterable(t: Table, sessionCat: String): Boolean =
     val schema = Option(t.getSchemaName).getOrElse("")
@@ -565,8 +602,137 @@ object MetadataFilterRewriter:
     * The AST occurrence count is kept alongside it, since the two are blind to different things.
     */
   private def textualRefCount(normalizedSql: String): Int =
-    TextualRefRe.findAllMatchIn(normalizedSql).size +
-      FunctionRefRe.findAllMatchIn(normalizedSql).size
+    math.max(spelledRefCount(normalizedSql), spelledRefCount(commentFree(normalizedSql)))
+
+  private def spelledRefCount(text: String): Int =
+    TextualRefRe.findAllMatchIn(text).size + FunctionRefRe.findAllMatchIn(text).size +
+      literalMentions(text)
+
+  /** `text` as DuckDB's tokenizer splits it, comments dropped and tokens joined by one space (a
+    * literal kept whole). The serialization of a statement jsqlparser read holds no comment, but
+    * the caller's own text, counted when it could not be read at all, may: there
+    * `information_schema/**/.views` would name the listing to DuckDB and nothing to the regex
+    * (re-review C1-a). The larger of the two counts is taken, over-counting being the safe side.
+    */
+  private def commentFree(text: String): String =
+    val view = ai.starlake.sql.SqlLexer.engineView(Option(text).getOrElse(""))
+    ai.starlake.sql.SqlLexer
+      .tokens(view)
+      .filterNot(_.isTrivia)
+      .map(t => view.substring(t.start, t.end))
+      .mkString(" ")
+
+  /** How many string literals of `text` name a filterable listing however the name is spelled
+    * inside them. A literal survives serialization verbatim, comments and escapes included, and
+    * query() / query_table() hand it to DuckDB's parser, which reads
+    * `information_schema./**/tables` or `E'information\x5fschema.tables'` as the listing while
+    * [[TextualRefRe]] does not. So a literal is read as words instead: it names a listing when it
+    * holds the word `information_schema` and one of the filterable view names, or a catalog
+    * function's name, in its text or in its text with backslash escapes decoded (an E-string, at
+    * any nesting depth). A comment cannot split a word, so no spelling escapes; a literal that only
+    * mentions both words is over-denied, the accepted direction.
+    *
+    * Where a literal ends depends on whether a backslash escapes the quote after it (jsqlparser
+    * reads it so, DuckDB does not), so the literals of both readings are judged.
+    */
+  private def literalMentions(text: String): Int =
+    (Literals
+      .of(text, backslashEscapes = true) ++ Literals.of(text, backslashEscapes = false)).distinct
+      .count(namesListing)
+
+  private def namesListing(literal: String): Boolean =
+    val decoded = Iterator.iterate(literal)(Literals.decodeEscapes).take(4).toList
+    decoded.exists { t =>
+      (InformationSchemaWord.findFirstIn(t).isDefined && ListingWord.findFirstIn(t).isDefined) ||
+      FunctionWord.findFirstIn(t).isDefined
+    }
+
+  private val InformationSchemaWord = """(?i)\binformation_schema\b""".r
+  private val ListingWord           = """(?i)\b(?:schemata|tables|columns|views)\b""".r
+  private val FunctionWord          = """(?i)\bduckdb_(?:tables|views|schemas|columns)\b""".r
+
+  /** The string literals of a statement's text: `'...'` (`''` a quote, optionally `\'`),
+    * `$tag$...$tag$`, skipping comments and quoted identifiers outside them. An unterminated
+    * literal runs to the end.
+    */
+  private[meta] object Literals:
+    def of(text: String, backslashEscapes: Boolean): List[String] =
+      val out = List.newBuilder[String]
+      val n   = text.length
+      var i   = 0
+      while i < n do
+        val c = text.charAt(i)
+        if c == '-' && text.startsWith("--", i) then
+          val eol = text.indexOf('\n', i)
+          i = if eol < 0 then n else eol + 1
+        else if c == '/' && text.startsWith("/*", i) then
+          val end = text.indexOf("*/", i + 2)
+          i = if end < 0 then n else end + 2
+        else if c == '"' then
+          // A quoted identifier (`""` a quote): a quote or comment marker inside it is a name.
+          var j    = i + 1
+          var open = true
+          while open && j < n do
+            if text.charAt(j) == '"' && j + 1 < n && text.charAt(j + 1) == '"' then j += 2
+            else if text.charAt(j) == '"' then
+              open = false
+              j += 1
+            else j += 1
+          i = j
+        else if c == '\'' then
+          val sb   = new StringBuilder
+          var j    = i + 1
+          var open = true
+          while open && j < n do
+            val d = text.charAt(j)
+            if d == '\\' && backslashEscapes && j + 1 < n then
+              sb.append(d).append(text.charAt(j + 1))
+              j += 2
+            else if d == '\'' && j + 1 < n && text.charAt(j + 1) == '\'' then
+              sb.append('\'')
+              j += 2
+            else if d == '\'' then
+              open = false
+              j += 1
+            else
+              sb.append(d)
+              j += 1
+          out += sb.toString
+          i = j
+        else if c == '$' then
+          DollarTag.findPrefixOf(text.substring(i)) match
+            case Some(tag) =>
+              val end = text.indexOf(tag, i + tag.length)
+              out += (if end < 0 then text.substring(i + tag.length)
+                      else text.substring(i + tag.length, end))
+              i = if end < 0 then n else end + tag.length
+            case None => i += 1
+        else i += 1
+      out.result()
+
+    private val DollarTag = """^\$[A-Za-z_]*\$""".r
+
+    /** One level of backslash escapes decoded as DuckDB's E-strings read them: `\xHH`, `\uHHHH`,
+      * `\UHHHHHHHH`, octal, and any other character as itself.
+      */
+    def decodeEscapes(s: String): String =
+      EscapeRe.replaceAllIn(
+        s,
+        m =>
+          val body    = m.group(1)
+          val decoded = Try {
+            val code =
+              if body.length > 1 && "xuU".contains(body.head) then
+                Integer.parseInt(body.drop(1), 16)
+              else if body.forall(c => c >= '0' && c <= '7') then Integer.parseInt(body, 8)
+              else body.head.toInt
+            new String(Character.toChars(code))
+          }.getOrElse(m.matched)
+          scala.util.matching.Regex.quoteReplacement(decoded)
+      )
+
+    private val EscapeRe =
+      """\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[0-7]{1,3}|.)""".r
 
   /** Tolerates every quote form the printer can emit around either identifier. */
   private val TextualRefRe =
@@ -604,21 +770,65 @@ object MetadataFilterRewriter:
               s"$schemaCol = ${lit(g.schemaName)} AND $tCol = ${lit(g.tableName)}"
         }
 
-  /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
-    * the whole predicate to keep the SQL readable.
+  /** One clause per catalog a grant covers, each pinned to that catalog (`catalogCol`) and holding
+    * the schema-and-name clauses of the grants on it: information_schema and the catalog functions
+    * list every attached catalog, so a clause without its catalog also listed another catalog's
+    * same-named objects, view SQL included (re-review I-a). A wildcard catalog covers the session
+    * catalog, the node's rule for an attached catalog (the tenant's database catalogs, never a
+    * federated one, `AuthzDecider.sessionCatalogs`); a named one covers itself (re-review I-a2: one
+    * session pin for every grant hid a granted federated catalog). Catalogs compare in lower case,
+    * as the node's grant match does.
     */
-  private[meta] def predicateFor(meta: String, grants: List[RolePermission]): String =
-    val (systemRows, clauses) =
-      if meta == "schemata" then (SystemRowClauseSchm, grantClauses(grants, "schema_name", None))
-      else (SystemRowClauseTab, grantClauses(grants, "table_schema", Some("table_name")))
-    if clauses.contains("TRUE") then "TRUE"
-    else (systemRows :: clauses).distinct.mkString("(", ") OR (", ")")
+  private def catalogClauses(
+      grants: List[RolePermission],
+      sessionCat: String,
+      catalogCol: String,
+      schemaCol: String,
+      tableCol: Option[String]
+  ): List[String] =
+    grants
+      .groupBy { g =>
+        if g.catalogName == RolePermission.Wildcard then sessionCat.toLowerCase(Locale.ROOT)
+        else g.catalogName.toLowerCase(Locale.ROOT)
+      }
+      .toList
+      .filter((catalog, _) => catalog.nonEmpty)
+      .sortBy(_._1)
+      .map { (catalog, onIt) =>
+        val clauses = grantClauses(onIt, schemaCol, tableCol)
+        val pin     = s"lower($catalogCol) = ${lit(catalog)}"
+        if clauses.contains("TRUE") then pin
+        else s"$pin AND ${clauses.distinct.mkString("((", ") OR (", "))")}"
+      }
 
-  /** The WHERE of a filtered catalog function call: `database_name` pinned to the session catalog
-    * (the functions list every attached catalog, including the DuckLake metadata one), then one
-    * clause per grant. No system-row clause: the internal views live in the `system` catalog, which
-    * the pin already excludes. A zero-grant principal gets `FALSE`, i.e. an empty listing rather
-    * than a denial, which is what lets a fresh ATTACH complete.
+  /** Disjunction: the system catalog's own rows, plus the rows each grant covers in its catalog
+    * ([[catalogClauses]]).
+    */
+  private[meta] def predicateFor(
+      meta: String,
+      grants: List[RolePermission],
+      sessionCat: String
+  ): String =
+    val (catalogCol, systemRows, clauses) =
+      if meta == "schemata" then
+        (
+          "catalog_name",
+          SystemRowClauseSchm,
+          catalogClauses(grants, sessionCat, "catalog_name", "schema_name", None)
+        )
+      else
+        (
+          "table_catalog",
+          SystemRowClauseTab,
+          catalogClauses(grants, sessionCat, "table_catalog", "table_schema", Some("table_name"))
+        )
+    (s"$catalogCol = 'system' AND $systemRows" :: clauses).mkString("(", ") OR (", ")")
+
+  /** The WHERE of a filtered catalog function call: the rows each grant covers in its catalog
+    * ([[catalogClauses]] on `database_name`; the functions list every attached catalog, the
+    * DuckLake metadata one included). No system-row clause: the internal views live in the `system`
+    * catalog, which no grant clause names. A zero-grant principal gets `FALSE`, i.e. an empty
+    * listing rather than a denial, which is what lets a fresh ATTACH complete.
     */
   private[meta] def functionPredicateFor(
       fn: String,
@@ -626,21 +836,20 @@ object MetadataFilterRewriter:
       sessionCat: String
   ): String =
     val clauses = fn match
-      case "duckdb_schemas" => grantClauses(grants, "schema_name", None)
-      case "duckdb_views"   => grantClauses(grants, "schema_name", Some("view_name"))
-      case _                => grantClauses(grants, "schema_name", Some("table_name"))
-    val objects =
-      if clauses.contains("TRUE") then "TRUE"
-      else if clauses.isEmpty then "FALSE"
-      else clauses.distinct.mkString("(", ") OR (", ")")
-    s"database_name = ${lit(sessionCat)} AND ($objects)"
+      case "duckdb_schemas" =>
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", None)
+      case "duckdb_views" =>
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", Some("view_name"))
+      case _ =>
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", Some("table_name"))
+    if clauses.isEmpty then "FALSE" else clauses.mkString("(", ") OR (", ")")
 
   /** SHOW TABLES handling (jsqlparser models it as a statement the filter walker never sees). Plain
     * SHOW TABLES is replaced by the filtered listing matching DuckDB's native single-column `name`
     * output; any other SHOW ... TABLES form is DENIED fail-closed, since it would otherwise ride
-    * the ControlFlow admit unfiltered. SHOW ALL TABLES never reaches a filtered principal
-    * (UnsupportedStatement -> ParseError -> denied by the validator upstream); the catch-all deny
-    * here is defense in depth only.
+    * the ControlFlow admit unfiltered. SHOW ALL TABLES never reaches it for a filtered principal
+    * (`RefusedForms` rewrites it into the filtered listing first); the catch-all deny here is
+    * defense in depth only.
     *
     * [[replace]] is the textual fast path, matched BEFORE parsing, and returns None for anything
     * that is not a SHOW ... TABLES form. Forms it does not recognise (a leading comment, odd
@@ -676,10 +885,14 @@ object MetadataFilterRewriter:
       * scoped to the session schema.
       */
     def filteredListingSql(grants: List[RolePermission], ctx: SchemaContext): String =
-      val pred   = predicateFor("tables", grants)
-      val schema = lit(ctx.defaultSchema.getOrElse("main"))
+      val session = ctx.defaultDatabase.getOrElse("")
+      val pred    = predicateFor("tables", grants, session)
+      val schema  = lit(ctx.defaultSchema.getOrElse("main"))
+      // The session schema of the session catalog only: a grant on another catalog lists it in
+      // the predicate, never here.
       s"SELECT table_name AS name FROM information_schema.tables " +
-        s"WHERE table_schema = $schema AND ($pred) ORDER BY name"
+        s"WHERE lower(table_catalog) = ${lit(session.toLowerCase(Locale.ROOT))} " +
+        s"AND table_schema = $schema AND ($pred) ORDER BY name"
 
     val VariantRefusal: String =
       "SHOW TABLES variants are not supported with filtered metadata; " +

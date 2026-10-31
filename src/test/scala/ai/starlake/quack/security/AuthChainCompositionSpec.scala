@@ -8,6 +8,7 @@ import ai.starlake.quack.edge.auth.{
   AuthScope,
   BasicAuthProvider,
   BearerAuthProvider,
+  DatabaseAuthenticator,
   JwtBearerAuthenticator,
   OidcBearerAuthenticator,
   ResourceOwnerPasswordAuthenticator
@@ -299,7 +300,9 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
       // alice exists in the in-memory store with the correct password
       val result = walkBasicChain(chain, AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "alicepw")
       result shouldBe a[Right[?, ?]]
-      result.toOption.get.authMethod shouldBe "in-memory"
+      // The in-memory provider stands in for the database authenticator, so its profile carries
+      // the authenticator's tag (not the Keycloak password grant's "keycloak-ropc").
+      result.toOption.get.authMethod shouldBe DatabaseAuthenticator.AuthMethod
 
       // Keycloak ROPC /token must NOT have been called
       val ropcCalls = mock.wireMockServer.findAll(

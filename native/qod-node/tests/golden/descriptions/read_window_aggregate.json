@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":[],"catalog":"system","name":"sum","schema":"main","type":"aggregate","via":null}],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id"],"kind":"table","name":"t","schema":"main","via":null}],"settings":[],"statement":"PROJECTION","v":1}

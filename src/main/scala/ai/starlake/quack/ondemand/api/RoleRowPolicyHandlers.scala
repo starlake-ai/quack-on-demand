@@ -22,7 +22,7 @@ final class RoleRowPolicyHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   def create(req: CreateRowPolicyRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RowPolicyDto] =
     val roleTenant = sup.tenantForRole(req.roleId)
     TenantScopeCheck.rejectForResource(apiKey, roleTenant)(scopeOf) match
@@ -65,7 +65,7 @@ final class RoleRowPolicyHandlers(
           }
 
   def update(req: UpdateRowPolicyRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val policyTenant = sup.tenantForRowPolicy(req.id)
     TenantScopeCheck.rejectForResource(apiKey, policyTenant)(scopeOf) match
@@ -101,7 +101,7 @@ final class RoleRowPolicyHandlers(
         }
 
   def delete(req: DeleteRowPolicyRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val policyTenant = sup.tenantForRowPolicy(req.id)
     TenantScopeCheck.rejectForResource(apiKey, policyTenant)(scopeOf) match
@@ -135,7 +135,7 @@ final class RoleRowPolicyHandlers(
         }
 
   def list(roleId: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RowPolicyListResponse] =
     TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(roleId))(scopeOf) match
       case Some(err) => IO.pure(Left(err))

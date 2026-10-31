@@ -132,6 +132,18 @@ object PoolEndpoints:
       .in(authToken)
       .out(jsonBody[PoolResponse])
 
+  val setPoolInitSql: PublicEndpoint[
+    (SetPoolInitSqlRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    PoolResponse,
+    Any
+  ] =
+    base.post
+      .in("pool" / "setInitSql")
+      .in(jsonBody[SetPoolInitSqlRequest])
+      .in(authToken)
+      .out(jsonBody[PoolResponse])
+
   val setPoolTemplate: PublicEndpoint[
     (SetPoolTemplateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
@@ -141,18 +153,6 @@ object PoolEndpoints:
     base.post
       .in("pool" / "setPodTemplate")
       .in(jsonBody[SetPoolTemplateRequest])
-      .in(authToken)
-      .out(jsonBody[PoolResponse])
-
-  val setPoolLockdown: PublicEndpoint[
-    (SetPoolLockdownRequest, Option[String]),
-    (sttp.model.StatusCode, ErrorResponse),
-    PoolResponse,
-    Any
-  ] =
-    base.post
-      .in("pool" / "setLockdown")
-      .in(jsonBody[SetPoolLockdownRequest])
       .in(authToken)
       .out(jsonBody[PoolResponse])
 

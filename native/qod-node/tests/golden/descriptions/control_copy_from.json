@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":["@DIR@/in.csv"],"catalog":"","name":"read_csv","schema":"","type":"table","via":null}],"objects":[{"access":"insert","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"c","schema":"main","via":null}],"settings":[],"statement":"INSERT","v":1}

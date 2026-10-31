@@ -9,14 +9,14 @@ import sttp.tapir.json.circe._
 /** Self-service surface for the profile-only (non-admin) session, split out of [[Endpoints]] like
   * the other domain modules and registered in [[EndpointModules.all]].
   *
-  * Identity comes STRICTLY from the session token -- there is no `tenant` / `user` input on either
+  * Identity comes STRICTLY from the session token -- there is no `tenant` / `user` input on any
   * route, so a caller cannot aim them at another principal. That also keeps them clear of
   * `apiKeyGuard`'s tenant-scope check, which would 403 `tenant_forbidden` on any `?tenant=` value
   * for a session whose `manageableTenants` is empty (every non-admin session). Admin sessions may
   * call these too and likewise see only themselves.
   *
-  * Both routes take the token through the shared [[Endpoints.authToken]] input (X-API-Key header OR
-  * `qod_session` cookie), so the browser path works without the SPA reading the HttpOnly cookie.
+  * Every route takes the token through the shared [[Endpoints.authToken]] input (X-API-Key header
+  * OR `qod_session` cookie), so the browser path works without the SPA reading the HttpOnly cookie.
   */
 object ProfileEndpoints:
 
@@ -49,3 +49,15 @@ object ProfileEndpoints:
       .in(query[Option[Int]]("limit"))
       .in(authToken)
       .out(jsonBody[StatementHistoryResponse])
+
+  /** The pools the calling user may connect to: the handshake's decision, narrowed by a PAT. */
+  val pools: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    ProfilePoolsResponse,
+    Any
+  ] =
+    base.get
+      .in("profile" / "pools")
+      .in(authToken)
+      .out(jsonBody[ProfilePoolsResponse])

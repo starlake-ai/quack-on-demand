@@ -44,36 +44,51 @@ object OpaClient:
   def endpoint(base: String, policyPath: String, rule: String): String =
     s"${base.stripSuffix("/")}/v1/data/$policyPath/$rule"
 
+  /** `message` with every occurrence of the bearer token masked. The JDK echoes an invalid header
+    * value in its IllegalArgumentException, so a token carrying a control character would otherwise
+    * reach the manager log and a superuser's dry-run answer.
+    */
+  private def redactToken(message: String, token: Option[String]): String =
+    token.filter(_.nonEmpty).fold(message)(t => message.replace(t, "<redacted>"))
+
   def jdkPost(timeoutMs: Int): Post =
     val client =
       HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs.toLong)).build()
-    (url, body, token) =>
-      var pending: Option[CompletableFuture[HttpResponse[Either[String, String]]]] = None
-      try
-        val b = HttpRequest
-          .newBuilder(URI.create(url))
-          .timeout(Duration.ofMillis(timeoutMs.toLong))
-          .header("Content-Type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString(body))
-        token.foreach(t => b.header("Authorization", s"Bearer $t"))
-        val future = client.sendAsync(b.build(), boundedBodyHandler(MaxResponseBytes))
-        pending = Some(future)
-        val resp = future.get(timeoutMs.toLong, TimeUnit.MILLISECONDS)
-        resp.body() match
-          case Left(err)       => Left(err)
-          case Right(bodyText) => Right((resp.statusCode(), bodyText))
-      catch
-        case _: TimeoutException =>
-          pending.foreach(_.cancel(true))
-          Left(s"OPA request timed out after $timeoutMs ms")
-        case e: ExecutionException =>
-          val cause = Option(e.getCause).getOrElse(e)
-          Left(s"${cause.getClass.getSimpleName}: ${Option(cause.getMessage).getOrElse("")}")
-        case e: InterruptedException =>
-          Thread.currentThread().interrupt()
-          Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
-        case e: Exception =>
-          Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
+    (url, body, token) => send(client, timeoutMs, url, body, token).left.map(redactToken(_, token))
+
+  private def send(
+      client: HttpClient,
+      timeoutMs: Int,
+      url: String,
+      body: String,
+      token: Option[String]
+  ): Either[String, (Int, String)] =
+    var pending: Option[CompletableFuture[HttpResponse[Either[String, String]]]] = None
+    try
+      val b = HttpRequest
+        .newBuilder(URI.create(url))
+        .timeout(Duration.ofMillis(timeoutMs.toLong))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString(body))
+      token.foreach(t => b.header("Authorization", s"Bearer $t"))
+      val future = client.sendAsync(b.build(), boundedBodyHandler(MaxResponseBytes))
+      pending = Some(future)
+      val resp = future.get(timeoutMs.toLong, TimeUnit.MILLISECONDS)
+      resp.body() match
+        case Left(err)       => Left(err)
+        case Right(bodyText) => Right((resp.statusCode(), bodyText))
+    catch
+      case _: TimeoutException =>
+        pending.foreach(_.cancel(true))
+        Left(s"OPA request timed out after $timeoutMs ms")
+      case e: ExecutionException =>
+        val cause = Option(e.getCause).getOrElse(e)
+        Left(s"${cause.getClass.getSimpleName}: ${Option(cause.getMessage).getOrElse("")}")
+      case e: InterruptedException =>
+        Thread.currentThread().interrupt()
+        Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
+      case e: Exception =>
+        Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
 
   private def boundedBodyHandler(cap: Int): BodyHandler[Either[String, String]] =
     (_: ResponseInfo) => new BoundedBodySubscriber(cap)

@@ -56,7 +56,7 @@ private trait SpawnScriptCatalogSecretCases extends Matchers with SpawnScriptTem
       lines(lake + 1) should include("METADATA_PARAMETERS MAP {'SECRET': 'qod_catalog_pg'}")
     }
 
-    it should "drop the secret after the catalog ATTACH and before federation SQL and serving" in {
+    it should "drop the secret after the catalog ATTACH and before federation SQL" in {
       val lines  = ducklake()
       val create =
         lines.indexWhere(_.startsWith("CREATE OR REPLACE TEMPORARY SECRET qod_catalog_pg"))
@@ -66,7 +66,8 @@ private trait SpawnScriptCatalogSecretCases extends Matchers with SpawnScriptTem
       create should be < first
       lake should be < drop
       drop should be < lines.indexOf("SELECT 'federation';")
-      drop should be < lines.indexWhere(_.contains("quack_serve("))
+      // qod-node serves only after the whole init SQL has run, so the secret is gone by then.
+      lines.exists(_.contains("quack_serve(")) shouldBe false
     }
 
     it should "double an apostrophe in the password" in {
@@ -82,14 +83,12 @@ class SpawnScriptCatalogSecretSpec extends AnyFlatSpec with SpawnScriptCatalogSe
   behavior of "the ducklake arm (bash)"
   cases()
 
-// PowerShell twin: cancelled off Windows, like SpawnScriptEncryptionWindowsSpec.
+// PowerShell twin: pwsh off Windows, cancelled without PowerShell, like
+// SpawnScriptEncryptionWindowsSpec.
 class SpawnScriptCatalogSecretWindowsSpec extends AnyFlatSpec with SpawnScriptCatalogSecretCases:
-  protected val command =
-    Seq("powershell.exe", "-File", "scripts/spawn-quack-node.ps1", "21999")
+  protected def command =
+    PowerShell.command.getOrElse(Nil) ++ Seq("-File", "scripts/spawn-quack-node.ps1", "21999")
   protected def assumeHost(): Unit =
-    assume(
-      System.getProperty("os.name").toLowerCase.contains("win"),
-      "spawn-quack-node.ps1 runs on Windows only"
-    )
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
   behavior of "the ducklake arm (PowerShell)"
   cases()

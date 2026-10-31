@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"schema","name":"","schema":"s2","via":null}],"settings":[],"statement":"CREATE_SCHEMA","v":1}

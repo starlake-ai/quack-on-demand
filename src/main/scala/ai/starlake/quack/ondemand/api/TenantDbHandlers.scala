@@ -3,8 +3,9 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.initsql.{InitSqlChecker, InitSqlTrust}
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import sttp.model.StatusCode
@@ -28,7 +29,11 @@ final class TenantDbHandlers(
       * can guarantee no plaintext database exists in the deployment. Gates creates only; existing
       * databases are untouched, so enabling it never bricks a running deployment.
       */
-    requireEncryption: Boolean
+    requireEncryption: Boolean,
+    /** The write-time check of a tenant admin's initSql (qod-node --check-init when this manager
+      * runs nodes on its host); the node stays the gate.
+      */
+    initSqlChecker: InitSqlChecker = InitSqlChecker.unavailable
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -43,6 +48,17 @@ final class TenantDbHandlers(
     */
   private def validateObjectStore(objectStore: Map[String, String]): Option[String] =
     TenantDb.objectStoreError(objectStore)
+
+  /** `400 invalid_metastore_key` for a metastore holding a key outside
+    * [[TenantDb.KnownMetastoreKeys]] (`error`, from [[TenantDb.metastoreKeyError]] or, on update,
+    * [[TenantDb.metastoreUpdateKeyError]]), before anything is written. A metastore is tenant-admin
+    * input, and its keys used to become environment variables of every node's launcher (`BASH_ENV`,
+    * `PATH`, `QOD_NODE_BIN`...); the launchers now drop such a key, and the API refuses to store
+    * one. A row stored before keeps working, and an update that sends its key back is refused; a
+    * secret-named one, which no response shows, is removed by sending it empty.
+    */
+  private def metastoreKeyRefusal(error: Option[String]): Option[(StatusCode, ErrorResponse)] =
+    error.map(msg => (StatusCode.BadRequest, ErrorResponse("invalid_metastore_key", msg)))
 
   /** The three `managedStorage` refusals, all 400 `invalid`: the deployment has managed storage
     * switched off, the caller mixed managed with a BYO location, or the kind cannot hold one. An
@@ -113,115 +129,174 @@ final class TenantDbHandlers(
       initSql = td.initSql,
       effectiveDataPath = sup.effectiveMetastoreFor(tenantName, td.name).getOrElse("dataPath", ""),
       tableCount = tableCountFor(tenantName, td),
-      encrypted = td.encrypted
+      encrypted = td.encrypted,
+      initSqlTrusted = td.initSqlTrusted
     )
 
+  /** `400 init_sql_refused` with `message`. */
+  private def initSqlRefused(message: String): (StatusCode, ErrorResponse) =
+    (StatusCode.BadRequest, ErrorResponse("init_sql_refused", message))
+
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantDbResponse] =
-    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.DatabaseCreate,
-          "denied",
-          tenant = Some(req.tenant)
-        )
-        IO.pure(Left(err))
-      case None =>
-        if req.tenant.isEmpty || req.name.isEmpty then
-          IO.pure(
-            Left(
-              (StatusCode.BadRequest, ErrorResponse("invalid", "tenant and name must be non-empty"))
-            )
-          )
-        else
+    createTenantDbAs(
+      req,
+      scopeOf(apiKey),
+      AuditActor.Bearer(apiKey)
+    )
+
+  /** The one database create path, shared by `POST /api/database/create` and the boot-time
+    * `ServeProvisionHook` (which passes `SessionScope.Superuser` and `AuditActor.System`): the
+    * tenant-scope gate on the caller's resolved scope, the name, metastore-key, object-store,
+    * managed-storage, encryption and kind checks, the create (quota-gated unless the scope is a
+    * superuser's), and its audit rows.
+    */
+  def createTenantDbAs(
+      req: TenantDbRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[TenantDbResponse] =
+    // A tenant admin's initSql is judged by the tenant initSql allowlist once the cheap checks pass
+    // (a caller outside the tenant gets its 403 from the scope gate, a malformed request its 400,
+    // both unjudged).
+    val writerTrusted = SuperuserCheck.forScope(scope).isEmpty
+    if TenantScopeCheck.forScope(scope, req.tenant).isDefined ||
+      createRefusal(req, writerTrusted).isDefined
+    then createChecked(req, scope, actor)
+    else
+      InitSqlChecker
+        .writeCheck(initSqlChecker, writerTrusted, req.initSql, None)
+        .flatMap {
+          case Left(message)  => IO.pure(Left(initSqlRefused(message)))
+          case Right(warning) =>
+            createChecked(req, scope, actor).map(_.map(_.copy(initSqlWarning = warning)))
+        }
+
+  /** The checks of a database create that need no I/O, in the order the create applies them. */
+  private def createRefusal(
+      req: TenantDbRequest,
+      writerTrusted: Boolean
+  ): Option[(StatusCode, ErrorResponse)] =
+    if req.tenant.isEmpty || req.name.isEmpty then
+      Some((StatusCode.BadRequest, ErrorResponse("invalid", "tenant and name must be non-empty")))
+    else
+      metastoreKeyRefusal(TenantDb.metastoreKeyError(req.metastore))
+        .orElse(InitSqlTrust.markerRefusal(req.initSql).map(initSqlRefused))
+        .orElse(InitSqlTrust.sizeRefusal(req.initSql, writerTrusted).map(initSqlRefused))
+        .orElse(
           validateObjectStore(req.objectStore)
             .orElse(validateManagedStorage(req))
-            .orElse(validateEncryption(req)) match
-            case Some(msg) =>
-              IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
-            case None =>
-              TenantDbKind.fromWire(req.kind) match
-                case Left(err) =>
-                  IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
-                case Right(kind) =>
-                  val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
-                  sup
-                    .createTenantDb(
-                      tenantName = req.tenant,
-                      suffix = req.name,
-                      kind = kind,
-                      metastore = req.encryptionKey.filter(_.nonEmpty).fold(req.metastore) { k =>
-                        req.metastore.updated(TenantDb.EncryptionKeyName, k)
-                      },
-                      dataPath = req.dataPath,
-                      objectStore = req.objectStore,
-                      defaultDatabase = req.defaultDatabase,
-                      defaultSchema = req.defaultSchema,
-                      initSql = req.initSql,
-                      managedStorage = req.managedStorage,
-                      encrypted = req.encrypted,
-                      gateBypass = gateBypass
-                    )
-                    .flatMap {
-                      case Right(td) =>
-                        if req.encryptionKey.exists(_.nonEmpty) then
-                          logger.warn(
-                            s"tenant-db ${td.name} was created with a caller-supplied encryption " +
-                              "key. QoD will never return it: if it is lost the database cannot " +
-                              "be opened."
+            .orElse(validateEncryption(req))
+            .map(msg => (StatusCode.BadRequest, ErrorResponse("invalid", msg)))
+        )
+        .orElse(
+          TenantDbKind
+            .fromWire(req.kind)
+            .left
+            .toOption
+            .map(err => (StatusCode.BadRequest, ErrorResponse("invalid_kind", err)))
+        )
+
+  private def createChecked(
+      req: TenantDbRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[TenantDbResponse] =
+    TenantScopeCheck.forScope(scope, req.tenant) match
+      case Some(err) =>
+        actor.controlPlane(audit, AuditActions.DatabaseCreate, "denied", tenant = Some(req.tenant))
+        IO.pure(Left(err))
+      case None =>
+        createRefusal(req, SuperuserCheck.forScope(scope).isEmpty) match
+          case Some(err) =>
+            IO.pure(Left(err))
+          case None =>
+            TenantDbKind.fromWire(req.kind) match
+              case Left(err) =>
+                IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
+              case Right(kind) =>
+                val gateBypass = SuperuserCheck.forScope(scope).isEmpty
+                sup
+                  .createTenantDb(
+                    tenantName = req.tenant,
+                    suffix = req.name,
+                    kind = kind,
+                    metastore = req.encryptionKey.filter(_.nonEmpty).fold(req.metastore) { k =>
+                      req.metastore.updated(TenantDb.EncryptionKeyName, k)
+                    },
+                    dataPath = req.dataPath,
+                    objectStore = req.objectStore,
+                    defaultDatabase = req.defaultDatabase,
+                    defaultSchema = req.defaultSchema,
+                    initSql = req.initSql,
+                    initSqlTrusted = gateBypass,
+                    managedStorage = req.managedStorage,
+                    encrypted = req.encrypted,
+                    gateBypass = gateBypass
+                  )
+                  .flatMap {
+                    case Right(td) =>
+                      if req.encryptionKey.exists(_.nonEmpty) then
+                        logger.warn(
+                          s"tenant-db ${td.name} was created with a caller-supplied encryption " +
+                            "key. QoD will never return it: if it is lost the database cannot " +
+                            "be opened."
+                        )
+                      actor.controlPlane(
+                        audit,
+                        AuditActions.DatabaseCreate,
+                        "ok",
+                        tenant = Some(req.tenant),
+                        target = Some(td.name),
+                        detail = Map("kind" -> kind.wireValue)
+                      )
+                      IO.blocking(Right(toResponse(req.tenant, td)))
+                    case Left(err: SupervisorError.NotFound) =>
+                      IO.pure(
+                        Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+                      )
+                    case Left(err: SupervisorError.InvalidArgument) =>
+                      IO.pure(
+                        Left(
+                          (StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message))
+                        )
+                      )
+                    case Left(err: SupervisorError.QuotaExceeded) =>
+                      actor.controlPlane(
+                        audit,
+                        AuditActions.DatabaseCreate,
+                        "denied",
+                        tenant = Some(req.tenant),
+                        detail = Map("reason" -> "quota")
+                      )
+                      IO.pure(
+                        Left(
+                          (
+                            StatusCode.TooManyRequests,
+                            ErrorResponse("quota_exceeded", err.message)
                           )
-                        audit.rest(
-                          apiKey,
-                          "control-plane",
-                          AuditActions.DatabaseCreate,
-                          "ok",
-                          tenant = Some(req.tenant),
-                          target = Some(td.name),
-                          detail = Map("kind" -> kind.wireValue)
                         )
-                        IO.blocking(Right(toResponse(req.tenant, td)))
-                      case Left(err: SupervisorError.NotFound) =>
-                        IO.pure(
-                          Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+                      )
+                    // Not a conflict: Postgres provisioning failed or the DuckLake pre-init
+                    // refused the catalog (already logged by the supervisor).
+                    case Left(err: SupervisorError.Internal) =>
+                      IO.pure(
+                        Left(
+                          (StatusCode.InternalServerError, ErrorResponse("internal", err.message))
                         )
-                      case Left(err: SupervisorError.InvalidArgument) =>
-                        IO.pure(
-                          Left(
-                            (StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message))
-                          )
-                        )
-                      case Left(err: SupervisorError.QuotaExceeded) =>
-                        audit.rest(
-                          apiKey,
-                          "control-plane",
-                          AuditActions.DatabaseCreate,
-                          "denied",
-                          tenant = Some(req.tenant),
-                          detail = Map("reason" -> "quota")
-                        )
-                        IO.pure(
-                          Left(
-                            (
-                              StatusCode.TooManyRequests,
-                              ErrorResponse("quota_exceeded", err.message)
-                            )
-                          )
-                        )
-                      case Left(err) =>
-                        IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
-                    }
+                      )
+                    case Left(err) =>
+                      IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
+                  }
 
   def listTenantDbs(tenant: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantDbListResponse] =
     // Resolve to the tenant id before the scope check (the query param may be a
     // display name); an unknown tenant falls through on the raw value, so an
     // out-of-scope session gets the same 403 whether the tenant exists or not
-    // (no existence leak) while superuser / static-key / open callers keep
-    // today's empty-list response.
+    // (no existence leak) while a superuser keeps the empty-list response.
     val tid = sup.getTenantById(tenant).orElse(sup.getTenant(tenant)).map(_.id).getOrElse(tenant)
     TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
@@ -234,14 +309,14 @@ final class TenantDbHandlers(
           )
         }
 
-  /** Resolved defaultMetastore connection values for the admin UI's create form. Any admin session
-    * (tenant or system) or the static key may read it: `ManagerServer.apiKeyGuard` already rejects
+  /** Resolved defaultMetastore connection values for the admin UI's create form. Any admin caller
+    * (tenant or system, session or PAT) may read it: `ManagerServer.apiKeyGuard` already rejects
     * unauthenticated callers and demotes profile sessions, and the values are deployment-wide
     * (tenant admins already see pgHost/pgUser on redacted database/list rows). `pgPassword` is
     * absent from the response type by construction.
     */
   def metastoreDefaults(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[MetastoreDefaultsResponse] =
     IO.pure {
       val d = sup.metastoreDefaults
@@ -256,7 +331,7 @@ final class TenantDbHandlers(
     }
 
   def deleteTenantDb(req: TenantDbOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -287,7 +362,47 @@ final class TenantDbHandlers(
         }
 
   def update(req: UpdateTenantDbRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
+  ): Out[UpdateTenantDbResponse] =
+    // A tenant admin's changed initSql is judged once the cheap checks pass (see createTenantDbAs).
+    val writerTrusted = SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty
+    (req.initSql, TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf)) match
+      case (Some(sql), None) if updateRefusal(req, writerTrusted).isEmpty =>
+        InitSqlChecker
+          .writeCheck(
+            initSqlChecker,
+            writerTrusted,
+            sql,
+            sup.findTenantDb(req.tenant, req.name).map(_.initSql)
+          )
+          .flatMap {
+            case Left(message)  => IO.pure(Left(initSqlRefused(message)))
+            case Right(warning) =>
+              updateChecked(req, apiKey)(scopeOf).map(
+                _.map(r => r.copy(db = r.db.copy(initSqlWarning = warning)))
+              )
+          }
+      case _ => updateChecked(req, apiKey)(scopeOf)
+
+  /** The checks of a database update that need no I/O, in the order the update applies them. */
+  private def updateRefusal(
+      req: UpdateTenantDbRequest,
+      writerTrusted: Boolean
+  ): Option[(StatusCode, ErrorResponse)] =
+    req.metastore
+      .flatMap(m => metastoreKeyRefusal(TenantDb.metastoreUpdateKeyError(m)))
+      .orElse(req.initSql.flatMap(InitSqlTrust.markerRefusal).map(initSqlRefused))
+      .orElse(
+        req.initSql.flatMap(InitSqlTrust.sizeRefusal(_, writerTrusted)).map(initSqlRefused)
+      )
+      .orElse(
+        req.objectStore
+          .flatMap(validateObjectStore)
+          .map(msg => (StatusCode.BadRequest, ErrorResponse("invalid", msg)))
+      )
+
+  private def updateChecked(req: UpdateTenantDbRequest, apiKey: Option[String])(
+      scopeOf: SessionScope.Resolver
   ): Out[UpdateTenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -300,16 +415,17 @@ final class TenantDbHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        req.objectStore.flatMap(validateObjectStore) match
-          case Some(msg) =>
-            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
+        updateRefusal(req, SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty) match
+          case Some(err) =>
+            IO.pure(Left(err))
           case None =>
             val patch = TenantDbPatch(
               metastore = req.metastore,
               objectStore = req.objectStore,
               defaultDatabase = req.defaultDatabase,
               defaultSchema = req.defaultSchema,
-              initSql = req.initSql
+              initSql = req.initSql,
+              initSqlWriterTrusted = SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty
             )
             sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
               case Right(r) =>

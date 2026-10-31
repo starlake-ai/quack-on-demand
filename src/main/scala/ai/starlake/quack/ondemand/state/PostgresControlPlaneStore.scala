@@ -21,7 +21,9 @@ import ai.starlake.quack.model.{
   Tenant,
   TenantAcl,
   TenantDb,
-  TenantDbKind
+  TenantDbKind,
+  TenantLocation,
+  UserS3Credential
 }
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -82,20 +84,32 @@ final class PostgresControlPlaneStore(
 
   // ---------------- Tenant ----------------
 
+  /** Every tenant read selects these columns (the ones [[readTenant]] maps), so a new tenant column
+    * is added in one place.
+    */
+  private val SelectTenants: String =
+    "SELECT id, display_name, disabled, auth_provider, auth_config, " +
+      "acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text, " +
+      "auth_client_secret FROM qodstate_tenant ORDER BY display_name"
+
   def upsertTenant(t: Tenant): Unit = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant
         |  (id, display_name, disabled, auth_provider, auth_config,
-        |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text)
-        |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
+        |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text,
+        |   auth_client_secret)
+        |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  display_name            = EXCLUDED.display_name,
         |  disabled                = EXCLUDED.disabled,
         |  auth_provider           = EXCLUDED.auth_provider,
-        |  auth_config             = EXCLUDED.auth_config""".stripMargin
+        |  auth_config             = EXCLUDED.auth_config,
+        |  auth_client_secret      = EXCLUDED.auth_client_secret""".stripMargin
     )
     // The acl columns are bound for the INSERT arm only: the conflict arm deliberately leaves
     // them alone (see ControlPlaneStore.upsertTenant), so a stale full row cannot revert them.
+    // auth_client_secret is the opposite: written in both arms, with auth_config, because the
+    // secret is bound to the issuer it was saved with and never changes on its own.
     try
       ps.setString(1, t.id)
       ps.setString(2, if t.displayName.nonEmpty then t.displayName else t.id)
@@ -103,6 +117,7 @@ final class PostgresControlPlaneStore(
       ps.setString(4, t.authProvider)
       ps.setString(5, mapToJson(t.authConfig))
       bindAcl(ps, 6, t.acl)
+      ps.setString(11, t.authClientSecret.orNull)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -129,14 +144,14 @@ final class PostgresControlPlaneStore(
     ps.setBoolean(from + 4, acl.sendStatementText)
 
   def listTenants(): List[Tenant] = withConn { c =>
-    val rs = c
-      .createStatement()
-      .executeQuery(
-        "SELECT id, display_name, disabled, auth_provider, auth_config, " +
-          "acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text " +
-          "FROM qodstate_tenant ORDER BY display_name"
-      )
+    val rs = c.createStatement().executeQuery(SelectTenants)
     try drain(rs)(readTenant)
+    finally rs.close()
+  }
+
+  def policyVersions(): Map[String, Long] = withConn { c =>
+    val rs = c.createStatement().executeQuery("SELECT id, policy_version FROM qodstate_tenant")
+    try drain(rs)(r => r.getString(1) -> r.getLong(2)).toMap
     finally rs.close()
   }
 
@@ -151,8 +166,9 @@ final class PostgresControlPlaneStore(
       val tps = c.prepareStatement(
         """INSERT INTO qodstate_tenant
           |  (id, display_name, disabled, auth_provider, auth_config,
-          |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text)
-          |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)""".stripMargin
+          |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text,
+          |   auth_client_secret)
+          |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)""".stripMargin
       )
       try
         tps.setString(1, tenant.id)
@@ -161,6 +177,7 @@ final class PostgresControlPlaneStore(
         tps.setString(4, tenant.authProvider)
         tps.setString(5, mapToJson(tenant.authConfig))
         bindAcl(tps, 6, tenant.acl)
+        tps.setString(11, tenant.authClientSecret.orNull)
         tps.executeUpdate()
       finally tps.close()
 
@@ -437,7 +454,8 @@ final class PostgresControlPlaneStore(
         opaPolicyPath = Option(rs.getString("opa_policy_path")),
         opaToken = Option(rs.getString("opa_token")),
         sendStatementText = rs.getBoolean("opa_send_statement_text")
-      )
+      ),
+      authClientSecret = Option(rs.getString("auth_client_secret"))
     )
 
   // ---------------- TenantDb ----------------
@@ -446,8 +464,9 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_db
         |  (id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |   kind, default_database, default_schema, init_sql, branch_of, encrypted)
-        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
+        |   kind, default_database, default_schema, init_sql, branch_of, encrypted,
+        |   init_sql_trusted)
+        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id            = EXCLUDED.tenant_id,
         |  name                 = EXCLUDED.name,
@@ -460,7 +479,8 @@ final class PostgresControlPlaneStore(
         |  default_schema       = EXCLUDED.default_schema,
         |  init_sql             = EXCLUDED.init_sql,
         |  branch_of            = EXCLUDED.branch_of,
-        |  encrypted            = EXCLUDED.encrypted""".stripMargin
+        |  encrypted            = EXCLUDED.encrypted,
+        |  init_sql_trusted     = EXCLUDED.init_sql_trusted""".stripMargin
     )
     try
       ps.setString(1, t.id)
@@ -476,6 +496,7 @@ final class PostgresControlPlaneStore(
       ps.setString(11, t.initSql)
       setNullable(ps, 12, t.branchOf)
       ps.setBoolean(13, t.encrypted)
+      ps.setBoolean(14, t.initSqlTrusted)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -483,7 +504,8 @@ final class PostgresControlPlaneStore(
   def listTenantDbs(tenantId: String): List[TenantDb] = withConn { c =>
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |       kind, default_database, default_schema, init_sql, branch_of, encrypted
+        |       kind, default_database, default_schema, init_sql, branch_of, encrypted,
+        |       init_sql_trusted
         |FROM qodstate_tenant_db WHERE tenant_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -516,7 +538,8 @@ final class PostgresControlPlaneStore(
       disabled = rs.getBoolean("disabled"),
       initSql = rs.getString("init_sql"),
       branchOf = Option(rs.getString("branch_of")),
-      encrypted = rs.getBoolean("encrypted")
+      encrypted = rs.getBoolean("encrypted"),
+      initSqlTrusted = rs.getBoolean("init_sql_trusted")
     )
 
   // ---------------- Pool ----------------
@@ -527,7 +550,8 @@ final class PostgresControlPlaneStore(
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
         |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |   cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes)
+        |   cpu, memory, pod_template_yaml, suspended, min_nodes, max_nodes,
+        |   init_sql_trusted)
         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
@@ -546,9 +570,9 @@ final class PostgresControlPlaneStore(
         |  memory                  = EXCLUDED.memory,
         |  pod_template_yaml       = EXCLUDED.pod_template_yaml,
         |  suspended               = EXCLUDED.suspended,
-        |  lockdown                = EXCLUDED.lockdown,
         |  min_nodes               = EXCLUDED.min_nodes,
-        |  max_nodes               = EXCLUDED.max_nodes""".stripMargin
+        |  max_nodes               = EXCLUDED.max_nodes,
+        |  init_sql_trusted        = EXCLUDED.init_sql_trusted""".stripMargin
     )
     try
       ps.setString(1, p.id)
@@ -570,15 +594,13 @@ final class PostgresControlPlaneStore(
       ps.setString(15, p.memory)
       ps.setString(16, p.podTemplateYaml)
       ps.setBoolean(17, p.suspended)
-      p.lockdown match
-        case Some(v) => ps.setBoolean(18, v)
-        case None    => ps.setNull(18, Types.BOOLEAN)
       p.minNodes match
+        case Some(v) => ps.setInt(18, v)
+        case None    => ps.setNull(18, Types.INTEGER)
+      p.maxNodes match
         case Some(v) => ps.setInt(19, v)
         case None    => ps.setNull(19, Types.INTEGER)
-      p.maxNodes match
-        case Some(v) => ps.setInt(20, v)
-        case None    => ps.setNull(20, Types.INTEGER)
+      ps.setBoolean(20, p.initSqlTrusted)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -588,7 +610,8 @@ final class PostgresControlPlaneStore(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
         |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |       cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes
+        |       cpu, memory, pod_template_yaml, suspended, min_nodes, max_nodes,
+        |       init_sql_trusted
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -624,12 +647,10 @@ final class PostgresControlPlaneStore(
       cpu = Option(rs.getString("cpu")).getOrElse(""),
       memory = Option(rs.getString("memory")).getOrElse(""),
       podTemplateYaml = Option(rs.getString("pod_template_yaml")).getOrElse(""),
-      // Column added in changeset 0024; NULL = inherit the global flag.
-      lockdown =
-        Option(rs.getObject("lockdown")).map(_.asInstanceOf[java.lang.Boolean].booleanValue),
       // Columns added in changeset 0025; NULL = fixed-size pool (no band).
       minNodes = Option(rs.getObject("min_nodes")).map(_.asInstanceOf[Number].intValue),
-      maxNodes = Option(rs.getObject("max_nodes")).map(_.asInstanceOf[Number].intValue)
+      maxNodes = Option(rs.getObject("max_nodes")).map(_.asInstanceOf[Number].intValue),
+      initSqlTrusted = rs.getBoolean("init_sql_trusted")
     )
 
   // ---------------- Pool load (autoscale demand buckets) ----------------
@@ -1769,21 +1790,15 @@ final class PostgresControlPlaneStore(
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
     ControlPlaneSnapshot(
-      tenants = selectAll(
-        c,
-        "SELECT id, display_name, disabled, auth_provider, auth_config, " +
-          "acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text " +
-          "FROM qodstate_tenant ORDER BY display_name",
-        readTenant
-      ),
+      tenants = selectAll(c, SelectTenants, readTenant),
       tenantDbs = selectAll(
         c,
-        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql, branch_of, encrypted FROM qodstate_tenant_db ORDER BY name",
+        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql, branch_of, encrypted, init_sql_trusted FROM qodstate_tenant_db ORDER BY name",
         readTenantDb
       ),
       pools = selectAll(
         c,
-        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes FROM qodstate_pool ORDER BY name",
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, min_nodes, max_nodes, init_sql_trusted FROM qodstate_pool ORDER BY name",
         readPool
       ),
       nodes = selectAll(
@@ -3083,6 +3098,20 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  def unpurgedManagedPrefixes(): List[ManagedPrefixRow] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, tenant_db_name, prefix, created_at, deleted_at, purge_eligible_at, purged_at
+        |FROM qodstate_managed_prefix
+        |WHERE purged_at IS NULL
+        |ORDER BY id""".stripMargin
+    )
+    try
+      val rs = ps.executeQuery()
+      try drain(rs)(readManagedPrefixRow)
+      finally rs.close()
+    finally ps.close()
+  }
+
   def markManagedPrefixPurged(id: String, purgedAt: Instant): Unit = withConn { c =>
     val ps = c.prepareStatement(
       "UPDATE qodstate_managed_prefix SET purged_at = ? WHERE id = ?"
@@ -3118,6 +3147,163 @@ final class PostgresControlPlaneStore(
       deletedAt = Option(rs.getTimestamp("deleted_at")).map(_.toInstant),
       purgeEligibleAt = Option(rs.getTimestamp("purge_eligible_at")).map(_.toInstant),
       purgedAt = Option(rs.getTimestamp("purged_at")).map(_.toInstant)
+    )
+
+  // ---------------- Tenant authorized locations ----------------
+
+  private val SelectTenantLocations: String =
+    "SELECT id, tenant_id, kind, location, created_at, created_by " +
+      "FROM qodstate_tenant_location"
+
+  def insertTenantLocation(l: TenantLocation): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_tenant_location
+        |  (id, tenant_id, kind, location, created_at, created_by)
+        |VALUES (?, ?, ?, ?, ?, ?)
+        |ON CONFLICT (tenant_id, location) DO NOTHING""".stripMargin
+    )
+    try
+      ps.setString(1, l.id)
+      ps.setString(2, l.tenantId)
+      ps.setString(3, l.kind)
+      ps.setString(4, l.location)
+      ps.setTimestamp(5, new Timestamp(l.createdAt))
+      setNullable(ps, 6, l.createdBy)
+      ps.executeUpdate() == 1
+    finally ps.close()
+  }
+
+  def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation] = withConn { c =>
+    val ps = c.prepareStatement(
+      """DELETE FROM qodstate_tenant_location WHERE tenant_id = ? AND id = ?
+        |RETURNING id, tenant_id, kind, location, created_at, created_by""".stripMargin
+    )
+    try
+      ps.setString(1, tenantId)
+      ps.setString(2, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readTenantLocation(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listTenantLocations(tenantId: String): List[TenantLocation] = withConn { c =>
+    val ps = c.prepareStatement(s"$SelectTenantLocations WHERE tenant_id = ? ORDER BY location")
+    try
+      ps.setString(1, tenantId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readTenantLocation)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listAllTenantLocations(): List[TenantLocation] = withConn { c =>
+    val rs =
+      c.createStatement().executeQuery(s"$SelectTenantLocations ORDER BY tenant_id, location")
+    try drain(rs)(readTenantLocation)
+    finally rs.close()
+  }
+
+  private def readTenantLocation(rs: ResultSet): TenantLocation =
+    TenantLocation(
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      kind = rs.getString("kind"),
+      location = rs.getString("location"),
+      createdAt = rs.getTimestamp("created_at").getTime,
+      createdBy = Option(rs.getString("created_by"))
+    )
+
+  // ---------------- Users' own S3 credentials ----------------
+
+  private val UserS3Columns: String =
+    "id, user_id, scope, access_key_id, secret_access_key, session_token, region, endpoint, " +
+      "url_style, created_at, updated_at"
+
+  def putUserS3Credential(c: UserS3Credential): UserS3Credential = withConn { conn =>
+    val ps = conn.prepareStatement(
+      s"""INSERT INTO qodstate_user_s3_credential
+         |  (id, user_id, scope, access_key_id, secret_access_key, session_token, region, endpoint,
+         |   url_style)
+         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         |ON CONFLICT (user_id, scope) DO UPDATE SET
+         |  access_key_id = EXCLUDED.access_key_id,
+         |  secret_access_key = EXCLUDED.secret_access_key,
+         |  session_token = EXCLUDED.session_token,
+         |  region = EXCLUDED.region,
+         |  endpoint = EXCLUDED.endpoint,
+         |  url_style = EXCLUDED.url_style,
+         |  updated_at = GREATEST(NOW(),
+         |    qodstate_user_s3_credential.updated_at + INTERVAL '1 millisecond')
+         |RETURNING $UserS3Columns""".stripMargin
+    )
+    try
+      ps.setString(1, c.id)
+      ps.setString(2, c.userId)
+      ps.setString(3, c.scope)
+      ps.setString(4, c.accessKeyId)
+      ps.setString(5, c.secretAccessKey)
+      setNullable(ps, 6, c.sessionToken)
+      setNullable(ps, 7, c.region)
+      setNullable(ps, 8, c.endpoint)
+      setNullable(ps, 9, c.urlStyle)
+      val rs = ps.executeQuery()
+      try
+        rs.next()
+        readUserS3Credential(rs)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def deleteUserS3Credential(userId: String, id: String): Option[UserS3Credential] = withConn {
+    conn =>
+      val ps = conn.prepareStatement(
+        s"DELETE FROM qodstate_user_s3_credential WHERE user_id = ? AND id = ? RETURNING $UserS3Columns"
+      )
+      try
+        ps.setString(1, userId)
+        ps.setString(2, id)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(readUserS3Credential(rs)) else None
+        finally rs.close()
+      finally ps.close()
+  }
+
+  def listUserS3Credentials(userId: String): List[UserS3Credential] = withConn { conn =>
+    val ps = conn.prepareStatement(
+      s"SELECT $UserS3Columns FROM qodstate_user_s3_credential WHERE user_id = ? ORDER BY scope"
+    )
+    try
+      ps.setString(1, userId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readUserS3Credential)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listAllUserS3Credentials(): List[UserS3Credential] = withConn { conn =>
+    val rs = conn
+      .createStatement()
+      .executeQuery(
+        s"SELECT $UserS3Columns FROM qodstate_user_s3_credential ORDER BY user_id, scope"
+      )
+    try drain(rs)(readUserS3Credential)
+    finally rs.close()
+  }
+
+  private def readUserS3Credential(rs: ResultSet): UserS3Credential =
+    UserS3Credential(
+      id = rs.getString("id"),
+      userId = rs.getString("user_id"),
+      scope = rs.getString("scope"),
+      accessKeyId = rs.getString("access_key_id"),
+      secretAccessKey = rs.getString("secret_access_key"),
+      sessionToken = Option(rs.getString("session_token")),
+      region = Option(rs.getString("region")),
+      endpoint = Option(rs.getString("endpoint")),
+      urlStyle = Option(rs.getString("url_style")),
+      createdAt = rs.getTimestamp("created_at").getTime,
+      updatedAt = rs.getTimestamp("updated_at").getTime
     )
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =

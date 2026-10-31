@@ -1,15 +1,7 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.acl.model.TableRef
-import ai.starlake.acl.parser.{TableAccess, Verb}
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{
-  Allowed,
-  Denied,
-  StatementValidator,
-  ValidationContext,
-  ValidationResult
-}
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -78,25 +70,32 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     * journal, store) so the test can call drainNow() and then assert on store.events.
     */
   private def setupWithJournal(
-      stub: () => QuackResponse = defaultStub,
-      validator: StatementValidator = StatementValidator.allowAll
+      stub: () => QuackResponse = defaultStub
   ): (FlightSqlRouter, EventJournal, RecordingTelemetryStore) =
     val sup     = buildSupervisor()
     val store   = new RecordingTelemetryStore
     val journal = new EventJournal(store)
     val tracker = new NodeLoadTracker
     val client  = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(stub())
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
       sessions,
       tracker,
       adapter,
-      validator = validator,
-      journal = journal
+      journal = journal,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, journal, store)
 
@@ -165,14 +164,23 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     store.events shouldBe empty
   }
 
-  it should "emit data-denial/sql.denied/denied with canonical:verb in detail(denied)" in {
-    val access  = TableAccess(TableRef("cat", "sch", "tbl"), Verb.Write)
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("insufficient grants", Set(access))
-    val (router, journal, store) = setupWithJournal(validator = denying)
+  it should "emit data-denial/sql.denied/denied for a node's authorization refusal" in {
+    val refusal = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: user:alice lacks grants on cat.sch.tbl:insert"
+        ),
+        1L
+      )
+    val (router, journal, store) = setupWithJournal(stub = refusal)
     router
-      .execute("aud-4", "alice", poolKey, "INSERT INTO cat.sch.tbl VALUES (1)")
+      .execute(
+        "aud-5",
+        "alice",
+        poolKey,
+        "INSERT INTO cat.sch.tbl VALUES (1)",
+        patId = Some("pat-9")
+      )
       .unsafeRunSync()
     journal.drainNow()
     store.events should have size 1
@@ -183,38 +191,35 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     e.actor shouldBe "alice"
     e.tenant shouldBe Some("acme")
     e.origin shouldBe "flightsql"
-    e.detail("denied") shouldBe "cat.sch.tbl:Write"
-  }
-
-  it should "thread patId into the data-denial audit event too" in {
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("insufficient grants", Set.empty)
-    val (router, journal, store) = setupWithJournal(validator = denying)
-    router
-      .execute(
-        "aud-4b",
-        "alice",
-        poolKey,
-        "INSERT INTO cat.sch.tbl VALUES (1)",
-        patId = Some("pat-8")
-      )
-      .unsafeRunSync()
-    journal.drainNow()
-    store.events should have size 1
-    store.events.head.patId shouldBe Some("pat-8")
+    e.patId shouldBe Some("pat-9")
+    e.detail("sql") shouldBe "INSERT INTO cat.sch.tbl VALUES (1)"
+    e.detail("reason") should include("QoD: user:alice lacks grants on cat.sch.tbl:insert")
   }
 
   it should "not throw and not record when using the default noop journal (EventJournal.noop)" in {
     val sup     = buildSupervisor()
     val tracker = new NodeLoadTracker
     val client  = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(defaultStub())
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     // No journal param -> defaults to EventJournal.noop
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter)
+    val router = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
     val result = router
       .execute("aud-5", "alice", poolKey, "INSERT INTO acme.public.t VALUES (1)")
       .unsafeRunSync()

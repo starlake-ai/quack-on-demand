@@ -77,10 +77,6 @@ export interface PoolResponse {
   // no explicit limit is set for that dimension.
   cpu: string;
   memory: string;
-  // Per-pool node-lockdown override, stored tri-state: "inherit" | "on" | "off".
-  lockdown?: string;
-  // The tri-state resolved against the global nodeLockdown.enabled flag.
-  lockdownEffective?: boolean;
   // Owner-declared demand scale-out band. Both absent on a fixed-size pool;
   // when set, the manager autoscales the pool within [minNodes, maxNodes]
   // and manual scales outside the band are refused.
@@ -92,6 +88,14 @@ export interface PoolResponse {
   pendingReason?: string | null;
   // The sentence behind pendingReason: servers by state and the next command.
   pendingDetail?: string | null;
+  // Operator-authored init SQL of the pool; empty when none.
+  initSql?: string;
+  /** Whether initSql was written by a superuser or the manager (nodes run it as written) rather
+    * than a tenant admin (nodes run only its allowlisted statements). Read-only. */
+  initSqlTrusted?: boolean;
+  /** Set on a write whose tenant-admin initSql this manager could not check (no local qod-node):
+    * the nodes still run only its allowlisted statements. */
+  initSqlWarning?: string | null;
 }
 
 // ----- Fleet backend: bare-metal / VM servers (QOD_RUNTIME_TYPE=fleet) -----
@@ -189,20 +193,20 @@ export interface DeletePoolRequest {
   force?: boolean;
 }
 
+/** POST /api/pool/setInitSql: replace a pool's init SQL (next node spawn). */
+export interface SetPoolInitSqlRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  initSql: string;
+}
+
 export interface SetPoolResourcesRequest {
   tenant: string;
   tenantDb: string;
   pool: string;
   cpu: string;
   memory: string;
-}
-
-export interface SetPoolLockdownRequest {
-  tenant: string;
-  tenantDb: string;
-  pool: string;
-  // "inherit" | "on" | "off"
-  lockdown: string;
 }
 
 export interface SetMaxConcurrentRequest {
@@ -235,9 +239,8 @@ export interface ClientConfigResponse {
   quackHost?: string;
   quackPort?: number;
   quackTls?: boolean;
-  // When false, no auth providers are configured server-side and the UI
-  // skips the login screen entirely. The REST API may still require an
-  // X-API-Key - that's a separate gate.
+  // Whether the server has an auth provider configured. The UI does not read it:
+  // a manager nobody can sign in to refuses to boot, so there is always a login.
   authEnabled: boolean;
   // True iff the runtime backend supports node placement (Kubernetes).
   // The UI hides cohort/placement controls when false.
@@ -332,6 +335,9 @@ export interface TenantResponse {
   opaPolicyPath?: string | null;
   opaTokenSet?: boolean;
   opaSendStatementText?: boolean;
+  // The OIDC client secret of the tenant's console sign-in is write-only too: only whether one
+  // is stored is exposed, never the value.
+  clientSecretSet: boolean;
 }
 
 export interface SetTenantDisabledRequest {
@@ -339,10 +345,18 @@ export interface SetTenantDisabledRequest {
   disabled: boolean;
 }
 
+/** Replaces a tenant's sign-in configuration. `authConfig` is replaced whole and may not carry a
+  * `clientSecret` key (400 invalid_auth_config). `clientSecret` is write-only: omitted keeps the
+  * stored secret only while `authConfig.issuerUrl` is unchanged and `authConfig.clientSecretRef`
+  * is not added or changed (either one drops it), `""` removes it, a value replaces it. A tenant
+  * has one secret source: a value also drops the `clientSecretRef` the request carries, and a
+  * value sent with an added or changed reference is refused (400 secret_conflict). Adding or
+  * changing `authConfig.clientSecretRef` needs a superuser (403 superuser_required). */
 export interface SetTenantAuthRequest {
   name: string;
   authProvider: AuthProvider;
   authConfig: Record<string, string>;
+  clientSecret?: string;
 }
 
 /** Patch of a tenant's data-access authorization. An omitted field keeps the stored value; `""`
@@ -355,6 +369,66 @@ export interface SetTenantAclRequest {
   opaPolicyPath?: string;
   opaToken?: string;
   sendStatementText?: boolean;
+}
+
+/** One authorized local folder of a tenant (`POST /api/tenant/location/list`), under the operator's
+  * QOD_TENANT_FILES_ROOT. S3 is per user (`/api/profile/s3/*`). */
+export interface TenantLocation {
+  id: string;
+  tenant: string;
+  kind: 'local';
+  location: string;
+  createdAt: number;
+  createdBy?: string | null;
+}
+
+export interface TenantLocationListResponse {
+  locations: TenantLocation[];
+}
+
+export interface AddTenantLocationRequest {
+  tenant: string;
+  location: string;
+}
+
+export interface RemoveTenantLocationRequest {
+  tenant: string;
+  id: string;
+}
+
+export interface TenantLocationChangeResponse {
+  location: TenantLocation;
+}
+
+/** One of a user's own S3 credentials (`/api/profile/s3/*`, `/api/user/s3/*`). The secret and the
+  * session token never come back: `secretSet` is always true, `sessionTokenSet` says whether a
+  * token is stored. `endpoint` null is AWS's own. Times are epoch milliseconds. */
+export interface S3Credential {
+  id: string;
+  userId: string;
+  scope: string;
+  accessKeyId: string;
+  secretSet: boolean;
+  sessionTokenSet: boolean;
+  region?: string | null;
+  endpoint?: string | null;
+  urlStyle?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface S3CredentialListResponse {
+  credentials: S3Credential[];
+}
+
+export interface ProfileS3AddRequest {
+  scope: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+  region?: string;
+  endpoint?: string;
+  urlStyle?: string;
 }
 
 export interface TenantListResponse {
@@ -421,6 +495,12 @@ export interface TenantDbResponse {
     * (memory kind, duckdb-file without a live pool, etc.). */
   tableCount: number | null;
   encrypted: boolean;
+  /** Whether initSql was written by a superuser or the manager (nodes run it as written) rather
+    * than a tenant admin (nodes run only its allowlisted statements). Read-only. */
+  initSqlTrusted?: boolean;
+  /** Set on a write whose tenant-admin initSql this manager could not check (no local qod-node):
+    * the nodes still run only its allowlisted statements. */
+  initSqlWarning?: string | null;
 }
 
 export interface TenantDbListResponse {

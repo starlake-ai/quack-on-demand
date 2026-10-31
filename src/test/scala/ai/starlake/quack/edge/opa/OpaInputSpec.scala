@@ -46,3 +46,28 @@ class OpaInputSpec extends AnyFlatSpec with Matchers:
     val doc = OpaInput.statement(target, user, "flightsql", "READ", Set.empty, Some("SELECT 1"))
     doc.hcursor.downField("input").downField("statement").downField("text").as[String] shouldBe
       Right("SELECT 1")
+
+  "OpaInput.decide" should "carry kinds, columns and via per access, the locations, and edge node" in:
+    val acc = List(
+      OpaAccess("lake", "main", "orders", "table", Verb.Read, List("v", "id"), None),
+      OpaAccess("lake", "main", "base", "table", Verb.Read, List("x"), Some("lake.main.v_secure")),
+      OpaAccess("lake", "main", "sales", "table", Verb.Write, Nil, None)
+    )
+    val locs = List(
+      OpaLocation("write", "s3://acme-etl/out/x.parquet", "s3://acme-etl/", "copy_to"),
+      OpaLocation("read", "s3://acme-etl/in/x.csv", "s3://acme-etl/in/", "read_csv")
+    )
+    OpaInput.decide(target, user, "WRITE", acc, locs) shouldBe parse(
+      """{"input":{"kind":"statement","tenant":"acme","database":"tpch","pool":"bi",
+        |"parentPool":null,
+        |"user":{"name":"alice","roles":["analyst"],"groups":["emea"],"claims":{"dept":"fin"}},
+        |"client":{"edge":"node"},
+        |"statement":{"class":"WRITE"},
+        |"accesses":[
+        | {"catalog":"lake","schema":"main","table":"base","verb":"read","kind":"table","columns":["x"],"via":"lake.main.v_secure"},
+        | {"catalog":"lake","schema":"main","table":"orders","verb":"read","kind":"table","columns":["id","v"],"via":null},
+        | {"catalog":"lake","schema":"main","table":"sales","verb":"write","kind":"table","columns":[],"via":null}],
+        |"locations":[
+        | {"access":"read","location":"s3://acme-etl/in/x.csv","scope":"s3://acme-etl/in/","via":"read_csv"},
+        | {"access":"write","location":"s3://acme-etl/out/x.parquet","scope":"s3://acme-etl/","via":"copy_to"}]}}""".stripMargin
+    ).toOption.get

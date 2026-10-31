@@ -100,18 +100,26 @@ final class MaintenanceWiring(
       stop = node => backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit),
       // Right(rows returned): ducklake_cleanup_old_files returns one row per file it deleted.
       exec = (node, sql) =>
-        adapter.send(node, sql, session = None, recordLoad = false).flatMap {
-          case QuackResponse.Ok(r, _, close) =>
-            IO.blocking {
-              var rows = 0L
-              while r.loadNextBatch() do rows += r.getVectorSchemaRoot.getRowCount
-              rows
-            }.guarantee(IO(close()))
-              .attempt
-              .map(_.left.map(e => s"reading the result: ${e.getMessage}"))
-          case QuackResponse.Failed(e, _) =>
-            IO.pure(Left(e.toString))
-        },
+        adapter
+          .send(
+            node,
+            sql,
+            ai.starlake.quack.edge.authz.NodePrincipal.System,
+            session = None,
+            recordLoad = false
+          )
+          .flatMap {
+            case QuackResponse.Ok(r, _, close) =>
+              IO.blocking {
+                var rows = 0L
+                while r.loadNextBatch() do rows += r.getVectorSchemaRoot.getRowCount
+                rows
+              }.guarantee(IO(close()))
+                .attempt
+                .map(_.left.map(e => s"reading the result: ${e.getMessage}"))
+            case QuackResponse.Failed(e, _) =>
+              IO.pure(Left(e.toString))
+          },
       snapshotsOlderThan = (t, td, cutoff) => catalogReader(t, td).snapshotsOlderThan(cutoff),
       pinnedSnapshotsOf = pinnedSetResolver.pinnedSnapshots,
       hasLiveBranchOf = pinnedSetResolver.hasLiveBranch,

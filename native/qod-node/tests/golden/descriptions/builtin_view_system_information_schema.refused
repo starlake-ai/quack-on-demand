@@ -1,0 +1,1 @@
+QoD: information_schema.tables is filtered to your grants only when the statement itself names it information_schema.tables

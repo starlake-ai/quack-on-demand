@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.LockoutConfig
+import ai.starlake.quack.ondemand.auth.LoginRealm
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -348,27 +349,41 @@ final class UserStore(
 
   /** Break-glass reset of a SUPERUSER row (`tenant IS NULL`) by username, used only by the
     * `admin reset-password` jar subcommand. One statement: new bcrypt hash, lockout cleared,
-    * `must_change_password` set to `mustChange`. Returns the row id, or None when no such superuser
-    * exists (a tenant user of the same name is never matched).
+    * `must_change_password` set to `mustChange`, and the account re-enabled only when `reenable` (a
+    * disabled account stays disabled otherwise). Returns the row's id with its enabled flag before
+    * and after, or None when no such superuser exists (a tenant user of the same name is never
+    * matched). `reenable` is required, never defaulted: re-enabling a superuser also brings back
+    * every personal access token it owns, so only a caller that named the account asks for it. With
+    * it, this is the recovery for a disabled superuser too: the last-superuser floor in
+    * `UserHandlers` can be raced to zero under HA, and no other credential reaches the manager.
     */
   def resetSuperuserPassword(
       username: String,
       plaintext: String,
-      mustChange: Boolean
-  ): Option[String] =
+      mustChange: Boolean,
+      reenable: Boolean
+  ): Option[UserStore.SuperuserReset] =
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, plaintext.toCharArray)
-      val ps   = c.prepareStatement(
-        "UPDATE qodstate_user SET password_hash = ?, must_change_password = ?, " +
-          "failed_attempts = 0, locked_at = NULL, updated_at = NOW() " +
-          "WHERE tenant IS NULL AND username = ? RETURNING id"
+      // The self-join's `prior` row is the version the statement read, so it carries the flag
+      // as it was before this update.
+      val ps = c.prepareStatement(
+        "UPDATE qodstate_user u SET password_hash = ?, must_change_password = ?, " +
+          "enabled = u.enabled OR ?, failed_attempts = 0, locked_at = NULL, updated_at = NOW() " +
+          "FROM qodstate_user prior " +
+          "WHERE prior.id = u.id AND u.tenant IS NULL AND u.username = ? " +
+          "RETURNING u.id, prior.enabled, u.enabled"
       )
       try
         ps.setString(1, hash)
         ps.setBoolean(2, mustChange)
-        ps.setString(3, username)
+        ps.setBoolean(3, reenable)
+        ps.setString(4, username)
         val rs = ps.executeQuery()
-        try if rs.next() then Some(rs.getString(1)) else None
+        try
+          if rs.next() then
+            Some(UserStore.SuperuserReset(rs.getString(1), rs.getBoolean(2), rs.getBoolean(3)))
+          else None
         finally rs.close()
       finally ps.close()
     }
@@ -468,9 +483,18 @@ final class UserStore(
       case None =>
         ps.setString(1, username)
 
-  /** All management-plane grants for an OIDC-verified identity. Matches `username = identity`
-    * first; if that yields nothing AND `email` is given, retries with `username = email` so
-    * operators can provision either form. tenant=NULL rows are superuser grants.
+  /** All management-plane grants for an IdP-verified identity, read in the realm the login was
+    * verified in. Matches `username = identity` first; if that yields nothing AND `email` is given,
+    * retries with `username = email` so operators can provision either form. The caller decides
+    * whether to hand an email over (`AuthHandlers`: only an SSO token's email the IdP marks
+    * verified, never a password login's). tenant=NULL rows are superuser grants.
+    *
+    * The realm bounds both lookups, the email fallback included:
+    *   - `LoginRealm.System` matches the rows of every realm (superuser rows and every tenant's
+    *     rows): the system login builds multi-tenant admin sessions from them.
+    *   - `LoginRealm.Tenant(id)` matches only rows with `tenant = id`, never a superuser row and
+    *     never another tenant's row. At most one row matches (`qodstate_user_scoped_unique` is
+    *     `(tenant, username)`).
     *
     * The disabled check is per-row, not per-username: the same username may exist once per tenant
     * plus once as global superuser, and a multi-tenant admin must keep every enabled row's grant
@@ -483,17 +507,24 @@ final class UserStore(
     *     and an enabled email-keyed row for the same person would silently restore access.
     *   - no rows: fall back to the email lookup (same per-row logic there).
     *
+    * Only rows of the realm count in these cases: in a tenant realm, a disabled row of another
+    * tenant neither denies nor stops the fallback.
+    *
     * Returns one `UserGrant` per enabled row. Order is unspecified.
     */
-  def grantsForIdentity(identity: String, email: Option[String]): List[UserGrant] =
+  def grantsForIdentity(
+      realm: LoginRealm,
+      identity: String,
+      email: Option[String]
+  ): List[UserGrant] =
     withConn { c =>
-      lookupByUsername(c, identity) match
+      lookupByUsername(c, realm, identity) match
         case Lookup.AllDisabled => Nil
         case Lookup.Found(gs)   => gs
         case Lookup.Missing     =>
           email
             .filter(e => e.nonEmpty && e != identity)
-            .map(lookupByUsername(c, _))
+            .map(lookupByUsername(c, realm, _))
             .map {
               case Lookup.AllDisabled => Nil
               case Lookup.Found(gs)   => gs
@@ -511,15 +542,25 @@ final class UserStore(
     case AllDisabled
     case Found(grants: List[UserGrant])
 
-  private def lookupByUsername(c: Connection, username: String): Lookup =
+  private def lookupByUsername(c: Connection, realm: LoginRealm, username: String): Lookup =
     // No `AND enabled` filter here: rows must be fetched regardless of
     // their enabled state so an all-disabled username can be distinguished
     // from a genuinely-missing one (see grantsForIdentity's doc).
-    val ps = c.prepareStatement(
-      "SELECT tenant, kind, enabled FROM qodstate_user WHERE username = ?"
-    )
+    val ps = realm match
+      case LoginRealm.System =>
+        val p = c.prepareStatement(
+          "SELECT tenant, kind, enabled FROM qodstate_user WHERE username = ?"
+        )
+        p.setString(1, username)
+        p
+      case LoginRealm.Tenant(id) =>
+        val p = c.prepareStatement(
+          "SELECT tenant, kind, enabled FROM qodstate_user WHERE username = ? AND tenant = ?"
+        )
+        p.setString(1, username)
+        p.setString(2, id)
+        p
     try
-      ps.setString(1, username)
       val rs        = ps.executeQuery()
       val buf       = scala.collection.mutable.ListBuffer.empty[UserGrant]
       var rowsFound = false
@@ -537,6 +578,11 @@ final class UserStore(
     finally ps.close()
 
 object UserStore:
+
+  /** The outcome of [[UserStore.resetSuperuserPassword]]: the row id and its enabled flag before
+    * and after the reset.
+    */
+  final case class SuperuserReset(id: String, wasEnabled: Boolean, enabled: Boolean)
 
   /** Outcome of an upsert: the persisted id and whether the row was freshly inserted (`true`) or an
     * existing row got its password + kind refreshed (`false`).

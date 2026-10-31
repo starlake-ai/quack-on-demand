@@ -45,7 +45,7 @@ final class CatalogHandlers(
     * tenantDbName).
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(sup, rawTenant, tenantDb, apiKey)(scopeOf)
 
@@ -57,7 +57,7 @@ final class CatalogHandlers(
       rawTenant: String,
       tenantDb: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope])(read: (String, String) => Res[T]): Res[T] =
+  )(scopeOf: SessionScope.Resolver)(read: (String, String) => Res[T]): Res[T] =
     gate(rawTenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         if auditReads then
@@ -83,14 +83,14 @@ final class CatalogHandlers(
         read(tid, db)
 
   def listSchemas(tenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Res[List[CatalogSchemaEntry]] =
     gated("schemas", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
       Right(listSchemasUnscoped(tid, db))
     }
 
   def listTables(tenant: String, tenantDb: String, schema: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Res[List[CatalogTableEntry]] =
     gated("tables", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
       Right(if !isDuckLake(tid, db) then Nil else resolveReader(tid, db).listTables(schema))
@@ -103,7 +103,7 @@ final class CatalogHandlers(
       before: Option[Long],
       table: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Res[List[CatalogSnapshotEntry]] =
+  )(scopeOf: SessionScope.Resolver): Res[List[CatalogSnapshotEntry]] =
     gated("snapshots", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
       Right(
         if !isDuckLake(tid, db) then Nil
@@ -136,7 +136,7 @@ final class CatalogHandlers(
       asOfTag: Option[String],
       asOfTs: Option[java.time.Instant],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Res[CatalogTableDetailResponse] =
+  )(scopeOf: SessionScope.Resolver): Res[CatalogTableDetailResponse] =
     gated("table", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
       if !isDuckLake(tid, db) then
         val detail = resolveReader(tid, db).getTable(schema, table, None)

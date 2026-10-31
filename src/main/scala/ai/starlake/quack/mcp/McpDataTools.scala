@@ -28,7 +28,7 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 /** The MCP data tier: the tools every authenticated principal gets. Each tool goes through the SAME
   * enforcement as the REST/FlightSQL surface it mirrors -- `run_sql` through the injected routed
-  * executor (StatementValidator, classifier, router), the catalog reads through the handlers'
+  * executor (classifier, router, the node's decision), the catalog reads through the handlers'
   * `TenantDbGate`/`TenantScopeCheck` with the principal's raw bearer as `apiKey` -- so there is no
   * second policy layer to keep in sync.
   *
@@ -44,7 +44,7 @@ final class McpDataTools(
     tags: TagHandlers,
     tenantDbs: TenantDbHandlers,
     profile: ProfileHandlers,
-    scopeOf: String => Option[SessionScope],
+    scopeOf: SessionScope.Resolver,
     /** Branch targeting (Epic 1): `(tenant, database, branch)` -> `(branch catalog tenant-db name,
       * branch pool key)`, or a caller-facing reason. The default refuses every `branch` argument,
       * for callers that do not wire branching.
@@ -80,8 +80,7 @@ final class McpDataTools(
   // ---------- shared helpers ----------
 
   private def connectionIdOf(principal: McpPrincipal): String = principal match
-    case McpPrincipal.StaticKey => "mcp-static"
-    case McpPrincipal.Pat(p)    => s"mcp-${p.patId}"
+    case McpPrincipal.Pat(p) => s"mcp-${p.patId}"
 
   private def routerFailureText(f: RouterFailure): String = f match
     // FIRST: an authorization-service outage (OPA down) is never rewritten into the
@@ -97,16 +96,22 @@ final class McpDataTools(
       "a node is still starting; retry in a few seconds"
     case other => other.reason
 
-  /** The caller identity + scope ceiling threaded into the routed executor, built from the resolved
-    * principal's own `TokenRestriction` (`Unrestricted` for the static key, the PAT's narrowed
-    * scope otherwise) so the executor enforces the same ceiling the MCP layer already checked the
-    * arguments against. `patId` carries the acting token's id for statement-history and audit
-    * attribution -- `None` for the static key, which is not a token at all.
+  /** The caller identity + scope ceiling threaded into the routed executor: the PAT's owner with
+    * the PAT's own narrowed `TokenRestriction`, so the executor enforces the same ceiling the MCP
+    * layer already checked the arguments against. `patId` carries the acting token's id for
+    * statement-history and audit attribution. `superuserAdmissible` is the owner's realm: true only
+    * for a PAT whose owning row is tenant-less (a superuser's token), so a tenant PAT never binds a
+    * superuser row at the executor's handshake gate.
     */
   private def callerFor(principal: McpPrincipal): ExecCaller = principal match
-    case McpPrincipal.StaticKey => ExecCaller.system(connectionIdOf(principal))
-    case McpPrincipal.Pat(p)    =>
-      ExecCaller(connectionIdOf(principal), p.user.username, p.restriction, Some(p.patId))
+    case McpPrincipal.Pat(p) =>
+      ExecCaller(
+        connectionIdOf(principal),
+        p.user.username,
+        p.restriction,
+        superuserAdmissible = p.user.tenant.isEmpty,
+        patId = Some(p.patId)
+      )
 
   /** Execute `sql` through the routed executor and decode at most `maxRows` rows. */
   private def execute(
@@ -393,11 +398,10 @@ final class McpDataTools(
 
   /** `describe_table` routed at an Iceberg alias: the table detail from [[IcebergCatalogHandlers]]
     * (admin-gated metadata), plus a small `sample` run like the DuckLake arm's: through the routed
-    * executor as the MCP principal (`callerFor`: the static key is the system caller, a PAT its
-    * owner with the token's restriction and id), capped by the token's maxRows. The sample never
-    * goes through a REST credential lookup, and any sample failure (no pool, ACL denial, router
-    * failure, a raised error, `sampleTimeout` elapsing) degrades to the detail alone instead of
-    * failing the call.
+    * executor as the MCP principal (`callerFor`: the PAT's owner with the token's restriction and
+    * id), capped by the token's maxRows. The sample never goes through a REST credential lookup,
+    * and any sample failure (no pool, ACL denial, router failure, a raised error, `sampleTimeout`
+    * elapsing) degrades to the detail alone instead of failing the call.
     */
   private def describeIcebergTable(
       principal: McpPrincipal,
@@ -553,19 +557,13 @@ final class McpDataTools(
     inputSchema = objectSchema(required = Nil, props = Seq.empty*),
     adminOnly = false,
     run = (principal, _) =>
-      principal.rawToken match
-        case None =>
-          IO.pure(
-            Left("my_usage needs a user-owned PAT; the static key has no identity to scope by")
-          )
-        case some =>
-          for
-            usage <- profile.usage(None, some).map(bridge)
-            stmts <- profile.statements(Some(RecentStatements), some).map(bridge)
-          yield for
-            u <- usage
-            s <- stmts
-          yield Json.obj("usage" -> u.asJson, "statements" -> s.asJson)
+      for
+        usage <- profile.usage(None, principal.rawToken).map(bridge)
+        stmts <- profile.statements(Some(RecentStatements), principal.rawToken).map(bridge)
+      yield for
+        u <- usage
+        s <- stmts
+      yield Json.obj("usage" -> u.asJson, "statements" -> s.asJson)
   )
 
 object McpDataTools:

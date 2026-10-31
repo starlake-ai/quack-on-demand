@@ -3097,6 +3097,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/pools:
+    get:
+      operationId: getApiProfilePools
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfilePoolsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/profile/statements:
     get:
       operationId: getApiProfileStatements
@@ -6080,9 +6114,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /api/pool/setLockdown:
+  /api/pool/setInitSql:
     post:
-      operationId: postApiPoolSetlockdown
+      operationId: postApiPoolSetinitsql
       parameters:
       - name: X-API-Key
         in: header
@@ -6098,7 +6132,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SetPoolLockdownRequest'
+              $ref: '#/components/schemas/SetPoolInitSqlRequest'
         required: true
       responses:
         '200':
@@ -6259,6 +6293,126 @@ paths:
       responses:
         '200':
           description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/s3/add:
+    post:
+      operationId: postApiProfileS3Add
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileS3AddRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialDto'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/s3/list:
+    post:
+      operationId: postApiProfileS3List
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileS3ListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/s3/remove:
+    post:
+      operationId: postApiProfileS3Remove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileS3RemoveRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialDto'
         '400':
           description: 'Invalid value for: body, Invalid value for: header X-API-Key,
             Invalid value for: cookie qod_session'
@@ -6764,6 +6918,126 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/location/add:
+    post:
+      operationId: postApiTenantLocationAdd
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddTenantLocationRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantLocationChangeResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/location/list:
+    post:
+      operationId: postApiTenantLocationList
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantLocationListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantLocationListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/location/remove:
+    post:
+      operationId: postApiTenantLocationRemove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveTenantLocationRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantLocationChangeResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/tenant/opaTest:
     post:
       operationId: postApiTenantOpatest
@@ -7000,6 +7274,86 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/user/s3/list:
+    post:
+      operationId: postApiUserS3List
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserS3ListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/s3/remove:
+    post:
+      operationId: postApiUserS3Remove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserS3RemoveRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialDto'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/user/update:
     post:
       operationId: postApiUserUpdate
@@ -7080,6 +7434,17 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ActiveStatementInfo'
+    AddTenantLocationRequest:
+      title: AddTenantLocationRequest
+      type: object
+      required:
+      - tenant
+      - location
+      properties:
+        tenant:
+          type: string
+        location:
+          type: string
     AuditActionsResponse:
       title: AuditActionsResponse
       type: object
@@ -7834,7 +8199,6 @@ components:
       - cpu
       - memory
       - podTemplateYaml
-      - lockdown
       properties:
         tenant:
           type: string
@@ -7868,8 +8232,6 @@ components:
         memory:
           type: string
         podTemplateYaml:
-          type: string
-        lockdown:
           type: string
         minNodes:
           type: integer
@@ -8181,12 +8543,18 @@ components:
       - poolKey
       - port
       - token
+      - authzKey
       - kind
       - env
-      - dbInitSql
+      - resourceSql
       - objectStoreSql
       - extraSetupSql
-      - lockdownSql
+      - nodeExtensions
+      - authzLimits
+      - tenantDbInitSql
+      - tenantDbInitTrusted
+      - tenantPoolInitSql
+      - tenantPoolInitTrusted
       properties:
         epoch:
           type: integer
@@ -8200,18 +8568,30 @@ components:
           format: int32
         token:
           type: string
+        authzKey:
+          type: string
         kind:
           type: string
         env:
           $ref: '#/components/schemas/Map_String'
-        dbInitSql:
+        resourceSql:
           type: string
         objectStoreSql:
           type: string
         extraSetupSql:
           type: string
-        lockdownSql:
+        nodeExtensions:
+          $ref: '#/components/schemas/FleetNodeExtensionsDto'
+        authzLimits:
+          $ref: '#/components/schemas/FleetNodeAuthzLimitsDto'
+        tenantDbInitSql:
           type: string
+        tenantDbInitTrusted:
+          type: boolean
+        tenantPoolInitSql:
+          type: string
+        tenantPoolInitTrusted:
+          type: boolean
     FleetHeartbeatRequest:
       title: FleetHeartbeatRequest
       type: object
@@ -8256,6 +8636,33 @@ components:
           $ref: '#/components/schemas/FleetAssignmentDto'
         approval:
           type: string
+    FleetNodeAuthzLimitsDto:
+      title: FleetNodeAuthzLimitsDto
+      type: object
+      required:
+      - decideTimeoutMs
+      - cacheEntries
+      properties:
+        decideTimeoutMs:
+          type: integer
+          format: int32
+        cacheEntries:
+          type: integer
+          format: int32
+    FleetNodeExtensionsDto:
+      title: FleetNodeExtensionsDto
+      type: object
+      required:
+      - allowCommunity
+      - allowUnsigned
+      - autoinstallKnown
+      properties:
+        allowCommunity:
+          type: boolean
+        allowUnsigned:
+          type: boolean
+        autoinstallKnown:
+          type: boolean
     FleetNodeReportDto:
       title: FleetNodeReportDto
       type: object
@@ -9419,9 +9826,8 @@ components:
       - initSql
       - cpu
       - memory
-      - lockdown
-      - lockdownEffective
       - pending
+      - initSqlTrusted
       properties:
         tenant:
           type: string
@@ -9453,10 +9859,6 @@ components:
           type: string
         memory:
           type: string
-        lockdown:
-          type: string
-        lockdownEffective:
-          type: boolean
         minNodes:
           type: integer
           format: int32
@@ -9469,6 +9871,10 @@ components:
         pendingReason:
           type: string
         pendingDetail:
+          type: string
+        initSqlTrusted:
+          type: boolean
+        initSqlWarning:
           type: string
     PreviewColumn:
       title: PreviewColumn
@@ -9501,6 +9907,64 @@ components:
           format: int64
         truncated:
           type: boolean
+    ProfilePool:
+      title: ProfilePool
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - status
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        status:
+          type: string
+    ProfilePoolsResponse:
+      title: ProfilePoolsResponse
+      type: object
+      properties:
+        pools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProfilePool'
+    ProfileS3AddRequest:
+      title: ProfileS3AddRequest
+      type: object
+      required:
+      - scope
+      - accessKeyId
+      - secretAccessKey
+      properties:
+        scope:
+          type: string
+        accessKeyId:
+          type: string
+        secretAccessKey:
+          type: string
+        sessionToken:
+          type: string
+        region:
+          type: string
+        endpoint:
+          type: string
+        urlStyle:
+          type: string
+    ProfileS3ListRequest:
+      title: ProfileS3ListRequest
+      type: object
+    ProfileS3RemoveRequest:
+      title: ProfileS3RemoveRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
     RdbmsConfig:
       title: RdbmsConfig
       type: object
@@ -9557,6 +10021,17 @@ components:
           type: string
         recoverable:
           type: boolean
+    RemoveTenantLocationRequest:
+      title: RemoveTenantLocationRequest
+      type: object
+      required:
+      - tenant
+      - id
+      properties:
+        tenant:
+          type: string
+        id:
+          type: string
     ResetPasswordRequest:
       title: ResetPasswordRequest
       type: object
@@ -9795,6 +10270,51 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RowPolicyDto'
+    S3CredentialDto:
+      title: S3CredentialDto
+      type: object
+      required:
+      - id
+      - userId
+      - scope
+      - accessKeyId
+      - secretSet
+      - sessionTokenSet
+      - createdAt
+      - updatedAt
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        scope:
+          type: string
+        accessKeyId:
+          type: string
+        secretSet:
+          type: boolean
+        sessionTokenSet:
+          type: boolean
+        region:
+          type: string
+        endpoint:
+          type: string
+        urlStyle:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+        updatedAt:
+          type: integer
+          format: int64
+    S3CredentialListResponse:
+      title: S3CredentialListResponse
+      type: object
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/S3CredentialDto'
     ScalePoolRequest:
       title: ScalePoolRequest
       type: object
@@ -9934,14 +10454,14 @@ components:
           type: string
         disabled:
           type: boolean
-    SetPoolLockdownRequest:
-      title: SetPoolLockdownRequest
+    SetPoolInitSqlRequest:
+      title: SetPoolInitSqlRequest
       type: object
       required:
       - tenant
       - tenantDb
       - pool
-      - lockdown
+      - initSql
       properties:
         tenant:
           type: string
@@ -9949,7 +10469,7 @@ components:
           type: string
         pool:
           type: string
-        lockdown:
+        initSql:
           type: string
     SetPoolResourcesRequest:
       title: SetPoolResourcesRequest
@@ -10020,6 +10540,8 @@ components:
           type: string
         authConfig:
           $ref: '#/components/schemas/Map_String'
+        clientSecret:
+          type: string
     SetTenantDisabledRequest:
       title: SetTenantDisabledRequest
       type: object
@@ -10318,6 +10840,7 @@ components:
       - initSql
       - effectiveDataPath
       - encrypted
+      - initSqlTrusted
       properties:
         id:
           type: string
@@ -10351,6 +10874,10 @@ components:
           format: int32
         encrypted:
           type: boolean
+        initSqlTrusted:
+          type: boolean
+        initSqlWarning:
+          type: string
     TenantListResponse:
       title: TenantListResponse
       type: object
@@ -10359,6 +10886,53 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TenantResponse'
+    TenantLocationChangeResponse:
+      title: TenantLocationChangeResponse
+      type: object
+      required:
+      - location
+      properties:
+        location:
+          $ref: '#/components/schemas/TenantLocationDto'
+    TenantLocationDto:
+      title: TenantLocationDto
+      type: object
+      required:
+      - id
+      - tenant
+      - kind
+      - location
+      - createdAt
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        kind:
+          type: string
+        location:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+        createdBy:
+          type: string
+    TenantLocationListRequest:
+      title: TenantLocationListRequest
+      type: object
+      required:
+      - tenant
+      properties:
+        tenant:
+          type: string
+    TenantLocationListResponse:
+      title: TenantLocationListResponse
+      type: object
+      properties:
+        locations:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantLocationDto'
     TenantOpRequest:
       title: TenantOpRequest
       type: object
@@ -10396,6 +10970,7 @@ components:
       - authConfig
       - opaTokenSet
       - opaSendStatementText
+      - clientSecretSet
       properties:
         name:
           type: string
@@ -10422,6 +10997,8 @@ components:
         opaTokenSet:
           type: boolean
         opaSendStatementText:
+          type: boolean
+        clientSecretSet:
           type: boolean
     TrendBucketEntry:
       title: TrendBucketEntry
@@ -10745,6 +11322,25 @@ components:
         userId:
           type: string
         roleId:
+          type: string
+    UserS3ListRequest:
+      title: UserS3ListRequest
+      type: object
+      required:
+      - userId
+      properties:
+        userId:
+          type: string
+    UserS3RemoveRequest:
+      title: UserS3RemoveRequest
+      type: object
+      required:
+      - userId
+      - id
+      properties:
+        userId:
+          type: string
+        id:
           type: string
     UserUpdateRequest:
       title: UserUpdateRequest

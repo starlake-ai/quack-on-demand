@@ -1,10 +1,8 @@
 package ai.starlake.quack.security
 
-import ai.starlake.quack.boot.BootFactories
 import ai.starlake.quack.edge.adapter.{QuackResponse, TestArrow}
-import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
+import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
-import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.model.{Pool, RoleDistribution, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.InProcessDuckDb
@@ -25,8 +23,8 @@ import scala.collection.mutable.ListBuffer
 import scala.jdk.CollectionConverters.*
 
 /** Shared setup for the OPA edge specs: a seeded control plane where tenant `acme` is in `opa` mode
-  * against a WireMock OPA and tenant `globex` stays in `qod` mode, the production validator built
-  * through [[BootFactories.aclValidator]], and small FlightSQL client helpers.
+  * against a WireMock OPA and tenant `globex` stays in `qod` mode, and small FlightSQL client
+  * helpers.
   *
   * Principals: `bob` (acme, NO role, NO grant, NO pool permission: every admission is OPA's),
   * `root` (superuser), `carol` (globex, a pool permission on globex `sales` and no table grant).
@@ -105,21 +103,6 @@ object OpaEdgeFixtures:
       new OpaDecisionCache(ttlSec),
       OpaInstruments.noop
     )
-
-  /** The production `TenantRoutingValidator` (QoD arm + OPA arm) for a supervisor. */
-  def validator(
-      opa: OpaAuthorizer,
-      aclEnabled: Boolean = true,
-      filteredMetadata: Boolean = true
-  ): PoolSupervisor => StatementValidator =
-    sup =>
-      BootFactories.aclValidator(
-        AclConfig(enabled = aclEnabled, dialect = "duckdb", filteredMetadata = filteredMetadata),
-        ManagerServerHarness.minimalManagerConfig(),
-        sup,
-        OpaConfig.default,
-        opa
-      )
 
   // ---------------------------------------------------------------------------------------------
   // FlightSQL client helpers

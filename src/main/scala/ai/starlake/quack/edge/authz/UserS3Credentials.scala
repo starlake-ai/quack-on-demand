@@ -1,0 +1,204 @@
+package ai.starlake.quack.edge.authz
+
+import ai.starlake.quack.model.UserS3Credential
+import com.typesafe.scalalogging.LazyLogging
+import io.circe.Json
+
+import scala.util.control.NonFatal
+
+/** Each user's own S3 credentials (in-engine authorization, decision 23), as a replica serves them:
+  * every session handle carries [[digest]] of its principal's set (`creds`), a node fetches the set
+  * from the replica its handle names ([[CredentialsRoute]]) when that digest differs from the one
+  * its connection secrets were made from, and the location rules admit a user's `s3://` URLs under
+  * the scopes of [[current]].
+  */
+trait UserS3Credentials:
+
+  /** `userId`'s credentials as last loaded, whether or not they can be served now. */
+  def of(userId: String): List[UserS3Credential]
+
+  /** The digest of the set [[current]] serves (a handle's `creds`). */
+  def digest(userId: String): String
+
+  /** `userId`'s credentials as this replica serves them now; Left (why) when it cannot vouch for
+    * them (the store could not be read since a change), which a caller answers as unavailable.
+    */
+  def current(userId: String): Either[String, List[UserS3Credential]] = Right(of(userId))
+
+object UserS3Credentials:
+
+  /** No user holds any credential: for components a test builds without a control plane. */
+  val none: UserS3Credentials = new UserS3Credentials:
+    def of(userId: String): List[UserS3Credential] = Nil
+    def digest(userId: String): String             = ""
+
+  /** What [[digestOf]] hashes: the JSON array of `[id, updatedAt]` pairs, by id. */
+  def digestJson(creds: List[UserS3Credential]): Json =
+    Json.arr(
+      creds.sortBy(_.id).map(c => Json.arr(Json.fromString(c.id), Json.fromLong(c.updatedAt)))*
+    )
+
+  /** A handle's `creds`: "" for no credential, else the lowercase hex SHA-256 of the canonical
+    * [[digestJson]]. Any added, removed or replaced credential changes it (a replace moves
+    * `updatedAt`).
+    */
+  def digestOf(creds: List[UserS3Credential]): String =
+    if creds.isEmpty then "" else CanonicalJson.sha256Hex(digestJson(creds))
+
+  /** A handle's `creds` while the principal's set cannot be served: 64 hex digits, as the node
+    * requires, that no [[digestOf]] produces (a SHA-256 of all zeros has no known preimage). A node
+    * connection never holds secrets fetched at it, so it always refetches, and the credentials
+    * endpoint's 503 fails the statement closed instead of letting the connection keep a set the
+    * replica no longer serves.
+    */
+  val UnavailableDigest: String = "0" * 64
+
+/** [[UserS3Credentials]] over a loader, refreshed by the supervisor together with the policy
+  * versions (after every local RBAC mutation, credential writes included, and on every restore,
+  * which HA peers run on the rbac NOTIFY). A failed refresh marks the cache stale: [[current]]
+  * answers Left until a refresh succeeds for a user the last sets hold credentials of, so a
+  * credential removed meanwhile is never served or admitted from them. Once a load has succeeded, a
+  * user they hold none of is still answered with none: a credential added meanwhile is missing,
+  * which only grants less, and a store outage does not refuse the statements of every user. Before
+  * any load has succeeded the sets say nothing of anyone, so every user is answered Left. While
+  * stale, every read retries the load, at most once per [[UserS3CredentialCache.RetryMs]]. Never
+  * logs a credential.
+  */
+final class UserS3CredentialCache(
+    load: () => List[UserS3Credential],
+    clock: () => Long = () => System.currentTimeMillis()
+) extends UserS3Credentials
+    with LazyLogging:
+
+  @volatile private var byUser: Map[String, (List[UserS3Credential], String)] = Map.empty
+  @volatile private var stale: Boolean                                        = false
+  @volatile private var loadedOnce: Boolean                                   = false
+  @volatile private var lastAttempt: Long                                     = 0L
+  // Reads are numbered as they start, and a read publishes only when no later-started one has.
+  // Every commit is followed by a read that starts after it (the writer's own refresh, or a peer's
+  // NOTIFY-driven restore), and no read that started before that one can publish over it: a
+  // commit's own read always wins over every read that started before it. Two reads may still load
+  // out of start order; the published set then lags until the next read, never past a commit whose
+  // own read has published.
+  private val reads               = new java.util.concurrent.atomic.AtomicLong(0L)
+  @volatile private var published = 0L
+
+  def of(userId: String): List[UserS3Credential] = byUser.get(userId).fold(Nil)(_._1)
+
+  def digest(userId: String): String =
+    retryIfStale()
+    byUser.get(userId).fold("")(_._2)
+
+  override def current(userId: String): Either[String, List[UserS3Credential]] =
+    retryIfStale()
+    if stale && (!loadedOnce || byUser.contains(userId)) then
+      Left(UserS3CredentialCache.StaleReason)
+    else Right(of(userId))
+
+  /** Reloads every user's credentials: [[read]] then [[publish]]. */
+  def refresh(): Unit = synchronized(publish(read()))
+
+  /** The credential sets as the store holds them now, to [[publish]] later. restore() reads them
+    * before it loads the state their digests vouch for, and publishes once that state is in place.
+    */
+  def read(): UserS3CredentialCache.Loaded =
+    val seq  = reads.incrementAndGet()
+    val at   = clock()
+    val sets =
+      try Right(load())
+      catch case NonFatal(e) => Left(FailureText.of(e))
+    UserS3CredentialCache.Loaded(seq, at, sets)
+
+  /** Publishes what [[read]] returned, unless a read that started after it has published already
+    * (see `reads`: a commit's own read is never overwritten by one that started before it). A
+    * failed read marks the cache stale.
+    */
+  def publish(loaded: UserS3CredentialCache.Loaded): Unit = synchronized {
+    if loaded.seq > published then
+      published = loaded.seq
+      lastAttempt = loaded.at
+      loaded.sets match
+        case Right(all) =>
+          byUser = all.groupBy(_.userId).map { (user, creds) =>
+            user -> (creds.sortBy(_.scope), UserS3Credentials.digestOf(creds))
+          }
+          if stale then logger.info("user S3 credentials: reloaded after a failed refresh")
+          stale = false
+          loadedOnce = true
+        case Left(cause) =>
+          stale = true
+          logger.warn(
+            s"user S3 credentials: refresh failed, serving none until a reload succeeds: $cause"
+          )
+  }
+
+  private def retryIfStale(): Unit =
+    if stale && clock() - lastAttempt >= UserS3CredentialCache.RetryMs then
+      synchronized(
+        if stale && clock() - lastAttempt >= UserS3CredentialCache.RetryMs then refresh()
+      )
+
+object UserS3CredentialCache:
+
+  /** One [[UserS3CredentialCache.read]]: its start order, its clock, and the sets or the failure as
+    * [[FailureText.of]] names it (never its message, which could carry a credential).
+    */
+  final case class Loaded(seq: Long, at: Long, sets: Either[String, List[UserS3Credential]]):
+    override def toString: String = s"Loaded($seq,$at,${sets.map(_.size)})"
+
+  /** How often a stale cache retries its load, at most. */
+  val RetryMs: Long = 1_000L
+
+  /** Why a stale cache serves nothing. */
+  val StaleReason: String = "the users' S3 credentials could not be read"
+
+/** The credentials a replica may serve: [[UserS3Credentials]] `base` without any credential whose
+  * scope now lies at or under a database data folder ([[location.LocationChecker.scopeError]]
+  * against the live deny set), nor one whose endpoint the operator no longer allows
+  * (`allowedEndpoints`: `QOD_USER_S3_ALLOWED_ENDPOINTS` as `UserS3Config.endpoints` normalizes it;
+  * a credential on AWS's own endpoint is always allowed). Both are checked when a credential is
+  * added, but a database created afterwards at that scope or at an ancestor of it (a DuckLake
+  * database with no data path of its own lands at `parent(default)/<name>`) would otherwise let the
+  * user's keys sign that database's files, and an endpoint the operator removed, then restarted,
+  * would still reach nodes, which would sign requests to that host. [[current]] is Left while
+  * either the base or the deny set cannot be read; [[digest]] is the served set's, so a handle
+  * names exactly what the credentials endpoint answers, and [[UserS3Credentials.UnavailableDigest]]
+  * while there is none. A user the base holds no credential of is always served the empty set
+  * (digest ""), whatever can be read: nothing to withhold. Each withheld credential is named once
+  * in a WARN (its user and id, never a key).
+  */
+final class ServedUserS3Credentials(
+    base: UserS3Credentials,
+    dataFolders: () => Either[String, List[String]],
+    allowedEndpoints: List[String]
+) extends UserS3Credentials
+    with LazyLogging:
+
+  private val withheld = scala.collection.concurrent.TrieMap.empty[String, Unit]
+
+  def of(userId: String): List[UserS3Credential] = current(userId).getOrElse(Nil)
+
+  def digest(userId: String): String =
+    current(userId).fold(_ => UserS3Credentials.UnavailableDigest, UserS3Credentials.digestOf)
+
+  override def current(userId: String): Either[String, List[UserS3Credential]] =
+    for
+      set     <- base.current(userId)
+      folders <- if set.isEmpty then Right(Nil) else dataFolders()
+    yield set.filter(admitted(_, folders))
+
+  private def admitted(c: UserS3Credential, folders: List[String]): Boolean =
+    val refusal = c.endpoint
+      .filterNot(allowedEndpoints.contains)
+      .map(e => s"its endpoint $e is no longer allowed (QOD_USER_S3_ALLOWED_ENDPOINTS)")
+      .orElse(location.LocationChecker.scopeError(c.scope, folders))
+    refusal match
+      case None =>
+        withheld.remove(c.id)
+        true
+      case Some(why) =>
+        if withheld.putIfAbsent(c.id, ()).isEmpty then
+          logger.warn(
+            s"user S3 credentials: withholding credential ${c.id} of user ${c.userId}: $why"
+          )
+        false

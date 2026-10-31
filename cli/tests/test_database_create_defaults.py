@@ -7,8 +7,8 @@ BASE = "http://localhost:20900"
 
 
 @pytest.fixture(autouse=True)
-def api_key(monkeypatch):
-    monkeypatch.setenv("QOD_API_KEY", "k")
+def token(monkeypatch):
+    monkeypatch.setenv("QOD_TOKEN", "k")
 
 
 def _create(runner, respx_mock, *args):

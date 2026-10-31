@@ -74,7 +74,8 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
       )
       val adapter = new QuackHttpAdapter(
         new QuackHttpClient(new RootAllocator()),
-        new NodeLoadTracker()
+        new NodeLoadTracker(),
+        ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
       )
       val wiring = new MaintenanceWiring(
         store = store,

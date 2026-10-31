@@ -27,6 +27,15 @@ spec:
           port: {{ .Values.networkPolicy.nodePortRange.from }}
           endPort: {{ .Values.networkPolicy.nodePortRange.to }}
   egress:
+    # The manager's decision endpoint: every node calls the replica that minted its statement's
+    # handle, on that replica's pod IP and container port (QOD_POD_IP, 20900).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "qod.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 20900
     # DNS
     - to:
         - namespaceSelector: {}

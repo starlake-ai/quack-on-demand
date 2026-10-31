@@ -23,21 +23,23 @@ final class ManifestHandlers(
       * database/create. An import is the other way a tenant-db row is created, so it has to honour
       * the policy or the deployment-wide guarantee is not one.
       */
-    requireEncryption: Boolean
+    requireEncryption: Boolean,
+    /** QOD_TENANT_FILES_ROOT: an imported local location must lie under it, as on location/add. */
+    tenantFilesRoot: Option[String] = None
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
-  /** Manifest export / import are cross-tenant operations -- a dump or replay touches every
-    * tenant's pools, roles, groups and users. Restricted to superusers; non-superuser sessions are
-    * rejected with 403. Static `QOD_API_KEY` callers (no session row) are admitted.
+  /** Manifest export / import are cross-tenant operations: a dump or replay touches every tenant's
+    * pools, roles, groups and users. Restricted to superusers; every other caller is rejected with
+    * 403.
     */
   private def superuserCheck(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Option[(StatusCode, ErrorResponse)] =
     SuperuserCheck.reject(apiKey, "manifest export/import is restricted to superusers")(scopeOf)
 
   def exportYaml(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
     superuserCheck(apiKey)(scopeOf) match
       case Some(err) => Left(err)
@@ -50,7 +52,7 @@ final class ManifestHandlers(
   }
 
   def importYaml(body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): IO[Either[(StatusCode, ErrorResponse), ManifestImportSummary]] =
     IO.blocking {
       superuserCheck(apiKey)(scopeOf) match
@@ -58,11 +60,29 @@ final class ManifestHandlers(
           audit.rest(apiKey, "control-plane", AuditActions.ManifestImport, "denied")
           Left(err)
         case None =>
-          parser.parse(body).flatMap(_.as[ConfigManifest]) match
+          parser
+            .parse(body)
+            .flatMap(_.as[ConfigManifest])
+            .map(m => (m, ManifestImporter.metastoreKeyErrors(m))) match
             case Left(e) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
-            case Right(m) =>
-              ManifestImporter.apply(m, store, federatedStore, requireEncryption) match
+            // The refusal database/create answers, with its code, before anything is written
+            // (apply's own validation refuses it too, for the importers that call it directly).
+            case Right((_, keyErrors)) if keyErrors.nonEmpty =>
+              Left(
+                StatusCode.BadRequest -> ErrorResponse(
+                  "invalid_metastore_key",
+                  keyErrors.mkString("; ")
+                )
+              )
+            case Right((m, _)) =>
+              ManifestImporter.apply(
+                m,
+                store,
+                federatedStore,
+                requireEncryption,
+                tenantFilesRoot
+              ) match
                 case Left(errs) =>
                   Left(
                     StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; "))

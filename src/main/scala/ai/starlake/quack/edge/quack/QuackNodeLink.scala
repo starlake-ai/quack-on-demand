@@ -7,6 +7,7 @@ import ai.starlake.quack.edge.adapter.{
   QuackTransport,
   QuackWireError
 }
+import ai.starlake.quack.edge.authz.NodeHandles
 import ai.starlake.quack.model.RunningNode
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -15,11 +16,28 @@ import java.net.URI
 
 /** Why a node round trip failed, in the two classes the router already distinguishes: a transport
   * problem (5xx, refused, timeout) is retried once on another node, an `ERROR_RESPONSE` from the
-  * node is final and its message goes to the client.
+  * node is final and its message goes to the client. [[HandleFailed]] is a third class, for the
+  * front door: on a fresh link the router retries it like a transport problem, and the stamping
+  * fallback never mistakes it for the failure of the stamp SQL. On the link of a client
+  * transaction, any of the three ends that transaction.
   */
 enum LinkFailure(val message: String):
   case Transient(msg: String) extends LinkFailure(msg)
   case Permanent(msg: String) extends LinkFailure(msg)
+
+  /** The session handle prelude before a PREPARE failed, so the statement was not sent: the node
+    * refused it (`refused`, and `detail` is the node's own error text), or it got no answer
+    * (`detail` is the transport's).
+    */
+  case HandleFailed(refused: Boolean, detail: String)
+      extends LinkFailure(s"${LinkFailure.handleCause(refused)}: $detail")
+
+object LinkFailure:
+
+  /** A failed session handle's cause, worded so that a 503 is not reported as a refusal. */
+  def handleCause(refused: Boolean): String =
+    if refused then "the node refused the statement's session handle"
+    else "the statement's session handle did not reach the node"
 
 /** One raw Quack connection from the manager to a node, opened for one client statement.
   *
@@ -29,15 +47,32 @@ enum LinkFailure(val message: String):
   * The only node bytes the manager reads are headers and, best effort through the native bridge,
   * the `needs_more_fetch` flag and result uuid it needs to drain its own prelude and epilogue
   * statements.
+  *
+  * Every PREPARE it sends follows a fresh session handle from `authorize` (`CALL
+  * system.main.qod_session(...)`, its own PREPARE): [[prepare]] for a relayed client statement,
+  * [[runDiscard]] for the manager's own. A link a client transaction keeps across statements is
+  * handed each statement's own `authorize` ([[mintWith]]).
   */
 final class QuackNodeLink(
     transport: QuackTransport,
     val url: URI,
-    val nodeConnectionId: String
+    val nodeConnectionId: String,
+    authorize: () => String
 ) extends LazyLogging:
 
-  /** POST already-framed bytes and return the node's response bytes. */
-  def relay(bytes: Array[Byte]): IO[Either[LinkFailure, Array[Byte]]] =
+  private val minter = new java.util.concurrent.atomic.AtomicReference(authorize)
+
+  /** Mints every later session handle with `next`: a client transaction's link carries statements
+    * of one session whose grants can change between them (they follow the tenant's policy version,
+    * [[ai.starlake.quack.edge.SessionGrants]]), and each is judged under the grants of its own.
+    */
+  def mintWith(next: () => String): Unit = minter.set(next)
+
+  /** POST already-framed bytes and return the node's response bytes. Private on purpose: it is the
+    * one way to put a PREPARE on the link with no session handle in front of it, so the only ways
+    * out are [[forward]] (which refuses a PREPARE), [[prepare]] and [[runDiscard]].
+    */
+  private def relay(bytes: Array[Byte]): IO[Either[LinkFailure, Array[Byte]]] =
     transport.post(url, bytes).attempt.map {
       case Right(resp)                       => Right(resp)
       case Left(e: QuackWireError.Transient) => Left(LinkFailure.Transient(e.msg))
@@ -46,16 +81,143 @@ final class QuackNodeLink(
         Left(LinkFailure.Transient(Option(e.getMessage).getOrElse(e.toString)))
     }
 
-  /** Forward a client request: same body, the node's connection id in the header. */
+  /** Forward a client request: same body, the node's connection id in the header. Never a PREPARE,
+    * which goes through [[prepare]] after its session handle.
+    */
   def forward(frame: QuackWire.Frame): IO[Either[LinkFailure, Array[Byte]]] =
-    relay(QuackWire.rewriteHeader(frame, nodeConnectionId))
+    if frame.header.msgType == QuackWire.Type.PrepareRequest then
+      IO.pure(Left(LinkFailure.Permanent("a PREPARE is never relayed without its session handle")))
+    else relay(QuackWire.rewriteHeader(frame, nodeConnectionId))
 
-  /** Run `sql` on this connection and discard its result: the author-stamping prelude and the
-    * COMMIT epilogue. Drains the FETCH loop so the node releases the result. A node
-    * `ERROR_RESPONSE` is `Permanent(message)`. The query gets its own random uuid, as a Quack v3
-    * client names every query it prepares.
+  /** Relay `req` as this connection's next PREPARE, after a fresh session handle; the node's
+    * response bytes as they are. A failed handle ([[LinkFailure.HandleFailed]]) means `req` was not
+    * sent.
+    */
+  def prepare(
+      req: QuackWire.PrepareRequest,
+      clientQueryId: Long
+  ): IO[Either[LinkFailure, Array[Byte]]] =
+    authorized(clientQueryId).flatMap {
+      case Left(f)   => IO.pure(Left(f))
+      case Right(()) =>
+        relay(QuackWire.encodePrepareRequest(nodeConnectionId, clientQueryId, req))
+    }
+
+  /** Run `sql` on this connection after a fresh session handle, and discard its result: the
+    * author-stamping prelude, a reopened BEGIN, the COMMIT epilogue. A node `ERROR_RESPONSE` to
+    * `sql` is `Permanent(message)`; a failed handle is [[LinkFailure.HandleFailed]], and `sql` was
+    * not sent.
     */
   def runDiscard(sql: String, clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
+    authorized(clientQueryId).flatMap {
+      case Left(f)   => IO.pure(Left(f))
+      case Right(()) => run(sql, clientQueryId)
+    }
+
+  /** Run `sql` on this connection after a fresh session handle and keep its result: the
+    * PREPARE_RESPONSE, then every FETCH_RESPONSE that carries chunks, as the node sent them, for
+    * the manager to decode itself (a SUMMARIZE's columns, Task 19). The node's ERROR_RESPONSE is
+    * `Right(Left(text))`, worded as DuckDB does (`errorText`): the node answered, the link is
+    * sound. A failed handle is [[LinkFailure.HandleFailed]] and `sql` was not sent; a result past
+    * `maxBytes` is `Permanent`.
+    */
+  def collect(
+      sql: String,
+      clientQueryId: Long,
+      maxBytes: Long = QuackNodeLink.MaxCollectBytes
+  ): IO[Either[LinkFailure, Either[String, List[Array[Byte]]]]] =
+    authorized(clientQueryId).flatMap {
+      case Left(f)   => IO.pure(Left(f))
+      case Right(()) =>
+        val prep = QuackWire.encodePrepareRequest(
+          nodeConnectionId,
+          clientQueryId,
+          QuackWire.PrepareRequest(sql, Some(QuackNodeLink.randomUuid()), None)
+        )
+        relay(prep).flatMap {
+          case Left(f)     => IO.pure(Left(f))
+          case Right(resp) =>
+            QuackWire.messageType(resp) match
+              case QuackWire.Type.ErrorResponse   => IO.pure(Right(Left(errorText(resp))))
+              case QuackWire.Type.PrepareResponse =>
+                val more = QuackNodeLink.nativeNeedsMore(resp).getOrElse(false)
+                QuackNodeLink.nativeResultUuid(resp) match
+                  case Some(uuid) if more =>
+                    collectFetches(
+                      uuid,
+                      clientQueryId,
+                      1L,
+                      List(resp),
+                      resp.length.toLong,
+                      maxBytes
+                    )
+                  case _ => IO.pure(Right(Right(List(resp))))
+              case other =>
+                IO.pure(
+                  Left(LinkFailure.Permanent(s"unexpected response type $other after PREPARE"))
+                )
+        }
+    }
+
+  /** [[drain]], keeping each FETCH_RESPONSE that carries chunks. */
+  private def collectFetches(
+      uuid: QuackWire.Hugeint,
+      clientQueryId: Long,
+      batch: Long,
+      kept: List[Array[Byte]],
+      bytes: Long,
+      maxBytes: Long
+  ): IO[Either[LinkFailure, Either[String, List[Array[Byte]]]]] =
+    if batch > QuackNodeLink.MaxDrainRounds || bytes > maxBytes then
+      IO.pure(Left(LinkFailure.Permanent("the result is too large for the manager to read")))
+    else
+      relay(QuackWire.encodeFetchRequest(nodeConnectionId, clientQueryId, uuid, batch)).flatMap {
+        case Left(f)     => IO.pure(Left(f))
+        case Right(resp) =>
+          if QuackWire.messageType(resp) == QuackWire.Type.ErrorResponse then
+            IO.pure(Right(Left(errorText(resp))))
+          else if QuackWire.isTerminalFetch(resp) then IO.pure(Right(Right(kept.reverse)))
+          else
+            collectFetches(
+              uuid,
+              clientQueryId,
+              batch + 1,
+              resp :: kept,
+              bytes + resp.length,
+              maxBytes
+            )
+      }
+
+  /** The session handle prelude, drained. Any failure of the prelude itself is `HandleFailed`, and
+    * the statement is not sent: a node error on it (the node refused the handle, and its text is
+    * kept as is but for DuckDB's excerpt of the statement, which would carry the handle) and a
+    * transport failure on it (the handle never reached the node), each worded for what happened so
+    * that a 503 is not reported as a refusal. No principal to vouch for (`authorize` throws) is
+    * `Permanent`: nothing could be minted, and no other node would do better.
+    */
+  private def authorized(clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
+    IO(minter.get()()).attempt.flatMap {
+      case Left(e) =>
+        IO.pure(Left(LinkFailure.Permanent(Option(e.getMessage).getOrElse(e.toString))))
+      case Right(prelude) =>
+        run(prelude, clientQueryId).map(_.left.map(handleFailure))
+    }
+
+  /** [[run]] answers a node error with `Permanent` and a transport failure with `Transient`. Either
+    * text loses any statement excerpt ([[NodeHandles.refusalText]]) here, before it is answered,
+    * fenced, logged or recorded.
+    */
+  private def handleFailure(f: LinkFailure): LinkFailure.HandleFailed = f match
+    case LinkFailure.Permanent(m) =>
+      LinkFailure.HandleFailed(refused = true, NodeHandles.refusalText(m))
+    case LinkFailure.Transient(m) =>
+      LinkFailure.HandleFailed(refused = false, NodeHandles.refusalText(m))
+    case h: LinkFailure.HandleFailed => h // never produced by run; keeps the match exhaustive
+
+  /** One PREPARE of `sql`, drained through its FETCH loop so the node releases the result. The
+    * query gets its own random uuid, as a Quack v3 client names every query it prepares.
+    */
+  private def run(sql: String, clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
     val prep = QuackWire.encodePrepareRequest(
       nodeConnectionId,
       clientQueryId,
@@ -101,6 +263,12 @@ final class QuackNodeLink(
   private def errorMessage(resp: Array[Byte]): String =
     QuackWire.decodeErrorMessage(resp).getOrElse("node error")
 
+  /** A statement's node error as the router reads it: DuckDB's wording, its exception type first
+    * ([[QuackWire.decodeErrorText]]), so a node's refusal reads as on the Arrow transport.
+    */
+  private def errorText(resp: Array[Byte]): String =
+    QuackWire.decodeErrorText(resp).getOrElse("node error")
+
   /** Best-effort DISCONNECT; a half-dead node must not fail the caller. */
   def close(): IO[Unit] =
     transport.post(url, QuackWire.encodeDisconnect(nodeConnectionId)).void.handleError { e =>
@@ -111,24 +279,33 @@ object QuackNodeLink:
 
   private val MaxDrainRounds = 1_000_000L
 
+  /** The most response bytes [[QuackNodeLink.collect]] keeps. */
+  val MaxCollectBytes: Long = 16L << 20
+
   /** A fresh query uuid for a statement the manager runs itself. */
   private[quack] def randomUuid(): QuackWire.Hugeint =
     val u = java.util.UUID.randomUUID()
     QuackWire.Hugeint(u.getMostSignificantBits, u.getLeastSignificantBits)
 
+  /** The `authorize` of a link that sends no statement (the handshake's version probe). */
+  val NoStatements: () => String =
+    () => throw new IllegalStateException("this node link sends no statement")
+
   /** Open a connection to `node` on the client's behalf: the client's own hello (versions,
     * platform, client id, heartbeat) with the node token as `auth_string`, so protocol negotiation
-    * runs end to end between the real client and the real node.
+    * runs end to end between the real client and the real node. The link's statements follow a
+    * session handle each, from `authorize`.
     */
   def open(
       transport: QuackTransport,
       node: RunningNode,
       hello: QuackWire.ConnectionRequest,
-      clientQueryId: Long
+      clientQueryId: Long,
+      authorize: () => String
   ): IO[Either[LinkFailure, (QuackNodeLink, QuackWire.ConnectionResponse)]] =
     val url  = QuackProtocol.endpointToHttp(s"quack:${node.host}:${node.port}")
     val body = QuackWire.encodeConnectionRequest(hello.copy(authString = node.token), clientQueryId)
-    val probe = new QuackNodeLink(transport, url, "")
+    val probe = new QuackNodeLink(transport, url, "", NoStatements)
     probe.relay(body).map {
       case Left(f)     => Left(f)
       case Right(resp) =>
@@ -136,7 +313,7 @@ object QuackNodeLink:
           case QuackWire.Type.ConnectionResponse =>
             QuackWire.decodeConnectionResponse(resp) match
               case Right((connId, r)) if connId.nonEmpty =>
-                Right((new QuackNodeLink(transport, url, connId), r))
+                Right((new QuackNodeLink(transport, url, connId, authorize), r))
               case Right(_) => Left(LinkFailure.Permanent("node answered without a connection id"))
               case Left(e)  =>
                 Left(LinkFailure.Permanent(s"unreadable CONNECTION_RESPONSE: ${e.message}"))

@@ -20,6 +20,10 @@ final case class TenantDb(
     // blob. Engine defaults live here: SET temp_directory, SET memory_limit,
     // INSTALL/LOAD. Edits take effect on the next node spawn.
     initSql: String = "",
+    // Whether `initSql` was written by a superuser or by the manager itself (nodes run it as
+    // written) or by a tenant admin (nodes run it under qod-node's tenant initSql allowlist). Set
+    // by every write from the writer (`InitSqlTrust.afterWrite`); Liquibase 0053.
+    initSqlTrusted: Boolean = false,
     // Parent tenant-db id when this row is a branch catalog (Epic 1); None for every ordinary
     // tenant-db. Branch rows attach on their nodes under the PARENT's catalog alias (metastore
     // key `catalogAlias`), are excluded from maintenance scheduling, and are torn down through
@@ -58,11 +62,11 @@ object TenantDb {
       EncryptionKeyName
     )
 
-  /** Metastore keys that must never reach a Kubernetes pod spec as a plain `EnvVar`. Read by both
-    * the strip in `KubernetesQuackBackend.buildPod` and the contents of the per-pool node-env
-    * Secret, so the two cannot drift. Deliberately distinct from [[SecretKeys]], which answers a
-    * different question (what must never round-trip through an API response) and spans the
-    * `objectStore` map as well.
+  /** The metastore's own secrets, which every launcher delivers as files and never as an
+    * environment variable (`NodeMetastore.secrets`: the spawn script's secrets directory, the
+    * Kubernetes per-pool node-env Secret, a fleet assignment). Deliberately distinct from
+    * [[SecretKeys]], which answers a different question (what must never round-trip through an API
+    * response) and spans the `objectStore` map as well.
     */
   val NodeSecretEnvKeys: Set[String] = Set("pgPassword", EncryptionKeyName)
 
@@ -71,6 +75,109 @@ object TenantDb {
     * parent's alias so grants, policies and user SQL written against the parent apply unchanged.
     */
   val CatalogAliasKey: String = "catalogAlias"
+
+  /** Metastore key the manager stamps from the row's own `encrypted` flag for the spawn scripts
+    * (`PoolSupervisor`'s effective metastore). Never a caller's key: [[KnownMetastoreKeys]] leaves
+    * it out.
+    */
+  val EncryptedKey: String = "encrypted"
+
+  /** The non-secret metastore keys a node's launcher reads from its environment:
+    * `scripts/spawn-quack-node.sh` and `.ps1` read exactly these (the node image's entrypoint and
+    * `qod fleet join` run the bash script). Every launcher overlay passes these and no other
+    * metastore key: `LocalQuackBackend`'s spawn environment, `KubernetesQuackBackend`'s pod env,
+    * `FleetQuackBackend`'s assignment env and `qod fleet join` (`_NODE_ENV_KEYS`, pinned equal by
+    * `NodeSecretFilesSpec`). Any other name would become an environment variable of a bash script
+    * and of qod-node: `BASH_ENV` (bash expands it before running the script), `PATH`, `LD_PRELOAD`,
+    * `QOD_NODE_BIN`, or a variable the manager sets itself (`kind`, `QOD_NODE_ID`, the decide
+    * limits `QOD_AUTHZ_DECIDE_TIMEOUT_MS` / `QOD_AUTHZ_CACHE_ENTRIES`). The metastore's secrets
+    * ([[NodeSecretEnvKeys]]) reach the launcher as files, never env. A key the scripts start
+    * reading from the metastore must be added here, or every launcher drops it.
+    */
+  val NodeEnvKeys: Set[String] =
+    Set(
+      "pgHost",
+      "pgPort",
+      "pgUser",
+      "dbName",
+      "catalogAlias",
+      "schemaName",
+      "dataPath",
+      "encrypted"
+    )
+
+  /** Every key a caller may store in a tenant-db's metastore, compared by exact name: the
+    * launcher's [[NodeEnvKeys]] minus [[EncryptedKey]] (stamped by the manager from the row's
+    * flag), plus the secrets [[NodeSecretEnvKeys]]. They are also every metastore key manager-side
+    * code reads (the DuckLake initializer, the catalog reader, the branch cloner and merge fence).
+    * `database/create`, `database/update` and a manifest import refuse any other key with
+    * `400 invalid_metastore_key` before anything is written, except that `database/update` also
+    * takes a secret-named key ([[SecretKeys]]) sent empty, which removes it
+    * ([[metastoreUpdateKeyError]]).
+    */
+  val KnownMetastoreKeys: Set[String] = (NodeEnvKeys - EncryptedKey) ++ NodeSecretEnvKeys
+
+  /** The clause naming [[KnownMetastoreKeys]], sorted, in every line that refuses or drops another
+    * key: the API's refusal, a node's dropped key, a manifest export's left-out key.
+    */
+  val MetastoreHoldsOnly: String =
+    s"a metastore holds only ${KnownMetastoreKeys.toList.sorted.mkString(", ")}"
+
+  /** The keys of `metastore` outside [[KnownMetastoreKeys]], sorted. */
+  def unknownMetastoreKeys(metastore: Map[String, String]): List[String] =
+    metastore.keys.filterNot(KnownMetastoreKeys.contains).toList.sorted
+
+  /** The refusal of a metastore holding a key outside [[KnownMetastoreKeys]], naming every such key
+    * and never a value; None when every key is known.
+    */
+  def metastoreKeyError(metastore: Map[String, String]): Option[String] =
+    unknownMetastoreKeys(metastore) match
+      case Nil  => None
+      case keys =>
+        val (noun, verb) = if keys.size == 1 then ("key", "is") else ("keys", "are")
+        val hint         =
+          if keys.contains(EncryptedKey) then
+            s" (`$EncryptedKey` is the database's own flag, set at create)"
+          else ""
+        Some(
+          s"metastore $noun ${keys.map(k => s"'$k'").mkString(", ")} $verb not accepted: " +
+            s"$MetastoreHoldsOnly$hint"
+        )
+
+  /** [[metastoreKeyError]] for `database/update`, which also takes a secret-named key outside
+    * [[KnownMetastoreKeys]] (a [[SecretKeys]] member: `s3_secret_access_key`, `azure_account_key`,
+    * `gcs_hmac_secret`) sent with an empty value. No response shows such a key and an update that
+    * leaves it out keeps it (`PoolSupervisor.mergeSecretKeys`), so sending it empty, which removes
+    * it in any spelling, is the one way to remove it from a row stored before the API refused it.
+    * Sent with a value, it is refused like any other key.
+    */
+  def metastoreUpdateKeyError(metastore: Map[String, String]): Option[String] =
+    metastoreKeyError(metastore.filterNot { case (k, v) => SecretKeys.contains(k) && v.isEmpty })
+
+  /** A metastore key fit for a log line: every control character escaped, so a stored key cannot
+    * forge a line.
+    */
+  def printableKey(key: String): String =
+    key.flatMap(c => if c.isControl then f"\\u${c.toInt}%04x" else c.toString)
+
+  /** How `database/update` removes `key`, a stored key outside [[KnownMetastoreKeys]] that no node
+    * uses, for the lines that name one (a node's dropped key, a manifest export's left-out key).
+    * Not for a spelling of [[NodeSecretEnvKeys]] (`PgPassword`): the nodes use that as their
+    * secret, so it is stored under its own name, never removed. An update replaces the whole
+    * metastore, so the advice always sends the full map: one sending only the key would revert
+    * every other key (a branch row would lose its `catalogAlias`). A secret-named key
+    * ([[SecretKeys]], in any spelling) is hidden from responses and kept by an update that leaves
+    * it out, so it goes by sending its [[SecretKeys]] name empty, which removes every spelling
+    * ([[metastoreUpdateKeyError]] accepts that).
+    */
+  def metastoreKeyRemoval(key: String): String =
+    SecretKeys.find(_.equalsIgnoreCase(key)) match
+      case Some(secret) =>
+        "Remove it by sending the database's full metastore through database/update with " +
+          s"'$secret' set to an empty value: an update replaces the metastore, and one that " +
+          "leaves a secret key out keeps it."
+      case None =>
+        "Remove it by sending the database's full metastore without it through database/update."
 
   /** The DuckDB catalog alias for a resolved metastore: `catalogAlias` when set, else `dbName`,
     * else `fallback`. Every site that derives the alias from a metastore (USE prelude, author
@@ -181,9 +288,13 @@ object TenantDb {
     * instead of re-implementing the check.
     */
   def objectStoreError(objectStore: Map[String, String]): Option[String] =
-    objectStore.find { case (_, v) => v.contains(";") }.map { case (k, _) =>
-      s"invalid objectStore value for '$k': must not contain ';'"
-    }
+    // A line break is refused too: the values are interpolated into the node's init SQL, where a
+    // value spread over lines could fake a line of that SQL (Task 20 review I1).
+    objectStore
+      .find { case (_, v) => v.contains(";") || v.contains('\n') || v.contains('\r') }
+      .map { case (k, _) =>
+        s"invalid objectStore value for '$k': must not contain ';' or a line break"
+      }
 
   /** Injection-safety checks only: reject any script-interpolated value that carries a
     * SQL-literal-breaking or identifier-breaking metacharacter, validating each field only when it
@@ -227,9 +338,6 @@ object TenantDb {
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
       .orElse(objectStoreError(td.objectStore))
-      // Not a metacharacter rule: initSql is SQL by design, but the CLI runs a dot-command line in
-      // it as an OS command (InitSqlScreen).
-      .orElse(InitSqlScreen.error("initSql", td.initSql))
 
   /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
     * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)

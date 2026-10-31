@@ -16,9 +16,10 @@ imagePullSecrets: []
 
 # --- Replicas ---------------------------------------------------------------
 # replicaCount > 1 turns on HA mode (QOD_HA_ENABLED=true): active-active
-# replicas with Postgres advisory-lock leader election. Requires
-# sessionJwtSecret (or existingSessionJwtSecret) so sessions verify on every
-# replica. See docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
+# replicas with Postgres advisory-lock leader election. Every replica signs
+# sessions with the same secret: sessionJwtSecret when set, else the one the
+# first manager stored in the control-plane database.
+# See docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
 replicaCount: 1
 
 # Optional override for the rendered names. `fullnameOverride` wins if set.
@@ -154,7 +155,8 @@ networkPolicy:
     cidrs: []
   # Peers allowed to reach the manager's REST/UI (20900) and FlightSQL
   # (31338) ports. Empty = allow from anywhere (e.g. behind an Ingress /
-  # LoadBalancer already restricting access upstream).
+  # LoadBalancer already restricting access upstream). Node pods always reach
+  # 20900 for their verdict calls, whatever this says.
   ingressFrom: []
   # Outbound SMTP for the hosted signup/notification flow. Off by default.
   smtp:
@@ -195,21 +197,6 @@ postgres:
   existingSecret: ""       # PROD: reference an externally-managed Secret containing the key below
   existingSecretKey: pgPassword
 
-# --- Tenant SQL screening -----------------------------------------------------
-# Node lockdown (QOD_NODE_LOCKDOWN) is ON in this chart, unlike the manager's
-# own first-run default. It stops non-superusers from running ATTACH, INSTALL
-# and LOAD, changing protected settings and reading local files. Without it (and with
-# the SQL ACL off) any tenant user can read the node's mounted secrets
-# (/var/run/qod-secrets: the catalog Postgres password, object-store keys,
-# federation SQL) with read_text(). Pools can still opt out one by one
-# (POST /api/pool/setLockdown). Turning it off chart-wide is only safe when
-# every tenant user is trusted with the postgres.user credential.
-security:
-  nodeLockdown: true
-  # SQL ACL (QOD_ACL_ENABLED): enforce role grants per table. Off by default;
-  # turning it on also refuses file-reading functions to non-superusers.
-  aclEnabled: false
-
 # --- Quack node image --------------------------------------------------------
 # Image used for the Quack node pods the manager spawns. This is the DuckDB
 # Quack server, NOT the manager - they're separate processes. Built from
@@ -239,8 +226,10 @@ storage:
 # these into the manager's defaultMetastore env vars, which KubernetesQuackBackend
 # then forwards into every spawned Quack node pod (the credentials as files of
 # the node's read-only secrets volume, never env vars). The node's
-# spawn-quack-node.sh consumes `QOD_S3_*` to emit the matching DuckDB
-# `CREATE SECRET quack_s3 (...)` so httpfs can talk to the endpoint.
+# spawn-quack-node.sh consumes `QOD_S3_*` to emit `CREATE SECRET qod_data_s3 (...)`,
+# scoped to each database's data path (no node holds an unscoped S3 secret), so
+# httpfs can talk to the endpoint; without the keys it uses the pod's AWS
+# credential chain.
 #
 # For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
 # For production: point endpoint at your bucket (https://s3.<region>.amazonaws.com
@@ -259,31 +248,35 @@ s3:
   existingSecretSecretKeyKey: s3SecretKey
 
 # --- Admin credentials -------------------------------------------------------
-# Initial admin user(s) seeded into qodstate_user on first boot only (a row
+# REQUIRED: admin.password or admin.existingSecret (the chart refuses to render
+# without one). The chart passes no static API key (there is no `apiKey` value
+# any more, and the chart refuses one): people log in (the UI, `qod login`) and
+# automation uses personal access tokens minted from a session
+# (`qod auth pat create`), so without an admin nobody could ever log in.
+#
+# The admin user(s) are seeded into qodstate_user on first boot only (a row
 # that already exists is never rewritten, so changing the password here and
-# re-deploying does NOT rotate it: use `qod auth change-password`).
-# `username` accepts a comma-separated list: every entry gets the same
-# password + admin role. Default seeds BOTH the project's documented
-# convention (`admin@localhost.local`) AND the short form (`admin`) so
-# operators can log in with either.
+# re-deploying does NOT rotate it: use `qod auth change-password`, or
+# `qod admin reset-password` with database access). `username` accepts a
+# comma-separated list: every entry gets the same password + admin role.
+# Default seeds BOTH the project's documented convention
+# (`admin@localhost.local`) AND the short form (`admin`) so operators can log
+# in with either.
 admin:
   username: "admin@localhost.local,admin"
-  # Either inline (dev) or via an externally-managed secret (prod).
+  # Either inline (dev) or via an externally-managed secret (prod), which holds
+  # the password under existingSecretKey.
   password: ""
   existingSecret: ""
   existingSecretKey: adminPassword
 
-# --- REST API gate ----------------------------------------------------------
-# Optional static X-API-Key for the /api/* admin endpoints. When unset
-# AND admin password is set, the UI's session-token flow still works for
-# the admin user. Leave empty for dev kind tests.
-apiKey:
-  value: ""
-  existingSecret: ""
-  existingSecretKey: apiKey
-
-# Session JWT signing key shared by all replicas. REQUIRED when replicaCount > 1.
-# Generate with: openssl rand -hex 32
+# Session JWT signing key (QOD_SESSION_JWT_SECRET). Optional at any replica
+# count: left empty, the first manager generates one, stores it in the
+# control-plane database and every restart and replica reads it, so sessions
+# survive restarts. Set it (openssl rand -hex 32) only when another service
+# must verify the sessions with the same key. To rotate the stored one, run
+# DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'
+# and restart every replica: every session and reset link ends.
 sessionJwtSecret: ""
 # Name of a pre-existing Secret with key "sessionJwtSecret" (takes precedence).
 existingSessionJwtSecret: ""

@@ -9,6 +9,7 @@ import ai.starlake.quack.model.{
   Tenant,
   TenantDbKind
 }
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.{NoFreeServer, QuackBackend}
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
@@ -73,7 +74,7 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
   private def fixture(): (FleetLikeBackend, PoolSupervisor, InMemoryControlPlaneStore, PoolKey) =
     val b   = new FleetLikeBackend
     val st  = new InMemoryControlPlaneStore()
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, st, lockdownEnabled = false)
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, st)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
       .createTenantDb("acme", "db", TenantDbKind.InMemory, Map.empty, dataPath = "")
@@ -314,7 +315,6 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend,
         tracker,
         cp,
-        lockdownEnabled = false,
         locks = locker,
         federationBlobOf = _ => IO(fedBlob)
       )
@@ -366,8 +366,15 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     fx.run {
       fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
       fx.holder(id(1)) shouldBe List("a")
-      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
-      h.drain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      val h = new FleetHandlers(
+        fx.store,
+        cfg,
+        backend = Some(fx.backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+      h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       fx.holder(id(1)) shouldBe List("b")
       fx.rowIds shouldBe List(id(1))
@@ -381,8 +388,15 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     fx.join("a")
     fx.run {
       fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
-      h.drain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      val h = new FleetHandlers(
+        fx.store,
+        cfg,
+        backend = Some(fx.backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+      h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       // Nothing holds the node any more (the drain released it): no server to keep it for, so
       // the row goes and the slot is pending, unlike a dead server that still holds it.
@@ -390,7 +404,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.pendingCount(fx.key) shouldBe 1
       fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
       fx.inner.get("a").get.assignedNodeId shouldBe None
-      h.undrain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      h.undrain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("a")
@@ -435,7 +450,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.join("a")
       val orphan = fx.inner
         .claim(
-          FleetAssignment(0, id(1), fx.key, 0, "t", "memory", Map.empty, "", "", "", ""),
+          FleetAssignment(0, id(1), fx.key, 0, "t", "memory", Map.empty, "", "", ""),
           30,
           None
         )
@@ -595,8 +610,15 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.holder(id(1)) shouldBe List("a")
       fx.agents("a").paused = true
       fx.inner.backdate("a", 40) // unreachable (> 30s), inside the 60s grace
-      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
-      h.remove(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      val h = new FleetHandlers(
+        fx.store,
+        cfg,
+        backend = Some(fx.backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+      h.remove(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("b")

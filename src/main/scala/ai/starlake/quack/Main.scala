@@ -5,7 +5,6 @@ import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{
-  AclConfig,
   AuthenticationConfig,
   AwsAuthConfig,
   AzureAuthConfig,
@@ -13,7 +12,6 @@ import ai.starlake.quack.edge.config.{
   GoogleAuthConfig,
   JwtAuthConfig,
   KeycloakAuthConfig,
-  NodeLockdownConfig,
   OpaConfig
 }
 import ai.starlake.quack.boot.{
@@ -21,9 +19,9 @@ import ai.starlake.quack.boot.{
   BootPreflight,
   CatalogReaders,
   EdgeRewriters,
+  LeaderDuties,
   ManagementAuthWiring
 }
-import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
 import ai.starlake.quack.model.{RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.{
@@ -37,7 +35,7 @@ import ai.starlake.quack.observability.metrics.{
 }
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
-import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
+import ai.starlake.quack.ondemand.bootstrap.{DemoBootstrapHook, ServeProvisionHook}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditRecorder,
   EventJournal,
@@ -91,11 +89,16 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
+  given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
+  given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
+  given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
+  given ProductHint[TenantFilesConfig]         = ProductHint[TenantFilesConfig](camelMapping)
+  given ProductHint[UserS3Config]              = ProductHint[UserS3Config](camelMapping)
   given ProductHint[BranchingConfig]           = ProductHint[BranchingConfig](camelMapping)
   given ProductHint[FleetConfig]               = ProductHint[FleetConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
@@ -124,11 +127,16 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagerAuthConfig]        = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
+  given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
+  given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
+  given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
   given ConfigReader[RoutingConfig]            = deriveReader[RoutingConfig]
   given ConfigReader[AutoscaleConfig]          = deriveReader[AutoscaleConfig]
+  given ConfigReader[TenantFilesConfig]        = deriveReader[TenantFilesConfig]
+  given ConfigReader[UserS3Config]             = deriveReader[UserS3Config]
   given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
   given ConfigReader[EmbeddedPostgresConfig]   = deriveReader[EmbeddedPostgresConfig]
   given ConfigReader[SmtpConfig]               = deriveReader[SmtpConfig]
@@ -168,7 +176,8 @@ object Main extends IOApp with LazyLogging:
           ai.starlake.quack.cli.ManifestCli.importFrom(
             store,
             System.in,
-            mgrCfg.requireEncryption
+            mgrCfg.requireEncryption,
+            mgrCfg.tenantFiles.rootOpt
           )
         }.map(rc => if rc == 0 then ExitCode.Success else ExitCode.Error)
       case "admin" :: "reset-password" :: rest =>
@@ -193,12 +202,12 @@ object Main extends IOApp with LazyLogging:
     * coordinates while `seedAdminUsers` writes the admin row into the embedded server -- the auth
     * split-brain this wrapper exists to close. See `EmbeddedControlPlane.applyAuthCoordinates` for
     * the per-key env-override rule. The server is stopped (never deleted) on every exit path via
-    * `guarantee`, including a failed boot, including a failure in the control-plane database ensure
-    * step.
+    * `guarantee`, including a failed boot (a refusal `bootManager` throws while it builds its IO
+    * included: `boot` is deferred), including a failure in the control-plane database ensure step.
     *
-    * This is deliberately NOT `DemoConfig.overlay`: it does not touch `apiKey`, `runtimeType`, TLS,
-    * or ACL, so a persistent embedded install keeps the normal secure posture. `DemoConfig.overlay`
-    * remains reachable only from `DemoRunner.runDemo`.
+    * This is deliberately NOT `DemoConfig.overlay`: it does not touch `runtimeType`, TLS, or ACL,
+    * so a persistent embedded install keeps the normal secure posture. `DemoConfig.overlay` remains
+    * reachable only from `DemoRunner.runDemo`.
     */
   private[quack] def withEmbeddedControlPlane(
       mgrCfg: ManagerConfig,
@@ -209,14 +218,18 @@ object Main extends IOApp with LazyLogging:
     else
       IO.blocking(ai.starlake.quack.boot.EmbeddedControlPlane.start(mgrCfg.embeddedPostgres))
         .flatMap { cp =>
+          // Deferred: `bootManager` runs its refusals (sys.error) while it builds its IO, and an
+          // eager call would throw before `guarantee` is attached, leaving the server running.
           (IO.blocking(cp.ensureDatabase(mgrCfg.defaultMetastore.dbName)) *>
-            boot(
-              ai.starlake.quack.boot.EmbeddedControlPlane.applyCoordinates(mgrCfg, cp),
-              ai.starlake.quack.boot.EmbeddedControlPlane.applyAuthCoordinates(
-                authCfg,
-                cp,
-                mgrCfg.defaultMetastore.dbName,
-                env
+            IO.defer(
+              boot(
+                ai.starlake.quack.boot.EmbeddedControlPlane.applyCoordinates(mgrCfg, cp),
+                ai.starlake.quack.boot.EmbeddedControlPlane.applyAuthCoordinates(
+                  authCfg,
+                  cp,
+                  mgrCfg.defaultMetastore.dbName,
+                  env
+                )
               )
             )).guarantee(IO.blocking(cp.stop()))
         }
@@ -227,21 +240,17 @@ object Main extends IOApp with LazyLogging:
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg   = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val opaCfg   = OpaConfig
       .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
       .fold(err => throw new IllegalArgumentException(err), identity)
-    val lockdownCfg = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
-    val metricsCfg  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+    val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     withEmbeddedControlPlane(mgrCfg, authCfg) { (resolved, resolvedAuth) =>
       bootManager(
         resolved,
         edgeCfg,
         resolvedAuth,
-        aclCfg,
         metricsCfg,
         opaCfg,
-        lockdownCfg = lockdownCfg,
         modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
         quackCfg = Some(quackCfg)
       )
@@ -251,45 +260,59 @@ object Main extends IOApp with LazyLogging:
       mgrCfg0: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
-      aclCfg: AclConfig,
       metricsCfg: MetricsConfig,
       /** Validated `quack-flightsql.opa` block (`OpaConfig.validate`). No default: every caller
         * must load and validate it, so a bad QOD_ACL_MODE / QOD_OPA_URL fails boot everywhere.
         */
       opaCfg: OpaConfig,
-      lockdownCfg: NodeLockdownConfig = NodeLockdownConfig(enabled = false),
       modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
       /** The native Quack front door block; loaded from `quack-native` when the caller does not
         * pass one (demo and serve overlays set their system properties before this runs).
         */
-      quackCfg: Option[QuackNativeConfig] = None
+      quackCfg: Option[QuackNativeConfig] = None,
+      /** What the removed-key and removed-switch refusals read (`BootPreflight.checkRemovedApiKey`,
+        * `checkRemovedSwitches`): the process environment and the raw configuration. Tests pass
+        * their own.
+        */
+      env: String => Option[String] = sys.env.get,
+      rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
   ): IO[ExitCode] =
-    val quackCfgResolved: QuackNativeConfig =
-      quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
-    // Unset boot secrets (session JWT secret, static API key) are generated and printed here,
-    // BEFORE anything reads them. A no-op under HA, so the gate below still sees the raw empty
-    // secret and refuses: per-replica random secrets cannot verify each other's sessions.
-    val mgrCfg = BootPreflight.withGeneratedBootSecrets(mgrCfg0)
-    HaPreconditions
-      .validate(
-        mgrCfg.ha.enabled,
-        mgrCfg.runtimeType,
-        mgrCfg.auth.management.sessionJwtSecret,
-        mgrCfg.embeddedPostgres.enabled
+    // The three auth refusals run first, at the top of bootManager, before it opens any socket: they
+    // read the configuration alone. A removed QOD_API_KEY refuses boot before HA validation, so an
+    // upgrade that still sets the key stops with the reason.
+    BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
+    // Then a removed switch (QOD_ACL_ENABLED, QOD_ACL_FILTERED_METADATA, QOD_ACL_DIALECT,
+    // QOD_NODE_LOCKDOWN): the node enforces always and the listing filter is always mounted.
+    BootPreflight.checkRemovedSwitches(env, rawConfig).left.foreach(msg => sys.error(msg))
+    // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
+    // client.
+    BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
+    // Then a manager nothing could create a session on (a personal access token is minted with
+    // one): `/api` would be unreachable.
+    BootPreflight
+      .checkLoginAvailable(
+        AuthenticationService.configuresPasswordProvider(authCfg),
+        mgrCfg0.auth.management
       )
       .left
       .foreach(msg => sys.error(msg))
+    val quackCfgResolved: QuackNativeConfig =
+      quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
+    HaPreconditions
+      .validate(mgrCfg0.ha.enabled, mgrCfg0.runtimeType, mgrCfg0.embeddedPostgres.enabled)
+      .left
+      .foreach(msg => sys.error(msg))
 
-    mgrCfg.fleet
-      .validateForRuntime(mgrCfg.runtimeType, duckdbOnHost = BootPreflight.duckdbOnHost())
+    mgrCfg0.fleet
+      .validateForRuntime(mgrCfg0.runtimeType)
       .left
       .foreach(msg => sys.error(msg))
 
     TelemetryConfig
       .validate(
-        mgrCfg.telemetry.store,
-        mgrCfg.telemetry.stmtHistoryRetentionDays,
-        mgrCfg.telemetry.auditSink
+        mgrCfg0.telemetry.store,
+        mgrCfg0.telemetry.stmtHistoryRetentionDays,
+        mgrCfg0.telemetry.auditSink
       )
       .left
       .foreach(msg => sys.error(msg))
@@ -302,28 +325,92 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
+    // Nodes started on this host run qod-node: resolve it now, after the native check loaded
+    // libduckdb (a bundled qod-node links the same one), so a manager that could not start a single
+    // node refuses to boot with the reason.
+    val qodNodeBin: Option[java.nio.file.Path] =
+      if BootFactories.runsLocalNodes(mgrCfg0) then
+        ai.starlake.quack.ondemand.runtime.QodNodeBinary.default match
+          case Left(msg)  => sys.error(msg)
+          case Right(bin) => Some(bin)
+      else None
+
     // Lockout enabled with no SMTP relay would strand a locked-out user with no way
     // back in. Pure check, no DB/network required, so it runs before the Postgres
     // preflight below.
     BootPreflight
-      .checkLockoutSmtp(mgrCfg.auth.lockout.enabled, mgrCfg.smtp.host)
+      .checkLockoutSmtp(mgrCfg0.auth.lockout.enabled, mgrCfg0.smtp.host)
       .left
       .foreach(msg => sys.error(msg))
     logger.info(
-      if mgrCfg.auth.lockout.enabled then
-        s"account lockout: enabled (locks after ${mgrCfg.auth.lockout.maxFailures} consecutive failed logins)"
+      if mgrCfg0.auth.lockout.enabled then
+        s"account lockout: enabled (locks after ${mgrCfg0.auth.lockout.maxFailures} consecutive failed logins)"
       else "account lockout: disabled"
     )
 
+    // The URL nodes call back for verdicts must be reachable from the runtime's nodes: on
+    // Kubernetes this pod's address (the chart sets QOD_POD_IP), in fleet mode the address the
+    // servers heartbeat to. Configuration only, so it runs before the Postgres preflight. The line
+    // is printed, not logged, as the session secret's source is: the logger's default ERROR root
+    // level would swallow it, and operators need to see which URL their nodes call.
+    BootPreflight.checkInternalUrl(
+      mgrCfg0.runtimeType,
+      mgrCfg0.nodeAuthz,
+      mgrCfg0.host,
+      mgrCfg0.port
+    ) match
+      case Left(msg)  => sys.error(msg)
+      case Right(url) => println(BootPreflight.decideUrlLine(url))
+
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
-    Banner.postgresPreflight(mgrCfg.defaultMetastore.asMap) match
+    Banner.postgresPreflight(mgrCfg0.defaultMetastore.asMap) match
       case Left(message) =>
         println(message)
         sys.exit(1)
       case Right(()) => ()
 
-    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+    LiquibaseRunner.fromDefaultMetastore(mgrCfg0.defaultMetastore.asMap).run()
+
+    // The session JWT secret: QOD_SESSION_JWT_SECRET when set, else the control plane's, created by
+    // the first boot (so it needs the schema applied just above). The rest of the boot runs in
+    // bootResolved, where only the resolved configuration is in scope: every component that signs
+    // or verifies with it (sessions, password-reset links, the OIDC state and SQL-token signers)
+    // reads it from there.
+    val mgrCfg: ManagerConfig = BootPreflight.withSessionSecret(
+      mgrCfg0, {
+        val dm = mgrCfg0.defaultMetastore
+        val ds = new org.postgresql.ds.PGSimpleDataSource()
+        ds.setURL(s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}")
+        ds.setUser(dm.pgUser)
+        ds.setPassword(dm.pgPassword)
+        ds
+      }
+    )
+    bootResolved(
+      mgrCfg,
+      edgeCfg,
+      authCfg,
+      metricsCfg,
+      opaCfg,
+      modules,
+      quackCfgResolved,
+      qodNodeBin
+    )
+
+  /** The boot after the Liquibase apply and the session secret's resolution: `mgrCfg` carries the
+    * resolved secret, and the configuration as loaded is not in scope.
+    */
+  private def bootResolved(
+      mgrCfg: ManagerConfig,
+      edgeCfg: FlightConfig,
+      authCfg: AuthenticationConfig,
+      metricsCfg: MetricsConfig,
+      opaCfg: OpaConfig,
+      modules: List[ai.starlake.quack.spi.ManagerModule],
+      quackCfgResolved: QuackNativeConfig,
+      qodNodeBin: Option[java.nio.file.Path]
+  ): IO[ExitCode] =
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
@@ -381,18 +468,85 @@ object Main extends IOApp with LazyLogging:
 
     val tracker            = new NodeLoadTracker
     val engineStatsTracker = new EngineStatsTracker
+    // Each node's authorization counters (decision 26): the health probe reads them on healthy
+    // ticks on every replica, MetricsBindings exports them as qod_node_authz_<counter>_total from
+    // the HA leader only.
+    val nodeAuthzStats = new NodeAuthzStatsTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // Each tenant's policy version (Liquibase 0050): NodeKeys stamps it into every handle, the
+    // supervisor refreshes it after RBAC mutations and restores. One instance for both.
+    val policyVersions =
+      new ai.starlake.quack.edge.authz.PolicyVersionCache(() => store.policyVersions())
+    // Each user's own S3 credentials (Liquibase 0052): NodeKeys digests them into every handle,
+    // the supervisor refreshes them with the policy versions, the internal credentials endpoint
+    // serves them to nodes. One instance for the three.
+    val userS3 =
+      new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
+    // What NodeKeys digests and the credentials endpoint serves: the cache without a credential
+    // whose scope now lies at or under a database data folder, nor one whose endpoint
+    // QOD_USER_S3_ALLOWED_ENDPOINTS no longer lists (checked at add, and here again since a
+    // restart may have shortened the list). The deny set is the location rules', built after the
+    // supervisor (denySet is set there); until then nothing is served.
+    val denySet = new java.util.concurrent.atomic.AtomicReference[
+      () => Either[String, List[String]]
+    ](() => Left("the database data folders are not loaded yet"))
+    val servedUserS3 =
+      new ai.starlake.quack.edge.authz.ServedUserS3Credentials(
+        userS3,
+        () => denySet.get()(),
+        mgrCfg.userS3.endpoints
+      )
+    // The nonces of the handles this replica mints: the credentials endpoint answers only those.
+    // Both bounded by QOD_AUTHZ_HANDLE_CONTEXTS_MAX, kept 360 s each.
+    val issuedHandles =
+      new ai.starlake.quack.edge.authz.IssuedHandles(mgrCfg.nodeAuthz.handleContextsMax.toLong)
+    // The authorization context of every handle this replica mints, by nonce: the decision
+    // endpoint judges a node's statement with the context its handle was minted for.
+    val mintedHandles =
+      new ai.starlake.quack.edge.authz.MintedHandles(mgrCfg.nodeAuthz.handleContextsMax.toLong)
+    // What the tenant's OPA was asked and answered for each OPA dry-run statement, by handle nonce:
+    // the decision endpoint records, the dry-run handler takes (decision 25).
+    val dryRunResults = new ai.starlake.quack.edge.authz.DryRunResults()
+    // Each pool's read-only federated catalogs (decision 24), carried in every handle but the
+    // system's: the node refuses any principal's write into them, superusers included. Its source
+    // lookup is wired once the supervisor exists; until then no user handle is minted.
+    val readOnlyCatalogs = new ai.starlake.quack.edge.authz.FederatedReadOnlyCatalogs()
+    // Each pool's session default path, the target of the router's USE prelude, carried in every
+    // handle (CONTRACT Addendum 4 item 22). Read from the supervisor, built after the keys: until it
+    // is set every handle carries none, and the node admits no secure view read after a USE.
+    val usePaths =
+      new java.util.concurrent.atomic.AtomicReference[ai.starlake.quack.model.PoolKey => String](
+        _ => ""
+      )
+    // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
+    // every node key derives from it, so it must outlive this process and agree across replicas.
+    val nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
+      ai.starlake.quack.edge.authz.NodeKeySecret
+        .resolve(mgrCfg.nodeAuthz.keySecret, store.jdbcDataSource) match
+        case Left(msg)     => sys.error(msg)
+        case Right(secret) =>
+          new ai.starlake.quack.edge.authz.NodeKeys(
+            secret,
+            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.host, mgrCfg.port),
+            versions = policyVersions,
+            creds = servedUserS3,
+            issued = Some(issuedHandles),
+            minted = Some(mintedHandles),
+            paths = key => usePaths.get()(key),
+            readOnlyCatalogs = readOnlyCatalogs
+          )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
-    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store)
+    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
     val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
       backend match
         case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend => Some(f)
         case _                                                       => None
     fleetBackend.foreach(f => f.nodeRowExists = id => store.nodeExists(id))
     // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
-    val ephemeralBackend: QuackBackend = BootFactories.ephemeralBackend(mgrCfg, backend)
+    val ephemeralBackend: QuackBackend =
+      BootFactories.ephemeralBackend(mgrCfg, backend, qodNodeBin, nodeKeys)
     // HA leader election and cross-replica NOTIFY run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
@@ -490,6 +644,37 @@ object Main extends IOApp with LazyLogging:
     // seeding). Must run before the supervisor below snapshots the RBAC graph; it NOTIFYs peers
     // (HA) when it changed anything, so replicas already running pick the new rows up.
     BuiltinRbacBackfill.run(store, publisher)
+    // A clientSecretRef stored before changeset 0048 is parked and unused until a write stores a
+    // secret source again: report it at ERROR, with the restore step, once per tenant per boot.
+    ai.starlake.quack.ondemand.auth.ParkedSecretRefs.report(store.listTenants())
+    // The write-time check of a tenant admin's initSql: the local qod-node's --check-init when this
+    // manager runs nodes on its host, else none (the node stays the gate).
+    val initSqlChecker =
+      qodNodeBin.fold(ai.starlake.quack.ondemand.initsql.InitSqlChecker.unavailable)(
+        ai.starlake.quack.ondemand.initsql.InitSqlChecker.nodeBinary(_)
+      )
+    // An initSql a tenant admin wrote (Liquibase 0053 left every earlier one untrusted) runs only
+    // under the tenant initSql allowlist: report each that loses statements (or that this manager
+    // cannot check), with how a superuser vouches for it. In the background: one check per row.
+    locally {
+      val snap = store.snapshot()
+      manifestFedStore.foreach { fs =>
+        scala.util
+          .Try {
+            val sources = snap.tenantDbs.flatMap(td => fs.listSources(td.id).map(td -> _))
+            ai.starlake.quack.ondemand.initsql.InitSqlTrustReport.federationLines(sources) ++
+              ai.starlake.quack.ondemand.initsql.InitSqlTrustReport.unquotedSecretLines(sources)
+          }
+          .fold(
+            e => logger.warn(s"federated source boot report: ${e.getClass.getSimpleName}"),
+            _.foreach(l => logger.warn(l))
+          )
+      }
+      ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
+        .report(snap.tenantDbs, snap.pools, initSqlChecker)
+        .handleError(e => logger.warn(s"initSql boot report: ${e.getClass.getSimpleName}"))
+        .unsafeRunAndForget()(cats.effect.unsafe.implicits.global)
+    }
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
     // Constructed before the supervisor so its teardown hook can clear a torn-down
@@ -525,21 +710,33 @@ object Main extends IOApp with LazyLogging:
       locks = poolLocks,
       publish = publisher,
       events = supEvents,
-      lockdownEnabled = lockdownCfg.enabled,
-      managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore)
+      managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore),
+      sharedPolicyVersions = Some(policyVersions),
+      sharedUserS3 = Some(userS3)
     )
     supRef.set(sup)
+    usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
+    readOnlyCatalogs.wire(
+      ai.starlake.quack.edge.authz.FederatedReadOnlyCatalogs.sourcesOf(
+        key => sup.findTenantDb(key.tenant, key.tenantDb).map(_.id),
+        manifestFedStore.map(fedStore => fedStore.listSources)
+      )
+    )
+    // The tenants' local folders, the users' S3 scopes and every database data folder, read live
+    // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
+    val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
+    denySet.set(() => locationRules.dataFolders())
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>
       sup.serverLivenessAll =
         () => ai.starlake.quack.ondemand.api.FleetHandlers.livenessByName(store, fb)
     }
 
-    // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant
-    // authenticator; others fall back to the manager-wide auth.google block.
+    // Tenants whose authConfig carries their provider's public client fields get a per-tenant
+    // bearer authenticator (no secret involved); the others fall back to the manager-wide
+    // quack-flightsql.auth.<provider> block.
     val tenantOidcRegistry = new ai.starlake.quack.edge.auth.TenantOidcRegistry(
       loadTenant = id => sup.getTenantById(id),
-      secrets = ai.starlake.quack.secrets.SecretRefResolver.default,
       roleClaim = authCfg.roleClaim
     )
     val authService = new AuthenticationService(
@@ -584,7 +781,7 @@ object Main extends IOApp with LazyLogging:
     )
 
     // A PAT bearer must attribute to its real owner, not fall through to the
-    // "unresolved token" static-key branch: session lookup first, PAT second.
+    // anonymous actor: session lookup first, PAT second.
     // patIdOf feeds pat_id on every audit.rest(apiKey, ...) call site (dozens,
     // across the REST handlers the MCP admin tools curry the raw PAT bearer
     // into) with zero call-site changes.
@@ -611,11 +808,10 @@ object Main extends IOApp with LazyLogging:
       rawConfig = com.typesafe.config.ConfigFactory.load(),
       audit = auditRecorder,
       singleton = singletonTasks,
-      // Fail-closed like the REST handlers' lookup, and PAT-aware like it: a module gate
-      // reading None as "static key" must never see None for an expired or unknown token.
-      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-        mgrCfg.apiKey,
-        t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+      // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or one that
+      // does not resolve, is SessionScope.NoAccess to a module gate.
+      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+        sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
       ),
       sessionOf = sessionTokens.get
     )
@@ -635,6 +831,7 @@ object Main extends IOApp with LazyLogging:
       mgrCfg.k8s.podTemplateEnabled,
       autoscaleHardCap = mgrCfg.autoscale.hardCap,
       audit = auditRecorder,
+      initSqlChecker = initSqlChecker,
       attachFailuresOf = (nodeId, startedAt) =>
         attachRegistry
           .failuresFor(nodeId, startedAt.toEpochMilli)
@@ -696,7 +893,8 @@ object Main extends IOApp with LazyLogging:
       catalog = catalogHandlers,
       audit = auditRecorder,
       managedEnabled = mgrCfg.managedObjectStore.enabled,
-      requireEncryption = mgrCfg.requireEncryption
+      requireEncryption = mgrCfg.requireEncryption,
+      initSqlChecker = initSqlChecker
     )
 
     // REST surface only; the scheduler + drain-loop fibers start later with the duty fibers.
@@ -770,7 +968,7 @@ object Main extends IOApp with LazyLogging:
       loadTenant = id => sup.getTenantById(id)
     )
     val grantsForIdentity: GrantsLookup =
-      (identity, email) => userStore.grantsForIdentity(identity, email)
+      (realm, identity, email) => userStore.grantsForIdentity(realm, identity, email)
     // Best-effort logout callback to Starlake, only wired when the SSO integration is on --
     // otherwise NoopStarlakeNotifier keeps logout free of any Starlake dependency.
     val starlakeNotifier: StarlakeNotifier =
@@ -793,7 +991,8 @@ object Main extends IOApp with LazyLogging:
       events = moduleEventBus.sink,
       changePasswordStore = Some(userStore),
       ssoTickets = ssoTicketStore,
-      starlakeNotifier = starlakeNotifier
+      starlakeNotifier = starlakeNotifier,
+      patSessionOf = patAuthenticator.sessionOf
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT
@@ -847,41 +1046,37 @@ object Main extends IOApp with LazyLogging:
     val bearerSessionOf
         : String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
       t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t))
-    // Self-service surface for non-admin sessions; scopes strictly to the
-    // session's own (tenant, username), so it takes no tenant/user input.
-    val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
-      // same self-scoped profile a login session would.
-      bearerSessionOf,
-      telemetryStore,
-      stmtHistory,
-      id => sup.getTenantById(id)
-    )
     val sessions       = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
     // The native client is the only client; the boot gate above already refused a platform
     // where it cannot load.
     val client  = new QuackHttpClient(arrowAllocator, nodeLeaseSec = mgrCfg.nodeLeaseSec)
-    val adapter = new QuackHttpAdapter(client, tracker)
-    if lockdownCfg.enabled then logger.info("node lockdown: enabled")
-    else
-      logger.warn(
-        "node lockdown: disabled; tenants of unlocked pools can read node credentials " +
-          "(set QOD_NODE_LOCKDOWN=true to enforce)"
-      )
+    val adapter = new QuackHttpAdapter(client, tracker, nodeKeys)
 
     // The first successful probe of a node also runs CREATE SCHEMA IF NOT EXISTS
     // so the pool's default schema exists before wrapWithDefaultSchema ever
     // prepends `USE <db>.<schema>`. Self-healing: a failed first probe is not
-    // recorded, so the next tick retries the (idempotent) CREATE.
-    val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
+    // recorded, so the next tick retries the (idempotent) CREATE. The probe prunes it to the nodes
+    // it listed after every tick (afterTick below).
+    val schemaInited = new ai.starlake.quack.edge.adapter.SchemaInitFlags
+
+    // A node that refuses the manager's session handles (a key from another node-key secret, a
+    // clock out of bounds) fails every statement Transient and stays unhealthy: its probe names the
+    // likely cause once, until the node passes again.
+    val handleRefusals = new HandleRefusalWarnings
 
     // Reads one node's attached catalogs. Decoding (batch draining, schema-only first batch,
     // close-on-every-path) lives in IcebergAttachVerifier.decodeCatalogNames, which is unit
     // tested; this is wiring only. Fail-soft: any surprise becomes a Left, never an exception.
     def nodeCatalogs(n: RunningNode): IO[Either[String, Set[String]]] =
       adapter
-        .send(n, "SELECT database_name FROM duckdb_databases()", session = None, recordLoad = false)
+        .send(
+          n,
+          "SELECT database_name FROM duckdb_databases()",
+          ai.starlake.quack.edge.authz.NodePrincipal.System,
+          session = None,
+          recordLoad = false
+        )
         .map {
           case QuackResponse.Failed(err, _)     => Left(err.toString)
           case QuackResponse.Ok(rows, _, close) =>
@@ -916,10 +1111,18 @@ object Main extends IOApp with LazyLogging:
             case None     => IO.pure(None),
         renderOne = src => builder.buildOne(src),
         runOnNode = (n, sql) =>
-          adapter.send(n, sql, session = None, recordLoad = false).map {
-            case QuackResponse.Ok(_, _, close) => close(); Right(())
-            case QuackResponse.Failed(err, _)  => Left(err.toString)
-          },
+          adapter
+            .send(
+              n,
+              sql,
+              ai.starlake.quack.edge.authz.NodePrincipal.System,
+              session = None,
+              recordLoad = false
+            )
+            .map {
+              case QuackResponse.Ok(_, _, close) => close(); Right(())
+              case QuackResponse.Failed(err, _)  => Left(err.toString)
+            },
         listCatalogs = nodeCatalogs,
         // The SAME enumeration the health probe itself ticks over (see `healthProbe.start`
         // below), so the registry is reconciled against the supervisor's own view of the fleet
@@ -933,7 +1136,7 @@ object Main extends IOApp with LazyLogging:
       tracker,
       n => {
         val initSql =
-          if schemaInited.containsKey(n.nodeId) then None
+          if schemaInited.done(n.nodeId) then None
           else
             sup.get(n.poolKey).flatMap { st =>
               Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty).map { db =>
@@ -950,14 +1153,22 @@ object Main extends IOApp with LazyLogging:
         // now is a transition check (was healthy, now failing) without restructuring HealthProbe
         // to expose one itself.
         val wasHealthy = tracker.snapshot(n.nodeId).healthy
-        adapter.probe(n, probeSql).map { ok =>
-          if ok && initSql.isDefined then schemaInited.put(n.nodeId, ())
+        adapter.probe(n, probeSql).map { verdict =>
+          val ok = verdict.healthy
+          if ok && initSql.isDefined then schemaInited.markDone(n.nodeId)
+          handleRefusals.warning(n.nodeId, verdict).foreach(w => logger.warn(w))
           // An encrypted database that fails its probe is most likely a key mismatch, which looks
           // exactly like the orphaned-node-port failure. Name the likely cause once per
           // healthy-to-unhealthy transition (not on every tick of a still-unhealthy node) so the
           // operator is not sent down the wrong path and a permanently key-mismatched node
-          // doesn't spam the log every healthCheckIntervalSec forever.
-          if !ok && wasHealthy && sup
+          // doesn't spam the log every healthCheckIntervalSec forever. Only a probe that failed on
+          // its own can be that: a node that refuses the manager's session handles (the warning
+          // above), or runs a statement without one (the canary's ERROR), is unhealthy for a
+          // reason of its own and is never blamed on the database key.
+          val probeFailed = verdict match
+            case ProbeVerdict.Failed(_) => true
+            case _                      => false
+          if probeFailed && wasHealthy && sup
               .get(n.poolKey)
               .exists(_.metastore.get("encrypted").contains("true"))
           then
@@ -970,12 +1181,22 @@ object Main extends IOApp with LazyLogging:
         }
       },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
-      // Piggyback the engine-stats scrape and the Iceberg attach verifier on each healthy tick;
-      // both are fail-soft (HealthProbe swallows onHealthy errors, so neither can flip the health
-      // flag).
+      // The per-node maps only the probe writes follow the nodes it lists, on every replica (a
+      // follower keeps reading the authz counters it does not export, so they are pruned here
+      // too, not only on a leader's scrape).
+      afterTick = live => {
+        engineStatsTracker.retain(live)
+        schemaInited.retain(live)
+        nodeAuthzStats.retain(live)
+      },
+      // Piggyback the engine-stats scrape, the Iceberg attach verifier and the node's
+      // authorization counters (decision 26: after the probe and its canary, on a connection of
+      // their own) on each healthy tick; all are fail-soft (HealthProbe swallows onHealthy errors,
+      // so none can flip the health flag; authzStats itself never raises and logs at DEBUG).
       onHealthy = n =>
         adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st))) *>
-          attachVerifier.fold(IO.unit)(_.verify(n).handleErrorWith(_ => IO.unit))
+          attachVerifier.fold(IO.unit)(_.verify(n).handleErrorWith(_ => IO.unit)) *>
+          adapter.authzStats(n).map(_.foreach(st => nodeAuthzStats.update(n.nodeId, st)))
     )
 
     def runWithMetrics(
@@ -985,29 +1206,47 @@ object Main extends IOApp with LazyLogging:
     ): IO[Unit] =
       val classifier = EdgeRewriters.statementClassifier()
       // ONE OPA authorizer per manager (one HttpClient, one decision cache), shared by the
-      // statement validator below, the handshake and the admin dry-run.
+      // decision pipeline below, the handshake and the admin dry-run.
+      val opaDecisions = new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec)
+      // Every bounded authorization cache reports its size, hits, misses, evictions and capacity
+      // (cache_*{cache=...}, qod_cache_capacity{cache=...}), on every replica: each is this
+      // replica's own.
+      mintedHandles.bindMetrics(metricsReg.composite)
+      issuedHandles.bindMetrics(metricsReg.composite)
+      dryRunResults.bindMetrics(metricsReg.composite)
+      sup.bindEffectiveSetCacheMetrics(metricsReg.composite)
+      opaDecisions.bindMetrics(metricsReg.composite)
       val opaAuthorizer = new ai.starlake.quack.edge.opa.OpaAuthorizer(
         opaCfg,
         new ai.starlake.quack.edge.opa.OpaClient(
           opaCfg.timeoutMs,
           ai.starlake.quack.edge.opa.OpaClient.jdkPost(opaCfg.timeoutMs)
         ),
-        new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec),
+        opaDecisions,
         new ai.starlake.quack.observability.metrics.OpaInstruments(metricsReg.composite)
       )
       // Handshake gate 4 for opa tenants; wired before any edge starts so no handshake ever sees
       // an unwired supervisor (which would refuse opa tenants as Unavailable).
       sup.wireOpa(opaAuthorizer)
-      // Built here, not with the other handlers, so the admin dry-run shares the one authorizer.
-      val tenants = new TenantHandlers(
+      val tenantLocationHandlers = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
         sup,
-        onAuthChanged = tenantOidcRegistry.invalidate,
-        audit = auditRecorder,
-        opa = Some(opaAuthorizer),
-        opaCfg = opaCfg
+        mgrCfg.tenantFiles.rootOpt,
+        auditRecorder
       )
-      val aclValidator: StatementValidator =
-        BootFactories.aclValidator(aclCfg, mgrCfg, sup, opaCfg, opaAuthorizer)
+      // The node decision pipeline and its endpoint (POST /api/internal/authz/decide), sharing
+      // the one OPA authorizer.
+      val authzDecider =
+        BootFactories.authzDecider(sup, opaCfg, opaAuthorizer, locationRules)
+      val decideRoute =
+        new ai.starlake.quack.edge.authz.DecideRoute(
+          nodeKeys,
+          mintedHandles,
+          authzDecider,
+          dryRunResults,
+          // The USE prelude a dry run lets run: the path NodeKeys carries in every handle.
+          key => usePaths.get()(key),
+          new ai.starlake.quack.observability.metrics.AuthzInstruments(metricsReg.composite)
+        )
       // Runs after sup.restore() (tenants are loaded by then): an OPA-mode tenant with no URL
       // anywhere has every decision refused, which is fail-closed but worth shouting about.
       def warnOpaTenantsWithoutUrl(): Unit =
@@ -1138,61 +1377,36 @@ object Main extends IOApp with LazyLogging:
           .increment(n.toDouble)
       })
 
-      // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey.
-      // Disabled sources are included deliberately: their alias stays ATTACHed on
-      // running nodes until the pool recycles, and excluding it would re-open the
-      // two-part-name bypass. No invalidation hook by design: the set reflects what
-      // MAY be attached on any node of the pool.
-      val attachedCatalogsCache =
-        new java.util.concurrent.ConcurrentHashMap[
-          ai.starlake.quack.model.PoolKey,
-          (Long, Set[String])
-        ]()
-      val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
-        val now    = System.currentTimeMillis()
-        val cached = Option(attachedCatalogsCache.get(key)).collect {
-          case (at, set) if now - at < 60000L => set
-        }
-        cached.getOrElse {
-          val builtins = ai.starlake.quack.model.DuckDbCatalogs.Builtins
-          val dbName   =
-            TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
-          val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
-            case (Some(td), Some(fedStore)) =>
-              fedStore.listSources(td.id).map(_.alias).toSet
-            case _ => Set.empty[String]
-          val result = builtins + dbName ++ aliases
-          attachedCatalogsCache.put(key, (now, result))
-          result
-        }
+      // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey and
+      // dropped at once by a federated-source write (federatedSourceCaches below), so a new
+      // alias is known on the next statement. Disabled sources are included deliberately: their
+      // alias stays ATTACHed on running nodes until the pool recycles, and excluding it would
+      // re-open the two-part-name bypass. The set reflects what MAY be attached on any node of
+      // the pool.
+      val attachedCatalogs = new ai.starlake.quack.edge.authz.AttachedCatalogs(key =>
+        val builtins = ai.starlake.quack.model.DuckDbCatalogs.Builtins
+        val dbName   =
+          TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
+        val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
+          case (Some(td), Some(fedStore)) =>
+            fedStore.listSources(td.id).map(_.alias).toSet
+          case _ => Set.empty[String]
+        builtins + dbName ++ aliases
+      )
+      val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] =
+        attachedCatalogs.of
+      // The two per-pool caches a federated source feeds: a stored source write drops them for
+      // its tenant-db's pools on this replica, and every restore (a peer's qod_topology NOTIFY,
+      // the periodic snapshot refresh, a manifest import) drops all of them (Task 11 addendum 7).
+      val federatedSourceCaches = new ai.starlake.quack.edge.authz.FederatedSourceCaches(
+        readOnlyCatalogs,
+        attachedCatalogs,
+        sup.getTenantDbById
+      )
+      sup.onRestore(() => federatedSourceCaches.clear())
 
-      // Per-pool read-only catalog lookup, cached 60s like attachedCatalogsOf. Disabled sources
-      // are included for the same reason: a disabled source's alias stays ATTACHed on running
-      // nodes until the pool recycles, so its read-only flag must keep applying until then.
-      val readOnlyCatalogsCache =
-        new java.util.concurrent.ConcurrentHashMap[
-          ai.starlake.quack.model.PoolKey,
-          (Long, Set[String])
-        ]()
-      val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
-        val now    = System.currentTimeMillis()
-        val cached = Option(readOnlyCatalogsCache.get(key)).collect {
-          case (at, set) if now - at < 60000L => set
-        }
-        cached.getOrElse {
-          val result = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
-            case (Some(td), Some(fedStore)) =>
-              // Through `FederatedAlias.readOnlySet`, not an inline map: this set is matched by
-              // `CatalogWriteScreen` against refs the ACL parser lowercased with `Locale.ROOT`,
-              // by exact equality, so a default-locale fold here fails OPEN on a `tr`/`az` JVM.
-              ai.starlake.quack.model.FederatedAlias.readOnlySet(fedStore.listSources(td.id))
-            case _ => Set.empty[String]
-          readOnlyCatalogsCache.put(key, (now, result))
-          result
-        }
-
-      // Mirrors attachedCatalogsOf's metastore resolution so the ACL SQL parser
-      // resolves unqualified table refs the same way the validator does.
+      // Mirrors attachedCatalogsOf's metastore resolution so the routing parser
+      // resolves unqualified table refs the same way the policy steps do.
       val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
         val ms = sup.effectiveMetastoreFor(key.tenant, key.tenantDb)
         ai.starlake.acl.model.Config.forDuckDB(
@@ -1219,7 +1433,6 @@ object Main extends IOApp with LazyLogging:
         sessions,
         tracker,
         adapter,
-        aclValidator,
         stmtHistory,
         stmtInstruments,
         classifier,
@@ -1229,7 +1442,6 @@ object Main extends IOApp with LazyLogging:
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
         attachedCatalogsOf = attachedCatalogsOf,
-        readOnlyCatalogsOf = readOnlyCatalogsOf,
         // The in-process sinks go FIRST: fanout has no error isolation, so a module
         // sink that throws must not be able to starve the autoscale demand signal or
         // the hibernation activity signal. Invariant: each of poolLoadStats.sink and
@@ -1239,16 +1451,6 @@ object Main extends IOApp with LazyLogging:
         events = routerEvents,
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
-        lockdownFor = sup.effectiveLockdown,
-        // DuckLake buckets are never directly addressable from tenant SQL under lockdown:
-        // every tenant-db dataPath bucket plus the managed root bucket (static config).
-        deniedBuckets = () =>
-          sup.duckLakeBuckets() ++
-            Option
-              .when(mgrCfg.managedObjectStore.enabled)(
-                mgrCfg.managedObjectStore.bucket.toLowerCase(Locale.ROOT)
-              )
-              .toSet,
         routingRefs = routingRefsCache,
         refsConfigFor = refsConfigFor,
         locality = localityTracker,
@@ -1256,11 +1458,22 @@ object Main extends IOApp with LazyLogging:
         placement = placementDirectory,
         cacheAwareRouting = mgrCfg.routing.cacheAware,
         loadCapFactor = mgrCfg.routing.loadCapFactor,
-        // Same value BootFactories hands every validator arm's implicit admit (QoD and OPA):
-        // see BootFactories.metadataFilterMounted.
-        metadataFilterRewriter = BootFactories.metadataFilterRewriter(aclCfg),
+        // Always mounted (Phase D decision 31): a tenant user's listings are narrowed to the
+        // granted objects, and nothing switches that off.
+        metadataFilterRewriter =
+          new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true),
         protectedWriteGuard = protectedWriteGuard,
         adminExecutor = adminExecutor
+      )
+      // The OPA dry run reaches a node through the router (decision 25), so its handler is built
+      // after it, sharing the one authorizer and the decision endpoint's dry-run results.
+      val tenants = new TenantHandlers(
+        sup,
+        onAuthChanged = tenantOidcRegistry.invalidate,
+        audit = auditRecorder,
+        opa = Some(opaAuthorizer),
+        opaCfg = opaCfg,
+        nodeRun = Some(OpaDryRun.nodeRun(fsRouter, dryRunResults))
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a
@@ -1313,6 +1526,8 @@ object Main extends IOApp with LazyLogging:
             lookupPoolForEdge,
             resolveTenantForEdge,
             authorizeForEdge,
+            // The supervisor's policy versions: a session's grants follow them (SessionGrants).
+            sup.policyVersions,
             // Branch targeting (Epic 1): the `branch` connection header.
             lookupBranch = (tenant, parentDb, branch) => branchLookup(tenant, parentDb, branch)
           )
@@ -1332,6 +1547,7 @@ object Main extends IOApp with LazyLogging:
             lookupPoolForEdge,
             resolveTenantForEdge,
             authorizeForEdge,
+            sup.policyVersions,
             edge = "quack"
           )
           val quackSessions = new ai.starlake.quack.edge.quack.QuackSessionRegistry(
@@ -1384,7 +1600,6 @@ object Main extends IOApp with LazyLogging:
           managerCls = classOf[ManagerConfig],
           flightCls = classOf[FlightConfig],
           authCls = classOf[AuthenticationConfig],
-          aclCls = classOf[AclConfig],
           validationCls = classOf[ai.starlake.quack.edge.config.ValidationConfig],
           metricsCls = classOf[MetricsConfig]
         )
@@ -1440,11 +1655,12 @@ object Main extends IOApp with LazyLogging:
             resolver,
             tenantIdResolver,
             audit = auditRecorder,
-            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-              mgrCfg.apiKey,
-              t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+              sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
             ),
             catalogAliasOf = catalogAliasOf,
+            invalidateSources = federatedSourceCaches.sourcesChanged,
+            publish = publisher,
             attachStatusOf = attachStatusOf
           )
         )
@@ -1457,7 +1673,8 @@ object Main extends IOApp with LazyLogging:
           scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
         federatedStore = manifestFedStore,
         audit = auditRecorder,
-        requireEncryption = mgrCfg.requireEncryption
+        requireEncryption = mgrCfg.requireEncryption,
+        tenantFilesRoot = mgrCfg.tenantFiles.rootOpt
       )
 
       // The routed executor (see boot.RoutedExecutor): restriction checks, EffectiveSet
@@ -1491,14 +1708,40 @@ object Main extends IOApp with LazyLogging:
         routedExecutor(recordExecution = false)
 
       // The executor identity of the catalog preview / data-diff / undrop / restore handlers:
-      // static key -> superuser, session -> its user, PAT -> its owner WITH its restriction and
-      // id, anything else -> 401. The JWT-only `sessionTokens.get` used to sit here, so a PAT
-      // (admitted by the guard) fell through to the synthetic superuser.
+      // session -> its user, PAT -> its owner WITH its restriction and id, anything else (no
+      // credential included) -> 401. Never a system caller: that is the manager's own work.
       val restCaller = ai.starlake.quack.ondemand.api.RestCaller(
-        staticKey = mgrCfg.apiKey,
         sessionOf = sessionTokens.get,
         patOf = patAuthenticator.resolve
       )
+
+      // Self-service surface for non-admin sessions; scopes strictly to the
+      // session's own (tenant, username), so it takes no tenant/user input. Built after
+      // restCaller: the pool listing resolves its caller exactly as the executor-identity
+      // handlers above do.
+      val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
+        // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
+        // same self-scoped profile a login session would.
+        bearerSessionOf,
+        telemetryStore,
+        stmtHistory,
+        id => sup.getTenantById(id),
+        sup,
+        restCaller
+      )
+      // Users' own S3 credentials (decision 23): self-service on the profile routes, an admin's
+      // list and remove on the user routes. The data-folder check reads the live deny set.
+      val s3CredentialHandlers = new ai.starlake.quack.ondemand.api.UserS3CredentialHandlers(
+        sup,
+        restCaller,
+        mgrCfg.userS3.endpoints,
+        locationRules.dataFolderOverlap,
+        auditRecorder
+      )
+      // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), outside the
+      // api-key guard; it answers only handles this replica minted (issuedHandles).
+      val credentialsRoute =
+        new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, servedUserS3)
 
       val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogPreviewHandlers(
@@ -1533,7 +1776,14 @@ object Main extends IOApp with LazyLogging:
             isAttached =
               (n, alias) => attachRegistry.isAttached(n.nodeId, n.startedAt.toEpochMilli, alias),
             attachSummary = (alias, ids) => attachRegistry.aliasSummary(alias, ids),
-            send = (n, sql) => adapter.send(n, sql, session = None, recordLoad = false),
+            send = (n, sql) =>
+              adapter.send(
+                n,
+                sql,
+                ai.starlake.quack.edge.authz.NodePrincipal.System,
+                session = None,
+                recordLoad = false
+              ),
             timeoutSec = mgrCfg.catalog.previewTimeoutSec,
             maxRows = 10000
           )
@@ -1574,9 +1824,9 @@ object Main extends IOApp with LazyLogging:
       )
 
       // Branches (Epic 1): the lifecycle service and its REST handlers. The actor resolver
-      // accepts a session JWT (UI / CLI login), a PAT (the MCP data tools curry the bearer as
-      // apiKey), the static key, or nothing (the MCP static principal); any other present token
-      // is refused with 401 instead of becoming the superuser admin actor.
+      // accepts a session JWT (UI / CLI login) or a PAT (the MCP data tools curry the bearer as
+      // apiKey); no credential, or any other token, is refused with 401 instead of becoming the
+      // superuser admin actor.
       val branchActorOf =
         ai.starlake.quack.ondemand.api.BranchHandlers.actorResolver(restCaller)
       lazy val branchService: ai.starlake.quack.ondemand.branch.BranchService =
@@ -1617,16 +1867,15 @@ object Main extends IOApp with LazyLogging:
         }
 
       // MCP endpoint (POST /mcp): the agent-facing tool surface over the SAME handler
-      // instances REST uses. Auth is PAT or the static key only; the run_sql path goes
-      // through routedExecutor(recordExecution = true) so DuckLake snapshots carry the
-      // acting user's author stamp exactly like FlightSQL writes.
+      // instances REST uses. Auth is a PAT only; the run_sql path goes through
+      // routedExecutor(recordExecution = true) so DuckLake snapshots carry the acting
+      // user's author stamp exactly like FlightSQL writes.
       val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
         if !mgrCfg.mcp.enabled then None
         else
-          val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-            ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-              mgrCfg.apiKey,
-              t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+          val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+            ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+              sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
             )
           for
             cat      <- catalogHandlers
@@ -1674,7 +1923,8 @@ object Main extends IOApp with LazyLogging:
               groupHandlers,
               roleHandlers,
               membershipHandlers,
-              mcpScopeOf
+              mcpScopeOf,
+              tenantLocationHandlers
             )
             val accessTools = new ai.starlake.quack.mcp.McpAccessTools(
               roleHandlers,
@@ -1696,16 +1946,15 @@ object Main extends IOApp with LazyLogging:
             )
             new ai.starlake.quack.mcp.McpRoutes(
               mgrCfg.mcp,
-              mgrCfg.apiKey.filter(_.nonEmpty),
               patAuthenticator.resolve,
               dataTools.tools ++ branchTools.toList.flatMap(_.tools) ++ adminTools.tools ++
-                identityTools.tools ++ accessTools.tools ++ platformTools.tools,
+                identityTools.tools ++ accessTools.tools ++ platformTools.tools ++
+                new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
               serverVersion = "dev"
             ).routes
       if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
         logger.warn("mcp: enabled but a required handler is unwired; POST /mcp not mounted")
-      else if mgrCfg.mcp.enabled then
-        logger.info("mcp: serving POST /mcp (bearer auth: PAT or static API key)")
+      else if mgrCfg.mcp.enabled then logger.info("mcp: serving POST /mcp (bearer auth: PAT)")
       else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
 
       // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),
@@ -1761,7 +2010,10 @@ object Main extends IOApp with LazyLogging:
             mgrCfg.fleet,
             backend = fleetBackend,
             publish = publisher,
-            audit = auditRecorder
+            audit = auditRecorder,
+            nodeKeys = nodeKeys,
+            nodeExtensions = mgrCfg.nodeExtensions,
+            nodeAuthzLimits = mgrCfg.nodeAuthzLimits
           )
         ),
         patAuth = Some(patAuthenticator),
@@ -1772,7 +2024,10 @@ object Main extends IOApp with LazyLogging:
           ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
         mcpRoutes = mcpRoutes,
         quackCfg = Some(quackCfgResolved),
-        icebergCatalog = icebergCatalogHandlers
+        icebergCatalog = icebergCatalogHandlers,
+        tenantLocations = Some(tenantLocationHandlers),
+        s3Credentials = Some(s3CredentialHandlers),
+        internalRoutes = List(credentialsRoute.routes, decideRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
@@ -1780,14 +2035,15 @@ object Main extends IOApp with LazyLogging:
       val managedStoreClient =
         new ai.starlake.quack.ondemand.storage.S3ManagedStoreClient(mgrCfg.managedObjectStore)
 
-      // Leader-only boot duties. Ordering: the bootstrap hook runs BEFORE restore()
-      // so the supervisor cache reflects imported state and reconcile() can spawn
-      // those pools; inverting leaves the REST/UI on an empty cache after boot.
+      // Leader-only boot duties, in LeaderDuties' order: the bootstrap hook writes the store
+      // BEFORE restore() so the supervisor cache reflects imported state and reconcile() can spawn
+      // those pools (inverting leaves the REST/UI on an empty cache after boot); serve
+      // provisioning creates through the supervisor AFTER it, before DuckLake init and reconcile.
       // Extracted so they run either at boot or later on promotion (haRefreshFiber
       // tick); leaderDutiesDone guards against running twice.
       val leaderDutiesDone       = new java.util.concurrent.atomic.AtomicBoolean(false)
       def leaderDuties: IO[Unit] =
-        DemoBootstrapHook.run(
+        val bootstrap = DemoBootstrapHook.run(
           env = k => sys.env.get(k).orElse(sys.props.get(k)),
           readFile = path =>
             if path.startsWith("classpath:") then
@@ -1811,18 +2067,28 @@ object Main extends IOApp with LazyLogging:
           store = store,
           fedStore = manifestFedStore,
           requireEncryption = mgrCfg.requireEncryption
-        ) *>
-          IO.delay(sup.restore()) *>
-          sup.ensureDuckLakeInitialized() *>
+        )
+        LeaderDuties(
+          bootstrap = bootstrap,
+          restore = IO.delay(sup.restore()),
+          provision = ServeProvisionHook.run(
+            env = k => sys.env.get(k).orElse(sys.props.get(k)),
+            sup = sup,
+            tenants = tenants,
+            tenantDbs = tenantDbs,
+            pools = pools
+          ),
+          initDuckLake = sup.ensureDuckLakeInitialized(),
           // Repopulate the K8s per-pod token cache from the qod-token-* Secrets
           // before reconcile() adopts pods; no-op in local mode.
-          backend
+          discover = backend
             .discoverExisting()
             .flatMap(found =>
               IO.delay(logger.info(s"discovered ${found.size} pre-existing node(s)"))
-            ) *>
-          sup.reconcile() *>
-          IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))
+            ),
+          reconcile = sup.reconcile(),
+          seedRevoked = IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))
+        )
 
       IO.delay(coordinator.foreach(_.tickNow())) *>
         (if coordinator.forall(_.isLeader) then leaderDuties *> IO.delay(leaderDutiesDone.set(true))
@@ -1892,9 +2158,6 @@ object Main extends IOApp with LazyLogging:
                     quack = quackDoor.map(_ =>
                       (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
                     ),
-                    aclEnabled = aclCfg.enabled,
-                    nodeLockdown = lockdownCfg.enabled,
-                    unlockedPools = sup.unlockedPoolCount,
                     aclMode = opaCfg.defaultMode,
                     opaTenants = sup.listTenants().count(_.acl.isOpa(opaCfg.defaultMode)),
                     cliConfigFile = sys.env.get("QOD_CONFIG_FILE").filter(_.nonEmpty)
@@ -2157,6 +2420,10 @@ object Main extends IOApp with LazyLogging:
               tracker,
               sessions,
               () => sup.list(),
+              nodeAuthzStats,
+              // Only the HA leader exports the node authz counters (every replica probes every
+              // node); a single manager has no coordinator and always leads.
+              isLeader = () => coordinator.forall(_.isLeader),
               engineStatsTracker
             )
           val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())

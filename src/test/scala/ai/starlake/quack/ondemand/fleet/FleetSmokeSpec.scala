@@ -1,9 +1,10 @@
 package ai.starlake.quack.ondemand.fleet
 
 import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, NodeLockdownConfig}
+import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
+import ai.starlake.quack.ondemand.runtime.QodNodeTestBinary
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import cats.effect.{ExitCode, FiberIO, IO}
 import cats.effect.unsafe.implicits.global
@@ -30,11 +31,13 @@ import scala.util.Try
 
 /** End-to-end smoke of the fleet backend: a real manager booted in-process with
   * `runtimeType = fleet`, a real `qod fleet join` (run from the CLI checkout through `uv run`), a
-  * real DuckDB node spawned by that join process, and a real FlightSQL statement routed to it.
+  * real node spawned by that join process (this checkout's qod-node build, `--qod-node-bin`), and a
+  * real FlightSQL statement routed to it.
   *
   * Steps (each one timed and printed):
   *   1. boot the manager on 20950 (REST) / 31350 (FlightSQL, plain gRPC), native front door off,
-  *      against a throwaway control-plane database;
+  *      against a throwaway control-plane database, and log in as its seeded admin (admin / admin):
+  *      every REST call sends that session;
   *   2. create tenant acme, a memory database, pool bi of size 1: the pool is pending (no server);
   *   3. start the join process (server s1, node port 23100), joins pending approval (autoApprove is
   *      empty), is approved over REST,
@@ -54,9 +57,10 @@ import scala.util.Try
   *   10. teardown (afterAll, also on failure, timed): join process and node processes, manager
   *       fiber, database.
   *
-  * Cancelled (not failed) when `duckdb` or `uv` is not on PATH, when the CLI checkout has no `cli/`
-  * directory, or when the test Postgres (SL_TEST_PG_* envs) is unreachable. Never touches the
-  * default ports 20900 / 31338 / 9494. Every wait is bounded (60 s ceilings).
+  * Cancelled (not failed) when there is no qod-node build (QOD_NODE_BIN or a local build), when
+  * `uv` is not on PATH, when the CLI checkout has no `cli/` directory, or when the test Postgres
+  * (SL_TEST_PG_* envs) is unreachable. Never touches the default ports 20900 / 31338 / 9494. Every
+  * wait is bounded (60 s ceilings).
   */
 class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   import Main.given
@@ -64,7 +68,6 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   private val RestPort   = 20950
   private val FlightPort = 31350
   private val NodePort   = 23100
-  private val ApiKey     = "smoke-key"
   private val JoinToken  = "smoke"
   private val Server     = "s1"
   private val Tenant     = "acme"
@@ -82,7 +85,8 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   /** Why the spec cannot run here, or None when every prerequisite is present. */
   private lazy val missing: Option[String] =
-    if !onPath("duckdb") then Some("duckdb not on PATH")
+    if QodNodeTestBinary.path.isEmpty then
+      Some("no qod-node binary (QOD_NODE_BIN or a local build)")
     else if !onPath("uv") then Some("uv not on PATH")
     else if !cliDir.isDirectory then Some("no cli/ directory next to the build")
     else if !TestPostgres.reachable then
@@ -90,6 +94,10 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     else None
 
   private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
+
+  // The seeded admin's session, minted once the manager answers /health (bootManager). Every
+  // REST call sends it as X-API-Key.
+  private var session: String = ""
 
   private var stateDir: Path                                             = null
   private var manager: FiberIO[Either[Throwable, ExitCode]]              = null
@@ -139,7 +147,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     val b = HttpRequest
       .newBuilder(URI.create(s"http://127.0.0.1:$RestPort$path"))
       .timeout(Duration.ofSeconds(20))
-      .header("X-API-Key", ApiKey)
+      .header("X-API-Key", session)
       .header("Content-Type", "application/json")
     val req = body match
       case Some(json) => b.method(method, HttpRequest.BodyPublishers.ofString(json)).build()
@@ -156,6 +164,21 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     val (code, body) = request("GET", path, None)
     withClue(s"GET $path -> $code $body: ")(code shouldBe 200)
     parse(body).fold(e => fail(e.getMessage), identity)
+
+  private def login(): String =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$RestPort/api/auth/login"))
+        .timeout(Duration.ofSeconds(20))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString("""{"username":"admin","password":"admin"}"""))
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    withClue("POST /api/auth/login: ")(r.statusCode() shouldBe 200)
+    parse(r.body()).toOption
+      .flatMap(_.hcursor.get[String]("token").toOption)
+      .getOrElse(fail("no token field in the login response"))
 
   private final case class PoolView(nodes: List[Json], pending: Int, reason: Option[String])
 
@@ -214,8 +237,8 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       "127.0.0.1",
       "--node-port",
       NodePort.toString,
-      "--duckdb-bin",
-      Process(Seq("which", "duckdb")).!!.trim,
+      "--qod-node-bin",
+      QodNodeTestBinary.path.get.toString,
       "--state-dir",
       stateDir.toString,
       "--insecure"
@@ -283,8 +306,8 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
          |quack-on-demand {
          |  host = "127.0.0.1"
          |  port = $RestPort
-         |  apiKey = "$ApiKey"
          |  runtimeType = "fleet"
+         |  nodeAuthz.internalUrl = "http://127.0.0.1:$RestPort"
          |  reconcileIntervalSec = 2
          |  ha.enabled = false
          |  embeddedPostgres.enabled = false
@@ -312,7 +335,6 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
          |  host = "127.0.0.1"
          |  port = $FlightPort
          |  tlsEnabled = false
-         |  acl.enabled = false
          |}
          |quack-native { enabled = false, port = 29494 }
          |""".stripMargin
@@ -326,8 +348,6 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg   = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
-    val lockdown = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
     val metrics  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     val opa      = ai.starlake.quack.edge.config.OpaConfig
       .validate(
@@ -342,10 +362,8 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         mgrCfg,
         edgeCfg,
         authCfg,
-        aclCfg,
         metrics,
         opa,
-        lockdownCfg = lockdown,
         quackCfg = Some(quackCfg)
       )
       .attempt
@@ -362,6 +380,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       )
       Option.when(r.statusCode() == 200)(())
     }
+    session = login()
 
   // ---------------------------------------------------------------- FlightSQL
 

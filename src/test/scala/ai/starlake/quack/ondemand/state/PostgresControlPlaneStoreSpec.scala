@@ -187,14 +187,26 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listPools(pool.tenantDbId).find(_.id == pool.id).get.suspended shouldBe true
   }
 
-  it should "round-trip the pool lockdown tri-state" in withStore { store =>
-    store.upsertTenant(tenant)
-    store.upsertTenantDb(tenantDb)
-    for (value <- List(None, Some(true), Some(false)))
-      val p = pool.copy(id = s"lock-$value", name = s"lock-$value", lockdown = value)
+  it should "store pools without a lockdown column (changeset 0055)" in withStoreAndUrl {
+    (store, url) =>
+      val c = DriverManager.getConnection(url, pgUser, pgPass)
+      try
+        val rs = c
+          .createStatement()
+          .executeQuery(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'qodstate_pool'"
+          )
+        val cols = Iterator.continually(rs).takeWhile(_.next()).map(_.getString(1)).toSet
+        cols should contain allOf ("min_nodes", "max_nodes", "init_sql_trusted")
+        cols should not contain "lockdown"
+      finally c.close()
+      store.upsertTenant(tenant)
+      store.upsertTenantDb(tenantDb)
+      val p = pool.copy(id = "nolock-1", name = "nolock-1", minNodes = Some(1), maxNodes = Some(3))
       store.upsertPool(p)
-      val back = store.listPools(p.tenantDbId).find(_.id == p.id).get
-      back.lockdown shouldBe value
+      def shape(x: Pool) = (x.name, x.minNodes, x.maxNodes, x.initSqlTrusted)
+      store.listPools(p.tenantDbId).find(_.id == p.id).map(shape) shouldBe Some(shape(p))
+      store.snapshot().pools.find(_.id == p.id).map(shape) shouldBe Some(shape(p))
   }
 
   it should "round-trip the pool autoscale band" in withStore { store =>
@@ -309,6 +321,21 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
       createdAt,
       createdAt.plusSeconds(1)
     )
+  }
+
+  it should "list every prefix not yet purged, live or dropped" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    val createdAt = Instant.parse("2026-08-12T10:00:00Z")
+    store.insertManagedPrefix("mp-b", tenant.id, tenantDb.name, "s3://m/acme_b-2/", createdAt)
+    store.insertManagedPrefix("mp-a", tenant.id, tenantDb.name, "s3://m/acme_a-1/", createdAt)
+    store.insertManagedPrefix("mp-c", tenant.id, tenantDb.name, "s3://m/acme_c-3/", createdAt)
+    store.markManagedPrefixDeleted("mp-b", createdAt, createdAt.plusSeconds(60))
+    store.markManagedPrefixDeleted("mp-c", createdAt, createdAt)
+    store.markManagedPrefixPurged("mp-c", createdAt.plusSeconds(1))
+    store.unpurgedManagedPrefixes().map(_.id) shouldBe List("mp-a", "mp-b")
+    store.unpurgedManagedPrefixes().map(_.prefix) shouldBe
+      List("s3://m/acme_a-1/", "s3://m/acme_b-2/")
   }
 
   it should "keep the first insert's createdAt on a duplicate id" in withStore { store =>

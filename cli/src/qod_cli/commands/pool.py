@@ -3,7 +3,13 @@ from typing import Optional
 import typer
 
 from ..registry import covers
-from ._run import call
+from ._run import call, warn_init_sql
+
+
+# Who may write what in an initSql (the manager refuses the rest with init_sql_refused).
+_INIT_SQL_HELP = ("SQL each node runs at start. A tenant admin's may hold only SET/RESET of allowlisted "
+                  "settings to literals, read-only PRAGMAs and INSTALL/LOAD of allowlisted extensions; "
+                  "a superuser's is not restricted.")
 
 app = typer.Typer(help="Pool lifecycle and pool-level access grants.")
 permission_app = typer.Typer(help="Pool access grants for users and groups.")
@@ -43,7 +49,6 @@ def list_(ctx: typer.Context):
         "initSql": "--init-sql",
         "startSuspended": "--start-suspended",
         "cohorts": "--cohort",
-        "lockdown": "--lockdown",
         "minNodes": "--min-nodes",
         "maxNodes": "--max-nodes",
     },
@@ -60,7 +65,7 @@ def create(
     idle_timeout_sec: int = typer.Option(-1, "--idle-timeout-sec"),
     max_concurrent_per_node: int = typer.Option(0, "--max-concurrent-per-node"),
     disabled: bool = typer.Option(False, "--disabled"),
-    init_sql: str = typer.Option(None, "--init-sql"),
+    init_sql: str = typer.Option(None, "--init-sql", help=_INIT_SQL_HELP),
     cpu: str = typer.Option("", "--cpu"),
     memory: str = typer.Option("", "--memory"),
     pod_template_file: typer.FileText = typer.Option(None, "--pod-template-file"),
@@ -71,11 +76,6 @@ def create(
         help="Repeatable placement cohort as writeonly,readonly,dual (e.g. 1,0,0). "
         "When supplied, cohort counts must sum to --size and roles must sum to "
         "--writeonly/--readonly/--dual.",
-    ),
-    lockdown: str = typer.Option(
-        "inherit",
-        "--lockdown",
-        help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag.",
     ),
     min_nodes: Optional[int] = typer.Option(None, "--min-nodes", help="Autoscale floor (set with --max-nodes)"),
     max_nodes: Optional[int] = typer.Option(None, "--max-nodes", help="Autoscale ceiling (set with --min-nodes)"),
@@ -91,7 +91,6 @@ def create(
         "memory": memory,
         "podTemplateYaml": pod_template_file.read() if pod_template_file else "",
         "startSuspended": start_suspended,
-        "lockdown": lockdown,
     }
     if init_sql is not None:
         body["initSql"] = init_sql
@@ -116,7 +115,7 @@ def create(
         body["minNodes"] = min_nodes
     if max_nodes is not None:
         body["maxNodes"] = max_nodes
-    call(ctx, "POST", "/api/pool/create", body=body)
+    warn_init_sql(call(ctx, "POST", "/api/pool/create", body=body))
 
 
 @app.command()
@@ -178,6 +177,23 @@ def set_disabled(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: s
     call(ctx, "POST", "/api/pool/setDisabled", body={**_key(tenant, db, pool), "disabled": disabled})
 
 
+@app.command("set-init-sql")
+@covers(
+    "POST",
+    "/api/pool/setInitSql",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "initSql": "--init-sql"},
+)
+def set_init_sql(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    pool: str = POOL,
+    init_sql: str = typer.Option(..., "--init-sql", help=_INIT_SQL_HELP + " Empty clears it; takes effect on the next node spawn."),
+):
+    """Replace a pool's init SQL."""
+    warn_init_sql(call(ctx, "POST", "/api/pool/setInitSql", body={**_key(tenant, db, pool), "initSql": init_sql}))
+
+
 @app.command("set-resources")
 @covers(
     "POST",
@@ -219,26 +235,6 @@ def set_autoscale(
     if max_nodes is not None:
         body["maxNodes"] = max_nodes
     call(ctx, "POST", "/api/pool/setAutoscale", body=body)
-
-
-@app.command("set-lockdown")
-@covers(
-    "POST",
-    "/api/pool/setLockdown",
-    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "lockdown": "--lockdown"},
-)
-def set_lockdown(
-    ctx: typer.Context,
-    tenant: str = TENANT,
-    db: str = DB,
-    pool: str = POOL,
-    lockdown: str = typer.Option(
-        ...,
-        "--lockdown",
-        help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag. Superuser only.",
-    ),
-):
-    call(ctx, "POST", "/api/pool/setLockdown", body={**_key(tenant, db, pool), "lockdown": lockdown})
 
 
 @app.command("set-pod-template")

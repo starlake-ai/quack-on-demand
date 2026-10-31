@@ -20,6 +20,25 @@ final case class OpaUser(
     claims: Map[String, String]
 )
 
+/** One access of a node decision: what DuckDB resolved, with the object's kind, the columns read
+  * (sorted) and the secure view it comes through.
+  */
+final case class OpaAccess(
+    catalog: String,
+    schema: String,
+    table: String,
+    kind: String,
+    verb: Verb,
+    columns: List[String],
+    via: Option[String]
+)
+
+/** One file location a node decision names: `access` read or write, `scope` the principal's own S3
+  * credential scope or the tenant folder that admitted it (decision 23), `via` the reader function
+  * or `copy_to`.
+  */
+final case class OpaLocation(access: String, location: String, scope: String, via: String)
+
 /** Builds the `{"input": ...}` documents of the OPA contract. Pure; golden-tested in OpaInputSpec:
   * any change here is a breaking change for every customer policy.
   */
@@ -77,6 +96,52 @@ object OpaInput:
         (common("statement", target, user, edge) ++ List(
           "statement" -> stmt,
           "accesses"  -> Json.arr(sorted(accesses).map(accessJson)*)
+        ))*
+      )
+    )
+
+  /** `client.edge` of a node decision. */
+  val NodeEdge: String = "node"
+
+  private def decideAccessJson(a: OpaAccess): Json = Json.obj(
+    "catalog" -> Json.fromString(a.catalog),
+    "schema"  -> Json.fromString(a.schema),
+    "table"   -> Json.fromString(a.table),
+    "verb"    -> Json.fromString(verbName(a.verb)),
+    "kind"    -> Json.fromString(a.kind),
+    "columns" -> Json.arr(a.columns.sorted.map(Json.fromString)*),
+    "via"     -> a.via.fold(Json.Null)(Json.fromString)
+  )
+
+  private def locationJson(l: OpaLocation): Json = Json.obj(
+    "access"   -> Json.fromString(l.access),
+    "location" -> Json.fromString(l.location),
+    "scope"    -> Json.fromString(l.scope),
+    "via"      -> Json.fromString(l.via)
+  )
+
+  /** The statement input of a node decision (in-engine authorization): the accesses DuckDB resolved
+    * and the file locations the statement names, sorted. There is never statement text: the node
+    * describes plans, not SQL.
+    */
+  def decide(
+      target: OpaTarget,
+      user: OpaUser,
+      statementClass: String,
+      accesses: List[OpaAccess],
+      locations: List[OpaLocation]
+  ): Json =
+    val sortedAccesses =
+      accesses.distinct.sortBy(a =>
+        (s"${a.catalog}.${a.schema}.${a.table}", verbName(a.verb), a.via.getOrElse(""), a.kind)
+      )
+    val sortedLocations = locations.distinct.sortBy(l => (l.location, l.access, l.via))
+    Json.obj(
+      "input" -> Json.obj(
+        (common("statement", target, user, NodeEdge) ++ List(
+          "statement" -> Json.obj("class" -> Json.fromString(statementClass)),
+          "accesses"  -> Json.arr(sortedAccesses.map(decideAccessJson)*),
+          "locations" -> Json.arr(sortedLocations.map(locationJson)*)
         ))*
       )
     )

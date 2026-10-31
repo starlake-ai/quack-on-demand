@@ -25,7 +25,7 @@ import java.time.Instant
   * Before the fix, a tenant-A admin session could mutate tenant-B's RBAC graph because none of the
   * RBAC handlers consulted [[TenantScopeCheck]]. This spec pins that down: every RBAC mutation
   * called with a tenant-B id under a tenant-A admin session must come back `403 tenant_forbidden`,
-  * while the same calls under a superuser session (or static-key) must succeed.
+  * while the same calls under a superuser session must succeed.
   *
   * The fixture extends [[SecurityFixtures]] with a second tenant `globex` (id `t-globex01`)
   * carrying its own admin role + grant edge so the spec can address tenant-B resources by id
@@ -138,7 +138,7 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHel
       : (ManagerServerHarness.Harness, SecurityFixtures.Fixture, String) =
     val fix     = SecurityFixtures.freshStore()
     val carolId = addTenantB(fix)
-    val h       = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h       = ManagerServerHarness.boot(fix.store)
     (h, fix, carolId)
 
   // ---- /role/delete ----
@@ -193,7 +193,7 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHel
     // The store seeds the built-ins with `builtin = true` (upsertRole never can).
     fix.store.ensureBuiltins(GlobexTenantId)
     val builtinId = fix.store.findRole(GlobexTenantId, BuiltinRbac.AllTables).get.id
-    val h         = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h         = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
       val body  = s"""{"id":"$builtinId"}"""
@@ -384,7 +384,7 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHel
     val carolId = addTenantB(fix)
     // The default memberships of a create resolve against tenant A's built-ins.
     fix.store.ensureBuiltins(SecurityFixtures.TenantId)
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.AliceUsername,

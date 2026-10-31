@@ -5,11 +5,10 @@
 # See docs/superpowers/specs/2026-09-20-external-iceberg-catalog-design.md.
 #
 # The `paths:` filters and SPECS below are one decision, not two: a filter that fires no spec is
-# noise, and a spec whose code has no filter never runs when that code changes. So the four
-# screening gates (SqlTrivia / SqlCommentStripper, StatementClassifier, LockdownScreen,
-# CatalogWriteScreen) and the two readers built on them (FlightSqlRouter, PrepareStrategy) are
-# listed on BOTH sides -- CatalogWriteScreen's read-only denial is only as good as the trivia
-# and comment handling underneath it, and that is shared code a change elsewhere can move.
+# noise, and a spec whose code has no filter never runs when that code changes. So the lexical
+# readers (SqlTrivia / SqlCommentStripper, StatementClassifier) and the two consumers built on
+# them (FlightSqlRouter, PrepareStrategy) are listed on BOTH sides: trivia and comment handling
+# is shared code a change elsewhere can move.
 #
 # Specs are named one by one rather than matched with a glob. `sbt "testOnly *Iceberg*"`
 # reports success when the pattern matches NOTHING, so a renamed or deleted spec would turn
@@ -133,8 +132,6 @@ jobs:
         ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfigSpec
         ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifierSpec
         ai.starlake.quack.ondemand.federation.iceberg.AttachErrorRedactorSpec
-        ai.starlake.quack.edge.sql.CatalogWriteScreenSpec
-        ai.starlake.quack.edge.sql.LockdownScreenSpec
         ai.starlake.quack.edge.FlightSqlRouterSpec
         ai.starlake.quack.edge.PrepareStrategySpec
         ai.starlake.quack.route.StatementClassifierSpec

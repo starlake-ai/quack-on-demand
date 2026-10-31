@@ -1,6 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/FlightSqlRealClientSpec.scala
 package ai.starlake.quack.security
 
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import org.apache.arrow.flight.{
   CallStatus,
   FlightCallHeaders,
@@ -81,8 +82,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
 
   "FlightSqlRealClientSpec" should
     "succeed with display-name tenant 'acme'" in {
-      val fix    = SecurityFixtures.freshStore()
-      val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+      val fix = SecurityFixtures.freshStore()
+      val h   = FlightEdgeHarness.boot(
+        fix.store,
+        enableProviders = true,
+        tls = false,
+        wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+          new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+        )
+      )
       val client = h.newClient()
       try
         val opt = headersOpt(
@@ -191,7 +200,15 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       )
     )
 
-    val h      = FlightEdgeHarness.boot(s, enableProviders = true, tls = false)
+    val h = FlightEdgeHarness.boot(
+      s,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       // Send the tenant id on the wire; lookupPool/authorize receive it unchanged.
@@ -214,8 +231,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   // -------------------------------------------------------------------------
 
   it should "fail with UNAUTHENTICATED on wrong password" in {
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       val opt = headersOpt(
@@ -233,14 +258,51 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       h.shutdown()
   }
 
+  it should "fail with UNAUTHENTICATED when no authenticator is configured, even a good password" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = false,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
+    val client = h.newClient()
+    try
+      val opt = headersOpt(
+        tenant = SecurityFixtures.TenantName,
+        pool = SecurityFixtures.PoolName,
+        user = SecurityFixtures.AliceUsername,
+        password = SecurityFixtures.AlicePassword
+      )
+      val ex = intercept[FlightRuntimeException] {
+        client.getInfo(FlightDescriptor.command("SELECT 1".getBytes("UTF-8")), opt)
+      }
+      ex.status().code() shouldBe FlightStatusCode.UNAUTHENTICATED
+      ex.getMessage should include("no authenticator is configured")
+    finally
+      client.close()
+      h.shutdown()
+  }
+
   // -------------------------------------------------------------------------
   // Case 4: missing tenant header is rejected with UNAUTHENTICATED and a
   // description mentioning the missing tenant scope.
   // -------------------------------------------------------------------------
 
   it should "fail with UNAUTHENTICATED when tenant header is absent" in {
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       val hdrs = new FlightCallHeaders()
@@ -279,8 +341,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   it should "serve GetSqlInfo without any Authorization header" in {
     import com.google.protobuf.{Any => ProtoAny}
     import org.apache.arrow.flight.sql.impl.FlightSql
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       // No Authorization, no tenant, no pool. Just the SqlInfo command.
@@ -329,8 +399,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
     Base64.getEncoder.withoutPadding.encodeToString(s"$user:$password".getBytes("UTF-8"))
 
   it should "accept Basic creds with UNPADDED base64 (Dremio parser workaround)" in {
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       val hdrs = new FlightCallHeaders()
@@ -350,8 +428,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "accept Basic creds presented via x-qod-authorization (alias of Authorization)" in {
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       val hdrs = new FlightCallHeaders()
@@ -373,8 +459,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   it should "reject a data-bearing call from an unauthenticated peer" in {
     import com.google.protobuf.{Any => ProtoAny}
     import org.apache.arrow.flight.sql.impl.FlightSql
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       val stmtCmd = FlightSql.CommandStatementQuery
@@ -406,8 +500,16 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   // -------------------------------------------------------------------------
 
   it should "select the system realm via the x-qod-superuser header alias" in {
-    val fix    = SecurityFixtures.freshStore()
-    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val fix = SecurityFixtures.freshStore()
+    val h   = FlightEdgeHarness.boot(
+      fix.store,
+      enableProviders = true,
+      tls = false,
+      wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      )
+    )
     val client = h.newClient()
     try
       val hdrs = new FlightCallHeaders()

@@ -10,9 +10,9 @@ import java.nio.charset.StandardCharsets
 /** Shared HTTP helpers for the e2e security specs (previously copied per spec).
   *
   * Mix into a spec and call `get` / `post` against a [[ManagerServerHarness.Harness]]'s
-  * `httpClient` + `baseUrl`. The `apiKey` parameter is sent as `X-API-Key`, which the manager
-  * accepts for both static keys and session tokens; the `WithCookie` variants send the session JWT
-  * through the `qod_session` cookie instead (browser transport).
+  * `httpClient` + `baseUrl`. The `apiKey` parameter is whichever credential the caller hands it (a
+  * session JWT or a personal access token), sent as `X-API-Key`; the `WithCookie` variants send the
+  * session JWT through the `qod_session` cookie instead (browser transport).
   */
 trait SecurityHttpHelpers:
 

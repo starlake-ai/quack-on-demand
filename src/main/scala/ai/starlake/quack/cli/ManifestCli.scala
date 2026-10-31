@@ -29,7 +29,8 @@ object ManifestCli:
   def importFrom(
       store: ControlPlaneStore,
       in: InputStream,
-      requireEncryption: Boolean
+      requireEncryption: Boolean,
+      tenantFilesRoot: Option[String] = None
   ): Int =
     val body = new String(in.readAllBytes(), StandardCharsets.UTF_8)
     parser.parse(body).flatMap(_.as[ConfigManifest]) match
@@ -37,7 +38,12 @@ object ManifestCli:
         System.err.println(s"invalid yaml: ${e.getMessage}")
         1
       case Right(m) =>
-        ManifestImporter.apply(m, store, requireEncryption = requireEncryption) match
+        ManifestImporter.apply(
+          m,
+          store,
+          requireEncryption = requireEncryption,
+          tenantFilesRoot = tenantFilesRoot
+        ) match
           case Left(errs) =>
             errs.foreach(e => System.err.println(s"error: $e"))
             1

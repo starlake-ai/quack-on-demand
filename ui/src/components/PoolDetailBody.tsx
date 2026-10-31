@@ -8,6 +8,7 @@ import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
 import { Modal } from './Modal';
 import Tabs from './Tabs';
 import { dashboardPath, poolsPath } from '../nav/links';
+import { initSqlToSend } from '../api/initSql';
 
 
 /** Header (title + Back button) + the four-tab body for one pool. No
@@ -65,7 +66,12 @@ export default function PoolDetailBody({
   const [scaleDual, setScaleDual]   = useState(0);
   const [scaleForce, setScaleForce] = useState(false);
   const [scaleErr, setScaleErr]     = useState<string | null>(null);
-  const [lockdownErr, setLockdownErr] = useState<string | null>(null);
+
+  // Pool init SQL edit (pool/setInitSql). null = untouched: nothing is sent, so a save never
+  // vouches for (or demotes) a text nobody edited.
+  const [initSqlDraft, setInitSqlDraft]   = useState<string | null>(null);
+  const [initSqlSaving, setInitSqlSaving] = useState(false);
+  const [initSqlNote, setInitSqlNote]     = useState<string | null>(null);
 
   // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
   const [resCpuEnabled, setResCpuEnabled] = useState(false);
@@ -161,6 +167,25 @@ export default function PoolDetailBody({
       setActionErr(errorMessage(e));
     } finally {
       setResSaving(false);
+    }
+  }
+
+  async function saveInitSql() {
+    if (data == null) return;
+    const toSend = initSqlToSend(data.initSql, initSqlDraft ?? '', initSqlDraft != null);
+    if (toSend === undefined) return;
+    setInitSqlSaving(true);
+    setActionErr(null);
+    setInitSqlNote(null);
+    try {
+      const r = await api.setPoolInitSql({ tenant, tenantDb, pool, initSql: toSend });
+      setData(r);
+      setInitSqlDraft(null);
+      if (r.initSqlWarning) setInitSqlNote(`Init SQL not checked: ${r.initSqlWarning}`);
+    } catch (e) {
+      setActionErr(errorMessage(e));
+    } finally {
+      setInitSqlSaving(false);
     }
   }
 
@@ -325,23 +350,6 @@ export default function PoolDetailBody({
     }
   }
 
-  async function handleSetLockdown(next: string) {
-    if (!data) return;
-    const current = data.lockdown ?? 'inherit';
-    if (next === current) return;
-    setLockdownErr(null);
-    if (!window.confirm(
-      `Set lockdown to "${next}" for pool "${tenantDb}/${pool}"?\n\n` +
-      'This restarts every node in the pool. Statements currently running on them will fail.'
-    )) return;
-    try {
-      const r = await api.setPoolLockdown({ tenant, tenantDb, pool, lockdown: next });
-      setData(r);
-    } catch (e) {
-      setLockdownErr(errorMessage(e));
-    }
-  }
-
   const nodesTab = (
     <div className="card">
       <div className="card-title">Nodes</div>
@@ -430,6 +438,34 @@ export default function PoolDetailBody({
         <p className="subtle" style={{ fontSize: '0.85em', marginTop: '0.4rem', marginBottom: 0 }}>
           Restart nodes to apply resource changes (Kubernetes only).
         </p>
+      </div>
+      <div style={{ marginBottom: '0.75rem' }}>
+        <label>Init SQL
+          <p className="subtle" style={{ marginBottom: 4 }}>
+            Runs at node boot after the catalog attach and before the federation SQL; edits take
+            effect on the next node spawn. A tenant admin&rsquo;s init SQL runs only{' '}
+            <code>SET</code>/<code>RESET</code> of allowlisted settings to a literal, read-only{' '}
+            <code>PRAGMA</code>s and <code>INSTALL</code>/<code>LOAD</code> of allowlisted
+            extensions; a superuser&rsquo;s runs as written.
+            {data.initSql ? (data.initSqlTrusted
+              ? ' Stored: written by a superuser, runs as written.'
+              : ' Stored: written by a tenant admin, runs under the allowlist.') : ''}
+          </p>
+          <textarea
+            rows={4}
+            value={initSqlDraft ?? data.initSql ?? ''}
+            onChange={ev => setInitSqlDraft(ev.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={initSqlSaving ||
+            initSqlToSend(data.initSql, initSqlDraft ?? '', initSqlDraft != null) === undefined}
+          onClick={() => void saveInitSql()}
+        >
+          {initSqlSaving ? 'Saving...' : 'Save init SQL'}
+        </button>
+        {initSqlNote && <div className="subtle" role="status">{initSqlNote}</div>}
       </div>
       {actionErr && <div className="login-err">{actionErr}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -723,32 +759,8 @@ export default function PoolDetailBody({
         <h2 style={{ margin: 0 }}>
           {data.tenant} / {data.tenantDb} / {data.pool}
           {data.suspended && <span className="badge warn" style={{ marginLeft: 8 }}>Hibernated</span>}
-          {(data.lockdownEffective || (data.lockdown ?? 'inherit') !== 'inherit') && (
-            <span className={data.lockdownEffective ? 'badge good' : 'badge warn'} style={{ marginLeft: 8 }}>
-              Lockdown: {data.lockdownEffective ? 'on' : 'off'}
-            </span>
-          )}
-          {(data.lockdown ?? 'inherit') !== 'inherit' && (
-            <span className="subtle" style={{ marginLeft: 4 }}>(override: {data.lockdown})</span>
-          )}
         </h2>
         <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
-          {isSuperuser && (
-            // The global `select` rule (styles.css) sets width: 100%, meant for
-            // stacked form fields; inline it back to auto here so the select
-            // sits sized-to-content in this flex row, matching the Suspend/Wake
-            // button beside it instead of stretching to fill the row.
-            <select
-              value={data.lockdown ?? 'inherit'}
-              onChange={e => void handleSetLockdown(e.target.value)}
-              aria-label="Set pool lockdown"
-              style={{ width: 'auto' }}
-            >
-              <option value="inherit">Lockdown: inherit</option>
-              <option value="on">Lockdown: on</option>
-              <option value="off">Lockdown: off</option>
-            </select>
-          )}
           <button
             type="button"
             onClick={openScale}
@@ -818,7 +830,6 @@ export default function PoolDetailBody({
         </div>
       </header>
       {suspendErr && <div className="login-err" style={{ marginTop: 8 }}>{suspendErr}</div>}
-      {lockdownErr && <div className="login-err" style={{ marginTop: 8 }}>{lockdownErr}</div>}
 
       <Tabs
         tabs={[

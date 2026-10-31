@@ -14,10 +14,9 @@ import java.net.http.HttpResponse
   * The four catalog GETs and `GET /api/database/list` historically carried no session input (the
   * endpoint-drift item in docs/AUDIT-FOLLOWUPS.md); they are now session-gated exactly like
   * [[ai.starlake.quack.ondemand.api.TagEndpoints]]: `apiKeyGuard` at the perimeter plus the
-  * handler-level TenantScopeCheck gate. This spec pins: credential-less 401 (static key set),
-  * cross-tenant 403 tenant_forbidden, superuser pass-through, 404 on an unknown tenant (no
-  * existence leak), listTenantDbs scope gating, and the keyless 401 with no static key configured
-  * (the former open mode is gone).
+  * handler-level TenantScopeCheck gate. This spec pins: credential-less 401 (the former open mode
+  * is gone), cross-tenant 403 tenant_forbidden, superuser pass-through, 404 on an unknown tenant
+  * (no existence leak), and listTenantDbs scope gating.
   */
 class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
@@ -40,14 +39,11 @@ class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
       errorCode(resp.body()) shouldBe Some("tenant_forbidden")
     }
 
-  private def bootWithTwoTenants(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def bootWithTwoTenants(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addTenantB(fix)
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       catalogReader = Some((_, _) => emptyReader)
     )
     (h, fix)
@@ -57,8 +53,8 @@ class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
 
   // ---------- Spec ----------------------------------------------------------
 
-  "catalog read endpoints" should "reject a credential-less schemas GET with 401 when a static key is set" in {
-    val (h, _) = bootWithTwoTenants(staticApiKey = Some("static-key-for-catalog-authz"))
+  "catalog read endpoints" should "reject a credential-less schemas GET with 401 (open mode is gone)" in {
+    val (h, _) = bootWithTwoTenants()
     try
       val resp = get(
         h.httpClient,
@@ -139,21 +135,6 @@ class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
       )
       withClue(s"tenant-A admin -> /database/list on own tenant body: ${allowed.body()}") {
         allowed.statusCode() shouldBe 200
-      }
-    finally h.shutdown()
-  }
-
-  it should "refuse a credential-less read even with no static key configured (open mode is gone)" in {
-    // The former zero-config open mode admitted this keyless read; the strict
-    // posture answers 401 and the dev path is a login (or QOD_API_KEY).
-    val (h, _) = bootWithTwoTenants()
-    try
-      val resp = get(
-        h.httpClient,
-        schemasUrl(h, SecurityFixtures.TenantId, SecurityFixtures.TenantDbName)
-      )
-      withClue(s"credential-less GET schemas body: ${resp.body()}") {
-        resp.statusCode() shouldBe 401
       }
     finally h.shutdown()
   }

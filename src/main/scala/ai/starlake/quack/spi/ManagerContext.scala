@@ -25,14 +25,16 @@ final case class ManagerContext(
     rawConfig: com.typesafe.config.Config,
     audit: AuditRecorder,
     singleton: SingletonTasks,
-    /** Resolves a session JWT (cookie or X-API-Key value) to its scope; None for static keys and
-      * unknown tokens. Same seam core handlers use for TenantScopeCheck / SuperuserCheck. Exempt
-      * from the SPI stability promise, like supervisor and users.
+    /** Resolves the caller's credential (the X-API-Key header or `qod_session` cookie value, None
+      * when the request carried neither) to its scope, PAT-aware and total: no credential, or one
+      * that does not resolve, is `SessionScope.NoAccess`. Same seam core handlers use for
+      * TenantScopeCheck / SuperuserCheck. Exempt from the SPI stability promise, like supervisor
+      * and users.
       */
-    scopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope],
-    /** Resolves a session JWT to the full session (identity + scope), None for static keys and
-      * unknown tokens. scopeOf is the scope-only projection; portal-style modules need the caller's
-      * username/tenant too. Exempt from the SPI stability promise.
+    scopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver,
+    /** Resolves a session JWT to the full session (identity + scope), None for anything else (a
+      * personal access token included). scopeOf is the scope-only projection; portal-style modules
+      * need the caller's username/tenant too. Exempt from the SPI stability promise.
       */
     sessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session]
 )

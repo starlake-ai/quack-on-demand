@@ -1,0 +1,2 @@
+{"access":"insert","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"audit","schema":"main","via":null}
+{"access":"insert","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"u","schema":"main","via":null}

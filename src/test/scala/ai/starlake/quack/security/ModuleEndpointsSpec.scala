@@ -24,7 +24,6 @@ class ModuleEndpointsSpec
     with BeforeAndAfterAll:
 
   private val module = new TestModule
-  private val ApiKey = "test-key"
 
   private var harness: ManagerServerHarness.Harness = uninitialized
 
@@ -32,7 +31,6 @@ class ModuleEndpointsSpec
     val fix = SecurityFixtures.freshStore()
     harness = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = Some(ApiKey),
       moduleEndpoints = module.endpoints,
       modulePublicPrefixes = module.publicPathPrefixes,
       moduleStaticMounts = List(StaticMount("/portal", "/portal-test"))
@@ -49,15 +47,18 @@ class ModuleEndpointsSpec
     resp.body() shouldBe "pong"
   }
 
-  it should "gate non-public module routes behind the api key" in {
+  it should "gate non-public module routes behind the guard" in {
     val denied = get(harness.httpClient, s"${harness.baseUrl}/api/hosted-test/secret")
-    withClue(s"GET /api/hosted-test/secret (no key) body: ${denied.body()}") {
+    withClue(s"GET /api/hosted-test/secret (no credential) body: ${denied.body()}") {
       denied.statusCode() shouldBe 401
     }
 
-    val admitted =
-      get(harness.httpClient, s"${harness.baseUrl}/api/hosted-test/secret", apiKey = Some(ApiKey))
-    withClue(s"GET /api/hosted-test/secret (with key) body: ${admitted.body()}") {
+    val admitted = get(
+      harness.httpClient,
+      s"${harness.baseUrl}/api/hosted-test/secret",
+      apiKey = Some(harness.superuserSession())
+    )
+    withClue(s"GET /api/hosted-test/secret (superuser session) body: ${admitted.body()}") {
       admitted.statusCode() shouldBe 200
     }
     admitted.body() shouldBe "classified"
@@ -80,7 +81,7 @@ class ModuleEndpointsSpec
   "a public prefix" should "match on segment boundaries, not raw string prefixes" in {
     // Declared public prefix is "/api/hosted-test/ping"; the endpoint below is
     // "/api/hosted-test/pingx", which shares the raw string prefix but is NOT a
-    // sub-path of it. Segment-safe matching must keep pingx gated behind the key.
+    // sub-path of it. Segment-safe matching must keep pingx gated behind the guard.
     val localModule = new ManagerModule:
       def name: String                             = "prefix-boundary-module"
       def changelogPath: Option[String]            = None
@@ -98,13 +99,12 @@ class ModuleEndpointsSpec
     val fix   = SecurityFixtures.freshStore()
     val local = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = Some(ApiKey),
       moduleEndpoints = localModule.endpoints,
       modulePublicPrefixes = localModule.publicPathPrefixes
     )
     try
       val denied = get(local.httpClient, s"${local.baseUrl}/api/hosted-test/pingx")
-      withClue(s"GET /api/hosted-test/pingx (no key) body: ${denied.body()}") {
+      withClue(s"GET /api/hosted-test/pingx (no credential) body: ${denied.body()}") {
         denied.statusCode() shouldBe 401
       }
     finally local.shutdown()
@@ -115,7 +115,6 @@ class ModuleEndpointsSpec
     val ex  = intercept[IllegalStateException] {
       ManagerServerHarness.boot(
         fix.store,
-        staticApiKey = Some(ApiKey),
         moduleEndpoints = module.endpoints ++ module.endpoints
       )
     }

@@ -386,31 +386,6 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Allow
   }
 
-  // On DuckDB 1.5.6 a backtick is an operator, so the call between the pair runs (see
-  // BacktickScreen); the shared lexer reads the pair as one identifier and would hide it.
-  it should "deny a backtick pair hiding query_table while the backtick screen is active" in {
-    assume(
-      ai.starlake.quack.edge.sql.BacktickScreen.active,
-      "backtick screen is inert on this DuckDB pin"
-    )
-    val b   = "`"
-    val sql = s"SELECT 1 $b 2 AS a, * FROM query_table('tpch1.customer') WHERE 3 $b 4 = 7"
-    guardWithCls().check(
-      sql,
-      StatementKind.Select,
-      eff(tenantUser, rows = List(rowPolicy)),
-      ctx
-    ) match
-      case Deny(reason) => reason should include("backtick")
-      case other        => fail(s"expected Deny, got $other")
-    guardWithCls().check(
-      sql,
-      StatementKind.Select,
-      eff(superuser, rows = List(rowPolicy)),
-      ctx
-    ) shouldBe Allow
-  }
-
   it should "deny a quoted name holding a dot, which the rewriters would match as a.b" in
     // A row policy on main."a.b" is keyed on that one name; the rewriter sees schema a, table b.
     List("SELECT * FROM \"a.b\"", "DELETE FROM \"a.b\"").foreach { sql =>
@@ -433,6 +408,72 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, rows = List(rowPolicy)),
       ctx
     ) shouldBe Allow
+  }
+
+  // The rewriters qualify every bare name against the pool's default schema; a statement batched
+  // after a USE / SET search_path resolves elsewhere, past the policy keyed on the default one.
+  it should "deny a batch that moves the schema or search path to a principal with policies" in
+    List(
+      "SET search_path = 'acme_tpch.other'; SELECT * FROM customer",
+      "USE acme_tpch.other; SELECT * FROM customer",
+      "SET schema = 'other'; DELETE FROM customer"
+    ).foreach { sql =>
+      withClue(sql) {
+        guardWithCls().check(
+          sql,
+          StatementKind.Other,
+          eff(tenantUser, rows = List(rowPolicy)),
+          ctx
+        ) match
+          case Deny(reason) => reason should include("own statement")
+          case other        => fail(s"expected Deny, got $other")
+      }
+    }
+
+  it should "leave a lone SET search_path, and a batch of a principal without policies, alone" in {
+    guardWithCls().check(
+      "SET search_path = 'acme_tpch.other'",
+      StatementKind.Other,
+      eff(tenantUser, rows = List(rowPolicy)),
+      ctx
+    ) match
+      case Deny(reason) => reason should not include "own statement"
+      case Allow        => succeed
+    guardWithCls().check(
+      "SET search_path = 'acme_tpch.other'; SELECT * FROM customer",
+      StatementKind.Other,
+      eff(tenantUser),
+      ctx
+    ) shouldBe Allow
+  }
+
+  it should "deny a SQL-valued setting to a principal with policies" in
+    List(
+      "SET pg_staleness_query = 'SELECT 1'",
+      "RESET pg_pool_health_check_query",
+      "EXPLAIN ANALYZE SET quack_authorization_function = 'f'"
+    ).foreach { sql =>
+      withClue(sql) {
+        guardWithCls().check(
+          sql,
+          StatementKind.Other,
+          eff(tenantUser, cols = List(maskEmail)),
+          ctx
+        ) match
+          case Deny(reason) => reason should include("runs SQL")
+          case other        => fail(s"expected Deny, got $other")
+      }
+    }
+
+  it should "not take a session setting for a SQL-valued one" in {
+    guardWithCls().check(
+      "SET SESSION TimeZone = 'UTC'",
+      StatementKind.Other,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) match
+      case Deny(reason) => reason should not include "runs SQL"
+      case Allow        => succeed
   }
 
   // What a DuckDB 2.0 quack client sends when it uses an attached catalog.
@@ -716,8 +757,8 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
   // Audit F20 / F22: DuckDB binds a two-part `X.t` catalog-first when X is an attached catalog
   // (the tenant-db alias, a federated alias), under the USE prelude to the very table a bare name
   // reads. Read schema-first, the name matched no policy keyed on the real schema: a write copied
-  // masked or filtered data out, and a plain SELECT read every row past a row policy. With the ACL
-  // on the gate refuses the name; the guard now refuses it for a policy holder with the ACL off.
+  // masked or filtered data out, and a plain SELECT read every row past a row policy. The guard
+  // refuses it for a policy holder.
 
   private val attachedCtx = ctx.copy(attachedCatalogs = Set("acme_tpch", "pg_src"))
 
@@ -782,4 +823,59 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       "CREATE TABLE tpch1.mine AS SELECT c_email FROM acme_tpch.customer",
       eff(tenantUser)
     ) shouldBe Allow
+  }
+
+  // histogram_values(source, col) runs query_table(source) and histogram runs histogram_values:
+  // the rewriters see a table function, never the protected table its string names.
+  "a reading table macro" should "be denied to a principal with policies, in a table position" in
+    List(
+      "SELECT * FROM histogram('tpch1.customer', c_email)",
+      "SELECT * FROM histogram_values('tpch1.customer', c_region)",
+      "SELECT * FROM main.\"histogram\"('tpch1.customer', c_email)",
+      "SELECT c_id FROM tpch1.orders WHERE c_id IN " +
+        "(SELECT bin FROM histogram_values('tpch1.customer', c_id))"
+    ).foreach { sql =>
+      withClue(sql) {
+        guardWithCls().check(
+          sql,
+          StatementKind.Select,
+          eff(tenantUser, rows = List(rowPolicy)),
+          ctx
+        ) match
+          case Deny(reason) => reason should include("histogram")
+          case other        => fail(s"expected Deny, got $other")
+      }
+    }
+
+  it should "leave the aggregate of that name to the rewriters" in {
+    guardWithCls().check(
+      "SELECT histogram(c_region) FROM tpch1.customer",
+      StatementKind.Select,
+      eff(tenantUser, rows = List(rowPolicy)),
+      ctx
+    ) shouldBe Allow
+  }
+
+  // Decisions 15 and 18: the node judges every file location; the guard no longer screens files.
+  "a file reader" should "be left to the node in a policy holder's read, and stay denied in a write" in {
+    val withRows = eff(tenantUser, rows = List(rowPolicy))
+    guardWithCls().check(
+      "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')",
+      StatementKind.Select,
+      withRows,
+      ctx
+    ) shouldBe Allow
+    // the guard cannot isolate a write's source it cannot parse: an incomplete extraction
+    guardWithCls().check(
+      "CREATE TABLE tpch1.scratch AS SELECT * FROM read_csv('s3://acme-etl/in/x.csv')",
+      StatementKind.Ddl,
+      withRows,
+      ctx
+    ) shouldBe a[Deny]
+    guardWithCls().check(
+      "COPY (SELECT * FROM tpch1.customer) TO 's3://acme-etl/out/c.parquet'",
+      StatementKind.Dml,
+      withRows,
+      ctx
+    ) shouldBe a[Deny]
   }

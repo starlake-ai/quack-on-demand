@@ -1,0 +1,1 @@
+CREATE MACRO m2(a) AS a

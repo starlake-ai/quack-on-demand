@@ -6,17 +6,39 @@ import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 
 import java.lang.{ProcessBuilder => JProcessBuilder}
+import java.nio.file.Path
 import java.security.SecureRandom
 import java.time.Instant
 import java.util.Base64
 import scala.collection.concurrent.TrieMap
 import scala.jdk.CollectionConverters.*
 
+/** Runs each node as a child process: the spawn script (bash, or PowerShell on Windows), which
+  * starts qod-node.
+  *
+  * @param nodeBin
+  *   the qod-node every spawn runs, handed to the script as `QOD_NODE_BIN` ([[QodNodeBinary]]; Main
+  *   resolves it at boot). None leaves the script to its inherited `QOD_NODE_BIN` or `PATH`, for
+  *   tests whose `commandFor` runs no script at all.
+  * @param nodeKeys
+  *   the keys every spawn's `QOD_NODE_AUTHZ_KEY` derives from; Main passes the manager's, so its
+  *   handles verify. Required: keys of another secret would have the node refuse every handle
+  * @param nodeExtensions
+  *   the extension policy every spawn hands qod-node (spec decision 17); Main passes the manager's
+  * @param nodeAuthzLimits
+  *   the decide limits every spawn hands qod-node; Main passes the manager's
+  */
 final class LocalQuackBackend(
     min: Int,
     max: Int,
     commandFor: (NodeSpec, Int, String) => List[String] =
-      LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript)
+      LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript),
+    nodeBin: Option[Path] = None,
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
+    nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
+      ai.starlake.quack.NodeExtensionsConfig(),
+    // Required (Main passes the manager's): a default would silently run qod-node's own limits.
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
 ) extends QuackBackend
     with LazyLogging:
 
@@ -35,14 +57,13 @@ final class LocalQuackBackend(
   private val reserved = TrieMap.empty[Int, ProcessHandle]
   // The OS reported no start instant for a node: logged once, see start().
   private val startInstantMissingLogged = new java.util.concurrent.atomic.AtomicBoolean(false)
+  // Metastore keys that reach no node, named once per pool and key.
+  private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
 
   // A manager killed together with a node it was spawning can leave a secrets directory behind.
   NodeSecretFiles.sweepStale()
 
-  def start(spec: NodeSpec): IO[RunningNode] =
-    QuackBackend.screenBootSql(spec) *> startScreened(spec)
-
-  private def startScreened(spec: NodeSpec): IO[RunningNode] = IO.blocking {
+  def start(spec: NodeSpec): IO[RunningNode] = IO.blocking {
     // One process per node id. A start under an id this backend still holds (reconcile replacing
     // a node it judged dead) stops the held process first: overwriting the handle instead would
     // leave that process running untracked, holding its port past every stop path, and leak the
@@ -58,34 +79,28 @@ final class LocalQuackBackend(
     val token = LocalQuackBackend.randomToken()
     val cmd   = commandFor(spec, port, token)
     val pb    = new JProcessBuilder(cmd*).inheritIO()
-    // Propagate the non-sensitive metastore as environment variables to the spawned Quack node.
+    // Propagate the metastore's TenantDb.NodeEnvKeys as environment variables to the spawned node.
     val env = pb.environment()
     // Nothing secret may sit in the node's environment (or argv): a node user reads both back
     // through getenv() / /proc/<pid>/environ. The sensitive values (NodeSecretFiles.Keys: metastore
-    // pgPassword / encryptionKey, federation and object-store SQL, the node token, the manager's
-    // own QOD_S3_* / QOD_AZURE_* credentials) go to a private directory the script reads and
-    // deletes; the manager's other credentials it inherited (QOD_API_KEY, the session JWT secret,
-    // passwords...) are dropped outright.
+    // pgPassword / encryptionKey, federation and object-store SQL, the node token, the node's key,
+    // the manager's own QOD_S3_* / QOD_AZURE_* credentials) go to a private directory the script
+    // reads and deletes; the manager's other credentials it inherited (the session JWT secret,
+    // passwords, any *API_KEY*...) are dropped outright.
     val inherited = env.asScala.toMap
     val secrets   = NodeSecretFiles.collect(
       spec.metastore,
       spec.extraSetupSql,
       spec.objectStoreSql,
+      NodeSecretFiles.tenantInitFiles(spec),
       token,
+      nodeKeys.keyHex(spec.nodeId),
       inherited
     )
     inherited.keys.foreach { k =>
       if NodeSecretFiles.isKey(k) || NodeSecretFiles.isInheritedSecret(k) then env.remove(k)
     }
-    // When running from an installed app-image (QOD_APP_HOME set), prepend the bundled duckdb bin
-    // so spawn-quack-node.sh's `command -v duckdb` resolves it. Additive: no-op in dev/source runs.
-    LocalQuackBackend.duckdbPathPrefix(sys.env.get("QOD_APP_HOME")).foreach { prefix =>
-      val current = Option(env.get("PATH")).getOrElse("")
-      env.put(
-        "PATH",
-        if current.isEmpty then prefix else s"$prefix${java.io.File.pathSeparator}$current"
-      )
-    }
+    nodeBin.foreach(b => env.put(QodNodeBinary.EnvVar, b.toString))
     // spec.metastore is ALREADY the fully-resolved, per-kind node metastore --
     // PoolSupervisor.effectiveMetastoreFor merged the manager defaults with the
     // tenant-db's own params and dropped whatever the kind doesn't want (e.g. no
@@ -94,16 +109,22 @@ final class LocalQuackBackend(
     // would resurrect a key `effectiveMetastoreFor` deliberately removed (e.g. the
     // bootstrap tenant-db's DuckLake directory reappearing as `dataPath` on a
     // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
-    spec.metastore.foreach { case (k, v) => if !NodeSecretFiles.isKey(k) then env.put(k, v) }
+    // Only TenantDb.NodeEnvKeys of it reach the script (NodeMetastore): the metastore is
+    // tenant-admin input, and any other name (BASH_ENV, PATH, QOD_NODE_BIN...) would
+    // run commands as this process's user or replace a variable set here, whatever the order of
+    // the puts.
+    droppedKeys.report(spec.poolKey, spec.metastore)
+    NodeMetastore.env(spec.metastore).foreach { case (k, v) => env.put(k, v) }
     env.put("kind", spec.kindWire)
-    // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy settings
-    // and before `INSTALL quack; LOAD quack;`, unlike extraSetupSql which runs
-    // after the catalog ATTACH.
-    if spec.dbInitSql.nonEmpty then env.put("dbInitSql", spec.dbInitSql)
-    // Engine lockdown block (NodeLockdown.sql). spawn-quack-node.sh appends it
-    // after extraSetupSql, right before quack_serve, so the value
-    // restrictions are in effect before the node serves any tenant statement.
-    if spec.lockdownSql.nonEmpty then env.put("lockdownSql", spec.lockdownSql)
+    // The node's id, which qod-node checks every session handle against (the script passes it as
+    // --node-id). No metastore key of this name reaches the environment.
+    env.put(NodeSecretFiles.NodeIdEnv, spec.nodeId)
+    // The extension policy qod-node fixes before its database opens (spec decision 17): all three,
+    // always, after the metastore overlay, so neither a variable this process inherited (they are
+    // also the manager's own config variables) nor a metastore entry decides one.
+    nodeExtensions.env.foreach { case (k, v) => env.put(k, v) }
+    // The decide limits, both, always, after the metastore overlay, for the same reason.
+    nodeAuthzLimits.env.foreach { case (k, v) => env.put(k, v) }
     val secretsDir =
       try NodeSecretFiles.writePrivateDir(secrets)
       catch
@@ -119,8 +140,8 @@ final class LocalQuackBackend(
           NodeSecretFiles.deleteQuietly(secretsDir)
           ports.release(port)
           throw e
-    // The script deletes the directory as soon as it has read it; this covers a script that dies
-    // first (bad kind, missing duckdb, a kill before it got that far).
+    // The script and qod-node delete the directory once read; this covers a script that dies first
+    // (a bad kind, no qod-node, a kill before it got that far).
     proc.onExit().thenRun(() => NodeSecretFiles.deleteQuietly(secretsDir))
     processes.put(spec.nodeId, proc)
     tokens.put(spec.nodeId, token)
@@ -263,7 +284,7 @@ final class LocalQuackBackend(
       adoptedProcs.collect { case (id, h) if !processes.contains(id) => h }).toList
       .filter(_.isAlive)
     // First pass: SIGTERM everyone in parallel (`taskkill /T` on Windows so
-    // the duckdb.exe grandchild of each spawn wrapper goes down too).
+    // the qod-node.exe grandchild of each spawn wrapper goes down too).
     handles.foreach(h => LocalQuackBackend.terminate(h, force = false))
     // Second pass: bounded wait, then SIGKILL stragglers.
     handles.foreach { h =>
@@ -290,13 +311,6 @@ object LocalQuackBackend:
     */
   val DefaultSpawnScript: String = "./scripts/spawn-quack-node.sh"
 
-  /** Directory to prepend to the spawned node's PATH so it resolves the bundled `duckdb`. Set only
-    * when `QOD_APP_HOME` is present (installed app-image); `None` for repo/dev runs, which rely on
-    * `duckdb` already being on PATH.
-    */
-  def duckdbPathPrefix(appHome: Option[String]): Option[String] =
-    appHome.filter(_.nonEmpty).map(h => s"$h/duckdb/bin")
-
   /** In-repo Windows fallback spawn script (a PowerShell mirror of `spawn-quack-node.sh`).
     * Production passes `mgrCfg.spawnScriptWindows` (HOCON `quack-on-demand.spawnScriptWindows`, env
     * `QOD_SPAWN_SCRIPT_WINDOWS`).
@@ -309,20 +323,20 @@ object LocalQuackBackend:
   private[runtime] val isWindows: Boolean =
     sys.props.getOrElse("os.name", "").toLowerCase(Locale.ROOT).contains("win")
 
-  /** Default command. Invokes `script` (the bundled spawn script in production), which starts
-    * DuckDB, attaches the DuckLake catalog, and calls `quack_serve(...)`. The token is NOT on the
-    * command line (any local user reads argv): the script reads it from the secrets directory.
+  /** Default command. Invokes `script` (the bundled spawn script in production), which assembles
+    * the init SQL and starts qod-node, which runs it and serves over quack. The token is NOT on the
+    * command line (any local user reads argv): qod-node reads it from the secrets directory.
     */
   def defaultCommand(script: String): (NodeSpec, Int, String) => List[String] =
     (_, port, _) => List(script, port.toString)
 
   /** This manager process's spawn marker: its REST port plus a per-boot random id, e.g.
     * `20900-3fa9c1e2`. Every node gets it as the spawn script's second argument, and the script
-    * puts it in the node directory name (`quack-node.<marker>.XXXXXX`, which duckdb's `-init` argv
-    * carries). `stop-jar`, `kill-quack-nodes` and `qod stop` match on `<port>-`, so stopping one
-    * manager only touches that manager's nodes, not those of another manager on the same host (an
-    * isolated test stack next to the one on :20900). The boot id tells two lives of the same port
-    * apart in the node directory names.
+    * puts it in the node directory name (`quack-node.<marker>.XXXXXX`, which qod-node's
+    * `--secret-directory` argv carries). `stop-jar`, `kill-quack-nodes` and `qod stop` match on
+    * `<port>-`, so stopping one manager only touches that manager's nodes, not those of another
+    * manager on the same host (an isolated test stack next to the one on :20900). The boot id tells
+    * two lives of the same port apart in the node directory names.
     */
   def managerMarker(restPort: Int): String = s"$restPort-$bootId"
 
@@ -333,9 +347,10 @@ object LocalQuackBackend:
 
   /** OS-aware default command. On Windows the child is
     * `powershell.exe -File <winScript> <port> <marker>` (the wrapper process the manager holds a
-    * `Process` handle for; its `duckdb.exe` grandchild is reaped via `taskkill /T`). On Unix it is
-    * `<unixScript> <port> <marker>`. `marker` is [[managerMarker]]; it is required so no production
-    * spawn goes out unmarked (an unmarked node is invisible to the per-manager stop paths).
+    * `Process` handle for; its `qod-node.exe` grandchild is reaped via `taskkill /T`). On Unix it
+    * is `<unixScript> <port> <marker>`. `marker` is [[managerMarker]]; it is required so no
+    * production spawn goes out unmarked (an unmarked node is invisible to the per-manager stop
+    * paths).
     */
   def defaultCommand(
       unixScript: String,
@@ -358,7 +373,7 @@ object LocalQuackBackend:
     else (_, port, _) => List(unixScript, port.toString, marker)
 
   /** Terminate a spawned node's process tree. On Windows uses `taskkill /PID <pid> /T` (`/F` when
-    * `force`) so the whole process tree (the PowerShell wrapper and its `duckdb.exe` child) is
+    * `force`) so the whole process tree (the PowerShell wrapper and its `qod-node.exe` child) is
     * killed; `Process.destroy()` alone would leave the grandchild orphaned. On Unix signals through
     * the handle, which carries the process start time, so a pid reused by another process is never
     * signalled.
@@ -382,7 +397,7 @@ object LocalQuackBackend:
         catch case _: Throwable => ()
     else if force then
       // SIGKILL bypasses the wrapper's trap, which is what normally
-      // forwards TERM to the duckdb grandchild; sweep the descendants
+      // forwards TERM to the qod-node child; sweep the descendants
       // first so the tree cannot outlive its wrapper.
       h.descendants().forEach { (d: java.lang.ProcessHandle) =>
         d.destroyForcibly(); ()
