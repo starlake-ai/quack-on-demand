@@ -53,11 +53,10 @@ enum MetadataFilterOutcome:
   * `duckdb_columns()` by one whose WHERE pins `database_name` to the session catalog and keeps the
   * granted rows (issue #114: the quack client's ATTACH syncs the remote catalog through
   * `duckdb_tables() UNION ALL duckdb_views()`). Runs for every non-superuser principal without an
-  * explicit information_schema grant; the ACL parser marks exactly the references this class
-  * filters (the same
-  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables FilterableTables]] /
+  * explicit information_schema grant. What it narrows is named in one place each:
+  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables FilterableTables]] and
   * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableFunctions FilterableFunctions]]
-  * lists).
+  * (the ACL parser's own catalog-function list).
   *
   * Fail-closed, and DENIAL is how it stays that way: a filterable reference the substitution walk
   * cannot reach is refused, not filtered. The walk alone cannot promise this (SQL puts tables in
