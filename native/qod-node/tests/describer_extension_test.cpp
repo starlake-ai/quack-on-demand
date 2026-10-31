@@ -7,6 +7,8 @@
 #include "json_writer.hpp"
 #include "locations.hpp"
 
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -55,10 +57,25 @@ std::string DescriptionWith(size_t from, const std::string &needle) {
 	return joined;
 }
 
+//! When set, a post_bind registered before the capture interrupts the statement's client context, so the
+//! describer runs on an interrupted context (what a client's cancel does while a statement binds).
+bool interrupt_binds = false;
+
+void InterruptBind(duckdb::PlannerExtensionInput &input, duckdb::BoundStatement &) {
+	if (interrupt_binds) {
+		input.context.Interrupt();
+	}
+}
+
 } // namespace
 
 int main() {
 	duckdb::DuckDB db(nullptr);
+	{
+		duckdb::PlannerExtension interrupter;
+		interrupter.post_bind_function = InterruptBind;
+		duckdb::PlannerExtension::Register(duckdb::DBConfig::GetConfig(*db.instance), interrupter);
+	}
 	qod_test::RegisterCapture(db);
 	duckdb::Connection con(db);
 	if (!Load(con, "httpfs") || !Load(con, "ducklake")) {
@@ -345,6 +362,55 @@ int main() {
 	expect_one("a replaced table's change feed across the replace",
 	           "SELECT id FROM ducklake_table_insertions('lake', 'main', 'rep', 1, " + rep_first + ")",
 	           replaced_read("\"id\""));
+	// A long replace chain (review I2): describing a read before the first replace walks the chain once,
+	// forward, from DuckLake's own table versions, not once per replace; QOD_REPLACE_CHAIN sets its length
+	// (default 300 here; 2000 when timed by hand). An interrupt while it is described takes effect.
+	{
+		auto chain = 300;
+		if (auto env = std::getenv("QOD_REPLACE_CHAIN")) {
+			chain = std::atoi(env);
+		}
+		std::string chain_first;
+		try {
+			qod::RunStrict(con, "CREATE TABLE lake.hourly (id INTEGER)", "create hourly");
+			qod::RunStrict(con, "INSERT INTO lake.hourly VALUES (1)", "insert hourly");
+			chain_first = lake_head();
+			for (int i = 0; i < chain; i++) {
+				qod::RunStrict(con, "CREATE OR REPLACE TABLE lake.hourly AS SELECT * FROM lake.hourly", "replace hourly");
+			}
+		} catch (std::exception &error) {
+			Fail(std::string("DuckLake replace chain setup: ") + error.what());
+		}
+		auto sql = "SELECT id FROM lake.hourly AT (VERSION => " + chain_first + ")";
+		auto started = std::chrono::steady_clock::now();
+		std::string error;
+		auto own = feed(sql, error);
+		auto elapsed =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+		std::cout << "describer_extension_test: a read before " << chain << " replaces described in " << elapsed
+		          << " ms" << std::endl;
+		const std::string hourly = "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\","
+		                           "\"catalog\":\"lake\",\"catalogType\":\"ducklake\",\"columns\":[\"id\"],"
+		                           "\"kind\":\"table\",\"name\":\"hourly\",\"replaced\":true,\"schema\":\"main\","
+		                           "\"via\":null}],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}";
+		if (!error.empty() || own.size() != 1 || own[0] != hourly) {
+			Fail("a read before a long replace chain: " + error + (own.empty() ? "" : " " + own[0]));
+		}
+		if (elapsed > 1000) {
+			Fail("a read before " + std::to_string(chain) + " replaces took " + std::to_string(elapsed) + " ms");
+		}
+		interrupt_binds = true;
+		error.clear();
+		auto interrupted = feed(sql, error);
+		interrupt_binds = false;
+		if (!interrupted.empty()) {
+			Fail("an interrupt while a dropped table's history is described did not stop the describer: " +
+			     interrupted[0]);
+		}
+		if (error.find("Interrupted") == std::string::npos) {
+			Fail("an interrupt while a dropped table's history is described: " + error);
+		}
+	}
 	{
 		std::string error;
 		auto own = feed("SELECT id FROM lake.reused AT (VERSION => " + reused_at + ")", error);
