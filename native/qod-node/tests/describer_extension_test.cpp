@@ -227,6 +227,89 @@ int main() {
 		}
 	}
 	con.Query("DETACH other_lake");
+
+	// ---- a DuckLake table at any snapshot is described as the table its stable id names now (DuckLake
+	// keeps an entry's oid across snapshots), under its current catalog, schema and name, its columns
+	// under their current names (by DuckLake field id), and `renamed` when any of them had another name
+	// at that snapshot (review M1: `secret` renamed to `secret_now`, a new `secret` created).
+	auto lake_head = [&]() {
+		auto rows = con.Query("SELECT max(snapshot_id) FROM ducklake_snapshots('lake')");
+		auto chunk = rows->HasError() ? nullptr : rows->Fetch();
+		return chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : std::string("0");
+	};
+	std::string old_secret;
+	std::string u_before;
+	std::string gone_at;
+	try {
+		u_before = lake_head();
+		qod::RunStrict(con, "ALTER TABLE lake.u RENAME COLUMN secret TO hidden", "rename u's column");
+		qod::RunStrict(con, "CREATE TABLE lake.secret (id INTEGER, email VARCHAR)", "create secret");
+		qod::RunStrict(con, "INSERT INTO lake.secret VALUES (1, 'old@x.io')", "insert secret");
+		old_secret = lake_head();
+		qod::RunStrict(con, "ALTER TABLE lake.secret RENAME TO secret_now", "rename secret");
+		qod::RunStrict(con, "ALTER TABLE lake.secret_now RENAME COLUMN email TO contact", "rename email");
+		qod::RunStrict(con, "CREATE TABLE lake.secret (id INTEGER, email VARCHAR)", "create the new secret");
+		qod::RunStrict(con, "INSERT INTO lake.secret VALUES (2, 'new@x.io')", "insert the new secret");
+		qod::RunStrict(con, "CREATE TABLE lake.gone (id INTEGER)", "create gone");
+		qod::RunStrict(con, "INSERT INTO lake.gone VALUES (1)", "insert gone");
+		gone_at = lake_head();
+		qod::RunStrict(con, "DROP TABLE lake.gone", "drop gone");
+	} catch (std::exception &error) {
+		Fail(std::string("DuckLake rename setup: ") + error.what());
+	}
+	auto read_of = [](const std::string &name, const std::string &columns, bool renamed) {
+		return "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+		       "\"catalogType\":\"ducklake\",\"columns\":[" +
+		       columns + "],\"kind\":\"table\",\"name\":\"" + name + "\"," + (renamed ? "\"renamed\":true," : "") +
+		       "\"schema\":\"main\",\"via\":null}],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}";
+	};
+	expect_one("an AT read of the renamed table's old name",
+	           "SELECT id, email FROM lake.secret AT (VERSION => " + old_secret + ")",
+	           read_of("secret_now", "\"contact\",\"id\"", true));
+	expect_one("an AT read of the renamed table, its renamed column not read",
+	           "SELECT id FROM lake.secret AT (VERSION => " + old_secret + ")",
+	           read_of("secret_now", "\"id\"", true));
+	expect_one("the change feed of the renamed table's old name",
+	           "SELECT * FROM ducklake_table_insertions('lake', 'main', 'secret', 1, " + old_secret + ")",
+	           read_of("secret_now", "\"contact\",\"id\"", true));
+	expect_one("a column renamed since the snapshot", "SELECT secret FROM lake.u AT (VERSION => " + u_before + ")",
+	           read_of("u", "\"hidden\"", true));
+	expect_one("the new table under the old name, now", "SELECT id, email FROM lake.secret",
+	           read_of("secret", "\"email\",\"id\"", false));
+	expect_one("the renamed table, now", "SELECT id, contact FROM lake.secret_now",
+	           read_of("secret_now", "\"contact\",\"id\"", false));
+	expect_one("the new table at its own latest snapshot",
+	           "SELECT id, email FROM lake.secret AT (VERSION => " + lake_head() + ")",
+	           read_of("secret", "\"email\",\"id\"", false));
+	// A table dropped since: no current table to judge it by, refused to a user, a superuser's to read.
+	{
+		std::string error;
+		auto own = feed("SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")", error);
+		if (error.find("QoD: lake.main.gone at that snapshot is a table dropped since") == std::string::npos ||
+		    !own.empty()) {
+			Fail("a dropped table's history, read by a user: " + error + (own.empty() ? "" : " " + own[0]));
+		}
+		error.clear();
+		auto own_feed =
+		    feed("SELECT * FROM ducklake_table_insertions('lake', 'main', 'gone', 1, " + gone_at + ")", error);
+		if (error.find("a table dropped since") == std::string::npos || !own_feed.empty()) {
+			Fail("a dropped table's change feed, read by a user: " + error);
+		}
+		capture.principal = qod_test::Root();
+		auto from = capture.all.size();
+		capture.on = true;
+		auto as_root = con.Query("SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")");
+		capture.on = false;
+		auto described = false;
+		for (auto i = from; i < capture.all.size(); i++) {
+			described = described || (capture.contexts[i] == con.context.get() &&
+			                          capture.all[i].find("\"name\":\"gone\"") != std::string::npos);
+		}
+		if (as_root->HasError() || !described) {
+			Fail("a dropped table's history, read by a superuser: " +
+			     (as_root->HasError() ? as_root->GetError() : std::string("not described as gone")));
+		}
+	}
 	con.Query("DETACH lake");
 	fs::remove_all(scratch);
 
