@@ -13,6 +13,7 @@ import pytest
 from qod_cli import fleet_join
 from qod_cli.fleet_join import (
     BACKOFF_MIN_S,
+    PLAIN_HTTP_MARKERS,
     FleetMember,
     cgroup_cpu_limit,
     cgroup_memory_limit,
@@ -950,8 +951,8 @@ def test_network_failure_leads_with_the_explanation(tmp_path, capsys, plain_http
     member.run_once()
     err = capsys.readouterr().err.splitlines()
     line = next(l for l in err if "cannot reach the manager" in l)
-    assert "answered plain HTTP" in line and "WRONG_VERSION_NUMBER" not in line
-    assert any("(cause:" in l and "WRONG_VERSION_NUMBER" in l for l in err)
+    assert "answered plain HTTP" in line and not any(m in line for m in PLAIN_HTTP_MARKERS)
+    assert any("(cause:" in l and any(m in l for m in PLAIN_HTTP_MARKERS) for l in err)
 
 
 @pytest.mark.parametrize("error,expected", [

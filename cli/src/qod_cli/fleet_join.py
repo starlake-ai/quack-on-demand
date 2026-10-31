@@ -311,10 +311,15 @@ def _causes(exc: BaseException) -> list[BaseException]:
     return seen
 
 
+# How OpenSSL reports a plain-HTTP answer to a TLS handshake: WRONG_VERSION_NUMBER up to 3.4,
+# "record layer failure" from 3.5 on.
+PLAIN_HTTP_MARKERS = ("WRONG_VERSION_NUMBER", "record layer failure")
+
+
 def scheme_mismatch(exc: BaseException, manager_url: str) -> bool:
     """An https:// URL whose port answered plain HTTP: no retry can fix that, only another URL."""
     return (httpx.URL(manager_url).scheme == "https"
-            and any("WRONG_VERSION_NUMBER" in str(e) for e in _causes(exc)))
+            and any(m in str(e) for e in _causes(exc) for m in PLAIN_HTTP_MARKERS))
 
 
 def network_hint(exc: BaseException, manager_url: str) -> str | None:
