@@ -75,7 +75,8 @@ class SchemaProbeAdbcSpec extends AnyFlatSpec with Matchers:
         wiring = FlightEdgeHarness.RouterWiring(
           nodeQuery = node,
           spawnNodes = true,
-          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
       )
       try

@@ -94,7 +94,8 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       journal = journal,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, journal, store)
 
@@ -216,7 +217,8 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       sessions,
       tracker,
       adapter,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val result = router
       .execute("aud-5", "alice", poolKey, "INSERT INTO acme.public.t VALUES (1)")

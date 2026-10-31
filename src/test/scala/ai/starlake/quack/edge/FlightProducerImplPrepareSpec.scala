@@ -75,7 +75,8 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
           tracker,
           adapter,
           adminExecutor = Some(new AdminStatementExecutor(sup)),
-          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
       else
         new FlightSqlRouter(
@@ -83,7 +84,8 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
           sessions,
           tracker,
           adapter,
-          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
     val producer = new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 

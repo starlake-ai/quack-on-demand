@@ -255,7 +255,8 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
         fix.store,
         authService = Some(auth),
         wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-          new MetadataFilterRewriter(enabled = true)
+          new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
       )
       try body(World(fix, idp, h, auth, new ConcurrentLinkedQueue[AuthzRequest]()))

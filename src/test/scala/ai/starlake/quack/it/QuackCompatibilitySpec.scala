@@ -175,7 +175,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       tracker,
       new QuackHttpAdapter(client, tracker, keys),
       columnPolicyRewriter = new ColumnPolicyRewriter(columns),
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val user   = RbacUser("u-1", Some("t-1"), "alice", kind = "user")
     val grants = List(

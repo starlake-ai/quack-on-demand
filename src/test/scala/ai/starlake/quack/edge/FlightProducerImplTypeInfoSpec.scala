@@ -52,7 +52,8 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
       new SessionRegistry,
       tracker,
       adapter,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 

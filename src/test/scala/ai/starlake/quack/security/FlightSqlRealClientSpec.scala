@@ -88,7 +88,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
         enableProviders = true,
         tls = false,
         wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-          new MetadataFilterRewriter(enabled = true)
+          new MetadataFilterRewriter(enabled = true),
+          protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
       )
       val client = h.newClient()
@@ -204,7 +205,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -235,7 +237,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -262,7 +265,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = false,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -295,7 +299,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -342,7 +347,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -399,7 +405,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -427,7 +434,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -457,7 +465,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()
@@ -497,7 +506,8 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       enableProviders = true,
       tls = false,
       wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
-        new MetadataFilterRewriter(enabled = true)
+        new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     val client = h.newClient()

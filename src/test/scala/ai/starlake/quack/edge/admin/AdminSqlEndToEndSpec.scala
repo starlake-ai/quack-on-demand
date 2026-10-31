@@ -60,7 +60,8 @@ class AdminSqlEndToEndSpec extends AnyFlatSpec with Matchers:
       adapter,
       stmtInstruments = new StatementInstruments(new SimpleMeterRegistry),
       adminExecutor = Some(new AdminStatementExecutor(sup)),
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (sup, store, router)
 

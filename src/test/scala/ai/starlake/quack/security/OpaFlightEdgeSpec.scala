@@ -50,7 +50,8 @@ class OpaFlightEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         nodeQuery = duckNode(OrdersSetup),
         journal = new EventJournal(audit),
         spawnNodes = true,
-        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     Booted(h, audit)

@@ -95,7 +95,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       journal = journal,
       columnPolicyRewriter = columns,
       attachedCatalogsOf = _ => attached,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, () => sent.synchronized(sent.toList))
 

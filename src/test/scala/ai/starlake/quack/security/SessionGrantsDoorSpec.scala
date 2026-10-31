@@ -47,7 +47,8 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       fix.store,
       wiring = FlightEdgeHarness.RouterWiring(
         spawnNodes = true,
-        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     try body(h, fix)

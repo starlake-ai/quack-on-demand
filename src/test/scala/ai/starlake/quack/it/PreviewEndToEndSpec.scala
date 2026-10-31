@@ -167,7 +167,8 @@ class PreviewEndToEndSpec
             sessions,
             tracker,
             adapter,
-            metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+            metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+            protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
           )
           test(router, poolKey)
     finally

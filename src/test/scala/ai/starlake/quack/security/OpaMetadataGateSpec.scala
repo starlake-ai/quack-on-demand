@@ -40,7 +40,8 @@ class OpaMetadataGateSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
           TestArrow.okResponse()
         ,
         metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
-        spawnNodes = true
+        spawnNodes = true,
+        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
     )
     try body(h, seen)

@@ -46,11 +46,14 @@ enum GuardOutcome:
   * `UnresolvedMode.Deny`, so a table whose columns the catalog cannot enumerate denies rather than
   * passing through unexpanded. Analysis is per statement: a batch is allowed only when every
   * statement is clean, so a benign write cannot launder a protected read in a sibling statement.
+  *
+  * `clsEnabled` and `rlsEnabled` are required, not defaulted (final review I1): false switches the
+  * guard off for that kind of policy, which a construction site must say rather than forget.
   */
 final class ProtectedWriteGuard(
     catalog: ColumnCatalog,
-    clsEnabled: Boolean = false,
-    rlsEnabled: Boolean = false
+    clsEnabled: Boolean,
+    rlsEnabled: Boolean
 ):
 
   import GuardOutcome._
@@ -277,6 +280,8 @@ final class ProtectedWriteGuard(
     "access denied: statement could not be fully analysed and reads a protected schema; query the table directly instead"
 
 object ProtectedWriteGuard:
+
+  /** A guard that admits everything: for specs isolating something else, never for production. */
   val disabled: ProtectedWriteGuard =
     new ProtectedWriteGuard(
       new ColumnCatalog.MapCatalog(Map.empty),

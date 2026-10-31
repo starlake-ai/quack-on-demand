@@ -79,7 +79,8 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       tracker,
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
       journal = journal,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     Fixture(router, journal, store, sup.get(poolKey).get.nodes)
 

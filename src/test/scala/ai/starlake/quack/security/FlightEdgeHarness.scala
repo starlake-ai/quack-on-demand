@@ -120,11 +120,12 @@ object FlightEdgeHarness:
       columnPolicyRewriter: ColumnPolicyRewriter = new ColumnPolicyRewriter(
         new ColumnCatalog.MapCatalog(Map.empty)
       ),
-      protectedWriteGuard: ProtectedWriteGuard = ProtectedWriteGuard.disabled,
       journal: EventJournal = EventJournal.noop,
       spawnNodes: Boolean = false,
       /** Required, like the router's: a default would let a spec forget it and narrow nothing. */
-      metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter
+      metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter,
+      /** Required, like the router's: a default would let a spec forget it and screen nothing. */
+      protectedWriteGuard: ProtectedWriteGuard
   )
 
   /** Boot a [[FlightEdgeServer]] on an ephemeral loopback port.

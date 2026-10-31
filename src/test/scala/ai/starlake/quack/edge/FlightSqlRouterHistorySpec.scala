@@ -97,7 +97,8 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
       tracker,
       adapter,
       journal = journal,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     (router, journal, store)
   }
@@ -172,7 +173,8 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
       sessions,
       tracker,
       adapter,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     val result = router.execute("hist-4", "alice", poolKey, "SELECT 1").unsafeRunSync()
     result shouldBe a[Right[?, ?]]

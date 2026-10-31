@@ -81,12 +81,14 @@ final class FlightSqlRouter(
     val metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter,
     /** Protected-write guard: denies a non-SELECT statement whose read side exposes a CLS-masked or
       * RLS-protected table (closes the write-wrapping bypass where a masked or filtered read
-      * launders into a CTAS / INSERT ... SELECT). Inert by default so a construction site that does
-      * not wire it admits every write. TAIL param for the same reason as `metadataFilterRewriter`:
-      * `Main` passes the leading arguments positionally.
+      * launders into a CTAS / INSERT ... SELECT), and on every statement of a policy holder the
+      * spellings the rewriters cannot read (decision 27). Required, not defaulted (final review
+      * I1): a default would let a construction site that forgets it admit every such statement
+      * unmasked. Only a spec isolating something else passes [[ProtectedWriteGuard.disabled]]. TAIL
+      * param for the same reason as `metadataFilterRewriter`: `Main` passes the leading arguments
+      * positionally.
       */
-    val protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
-      ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
+    val protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard,
     /** SQL admin dialect dispatch: when set, a claimed statement (GRANT/REVOKE/CREATE ROLE/etc, see
       * [[ai.starlake.quack.edge.admin.AdminSqlParser.claims]]) is answered by the manager - or
       * rejected - and is NEVER forwarded to a node. None (the default) leaves every construction
@@ -282,9 +284,9 @@ final class FlightSqlRouter(
 
   /** Run a statement under the named connection; the caller MUST close the [[QueryResult]].
     *
-    * `effectiveSet = None` means no handshake state was attached: the statement binds no
-    * principal ([[ai.starlake.quack.edge.authz.NodePrincipal.Unbound]]), so no session handle is
-    * minted for it and it never reaches a node.
+    * `effectiveSet = None` means no handshake state was attached: the statement binds no principal
+    * ([[ai.starlake.quack.edge.authz.NodePrincipal.Unbound]]), so no session handle is minted for
+    * it and it never reaches a node.
     *
     * `preferredNode` is a SOFT pin (prepared Prepare + Execute on the same node for warm caches; a
     * native Quack session's catalog reads on one node): a transaction pin still overrides, and a
