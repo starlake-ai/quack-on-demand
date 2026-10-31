@@ -51,8 +51,9 @@ object AdminSqlParser:
             kw(1) == "ROLE" || kw(1) == "USER" ||
             (kw(1) == "ROW" && kw(2) == "POLICY") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICY")
-          case "ALTER" => kw(1) == "GROUP" || kw(1) == "USER"
-          case "SHOW"  =>
+          case "ALTER"  => kw(1) == "GROUP" || kw(1) == "USER"
+          case "UNDROP" => kw(1) == "TABLE"
+          case "SHOW"   =>
             kw(1) == "ROLES" || kw(1) == "GRANTS" || kw(1) == "USERS" ||
             (kw(1) == "ROW" && kw(2) == "POLICIES") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICIES") ||
@@ -521,7 +522,20 @@ object AdminSqlParser:
       else if optKw("DROP") then drop()
       else if optKw("ALTER") then alter()
       else if optKw("SHOW") then show()
+      else if optKw("UNDROP") then undrop()
       else Left(s"not an admin statement: '${toks(0).raw}'")
+
+    /** `UNDROP TABLE [schema.]t [AS new_name]`. */
+    private def undrop(): Either[String, AdminCommand] =
+      for
+        _     <- kw("TABLE")
+        first <- ident("table name")
+        named <-
+          if optDot() then ident("table name").map(t => (Some(first), t))
+          else Right((None, first))
+        asName <- if optKw("AS") then ident("new table name").map(Some(_)) else Right(None)
+        out    <- end(AdminCommand.UndropTable(named._1, named._2, asName))
+      yield out
 
     private def grant(): Either[String, AdminCommand] =
       if optKw("ROLE") then

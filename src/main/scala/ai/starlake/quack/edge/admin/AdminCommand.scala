@@ -67,3 +67,8 @@ enum AdminCommand:
   case ShowColumnPolicies(filter: PolicyFilter)
   case ShowPoolGrants(principal: Option[Principal])
   case ShowUsers
+
+  /** `UNDROP TABLE [schema.]t [AS new_name]`: recovers a dropped DuckLake table as its caller,
+    * whoever they are (the node judges the read and the create); not an admin-only statement.
+    */
+  case UndropTable(schema: Option[String], table: String, asName: Option[String])

@@ -1253,6 +1253,10 @@ object Main extends IOApp with LazyLogging:
       // these statements (the claim step in FlightSqlRouter.execute is simply never wired).
       val sqlAdminEnabled =
         com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.sqlAdmin.enabled")
+      val undropStatement =
+        new java.util.concurrent.atomic.AtomicReference[
+          ai.starlake.quack.edge.admin.AdminStatementExecutor.UndropFn
+        ](null)
       val adminExecutor =
         Option.when(sqlAdminEnabled)(
           new ai.starlake.quack.edge.admin.AdminStatementExecutor(
@@ -1330,7 +1334,15 @@ object Main extends IOApp with LazyLogging:
                     )
                     .map(_.map(_ => ()))
               },
-            audit = auditRecorder
+            audit = auditRecorder,
+            // UNDROP TABLE runs through the catalog undrop handlers, built after the router they
+            // execute on: bound below, once they exist (unwired until then fails closed).
+            undropFn = (user, poolKey, eff, schema, table, asName) =>
+              Option(undropStatement.get()) match
+                case Some(fn) => fn(user, poolKey, eff, schema, table, asName)
+                case None     =>
+                  ai.starlake.quack.edge.admin.AdminStatementExecutor
+                    .unwiredUndrop(user, poolKey, eff, schema, table, asName)
           )
         )
       if !sqlAdminEnabled then
@@ -1819,6 +1831,7 @@ object Main extends IOApp with LazyLogging:
           audit = auditRecorder
         )
       )
+      undropHandlers.foreach(h => undropStatement.set(h.undropStatement))
 
       val restoreHandlers: Option[ai.starlake.quack.ondemand.api.CatalogRestoreHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogRestoreHandlers(

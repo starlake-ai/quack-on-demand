@@ -39,7 +39,8 @@ final class AdminStatementExecutor(
       AdminStatementExecutor.unwiredRequirePasswordChange,
     setUserEnabledFn: AdminStatementExecutor.SetUserEnabledFn =
       AdminStatementExecutor.unwiredSetUserEnabled,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    undropFn: AdminStatementExecutor.UndropFn = AdminStatementExecutor.unwiredUndrop
 ) extends LazyLogging:
 
   private final case class Ctx(
@@ -84,6 +85,11 @@ final class AdminStatementExecutor(
             detail = Map("cmd" -> "unparsed")
           )
           IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
+        case Right(AdminCommand.UndropTable(schema, table, asName)) =>
+          // Not an admin statement: any signed-in user may ask, and it runs as them, so the node
+          // decides the read of the dropped table and the create (no admin gate here).
+          logger.info(s"sql-admin user=$user tenant=${poolKey.tenant} cmd=UndropTable")
+          undropFn(user, poolKey, effectiveSet, schema, table, asName)
         case Right(cmd) =>
           authorize(user, poolKey, effectiveSet) match
             case Left(f @ RouterFailure.AccessDenied(_)) =>
@@ -676,6 +682,10 @@ final class AdminStatementExecutor(
           Right(AdminResults.table(List("id", "name", "description"), rows))
         }
 
+      case AdminCommand.UndropTable(_, _, _) =>
+        // Dispatched in execute before the admin gate; never reaches the admin path.
+        IO.pure(Left(RouterFailure.Internal("UNDROP TABLE is not an admin statement")))
+
       case AdminCommand.ShowUsers =>
         IO.blocking {
           val rows = supervisor
@@ -877,6 +887,23 @@ final class AdminStatementExecutor(
         }
 
 object AdminStatementExecutor:
+
+  /** (user, poolKey, the session's effective set, schema, table, asName) -> the dialect's row.
+    * `UNDROP TABLE`, wired in Main over `CatalogUndropHandlers.undropStatement`; the default fails
+    * closed.
+    */
+  type UndropFn = (
+      String,
+      PoolKey,
+      Option[EffectiveSet],
+      Option[String],
+      String,
+      Option[String]
+  ) => IO[Either[RouterFailure, QueryResult]]
+
+  val unwiredUndrop: UndropFn =
+    (_, _, _, _, _, _) => IO.pure(Left(RouterFailure.Internal("UNDROP TABLE is not wired")))
+
   /** (tenantId, username, password, kind, memberships) -> created user. Wired in Main over
     * PoolSupervisor.createUser + the boot UserStore with failIfExists = true; the default keeps
     * test/unwired constructions compiling and fail-closed.

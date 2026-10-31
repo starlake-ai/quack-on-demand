@@ -246,7 +246,30 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       case Left(RouterFailure.AccessDenied(_)) => succeed
       case other                               => fail(s"expected AccessDenied, got $other")
 
-  it should "admit superusers and tenant admins of the session tenant" in:
+  "UNDROP TABLE" should "run as its caller, admin or not, through the undrop function" in:
+    val (sup, _, _) = setup()
+    val seen        =
+      scala.collection.mutable.ListBuffer.empty[(String, Option[String], String, Option[String])]
+    val exec = new AdminStatementExecutor(
+      sup,
+      undropFn = (user, _, eff, schema, table, asName) =>
+        IO {
+          seen += ((user, eff.map(_.user.username), table, asName))
+          Right(AdminResults.ok(s"table $table restored"))
+        }.map(identity)
+    )
+    exec
+      .execute("carol", poolKey, "UNDROP TABLE main.orders AS o2", userEff(sup))
+      .unsafeRunSync() match
+      case Right(r) => r.close()
+      case other    => fail(s"expected the undrop function's answer, got $other")
+    seen.toList shouldBe List(("carol", userEff(sup).map(_.user.username), "orders", Some("o2")))
+    // Unwired, it fails closed.
+    new AdminStatementExecutor(sup)
+      .execute("carol", poolKey, "UNDROP TABLE t", userEff(sup))
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+
+  "authorization" should "admit superusers and tenant admins of the session tenant" in:
     val (sup, _, exec) = setup()
     exec.execute("root", poolKey, "CREATE ROLE r1", superEff).unsafeRunSync().isRight shouldBe true
     run(exec, sup, "CREATE ROLE r2").isRight shouldBe true

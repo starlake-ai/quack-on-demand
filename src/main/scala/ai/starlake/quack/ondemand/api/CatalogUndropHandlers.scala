@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -105,133 +106,241 @@ final class CatalogUndropHandlers(
         audit.rest(apiKey, "control-plane", AuditActions.CatalogUndrop, "denied")
         IO.pure(Left(e))
       case Right((tid, db)) =>
-        val target = req.asName.getOrElse(req.table)
-        def denied(
-            sc: StatusCode,
-            code: String,
-            msg: String
-        ): Either[(StatusCode, ErrorResponse), UndropResponse] =
-          audit.rest(
-            apiKey,
-            "control-plane",
-            AuditActions.CatalogUndrop,
-            "denied",
-            tenant = Some(tid),
-            target = Some(s"$db/${req.schema}.${req.table}")
-          )
-          err(sc, code, msg)
-
-        if List(req.schema, req.table, target).exists(v => v.isEmpty || hasUnsafeChars(v)) then
-          IO.pure(
-            denied(
-              StatusCode.BadRequest,
-              "invalid_name",
-              "schema, table, and asName must be non-empty and free of quotes, separators, " +
-                "and whitespace"
+        recover(
+          tid,
+          db,
+          req.schema,
+          req.table,
+          req.asName,
+          req.fromSnapshot,
+          writePoolKey(tid, db),
+          callerOf(s"undrop-$tid-$db", apiKey)
+        ).map { outcome =>
+          auditUndrop(outcome, tid, db, req.schema, req.table) { (outcomeTag, target, detail) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.CatalogUndrop,
+              outcomeTag,
+              tenant = Some(tid),
+              target = Some(target),
+              detail = detail
             )
-          )
-        else
-          val reader = resolveReader(tid, db)
-          reader.findDroppedTable(req.schema, req.table) match
-            case None =>
-              IO.pure(
-                denied(
-                  StatusCode.NotFound,
-                  "not_found",
-                  s"no dropped table '${req.schema}.${req.table}'"
-                )
+          }
+          outcome
+        }
+
+  /** `UNDROP TABLE [schema.]t [AS new_name]` (the gateway's admin dialect), on the caller's own
+    * session: the same recovery as [[undrop]], run as `user` (`eff` the session's principal) on the
+    * session's pool, so the node decides the read of the dropped table (its last live name's grant)
+    * and the create (DDL in the schema). `schema` defaults to the database's default schema. The
+    * answer is the dialect's (status, detail) row; a refusal is a plain-words [[RouterFailure]].
+    */
+  def undropStatement(
+      user: String,
+      poolKey: PoolKey,
+      eff: Option[EffectiveSet],
+      schema: Option[String],
+      table: String,
+      asName: Option[String]
+  ): IO[Either[RouterFailure, ai.starlake.quack.edge.QueryResult]] =
+    eff match
+      case None => IO.pure(Left(RouterFailure.AccessDenied("UNDROP TABLE needs a signed-in user")))
+      case Some(e) =>
+        val tid = TenantDbGate.resolveTenantId(sup, poolKey.tenant).getOrElse(poolKey.tenant)
+        sup.findTenantDb(tid, poolKey.tenantDb) match
+          case None =>
+            IO.pure(Left(RouterFailure.NotFound(s"database '${poolKey.tenantDb}' not found")))
+          case Some(td) if td.kind != ai.starlake.quack.model.TenantDbKind.DuckLake =>
+            IO.pure(
+              Left(RouterFailure.BadRequest("UNDROP TABLE needs a DuckLake database"))
+            )
+          case Some(td) =>
+            val s = schema.getOrElse(
+              sup.effectiveMetastoreFor(tid, td.name).getOrElse("schemaName", "main")
+            )
+            val caller =
+              ExecCaller.unrestricted(
+                s"undrop-$tid-${td.name}",
+                user,
+                superuserAdmissible = e.user.tenant.isEmpty
               )
-            case Some(entry) =>
-              val fromSnapshot = req.fromSnapshot.getOrElse(entry.lastLiveSnapshot)
-              if req.fromSnapshot.exists(_ > entry.lastLiveSnapshot) then
-                IO.pure(
-                  denied(
-                    StatusCode.UnprocessableEntity,
-                    "invalid_snapshot",
-                    s"fromSnapshot must be at most the last-live snapshot " +
-                      s"${entry.lastLiveSnapshot} (the table does not resolve at later versions)"
+            recover(tid, td.name, s, table, asName, None, Some(poolKey), Right(caller)).map {
+              outcome =>
+                auditUndrop(outcome, tid, td.name, s, table) { (outcomeTag, target, detail) =>
+                  audit.restAs(
+                    user,
+                    if e.user.tenant.isEmpty then "system" else "tenant",
+                    "control-plane",
+                    AuditActions.CatalogUndrop,
+                    outcomeTag,
+                    tenant = Some(tid),
+                    target = Some(target),
+                    detail = detail
                   )
-                )
-              else if !reader.snapshotExists(fromSnapshot) then
-                IO.pure(
-                  denied(
-                    StatusCode.Gone,
-                    "snapshot_expired",
-                    s"snapshot $fromSnapshot has been expired; the table is no longer recoverable"
-                  )
-                )
-              else if reader
-                  .maxSnapshotId()
-                  .exists(m => reader.tableExistsAt(req.schema, target, m))
-              then
-                IO.pure(
-                  denied(
-                    StatusCode.Conflict,
-                    "name_conflict",
-                    s"table '${req.schema}.$target' exists; supply asName to restore under a " +
-                      "different name"
-                  )
-                )
-              else
-                writePoolKey(tid, db) match
-                  case None =>
-                    IO.pure(
-                      denied(
-                        StatusCode.NotFound,
-                        "no_pool",
-                        s"tenant-db '$db' has no running pool; undrop needs at least one pool " +
-                          "with a live WriteOnly/Dual node"
+                }
+                outcome match
+                  case Right(r) =>
+                    Right(
+                      ai.starlake.quack.edge.admin.AdminResults.ok(
+                        s"table ${r.schema}.${r.table} restored as ${r.schema}.${r.restoredAs} " +
+                          s"from snapshot ${r.fromSnapshot}"
                       )
                     )
-                  case Some(poolKey) =>
-                    callerOf(s"undrop-$tid-$db", apiKey) match
-                      case Left((code, e)) => IO.pure(denied(code, e.error, e.message))
-                      case Right(caller)   =>
-                        val sql =
-                          s"CREATE TABLE ${quoteIdent(req.schema)}.${quoteIdent(target)} AS " +
-                            s"SELECT * FROM ${quoteIdent(req.schema)}.${quoteIdent(req.table)} " +
-                            s"AT (VERSION => $fromSnapshot)"
-                        def committedResponse()
-                            : Either[(StatusCode, ErrorResponse), UndropResponse] =
-                          audit.rest(
-                            apiKey,
-                            "control-plane",
-                            AuditActions.CatalogUndrop,
-                            "ok",
-                            tenant = Some(tid),
-                            target = Some(s"$db/${req.schema}.${req.table}"),
-                            detail = Map(
-                              "schema"       -> req.schema,
-                              "table"        -> req.table,
-                              "restoredAs"   -> target,
-                              "fromSnapshot" -> fromSnapshot.toString
-                            )
-                          )
-                          Right(UndropResponse(req.schema, req.table, target, fromSnapshot))
-                        executor(caller, poolKey, sql)
-                          .timeout(cfg.undropTimeoutSec.seconds)
-                          .attempt
-                          .map {
-                            case Left(e) =>
-                              // Cancellation of the blocking HTTP leg is best-effort, so a CTAS that
-                              // outlives the timeout may still have committed on the node: probe the
-                              // catalog before answering so the response and audit reflect reality.
-                              if reader
-                                  .maxSnapshotId()
-                                  .exists(m => reader.tableExistsAt(req.schema, target, m))
-                              then committedResponse()
-                              else
-                                val msg = e match
-                                  case _: java.util.concurrent.TimeoutException =>
-                                    s"undrop timed out after ${cfg.undropTimeoutSec}s"
-                                  case other => s"undrop failed: ${other.getMessage}"
-                                denied(StatusCode.BadGateway, "undrop_failed", msg)
-                            case Right(Left(RouterFailure.AccessDenied(reason))) =>
-                              denied(StatusCode.Forbidden, "acl_denied", reason)
-                            case Right(Left(failure)) =>
-                              denied(StatusCode.BadGateway, "undrop_failed", failure.reason)
-                            case Right(Right(result)) =>
-                              // A CTAS result stream carries only a row count nobody reads.
-                              result.close()
-                              committedResponse()
-                          }
+                  case Left((code, err)) => Left(statementFailure(code, err, s, table, asName))
+            }
+
+  /** A refusal of the recovery in plain words, for the admin dialect. */
+  private def statementFailure(
+      code: StatusCode,
+      err: ErrorResponse,
+      schema: String,
+      table: String,
+      asName: Option[String]
+  ): RouterFailure =
+    err.error match
+      case "not_found" =>
+        RouterFailure.NotFound(s"there is no dropped table $schema.$table")
+      case "name_conflict" =>
+        val target = asName.getOrElse(table)
+        RouterFailure.AlreadyExists(
+          s"a table $schema.$target exists; use UNDROP TABLE $schema.$table AS <new name>"
+        )
+      case "acl_denied" =>
+        RouterFailure.AccessDenied(s"not permitted: ${err.message}")
+      case "invalid_name" =>
+        RouterFailure.BadRequest(
+          "UNDROP TABLE names must be plain names, free of quotes, separators and whitespace"
+        )
+      case _ if code == StatusCode.Gone =>
+        RouterFailure.NotFound(s"$schema.$table is no longer recoverable: ${err.message}")
+      case _ => RouterFailure.Internal(err.message)
+
+  /** Audits one recovery: ok with its detail, or denied. */
+  private def auditUndrop(
+      outcome: Either[(StatusCode, ErrorResponse), UndropResponse],
+      tid: String,
+      db: String,
+      schema: String,
+      table: String
+  )(write: (String, String, Map[String, String]) => Unit): Unit =
+    outcome match
+      case Right(r) =>
+        write(
+          "ok",
+          s"$db/$schema.$table",
+          Map(
+            "schema"       -> r.schema,
+            "table"        -> r.table,
+            "restoredAs"   -> r.restoredAs,
+            "fromSnapshot" -> r.fromSnapshot.toString
+          )
+        )
+      case Left(_) => write("denied", s"$db/$schema.$table", Map.empty)
+
+  /** The recovery itself, shared by the REST endpoint, the MCP tool and `UNDROP TABLE`: name
+    * screen, the dropped table's last live snapshot, the name check, then `CREATE TABLE <target> AS
+    * SELECT * FROM <table> AT (VERSION => n)` as `caller` on `pool`. `pool` and `caller` are
+    * consulted only once the catalog checks pass, in that order. No audit: the callers audit.
+    */
+  def recover(
+      tid: String,
+      db: String,
+      schema: String,
+      table: String,
+      asName: Option[String],
+      fromSnapshotReq: Option[Long],
+      pool: => Option[PoolKey],
+      caller: => Either[(StatusCode, ErrorResponse), ExecCaller]
+  ): Out[UndropResponse] =
+    val target = asName.getOrElse(table)
+    if List(schema, table, target).exists(v => v.isEmpty || hasUnsafeChars(v)) then
+      IO.pure(
+        err(
+          StatusCode.BadRequest,
+          "invalid_name",
+          "schema, table, and asName must be non-empty and free of quotes, separators, " +
+            "and whitespace"
+        )
+      )
+    else
+      val reader = resolveReader(tid, db)
+      reader.findDroppedTable(schema, table) match
+        case None =>
+          IO.pure(err(StatusCode.NotFound, "not_found", s"no dropped table '$schema.$table'"))
+        case Some(entry) =>
+          val fromSnapshot = fromSnapshotReq.getOrElse(entry.lastLiveSnapshot)
+          if fromSnapshotReq.exists(_ > entry.lastLiveSnapshot) then
+            IO.pure(
+              err(
+                StatusCode.UnprocessableEntity,
+                "invalid_snapshot",
+                s"fromSnapshot must be at most the last-live snapshot " +
+                  s"${entry.lastLiveSnapshot} (the table does not resolve at later versions)"
+              )
+            )
+          else if !reader.snapshotExists(fromSnapshot) then
+            IO.pure(
+              err(
+                StatusCode.Gone,
+                "snapshot_expired",
+                s"snapshot $fromSnapshot has been expired; the table is no longer recoverable"
+              )
+            )
+          else if reader.maxSnapshotId().exists(m => reader.tableExistsAt(schema, target, m)) then
+            IO.pure(
+              err(
+                StatusCode.Conflict,
+                "name_conflict",
+                s"table '$schema.$target' exists; supply asName to restore under a " +
+                  "different name"
+              )
+            )
+          else
+            pool match
+              case None =>
+                IO.pure(
+                  err(
+                    StatusCode.NotFound,
+                    "no_pool",
+                    s"tenant-db '$db' has no running pool; undrop needs at least one pool " +
+                      "with a live WriteOnly/Dual node"
+                  )
+                )
+              case Some(poolKey) =>
+                caller match
+                  case Left(e)  => IO.pure(Left(e))
+                  case Right(c) =>
+                    val sql =
+                      s"CREATE TABLE ${quoteIdent(schema)}.${quoteIdent(target)} AS " +
+                        s"SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(table)} " +
+                        s"AT (VERSION => $fromSnapshot)"
+                    val committed: Either[(StatusCode, ErrorResponse), UndropResponse] =
+                      Right(UndropResponse(schema, table, target, fromSnapshot))
+                    executor(c, poolKey, sql)
+                      .timeout(cfg.undropTimeoutSec.seconds)
+                      .attempt
+                      .map {
+                        case Left(e) =>
+                          // Cancellation of the blocking HTTP leg is best-effort, so a CTAS that
+                          // outlives the timeout may still have committed on the node: probe the
+                          // catalog before answering so the response and audit reflect reality.
+                          if reader
+                              .maxSnapshotId()
+                              .exists(m => reader.tableExistsAt(schema, target, m))
+                          then committed
+                          else
+                            val msg = e match
+                              case _: java.util.concurrent.TimeoutException =>
+                                s"undrop timed out after ${cfg.undropTimeoutSec}s"
+                              case other => s"undrop failed: ${other.getMessage}"
+                            err(StatusCode.BadGateway, "undrop_failed", msg)
+                        case Right(Left(RouterFailure.AccessDenied(reason))) =>
+                          err(StatusCode.Forbidden, "acl_denied", reason)
+                        case Right(Left(failure)) =>
+                          err(StatusCode.BadGateway, "undrop_failed", failure.reason)
+                        case Right(Right(result)) =>
+                          // A CTAS result stream carries only a row count nobody reads.
+                          result.close()
+                          committed
+                      }

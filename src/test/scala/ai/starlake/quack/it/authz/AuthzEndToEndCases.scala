@@ -2230,6 +2230,47 @@ abstract class AuthzEndToEndCases(
     withClue(db)(dc shouldBe 200)
   }
 
+  // ---------- UNDROP TABLE (the gateway's dialect), on both doors, as its caller ----------
+
+  "UNDROP TABLE" should "recover a dropped table as its caller, on both doors" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_t (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.ud_t VALUES (7)")
+    admin("lake", s"DROP TABLE $lake.main.ud_t")
+    doors.foreach { d =>
+      withClue(s"[$d] bob: ") {
+        val back = s"ud_back_${d.toString.toLowerCase(java.util.Locale.ROOT)}"
+        as(d, "bob", "lake", s"UNDROP TABLE main.ud_t AS $back") match
+          case Right(rows) => rows.mkString should include(s"restored as main.$back")
+          case Left(err)   => fail(err)
+        as(d, "bob", "lake", s"SELECT id FROM $lake.main.$back") shouldBe Right(List("7"))
+      }
+    }
+  }
+
+  it should "say in plain words when nothing is dropped, the name is taken, or it is not permitted" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_taken (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_taken")
+    admin("lake", s"CREATE TABLE $lake.main.ud_taken (id INTEGER)")
+    admin("lake", s"CREATE TABLE $lake.main.ud_denied (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_denied")
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        as(d, "bob", "lake", "UNDROP TABLE main.ud_nothing") match
+          case Left(err) => err should include("there is no dropped table main.ud_nothing")
+          case Right(r)  => fail(s"expected a refusal, got $r")
+        as(d, "bob", "lake", "UNDROP TABLE main.ud_taken") match
+          case Left(err) => err should include("use UNDROP TABLE main.ud_taken AS <new name>")
+          case Right(r)  => fail(s"expected a refusal, got $r")
+        // nico holds no grant on ud_denied and no DDL in main.
+        as(d, "nico", "lake", "UNDROP TABLE main.ud_denied AS ud_nico") match
+          case Left(err) => err should include("not permitted")
+          case Right(r)  => fail(s"expected a refusal, got $r")
+      }
+    }
+  }
+
   "a plain view over a renamed table's history" should "be refused by the node to a principal with policies" in {
     ready()
     val (old, _) = vaultHistory
