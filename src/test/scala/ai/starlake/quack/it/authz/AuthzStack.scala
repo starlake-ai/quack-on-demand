@@ -58,7 +58,9 @@ final class AuthzStack(
     /** What this stack's tenants and source databases are named with, before a run's hex: the
       * databases [[boot]] drops when an earlier run of this stack left them.
       */
-    stackPrefixes: List[String] = Nil
+    stackPrefixes: List[String] = Nil,
+    /** Manager modules booted with the stack, as `ModuleLoader.discover()` hands them to Main. */
+    modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
 ):
   import Main.given
 
@@ -136,6 +138,7 @@ final class AuthzStack(
         authCfg,
         metrics,
         opa,
+        modules = modules,
         quackCfg = Some(quackCfg)
       )
       .attempt
@@ -225,6 +228,21 @@ final class AuthzStack(
     val (code, body) = postStatus(path, json, token)
     if code < 200 || code >= 300 then throw new IllegalStateException(s"POST $path -> $code $body")
     if body.isBlank then Json.Null else parse(body).fold(e => throw e, identity)
+
+  /** A GET as the seeded admin; throws on a non-2xx answer. */
+  def get(path: String): Json =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$restPort$path"))
+        .timeout(Duration.ofSeconds(30))
+        .header("X-API-Key", session)
+        .GET()
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    if r.statusCode() < 200 || r.statusCode() >= 300 then
+      throw new IllegalStateException(s"GET $path -> ${r.statusCode()}")
+    parse(r.body()).fold(e => throw e, identity)
 
   /** A PUT as the seeded admin (the federated-secret upsert); throws on a non-2xx answer. */
   def put(path: String, json: String): Unit =
