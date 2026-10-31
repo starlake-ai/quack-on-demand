@@ -1137,6 +1137,9 @@ table" card; MCP `list_recoverable` / `undrop_table` work with a regular user's 
   view holds that name and the grant covers it, refused once the name is reused (only a superuser
   reads it then);
 - any of those three is refused to a user with column or row policies.
+- a dropped table read `AT (TIMESTAMP => ...)` can be refused when the node cannot pin the
+  timestamp to the same snapshot DuckLake reads (sub-microsecond rounding, a session TimeZone it
+  cannot apply): read it `AT (VERSION => n)` instead, which is never affected.
 
 ## Federation - external catalogs via DuckDB extensions
 
