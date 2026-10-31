@@ -531,6 +531,34 @@ final class AuthzStack(
   /** `sql` through MCP's `run_sql` with personal access token `pat`: the tool's text (Right), or
     * its error text (Left).
     */
+  /** MCP tool `name` with `arguments` under the bearer `pat`: its text (Right), or the error text.
+    */
+  def mcpTool(pat: String, name: String, arguments: Json): Either[String, String] =
+    val body = Json
+      .obj(
+        "jsonrpc" -> Json.fromString("2.0"),
+        "id"      -> Json.fromInt(1),
+        "method"  -> Json.fromString("tools/call"),
+        "params"  -> Json.obj("name" -> Json.fromString(name), "arguments" -> arguments)
+      )
+      .noSpaces
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$restPort/mcp"))
+        .timeout(Duration.ofSeconds(30))
+        .header("Content-Type", "application/json")
+        .header("Authorization", s"Bearer $pat")
+        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    val result = parse(r.body()).toOption.map(_.hcursor.downField("result"))
+    val text   = result
+      .flatMap(_.downField("content").downN(0).get[String]("text").toOption)
+      .getOrElse(r.body())
+    if result.flatMap(_.get[Boolean]("isError").toOption).contains(false) then Right(text)
+    else Left(text)
+
   def mcp(pat: String, sql: String, database: String): Either[String, String] =
     val body = Json
       .obj(

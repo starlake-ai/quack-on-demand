@@ -2313,6 +2313,9 @@ abstract class AuthzEndToEndCases(
       session("dina")
     )
     withClue(db)(dc shouldBe 403)
+    // The node's refusal of the create (review M8), not a scope or pool refusal.
+    db should include("acl_denied")
+    db should include("drop_free_dina")
     // bob (`*.*.* ALL`, a regular user) recovers it under a new name, and reads it.
     val (bc, bb) = stack.postStatus(
       "/api/profile/undrop",
@@ -2326,6 +2329,111 @@ abstract class AuthzEndToEndCases(
     )
     withClue(bb)(bc shouldBe 200)
     allowed("bob", "lake", s"SELECT id FROM $lake.main.drop_free_bob", Some(List("1")))
+  }
+
+  private def patOf(user: String, name: String, fields: (String, Json)*): String =
+    stack
+      .post(
+        "/api/auth/pat/create",
+        obj((List("name" -> s(s"$name-$run"), "dropAdmin" -> Json.False) ++ fields)*),
+        token = session(user)
+      )
+      .hcursor
+      .get[String]("token")
+      .fold(e => throw e, identity)
+
+  it should "honour every axis of a token: databases, verb ceiling (review I1)" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_scope (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_scope")
+    val elsewhere = patOf("bob", "ud-elsewhere", "databases" -> Json.arr(s(files)))
+    val (lc, lb)  = stack.getStatus(s"/api/profile/recoverable?tenantDb=$lake", elsewhere)
+    withClue(lb)(lc shouldBe 403)
+    lb should include("token_scope")
+    val undropBody =
+      obj("tenantDb" -> s(lake), "schema" -> s("main"), "table" -> s("ud_scope"))
+    val (uc, ub) = stack.postStatus("/api/profile/undrop", undropBody, elsewhere)
+    withClue(ub)(uc shouldBe 403)
+    ub should include("token_scope")
+    val mcpArgs = Json.obj("database" -> s(lake), "schema" -> s("main"), "table" -> s("ud_scope"))
+    stack.mcpTool(elsewhere, "list_recoverable", Json.obj("database" -> s(lake))) match
+      case Left(err) => err should include("not permitted for this token")
+      case Right(t)  => fail(s"a token scoped elsewhere listed: $t")
+    stack.mcpTool(elsewhere, "undrop_table", mcpArgs) match
+      case Left(err) => err should include("not permitted for this token")
+      case Right(t)  => fail(s"a token scoped elsewhere recovered: $t")
+    // A read-only token may not create the table a recovery creates.
+    val readOnly = patOf("bob", "ud-ro", "verbCeiling" -> s("RO"))
+    val (rc, rb) = stack.postStatus("/api/profile/undrop", undropBody, readOnly)
+    withClue(rb)(rc shouldBe 403)
+    rb should include("verb ceiling")
+    stack.mcpTool(readOnly, "undrop_table", mcpArgs) match
+      case Left(err) => err should include("verb ceiling")
+      case Right(t)  => fail(s"a read-only token recovered: $t")
+  }
+
+  it should "recover through MCP with a regular user's token, and refuse AS on a taken name" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_mcp (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.ud_mcp VALUES (5)")
+    admin("lake", s"DROP TABLE $lake.main.ud_mcp")
+    val pat = patOf("bob", "ud-mcp")
+    // AS on a name a live table holds: refused before anything runs.
+    stack.mcpTool(
+      pat,
+      "undrop_table",
+      Json.obj(
+        "database" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("ud_mcp"),
+        "as_name"  -> s("orders")
+      )
+    ) match
+      case Left(err) => err should include("exists")
+      case Right(t)  => fail(s"recovered over a live table: $t")
+    val (tc, tb) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("ud_mcp"),
+        "asName"   -> s("orders")
+      ),
+      session("bob")
+    )
+    withClue(tb)(tc shouldBe 409)
+    tb should include("name_conflict")
+    stack.mcpTool(
+      pat,
+      "undrop_table",
+      Json.obj("database" -> s(lake), "schema" -> s("main"), "table" -> s("ud_mcp"))
+    ) shouldBe a[Right[?, ?]]
+    allowed("bob", "lake", s"SELECT id FROM $lake.main.ud_mcp", Some(List("5")))
+  }
+
+  "UNDROP TABLE names" should "compare without case, as DuckDB resolves them (review M6)" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_case (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.ud_case VALUES (8)")
+    admin("lake", s"DROP TABLE $lake.main.ud_case")
+    stack.flight("UNDROP TABLE MAIN.UD_CASE AS ud_case_back", "bob", BobPw, Acme, "lake") match
+      case Right(rows) => rows.mkString should include("restored as main.ud_case_back")
+      case Left(err)   => fail(err)
+    allowed("bob", "lake", s"SELECT id FROM $lake.main.ud_case_back", Some(List("8")))
+  }
+
+  "UNDROP TABLE inside a transaction" should "be refused (review M5)" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_tx (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_tx")
+    val held = stack.heldFlight("bob", BobPw, Acme, "lake")
+    try
+      held.run("BEGIN TRANSACTION") shouldBe a[Right[?, ?]]
+      held.run("UNDROP TABLE main.ud_tx") match
+        case Left(err) => err should include("cannot run inside a transaction")
+        case Right(r)  => fail(s"UNDROP ran inside a transaction: $r")
+      held.run("ROLLBACK")
+    finally held.close()
   }
 
   "a plain view over a renamed table's history" should "be refused by the node to a principal with policies" in {
