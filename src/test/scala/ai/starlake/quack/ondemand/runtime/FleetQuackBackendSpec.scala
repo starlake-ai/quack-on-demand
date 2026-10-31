@@ -131,6 +131,15 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     n.token should not be empty
   }
 
+  it should "stamp the start time to the microsecond, so the node row round-trips it exactly" in {
+    val (store, backend, setClock, _) = fixture()
+    setClock(Instant.parse("2026-10-31T12:00:00.999999500Z"))
+    val agent = new FakeAgent(store, "srv-1", host = "10.0.0.7"); agent.beat()
+    val n     = withAgent(agent)(backend.start(spec("quack-acme-db-bi-1")))
+    // The shared clock moves in whole seconds meanwhile: the sub-second part is the stamp's.
+    n.startedAt.getNano shouldBe 999999000
+  }
+
   it should "send the pool's cpu/memory as DuckDB SETs apart from the tenant's initSql" in {
     val (store, backend, _, _) = fixture()
     val small = new FakeAgent(store, "small", memoryBytes = Some(512L << 20)); small.beat()

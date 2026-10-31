@@ -165,7 +165,7 @@ final class FleetQuackBackend(
               token = token,
               pid = None,
               podName = None,
-              startedAt = clock(),
+              startedAt = RunningNode.startStamp(clock()),
               maxConcurrent = spec.maxConcurrent,
               serverName = Some(row.name)
             )

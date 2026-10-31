@@ -509,7 +509,7 @@ final class KubernetesQuackBackend(
         token = token,
         pid = None,
         podName = Some(spec.nodeId),
-        startedAt = Instant.now(),
+        startedAt = RunningNode.startStamp(Instant.now()),
         maxConcurrent = spec.maxConcurrent
       )
     }
@@ -952,7 +952,7 @@ final class KubernetesQuackBackend(
         token = tokens.getOrElse(nodeId, ""),
         pid = None,
         podName = Some(nodeId),
-        startedAt = Instant.now(),
+        startedAt = RunningNode.startStamp(Instant.now()),
         maxConcurrent = labels.get("quack-max-concurrent").flatMap(_.toIntOption).getOrElse(0)
       )
     }

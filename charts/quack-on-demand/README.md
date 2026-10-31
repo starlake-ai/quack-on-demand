@@ -228,6 +228,7 @@ When you need the wire encrypted (compliance such as SOC2 / HIPAA / PCI), run a 
 - **TLS** - leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
 - **Probes** - liveness targets `/health` (always 200 while the JVM is alive); readiness targets `/ready` (503 until Postgres is reachable). Readiness gates traffic until Postgres connectivity is confirmed, so a rolling restart doesn't briefly serve requests against an unavailable control plane.
 - **drainTimeoutSec** (`QOD_DRAIN_TIMEOUT_SEC`) - default 60 s. Gives in-flight FlightSQL streams a chance to finish before the JVM is killed. `terminationGracePeriodSeconds` is derived as `drainTimeoutSec + 15` (default 75 s).
+- **poolDrainTimeoutSec** (`QOD_POOL_DRAIN_TIMEOUT_SEC`) - default 20 s. How long a non-force scale-down, stop, delete or suspend of a pool waits for the draining nodes' in-flight statements (and, except on suspend, native front-door results being fetched and open native transactions) before stopping them anyway. The teardown holds the pool's lock meanwhile and the REST call blocks for it, so keep it below the `qod` CLI's 30 s REST timeout; 0 stops at once.
 
 ## Uninstall
 

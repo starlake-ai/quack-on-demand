@@ -12,10 +12,10 @@ import java.time.Instant
 import scala.concurrent.duration.DurationInt
 
 class HibernationWiringSpec extends AnyFlatSpec with Matchers:
-  private val poolKey  = PoolKey("t", "db", "p")
-  private val cfg  = HibernationConfig()
-  private val now  = Instant.parse("2026-09-03T12:00:00Z")
-  private def idleView = HibernationView(poolKey, false, false, 1, 30.minutes)
+  private val poolKey       = PoolKey("t", "db", "p")
+  private val cfg           = HibernationConfig()
+  private val now           = Instant.parse("2026-09-03T12:00:00Z")
+  private def idleView      = HibernationView(poolKey, false, false, 1, 30.minutes)
   private def staleActivity = Map(poolKey -> now.minusSeconds(31 * 60))
 
   private def wiring(
@@ -37,14 +37,15 @@ class HibernationWiringSpec extends AnyFlatSpec with Matchers:
   "sweep" should "flush local activity on every replica but only suspend as leader" in:
     var flushed   = 0
     var suspended = 0
-    val w = wiring(leader = false, suspend = _ => IO { suspended += 1; Right(()) }, () => flushed += 1)
+    val w         =
+      wiring(leader = false, suspend = _ => IO { suspended += 1; Right(()) }, () => flushed += 1)
     w.sweep().unsafeRunSync()
     flushed shouldBe 1
     suspended shouldBe 0
 
   it should "suspend an idle pool as leader" in:
     var suspended = List.empty[PoolKey]
-    val w         = wiring(leader = true, suspend = k => IO { suspended = suspended :+ k; Right(()) })
+    val w = wiring(leader = true, suspend = k => IO { suspended = suspended :+ k; Right(()) })
     w.sweep().unsafeRunSync()
     suspended shouldBe List(poolKey)
 
@@ -54,6 +55,33 @@ class HibernationWiringSpec extends AnyFlatSpec with Matchers:
     w.sweep().unsafeRunSync()
     w.sweep().unsafeRunSync()
     calls shouldBe 2
+
+  it should "retry a pool its suspend found busy on the next sweep, as a skip, not a failure" in:
+    import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+    var calls = 0
+    val w     = wiring(
+      leader = true,
+      suspend = k =>
+        IO(calls += 1) *> IO.defer {
+          if calls == 1 then
+            IO.raiseError(new ai.starlake.quack.ondemand.PoolSupervisor.PoolBusy(k, "test"))
+          else IO.pure(Right(()))
+        }
+    )
+    val (_, events) =
+      LogCapture.logged(classOf[HibernationWiring].getName)(w.sweep().unsafeRunSync())
+    // A failed suspend warns; a busy pool is only noted.
+    events.filter(_.getLevel == ch.qos.logback.classic.Level.WARN) shouldBe empty
+    events.map(_.getFormattedMessage).exists(_.contains("is busy")) shouldBe true
+    w.sweep().unsafeRunSync()
+    calls shouldBe 2
+
+  it should "warn when a suspend throws for any other reason" in:
+    import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+    val w = wiring(leader = true, suspend = _ => IO.raiseError(new RuntimeException("boom")))
+    val (_, events) =
+      LogCapture.logged(classOf[HibernationWiring].getName)(w.sweep().unsafeRunSync())
+    events.exists(_.getLevel == ch.qos.logback.classic.Level.WARN) shouldBe true
 
   it should "drop a suspended pool's first-seen baseline" in:
     // Never-active pool: first sweep baselines, a later sweep suspends and clears.

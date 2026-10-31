@@ -91,3 +91,50 @@ class NodeLoadTrackerSpec extends AnyFlatSpec with Matchers:
     t.onFinish("busy", 7)
     t.retain(live = Set.empty, since = t.mark())
     t.trackedNodes shouldBe empty
+
+  // -- admission: what a drain refuses ---------------------------------------------
+
+  it should "admit a call unless the node is draining, and write nothing when it refuses" in:
+    val t = new NodeLoadTracker
+    t.tryStart("n1") shouldBe true
+    t.snapshot("n1").inFlight shouldBe 1
+    t.setDraining("n1", true)
+    val m = t.mark()
+    t.tryStart("n1") shouldBe false
+    t.snapshot("n1").inFlight shouldBe 1
+    // A refusal is no write: the node is still untouched since the mark.
+    t.onFinish("n1", 5)
+    t.retain(live = Set.empty, since = m)
+    t.trackedNodes shouldBe Set("n1")
+    t.retain(live = Set.empty, since = t.mark())
+    t.trackedNodes shouldBe empty
+
+  it should "count a front-door hold until it is released, once, and refuse one on a draining node" in:
+    val t = new NodeLoadTracker
+    val h = t.tryHold("n1").getOrElse(fail("refused"))
+    t.snapshot("n1").held shouldBe 1
+    t.snapshot("n1").inFlight shouldBe 0
+    t.snapshot("n1").idle shouldBe false
+    t.setDraining("n1", true)
+    t.tryHold("n1") shouldBe None
+    t.snapshot("n1").held shouldBe 1
+    h.release()
+    h.release()
+    t.snapshot("n1").held shouldBe 0
+    t.snapshot("n1").idle shouldBe true
+
+  it should "keep, on retain, a node not live while a front-door hold is open on it" in:
+    val t = new NodeLoadTracker
+    val h = t.tryHold("held").getOrElse(fail("refused"))
+    t.retain(live = Set.empty, since = t.mark())
+    t.trackedNodes shouldBe Set("held")
+    h.release()
+    t.retain(live = Set.empty, since = t.mark())
+    t.trackedNodes shouldBe empty
+
+  it should "give a forgotten node no entry back when its hold is released" in:
+    val t = new NodeLoadTracker
+    val h = t.tryHold("gone").getOrElse(fail("refused"))
+    t.remove("gone")
+    h.release()
+    t.trackedNodes shouldBe empty

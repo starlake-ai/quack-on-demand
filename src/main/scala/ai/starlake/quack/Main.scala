@@ -712,7 +712,8 @@ object Main extends IOApp with LazyLogging:
       events = supEvents,
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore),
       sharedPolicyVersions = Some(policyVersions),
-      sharedUserS3 = Some(userS3)
+      sharedUserS3 = Some(userS3),
+      drainTimeout = scala.concurrent.duration.DurationInt(mgrCfg.poolDrainTimeoutSec).seconds
     )
     supRef.set(sup)
     usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
@@ -2272,10 +2273,22 @@ object Main extends IOApp with LazyLogging:
                         (k, t, d)
                       case ai.starlake.quack.ondemand.autoscale.AutoscaleAction.ScaleIn(k, t, d) =>
                         (k, t, d)
-                    sup.scale(k, t, d, force = false, reason = "autoscale").attempt.map {
-                      case Right(_) => Right(())
-                      case Left(e)  => Left(Option(e.getMessage).getOrElse(e.toString))
-                    }
+                    sup
+                      .scale(
+                        k,
+                        t,
+                        d,
+                        force = false,
+                        reason = "autoscale",
+                        onBusy = PoolSupervisor.OnBusy.Skip("autoscale")
+                      )
+                      .attempt
+                      .flatMap {
+                        // A pool another holder has (a drain): the wiring retries it next sweep.
+                        case Left(busy: PoolSupervisor.PoolBusy) => IO.raiseError(busy)
+                        case Right(_)                            => IO.pure(Right(()))
+                        case Left(e) => IO.pure(Left(Option(e.getMessage).getOrElse(e.toString)))
+                      }
                   },
                   isLeader = () => coordinator.forall(_.isLeader),
                   audit = auditRecorder
@@ -2302,11 +2315,16 @@ object Main extends IOApp with LazyLogging:
                       java.time.Instant.now().minusSeconds(30L * 24 * 3600)
                     ): Unit,
                   suspend = key =>
-                    sup.suspendPool(key, "idle").attempt.map {
-                      case Right(Right(_)) => Right(())
-                      case Right(Left(e))  => Left(e.toString)
-                      case Left(t)         => Left(Option(t.getMessage).getOrElse(t.toString))
-                    },
+                    sup
+                      .suspendPool(key, "idle", onBusy = PoolSupervisor.OnBusy.Skip("hibernation"))
+                      .attempt
+                      .flatMap {
+                        // A pool another holder has (a drain): the wiring retries it next sweep.
+                        case Left(busy: PoolSupervisor.PoolBusy) => IO.raiseError(busy)
+                        case Right(Right(_))                     => IO.pure(Right(()))
+                        case Right(Left(e))                      => IO.pure(Left(e.toString))
+                        case Left(t) => IO.pure(Left(Option(t.getMessage).getOrElse(t.toString)))
+                      },
                   isLeader = () => coordinator.forall(_.isLeader),
                   audit = auditRecorder
                 )

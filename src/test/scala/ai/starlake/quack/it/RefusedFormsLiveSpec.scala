@@ -453,6 +453,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   }
 
   "SUMMARIZE" should "match DuckDB's own SUMMARIZE, which a superuser runs" in {
+    assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val own = LiveQodNode.lines(
       new QuackHttpClient(TestArrow.sharedAllocator)
         .query(

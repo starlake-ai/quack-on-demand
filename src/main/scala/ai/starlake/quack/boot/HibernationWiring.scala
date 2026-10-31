@@ -67,6 +67,10 @@ final class HibernationWiring(
                       )
                       auditSuspend(key, "", outcome = "error", error = Some(err))
                     succeeded
+                  case Left(_: PoolSupervisor.PoolBusy) =>
+                    // Its lock is held (a teardown draining it): retried next sweep.
+                    logger.info(s"hibernation: $key is busy; retried next sweep")
+                    succeeded
                   case Left(t) =>
                     logger.warn(
                       s"hibernation: suspend threw for $key, will retry next sweep: ${t.getMessage}"

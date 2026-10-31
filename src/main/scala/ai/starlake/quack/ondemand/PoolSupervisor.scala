@@ -53,6 +53,7 @@ import cats.syntax.all._
 import com.typesafe.scalalogging.LazyLogging
 
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.DurationInt
 import scala.util.Try
 
 /** Patch for [[PoolSupervisor.updateTenantDb]]. Absent fields unchanged; present fields replace.
@@ -157,7 +158,12 @@ final class PoolSupervisor(
     /** The user S3 credential cache Main shares with NodeKeys (handle digests) and the internal
       * credentials endpoint. None (tests) still keeps a real cache, over this supervisor's store.
       */
-    sharedUserS3: Option[ai.starlake.quack.edge.authz.UserS3CredentialCache] = None
+    sharedUserS3: Option[ai.starlake.quack.edge.authz.UserS3CredentialCache] = None,
+    /** The longest a non-force teardown (scale-down, stop, delete, suspend) waits for a draining
+      * node to go idle before it stops the node anyway (`QOD_POOL_DRAIN_TIMEOUT_SEC`). Zero stops
+      * at once.
+      */
+    drainTimeout: scala.concurrent.duration.FiniteDuration = PoolSupervisor.DefaultDrainTimeout
 ) extends LazyLogging:
 
   /** Each tenant's policy version (Liquibase 0050), refreshed after every local RBAC or ACL
@@ -1017,10 +1023,48 @@ final class PoolSupervisor(
       IO.delay(logger.warn(s"reconcile loop: pass failed, continuing: ${t.getMessage}"))
     } *> IO.sleep(interval)).foreverM.void
 
+  /** A pool whose lock another holder has (a teardown draining it) is skipped this pass: the next
+    * pass takes it again ([[lockFor]]).
+    */
   private def reconcilePool(key: PoolKey, state: PoolState): IO[PoolState] =
-    locks.withLock(key) {
+    lockFor(key, PoolSupervisor.OnBusy.Skip("reconcile")) {
       reconcilePoolUnlocked(key, state)
-    }
+    }.recover { case _: PoolSupervisor.PoolBusy => state }
+
+  /** Consecutive skips per (leader duty, pool), for [[lockFor]]'s bound. */
+  private val leaderSkips = TrieMap.empty[(String, PoolKey), Int]
+
+  /** Take the pool's lock for a mutation. `Wait` queues for it, as every user-initiated mutation
+    * does. `Skip(duty)` is a leader duty's: it tries the lock and, when another holder has it,
+    * raises [[PoolSupervisor.PoolBusy]] at once without running `io`, so a teardown draining one
+    * pool (up to the drain timeout) does not hold up the duty's pass over every other pool. After
+    * [[PoolSupervisor.MaxLeaderSkips]] consecutive skips of the same pool the duty queues for it
+    * instead, so a pool drained back to back is not skipped forever: it waits at most one drain
+    * then.
+    */
+  private def lockFor[A](key: PoolKey, onBusy: PoolSupervisor.OnBusy)(io: IO[A]): IO[A] =
+    onBusy match
+      case PoolSupervisor.OnBusy.Wait       => locks.withLock(key)(io)
+      case PoolSupervisor.OnBusy.Skip(duty) =>
+        IO.defer {
+          val streak = (duty, key)
+          if leaderSkips.getOrElse(streak, 0) >= PoolSupervisor.MaxLeaderSkips then
+            IO(
+              logger.info(
+                s"$duty: $key skipped ${PoolSupervisor.MaxLeaderSkips} times in a row; " +
+                  "waiting for its lock"
+              )
+            ) *> locks.withLock(key)(io).guarantee(IO(leaderSkips.remove(streak)).void)
+          else
+            locks.tryWithLock(key)(io).flatMap {
+              case Some(a) => IO(leaderSkips.remove(streak)).as(a)
+              case None    =>
+                IO {
+                  val n = leaderSkips.updateWith(streak)(c => Some(c.getOrElse(0) + 1))
+                  logger.info(s"$duty: $key is busy (skip ${n.getOrElse(1)}); retried next tick")
+                } *> IO.raiseError(new PoolSupervisor.PoolBusy(key, duty))
+            }
+        }
 
   private def reconcilePoolUnlocked(key: PoolKey, state: PoolState): IO[PoolState] =
     // Refresh BOTH halves of the pool's state INSIDE the advisory lock so a second lock holder acts
@@ -3002,7 +3046,8 @@ final class PoolSupervisor(
       newDist: RoleDistribution,
       force: Boolean,
       gateBypass: Boolean = false,
-      reason: String = "manual"
+      reason: String = "manual",
+      onBusy: PoolSupervisor.OnBusy = PoolSupervisor.OnBusy.Wait
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
     val st    = get(key)
@@ -3023,10 +3068,9 @@ final class PoolSupervisor(
       case Left(reason) =>
         IO.raiseError(new ai.starlake.quack.spi.QuotaExceededException(reason))
       case Right(()) =>
-        locks
-          .withLock(key) {
-            withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
-          }
+        lockFor(key, onBusy) {
+          withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
+        }
           .flatTap { nodes =>
             IO(
               events.emit(
@@ -3101,10 +3145,7 @@ final class PoolSupervisor(
               toRemove.foldLeft(IO.unit)((acc, n) =>
                 acc *> stopNodeBestEffort(key, n.nodeId, "scale-down")
               )
-            else
-              toRemove.foldLeft(IO.unit) { (acc, n) =>
-                acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(key, n)
-              }
+            else drainAndStop(key, toRemove, waitForHolds = true)
           val deleteRemoved =
             // Drop both the store row and the tracker entry now the node is stopped. setDraining
             // (force=false above) created the entry; without this remove it lingers in snapshotAll
@@ -3181,39 +3222,42 @@ final class PoolSupervisor(
     * [[resumePool]]) wakes them. Idempotent. The flag is set FIRST so a query racing the drain sees
     * suspended=true and re-wakes the pool once the lock frees.
     */
-  def suspendPool(key: PoolKey, reason: String): IO[Either[SupervisorError, Pool]] =
-    locks
-      .withLock(key)(withCacheRecoveryIO("suspendPool")(IO.defer {
-        pools.get(key) match
-          case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
-          case Some(state) =>
-            poolIdByKey.get(key).flatMap(poolRows.get) match
-              case None =>
-                IO.pure(
-                  Left(
-                    SupervisorError.Internal(
-                      s"pool entity missing for $key (control-plane out of sync)"
-                    )
+  def suspendPool(
+      key: PoolKey,
+      reason: String,
+      onBusy: PoolSupervisor.OnBusy = PoolSupervisor.OnBusy.Wait
+  ): IO[Either[SupervisorError, Pool]] =
+    lockFor(key, onBusy)(withCacheRecoveryIO("suspendPool")(IO.defer {
+      pools.get(key) match
+        case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
+        case Some(state) =>
+          poolIdByKey.get(key).flatMap(poolRows.get) match
+            case None =>
+              IO.pure(
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
                   )
                 )
-              case Some(p) =>
-                val updated = p.copy(suspended = true)
-                val flagIO  = IO.blocking {
-                  store.upsertPool(updated)
-                  poolRows.put(updated.id, updated)
-                  pools.put(key, state.copy(suspended = true))
+              )
+            case Some(p) =>
+              val updated = p.copy(suspended = true)
+              val flagIO  = IO.blocking {
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(suspended = true))
+                publish.topologyChanged()
+              }
+              flagIO *> drainAndForgetNodes(key, state.nodes) *> IO
+                .delay {
+                  pools.put(key, state.copy(nodes = Nil, suspended = true))
                   publish.topologyChanged()
+                  events.emit(
+                    ManagerEvent.PoolSuspended(key.tenant, key.tenantDb, key.pool, reason)
+                  )
                 }
-                flagIO *> drainAndForgetNodes(key, state.nodes) *> IO
-                  .delay {
-                    pools.put(key, state.copy(nodes = Nil, suspended = true))
-                    publish.topologyChanged()
-                    events.emit(
-                      ManagerEvent.PoolSuspended(key.tenant, key.tenantDb, key.pool, reason)
-                    )
-                  }
-                  .as(Right(updated))
-      }))
+                .as(Right(updated))
+    }))
       .flatTap {
         case Right(_) => IO(onPoolTeardown(key))
         case Left(_)  => IO.unit
@@ -3275,10 +3319,7 @@ final class PoolSupervisor(
             state.nodes.foldLeft(IO.unit)((acc, n) =>
               acc *> stopNodeBestEffort(key, n.nodeId, "pool-delete")
             )
-          else
-            state.nodes.foldLeft(IO.unit) { (acc, n) =>
-              acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(key, n)
-            }
+          else drainAndStop(key, state.nodes, waitForHolds = true)
         stopAll *>
           state.nodes.foldLeft(IO.unit)((acc, n) =>
             // Store row and tracker entry both go now the node is stopped, so a drained-then-deleted
@@ -3298,26 +3339,78 @@ final class PoolSupervisor(
             pools.remove(key)
             pendingReasons.remove(key)
             poolIdByKey.remove(key)
+            leaderSkips.keys.filter(_._2 == key).foreach(leaderSkips.remove)
             publish.topologyChanged()
             events.emit(ManagerEvent.PoolDeleted(key.tenant, key.tenantDb, key.pool))
           }
 
-  private def drainAndStop(key: PoolKey, n: RunningNode, reason: String = "drain"): IO[Unit] =
-    stopNodeBestEffort(key, n.nodeId, reason)
+  /** Drain `nodes`, then stop them: mark them all draining at once, wait until none has work left,
+    * then stop each. A scale-down passes only the nodes it removes, so the others keep serving; a
+    * stop, delete or suspend passes the whole pool, so new statements fail at once ("no fallback
+    * node") while the drain waits, since the pool is going away. The work waited for is the
+    * statements in flight and, with `waitForHolds`, the native front door's held connections too
+    * ([[ai.starlake.quack.route.NodeLoad.idle]]): results the client still fetches, open client
+    * transactions. A suspend passes `waitForHolds = false`: the pool is marked suspended first, so
+    * a held transaction's next statement would wake it, and the resume waits for this teardown's
+    * lock: waiting for the transaction would always run to the timeout and lose it anyway.
+    *
+    * The wait is bounded by `drainTimeout` (`QOD_POOL_DRAIN_TIMEOUT_SEC`): past it the nodes are
+    * stopped anyway, with a warning naming what was still running, so a client that never finishes
+    * (an open transaction left idle, a result never fetched) cannot hold a teardown, and the pool
+    * lock it runs under, forever. The leader's duties skip a pool whose lock is held ([[lockFor]]).
+    *
+    * The wait sees this replica's statements only: under HA, another replica's are not waited for.
+    * Cancelling the wait clears the draining flags, so the nodes stay routable. Once the wait ends
+    * the stops run uncancelable: no cancellation gap can leave a stopped node routable again.
+    */
+  private def drainAndStop(
+      key: PoolKey,
+      nodes: List[RunningNode],
+      waitForHolds: Boolean,
+      reason: String = "drain"
+  ): IO[Unit] =
+    def busy: List[(String, ai.starlake.quack.route.NodeLoad)] =
+      nodes
+        .map(n => n.nodeId -> tracker.snapshot(n.nodeId))
+        .filter { case (_, l) => if waitForHolds then !l.idle else l.inFlight > 0 }
+    def awaitIdle: IO[Unit] = IO.defer {
+      if busy.isEmpty then IO.unit else IO.sleep(25.millis) *> awaitIdle
+    }
+    val bounded =
+      if drainTimeout <= scala.concurrent.duration.Duration.Zero then IO.unit
+      else
+        awaitIdle.timeoutTo(
+          drainTimeout,
+          IO.delay {
+            val left = busy
+              .map { case (id, l) => s"$id (in flight ${l.inFlight}, held ${l.held})" }
+              .mkString(", ")
+            if left.nonEmpty then
+              logger.warn(
+                s"drain of $key timed out after $drainTimeout; stopping anyway: $left"
+              )
+          }
+        )
+    if nodes.isEmpty then IO.unit
+    else
+      // Install cancellation cleanup before exposing the draining flags.
+      IO.uncancelable { poll =>
+        IO.delay(nodes.foreach(n => tracker.setDraining(n.nodeId, true))) *>
+          poll(bounded).onCancel(
+            IO.delay(nodes.foreach(n => tracker.setDraining(n.nodeId, false)))
+          ) *>
+          nodes.traverse_(n => stopNodeBestEffort(key, n.nodeId, reason))
+      }
 
-  /** Drain-stop then forget each node (mark draining, [[drainAndStop]] with reason "suspend", then
-    * delete the store row + tracker entry). Shared by [[suspendPool]] and reconcile's
-    * suspended-pool heal so the per-node sequence can't drift.
+  /** Drain-stop then forget `nodes` ([[drainAndStop]] with reason "suspend", in-flight statements
+    * only, then delete the store rows + tracker entries). Shared by [[suspendPool]] and reconcile's
+    * suspended-pool heal so the sequence can't drift.
     */
   private def drainAndForgetNodes(key: PoolKey, nodes: List[RunningNode]): IO[Unit] =
-    val drainIO = nodes.foldLeft(IO.unit) { (acc, n) =>
-      acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *>
-        drainAndStop(key, n, reason = "suspend")
-    }
     val forgetIO = nodes.foldLeft(IO.unit) { (acc, n) =>
       acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
     }
-    drainIO *> forgetIO
+    drainAndStop(key, nodes, waitForHolds = false, reason = "suspend") *> forgetIO
 
   /** Operator restart of a single node: stop it (in-flight statements fail to their clients),
     * respawn through reconcile's NodeSpec path, clear any quarantine so the fresh node is routable,
@@ -4543,6 +4636,30 @@ object PoolSupervisor:
     */
   val NodeStartupGrace: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(120).seconds
+
+  /** What a pool mutation does when another holder has the pool's lock (a teardown draining it):
+    * `Wait` queues for it, as every user-initiated mutation does; `Skip` is a leader duty's
+    * (reconcile, autoscale, hibernation), named by `duty`, which leaves the pool to its next tick.
+    */
+  enum OnBusy:
+    case Wait
+    case Skip(duty: String)
+
+  /** A leader duty skipped a pool whose lock another holder has ([[OnBusy.Skip]]): nothing ran, the
+    * caller tries again on its next tick.
+    */
+  final class PoolBusy(val key: PoolKey, val duty: String)
+      extends RuntimeException(s"$duty: pool $key is busy (its lock is held); retried next tick")
+
+  /** Default [[PoolSupervisor]] `drainTimeout`: `QOD_POOL_DRAIN_TIMEOUT_SEC`'s own default, below
+    * the CLI's 30 s REST timeout so a `qod pool stop` facing an idle transaction still gets its
+    * answer.
+    */
+  val DefaultDrainTimeout: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(20).seconds
+
+  /** Consecutive skips of a busy pool after which a leader duty queues for its lock instead. */
+  val MaxLeaderSkips: Int = 3
 
   /** Effective sets kept at most, one per (user, JWT roles, JWT groups). */
   val EffectiveCacheMaxEntries: Long = 10_000L

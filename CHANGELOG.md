@@ -846,6 +846,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
   pools that are gone; HA peers also forget the load figures of nodes another replica removed.
 - `qod_node_authz_*` are exported by the HA leader only, so `sum by (node)` no longer multiplies by
   the replica count.
+- Drain waits for in-flight statements before stopping a node, on FlightSQL and the native front
+  door (#161, thanks `ItsM0rty`). The wait is bounded by the new `QOD_POOL_DRAIN_TIMEOUT_SEC`
+  (default 20 s).
 
 ## 0.10.1
 

@@ -45,6 +45,12 @@ final class QuackSession(
   val current: AtomicReference[Option[QuackStatement]]         = new AtomicReference(None)
   val txLink: AtomicReference[Option[(String, QuackNodeLink)]] = new AtomicReference(None)
 
+  /** A fresh link a node answered a statement on, between the router's Ok and the front door
+    * storing the statement: the PREPARE releases it if it ends before then (cancelled), so the link
+    * and its hold on the node are never orphaned.
+    */
+  val handoff: AtomicReference[Option[QuackNodeLink]] = new AtomicReference(None)
+
   /** The fence, with the answer it gives: raised when the client transaction on `txLink` ended on
     * the node behind the client's back (an admin kill disconnected it, or a statement or its
     * session handle failed on its link). The client still believes it is inside a transaction, so

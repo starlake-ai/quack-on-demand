@@ -232,6 +232,24 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | Self-healing on restart | The registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience) | Nothing in DuckDB restarts a crashed engine for you |
 | Resume-on-query | A suspended pool wakes on the first statement with a bounded hold | Scale-to-zero without client-side retry logic |
 
+Non-force scale-down, stop, delete and suspension wait for the current manager's work on the
+draining nodes to finish: FlightSQL statements in flight and, except on suspension, native front
+door results the client is still fetching and open native transactions. A scale-down drains only
+the nodes it removes; stop, delete and suspension drain the whole pool at once, so new statements
+are refused while they wait. New statements to a draining node are refused before dispatch and go
+to another node. Statements of an open native transaction still run on its node until COMMIT or
+ROLLBACK; a FlightSQL transaction is not waited for, and its statements on a draining node are
+refused. A suspension does not wait for native transactions or unread results: a transaction's
+next statement wakes the pool and is told the transaction was aborted. Reads the manager runs
+without load bookkeeping (catalog and Iceberg previews, data diffs, restore dry runs) are neither
+refused nor waited for. The wait is bounded by `QOD_POOL_DRAIN_TIMEOUT_SEC` (default 20 s, below
+the `qod` CLI's 30 s REST timeout): past it the nodes are stopped anyway, and a native transaction
+left open on one is answered "the transaction's node left the pool" on its next statement.
+`force=true` skips the wait on scale, stop and delete. Reconcile, autoscale and hibernation skip a
+pool while a drain holds it and take it on a later pass. This is a local drain, not coordination
+across manager replicas, and a FlightSQL result stream is not waited for once the node has
+answered.
+
 ### Multi-tenancy and isolation
 
 | Feature | Description | Added value |

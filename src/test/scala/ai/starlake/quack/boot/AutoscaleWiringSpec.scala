@@ -62,6 +62,29 @@ class AutoscaleWiringSpec extends AnyFlatSpec with Matchers:
     w.sweep().unsafeRunSync() // retry
     calls shouldBe 4
 
+  it should "decide a pool whose scale found it busy again on the next sweep, counting no failure" in:
+    // A drain holds the pool's lock: the scale was not attempted, so neither its cooldown nor a
+    // failure is booked against the pool.
+    var calls = 0
+    val w     = new AutoscaleWiring(
+      cfg,
+      views = () => List(hotView),
+      flushLocal = () => (),
+      purge = () => (),
+      scale = _ =>
+        IO(calls += 1) *> IO.defer {
+          if calls == 1 then
+            IO.raiseError(new ai.starlake.quack.ondemand.PoolSupervisor.PoolBusy(poolKey, "test"))
+          else IO.pure(Right(()))
+        },
+      isLeader = () => true
+    )
+    w.sweep().unsafeRunSync()
+    w.failuresForTest shouldBe empty
+    w.backoffForTest shouldBe empty
+    w.sweep().unsafeRunSync()
+    calls shouldBe 2
+
   it should "not let a scale error kill the sweep" in:
     val w = new AutoscaleWiring(
       cfg.copy(scaleOutCooldownSec = 0),

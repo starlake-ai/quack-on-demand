@@ -545,9 +545,19 @@ final case class ManagerConfig(
     spawnScriptWindows: String,
     @field @ConfigField(
       envVar = "QOD_DRAIN_TIMEOUT_SEC",
-      description = "Seconds to wait for in-flight statements during graceful pool shutdown."
+      description = "Seconds to wait for in-flight statements during graceful manager shutdown."
     )
     drainTimeoutSec: Int,
+    @field @ConfigField(
+      envVar = "QOD_POOL_DRAIN_TIMEOUT_SEC",
+      description =
+        "Seconds a non-force pool teardown (scale-down, stop, delete, suspend) waits for the " +
+          "draining nodes' work before stopping them anyway: FlightSQL statements in flight and, " +
+          "except on suspend, native front-door results still being fetched and open native " +
+          "transactions. The teardown holds the pool's lock meanwhile, and a REST call blocks " +
+          "for it: keep it below the 30 s REST timeout of the qod CLI. 0 stops at once."
+    )
+    poolDrainTimeoutSec: Int,
     @field @ConfigField(
       envVar = "QOD_HEALTH_CHECK_INTERVAL_SEC",
       description = "Seconds between supervisor health checks against child nodes."
@@ -612,6 +622,10 @@ final case class ManagerConfig(
   require(
     nodeLeaseSec >= 1,
     s"nodeLeaseSec (QOD_QUACK_NODE_LEASE_SEC) must be >= 1, got $nodeLeaseSec"
+  )
+  require(
+    poolDrainTimeoutSec >= 0,
+    s"poolDrainTimeoutSec (QOD_POOL_DRAIN_TIMEOUT_SEC) must be >= 0, got $poolDrainTimeoutSec"
   )
 
 /** Where tenants may authorize local folders for their users (in-engine authorization, decision

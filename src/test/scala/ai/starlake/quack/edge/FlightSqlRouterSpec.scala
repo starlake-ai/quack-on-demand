@@ -3215,3 +3215,72 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
         router.history.snapshot(1).head.status shouldBe "denied"
       case Left(e) => fail(s"escaped ${e.getClass.getName}", e)
+
+  // ---- drain: a statement routed to a node that starts draining ----
+
+  "a statement routed to a node that starts draining" should "be refused there, nothing sent, and run once on the surviving node" in:
+    val backend = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          24000 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
+    sup
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val sent   = TrieMap.empty[String, Int]
+    val client = new QuackHttpClient(TestArrow.sharedAllocator):
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
+        IO { sent.updateWith(endpoint)(c => Some(c.getOrElse(0) + 1)); TestArrow.okResponse() }
+    // Runs once the router holds the snapshot it routes from, which still shows every node
+    // routable: the nodes named here start draining in that window.
+    val drainNow = new java.util.concurrent.atomic.AtomicReference(List.empty[String])
+    val router   = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      stmtInstruments = si,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
+      refsConfigFor = _ =>
+        drainNow.get().foreach(tracker.setDraining(_, true))
+        ai.starlake.acl.model.Config.forDuckDB(None, None)
+    )
+    val List(first, survivor) = sup.get(poolKey).get.nodes
+    // The survivor carries load, so the least-loaded pick is the node about to drain.
+    tracker.onStart(survivor.nodeId)
+    drainNow.set(List(first.nodeId))
+    router.execute("drain-1", "alice", poolKey, "SELECT 1").unsafeRunSync() match
+      case Right(qr) =>
+        qr.nodeId shouldBe survivor.nodeId
+        qr.close()
+      case Left(f) => fail(s"expected the survivor to serve, got $f")
+    sent.toMap shouldBe Map(s"quack:127.0.0.1:${survivor.port}" -> 1)
+    tracker.snapshot(first.nodeId).copy(draining = false) shouldBe
+      ai.starlake.quack.route.NodeLoad.empty
+

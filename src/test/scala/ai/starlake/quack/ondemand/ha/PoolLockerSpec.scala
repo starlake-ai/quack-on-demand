@@ -6,6 +6,8 @@ import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import scala.concurrent.duration.*
+
 class PoolLockerSpec extends AnyFlatSpec with Matchers:
 
   import TestPostgres.{pgHost, pgPass, pgPort, pgUser}
@@ -126,4 +128,44 @@ class PoolLockerSpec extends AnyFlatSpec with Matchers:
     release.countDown()
     holder.joinWithNever.unsafeRunSync()
     locker.permitKeys shouldBe 0
+  }
+
+  // -- tryWithLock: what the leader loops take, skipping a pool another holder has --------------
+
+  /** Holds `key` on `locker` until the returned release is called. */
+  private def holding(locker: PoolLocker, key: ai.starlake.quack.model.PoolKey): () => Unit =
+    val inside  = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    val fiber   = locker
+      .withLock(key)(IO.blocking {
+        inside.countDown()
+        release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+      })
+      .start
+      .unsafeRunSync()
+    inside.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+    () =>
+      release.countDown()
+      fiber.joinWithNever.unsafeRunSync()
+      ()
+
+  "tryWithLock" should "refuse at once while the pool is held, and run once it is free (in process)" in {
+    val locker  = PoolLocker.inProcess()
+    val release = holding(locker, inKey)
+    locker.tryWithLock(inKey)(IO.pure(1)).timeout(1.second).unsafeRunSync() shouldBe None
+    release()
+    locker.tryWithLock(inKey)(IO.pure(1)).unsafeRunSync() shouldBe Some(1)
+    locker.permitKeys shouldBe 0
+  }
+
+  it should "refuse at once while another session holds the pool, and run once it is free (Postgres)" in {
+    if !TestPostgres.reachable then cancel("local Postgres not reachable; skipping")
+    val locker  = new PgPoolLocker(url, pgUser, pgPass)
+    val key     = ai.starlake.quack.model.PoolKey("acme", "default", "try-lock")
+    val release = holding(locker, key)
+    locker.tryWithLock(key)(IO.pure(1)).timeout(5.seconds).unsafeRunSync() shouldBe None
+    release()
+    locker.tryWithLock(key)(IO.pure(1)).unsafeRunSync() shouldBe Some(1)
+    // The try released its session lock: a blocking holder gets the pool at once.
+    locker.withLock(key)(IO.pure(2)).timeout(5.seconds).unsafeRunSync() shouldBe 2
   }

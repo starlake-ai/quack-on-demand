@@ -14,10 +14,18 @@ import java.util.concurrent.ConcurrentHashMap
 trait PoolLocker:
   def withLock[A](key: PoolKey)(io: IO[A]): IO[A]
 
+  /** Run `io` under the pool's lock if it is free now, else None at once without running it: what
+    * the leader's duties (reconcile, autoscale, hibernation) take, so a pool another holder has (a
+    * teardown draining it) is skipped until their next tick instead of queueing them behind it.
+    * This default waits for the lock, which keeps an implementation that cannot try correct.
+    */
+  def tryWithLock[A](key: PoolKey)(io: IO[A]): IO[Option[A]] = withLock(key)(io).map(Some(_))
+
 object PoolLocker:
   /** Non-HA default: no cross-process locking (single manager). */
   val noop: PoolLocker = new PoolLocker:
-    def withLock[A](key: PoolKey)(io: IO[A]): IO[A] = io
+    def withLock[A](key: PoolKey)(io: IO[A]): IO[A]                     = io
+    override def tryWithLock[A](key: PoolKey)(io: IO[A]): IO[Option[A]] = io.map(Some(_))
 
   /** Single-manager serialization: one in-process permit per pool, the same contract as
     * [[PgPoolLocker]] without a database (and the same no-nesting rule: a second `withLock` on the
@@ -66,6 +74,12 @@ final class InProcessPoolLocker extends PoolLocker:
   def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
     IO.delay(enter(key)).bracket(_.permit.surround(io))(_ => IO.delay(leave(key)))
 
+  override def tryWithLock[A](key: PoolKey)(io: IO[A]): IO[Option[A]] =
+    IO.delay(enter(key))
+      .bracket(
+        _.tryPermit.use(acquired => if acquired then io.map(Some(_)) else IO.pure(None))
+      )(_ => IO.delay(leave(key)))
+
   /** Visible for tests: pools with a holder or a waiter. */
   private[ha] def permitKeys: Int = permits.size
 
@@ -86,15 +100,51 @@ final class PgPoolLocker(jdbcUrl: String, user: String, password: String) extend
   def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
     IO.blocking(acquire(key)).bracket(_ => io)(c => IO.blocking(c.close()))
 
+  /** `pg_try_advisory_lock`: no waiter left holding a connection. The lock is session scoped, so
+    * closing the connection releases it.
+    */
+  override def tryWithLock[A](key: PoolKey)(io: IO[A]): IO[Option[A]] =
+    IO.blocking(tryAcquire(key))
+      .bracket {
+        case Some(_) => io.map(Some(_))
+        case None    => IO.pure(None)
+      }(c => IO.blocking(c.foreach(_.close())))
+
+  private def lockName(key: PoolKey): String =
+    s"qod-pool:${key.tenant}/${key.tenantDb}/${key.pool}"
+
   private def acquire(key: PoolKey): Connection =
     val c = DriverManager.getConnection(jdbcUrl, user, password)
     try
       val st = c.prepareStatement("SELECT pg_advisory_lock(hashtext(?))")
       try
-        st.setString(1, s"qod-pool:${key.tenant}/${key.tenantDb}/${key.pool}")
+        st.setString(1, lockName(key))
         st.execute()
       finally st.close()
       c
+    catch
+      case t: Throwable =>
+        try c.close()
+        catch case _: Throwable => ()
+        throw t
+
+  /** A fresh connection holding the pool's session lock, or None (connection closed) when another
+    * session holds it.
+    */
+  private def tryAcquire(key: PoolKey): Option[Connection] =
+    val c = DriverManager.getConnection(jdbcUrl, user, password)
+    try
+      val st  = c.prepareStatement("SELECT pg_try_advisory_lock(hashtext(?))")
+      val got =
+        try
+          st.setString(1, lockName(key))
+          val rs = st.executeQuery()
+          rs.next() && rs.getBoolean(1)
+        finally st.close()
+      if got then Some(c)
+      else
+        c.close()
+        None
     catch
       case t: Throwable =>
         try c.close()
