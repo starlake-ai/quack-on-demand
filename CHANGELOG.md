@@ -780,6 +780,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
 
 ### Fixed
 
+- Security: reading a DuckLake table at an earlier snapshot (time travel, the data diff, branch
+  counts) is judged on the table as it is now, so a table renamed since is no longer covered by the
+  grant on the table that took its old name; one dropped since is superusers' only (so is undrop).
 - Security: branch change counts (`GET /api/branch/.../changes`, MCP `branch_changes`) ran as the
   manager's system caller, so anyone allowed to use a branch read insert, delete and update counts
   of tables they hold no grant on. They now run as the requester, as the "REST and MCP data
