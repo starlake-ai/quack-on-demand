@@ -1233,6 +1233,135 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.isDuckLakeInitPendingForTest(a.id) shouldBe false
   }
 
+  it should "report a blocked database with the fix its derived dataPath calls for" in {
+    // The row names no dataPath, so it is derived from the default (/data/ducklake) as
+    // /data/acme_c; the catalog was created by an installation whose root sat elsewhere.
+    // A create refuses an empty DuckLake dataPath, but a manifest import (the demo bootstrap)
+    // stores one: write the row as it would, then restore.
+    val failing = TrieMap.empty[String, Throwable]
+    val store   = new InMemoryControlPlaneStore()
+    val sup     = new PoolSupervisor(
+      new CapturingBackend,
+      new NodeLoadTracker,
+      store,
+      defaultMetastore = sparseDefaults,
+      duckLakeInitializer = (m, _) => failing.get(m.getOrElse("dbName", "")).foreach(t => throw t)
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val created = sup
+      .createTenantDb("acme", "c", TenantDbKind.DuckLake, Map.empty, "/data/acme_c")
+      .unsafeRunSync()
+      .toOption
+      .get
+    val poolKey = PoolKey("acme", "acme_c", "bi")
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val c = created.copy(dataPath = "")
+    store.upsertTenantDb(c)
+    sup.restore()
+    failing.put(
+      "acme_c",
+      DuckLakeInitializer.DataPathMismatchException(
+        "mismatch",
+        effective = "/data/acme_c",
+        recorded = "/repo/ducklake/acme_c/"
+      )
+    )
+
+    sup.ensureDuckLakeInitialized().unsafeRunSync()
+
+    sup.isDataPathBlockedForTest(c.id) shouldBe true
+    val detail = sup.poolBlockReason(poolKey).getOrElse(fail("no block reason"))
+    detail should include("QOD_DUCKLAKE_DATA_PATH = /data/ducklake")
+    detail should include("restart the manager with QOD_DUCKLAKE_DATA_PATH=/repo/ducklake/ducklake")
+    detail should include(
+      "qod database update --tenant acme --name acme_c --metastore dataPath=/repo/ducklake/acme_c/"
+    )
+    val problems = sup.startupProblems()
+    problems.map(p => (p.tenant, p.database, p.kind, p.pools)) shouldBe List(
+      ("acme", "acme_c", PoolSupervisor.StartupProblem.Kind.Blocked, List("bi"))
+    )
+    problems.head.fixes.head should startWith("restart the manager with QOD_DUCKLAKE_DATA_PATH=")
+  }
+
+  "startupProblems" should "list federation failures after blocks, both for a database with both" in {
+    val (_, _, sup) = scriptedInitializer()
+    val a           = lakeDb(sup, "a")
+    val b           = lakeDb(sup, "b")
+    sup.failFederationForTest(a.id, "env var 'QOD_PG_PASSWORD' not set for secret 'PG_PASSWORD'")
+    sup.failFederationForTest(b.id, "boom")
+    sup.blockDataPathForTest(b.id, "blocked (test)")
+
+    val problems = sup.startupProblems()
+    problems.map(p => (p.database, p.kind)) shouldBe List(
+      ("acme_b", PoolSupervisor.StartupProblem.Kind.Blocked),
+      ("acme_a", PoolSupervisor.StartupProblem.Kind.Federation),
+      ("acme_b", PoolSupervisor.StartupProblem.Kind.Federation)
+    )
+    problems(1).reason should include("QOD_PG_PASSWORD")
+  }
+
+  it should "forget a deleted database's problems" in {
+    val (_, _, sup) = scriptedInitializer()
+    val a           = lakeDb(sup, "a")
+    sup.failFederationForTest(a.id, "boom")
+    sup.deleteTenantDb("acme", "acme_a").unsafeRunSync().isRight shouldBe true
+    sup.startupProblems() shouldBe Nil
+  }
+
+  "dataPathBlockReason" should "pin a row whose metastore names other keys without dropping them" in {
+    val td = TenantDb(
+      id = "x",
+      tenantId = "acme",
+      name = "sales",
+      kind = TenantDbKind.DuckLake,
+      metastore = Map("pgHost" -> "db.internal", "pgPassword" -> "secret"),
+      dataPath = ""
+    )
+    val r = PoolSupervisor.dataPathBlockReason(
+      td,
+      "acme",
+      "/Users/me/Library/Application Support/qod/ducklake/data",
+      "/Users/me/Library/Application Support/qod/ducklake/sales",
+      "/srv/lake/sales"
+    )
+    r.fixes.head shouldBe "restart the manager with QOD_DUCKLAKE_DATA_PATH=/srv/lake/data"
+    r.fixes(1) should include(
+      "--metastore dataPath=/srv/lake/sales --metastore pgHost=db.internal"
+    )
+    (r.fixes(1) should not).include("secret")
+    r.reason should include("(QOD_DUCKLAKE_DATA_PATH = /Users/me/Library/Application Support/")
+  }
+
+  it should "offer no env fix when no default root derives the recorded path" in {
+    val td = TenantDb("x", "acme", "sales", TenantDbKind.DuckLake, Map.empty, "")
+    val r  = PoolSupervisor.dataPathBlockReason(td, "acme", "/a/data", "/a/sales", "/b/other")
+    r.fixes.exists(_.contains("QOD_DUCKLAKE_DATA_PATH=")) shouldBe false
+    r.fixes.head should include("--metastore dataPath=/b/other")
+  }
+
+  it should "point a metastore dataPath at the recorded path, and quote one with spaces" in {
+    val td = TenantDb(
+      "x",
+      "acme",
+      "sales",
+      TenantDbKind.DuckLake,
+      Map("dataPath" -> "/old/sales"),
+      ""
+    )
+    val r = PoolSupervisor.dataPathBlockReason(td, "acme", "/a/data", "/old/sales", "/new dir/sales")
+    r.reason should startWith("its metastore dataPath /old/sales")
+    r.fixes.head should include("--metastore 'dataPath=/new dir/sales'")
+  }
+
+  it should "name only separate control planes for a create-time dataPath" in {
+    val td = TenantDb("x", "acme", "sales", TenantDbKind.DuckLake, Map.empty, "/fixed/sales")
+    val r  = PoolSupervisor.dataPathBlockReason(td, "acme", "/a/data", "/fixed/sales", "/b/sales")
+    r.fixes shouldBe List(
+      "if two installations share this control plane (a dev checkout and the qod launcher), " +
+        "give each its own with QOD_PG_DBNAME"
+    )
+  }
+
   it should "neither block nor retry on any other init failure" in {
     val (failing, _, sup) = scriptedInitializer()
     val a                 = lakeDb(sup, "a")

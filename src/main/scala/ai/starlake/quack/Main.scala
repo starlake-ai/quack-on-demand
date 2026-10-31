@@ -2225,7 +2225,8 @@ object Main extends IOApp with LazyLogging:
                     ),
                     aclMode = opaCfg.defaultMode,
                     opaTenants = sup.listTenants().count(_.acl.isOpa(opaCfg.defaultMode)),
-                    cliConfigFile = sys.env.get("QOD_CONFIG_FILE").filter(_.nonEmpty)
+                    cliConfigFile = sys.env.get("QOD_CONFIG_FILE").filter(_.nonEmpty),
+                    problems = sup.startupProblems()
                   )
                 )
                 val shutdownCoordinator = new ai.starlake.quack.boot.ShutdownCoordinator(

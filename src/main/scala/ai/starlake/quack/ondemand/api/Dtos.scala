@@ -139,7 +139,7 @@ final case class PoolResponse(
     tenantDb: String,
     pool: String,
     nodes: List[NodeInfo],
-    status: String,
+    status: String, // ready | disabled | blocked
     metastore: Map[String, String] =
       Map.empty, // effective metastore inherited from the tenant-db, password redacted
     disabled: Boolean = false,  // when true, the edge rejects fresh handshakes targeting this pool
@@ -168,7 +168,11 @@ final case class PoolResponse(
     // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
     initSqlTrusted: Boolean = false,
     // Set on a create whose tenant-admin initSql this manager could not check (see TenantDbResponse).
-    initSqlWarning: Option[String] = None
+    initSqlWarning: Option[String] = None,
+    // When `status` is `blocked`: why the pool's database is blocked and the fix. Its nodes are
+    // never started, so any node listed is a stale record of an earlier run. Replica-local: an HA
+    // follower runs no DuckLake init and reports `ready`.
+    statusDetail: Option[String] = None
 )
 
 /** POST /api/pool/setInitSql: replace a pool's initSql (CONTRACT Addendum 4 item 27). A tenant

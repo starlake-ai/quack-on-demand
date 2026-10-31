@@ -146,3 +146,55 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       )
     (bare should not).include("qod config")
   }
+
+  it should "list each problem under PROBLEMS and count them on the is-up line" in {
+    import ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem
+    val problems = List(
+      StartupProblem(
+        "acme",
+        "acme_tpch",
+        StartupProblem.Kind.Blocked,
+        "its dataPath /x/qod/ducklake/acme_tpch does not match",
+        List(
+          "restart the manager with QOD_DUCKLAKE_DATA_PATH='/Users/me/Application Support/data'",
+          "pin this database"
+        ),
+        List("bi", "etl")
+      ),
+      StartupProblem(
+        "globex",
+        "globex_tpcds",
+        StartupProblem.Kind.Federation,
+        "its federation sources did not resolve (| env var not set)",
+        List("fix the source"),
+        List("bi")
+      )
+    )
+    val b = Banner.startup(
+      meta,
+      "0.0.0.0",
+      20900,
+      "0.0.0.0",
+      31338,
+      tlsEnabled = true,
+      problems = problems
+    )
+    b should include("is up, with 2 problem(s): see PROBLEMS below")
+    b should include("\n PROBLEMS\n   acme/acme_tpch: BLOCKED, pools bi, etl NOT started\n")
+    b should include("     why : its dataPath /x/qod/ducklake/acme_tpch does not match\n")
+    // Never wrapped: the quoted path with a space copies whole.
+    b should include(
+      "     fix : restart the manager with QOD_DUCKLAKE_DATA_PATH='/Users/me/Application Support/data'\n"
+    )
+    b should include("      or : pin this database\n")
+    b should include("   globex/globex_tpcds: federation aliases missing (pools bi)\n")
+    // Problem text is kept verbatim, even a line that stripMargin would have eaten.
+    b should include("(| env var not set)")
+    b should include("Client connection strings:")
+  }
+
+  it should "print no PROBLEMS section when there is none" in {
+    val b = Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true)
+    (b should not).include("PROBLEMS")
+    b should include(" is up\n")
+  }

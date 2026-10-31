@@ -205,6 +205,34 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.toOption.get.pools.size shouldBe 2
 
+  it should "report a pool of a blocked database as blocked, with why and the fix" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val td = sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+      .toOption
+      .get
+    val h = new PoolHandlers(sup, tracker)
+    h.createPool(req(pool = "sales", size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ =>
+      SessionScope.Superuser
+    ).unsafeRunSync()
+    def sales =
+      h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get.pools.head
+    (sales.status, sales.statusDetail) shouldBe ("ready", None)
+
+    sup.blockDataPathForTest(td.id, "dataPath mismatch (test)")
+    (sales.status, sales.statusDetail) shouldBe ("blocked", Some("dataPath mismatch (test)"))
+
+    // A disabled pool reports disabled first: nothing would start it anyway.
+    h.setPoolDisabled(
+      SetPoolDisabledRequest("acme", "acme_default", "sales", disabled = true),
+      None
+    )(_ => SessionScope.Superuser)
+      .unsafeRunSync()
+    sales.status shouldBe "disabled"
+
   "poolStatus" should "return 404 for unknown pool" in:
     val h   = freshHandlers
     val out = h.poolStatus("acme", "acme_default", "missing").unsafeRunSync()

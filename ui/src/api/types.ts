@@ -60,7 +60,12 @@ export interface PoolResponse {
   tenantDb: string;
   pool: string;
   nodes: NodeInfo[];
+  // ready | disabled | blocked. `blocked`: the pool's database is blocked (its DuckLake catalog
+  // disagrees with the control plane), so its nodes are never started; see statusDetail.
   status: string;
+  // When status is "blocked": why, and the fix. Any node listed is a stale record of an earlier
+  // run.
+  statusDetail?: string | null;
   // Effective metastore for this pool (inherited from the tenant-db).
   // pgPassword is redacted.
   metastore: Record<string, string>;

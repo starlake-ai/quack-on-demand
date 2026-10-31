@@ -69,6 +69,8 @@ final class PoolHandlers(
       val poolEntityCohorts = sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
       // From the pool row; None on a fixed-size pool.
       val band = sup.autoscaleBand(key)
+      // Set when the pool's database is blocked: reconcile never starts its nodes.
+      val block = sup.poolBlockReason(key)
       PoolResponse(
         tenant = key.tenant,
         tenantDb = key.tenantDb,
@@ -101,7 +103,8 @@ final class PoolHandlers(
             serverState = n.serverName.flatMap(liveness.get)
           )
         },
-        status = PoolHandlers.statusOf(p),
+        status = PoolHandlers.statusOf(p, blocked = block.isDefined),
+        statusDetail = block,
         metastore = redact(p.metastore),
         disabled = p.disabled,
         suspended = p.suspended,
@@ -892,6 +895,8 @@ final class PoolHandlers(
 object PoolHandlers:
 
   /** The `status` `/api/pool/list` reports for a pool, shared with `/api/profile/pools` so both
-    * routes speak the same values: `disabled` for a disabled pool, else `ready`.
+    * routes speak the same values: `disabled` for a disabled pool, `blocked` for one whose database
+    * is blocked (`PoolSupervisor.poolBlockReason`: its nodes are never started), else `ready`.
     */
-  def statusOf(p: PoolState): String = if p.disabled then "disabled" else "ready"
+  def statusOf(p: PoolState, blocked: Boolean): String =
+    if p.disabled then "disabled" else if blocked then "blocked" else "ready"

@@ -171,7 +171,15 @@ final class ProfileHandlers(
         Left((StatusCode.ServiceUnavailable, ErrorResponse("authz_unavailable", msg)))
       case None =>
         Right(ProfilePoolsResponse(decided.toList.collect { case (p, Right(_)) =>
-          ProfilePool(p.key.tenant, p.key.tenantDb, p.key.pool, PoolHandlers.statusOf(p))
+          ProfilePool(
+            p.key.tenant,
+            p.key.tenantDb,
+            p.key.pool,
+            PoolHandlers.statusOf(
+              p,
+              blocked = sup.poolBlockReason(p.key).isDefined
+            )
+          )
         }))
 
   /** The one refusal every profile route answers when the caller has no identity to scope by. */

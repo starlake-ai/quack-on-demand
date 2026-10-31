@@ -52,6 +52,16 @@ keeps the pre-release JDBC and `mavenLocal` off main. The qod CLI caches DuckDB 
 
 **DuckDB 2.0.** The engine is the v2.0.0 release and the JDBC is `org.duckdb:duckdb_jdbc:2.0.0.0` from Maven Central. `run-jar.sh` and the qod CLI provision the CLI and libduckdb from the release's `duckdb-cli-<platform>.tar.gz` / `duckdb-shared-libs-<platform>.tar.gz` (2.x asset names; 1.x shipped `.zip`s). `scripts/dev/build-duckdb-prerelease.sh` is obsolete: it deletes the cache it writes to, the release's included, so never run it.
 
+**Boot problems are reported, never only logged.** A tenant-db whose DuckLake init is refused
+for good (`PreInitMismatchException`: a dataPath or encryption disagreement with the catalog) is
+blocked: reconcile never starts its pools. `PoolSupervisor.startupProblems` lists every blocked
+tenant-db and every tenant-db whose federation blob failed to resolve; the boot banner then reads
+`is up, with N problem(s)` and prints each under PROBLEMS (why, then each fix on its own unwrapped
+line), and `/api/pool/list` reports the pools `blocked` with `statusDetail` (`poolBlockReason`).
+A dataPath mismatch's fix is built from where the path came from (`dataPathBlockReason`): derived
+from `QOD_DUCKLAKE_DATA_PATH` (the row names none, as a manifest import's rows can), the row's
+metastore, or its create-time `dataPath`. Replica-local: an HA follower runs no DuckLake init.
+
 **DuckLake migration.** Only the manager's DuckLake initializer attaches with `AUTOMATIC_MIGRATION`, and only when the catalog needs it (`DuckLakeInitializer.migrationPlan`, decided under its advisory lock): a catalog older than the latest DuckLake, or one at the latest dev version last migrated by another engine build (recorded in `qod_meta.ducklake_migration` in the catalog's database; `LatestDuckLakeVersion` is pinned by a spec). A current catalog attaches with no DDL. The initializer's catalog connection carries `lock_timeout=5000`; a timeout is retry-later (`CatalogLockTimeoutException`, `PoolSupervisor.duckLakeInitPending`, retried by the leader's reconcile loop), never a blocking mismatch. Nodes, loaders and the demo seed attach as-is (DuckDB 2.0 attaches any catalog >= 1.0 without migrating). Migration is one-way: back up catalog databases before upgrading.
 
 UI dev loop (proxies `/api/*` to `localhost:20900`):
@@ -739,7 +749,7 @@ Starlake integration is on) and answers `403 admin_required` on everything else;
 only the `/profile` route (own password change; own usage/statements; own S3 credentials) for them.
 `GET /api/profile/pools` (`qod profile pools`) answers
 `{"pools":[{"tenant":...,"tenantDb":...,"pool":...,"status":...}]}` (the field names and
-`status` values of `/api/pool/list`, `ready` or `disabled`, nothing else) for the pools of the
+`status` values of `/api/pool/list`, `ready`, `disabled` or `blocked`, nothing else) for the pools of the
 caller's tenants (every tenant for a superuser) that it may connect to, each decided by the
 FlightSQL handshake's own `PoolSupervisor.authorizeHandshakeDetailed` for the request
 `ExecCaller.authzRequest` builds, and narrowed by a PAT's `databases` / `pools`; a denied

@@ -70,7 +70,11 @@ object Banner:
       /** The `qod` CLI config file (`QOD_CONFIG_FILE`, set by `qod start`) the manager was launched
         * with; None when launched outside the CLI.
         */
-      cliConfigFile: Option[String] = None
+      cliConfigFile: Option[String] = None,
+      /** What boot found wrong (`PoolSupervisor.startupProblems`): listed under PROBLEMS and
+        * counted on the "is up" line, so a blocked database is never hidden behind a clean banner.
+        */
+      problems: List[ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem] = Nil
   ): String =
     def display(h: String) = if h == "0.0.0.0" || h == "::" then "localhost" else h
     // Constant since Phase D: every node checks every statement, and nothing switches it off.
@@ -87,13 +91,41 @@ object Banner:
     val configLine = cliConfigFile.fold("")(f => s"\n   qod config    : $f")
     val version    =
       Option(getClass.getPackage.getImplementationVersion).getOrElse("dev")
+    val upLine =
+      if problems.isEmpty then s"Quack on Demand $version is up"
+      else s"Quack on Demand $version is up, with ${problems.size} problem(s): see PROBLEMS below"
+    // The problems are appended outside stripMargin: their text is data (paths, messages), and a
+    // line of it starting with `|` would lose its margin.
     s"""$Line
-       | Quack on Demand $version is up$configLine
+       | $upLine$configLine
        |   control plane : ${jdbcControlPlaneUrl(meta)}
        |   REST API + UI : http://$rh:$restPort  (UI: http://$rh:$restPort/ui)
        |   FlightSQL     : $scheme://$fh:$flightPort$quackLine
        |$aclLine
        |$modeLine
-       |
-       | Client connection strings: $ClientsDocUrl
-       |$Line""".stripMargin
+       |""".stripMargin + problemsSection(problems) +
+      s"""
+         | Client connection strings: $ClientsDocUrl
+         |$Line""".stripMargin
+
+  /** The PROBLEMS block of [[startup]]: one entry per problem, then why and each way out on a line
+    * of its own. Never wrapped, so a path or command (spaces included) copies whole. Empty when
+    * there is none.
+    */
+  private[quack] def problemsSection(
+      problems: List[ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem]
+  ): String =
+    import ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem.Kind
+    if problems.isEmpty then ""
+    else
+      val entries = problems.map { p =>
+        val pools = if p.pools.isEmpty then "no pools" else s"pools ${p.pools.mkString(", ")}"
+        val head  = p.kind match
+          case Kind.Blocked    => s"${p.tenant}/${p.database}: BLOCKED, $pools NOT started"
+          case Kind.Federation => s"${p.tenant}/${p.database}: federation aliases missing ($pools)"
+        val fixes = p.fixes.zipWithIndex.map { (f, i) =>
+          if i == 0 then s"     fix : $f" else s"      or : $f"
+        }
+        (List(s"   $head", s"     why : ${p.reason}") ++ fixes).mkString("\n")
+      }
+      s"\n PROBLEMS\n${entries.mkString("\n")}\n"

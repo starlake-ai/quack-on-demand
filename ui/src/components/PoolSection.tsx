@@ -227,6 +227,15 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                   </a>
                   {p.disabled && <span className="subtle"> (disabled)</span>}
                   {p.suspended && <span className="subtle"> (hibernated)</span>}
+                  {p.status === 'blocked' && (
+                    <span
+                      className="badge bad"
+                      style={{ marginLeft: 6 }}
+                      title={p.statusDetail ?? ''}
+                    >
+                      blocked: nodes not started
+                    </span>
+                  )}
                 </td>
                 <td align="right">
                   {p.nodes.length}

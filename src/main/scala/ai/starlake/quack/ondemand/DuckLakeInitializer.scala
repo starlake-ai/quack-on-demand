@@ -622,10 +622,16 @@ object DuckLakeInitializer extends LazyLogging:
   sealed abstract class PreInitMismatchException(message: String) extends RuntimeException(message)
 
   /** Raised by [[guardDataPath]] when the effective dataPath this manager is about to ATTACH with
-    * does not match the dataPath already recorded in the tenant-db's `ducklake_metadata`.
+    * does not match the dataPath already recorded in the tenant-db's `ducklake_metadata`. Carries
+    * both paths (empty when the thrower had none) so `PoolSupervisor` can name the fix that applies
+    * to the row: a dataPath derived from the manager default is fixed by that default, an explicit
+    * one by the row.
     */
-  final case class DataPathMismatchException(message: String)
-      extends PreInitMismatchException(message)
+  final case class DataPathMismatchException(
+      message: String,
+      effective: String = "",
+      recorded: String = ""
+  ) extends PreInitMismatchException(message)
 
   /** Raised by [[guardEncryption]] when the tenant-db row's `encrypted` flag disagrees with the
     * catalog's recorded `ducklake_metadata.encrypted`. Permanent by construction: DuckLake stamps
@@ -704,7 +710,9 @@ object DuckLakeInitializer extends LazyLogging:
               "this world (drop the control-plane and tenant-db databases, then re-seed), or if the " +
               "data really moved, update the database's dataPath via POST /api/database/update. " +
               "After fixing, update the database via POST /api/database/update or restart the " +
-              "manager to re-attempt."
+              "manager to re-attempt.",
+            effectiveDataPath,
+            recorded
           )
       }
 

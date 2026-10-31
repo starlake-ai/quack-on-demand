@@ -759,6 +759,9 @@ export default function PoolDetailBody({
         <h2 style={{ margin: 0 }}>
           {data.tenant} / {data.tenantDb} / {data.pool}
           {data.suspended && <span className="badge warn" style={{ marginLeft: 8 }}>Hibernated</span>}
+          {data.status === 'blocked' && (
+            <span className="badge bad" style={{ marginLeft: 8 }}>Blocked</span>
+          )}
         </h2>
         <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
           <button
@@ -829,6 +832,12 @@ export default function PoolDetailBody({
             )}
         </div>
       </header>
+      {data.status === 'blocked' && (
+        <div className="login-err" style={{ marginTop: 8 }}>
+          This pool's nodes are not started: its database is blocked. Any node listed is a stale
+          record of an earlier run. {data.statusDetail}
+        </div>
+      )}
       {suspendErr && <div className="login-err" style={{ marginTop: 8 }}>{suspendErr}</div>}
 
       <Tabs

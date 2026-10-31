@@ -229,7 +229,13 @@ final class PoolSupervisor(
   // reconcile() to skip that tenant-db's pools instead of failing every node spawn with the same
   // DuckDB error. Cleared by updateTenantDb (remediation) and deleteTenantDb. In-memory only: a
   // restart also clears it and re-attempts on the next boot.
-  private val dataPathBlocked = TrieMap.empty[String, String]
+  private val dataPathBlocked = TrieMap.empty[String, PoolSupervisor.BlockReason]
+
+  // tenant-db.id -> why its federation blob failed to resolve on the last attempt (restore() or a
+  // spawn's fresh resolution). Its nodes then come up without some or all of its federation
+  // aliases, which nothing else surfaces: reported by [[startupProblems]]. Cleared by the next
+  // successful resolution and by deleteTenantDb; in-memory only.
+  private val federationFailed = TrieMap.empty[String, String]
 
   // tenant-db.id -> the CatalogLockTimeoutException message of its last DuckLake init: a table
   // lock on the catalog was not granted in time (a long read or an open transaction on a node).
@@ -605,7 +611,58 @@ final class PoolSupervisor(
 
   /** Test-only seam: seed [[dataPathBlocked]] directly so specs can assert reconcile()'s skip. */
   private[ondemand] def blockDataPathForTest(tenantDbId: String, message: String): Unit =
-    dataPathBlocked.put(tenantDbId, message)
+    dataPathBlocked.put(tenantDbId, PoolSupervisor.BlockReason(message, Nil))
+
+  /** Why `key`'s pools are not started, when its tenant-db is blocked: the reason, then the fix
+    * when one is known. None for a pool whose tenant-db is not blocked.
+    */
+  def poolBlockReason(key: PoolKey): Option[String] =
+    poolIdByKey
+      .get(key)
+      .flatMap(poolRows.get)
+      .flatMap(p => dataPathBlocked.get(p.tenantDbId))
+      .map(_.sentence)
+
+  /** What this replica found wrong while restoring and initializing its databases, for the boot
+    * banner: every blocked tenant-db (its pools are never started) and every tenant-db whose
+    * federation blob failed to resolve (its nodes lack federation aliases), both for a database
+    * that has both, so fixing one never uncovers the other later. Sorted by tenant and database,
+    * blocked ones first. Empty on an HA follower until it leads (it runs no DuckLake init).
+    */
+  def startupProblems(): List[PoolSupervisor.StartupProblem] =
+    import PoolSupervisor.StartupProblem
+    def named(id: String) =
+      tenantDbs.get(id).map { td =>
+        (tenants.get(td.tenantId).map(_.id).getOrElse(td.tenantId), td.name)
+      }
+    def poolsOf(id: String) = poolRows.values.filter(_.tenantDbId == id).map(_.name).toList.sorted
+    val blocked             = dataPathBlocked.toList.flatMap { case (id, b) =>
+      named(id).map { case (t, db) =>
+        StartupProblem(t, db, StartupProblem.Kind.Blocked, b.reason, b.fixes, poolsOf(id))
+      }
+    }
+    val federation =
+      federationFailed.toList.flatMap { case (id, msg) =>
+        named(id).map { case (t, db) =>
+          StartupProblem(
+            t,
+            db,
+            StartupProblem.Kind.Federation,
+            s"its federation sources did not resolve ($msg), so its nodes start without any of " +
+              "its federation aliases",
+            List(
+              "fix the source or the secret it names (an env: secret is read from the " +
+                "manager's own environment), then restart the manager"
+            ),
+            poolsOf(id)
+          )
+        }
+      }
+    blocked.sortBy(p => (p.tenant, p.database)) ++ federation.sortBy(p => (p.tenant, p.database))
+
+  /** Test-only seam: record a federation resolution failure as restore() would. */
+  private[ondemand] def failFederationForTest(tenantDbId: String, message: String): Unit =
+    federationFailed.put(tenantDbId, message)
 
   /** Test-only seam: read back [[dataPathBlocked]] membership. */
   private[ondemand] def isDataPathBlockedForTest(tenantDbId: String): Boolean =
@@ -754,6 +811,7 @@ final class PoolSupervisor(
     // dataPath block held for it is moot; drop it rather than leaking it forever.
     dataPathBlocked.keys.toList.filterNot(snapTenantDbIds).foreach(dataPathBlocked.remove)
     duckLakeInitPending.keys.toList.filterNot(snapTenantDbIds).foreach(duckLakeInitPending.remove)
+    federationFailed.keys.toList.filterNot(snapTenantDbIds).foreach(federationFailed.remove)
 
     snap.tenants.foreach(t => tenants.put(t.id, t))
     snap.tenantDbs.foreach(td => putTenantDbRow(td))
@@ -788,11 +846,13 @@ final class PoolSupervisor(
           // Not a federated tenant-db (per the just-fetched filter): skip resolution entirely,
           // same fallback path as a resolution failure below, minus the WARN - this is the
           // expected common case, not an error.
+          federationFailed.remove(td.id)
           scala.util.Failure(new java.util.NoSuchElementException("not a federated tenant-db"))
         else
           val attempt = scala.util.Try(
             federationBlobOf(td.id).timeout(blobResolveTimeout).unsafeRunSync().getOrElse("")
           )
+          if attempt.isSuccess then federationFailed.remove(td.id)
           attempt.failed.foreach { e =>
             val bound = e match
               case _: java.util.concurrent.TimeoutException => s" (bound: $blobResolveTimeout)"
@@ -803,6 +863,7 @@ final class PoolSupervisor(
             // traverse), not just the one bad source, so every pool of this tenant-db respawned
             // from this state loses EVERY federation alias, not only the offending one, until the
             // cause is fixed and the state re-saved.
+            federationFailed.put(td.id, s"${e.getMessage}$bound")
             logger.error(
               s"restore: federation blob resolution failed for tenant-db '${td.name}'$bound: " +
                 s"${e.getMessage}; ALL federation aliases for this tenant-db are lost on every " +
@@ -962,9 +1023,20 @@ final class PoolSupervisor(
       case t: DuckLakeInitializer.PreInitMismatchException =>
         // Not transient: every future node spawn hits the same DuckDB DATA_PATH or encryption
         // error, so log loudly and block this tenant-db's pools from reconcile()'s spawns (see
-        // isDataPathBlocked).
-        dataPathBlocked.put(td.id, t.getMessage)
-        logger.error(s"$ctx: '${td.name}' ${t.getMessage}")
+        // isDataPathBlocked). The boot banner and the pool status report it too.
+        val block = t match
+          case m: DuckLakeInitializer.DataPathMismatchException
+              if m.effective.nonEmpty && m.recorded.nonEmpty =>
+            PoolSupervisor.dataPathBlockReason(
+              td,
+              tenants.get(td.tenantId).map(_.id).getOrElse(td.tenantId),
+              defaultMetastore.getOrElse("dataPath", ""),
+              m.effective,
+              m.recorded
+            )
+          case other => PoolSupervisor.BlockReason(other.getMessage, Nil)
+        dataPathBlocked.put(td.id, block)
+        logger.error(s"$ctx: '${td.name}' pools not started: ${block.sentence}")
       case t: DuckLakeInitializer.CatalogLockTimeoutException =>
         // Transient: the lock holder is a read or a transaction that ends. Retry later rather than
         // block anything; the bounded wait already happened inside the initializer.
@@ -1122,21 +1194,24 @@ final class PoolSupervisor(
         ).as(None)
       }
       .flatMap { fedTds =>
-        if fedTds.exists(!_.contains(tenantDbId)) then IO.pure(Some(""))
+        if fedTds.exists(!_.contains(tenantDbId)) then
+          IO.delay(federationFailed.remove(tenantDbId)).as(Some(""))
         else
           federationBlobOf(tenantDbId).timeout(blobResolveTimeout).attempt.flatMap {
-            case Right(blobOpt) => IO.pure(Some(blobOpt.getOrElse("")))
-            case Left(e)        =>
+            case Right(blobOpt) =>
+              IO.delay(federationFailed.remove(tenantDbId)).as(Some(blobOpt.getOrElse("")))
+            case Left(e) =>
               val bound = e match
                 case _: java.util.concurrent.TimeoutException => s" (bound: $blobResolveTimeout)"
                 case _                                        => ""
-              IO.delay(
-                logger.error(
-                  s"$ctx: federation blob resolution failed$bound: ${e.getMessage}; spawning " +
-                    "with this pool's last-known-good federation blob, which may predate the " +
-                    "most recent federated-source edit (one bad source fails the whole blob)"
-                )
-              ).as(None)
+              IO.delay(federationFailed.put(tenantDbId, s"${e.getMessage}$bound")) *>
+                IO.delay(
+                  logger.error(
+                    s"$ctx: federation blob resolution failed$bound: ${e.getMessage}; spawning " +
+                      "with this pool's last-known-good federation blob, which may predate the " +
+                      "most recent federated-source edit (one bad source fails the whole blob)"
+                  )
+                ).as(None)
           }
       }
 
@@ -2476,6 +2551,7 @@ final class PoolSupervisor(
                   dataFoldersChanged()
                   dataPathBlocked.remove(td.id)
                   duckLakeInitPending.remove(td.id)
+                  federationFailed.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
                   catch case _: Throwable => ()
                   dbAdmin.dropDatabase(td.name) match
@@ -4630,6 +4706,94 @@ final class PoolSupervisor(
     }
 
 object PoolSupervisor:
+
+  /** Why a tenant-db's pools are not started: what disagrees, and the operator's ways out, most
+    * likely first (none when the reason carries its own, as an encryption mismatch does).
+    */
+  final case class BlockReason(reason: String, fixes: List[String]):
+    def sentence: String =
+      if fixes.isEmpty then reason else s"$reason. Fix: ${fixes.mkString("; or ")}"
+
+  /** Something boot found wrong that leaves the manager up but a database degraded, as the boot
+    * banner reports it: `Blocked` (its pools are never started) or `Federation` (its nodes start
+    * without its federation aliases).
+    */
+  final case class StartupProblem(
+      tenant: String,
+      database: String,
+      kind: StartupProblem.Kind,
+      reason: String,
+      fixes: List[String],
+      pools: List[String]
+  )
+  object StartupProblem:
+    enum Kind:
+      case Blocked, Federation
+
+  private def lastSegment(path: String): String =
+    val trimmed = path.stripSuffix("/")
+    trimmed.substring(trimmed.lastIndexOf('/') + 1)
+
+  /** A shell word: single-quoted unless made only of characters a shell leaves alone. */
+  private[ondemand] def shellWord(s: String): String =
+    if s.nonEmpty && s.forall(c => c.isLetterOrDigit || "_-./:=@%+,".contains(c)) then s
+    else "'" + s.replace("'", "'\\''") + "'"
+
+  /** The operator-facing reason and fix for a DuckLake catalog whose recorded data_path differs
+    * from the one the control plane resolves for `td` (see `effectiveMetastoreFor`). The fix
+    * depends on where that path came from:
+    *   - derived from the manager default (`quack-on-demand.defaultMetastore.dataPath`, env
+    *     `QOD_DUCKLAKE_DATA_PATH`; the row names none): restarting with the default that derives
+    *     the recorded path, when one does (the recorded last segment is the database name), or
+    *     pinning the row to the recorded path;
+    *   - the row's metastore `dataPath`: pointing it at the recorded path;
+    *   - the row's create-time `dataPath`, which no update changes: separate control planes.
+    * Two installations sharing one control plane with different data roots (a dev checkout and the
+    * qod launcher) is the usual cause, so every variant names it.
+    */
+  def dataPathBlockReason(
+      td: TenantDb,
+      tenant: String,
+      rootDataPath: String,
+      effective: String,
+      recorded: String
+  ): BlockReason =
+    val shared =
+      "if two installations share this control plane (a dev checkout and the qod launcher), give " +
+        "each its own with QOD_PG_DBNAME"
+    val plainMetastore = td.metastore.filterNot((k, _) => TenantDb.SecretKeys.contains(k))
+    def pin(keys: Map[String, String]) =
+      val args = (keys + ("dataPath" -> recorded)).toList.sortBy(_._1).map { (k, v) =>
+        s"--metastore ${shellWord(s"$k=$v")}"
+      }
+      s"qod database update --tenant ${shellWord(tenant)} --name ${shellWord(td.name)} " +
+        args.mkString(" ")
+    val derived =
+      td.dataPath.isEmpty && !td.metastore.contains("dataPath") && rootDataPath.nonEmpty
+    if derived then
+      val reason =
+        s"its dataPath $effective, derived from the manager's default data path " +
+          s"(QOD_DUCKLAKE_DATA_PATH = $rootDataPath), is not the path its DuckLake catalog " +
+          s"recorded, $recorded"
+      val viaEnv =
+        if lastSegment(recorded) == td.name then
+          val root = replaceLastSegment(recorded.stripSuffix("/"), lastSegment(rootDataPath))
+          Some(s"restart the manager with QOD_DUCKLAKE_DATA_PATH=${shellWord(root)}")
+        else None
+      val viaRow = s"pin this database to its catalog's path: ${pin(plainMetastore)}"
+      BlockReason(reason, viaEnv.toList :+ viaRow :+ shared)
+    else if td.dataPath.isEmpty then
+      BlockReason(
+        s"its metastore dataPath $effective is not the path its DuckLake catalog recorded, " +
+          recorded,
+        List(s"if the data moved, point the database at it: ${pin(plainMetastore)}", shared)
+      )
+    else
+      BlockReason(
+        s"its dataPath $effective, set when it was created, is not the path its DuckLake catalog " +
+          s"recorded, $recorded",
+        List(shared)
+      )
 
   /** Default [[PoolSupervisor]] `nodeStartupGrace`: the same 120 s the K8s and fleet backends give
     * a node to become ready (`QOD_K8S_STARTUP_TIMEOUT_SEC`, `QOD_FLEET_STARTUP_TIMEOUT_SEC`).
