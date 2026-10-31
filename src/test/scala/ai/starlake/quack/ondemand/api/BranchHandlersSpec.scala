@@ -81,7 +81,15 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
         def disarm(meta: Map[String, String], message: String)          = ()
       ,
       counter = new ChangeCounter:
-        def count(t: String, b: Branch, a: String, c: TableChange, f: Long, h: Long) =
+        def count(
+            caller: ai.starlake.quack.ondemand.api.ExecCaller,
+            t: String,
+            b: Branch,
+            a: String,
+            c: TableChange,
+            f: Long,
+            h: Long
+        ) =
           IO.pure(Right((0L, 0L, 0L)))
       ,
       purgeFiles = (_, _) => Right(()),
@@ -100,7 +108,8 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       sup,
       service,
       preview,
-      BranchHandlers.actorResolver(callers)
+      BranchHandlers.actorResolver(callers),
+      callers
     )
 
     def merge(key: Option[String]) =

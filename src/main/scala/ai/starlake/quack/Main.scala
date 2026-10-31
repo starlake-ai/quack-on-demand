@@ -1873,6 +1873,7 @@ object Main extends IOApp with LazyLogging:
             branchService,
             ph,
             branchActorOf,
+            callerOf = restCaller,
             audit = auditRecorder
           )
         }

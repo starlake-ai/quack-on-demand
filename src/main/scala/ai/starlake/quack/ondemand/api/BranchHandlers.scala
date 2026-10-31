@@ -26,6 +26,8 @@ final class BranchHandlers(
     service: BranchService,
     preview: CatalogPreviewHandlers,
     actorOf: Option[String] => Either[(StatusCode, ErrorResponse), BranchActor],
+    /** Who the change counts run as: the requester, resolved like every other data endpoint. */
+    callerOf: RestCaller,
     audit: AuditRecorder = AuditRecorder.noop
 ):
 
@@ -153,11 +155,18 @@ final class BranchHandlers(
       counts: Option[Boolean],
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[BranchChangesResponse] =
-    gatedActor(tenant, tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
+    // Counts run as the requester (a session or, over MCP, the PAT curried as apiKey), resolved
+    // like the data diff's: the node decides which tables they may count, never the system caller.
+    (for
+      (tid, db, actor) <- gatedActor(tenant, tenantDb, apiKey)(scopeOf)
+      countsAs         <-
+        if counts.getOrElse(true) then callerOf(s"branch-changes-$tid-$db", apiKey).map(Some(_))
+        else Right(None)
+    yield (tid, db, actor, countsAs)) match
+      case Left(e)                           => IO.pure(Left(e))
+      case Right((tid, db, actor, countsAs)) =>
         service
-          .changes(tid, db, branch, counts.getOrElse(true), actor, apiKey)
+          .changes(tid, db, branch, countsAs, actor, apiKey)
           .map(_.left.map(toErr).map { case (b, cs) => changesResponse(b, cs) })
 
   /** Delegates to the catalog data-diff on the BRANCH tenant-db over `(fork, head]`. */

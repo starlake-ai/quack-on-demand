@@ -776,6 +776,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
 
 ### Fixed
 
+- Security: branch change counts (`GET /api/branch/.../changes`, MCP `branch_changes`) ran as the
+  manager's system caller, so anyone allowed to use a branch read insert, delete and update counts
+  of tables they hold no grant on. They now run as the requester, as the "REST and MCP data
+  statements run as their caller" entry above says; a table whose count the node refuses them shows
+  zero counts, as a failed count always has. Propose still counts every table as the system caller.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

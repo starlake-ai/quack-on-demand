@@ -130,7 +130,15 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         def disarm(meta: Map[String, String], message: String) = fenceDisarms += message: Unit
       ,
       counter = new ChangeCounter:
-        def count(t: String, b: Branch, a: String, c: TableChange, f: Long, h: Long) =
+        def count(
+            caller: ai.starlake.quack.ondemand.api.ExecCaller,
+            t: String,
+            b: Branch,
+            a: String,
+            c: TableChange,
+            f: Long,
+            h: Long
+        ) =
           IO.pure(Right((3L, 1L, 2L)))
       ,
       purgeFiles = (path, _) => { purged += path; Right(()) },
