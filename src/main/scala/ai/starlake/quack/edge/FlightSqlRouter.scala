@@ -112,6 +112,13 @@ final class FlightSqlRouter(
       status: String,
       error: Option[String],
       kind: StatementKind,
+      /** The statement ran as the manager's system principal (`EffectiveSet.system`, a module's
+        * system SQL): its values and their echo in the error are masked
+        * ([[ai.starlake.quack.ondemand.telemetry.StatementValueMask]]), since history and audit are
+        * shown to the tenant's admins and the manager's own statements may carry platform
+        * credentials. Required, so no record site can leave it out.
+        */
+      systemPrincipal: Boolean,
       realm: String = "tenant",
       prepareDurationMs: Option[Long] = None,
       /** The acting personal-access-token id, when the resolved principal authenticated with one.
@@ -142,10 +149,14 @@ final class FlightSqlRouter(
     // the statement, so nothing of diagnostic value survives redacting it anyway.
     val claimed     = ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql)
     val recordedSql =
-      if claimed then ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder else sql
+      if claimed then ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+      else if systemPrincipal then ai.starlake.quack.ondemand.telemetry.StatementValueMask.sql(sql)
+      else sql
     val recordedError =
       if claimed then
         error.map(_ => ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder)
+      else if systemPrincipal then
+        error.map(ai.starlake.quack.ondemand.telemetry.StatementValueMask.error(_, sql))
       else error
     history.record(
       StatementRecord(
@@ -623,6 +634,7 @@ final class FlightSqlRouter(
             FlightSqlRouter.failureStatus(failure),
             Some(failure.reason),
             classifier.classify(sql),
+            systemPrincipal = effectiveSet.exists(_.system),
             realm = "tenant",
             patId = patId,
             source = source
@@ -915,6 +927,7 @@ final class FlightSqlRouter(
         status = "denied",
         error = Some(TooDeep.Reason),
         kind = TooDeep.orElse(StatementKind.Other)(classifier.classify(sql)),
+        systemPrincipal = effectiveSet.exists(_.system),
         realm = if effectiveSet.exists(_.user.tenant.isEmpty) then "system" else "tenant",
         patId = patId,
         source = source
@@ -982,6 +995,7 @@ final class FlightSqlRouter(
           status,
           error,
           kind,
+          effectiveSet.exists(_.system),
           realm,
           prepMs,
           patId,

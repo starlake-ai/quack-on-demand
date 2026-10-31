@@ -775,7 +775,8 @@ In-engine authorization, Phase D: the node decides every statement alone.
   judged as a read of that table; refused under column or row policies.
 - Module SPI: `ManagerContext.systemSql` (required) runs one statement on a pool as the manager's
   system caller, for a module's own provisioning statements, never SQL a user supplied; each is
-  labelled `module:<name>` in statement history and audited as `module.sql`.
+  labelled `module:<name>` in statement history and audited as `module.sql`, both shown to the
+  tenant's admins with the statement's values masked (as the stdout audit sink masks them).
 
 ### Fixed
 

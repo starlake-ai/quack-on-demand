@@ -190,13 +190,27 @@ class ModuleSystemSqlSpec extends AnyFlatSpec with Matchers:
     e.detail("reason") shouldBe AdminSqlParser.RedactedPlaceholder
   }
 
+  it should "mask a statement's values and their echo in the reason, in the audit row" in {
+    val sql = "CREATE SECRET s3k (TYPE s3, KEY_ID 'AKIAEXAMPLE', SECRET 'topsecret')"
+    val f   = new Fixture(() =>
+      IO.pure(Left(RouterFailure.Unavailable("Invalid Input Error: secret 'topsecret' rejected")))
+    )
+    f.run(sql) shouldBe Left("Invalid Input Error: secret 'topsecret' rejected")
+    val e = f.auditRows.head
+    e.detail("sql") should startWith("CREATE SECRET s3k")
+    List("topsecret", "AKIAEXAMPLE").foreach(v => e.detail("sql") should not include v)
+    e.detail("reason") should not include "topsecret"
+  }
+
   it should "cap the statement and the reason it audits at 500 characters" in {
     val long = "SELECT " + ("1," * 400) + "1"
-    val f    = new Fixture(() => IO.pure(Left(RouterFailure.Unavailable("e" * 900))))
+    // Words, not one long run: the error scrubber masks a long unbroken token as a credential.
+    val reason = "no such table here " * 50
+    val f      = new Fixture(() => IO.pure(Left(RouterFailure.Unavailable(reason))))
     f.run(long)
     val e = f.auditRows.head
     e.detail("sql") shouldBe long.take(500)
-    e.detail("reason") shouldBe "e" * 500
+    e.detail("reason") shouldBe reason.take(500)
   }
 
   "ManagerContext" should "not be buildable without the system SQL capability" in {

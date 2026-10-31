@@ -330,6 +330,44 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.sql should not include "topsecret"
     latest.status shouldBe "denied"
 
+  it should "mask the values of a system statement and its error in history, keeping user text" in:
+    // The manager's own statements (a module's system SQL) may carry platform credentials, and
+    // history and audit are shown to the tenant's admins: their values are masked as the stdout
+    // sink masks every statement leaving the control plane.
+    val nodeErr = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent("Invalid Input Error: secret 'topsecret' was rejected"),
+        1L
+      )
+    val (router, _, _) = setup(stub = nodeErr)
+    val systemEff      = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("", None, "module:seed", kind = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      system = true
+    )
+    router
+      .execute(
+        "c-sys-mask",
+        "module:seed",
+        poolKey,
+        "CREATE SECRET s3k (TYPE s3, KEY_ID 'AKIAEXAMPLE', SECRET 'topsecret')",
+        effectiveSet = Some(systemEff)
+      )
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = router.history.snapshot(1).head
+    latest.user shouldBe "module:seed"
+    latest.sql should startWith("CREATE SECRET s3k")
+    latest.sql should not include "topsecret"
+    latest.sql should not include "AKIAEXAMPLE"
+    latest.error.getOrElse("") should not include "topsecret"
+    // A user's statement keeps its text, as before.
+    val (plain, _, _) = setup()
+    plain.execute("c-user-text", "alice", poolKey, "SELECT 'hello'").unsafeRunSync()
+    plain.history.snapshot(1).head.sql shouldBe "SELECT 'hello'"
+
   it should "redact both sql and a node's quoted-statement error for an admitted statement" in:
     // The claimed statement is forwarded to the
     // node, whose own parser error quotes the offending line back verbatim - exactly how

@@ -17,9 +17,13 @@ import cats.effect.IO
   * Attribution: Main builds each module's instance bound to that module's name before
   * `ManagerModule.start`, so a module cannot act under another's name. Every statement is labelled
   * `module:<name>` (statement history, the DuckLake commit author of a write) and leaves one
-  * `module.sql` audit row naming the module, the pool, the outcome and the statement (a
-  * claim-shaped admin statement and its error redacted, as statement history redacts them; both
-  * capped at 500 characters).
+  * `module.sql` audit row naming the module, the pool, the outcome and the statement.
+  *
+  * Visibility: statement history and the audit rows of a pool are shown to that tenant's admins.
+  * Their copy of the statement has every literal and option value masked (`CREATE SECRET` values,
+  * `SET s3_secret_access_key = ...`), and its error is scrubbed of them; a claim-shaped admin
+  * statement is replaced whole. The masking is of values, not of names or structure: never put a
+  * credential in an identifier, and prefer a secret the node already holds to one in the statement.
   *
   * The statement runs once, through the router, on a node of `pool`, with the pool's default
   * catalog and schema current, so unqualified names resolve in the tenant-db. The answer is
