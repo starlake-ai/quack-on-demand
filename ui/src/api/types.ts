@@ -1091,6 +1091,7 @@ export interface RecoverableTableEntry {
   lastLiveSnapshot: number;
   droppedAt?: string | null;   // ISO-8601; absent once the drop snapshot itself expired
   recoverable: boolean;
+  tableId: number;             // DuckLake table id: a name dropped twice is two entries
 }
 
 /** One pool the caller may connect to (`GET /api/profile/pools`). */

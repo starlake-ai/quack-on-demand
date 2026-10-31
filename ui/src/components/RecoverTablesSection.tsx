@@ -39,7 +39,9 @@ export function RecoverTablesSection() {
 
   useEffect(() => { void reload(database); }, [database, reload]);
 
-  const key = (t: RecoverableTableEntry) => `${t.schema}.${t.table}`;
+  // A name dropped twice is two entries: keyed by table id and drop snapshot, never by name alone.
+  const key = (t: RecoverableTableEntry) => `${t.tableId}@${t.droppedAtSnapshot}`;
+  const label = (t: RecoverableTableEntry) => `${t.schema}.${t.table}`;
 
   async function undrop(t: RecoverableTableEntry) {
     setError('');
@@ -91,7 +93,7 @@ export function RecoverTablesSection() {
           <tbody>
             {tables.map(t => (
               <tr key={key(t)}>
-                <td><code>{key(t)}</code></td>
+                <td><code>{label(t)}</code></td>
                 <td className="subtle">{t.droppedAt ?? `snapshot ${t.droppedAtSnapshot}`}</td>
                 <td>
                   <input
@@ -111,8 +113,9 @@ export function RecoverTablesSection() {
         </table>
       )}
       <p className="subtle" style={{ marginBottom: 0 }}>
-        Recovering runs as you: you need a read grant on the table&apos;s last name and the right to
-        create tables in its schema. SQL: <code>UNDROP TABLE schema.table [AS new_name]</code>.
+        Recovering runs as you: you need a read grant on the table&apos;s last name, which no live
+        table or view may hold, and the right to create tables in its schema. SQL:{' '}
+        <code>UNDROP TABLE schema.table [AS new_name]</code>.
       </p>
     </div>
   );
