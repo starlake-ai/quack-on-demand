@@ -141,6 +141,11 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
     "read_window"           -> Allow,
     "read_window_aggregate" -> Allow,
     "view_plain"            -> Allow,
+    // a built-in view inlines to its listing functions (no object): the node's describer refuses
+    // every built-in view to a non-superuser but the own-text information_schema reads the
+    // gateway filters, so the description that reaches the decider is that read's, or a superuser's
+    "builtin_view_information_schema" -> Allow, // duckdb_tables, duckdb_views: listing
+    "superuser_builtin_view_pg_views" -> Allow, // duckdb_views: listing
     // settings
     "settings_explicit_session" -> Allow, // SET SESSION default_order
     "settings_global_default" -> Refuse("setting default_order at global scope is superuser-only"),
