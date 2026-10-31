@@ -135,6 +135,16 @@ the `statement` rule with this input:
   on the view, and the starter policy does the same. The view itself is listed too (`kind:
   secure_view`, `via: null`). Secure views live in DuckDB catalogs (a `memory` or `duckdb-file`
   database); a DuckLake catalog holds none.
+- `history` (only present when non-empty) marks a DuckLake read at an earlier snapshot that crossed
+  a change of the table, with any of `renamed` (the statement wrote a name the table, or a column
+  read, had then and has no longer; the access names the table and columns as they are now),
+  `dropped` (the table was dropped since; the access names its last live name, readable while no
+  live table holds it) and `replaced` (the table was replaced since by `CREATE OR REPLACE` or a QoD
+  restore; the access names the table that replaced it). A policy that wants to keep history
+  current-only can deny any access carrying `history`. The input does NOT otherwise tell an
+  earlier-snapshot read (`AT (VERSION => n)`), a change-feed read (`ducklake_table_changes`, the
+  data diff, branch counts) or a data diff from a read of the current rows: an unchanged table's
+  history reads exactly like the table.
 - `locations` lists the files the statement reads (a reader function such as `read_parquet`, or
   `COPY ... FROM`) or writes (`COPY ... TO`), already admitted by QoD: under one of the user's own S3
   credential scopes (`qod profile s3 add`) or the tenant's authorized folders, and outside every

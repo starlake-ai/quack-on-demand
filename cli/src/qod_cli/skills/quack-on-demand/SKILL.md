@@ -1102,6 +1102,37 @@ what the later Execute actually delivers.
   username 404s. A resolved user holding no grants lists as an empty result,
   not an error.
 
+### Recover a dropped table (UNDROP TABLE, self-service)
+
+Any signed-in user can recover a dropped DuckLake table, as themselves, through SQL on either door
+(FlightSQL, `qod sql`, or a DuckDB client ATTACHed to the native front door):
+
+```sql
+UNDROP TABLE main.orders;                  -- under its last name
+UNDROP TABLE main.orders AS orders_back;   -- under a new name
+```
+
+It finds the table's last live snapshot and runs `CREATE TABLE ... AS SELECT * FROM ... AT (VERSION
+=> n)` as the caller, so it needs a read grant on the table's last name and DDL in the schema. The
+answers are plain words: "there is no dropped table main.orders", "a table main.orders exists; use
+UNDROP TABLE main.orders AS <new name>", "not permitted: ...". Without a schema, the database's
+default schema is used.
+
+The same, from the profile (regular users included): `qod profile recoverable --db lake` lists the
+dropped tables of your own database you may recover, `qod profile undrop --db lake --schema main
+--table orders [--as-name orders_back]` recovers one; the UI profile page has a "Recover a dropped
+table" card; MCP `list_recoverable` / `undrop_table` work with a regular user's PAT. Admins keep
+`qod catalog recoverable` / `qod catalog undrop` (any table, `--from-snapshot`).
+
+**Which history a user may read** (time travel, the data diff, the change feed, undrop):
+- a table renamed since is judged as the table it is now (its current name's grant);
+- a table replaced since (`CREATE OR REPLACE`, a QoD restore) is the same table: its history is
+  judged on the current name's grant;
+- a table dropped since is judged as a read of its last live name: allowed while no live table
+  holds that name and the grant covers it, refused once the name is reused (only a superuser reads
+  it then);
+- any of those three is refused to a user with column or row policies.
+
 ## Federation - external catalogs via DuckDB extensions
 
 Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='RO')` grants read access to a federated alias just like a DuckLake table. **Known limitation, column policies:** with column-level security on (the default), a principal holding ANY column policy, even one on an unrelated table, is denied (fail-closed, "column policy rewrite could not parse statement" or "unresolved table") every read of a table outside the session's default catalog and schema: a federated alias, another attached catalog such as an Iceberg one, or another schema of the same DuckLake database. A table grant alone does not make such a table readable for that principal, and a mask on a federated table never masks: the read is denied instead. Principals with no column policy are unaffected. Sources come in two flavours: `sql`, where the operator writes the `ATTACH` text, and typed sources where QoD writes it: `iceberg-rest` (see "Register an Iceberg REST catalog") and `postgres` / `mysql` (see "Register a Postgres or MySQL database").

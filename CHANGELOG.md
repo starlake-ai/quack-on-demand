@@ -773,6 +773,14 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Tenant users may read the change data of tables they may read: the data diff and branch change
   counts (`ducklake_table_changes` / `_insertions` / `_deletions` naming the table by literals) are
   judged as a read of that table; refused under column or row policies.
+- `UNDROP TABLE [schema.]t [AS new_name]` in SQL (both doors and `qod sql`): any user recovers a
+  dropped table as themselves, with a read grant on its last name and DDL in the schema.
+- Self-service undrop: regular users list and recover their own dropped tables from the profile
+  page, `qod profile recoverable` / `qod profile undrop`, and MCP `list_recoverable` /
+  `undrop_table`.
+- OPA: a node decision's access carries `history` (`renamed`, `dropped`, `replaced`) for a DuckLake
+  read across such a change; an earlier-snapshot or change-feed read of an unchanged table is not
+  told apart from a current read (examples/opa/README.md).
 - Module SPI: `ManagerContext.systemSql` (required) runs one statement on a pool as the manager's
   system caller, for a module's own provisioning statements, never SQL a user supplied; each is
   labelled `module:<name>` in statement history and audited as `module.sql`, both shown to the
@@ -781,8 +789,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
 ### Fixed
 
 - Security: reading a DuckLake table at an earlier snapshot (time travel, the data diff, branch
-  counts) is judged on the table as it is now, so a table renamed since is no longer covered by the
-  grant on the table that took its old name; one dropped since is superusers' only (so is undrop).
+  counts, undrop) is judged on the table as it is now: a table renamed since is no longer covered
+  by the grant on the table that took its old name; a table replaced since (CREATE OR REPLACE, a
+  restore) keeps its history under its current grant; a dropped one is readable on its last name's
+  grant while no other table holds that name. Users with column or row policies are refused all
+  three.
 - Security: branch change counts (`GET /api/branch/.../changes`, MCP `branch_changes`) ran as the
   manager's system caller, so anyone allowed to use a branch read insert, delete and update counts
   of tables they hold no grant on. They now run as the requester, as the "REST and MCP data
