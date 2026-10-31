@@ -221,7 +221,11 @@ if(QOD_NODE_TESTS)
   function(qod_node_test name)
     add_executable(${name} tests/${name}.cpp)
     target_link_libraries(${name} PRIVATE qod_node_core)
-    if(NOT QOD_NODE_DUCKDB_STATIC)
+    if(QOD_NODE_DUCKDB_STATIC)
+      # The static extensions registered before main, as qod-node's main registers them: a source of
+      # the program itself, so the linker cannot drop it as an unreferenced archive member.
+      target_sources(${name} PRIVATE tests/static_registration.cpp)
+    else()
       set_target_properties(${name} PROPERTIES BUILD_RPATH ${DUCKDB_LIB_DIR})
     endif()
   endfunction()
