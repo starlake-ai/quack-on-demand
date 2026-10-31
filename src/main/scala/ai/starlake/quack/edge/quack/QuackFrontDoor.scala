@@ -328,6 +328,9 @@ final class QuackFrontDoor(
           if reopenTx then s.txAborted.set(None)
           afterPrepare(s, cq, prep.sql, routed)
       }
+      // A link the node answered on but no statement took (a cancel between the router's Ok and
+      // `afterPrepare`) is released here, with its hold on the node.
+      .guarantee(IO.defer(s.handoff.getAndSet(None).fold(IO.unit)(_.close())))
 
   private def afterPrepare(
       s: QuackSession,
@@ -335,21 +338,23 @@ final class QuackFrontDoor(
       sql: String,
       routed: Routed[PrepareOutcome]
   ): IO[Array[Byte]] =
-    val po   = routed.value
-    val kind = router.classifier.classify(sql)
-    if kind == StatementKind.Begin then s.txLink.set(Some((routed.nodeId, po.link)))
+    val po        = routed.value
+    val kind      = router.classifier.classify(sql)
     val statement = QuackStatement(po.link, routed.nodeId, kind, cq, routed.close)
     statement.pendingCommit.set(po.stamped)
     val moreOpt: Option[Boolean] =
       if messageType(po.response) == Type.PrepareResponse then
         QuackNodeLink.nativeNeedsMore(po.response)
       else Some(false)
-    moreOpt match
-      case Some(true) =>
-        IO {
-          s.current.set(Some(statement))
-          po.response
-        }
+    // One step takes the link over from the hand-off: the session holds the statement (and a
+    // BEGIN's link as its transaction's) before anything else can be cancelled. A statement served
+    // in full is finished at once below, which retires it again.
+    IO {
+      s.handoff.set(None)
+      if kind == StatementKind.Begin then s.txLink.set(Some((routed.nodeId, po.link)))
+      s.current.set(Some(statement))
+    } *> (moreOpt match
+      case Some(true)  => IO.pure(po.response)
       case Some(false) =>
         finishStatement(s, statement, commit = true).map(_.map(encodeError).getOrElse(po.response))
       case None if po.stamped =>
@@ -360,11 +365,7 @@ final class QuackFrontDoor(
               "Quack path for this process"
           )
         finishStatement(s, statement, commit = true).map(_.map(encodeError).getOrElse(po.response))
-      case None =>
-        IO {
-          s.current.set(Some(statement))
-          po.response
-        }
+      case None => IO.pure(po.response))
 
   // -------------------------------------------------------------------------------------------
   // Node calls
@@ -546,7 +547,14 @@ final class QuackFrontDoor(
                           .open(transport, node, s.hello, cq, authorize, hold2)
                           .flatMap {
                             case Left(fail2)    => elapsed().map(ms => toOutcome[A](fail2, ms))
-                            case Right((l2, _)) => body(l2, false, false, elapsed)
+                            case Right((l2, _)) =>
+                              // A raise or a cancel leaves no statement on the fresh link: close it,
+                              // which gives its hold back (the backstop in `admitted` holds the
+                              // first link's).
+                              body(l2, false, false, elapsed).guaranteeCase {
+                                case Outcome.Succeeded(_) => IO.unit
+                                case _                    => l2.close()
+                              }
                           })
                 }
             }
@@ -581,7 +589,9 @@ final class QuackFrontDoor(
                     NodeOutcome.Permanent(decodeErrorText(resp).getOrElse("node error"), ms)
                   )
                 else
-                  elapsed().map(ms =>
+                  // A fresh link is the session's to release from here until `afterPrepare`
+                  // stores its statement (`QuackSession.handoff`).
+                  IO(if !reused then s.handoff.set(Some(link))) *> elapsed().map(ms =>
                     NodeOutcome.Ok(
                       PrepareOutcome(link, resp, stamped, reused),
                       ms,
@@ -599,7 +609,7 @@ final class QuackFrontDoor(
     * once. Failures on the link are handled as [[relaySend]]'s are. The node's chunks are decoded
     * by the native bridge, as on the Arrow path, never encoded.
     */
-  private def evaluateSend(s: QuackSession, cq: Long): FlightSqlRouter.NodeSend[NodeRows] =
+  private[quack] def evaluateSend(s: QuackSession, cq: Long): FlightSqlRouter.NodeSend[NodeRows] =
     (node, wrappedSql, _, recordLoad, principal) =>
       IO.defer {
         val tx = s.txLink.get()
@@ -716,49 +726,61 @@ final class QuackFrontDoor(
             finally qr.close()
           }.flatMap { case (cols, rows) =>
             val rendered = renderValues(cols, rows)
-            pickReadNode(s.bound.poolKey).map(n => (n, router.tracker.tryHold(n.nodeId))) match
-              case None => IO.pure(encodeError("no routable node to render the result"))
-              // Picked just before a drain began: nothing was sent, the client may retry.
-              case Some((node, None)) =>
-                IO.pure(encodeError(s"${QuackHttpAdapter.draining(node.nodeId)}; retry"))
-              case Some((node, Some(hold))) =>
-                QuackNodeLink
-                  .open(
-                    transport,
-                    node,
-                    s.hello,
-                    cq,
-                    router.adapter
-                      .authorizer(node, ai.starlake.quack.edge.authz.NodePrincipal.System),
-                    hold
-                  )
-                  .flatMap {
-                    case Left(fail)       => IO.pure(encodeError(fail.message))
-                    case Right((link, _)) =>
-                      link
-                        .prepare(prep.copy(sql = rendered), cq)
-                        .flatMap {
-                          case Left(fail)  => link.close().as(encodeError(fail.message))
-                          case Right(resp) =>
-                            if messageType(resp) != Type.PrepareResponse then link.close().as(resp)
-                            else
-                              // Same lifecycle as a relayed result: the link stays current while
-                              // the node still has chunks to FETCH, and the sweeper, the next
-                              // statement or the disconnect releases it.
-                              val st = QuackStatement(
-                                link,
-                                node.nodeId,
-                                StatementKind.Select,
-                                cq,
-                                closer(s, link, cq, reused = false)
-                              )
-                              if QuackNodeLink.nativeNeedsMore(resp).contains(false) then
-                                finishStatement(s, st, commit = false).as(resp)
-                              else IO { s.current.set(Some(st)); resp }
-                        }
-                  }
+            pickReadNode(s.bound.poolKey) match
+              case None       => IO.pure(encodeError("no routable node to render the result"))
+              case Some(node) => renderOn(s, node, prep, cq, rendered)
           }
       }
+
+  /** Render an admin result (`rendered`, a VALUES query) on `node` under the client's PREPARE
+    * `prep`, as the system principal, on a link of its own the node is held for. A node picked just
+    * before its drain began refuses it: nothing was sent, the client may retry.
+    */
+  private[quack] def renderOn(
+      s: QuackSession,
+      node: RunningNode,
+      prep: PrepareRequest,
+      cq: Long,
+      rendered: String
+  ): IO[Array[Byte]] =
+    router.tracker.tryHold(node.nodeId) match
+      case None =>
+        IO.pure(encodeError(s"${QuackHttpAdapter.draining(node.nodeId)}; retry"))
+      case Some(hold) =>
+        QuackNodeLink
+          .open(
+            transport,
+            node,
+            s.hello,
+            cq,
+            router.adapter.authorizer(node, ai.starlake.quack.edge.authz.NodePrincipal.System),
+            hold
+          )
+          .flatMap {
+            case Left(fail)       => IO.pure(encodeError(fail.message))
+            case Right((link, _)) =>
+              link
+                .prepare(prep.copy(sql = rendered), cq)
+                .flatMap {
+                  case Left(fail)  => link.close().as(encodeError(fail.message))
+                  case Right(resp) =>
+                    if messageType(resp) != Type.PrepareResponse then link.close().as(resp)
+                    else
+                      // Same lifecycle as a relayed result: the link stays current while the
+                      // node still has chunks to FETCH, and the sweeper, the next statement or
+                      // the disconnect releases it.
+                      val st = QuackStatement(
+                        link,
+                        node.nodeId,
+                        StatementKind.Select,
+                        cq,
+                        closer(s, link, cq, reused = false)
+                      )
+                      if QuackNodeLink.nativeNeedsMore(resp).contains(false) then
+                        finishStatement(s, st, commit = false).as(resp)
+                      else IO { s.current.set(Some(st)); resp }
+                }
+          }
 
   private def pickReadNode(poolKey: PoolKey): Option[RunningNode] =
     router.supervisor.snapshot(poolKey).flatMap { snap =>
@@ -845,7 +867,16 @@ final class QuackFrontDoor(
       s: QuackSession,
       st: QuackStatement,
       commit: Boolean
-  ): IO[Option[String]] =
+  ): IO[Option[String]] = IO.uncancelable(_ => finishStatement0(s, st, commit))
+
+  /** [[finishStatement]], which runs it uncancelable: once retired, a statement is always closed,
+    * so its link and the link's hold on the node are never left behind.
+    */
+  private def finishStatement0(
+      s: QuackSession,
+      st: QuackStatement,
+      commit: Boolean
+  ): IO[Option[String]] = IO.defer {
     if !st.finished.compareAndSet(false, true) then IO.pure(None)
     else
       // Clear only if this statement is still the current one (identity, not Option equality).
@@ -863,6 +894,7 @@ final class QuackFrontDoor(
            else IO.unit) *>
           IO.pure(err)
       }
+  }
 
   private def finishCurrent(s: QuackSession, commit: Boolean): IO[Option[String]] =
     s.current.get() match

@@ -62,6 +62,7 @@ final class AutoscaleWiring(
           // n sweeps is skipped on exactly n sweeps, and the counter it just failed on
           // is not one of them.
           val skip               = backoff.keySet
+          val before             = state
           val (actions, updated) = Autoscale.decide(now(), vs, state, skip, cfg)
           state = updated
           backoff = backoff.collect { case (k, n) if n > 1 => k -> (n - 1) }
@@ -76,8 +77,9 @@ final class AutoscaleWiring(
             acc *> IO.defer(scale(a)).attempt.flatMap { outcome =>
               IO.blocking {
                 outcome match
-                  case Right(Right(())) => noteSuccess(a, byKey.get(keyOf(a)))
-                  case Right(Left(err)) => noteFailure(a, err)
+                  case Left(_: PoolSupervisor.PoolBusy) => noteBusy(a, before)
+                  case Right(Right(()))                 => noteSuccess(a, byKey.get(keyOf(a)))
+                  case Right(Left(err))                 => noteFailure(a, err)
                   case Left(t) => noteFailure(a, Option(t.getMessage).getOrElse(t.toString))
               }
             }
@@ -92,6 +94,15 @@ final class AutoscaleWiring(
     val from = view.map(_.distribution.total).getOrElse(-1)
     val util = view.flatMap(_.utilization).map(u => f"$u%.2f").getOrElse("?")
     s"${key.tenant}/${key.tenantDb}/${key.pool} $dir $from -> $target util=$util"
+
+  /** The pool's lock was held (a teardown draining it): the scale was not attempted. The pool's
+    * state goes back to what it was before this sweep's decision, so no cooldown and no failure is
+    * booked and the next sweep decides it again.
+    */
+  private def noteBusy(a: AutoscaleAction, before: Map[PoolKey, PoolAutoState]): Unit =
+    val key = keyOf(a)
+    state = before.get(key).fold(state - key)(prev => state.updated(key, prev))
+    logger.info(s"autoscale: $key is busy; decided again next sweep")
 
   private def noteSuccess(a: AutoscaleAction, view: Option[AutoscaleView]): Unit =
     val key = keyOf(a)

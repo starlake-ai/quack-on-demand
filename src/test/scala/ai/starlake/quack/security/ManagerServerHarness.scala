@@ -56,6 +56,7 @@ object ManagerServerHarness:
     spawnScript = "",
     spawnScriptWindows = "",
     drainTimeoutSec = 5,
+    poolDrainTimeoutSec = 5,
     healthCheckIntervalSec = 30,
     reconcileIntervalSec = 0,
     sessionIdleTtlSec = 28800,

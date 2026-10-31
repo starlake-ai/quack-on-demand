@@ -12,10 +12,10 @@ import java.time.Instant
 import scala.concurrent.duration.DurationInt
 
 class HibernationWiringSpec extends AnyFlatSpec with Matchers:
-  private val poolKey  = PoolKey("t", "db", "p")
-  private val cfg  = HibernationConfig()
-  private val now  = Instant.parse("2026-09-03T12:00:00Z")
-  private def idleView = HibernationView(poolKey, false, false, 1, 30.minutes)
+  private val poolKey       = PoolKey("t", "db", "p")
+  private val cfg           = HibernationConfig()
+  private val now           = Instant.parse("2026-09-03T12:00:00Z")
+  private def idleView      = HibernationView(poolKey, false, false, 1, 30.minutes)
   private def staleActivity = Map(poolKey -> now.minusSeconds(31 * 60))
 
   private def wiring(
@@ -37,20 +37,36 @@ class HibernationWiringSpec extends AnyFlatSpec with Matchers:
   "sweep" should "flush local activity on every replica but only suspend as leader" in:
     var flushed   = 0
     var suspended = 0
-    val w = wiring(leader = false, suspend = _ => IO { suspended += 1; Right(()) }, () => flushed += 1)
+    val w         =
+      wiring(leader = false, suspend = _ => IO { suspended += 1; Right(()) }, () => flushed += 1)
     w.sweep().unsafeRunSync()
     flushed shouldBe 1
     suspended shouldBe 0
 
   it should "suspend an idle pool as leader" in:
     var suspended = List.empty[PoolKey]
-    val w         = wiring(leader = true, suspend = k => IO { suspended = suspended :+ k; Right(()) })
+    val w = wiring(leader = true, suspend = k => IO { suspended = suspended :+ k; Right(()) })
     w.sweep().unsafeRunSync()
     suspended shouldBe List(poolKey)
 
   it should "retry a failed suspend on the next sweep" in:
     var calls = 0
     val w     = wiring(leader = true, suspend = _ => IO { calls += 1; Left("boom") })
+    w.sweep().unsafeRunSync()
+    w.sweep().unsafeRunSync()
+    calls shouldBe 2
+
+  it should "retry a pool its suspend found busy on the next sweep" in:
+    var calls = 0
+    val w     = wiring(
+      leader = true,
+      suspend = k =>
+        IO(calls += 1) *> IO.defer {
+          if calls == 1 then
+            IO.raiseError(new ai.starlake.quack.ondemand.PoolSupervisor.PoolBusy(k, "test"))
+          else IO.pure(Right(()))
+        }
+    )
     w.sweep().unsafeRunSync()
     w.sweep().unsafeRunSync()
     calls shouldBe 2

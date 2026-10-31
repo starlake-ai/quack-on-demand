@@ -101,6 +101,9 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     * every PREPARE but ROLLBACK and COMMIT (which DuckDB runs as a ROLLBACK), a session handle
     * included, answers [[TxAbortedError]].
     */
+  /** How a respawned node answers a connection of the process it replaced. */
+  private final class DeadConnection extends RuntimeException("Invalid connection id")
+
   private final class ScriptedTransport extends QuackTransport:
     @volatile var prepareNeedsMore: Boolean       = false
     @volatile var prepareError: Option[String]    = None
@@ -126,17 +129,49 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     /** Traffic after a successful handshake, which itself costs one probe connection (a
       * CONNECTION_REQUEST and a DISCONNECT) that takes node connection id NODE1.
       */
-    def sinceHandshake: List[Frame]                        = posted.toList.drop(2)
-    def typesSinceHandshake: List[Int]                     = sinceHandshake.map(_.header.msgType)
-    def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
+    def sinceHandshake: List[Frame]    = posted.toList.drop(2)
+    def typesSinceHandshake: List[Int] = sinceHandshake.map(_.header.msgType)
+
+    /** Told every PREPARE as it arrives, before the node answers it. */
+    @volatile var onPrepare: Prepared => Unit = _ => ()
+
+    /** The first PREPARE it matches is recorded and never answered (`hung` counts down). */
+    @volatile var hangWhen: Prepared => Boolean = _ => false
+    val hung                                    = new java.util.concurrent.CountDownLatch(1)
+
+    def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO.defer {
+      val hangs = frame(body).toOption
+        .filter(_.header.msgType == Type.PrepareRequest)
+        .flatMap(f => decodePrepareRequest(f).toOption.map(r => Prepared(r.sql, uri, "")))
+        .exists(hangWhen)
+      if hangs then
+        IO {
+          hangWhen = _ => false
+          posted.synchronized(prepareUris += uri)
+          hung.countDown()
+        } *> IO.never
+      else answer(uri, body)
+    }
+
+    /** Node connections whose process is gone: a respawned node refuses them. */
+    @volatile var deadConnections: Set[String] = Set.empty
+
+    /** Node connection ids handed out so far. */
+    def connectionIds: Set[String] = (1 to connections.get()).map(i => s"NODE$i").toSet
+
+    private def answer(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
       if unreachablePorts.contains(uri.getPort) then
         throw new java.io.IOException(s"connection refused: ${uri.getPort}")
       val f    = frame(body).toOption.get
       val conn = f.header.connectionId
+      if deadConnections.contains(conn) then
+        posted.synchronized(posted += f)
+        throw new DeadConnection
       val sent =
         if f.header.msgType != Type.PrepareRequest then None
         else decodePrepareRequest(f).toOption.map(r => Prepared(r.sql, uri, conn))
       posted.synchronized(sent.foreach(prepared += _))
+      sent.foreach(onPrepare)
       // An aborted transaction refuses the statement before anything else looks at it.
       val aborted = sent
         .filter(p => abortsTx && transactions.get(conn).contains(true))
@@ -217,7 +252,9 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       /** Runs once the router holds the pool snapshot it picks from, before it picks: a teardown
         * that starts draining there plays the race of a route chosen just before the drain.
         */
-      beforePick: NodeLoadTracker => Unit = _ => ()
+      beforePick: NodeLoadTracker => Unit = _ => (),
+      /** Told every manager event as it is emitted, on the emitting fiber. */
+      onEvent: ManagerEvent => Unit = _ => ()
   ): Fixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -263,8 +300,10 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     val store                  = new RecordingTelemetryStore
     val journal                = new EventJournal(store)
     val events                 = ArrayBuffer.empty[ManagerEvent]
-    val sink: ManagerEventSink = e => events.synchronized(events += e)
-    val client                 =
+    val sink: ManagerEventSink = e =>
+      onEvent(e)
+      events.synchronized(events += e)
+    val client =
       new QuackHttpClient(TestArrow.sharedAllocator)
     val router = new FlightSqlRouter(
       sup,
@@ -1312,3 +1351,161 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     fx.router.supervisor.stopPool(poolKey, force = false).timeout(5.seconds).unsafeRunSync()
     fx.router.supervisor.get(poolKey).get.nodes shouldBe empty
     errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer
+
+  /** Front-door holds on every node of the pool. */
+  private def held(fx: Fixture): Int = fx.nodes.map(n => fx.tracker.snapshot(n.nodeId).held).sum
+
+  "a statement refused by a node that started draining" should "run once, on the surviving node" in:
+    val draining = new java.util.concurrent.atomic.AtomicReference(List.empty[String])
+    val fx     = setup(beforePick = tracker => draining.get().foreach(tracker.setDraining(_, true)))
+    val connId = connect(fx)
+    val List(first, survivor) = fx.nodes
+    // The survivor carries load, so the least-loaded pick is the node about to drain.
+    fx.tracker.onStart(survivor.nodeId)
+    draining.set(List(first.nodeId))
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(false)
+    fx.transport.prepared.toList.filterNot(_.isHandle).map(p => (p.sql, p.uri.getPort)) shouldBe
+      List(("USE memory.main; SELECT 1", survivor.port))
+    // One node connection, the survivor's: the draining node got no byte.
+    fx.transport.typesSinceHandshake shouldBe List(
+      Type.ConnectionRequest,
+      Type.PrepareRequest,
+      Type.Disconnect
+    )
+    held(fx) shouldBe 0
+
+  "a statement cancelled before its node answers" should "give its node's hold back" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    fx.transport.hangWhen = p => p.sql.contains("SELECT 42")
+    val f = fx.door
+      .handle(encodePrepareRequest(connId, 3L, PrepareRequest("SELECT 42", None, None)))
+      .start
+      .unsafeRunSync()
+    fx.transport.hung.await(3, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+    held(fx) shouldBe 1
+    f.cancel.timeout(3.seconds).unsafeRunSync()
+    held(fx) shouldBe 0
+
+  "a stamped write whose fallback link its draining node refuses" should "go once to the other node" in:
+    val fx     = setup(stamping = true)
+    val connId = connect(fx)
+    fx.transport.stampError = Some("Catalog Error: function ducklake_set_commit_message failed")
+    // The first stamp's node starts draining once that stamp failed: the fresh link the write
+    // falls back to must be admitted again, and is refused there.
+    val stampedOn = new java.util.concurrent.atomic.AtomicReference(Option.empty[Int])
+    fx.transport.onPrepare = p =>
+      if p.sql.startsWith(StampPrefix) && stampedOn.compareAndSet(None, Some(p.uri.getPort)) then
+        fx.nodes.find(_.port == p.uri.getPort).foreach(n => fx.tracker.setDraining(n.nodeId, true))
+    prepare(fx, connId, StampedWrite) shouldBe prepareResp(false)
+    val writes = fx.transport.prepared.toList
+      .filterNot(p => p.isHandle || p.sql.startsWith(StampPrefix))
+      .filter(_.sql.contains(StampedWrite))
+    writes should have size 1
+    Some(writes.head.uri.getPort) should not be stampedOn.get()
+    held(fx) shouldBe 0
+
+  "a stamped write's fallback link" should "be closed, its hold given back, when the write is cancelled" in:
+    val fx     = setup(stamping = true)
+    val connId = connect(fx)
+    fx.transport.stampError = Some("Catalog Error: function ducklake_set_commit_message failed")
+    fx.transport.hangWhen = p =>
+      !p.sql.startsWith(StampPrefix) && !p.sql.startsWith(HandlePrefix) &&
+        p.sql.contains(StampedWrite)
+    val f = fx.door
+      .handle(encodePrepareRequest(connId, 3L, PrepareRequest(StampedWrite, None, None)))
+      .start
+      .unsafeRunSync()
+    fx.transport.hung.await(3, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+    held(fx) shouldBe 1
+    f.cancel.timeout(3.seconds).unsafeRunSync()
+    held(fx) shouldBe 0
+    fx.transport.types.last shouldBe Type.Disconnect
+
+  "a statement cancelled between its node's answer and its hand-off to the session" should "release its link" in:
+    val armed   = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val entered = new java.util.concurrent.CountDownLatch(1)
+    val gate    = new java.util.concurrent.CountDownLatch(1)
+    val fx      = setup(onEvent = {
+      case _: ManagerEvent.StatementExecuted if armed.get() =>
+        entered.countDown()
+        gate.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        ()
+      case _ => ()
+    })
+    fx.transport.prepareNeedsMore = true
+    val connId = connect(fx)
+    armed.set(true)
+    val f = fx.door
+      .handle(encodePrepareRequest(connId, 3L, PrepareRequest("SELECT 1", None, None)))
+      .start
+      .unsafeRunSync()
+    // The node answered (its result needs FETCH, so the link must outlive the PREPARE) and the
+    // router is reporting the statement: the session does not hold it yet.
+    entered.await(3, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+    held(fx) shouldBe 1
+    val cancel = f.cancel.start.unsafeRunSync()
+    armed.set(false)
+    gate.countDown()
+    cancel.joinWithNever.timeout(3.seconds).unsafeRunSync()
+    held(fx) shouldBe 0
+    fx.sessions.get(connId).get.current.get() shouldBe None
+    fx.transport.types.last shouldBe Type.Disconnect
+
+  "the evaluation of a value on a fresh link" should "be refused Transient by a draining node, sending nothing" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    val node   = fx.nodes.head
+    fx.tracker.setDraining(node.nodeId, true)
+    val before = fx.transport.posted.size
+    val send   = fx.door.evaluateSend(fx.sessions.get(connId).get, 3L)
+    send(
+      node,
+      "SELECT 1",
+      None,
+      true,
+      ai.starlake.quack.edge.authz.NodePrincipal.System
+    ).unsafeRunSync() match
+      case NodeOutcome.Transient(m, _) => m should include("is draining")
+      case other                       => fail(s"expected Transient, got $other")
+    fx.transport.posted.size shouldBe before
+    held(fx) shouldBe 0
+
+  "an admin result's rendering" should "be refused, retryably, by a node that started draining" in:
+    val fx     = setup(superuser = true, withAdmin = true)
+    val connId = connect(fx)
+    val node   = fx.nodes.head
+    fx.tracker.setDraining(node.nodeId, true)
+    val before = fx.transport.posted.size
+    val resp   = fx.door
+      .renderOn(
+        fx.sessions.get(connId).get,
+        node,
+        PrepareRequest("CREATE ROLE analysts", None, None),
+        3L,
+        "SELECT 'ok' AS status"
+      )
+      .unsafeRunSync()
+    errorText(resp) should include("is draining; retry")
+    fx.transport.posted.size shouldBe before
+    held(fx) shouldBe 0
+
+  "a suspend" should "not wait for an open front-door transaction, whose next statement is told it was aborted" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    // The drain timeout is 10 s: the suspend must not wait for the transaction, whose COMMIT
+    // would itself wait for the suspend to resume the pool.
+    fx.router.supervisor
+      .suspendPool(poolKey, "test")
+      .timeout(3.seconds)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    // The COMMIT wakes the pool. A resume respawns the nodes under their node ids, so the pin
+    // finds its node again, but the new process refuses the stopped one's connection: the client
+    // is told its transaction was aborted, and its ROLLBACK runs on a fresh link.
+    fx.transport.deadConnections = fx.transport.connectionIds
+    val answer = errorText(prepare(fx, connId, "COMMIT"))
+    answer should startWith("transaction aborted")
+    answer should endWith("ROLLBACK to continue")
+    prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
