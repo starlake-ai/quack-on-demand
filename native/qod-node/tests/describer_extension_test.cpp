@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <process.h>
@@ -362,6 +363,73 @@ int main() {
 	expect_one("a replaced table's change feed across the replace",
 	           "SELECT id FROM ducklake_table_insertions('lake', 'main', 'rep', 1, " + rep_first + ")",
 	           replaced_read("\"id\""));
+	// Review N1: with several dropped tables that once held the bound name, the read's table is the one
+	// holding that name at the read's point, never one merely live under another name then. C is created as
+	// x, renamed tt and dropped; T is created as a, renamed tt, then secret2, and dropped. A read of tt while
+	// T held it is T, judged under its last name secret2: by TIMESTAMP and by the change feed.
+	{
+		auto snapshot_time = [&](const std::string &id) {
+			auto rows = con.Query("SELECT snapshot_time::VARCHAR FROM ducklake_snapshots('lake') WHERE snapshot_id = " + id);
+			auto chunk = rows->HasError() ? nullptr : rows->Fetch();
+			return chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : std::string();
+		};
+		auto step = [&](const std::string &sql) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			qod::RunStrict(con, sql, sql);
+		};
+		std::string t_held;
+		try {
+			step("CREATE TABLE lake.x (id INTEGER, cx VARCHAR)");
+			step("INSERT INTO lake.x VALUES (1, 'c')");
+			step("CREATE TABLE lake.a (id INTEGER, tv VARCHAR)");
+			step("INSERT INTO lake.a VALUES (2, 't')");
+			step("ALTER TABLE lake.x RENAME TO tt");
+			step("DROP TABLE lake.tt");
+			step("ALTER TABLE lake.a RENAME TO tt");
+			t_held = lake_head();
+			step("ALTER TABLE lake.tt RENAME TO secret2");
+			step("DROP TABLE lake.secret2");
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		} catch (std::exception &error) {
+			Fail(std::string("review N1 setup: ") + error.what());
+		}
+		auto secret2 = "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+		               "\"catalogType\":\"ducklake\",\"columns\":[\"id\"],\"dropped\":true,\"kind\":\"table\","
+		               "\"name\":\"secret2\",\"renamed\":true,\"schema\":\"main\",\"via\":null}],\"settings\":[],"
+		               "\"statement\":\"PROJECTION\",\"v\":1}";
+		expect_one("a TIMESTAMP read of tt while T held it (review N1)",
+		           "SELECT id FROM lake.tt AT (TIMESTAMP => '" + snapshot_time(t_held) + "'::TIMESTAMPTZ)", secret2);
+		expect_one("the change feed of tt while T held it (review N1)",
+		           "SELECT id FROM ducklake_table_insertions('lake', 'main', 'tt', 1, " + t_held + ")", secret2);
+	}
+	// Review N4: a schema named like the metadata catalog in the default catalog cannot shadow the metadata
+	// read, which names it fully: the dropped table is still judged by its last live name.
+	{
+		qod::RunStrict(con, "CREATE SCHEMA memory.__ducklake_metadata_lake", "spoof schema");
+		expect_one("a dropped table read past a spoofing schema (review N4)",
+		           "SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")", dropped_read("gone", "\"id\"", false));
+		con.Query("DROP SCHEMA memory.__ducklake_metadata_lake");
+	}
+	// Review N3: names compare as DuckDB resolves them, without case: CREATE OR REPLACE TABLE RC over rc is a
+	// replace, and the read is the replacement's.
+	{
+		std::string rc_at;
+		try {
+			qod::RunStrict(con, "CREATE TABLE lake.rc (id INTEGER)", "create rc");
+			qod::RunStrict(con, "INSERT INTO lake.rc VALUES (1)", "insert rc");
+			rc_at = lake_head();
+			qod::RunStrict(con, "CREATE OR REPLACE TABLE lake.RC AS SELECT * FROM lake.rc", "replace RC");
+		} catch (std::exception &error) {
+			Fail(std::string("review N3 setup: ") + error.what());
+		}
+		std::string error;
+		auto own = feed("SELECT id FROM lake.rc AT (VERSION => " + rc_at + ")", error);
+		if (!error.empty() || own.size() != 1 || own[0].find("\"replaced\":true") == std::string::npos ||
+		    own[0].find("\"renamed\"") != std::string::npos ||
+		    own[0].find("\"name\":\"rc\"") == std::string::npos && own[0].find("\"name\":\"RC\"") == std::string::npos) {
+			Fail("a case-only CREATE OR REPLACE (review N3): " + error + (own.empty() ? "" : " " + own[0]));
+		}
+	}
 	// A long replace chain (review I2): describing a read before the first replace walks the chain once,
 	// forward, from DuckLake's own table versions, not once per replace; QOD_REPLACE_CHAIN sets its length
 	// (default 300 here; 2000 when timed by hand). An interrupt while it is described takes effect.

@@ -1660,6 +1660,11 @@ void Walker::Get(LogicalGet &get, const std::string &via) {
 	AddFunction("table", qualified, TableArgs(get, name, via), via);
 }
 
+//! Names as DuckDB resolves identifiers: without case.
+bool SameName(const std::string &a, const std::string &b) {
+	return StringUtil::CIEquals(a, b);
+}
+
 //! The top-level columns of a DuckLake scan's bind data by name and by DuckLake field id: DuckLake binds its
 //! scans as multi-file reads mapped by field id (DuckLakeMultiFileReader::Bind, ducklake_multi_file_reader.cpp at
 //! the DuckLake pin), each column's identifier its field id, which a rename keeps. False when the bind data is
@@ -1732,8 +1737,8 @@ void Walker::DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::
 		}
 		return;
 	}
-	auto renamed =
-	    Text(current->name) != Text(bound.name) || Text(current->ParentSchema().name) != Text(bound.ParentSchema().name);
+	auto renamed = !SameName(Text(current->name), Text(bound.name)) ||
+	               !SameName(Text(current->ParentSchema().name), Text(bound.ParentSchema().name));
 	auto described = columns;
 	if (current.get() != &bound) {
 		std::map<std::string, int64_t> then;
@@ -1757,7 +1762,7 @@ void Walker::DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::
 			auto name = now.find(id->second);
 			// A column dropped since keeps its name at that snapshot, and marks the read renamed.
 			auto current_name = name == now.end() ? column : name->second;
-			renamed = renamed || name == now.end() || current_name != column;
+			renamed = renamed || name == now.end() || !SameName(current_name, column);
 			described.insert(current_name);
 		}
 		if (!matched) {
@@ -1805,29 +1810,43 @@ struct DuckLakeTableVersion {
 	std::string name;
 };
 
-//! The versions of every table of schema `schema` of DuckLake catalog `catalog`, by table id then begin, read
-//! from DuckLake's own metadata catalog (`__ducklake_metadata_<catalog>`, its `ducklake_table` and
-//! `ducklake_schema`) on a connection of the node's (not a quack session: nothing on it is decided or
+//! `"__ducklake_metadata_<catalog>"."<its default schema>"`, the fully qualified home of DuckLake's metadata
+//! tables (a DuckDB file's main, a Postgres catalog's public), so no schema of another catalog can shadow it;
+//! empty when that catalog is not attached (the read is then refused: fail closed). DuckLake keeps the
+//! metadata catalog out of the listings, not out of a lookup by name. A METADATA_SCHEMA other than the
+//! default schema is not found, and refused.
+std::string DuckLakeMetadataPrefix(ClientContext &context, const std::string &catalog) {
+	auto metadata = "__ducklake_metadata_" + catalog;
+	auto entry = Catalog::GetCatalogEntry(context, Identifier(metadata));
+	if (!entry) {
+		return "";
+	}
+	auto schema = entry->GetDefaultSchema();
+	if (!schema) {
+		return "";
+	}
+	return KeywordHelper::WriteQuoted(metadata, '"') + "." + KeywordHelper::WriteQuoted(Text(*schema), '"');
+}
+
+//! The versions of every table of schema `schema` (its name compared without case) of the DuckLake catalog
+//! whose metadata tables `prefix` names, by table id then begin, read from `ducklake_table` and
+//! `ducklake_schema` on a connection of the node's (not a quack session: nothing on it is decided or
 //! attributed to the client, and the client's plan never names the metadata catalog). `ok` false when they
 //! cannot be read.
-std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, const std::string &catalog,
+std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, const std::string &prefix,
                                                        const std::string &schema, const std::string &bound_name,
-                                                       std::string &metadata, std::string &metadata_schema,
                                                        bool &ok) {
 	ok = false;
 	std::vector<DuckLakeTableVersion> versions;
+	if (prefix.empty()) {
+		return versions;
+	}
 	Connection internal(*context.db);
-	metadata = "__ducklake_metadata_" + catalog;
-	// DuckLake keeps its metadata catalog out of the listings: its tables are named in the catalog's default
-	// schema (a DuckDB file's main, a Postgres catalog's public), which a METADATA_SCHEMA elsewhere misses
-	// (then the read is refused: fail closed).
-	metadata_schema.clear();
-	auto prefix = KeywordHelper::WriteQuoted(metadata, '"');
 	auto result = internal.Query(
 	    "SELECT t.table_id, t.begin_snapshot, coalesce(t.end_snapshot, -1), t.table_name FROM " + prefix +
 	    ".ducklake_table t WHERE t.schema_id IN (SELECT schema_id FROM " + prefix +
-	    ".ducklake_schema WHERE schema_name = " + KeywordHelper::WriteQuoted(schema, '\'') +
-	    ") ORDER BY t.table_id, t.begin_snapshot LIMIT " + std::to_string(kMaxDuckLakeHistory + 1));
+	    ".ducklake_schema WHERE lower(schema_name) = lower(" + KeywordHelper::WriteQuoted(schema, '\'') +
+	    ")) ORDER BY t.table_id, t.begin_snapshot LIMIT " + std::to_string(kMaxDuckLakeHistory + 1));
 	if (result->HasError()) {
 		return versions;
 	}
@@ -1847,12 +1866,31 @@ std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, 
 	return versions;
 }
 
-//! The top-level column names of DuckLake table `table_id` at snapshot `at`, by field id (`ducklake_column`).
-std::map<int64_t, std::string> DuckLakeColumnsAt(ClientContext &context, const std::string &metadata,
-                                                 const std::string &metadata_schema, int64_t table_id, int64_t at) {
-	std::map<int64_t, std::string> columns;
+//! The snapshot an `AT (TIMESTAMP => ts)` reads (the latest committed at or before `ts`, as DuckLake picks
+//! it), from `ducklake_snapshot`; -1 when none.
+int64_t DuckLakeSnapshotAt(ClientContext &context, const std::string &prefix, const Value &ts) {
+	if (prefix.empty() || ts.IsNull()) {
+		return -1;
+	}
 	Connection internal(*context.db);
-	auto prefix = KeywordHelper::WriteQuoted(metadata, '"');
+	auto result = internal.Query("SELECT coalesce(max(snapshot_id), -1) FROM " + prefix +
+	                             ".ducklake_snapshot WHERE snapshot_time <= " +
+	                             KeywordHelper::WriteQuoted(ts.ToString(), '\'') + "::TIMESTAMPTZ");
+	if (result->HasError()) {
+		return -1;
+	}
+	auto chunk = result->Fetch();
+	return chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).GetValue<int64_t>() : -1;
+}
+
+//! The top-level column names of DuckLake table `table_id` at snapshot `at`, by field id (`ducklake_column`).
+std::map<int64_t, std::string> DuckLakeColumnsAt(ClientContext &context, const std::string &prefix, int64_t table_id,
+                                                 int64_t at) {
+	std::map<int64_t, std::string> columns;
+	if (prefix.empty()) {
+		return columns;
+	}
+	Connection internal(*context.db);
 	auto result = internal.Query("SELECT column_id, column_name FROM " + prefix +
 	                             ".ducklake_column WHERE table_id = " + std::to_string(table_id) +
 	                             " AND parent_column IS NULL AND begin_snapshot <= " + std::to_string(at) +
@@ -1922,10 +1960,9 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		                          " at that snapshot is a table dropped since, whose last name QoD cannot find, which "
 		                          "only superusers read");
 	};
-	std::string metadata;
-	std::string metadata_schema;
+	auto prefix = DuckLakeMetadataPrefix(context_, catalog_name);
 	bool ok = false;
-	auto versions = DuckLakeTableVersions(context_, catalog_name, schema_name, bound_name, metadata, metadata_schema, ok);
+	auto versions = DuckLakeTableVersions(context_, prefix, schema_name, bound_name, ok);
 	if (!ok) {
 		cannot_find();
 	}
@@ -1934,12 +1971,21 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		by_id[version.id].push_back(version);
 	}
 	auto live = [&](int64_t id) { return by_id[id].back().end < 0; };
-	// The table: the one the bound name names at the AT clause's version, else among the dropped ones that held it.
+	// The table: the one the bound name names at the AT clause's snapshot (a TIMESTAMP resolved to the snapshot
+	// DuckLake reads at it), else among the dropped ones that held it.
 	int64_t table_id = -1;
-	if (get.at_clause && StringUtil::Lower(Text(get.at_clause->Unit())) == "version") {
-		auto at = get.at_clause->GetValue().GetValue<int64_t>();
+	int64_t at = -1;
+	if (get.at_clause) {
+		auto unit = StringUtil::Lower(Text(get.at_clause->Unit()));
+		if (unit == "version") {
+			at = get.at_clause->GetValue().GetValue<int64_t>();
+		} else if (unit == "timestamp") {
+			at = DuckLakeSnapshotAt(context_, prefix, get.at_clause->GetValue());
+		}
+	}
+	if (at >= 0) {
 		for (auto &version : versions) {
-			if (version.name == written && version.begin <= at && (version.end < 0 || version.end > at)) {
+			if (SameName(version.name, written) && version.begin <= at && (version.end < 0 || version.end > at)) {
 				table_id = version.id;
 			}
 		}
@@ -1952,7 +1998,7 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 				continue;
 			}
 			for (auto &version : entry.second) {
-				if (version.name == written) {
+				if (SameName(version.name, written)) {
 					candidates.emplace_back(entry.first, version.begin);
 					break;
 				}
@@ -1966,8 +2012,11 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 			for (auto &candidate : candidates) {
 				CheckInterrupt(context_);
 				auto holds = false;
-				TablesAt(context_, catalog, {schema_name}, candidate.second,
-				         [&](TableCatalogEntry &entry) { holds = holds || entry.oid == bound.oid; });
+				// The table holding the bound name there, and only it (review N1): the bound table live under
+				// another name at that point is another table's stretch under the name, not this one.
+				TablesAt(context_, catalog, {schema_name}, candidate.second, [&](TableCatalogEntry &entry) {
+					holds = holds || (entry.oid == bound.oid && SameName(Text(entry.name), written));
+				});
 				if (holds) {
 					table_id = candidate.first;
 					break;
@@ -1979,9 +2028,10 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		cannot_find();
 	}
 	// Forward from its end: a table first appearing at that snapshot under its last name replaced it.
+	// Keyed by the lower-case name: a CREATE OR REPLACE TABLE T over t is a replace (review N3).
 	std::map<std::pair<std::string, int64_t>, int64_t> first_under; // (name, first begin) -> id
 	for (auto &entry : by_id) {
-		first_under[{entry.second.front().name, entry.second.front().begin}] = entry.first;
+		first_under[{StringUtil::Lower(entry.second.front().name), entry.second.front().begin}] = entry.first;
 	}
 	auto replaced = false;
 	auto current = table_id;
@@ -1994,7 +2044,7 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		if (last.end < 0) {
 			break;
 		}
-		auto successor = first_under.find({last.name, last.end});
+		auto successor = first_under.find({StringUtil::Lower(last.name), last.end});
 		if (successor == first_under.end() || successor->second == current) {
 			break;
 		}
@@ -2002,7 +2052,7 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		current = successor->second;
 	}
 	auto &last = by_id[current].back();
-	auto renamed = last.name != written;
+	auto renamed = !SameName(last.name, written);
 	if (last.end < 0) {
 		// Replaced, and the replacement lives: judged under its current name.
 		AddObject("table", "read", catalog_name, catalog.GetCatalogType(), catalog.IsTemporaryCatalog(), schema_name,
@@ -2032,7 +2082,7 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		std::map<std::string, int64_t> then;
 		std::map<int64_t, std::string> unused;
 		auto matched = DuckLakeFieldIds(get.bind_data.get(), then, unused);
-		auto at_last = DuckLakeColumnsAt(context_, metadata, metadata_schema, current, last.end - 1);
+		auto at_last = DuckLakeColumnsAt(context_, prefix, current, last.end - 1);
 		described.clear();
 		for (auto &column : columns) {
 			auto id = then.find(column);
@@ -2041,7 +2091,7 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 				Unsupported("a read of " + bound_name +
 				            ", dropped since, whose columns cannot be matched to its last live columns");
 			}
-			renamed = renamed || name->second != column;
+			renamed = renamed || !SameName(name->second, column);
 			described.insert(name->second);
 		}
 	}
