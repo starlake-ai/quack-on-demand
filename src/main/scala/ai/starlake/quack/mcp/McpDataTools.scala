@@ -28,7 +28,7 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 /** The MCP data tier: the tools every authenticated principal gets. Each tool goes through the SAME
   * enforcement as the REST/FlightSQL surface it mirrors -- `run_sql` through the injected routed
-  * executor (StatementValidator, classifier, router), the catalog reads through the handlers'
+  * executor (classifier, router, the node's decision), the catalog reads through the handlers'
   * `TenantDbGate`/`TenantScopeCheck` with the principal's raw bearer as `apiKey` -- so there is no
   * second policy layer to keep in sync.
   *

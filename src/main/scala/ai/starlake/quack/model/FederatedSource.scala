@@ -22,8 +22,8 @@ import java.time.Instant
   * superusers by the node, or a mutating `CALL`) is not covered by that rule. A changed flag
   * reaches the next handle: a stored source write drops the `ReadOnlyCatalogs` cache of its
   * tenant-db's pools on the replica that served it and sends `qod_topology`, whose restore drops
-  * every peer's (`FederatedSourceCaches`); a new alias is known to the router as soon. A manifest
-  * import's restore does the same. The REST create path defaults a new typed (`iceberg_rest`,
+  * every peer's (`FederatedSourceCaches`); a new or removed alias reaches the router's attached
+  * catalogs (`AttachedCatalogs`) at the same moment. A manifest import's restore does the same. The REST create path defaults a new typed (`iceberg_rest`,
   * `postgres`, `mysql`) source to true. This field defaults to false so pre-0038 sources keep their
   * behaviour.
   *

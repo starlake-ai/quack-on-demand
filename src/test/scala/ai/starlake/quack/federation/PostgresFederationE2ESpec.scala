@@ -21,7 +21,8 @@ import scala.util.Try
   * Layer B (always-runnable): exercised against a live local Postgres
   * (same one used by the rest of the suite). Cancelled cleanly when
   * Postgres is not reachable. Covers all three TenantDbKind variants
-  * (DuckLake, DuckDbFile, InMemory) and the ACL grant/revoke cycle.
+  * (DuckLake, DuckDbFile, InMemory). Federated grant matching is the node decider's
+  * (`AuthzDeciderSpec`, and end to end `AuthzEndToEndCases`).
   *
   * Layer A (gated): full DuckDB spawn. Requires `duckdb` and `psql` on
   * PATH and Postgres reachable. Skipped via `cancel` if either is

@@ -33,8 +33,8 @@ final class FlightEdgeServer(
     // the user-scope and pool-access gates, computes the EffectiveSet
     // (union-merging any JWT-claimed role / group names), and returns
     // an AuthorizedHandshake. The session's grants are pinned onto
-    // ConnectionContext so the per-statement ACL gate reads them without
-    // further joins until a grant changes. See EdgeHandshake for the
+    // ConnectionContext so each statement's session handle carries them
+    // without further joins until a grant changes. See EdgeHandshake for the
     // argument contract; HandshakeDenial.Unavailable (OPA unreachable)
     // surfaces as UNAVAILABLE.
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],

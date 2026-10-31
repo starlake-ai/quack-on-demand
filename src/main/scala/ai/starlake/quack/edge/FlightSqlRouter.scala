@@ -282,8 +282,9 @@ final class FlightSqlRouter(
 
   /** Run a statement under the named connection; the caller MUST close the [[QueryResult]].
     *
-    * `effectiveSet = None` means no handshake state was attached; PostgresAclValidator denies
-    * anything tenant-scoped in that case to fail safe.
+    * `effectiveSet = None` means no handshake state was attached: the statement binds no
+    * principal ([[ai.starlake.quack.edge.authz.NodePrincipal.Unbound]]), so no session handle is
+    * minted for it and it never reaches a node.
     *
     * `preferredNode` is a SOFT pin (prepared Prepare + Execute on the same node for warm caches; a
     * native Quack session's catalog reads on one node): a transaction pin still overrides, and a

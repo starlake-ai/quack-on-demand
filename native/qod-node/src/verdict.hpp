@@ -73,8 +73,9 @@ public:
 
 	//! Caches `verdict` until min(expiresAt, now_ms + kMaxCachedVerdictMs), evicting the least recently
 	//! used entry past capacity. Does not cache a screen verdict, a retryable refusal or a verdict
-	//! already expired at `now_ms`. Returns how many entries it evicted for room: never one it replaced,
-	//! nor an expired one (Find drops those).
+	//! already expired at `now_ms`. Returns how many entries it evicted for room: never the one it
+	//! replaced; an entry evicted from the least recently used end counts whether or not it had already
+	//! expired (an expired entry Find drops is no eviction).
 	size_t Put(const Verdict &verdict, int64_t now_ms);
 
 	size_t Size();

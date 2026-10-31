@@ -14,8 +14,8 @@ import scala.collection.concurrent.TrieMap
   * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] the handshake resolved, resolved again on the
   * first statement after the tenant's policy version moved, so a statement reads no join against
   * qodstate_role_permission / qodstate_user_role until a grant changed. Superusers carry an empty
-  * effective set, never resolved again; the validator bypasses them outright based on
-  * `effectiveSet.user.tenant.isEmpty`.
+  * effective set, never resolved again; the node allows their statements without a decision
+  * (`effectiveSet.user.tenant.isEmpty` makes the minted principal a superuser).
   *
   * Sessions carry an `expiresAt`. Once past, every accessor pretends the entry doesn't exist and
   * the auth handler falls through to a full handshake -- which re-validates the original
@@ -65,7 +65,7 @@ object ConnectionContext:
 
   /** `grants` is required: the FlightSQL handshake binds the [[SessionGrants]] it resolved, which
     * follow the tenant's policy version; None binds a session without handshake state, whose
-    * statements the validator denies.
+    * statements bind no principal, so no session handle is minted and no node runs them.
     */
   def bind(
       peer: String,

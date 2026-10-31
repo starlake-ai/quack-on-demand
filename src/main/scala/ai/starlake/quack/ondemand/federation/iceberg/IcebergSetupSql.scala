@@ -70,14 +70,15 @@ object IcebergSetupSql:
     * `authType = none`; a credentialed catalog (Polaris, Lakekeeper, Glue) gets the identical
     * ATTACH option but is not itself covered, and the spec CANCELS when the fixture or the duckdb
     * CLI is absent, so it is evidence only in a run where it actually executed - the `iceberg` CI
-    * workflow starts the fixture and fails the job on a cancellation. Keep `CatalogWriteScreen` as
-    * defence in depth regardless (it is also the ONLY enforcement for free-form `sql` sources,
-    * whose ATTACH text QoD does not control). This render call runs at node spawn, so the emitted
-    * `READ_ONLY` binds for the lifetime of the attach: flipping `FederatedSource.readOnly`
-    * afterwards does not change an already-running node's engine-level behaviour until the pool
-    * recycles and re-renders this output, even though `CatalogWriteScreen` re-reads the flag on its
-    * own ~60s cache - see `FederatedSource.readOnly`'s scaladoc for the full two-layer split,
-    * including the `CALL` residual this layer is meant to close.
+    * workflow starts the fixture and fails the job on a cancellation. The node's read-only rule
+    * (the signed handle's read-only set, spec decision 24) is the other layer, for every principal,
+    * and the ONLY one for free-form `sql` sources, whose ATTACH text QoD does not control. This
+    * render call runs at node spawn, so the emitted `READ_ONLY` binds for the lifetime of the
+    * attach: flipping `FederatedSource.readOnly` afterwards does not change an already-running
+    * node's engine-level behaviour until the pool recycles and re-renders this output, even though
+    * the node's rule follows the flag from the next statement - see `FederatedSource.readOnly`'s
+    * scaladoc for the full two-layer split, including the `CALL` residual this layer is meant to
+    * close.
     */
   def render(v: ValidatedIcebergConfig, readOnly: Boolean): String =
     val cfg    = v.config

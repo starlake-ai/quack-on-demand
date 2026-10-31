@@ -17,8 +17,8 @@ import java.util.Locale
   * metadata filter narrows (`information_schema.columns`, `duckdb_tables()`, `duckdb_views()`),
   * and, for every form that describes one object, `NOT EXISTS (SELECT 1 FROM <c>.<s>.<t> LIMIT 0)`,
   * a read of that object in the plan, so the node requires a read grant on it (a secure view: its
-  * own grant). The result then goes through every gateway screen and the node like any client
-  * statement. A misread name answers wrongly or is refused, never reaches more: whatever the
+  * own grant). The result then goes through the gateway's policy screens and the node like any
+  * client statement. A misread name answers wrongly or is refused, never reaches more: whatever the
   * rewrite names, the client could have named. Anything else, `DESCRIBE (<query>)` and
   * `SUMMARIZE (<query>)` included (their rows would need a result schema the manager cannot encode
   * on the native front door), is None and reaches the node unchanged.

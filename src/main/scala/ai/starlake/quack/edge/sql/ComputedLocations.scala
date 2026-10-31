@@ -19,8 +19,8 @@ import java.util.Locale
   * parenthesized `FROM` / `TO` location. The router then has the node evaluate each one
   * ([[evaluation]], as its own statement, with the principal's own handle, judged like any other)
   * and puts the value in its place as a string literal ([[literal]], [[substitute]]), so the
-  * statement that runs names a literal location that every gateway screen and the node's full
-  * screen judge exactly as if the client had typed it. Nothing else in the statement is touched.
+  * statement that runs names a literal location that the gateway's policy screens and the node's
+  * full screen judge exactly as if the client had typed it. Nothing else in the statement is touched.
   *
   * Recognized only when the statement is one statement that runs once (a query, a SUMMARIZE, a
   * PIVOT or UNPIVOT, a COPY, an INSERT, UPDATE, DELETE or MERGE: [[RunOnceWords]]; a stored

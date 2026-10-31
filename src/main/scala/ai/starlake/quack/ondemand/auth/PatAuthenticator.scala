@@ -33,7 +33,7 @@ final case class PatPrincipal(
   *     `AuthHandlers.mintSessionFor` applies at login. A PAT authenticates AS its owning user, so
   *     it must never outrank that user's own login session: a tenant-less non-admin row is demoted
   *     to a profile-only principal here exactly as login refuses it `admin_required`. (The data
-  *     plane -- `PostgresAclValidator`, the RLS/CLS rewriters, the handshake pool gate -- keys its
+  *     plane -- the node's grant check, the RLS/CLS rewriters, the handshake pool gate -- keys its
   *     own bypass off `tenant.isEmpty` alone; that is the FlightSQL side's rule, not this one.)
   *   - `manageableTenants` = the tenants where this principal carries role `admin`, from the owning
   *     row or any sibling grant.

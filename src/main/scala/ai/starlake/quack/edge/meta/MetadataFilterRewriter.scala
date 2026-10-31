@@ -53,8 +53,8 @@ enum MetadataFilterOutcome:
   * `duckdb_columns()` by one whose WHERE pins `database_name` to the session catalog and keeps the
   * granted rows (issue #114: the quack client's ATTACH syncs the remote catalog through
   * `duckdb_tables() UNION ALL duckdb_views()`). Runs for every non-superuser principal without an
-  * explicit information_schema grant; the ACL validator implicitly admits exactly the references
-  * this class filters (same flag, same
+  * explicit information_schema grant; the ACL parser marks exactly the references this class
+  * filters (the same
   * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables FilterableTables]] /
   * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableFunctions FilterableFunctions]]
   * lists).
@@ -84,7 +84,7 @@ enum MetadataFilterOutcome:
   * MENTIONS a filterable table inside a STRING LITERAL is denied on the phantom match (literals
   * survive serialization, comments do not); and a CROSS-CATALOG filterable reference sitting in a
   * traversal blind spot is denied even though the walk leaves cross-catalog metadata alone on
-  * purpose (rare, fail-closed, and the validator would have grant-gated that reference anyway).
+  * purpose (rare, fail-closed, and the node grant-gates that reference anyway).
   */
 final class MetadataFilterRewriter(
     /** False only in specs isolating the node: production (`Main`) always mounts it enabled. */
@@ -120,16 +120,15 @@ final class MetadataFilterRewriter(
         case Some(outcome) => outcome
         case None          =>
           // parseStatements, NOT parse: parse truncates a batch to its first statement, so
-          // everything after the first semicolon reached the node untouched while the
-          // validator admitted the batch as a pure read. The parser is configured exactly as
-          // the ACL validator configures it (SqlParser.extract), so the two see the same
-          // statement list: a shape one of them splits and the other does not is a gap
-          // between them.
+          // everything after the first semicolon reached the node untouched. The parser is
+          // configured exactly as SqlParser.extract configures it (the protected-write guard's
+          // and RewriteScope's reader), so they see the same statement list: a shape one of them
+          // splits and the other does not is a gap between them.
           parseBatch(sql) match
             case None =>
-              // Unparseable. Forwarding it used to rest on the validator denying it upstream,
-              // which held only while the two parsers read the statement identically - the
-              // time-travel strip was the counterexample. The fail-closed reading is structural
+              // Unparseable. Forwarding it once rested on the gateway's validator (deleted in
+              // Phase D) denying it upstream, which held only while the two parsers read the
+              // statement identically - the time-travel strip was the counterexample. The fail-closed reading is structural
               // now: text this filter could not analyse, naming a filterable table, is refused
               // rather than forwarded on trust. Text naming none still passes, so an ordinary
               // unsupported statement is unaffected.
@@ -184,8 +183,8 @@ final class MetadataFilterRewriter(
         else StmtOutcome.Refused(ShowTables.VariantRefusal)
       case other =>
         // USE / SET / txn control / DDL / DML: left exactly as written, but a filterable
-        // reference anywhere in it is refused. The validator's pure-read gate should already
-        // have denied such a batch; this arm does not rely on that.
+        // reference anywhere in it is refused; nothing upstream screens such a batch for the
+        // filter.
         val text = other.toString
         if text.isBlank then
           // An unsupported statement that serializes to nothing has swallowed whatever
@@ -215,7 +214,7 @@ final class MetadataFilterRewriter(
         val walker     = new Walker(grants, ctx)
         walker.walkSelect(sel)
         // Cross-catalog references are left alone on purpose (they stay grant-gated by the
-        // validator), so they are accounted for rather than counted as unfiltered leftovers.
+        // node), so they are accounted for rather than counted as unfiltered leftovers.
         val accounted = walker.substitutions + refs.crossCatalog
         walker.failure match
           case Some(reason) => StmtOutcome.Refused(reason)
@@ -229,15 +228,15 @@ final class MetadataFilterRewriter(
     * grammar does not model (`USE db.schema`, dialect-specific forms) come back as opaque nodes
     * instead of failing the whole parse and blinding the filter. Mirrors `SqlParser.extract`
     * exactly - same time-travel strip, same lexer-canonical input, same feature configuration -
-    * because any difference in how the validator and this filter read a statement is a statement
-    * one of them admits and the other never sees. None when the input cannot be rendered or parsed;
+    * because any difference in how the policy screens and this filter read a statement is a
+    * statement one of them admits and the other never sees. None when the input cannot be rendered or parsed;
     * otherwise the statements and whether their re-serialization is the caller's statement
     * (`ParserInput.Rendered.exact`).
     */
   private def parseBatch(sql: String): Option[(net.sf.jsqlparser.statement.Statements, Boolean)] =
     // DuckLake's `AT (VERSION => n)` is not in the grammar, and a clause sitting AFTER a
     // filterable reference collapses the statement into an opaque tail that no longer mentions
-    // it - while the validator, parsing the stripped text, has already admitted the read.
+    // it - while a reader parsing the stripped text sees the read.
     ai.starlake.sql.ParserInput
       .renderWithoutTimeTravel(sql)
       .toOption
@@ -418,8 +417,8 @@ object MetadataFilterRewriter:
 
   val FilterableTables: Set[String] = Set("schemata", "tables", "columns", "views")
 
-  /** DuckDB catalog functions filtered here and admitted by the validator under the same flag. One
-    * list, owned by the ACL parser (which also marks the bare spelling unsupported).
+  /** DuckDB catalog functions filtered here. One list, owned by the ACL parser (which also marks
+    * the bare spelling unsupported).
     */
   val FilterableFunctions: Set[String] =
     ai.starlake.acl.parser.TableExtractor.DuckDbCatalogFunctions
@@ -539,7 +538,7 @@ object MetadataFilterRewriter:
       super.visit(tf, context)
 
   /** A filterable information_schema table of some OTHER catalog. The substitution walk leaves
-    * these alone by design (cross-catalog metadata stays grant-gated by the validator rather than
+    * these alone by design (cross-catalog metadata stays grant-gated by the node rather than
     * filtered), so the textual tripwire must not read them as unfiltered leftovers.
     */
   private def crossCatalogFilterable(t: Table, sessionCat: String): Boolean =
@@ -648,9 +647,9 @@ object MetadataFilterRewriter:
   /** SHOW TABLES handling (jsqlparser models it as a statement the filter walker never sees). Plain
     * SHOW TABLES is replaced by the filtered listing matching DuckDB's native single-column `name`
     * output; any other SHOW ... TABLES form is DENIED fail-closed, since it would otherwise ride
-    * the ControlFlow admit unfiltered. SHOW ALL TABLES never reaches a filtered principal
-    * (UnsupportedStatement -> ParseError -> denied by the validator upstream); the catch-all deny
-    * here is defense in depth only.
+    * the ControlFlow admit unfiltered. SHOW ALL TABLES never reaches it for a filtered principal
+    * (`RefusedForms` rewrites it into the filtered listing first); the catch-all deny here is
+    * defense in depth only.
     *
     * [[replace]] is the textual fast path, matched BEFORE parsing, and returns None for anything
     * that is not a SHOW ... TABLES form. Forms it does not recognise (a leading comment, odd

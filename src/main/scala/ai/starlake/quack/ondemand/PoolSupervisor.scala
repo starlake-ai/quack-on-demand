@@ -1106,8 +1106,9 @@ final class PoolSupervisor(
     * silent: with no blob a `sql` source is simply absent, no error anywhere.
     *
     * Re-resolving at the moment of use (rather than invalidating this cache when a federation
-    * mutation commits) is also the only placement that covers an HA replica which never saw the
-    * mutation: federation writes fire no `qod_topology` NOTIFY.
+    * mutation commits) also covers an HA replica that missed the mutation: federation writes do
+    * send `qod_topology` (`FederatedSourceHandlers`), but a NOTIFY can be missed and a restore
+    * skipped under the versions lock, and the fresh read does not depend on either.
     *
     * Fallback direction is deliberate: on ANY failure to produce a fresh blob the node spawns with
     * the last-known-good one, never with an empty one - a default that silently disables federation
@@ -4361,8 +4362,8 @@ final class PoolSupervisor(
                   case Some(user) if !user.enabled =>
                     Left(HandshakeDenial.Denied(s"user '$username' is disabled"))
                   case Some(user) =>
-                    // 3. Effective set. Superusers get an empty set; the per-statement validator
-                    //    bypasses them. Claims are copied in after the cache lookup (never part
+                    // 3. Effective set. Superusers get an empty set; the node allows their
+                    //    statements without a decision. Claims are copied in after the cache lookup (never part
                     //    of the effective-set cache key).
                     val eff =
                       if user.tenant.isEmpty then

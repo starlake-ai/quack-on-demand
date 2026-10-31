@@ -12,7 +12,8 @@ import ai.starlake.quack.ondemand.state._
   * }}}
   *
   * One of these is pinned onto each FlightSQL [[ai.starlake.quack.edge.ConnectionContext]] keyed by
-  * peerId so the per-statement ACL gate reads it without any further joins. The REST surface also
+  * peerId, and each statement's session handle carries it (the node decider judges with it)
+  * without any further joins. The REST surface also
   * exposes it through `/user/{id}/effective` and reuses it inside the role/group/pool columns
   * served by `/user/list`.
   */

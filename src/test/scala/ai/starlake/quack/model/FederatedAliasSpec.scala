@@ -7,9 +7,8 @@ import java.util.Locale
 
 /** The one alias fold, and the read-only set built on it.
   *
-  * The fold decides whether `CatalogWriteScreen`'s `denied.contains(...)` matches. Its other side
-  * is produced by the ACL parser, which lowercases with `Locale.ROOT`, and the comparison is exact
-  * string equality. So a fold that consults the JVM default locale takes a read-only catalog whose
+  * The fold decides whether the read-only set a session handle carries matches the catalog a plan
+  * writes, which the node lowercases itself, and the comparison is exact string equality. So a fold that consults the JVM default locale takes a read-only catalog whose
   * alias holds an ASCII `I` out of the denied set on a `tr` or `az` JVM, and the write it was
   * supposed to refuse is admitted.
   */

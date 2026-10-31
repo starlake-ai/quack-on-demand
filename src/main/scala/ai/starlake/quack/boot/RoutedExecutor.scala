@@ -33,8 +33,8 @@ object RoutedExecutor:
 
   // Adapts FlightSqlRouter.execute to PreviewExecutor, mirroring the FlightSQL
   // handshake's EffectiveSet resolution: a system caller (ExecCaller.system, the manager's own
-  // work) gets a synthetic superuser EffectiveSet (NOT None, which PostgresAclValidator
-  // denies fail-safe) and is never attenuated -- a system caller is definitionally
+  // work) gets a synthetic superuser EffectiveSet (NOT None, for which no session handle can be
+  // minted: NodePrincipal.Unbound) and is never attenuated -- a system caller is definitionally
   // TokenRestriction.Unrestricted; every session and PAT resolves through
   // sup.authorizeHandshakeDetailed (same gate + 60s cache as the handshake, edge "mcp"), a
   // Denied short-circuiting to AccessDenied and an Unavailable (the tenant's OPA unreachable)

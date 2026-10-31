@@ -131,8 +131,9 @@ final case class ManifestPool(
     cpu: String = "",
     memory: String = "",
     podTemplateYaml: String = "",
-    // `lockdown` (the per-pool node-lockdown override) was removed in 0.10.2: an earlier export's
-    // member decodes and is ignored (this codec does not decode strictly).
+    // `lockdown` (the per-pool node-lockdown override) was removed with in-engine authorization
+    // Phase D: an earlier export's member decodes and is ignored (this codec does not decode
+    // strictly).
     // Owner-declared demand scale-out band, round-tripped verbatim from
     // Pool.minNodes/maxNodes. Both None (the default) decode as a fixed-size
     // pool, so pre-autoscale YAMLs decode unchanged. Set together or not at

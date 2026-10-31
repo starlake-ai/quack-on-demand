@@ -312,7 +312,7 @@ final class AuthzDecider(
       else refuse(s"user:${eff.user.username} lacks grants on ${names(missing)}")
 
   /** The catalogs a wildcard catalog grant covers on this statement: the tenant-db names of the
-    * user's tenant (as the gateway's validator), plus the catalog the pool's node attaches its
+    * user's tenant, plus the catalog the pool's node attaches its
     * database as (`memory` for kind memory, a `catalogAlias` or `dbName`), when the pool is the
     * user's own tenant's. Per pool, never tenant-wide: on a DuckLake pool the instance-wide
     * `memory` catalog stays outside every wildcard.
@@ -395,8 +395,8 @@ final class AuthzDecider(
         else if badVia.nonEmpty then
           refuse(s"user:${eff.user.username} lacks grants on ${names(badVia)}")
         else
-          // Lowercase names, as the gateway's TableRef gives OPA; `via` the outermost view of
-          // its chain, the one whose grant QoD itself checks.
+          // Lowercase names (as the gateway's statement input to OPA had them); `via` the
+          // outermost view of its chain, the one whose grant QoD itself checks.
           def low(s: String): String = s.toLowerCase(Locale.ROOT)
           val accesses               = gated.map { o =>
             val schemaWide = o.kind == "schema"

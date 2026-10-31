@@ -171,9 +171,9 @@ const char *const kCopyFileNameOptions[] = {"file_extension", "filename_pattern"
 //! which HTTP client sends a request, the proxies it passes and the connections it reuses; the
 //! project a GCS request is billed to; the consistency check between reads of one file; the secret
 //! defaults; and the caches that would hand one user what another read. From httpfs's settings at
-//! DuckDB 2.0.0 (duckdb_settings() with httpfs loaded, and DuckDbSettingScopes, generated from the
-//! httpfs sources, for the ones registered only later, such as the curl client's) and the core
-//! secret and cache settings.
+//! DuckDB 2.0.0 (duckdb_settings() with httpfs loaded, and the manager's former generated setting
+//! scope table, read from the httpfs sources, for the ones registered only later, such as the curl
+//! client's) and the core secret and cache settings.
 const char *const kReservedSettings[] = {"allow_persistent_secrets",
                                          "allow_unredacted_secrets",
                                          "aws_default_credentials",
