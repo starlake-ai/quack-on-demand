@@ -684,7 +684,10 @@ final class PoolSupervisor(
     // This replica's own commits stay out of that window through the versions lock.
     val versions    = policyVersions.read()
     val credentials = userS3.read()
-    val snap        = store.snapshot()
+    // The tracker's write mark, also read before the snapshot: the trim below keeps every node
+    // written after it, which the snapshot may not list yet (a respawn re-applying a quarantine).
+    val trimMark = tracker.mark()
+    val snap     = store.snapshot()
 
     // Diff-aware rehydration: restore() is also driven by peer NOTIFY handlers, so a row a peer
     // DELETED must disappear from this mirror, not just get overwritten. Compute the snapshot key
@@ -832,6 +835,10 @@ final class PoolSupervisor(
     pools.values.flatMap(_.nodes).foreach { n =>
       tracker.setQuarantined(n.nodeId, quarantinedIds.contains(n.nodeId))
     }
+    // Forget the load and latency ring of every node with no row, on every replica: the
+    // supervisor's own removal sites run only on the replica that removed the node, so a peer
+    // learns of it here. Nodes written since the mark or with statements in flight stay.
+    tracker.retain(snap.nodes.iterator.map(_.nodeId).toSet, trimMark)
     // Authorized locations, diff-aware like the caches above: a tenant a peer emptied drops out.
     val locationsByTenant = store.listAllTenantLocations().groupBy(_.tenantId)
     locationCache.keys.toList.filterNot(locationsByTenant.contains).foreach(locationCache.remove)
