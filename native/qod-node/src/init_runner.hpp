@@ -32,7 +32,8 @@ duckdb::unique_ptr<duckdb::QueryResult> RunStrict(duckdb::Connection &con, const
 std::string ErrorWithoutStatement(const duckdb::QueryResult &result);
 
 //! The whole content of path (a file), or of stdin when path is "-" (how the spawn scripts hand over
-//! the init SQL: a pipe, never on disk). Throws if it cannot be read.
+//! the init SQL: a pipe, never on disk), one leading UTF-8 byte order mark dropped. Throws if it cannot
+//! be read.
 std::string ReadAll(const std::string &path);
 
 } // namespace qod

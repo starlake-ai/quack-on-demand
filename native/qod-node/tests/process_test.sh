@@ -335,6 +335,22 @@ else
   cat "$work/term.out"
 fi
 
+# --- serve: a UTF-8 byte order mark before the nonce line is dropped --------------------------------
+# Windows PowerShell's Process.Start writes one down the child's stdin under code page 65001.
+{ printf '\xef\xbb\xbf'; nonce_line; printf 'SELECT 1;\n'; } |
+  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-bom)" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/bom.out" 2>&1 &
+bom_node=$!
+pids+=("$bom_node")
+if wait_for '\[qod-node\] ready' "$work/bom.out"; then
+  grep -q '1 of 1 statement(s) ran' "$work/bom.out" || fail "BOM init: expected 1 of 1 statement to run"
+  kill -TERM "$bom_node"
+  wait_exit "$bom_node" || fail "BOM init: the node did not stop"
+else
+  fail "BOM init: the node never became ready"
+  cat "$work/bom.out"
+fi
+
 # --- serve: quack loads before an init statement that restricts file access -----------------------
 # A trusted init statement (a superuser's database or pool initSql) may disable the local file system:
 # quack, whose extension file is local, is loaded before that statement runs (RestrictsNodeAccess).

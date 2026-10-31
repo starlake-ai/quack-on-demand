@@ -74,6 +74,21 @@ std::string ErrorWithoutStatement(const duckdb::QueryResult &result) {
 	return excerpt == std::string::npos ? message : message.substr(0, excerpt);
 }
 
+namespace {
+
+//! `text` without one leading UTF-8 byte order mark. Windows PowerShell's Process.Start opens the child's
+//! stdin with a StreamWriter in the console's input encoding and flushes it at once (AutoFlush), which
+//! writes that encoding's preamble: under code page 65001 a BOM precedes the spawn script's bytes, and
+//! the nonce line would no longer be the first line.
+std::string WithoutByteOrderMark(std::string text) {
+	if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+		text.erase(0, 3);
+	}
+	return text;
+}
+
+} // namespace
+
 std::string ReadAll(const std::string &path) {
 	std::stringstream buffer;
 	if (path == "-") {
@@ -85,14 +100,14 @@ std::string ReadAll(const std::string &path) {
 		if (std::cin.bad()) {
 			throw std::runtime_error("cannot read the init SQL from stdin");
 		}
-		return buffer.str();
+		return WithoutByteOrderMark(buffer.str());
 	}
 	std::ifstream in(PathFromUtf8(path), std::ios::binary);
 	if (!in) {
 		throw std::runtime_error("cannot read init file " + path);
 	}
 	buffer << in.rdbuf();
-	return buffer.str();
+	return WithoutByteOrderMark(buffer.str());
 }
 
 } // namespace qod

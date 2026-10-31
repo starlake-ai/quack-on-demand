@@ -760,8 +760,10 @@ $exitCode = 1
 try {
   $proc = [System.Diagnostics.Process]::Start($psi)
   # The init SQL as UTF-8 bytes straight down the pipe: the StandardInput writer of Windows
-  # PowerShell would encode it in the console's code page. A qod-node that ended before reading it
-  # says why on its own output.
+  # PowerShell would encode it in the console's code page. That writer has already written its
+  # encoding's preamble when Process.Start turned AutoFlush on: a UTF-8 byte order mark under code
+  # page 65001, which qod-node drops (ReadAll) so the nonce line stays first. A qod-node that ended
+  # before reading it says why on its own output.
   try {
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($initSql)
     $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)

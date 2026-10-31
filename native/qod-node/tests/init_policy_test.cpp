@@ -8,9 +8,13 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "init_policy.hpp"
 #include "init_policy_lists.hpp"
+#include "init_runner.hpp"
 #include "screen_rules.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -231,6 +235,18 @@ int main() {
 		       "a stream with another nonce is refused, naming neither");
 		Expect(refused("SET a = 1;\n-- qod:init-nonce " + n + "\n", n), "the line must come first");
 		Expect(refused("-- qod:init-nonce " + n + "\n", ""), "an empty nonce matches nothing");
+		// A UTF-8 byte order mark before the line (what Windows PowerShell's stdin writer emits under code
+		// page 65001) is dropped when the text is read, and only there: inside the text it is no blank.
+		auto path = std::filesystem::temp_directory_path() / ("qod-init-bom-" + std::to_string(std::random_device()()));
+		{
+			std::ofstream out(path, std::ios::binary);
+			out << "\xEF\xBB\xBF-- qod:init-nonce " << n << "\r\nSET a = 1;\n";
+		}
+		auto read = qod::ReadAll(path.string());
+		std::filesystem::remove(path);
+		Expect(read.compare(0, 3, "\xEF\xBB\xBF") != 0 && qod::RequireInitNonceLine(read, n) == "SET a = 1;\n",
+		       "a leading byte order mark is dropped on read");
+		Expect(refused("\xEF\xBB\xBF-- qod:init-nonce " + n + "\n", n), "the line itself must not hold one");
 	}
 
 	// ---- --check-init's verdict
