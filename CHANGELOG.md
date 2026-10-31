@@ -773,8 +773,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Tenant users may read the change data of tables they may read: the data diff and branch change
   counts (`ducklake_table_changes` / `_insertions` / `_deletions` naming the table by literals) are
   judged as a read of that table; refused under column or row policies.
-- `UNDROP TABLE [schema.]t [AS new_name]` in SQL (both doors and `qod sql`): any user recovers a
-  dropped table as themselves, with a read grant on its last name and DDL in the schema.
+- `UNDROP TABLE [schema.]t [AS new_name]` in SQL (both doors and `qod sql`; part of the SQL admin
+  dialect, `QOD_SQL_ADMIN_ENABLED`, on by default): any user recovers a dropped table as themselves,
+  with a read grant on its last name (held by no live table or view) and DDL in the schema. Names
+  compare without case. Refused inside an open transaction: its recovery commits on its own, so a
+  ROLLBACK could not undo it.
 - Self-service undrop: regular users list and recover their own dropped tables from the profile
   page, `qod profile recoverable` / `qod profile undrop`, and MCP `list_recoverable` /
   `undrop_table`.
@@ -792,8 +795,8 @@ In-engine authorization, Phase D: the node decides every statement alone.
   counts, undrop) is judged on the table as it is now: a table renamed since is no longer covered
   by the grant on the table that took its old name; a table replaced since (CREATE OR REPLACE, a
   restore) keeps its history under its current grant; a dropped one is readable on its last name's
-  grant while no other table holds that name. Users with column or row policies are refused all
-  three.
+  grant while no live table or view holds that name. Users with column or row policies are refused
+  all three.
 - Security: branch change counts (`GET /api/branch/.../changes`, MCP `branch_changes`) ran as the
   manager's system caller, so anyone allowed to use a branch read insert, delete and update counts
   of tables they hold no grant on. They now run as the requester, as the "REST and MCP data

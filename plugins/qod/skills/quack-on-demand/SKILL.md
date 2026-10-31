@@ -1113,10 +1113,15 @@ UNDROP TABLE main.orders AS orders_back;   -- under a new name
 ```
 
 It finds the table's last live snapshot and runs `CREATE TABLE ... AS SELECT * FROM ... AT (VERSION
-=> n)` as the caller, so it needs a read grant on the table's last name and DDL in the schema. The
-answers are plain words: "there is no dropped table main.orders", "a table main.orders exists; use
-UNDROP TABLE main.orders AS <new name>", "not permitted: ...". Without a schema, the database's
-default schema is used.
+=> n)` as the caller, so it needs a read grant on the table's last name, which no live table or view
+may hold, and DDL in the schema. The answers are plain words: "there is no dropped table
+main.orders", "a table or view main.orders exists; use UNDROP TABLE main.orders AS <new name>", "not
+permitted: ...". Without a schema, the database's default schema is used; names compare without
+case, as DuckDB resolves them. It is part of the SQL admin dialect, so it needs
+`QOD_SQL_ADMIN_ENABLED` (on by default). It is refused inside an open transaction (`BEGIN ...`): its
+recovery commits on a connection of its own, which the client's ROLLBACK could not undo; run it
+outside one. A personal access token's databases, pools and verb ceiling apply to every undrop
+route (a read-only token cannot recover).
 
 The same, from the profile (regular users included): `qod profile recoverable --db lake` lists the
 dropped tables of your own database you may recover, `qod profile undrop --db lake --schema main
@@ -1128,9 +1133,9 @@ table" card; MCP `list_recoverable` / `undrop_table` work with a regular user's 
 - a table renamed since is judged as the table it is now (its current name's grant);
 - a table replaced since (`CREATE OR REPLACE`, a QoD restore) is the same table: its history is
   judged on the current name's grant;
-- a table dropped since is judged as a read of its last live name: allowed while no live table
-  holds that name and the grant covers it, refused once the name is reused (only a superuser reads
-  it then);
+- a table dropped since is judged as a read of its last live name: allowed while no live table or
+  view holds that name and the grant covers it, refused once the name is reused (only a superuser
+  reads it then);
 - any of those three is refused to a user with column or row policies.
 
 ## Federation - external catalogs via DuckDB extensions

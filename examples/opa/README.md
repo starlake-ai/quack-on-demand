@@ -140,7 +140,9 @@ the `statement` rule with this input:
   read, had then and has no longer; the access names the table and columns as they are now),
   `dropped` (the table was dropped since; the access names its last live name, readable while no
   live table holds it) and `replaced` (the table was replaced since by `CREATE OR REPLACE` or a QoD
-  restore; the access names the table that replaced it). A policy that wants to keep history
+  restore; the access names the table that replaced it, but its `columns` are the replaced
+  table's column names as the statement read them, not the successor's, so a column rule keyed on
+  the successor's names can misfire on them). A policy that wants to keep history
   current-only can deny any access carrying `history`. The input does NOT otherwise tell an
   earlier-snapshot read (`AT (VERSION => n)`), a change-feed read (`ducklake_table_changes`, the
   data diff, branch counts) or a data diff from a read of the current rows: an unchanged table's
