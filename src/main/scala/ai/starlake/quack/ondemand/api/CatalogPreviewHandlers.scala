@@ -306,7 +306,10 @@ final class CatalogPreviewHandlers(
                   )
                 )
               case Some(poolKey) =>
-                callerOf(s"preview-$tid-$db", apiKey) match
+                callerOf(s"preview-$tid-$db", apiKey).flatMap(caller =>
+                  // A token's databases and pools axes (review N5).
+                  TokenScope.refusal(caller, db, Some(poolKey), writes = false).toLeft(caller)
+                ) match
                   case Left(e) =>
                     audit.rest(
                       apiKey,
@@ -574,7 +577,10 @@ final class CatalogPreviewHandlers(
       apiKey: Option[String],
       denied: (StatusCode, String, String) => Either[(StatusCode, ErrorResponse), DataDiffResponse]
   ): Out[DataDiffResponse] =
-    callerOf(s"diff-$tid-$db", apiKey) match
+    callerOf(s"diff-$tid-$db", apiKey).flatMap(caller =>
+      // A token's databases and pools axes (review N5).
+      TokenScope.refusal(caller, db, Some(poolKey), writes = false).toLeft(caller)
+    ) match
       case Left((code, e)) => IO.pure(denied(code, e.error, e.message))
       case Right(caller)   =>
         runDiffAs(

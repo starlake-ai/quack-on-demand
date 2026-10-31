@@ -123,52 +123,15 @@ final class CatalogUndropHandlers(
       ErrorResponse("token_scope", s"database '$db' is not permitted for this token")
     )
 
-  /** A token's scope on one recovery, every axis it carries (review I1): its databases, its pools
-    * (the pool the recovery runs on), its verb ceiling (a recovery creates a table: DDL) and
-    * `branchOnly` (a recovery writes; only a branch pool admits a write). None when it may.
+  /** A token's scope on one recovery (review I1): [[TokenScope.refusal]], a recovery creating a
+    * table on `pool`.
     */
   private def tokenRefusal(
       caller: ExecCaller,
       db: String,
       pool: PoolKey
   ): Option[(StatusCode, ErrorResponse)] =
-    val r = caller.restriction
-    if !r.allowsDatabase(db) then Some(databaseRefused(db))
-    else if !r.allowsPool(pool.pool) && !ai.starlake.quack.ondemand.branch.BranchNames
-        .isBranchPool(pool.pool)
-    then
-      Some(
-        (
-          StatusCode.Forbidden,
-          ErrorResponse("token_scope", s"pool '${pool.pool}' is not permitted for this token")
-        )
-      )
-    else if r.verbCeiling.exists(v =>
-        !ai.starlake.quack.ondemand.auth.TokenRestriction.covers(v).contains("Ddl")
-      )
-    then
-      Some(
-        (
-          StatusCode.Forbidden,
-          ErrorResponse(
-            "token_scope",
-            s"this token's verb ceiling (${r.verbCeiling.getOrElse("")}) does not allow creating " +
-              "a table, which a recovery does"
-          )
-        )
-      )
-    else if r.branchOnly && !ai.starlake.quack.ondemand.branch.BranchNames.isBranchPool(pool.pool)
-    then
-      Some(
-        (
-          StatusCode.Forbidden,
-          ErrorResponse(
-            "write_requires_branch",
-            "this token may only write on a branch, and a recovery writes"
-          )
-        )
-      )
-    else None
+    TokenScope.refusal(caller, db, Some(pool), writes = true)
 
   def undrop(req: UndropRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver

@@ -203,7 +203,10 @@ final class CatalogRestoreHandlers(
                     else
                       // Resolved before either leg: an unresolvable token is a 401, and both the
                       // dry run and the execute run as this caller.
-                      callerOf(s"restore-$tid-$db", apiKey) match
+                      callerOf(s"restore-$tid-$db", apiKey).flatMap(caller =>
+                        // A token's every axis (review N5): the execute replaces the table.
+                        TokenScope.refusal(caller, db, None, writes = !dryRun).toLeft(caller)
+                      ) match
                         case Left((code, e)) => IO.pure(denied(code, e.error, e.message))
                         case Right(caller)   =>
                           if dryRun then
