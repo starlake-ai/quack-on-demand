@@ -220,13 +220,13 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
   private val nameNotLiveAgain =
     """   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
       |                    JOIN ducklake_schema ls ON ls.schema_id = l.schema_id
-      |                   WHERE lower(ls.schema_name) = lower(s.schema_name)
-      |                     AND lower(l.table_name)  = lower(t.table_name)
+      |                   WHERE translate(ls.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+      |                     AND translate(l.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')  = translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
       |                     AND l.end_snapshot IS NULL)
       |   AND NOT EXISTS (SELECT 1 FROM ducklake_view v
       |                    JOIN ducklake_schema vs ON vs.schema_id = v.schema_id
-      |                   WHERE lower(vs.schema_name) = lower(s.schema_name)
-      |                     AND lower(v.view_name)   = lower(t.table_name)
+      |                   WHERE translate(vs.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+      |                     AND translate(v.view_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')   = translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
       |                     AND v.end_snapshot IS NULL)""".stripMargin
 
   def listDroppedTables(limit: Int = 50): List[DroppedTableEntry] =
@@ -243,7 +243,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
   def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
     query(
       droppedTablesSelect +
-        "\n   AND lower(s.schema_name) = lower(?) AND lower(t.table_name) = lower(?)" +
+        "\n   AND translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')" +
         "\n ORDER BY t.end_snapshot DESC\n LIMIT 1",
       schema,
       table
@@ -961,8 +961,9 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     tableIdAt(schema, table, snapshotId).isDefined
 
   /** Whether a live table or view holds `schema.name` at snapshot `snapshotId`, compared without
-    * case, as DuckDB resolves names: what an undrop's target name and the node's dropped-table rule
-    * must find free.
+    * case for ASCII letters only, as DuckDB resolves names (translate(), never lower(), which a
+    * Postgres locale may extend to other letters: review 5 R3): what an undrop's target name and
+    * the node's dropped-table rule must find free.
     */
   def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean =
     val (sPred, sArgs) = visible("s", Some(snapshotId))
@@ -971,12 +972,12 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     query(
       s"""SELECT 1 FROM ducklake_schema s
          |  JOIN ducklake_table t ON t.schema_id = s.schema_id
-         | WHERE lower(s.schema_name) = lower(?) AND lower(t.table_name) = lower(?)
+         | WHERE translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
          |   AND $sPred AND $tPred
          | UNION ALL
          |SELECT 1 FROM ducklake_schema s
          |  JOIN ducklake_view v ON v.schema_id = s.schema_id
-         | WHERE lower(s.schema_name) = lower(?) AND lower(v.view_name) = lower(?)
+         | WHERE translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(v.view_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
          |   AND $sPred AND $vPred""".stripMargin,
       (List(schema, name) ++ sArgs ++ tArgs ++ List(schema, name) ++ sArgs ++ vArgs)*
     )(_ => 1).nonEmpty
