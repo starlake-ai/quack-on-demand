@@ -636,6 +636,16 @@ final class QuackFrontDoor(
 
   private def admin(s: QuackSession, f: Frame, prep: PrepareRequest): IO[Array[Byte]] =
     val cq = f.header.clientQueryId
+    if AdminSqlParser.isUndrop(prep.sql) && s.txLink.get().isDefined then
+      IO.pure(encodeError(ai.starlake.quack.edge.FlightSqlRouter.UndropInTransaction.reason))
+    else admin0(s, f, prep, cq)
+
+  private def admin0(
+      s: QuackSession,
+      f: Frame,
+      prep: PrepareRequest,
+      cq: Long
+  ): IO[Array[Byte]] =
     s.bound.grants.currentIO
       .flatMap {
         case Left(fail) => grantsRefused(s, prep.sql, fail).map(Left(_))

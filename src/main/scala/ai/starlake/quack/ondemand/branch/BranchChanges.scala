@@ -29,7 +29,11 @@ final case class TableChange(
     kind: ChangeKind,
     inserted: Long = 0L,
     deleted: Long = 0L,
-    updated: Long = 0L
+    updated: Long = 0L,
+    /** The counts were asked for and could not be had (the node refused the requester the table, or
+      * the count failed): the zeros are no counts.
+      */
+    countsUnavailable: Boolean = false
 ):
   def mergeable: Boolean = kind != ChangeKind.Altered
 

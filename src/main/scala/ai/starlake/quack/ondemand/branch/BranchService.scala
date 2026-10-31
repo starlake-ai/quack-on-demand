@@ -60,9 +60,14 @@ object BranchFailure:
 trait MergeExecutor:
   def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]]
 
-/** Change-feed counts of one modified table on the branch pool: `(inserted, deleted, updated)`. */
+/** Change-feed counts of one modified table on the branch pool: `(inserted, deleted, updated)`.
+  * `caller` is who the count statement runs as, required so no call site can leave it to a default:
+  * the requester for counts asked over REST or MCP (the node may refuse them a table, and that
+  * table then shows no counts), the system caller only for the lifecycle's own summary (propose).
+  */
 trait ChangeCounter:
   def count(
+      caller: ai.starlake.quack.ondemand.api.ExecCaller,
       tenant: String,
       branch: Branch,
       alias: String,
@@ -449,14 +454,17 @@ final class BranchService(
     TenantDb.catalogAlias(sup.effectiveMetastoreFor(tenant, parent.name), parent.name)
 
   /** The change set of a live branch against main, with change-feed counts for modified tables when
-    * `withCounts` (each count is one statement on the branch pool; failures degrade to zeroes with
-    * a WARN so the listing never fails on a hibernated pool).
+    * `countsAs` names a caller: each count is one statement on the branch pool run as that caller
+    * (the requester, never the system caller: the node decides which tables they may count). A
+    * failed or refused count degrades to zeroes flagged `countsUnavailable`, with a WARN, so the
+    * listing never fails on a hibernated pool or a table the requester holds no grant on. `None`:
+    * no counts.
     */
   def changes(
       tenant: String,
       parentDb: String,
       name: String,
-      withCounts: Boolean,
+      countsAs: Option[ai.starlake.quack.ondemand.api.ExecCaller],
       actor: BranchActor,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchChangeSet)]] =
@@ -469,7 +477,7 @@ final class BranchService(
     pre match
       case Left(f)            => IO.pure(Left(f))
       case Right((parent, b)) =>
-        computeChanges(tenant, parent, b, withCounts).map { cs =>
+        computeChanges(tenant, parent, b, countsAs).map { cs =>
           audit.rest(
             apiKey,
             "control-plane",
@@ -487,40 +495,53 @@ final class BranchService(
       tenant: String,
       parent: TenantDb,
       b: Branch,
-      withCounts: Boolean
+      countsAs: Option[ai.starlake.quack.ondemand.api.ExecCaller]
   ): IO[BranchChangeSet] =
     IO.blocking {
       val br = resolveReader(tenant, b.tenantDbName)
       val mr = resolveReader(tenant, parent.name)
       BranchChanges.compute(br, mr, b.forkSnapshot)
-    }.flatMap { cs =>
-      if !withCounts then IO.pure(cs)
-      else
-        val alias = parentAliasOf(tenant, parent)
-        cs.tables
-          .foldLeft(IO.pure(List.empty[TableChange])) { (acc, t) =>
-            acc.flatMap { done =>
-              if t.kind != ChangeKind.Modified then IO.pure(done :+ t)
-              else
-                counter.count(tenant, b, alias, t, cs.forkSnapshot, cs.headSnapshot).map {
-                  case Right((ins, del, upd)) =>
-                    done :+ t.copy(inserted = ins, deleted = del, updated = upd)
-                  case Left(err) =>
-                    logger.warn(s"branch changes: counts for ${t.schema}.${t.table} failed: $err")
-                    done :+ t
-                }
+    }.flatMap(cs => countsAs.fold(IO.pure(cs))(caller => countAs(tenant, parent, b, cs, caller)))
+
+  /** `cs` with change-feed counts of its modified tables, each counted as `caller`. */
+  private def countAs(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch,
+      cs: BranchChangeSet,
+      caller: ai.starlake.quack.ondemand.api.ExecCaller
+  ): IO[BranchChangeSet] =
+    val alias = parentAliasOf(tenant, parent)
+    cs.tables
+      .foldLeft(IO.pure(List.empty[TableChange])) { (acc, t) =>
+        acc.flatMap { done =>
+          if t.kind != ChangeKind.Modified then IO.pure(done :+ t)
+          else
+            counter.count(caller, tenant, b, alias, t, cs.forkSnapshot, cs.headSnapshot).map {
+              case Right((ins, del, upd)) =>
+                done :+ t.copy(inserted = ins, deleted = del, updated = upd)
+              case Left(err) =>
+                logger.warn(s"branch changes: counts for ${t.schema}.${t.table} failed: $err")
+                done :+ t.copy(countsUnavailable = true)
             }
-          }
-          .map(ts => cs.copy(tables = ts))
-    }
+        }
+      }
+      .map(ts => cs.copy(tables = ts))
 
   // ---------- propose ----------
 
+  /** Records a merge proposal. Its stored summary (`summaryJson`, the merge row) counts every
+    * modified table as the system caller: the lifecycle's own record, shown in full to superusers
+    * only (`BranchHandlers` strips its counts for anyone else). The change set returned to the
+    * proposer counts as `countsAs`, the requester, like [[changes]]: a table the node refuses them
+    * is flagged `countsUnavailable`, never filled from the system's counts.
+    */
   def propose(
       tenant: String,
       parentDb: String,
       name: String,
       actor: BranchActor,
+      countsAs: ai.starlake.quack.ondemand.api.ExecCaller,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
     val pre = for
@@ -545,7 +566,15 @@ final class BranchService(
         )
         IO.pure(Left(f))
       case Right((parent, b)) =>
-        computeChanges(tenant, parent, b, withCounts = true).flatMap { cs =>
+        // The lifecycle's own summary (stored on the merge row): every modified table, counted
+        // as the system caller, whoever proposes. The proposer's reply counts as the proposer.
+        val system = ai.starlake.quack.ondemand.api.ExecCaller.system(s"branch-counts-$tenant")
+        (for
+          shape  <- computeChanges(tenant, parent, b, countsAs = None)
+          stored <- countAs(tenant, parent, b, shape, system)
+          reply  <-
+            if countsAs.system then IO.pure(stored) else countAs(tenant, parent, b, shape, countsAs)
+        yield (stored, reply)).flatMap { (cs, reply) =>
           IO.blocking {
             val merge = store.createBranchMerge(
               BranchMerge(
@@ -574,7 +603,7 @@ final class BranchService(
                 "mergeable" -> cs.mergeable.toString
               )
             )
-            Right((updated, merge, cs))
+            Right((updated, merge, reply))
           }
         }
 
@@ -653,7 +682,7 @@ final class BranchService(
       actor: BranchActor,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
-    computeChanges(tenant, parent, b, withCounts = false).flatMap { cs =>
+    computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
       def refuse(f: BranchFailure): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
         audit.rest(
           apiKey,

@@ -28,11 +28,12 @@ object CatalogPreviewHandlers:
     */
   type PreviewExecutor = (ExecCaller, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
 
-  /** The display label of a system caller ([[ExecCaller.system]]: the restore dry run, the branch
-    * change counter) in logs and statement history. It carries NO privilege: the routed executor
-    * decides on `ExecCaller.system` alone, because user names are not reserved and a tenant user
-    * may be called "superuser". No credential is a system caller: [[RestCaller]] (REST) and
-    * `McpDataTools.callerFor` (MCP) run a session or a PAT as its user.
+  /** The display label of a system caller ([[ExecCaller.system]]: a branch proposal's stored
+    * summary; a module's system SQL is labelled `module:<name>` instead) in logs and statement
+    * history. It carries NO privilege: the routed executor decides on `ExecCaller.system` alone,
+    * because user names are not reserved and a tenant user may be called "superuser". No credential
+    * is a system caller: [[RestCaller]] (REST) and `McpDataTools.callerFor` (MCP) run a session or
+    * a PAT as its user.
     */
   val SuperuserIdentity = "superuser"
 
@@ -305,7 +306,12 @@ final class CatalogPreviewHandlers(
                   )
                 )
               case Some(poolKey) =>
-                callerOf(s"preview-$tid-$db", apiKey) match
+                callerOf(s"preview-$tid-$db", apiKey).flatMap(caller =>
+                  // A token's databases and pools axes (review N5).
+                  TokenScope
+                    .refusal(sup, tid, caller, db, Some(poolKey), writes = false)
+                    .toLeft(caller)
+                ) match
                   case Left(e) =>
                     audit.rest(
                       apiKey,
@@ -573,7 +579,10 @@ final class CatalogPreviewHandlers(
       apiKey: Option[String],
       denied: (StatusCode, String, String) => Either[(StatusCode, ErrorResponse), DataDiffResponse]
   ): Out[DataDiffResponse] =
-    callerOf(s"diff-$tid-$db", apiKey) match
+    callerOf(s"diff-$tid-$db", apiKey).flatMap(caller =>
+      // A token's databases and pools axes (review N5).
+      TokenScope.refusal(sup, tid, caller, db, Some(poolKey), writes = false).toLeft(caller)
+    ) match
       case Left((code, e)) => IO.pure(denied(code, e.error, e.message))
       case Right(caller)   =>
         runDiffAs(

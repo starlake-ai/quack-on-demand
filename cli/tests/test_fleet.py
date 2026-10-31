@@ -123,7 +123,7 @@ def test_fleet_join_refuses_a_qod_node_of_another_protocol(monkeypatch, tmp_path
             pass
 
     def wrong(binary):
-        raise fleet_cmd.qod_node.WrongProtocol(f"{binary} speaks node protocol 2; this qod speaks 5")
+        raise fleet_cmd.qod_node.WrongProtocol(f"{binary} speaks node protocol 2; this qod speaks 6")
 
     monkeypatch.setattr(fleet_cmd, "FleetMember", FakeMember)
     monkeypatch.setattr(fleet_cmd.signal, "signal", lambda *a: None)

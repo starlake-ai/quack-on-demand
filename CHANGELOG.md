@@ -17,8 +17,11 @@ Before upgrading:
    point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every
    environment, chart value and Compose file. A manager with it set refuses to boot.
 3. Unset `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` and `QOD_NODE_LOCKDOWN`
-   everywhere (`qod setup --unset <NAME>` for a persisted one), and drop the Helm values
-   `security.aclEnabled` and `security.nodeLockdown`. Boot refuses each of them.
+   everywhere (`qod setup --unset <NAME>` for a persisted one), with their HOCON keys
+   (`quack-flightsql.acl.*`, `quack-flightsql.nodeLockdown`): boot refuses each of them, in either
+   form. Drop the Helm values `security.aclEnabled` and `security.nodeLockdown` too: the chart no
+   longer reads them, so they change nothing, but the same variables set through the chart's `env`
+   are refused at boot like any other.
 4. Grant tenant users what they read: enforcement can no longer be turned off, and per-pool
    lockdown is gone.
 5. On OPA tenants, update the policies for the node's input (`columns`, `via`, `locations`).
@@ -36,7 +39,7 @@ During the upgrade:
 
 After upgrading:
 
-10. Restart every node. Nodes speak protocol 5 with session handle v3; a node started by an earlier
+10. Restart every node. Nodes speak protocol 6 with session handle v4; a node started by an earlier
     release, or an earlier node image, does not work with this manager. On Kubernetes pull this
     release's node image.
 11. Read the boot log. Review the WARNs about untrusted initSql and `sql` federation sources (a
@@ -395,7 +398,7 @@ After upgrading:
     not know `qod_session` and is never routed to.
 
 - **Security: BREAKING: the nodes decide every tenant statement on what DuckDB resolved.** Each
-  node (qod-node, node protocol 5) now judges a statement of a user who is not a superuser on the
+  node (qod-node, node protocol 6) now judges a statement of a user who is not a superuser on the
   plan DuckDB bound for it, before it runs: the tables, views and columns it reads or writes, the
   functions and settings it calls, the files it names. It asks the manager replica that minted the
   session for a verdict (`POST /api/internal/authz/decide`, signed with the node's key, never in
@@ -432,9 +435,9 @@ After upgrading:
     any backend: session handles are now version 3, and such a node refuses every one, the health
     probe's included, so it stays unhealthy. Release note: the vendored qod-node binaries
     (`native/qod-node/binaries/`, the qod wheel's bundled copies for `qod fleet join`, the Windows
-    downloads and the Kubernetes node image) move to node protocol 5 with this release; a manager
+    downloads and the Kubernetes node image) move to node protocol 6 with this release; a manager
     that starts nodes on its host refuses to boot on a binary of another protocol, `qod fleet join`
-    refuses to run one (exit 2), the node image build fails on one, and protocol 5 nodes refuse an
+    refuses to run one (exit 2), the node image build fails on one, and protocol 6 nodes refuse an
     init stream without this release's nonce line.
 
 - **BREAKING: statements tenant users can no longer run.** To keep the node's decision sound, a
@@ -536,14 +539,13 @@ After upgrading:
   add`) or create a scoped secret; an initSql that reads other buckets needs its own `CREATE
   SECRET`.
 
-- **Iceberg tables on S3 are read-only through QoD for every principal, superusers included.** A
-  catalog that neither vends credentials nor has AWS credentials of its own now reads its tables
-  with each reading user's own S3 keys, which qod-node installs as connection secrets, and DuckDB's
-  Iceberg extension (v2.0.0) commits its manifest files without connection secrets, so a write
-  fails with HTTP 403 at commit, a superuser's too. This lasts until upstream duckdb-iceberg signs
-  its commits with connection secrets. The raw files
-  of a warehouse bucket are not data folders QoD knows: a user holding keys for it can read them
-  directly.
+- **Iceberg tables on S3 read with users' own S3 keys are read-only through QoD, for superusers
+  too.** A catalog that neither vends credentials nor has AWS credentials of its own now reads its
+  tables with each reading user's own S3 keys, which qod-node installs as connection secrets, and
+  DuckDB's Iceberg extension (v2.0.0) commits its manifest files without connection secrets, so a
+  write fails with HTTP 403 at commit, a superuser's too. This lasts until upstream duckdb-iceberg
+  signs its commits with connection secrets. The raw files of a warehouse bucket are not data
+  folders QoD knows: a user holding keys for it can read them directly.
 
 - **BREAKING: extension settings are fixed when a node starts.** `allow_community_extensions`,
   `allow_unsigned_extensions` and `autoinstall_known_extensions` are false on every node, set before
@@ -675,7 +677,7 @@ In-engine authorization, Phase D: the node decides every statement alone.
   log line are gone, the configuration page and generated configuration docs lose the three
   `quack-flightsql.acl.*` keys and the lockdown key, and `GET /api/audit/actions` no longer lists
   `pool.setLockdown` (stored audit rows keep it).
-- Every node must restart: node protocol 5 and session handle v3; earlier node images, vendored
+- Every node must restart: node protocol 6 and session handle v4; earlier node images, vendored
   binaries and fleet wheels do not work with this manager.
 - Upgrade the `qod` CLI with the manager: an older `qod serve` always exports `QOD_ACL_ENABLED`,
   which this manager refuses (`qod serve` no longer sets it). A value stored by `qod setup --set`
@@ -768,9 +770,45 @@ In-engine authorization, Phase D: the node decides every statement alone.
   bind; a batch that moves the schema or search path, quoted names holding a dot and two-part names
   headed by an attached catalog are admitted to principals without column or row policies, judged as
   DuckDB binds them.
+- Tenant users may read the change data of tables they may read: the data diff and branch change
+  counts (`ducklake_table_changes` / `_insertions` / `_deletions` naming the table by literals) are
+  judged as a read of that table; refused under column or row policies.
+- `UNDROP TABLE [schema.]t [AS new_name]` in SQL (both doors and `qod sql`; part of the SQL admin
+  dialect, `QOD_SQL_ADMIN_ENABLED`, on by default): any user recovers a dropped table as themselves,
+  with a read grant on its last name (held by no live table or view) and DDL in the schema. Names
+  compare without case. Refused inside an open transaction: its recovery commits on its own, so a
+  ROLLBACK could not undo it.
+- Self-service undrop: regular users list and recover their own dropped tables from the profile
+  page, `qod profile recoverable` / `qod profile undrop`, and MCP `list_recoverable` /
+  `undrop_table`.
+- OPA: a node decision's access carries `history` (`renamed`, `dropped`, `replaced`) for a DuckLake
+  read across such a change; an earlier-snapshot or change-feed read of an unchanged table is not
+  told apart from a current read (examples/opa/README.md).
+- Module SPI: `ManagerContext.systemSql` (required) runs one statement on a pool as the manager's
+  system caller, for a module's own provisioning statements, never SQL a user supplied; each is
+  labelled `module:<name>` in statement history and audited as `module.sql`, both shown to the
+  tenant's admins with the statement's values masked (as the stdout audit sink masks them).
 
 ### Fixed
 
+- Security: reading a DuckLake table at an earlier snapshot (time travel, the data diff, branch
+  counts, undrop) is judged on the table as it is now: a table renamed since is no longer covered
+  by the grant on the table that took its old name; a table replaced since (CREATE OR REPLACE, a
+  restore) keeps its history under its current grant; a dropped one is readable on its last name's
+  grant while no live table or view holds that name. Users with column or row policies are refused
+  all three.
+- Security: branch change counts (`GET /api/branch/.../changes`, MCP `branch_changes`) ran as the
+  manager's system caller, so anyone allowed to use a branch read insert, delete and update counts
+  of tables they hold no grant on. They now run as the requester, as the "REST and MCP data
+  statements run as their caller" entry above says. A table whose count the node refuses them, or
+  whose count fails, is no longer a fake 0: it carries `countsUnavailable: true` (its zeros are no
+  counts). A proposal's reply (REST, MCP `propose_merge`) counts as the proposer too. The summary
+  stored on the merge row is still counted as the system caller, but `get`, propose and merge
+  replies show its per-table counts to superusers only; anyone else, tenant admins included (the
+  nodes judge them by their grants), gets them zeroed and flagged `countsUnavailable`.
+- The restore dry run (REST `POST /api/catalog/restore` with `dryRun`, MCP `restore_snapshot`)
+  counts as the requester instead of the system caller; a table they may not read answers 403
+  `acl_denied`.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

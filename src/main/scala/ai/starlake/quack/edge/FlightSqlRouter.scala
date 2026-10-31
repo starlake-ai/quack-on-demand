@@ -112,6 +112,13 @@ final class FlightSqlRouter(
       status: String,
       error: Option[String],
       kind: StatementKind,
+      /** The statement ran as the manager's system principal (`EffectiveSet.system`, a module's
+        * system SQL): its values and their echo in the error are masked
+        * ([[ai.starlake.quack.ondemand.telemetry.StatementValueMask]]), since history and audit are
+        * shown to the tenant's admins and the manager's own statements may carry platform
+        * credentials. Required, so no record site can leave it out.
+        */
+      systemPrincipal: Boolean,
       realm: String = "tenant",
       prepareDurationMs: Option[Long] = None,
       /** The acting personal-access-token id, when the resolved principal authenticated with one.
@@ -142,10 +149,14 @@ final class FlightSqlRouter(
     // the statement, so nothing of diagnostic value survives redacting it anyway.
     val claimed     = ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql)
     val recordedSql =
-      if claimed then ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder else sql
+      if claimed then ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+      else if systemPrincipal then ai.starlake.quack.ondemand.telemetry.StatementValueMask.sql(sql)
+      else sql
     val recordedError =
       if claimed then
         error.map(_ => ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder)
+      else if systemPrincipal then
+        error.map(ai.starlake.quack.ondemand.telemetry.StatementValueMask.error(_, sql))
       else error
     history.record(
       StatementRecord(
@@ -340,10 +351,13 @@ final class FlightSqlRouter(
         // never forwarded to a node - the fail-closed contract of the admin dialect.
         // recordExecution follows the same probe-suppression contract as the routed path
         // (Prepare-time DESCRIBE probes must not show up in the UI's statement list).
-        if !recordExecution then exec.execute(user, poolKey, sql, effectiveSet)
+        if ai.starlake.quack.edge.admin.AdminSqlParser.isUndrop(sql) &&
+          sessions.get(connectionId).exists(_.txOpen)
+        then IO.pure(Left(FlightSqlRouter.UndropInTransaction))
+        else if !recordExecution then exec.execute(user, poolKey, sql, effectiveSet, connectionId)
         else
           IO.monotonic.flatMap { t0 =>
-            exec.execute(user, poolKey, sql, effectiveSet).flatMap { result =>
+            exec.execute(user, poolKey, sql, effectiveSet, connectionId).flatMap { result =>
               IO.monotonic.map { t1 =>
                 recordAdmin(
                   user,
@@ -372,6 +386,37 @@ final class FlightSqlRouter(
           evaluate = Some(adapterEvaluate),
           purpose = DecidePurpose.Live
         ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
+
+  /** One statement as the session `effectiveSet` (its claims, JWT roles and groups), on a
+    * connection of its own (`connectionId`), opened before it without a SessionOpened event (it is
+    * part of the caller's own session, already metered) and closed after it, whatever the outcome:
+    * UNDROP TABLE's CTAS (review N2). Recorded like any statement; never the admin dialect.
+    */
+  def executeOneShot(
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      effectiveSet: EffectiveSet
+  ): IO[Either[RouterFailure, QueryResult]] =
+    // A per-call nonce (review 5 R4): two concurrent calls on one connection get a session each, so
+    // the first one's close never drops the second's. Deferred: execute opens (and meters) its
+    // session while it is built, before this one exists.
+    // The nonce is drawn per run of the returned IO, never once per call to this method.
+    IO(s"$connectionId#${java.util.UUID.randomUUID()}").flatMap { oneShot =>
+      IO(sessions.open(oneShot, user, poolKey)) *>
+        IO.defer(
+          execute(
+            oneShot,
+            user,
+            poolKey,
+            sql,
+            effectiveSet = Some(effectiveSet),
+            recordExecution = true,
+            adminDispatch = false
+          )
+        ).guarantee(IO(sessions.close(oneShot)))
+    }
 
   /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
     * around. `session` is always None on the outbound wire.
@@ -623,6 +668,7 @@ final class FlightSqlRouter(
             FlightSqlRouter.failureStatus(failure),
             Some(failure.reason),
             classifier.classify(sql),
+            systemPrincipal = effectiveSet.exists(_.system),
             realm = "tenant",
             patId = patId,
             source = source
@@ -915,6 +961,7 @@ final class FlightSqlRouter(
         status = "denied",
         error = Some(TooDeep.Reason),
         kind = TooDeep.orElse(StatementKind.Other)(classifier.classify(sql)),
+        systemPrincipal = effectiveSet.exists(_.system),
         realm = if effectiveSet.exists(_.user.tenant.isEmpty) then "system" else "tenant",
         patId = patId,
         source = source
@@ -955,6 +1002,12 @@ final class FlightSqlRouter(
     // With the session's authorization context: the handle digests it and the decision endpoint
     // judges the statement's plan with it (MintedHandles).
     val principal = ai.starlake.quack.edge.authz.NodePrincipal.of(effectiveSet, poolKey, purpose)
+    // The text the active-statement registry shows (ActiveStatementHandlers.list, to the tenant's
+    // admins): a system statement's values masked, as history and audit mask them (review M1).
+    val activeSql =
+      if effectiveSet.exists(_.system) then
+        ai.starlake.quack.ondemand.telemetry.StatementValueMask.sql(clientSql)
+      else clientSql
     // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
     // table refs resolve to what the node actually sees at execution time.
     val maybeState               = supervisor.get(poolKey)
@@ -982,6 +1035,7 @@ final class FlightSqlRouter(
           status,
           error,
           kind,
+          effectiveSet.exists(_.system),
           realm,
           prepMs,
           patId,
@@ -1279,7 +1333,7 @@ final class FlightSqlRouter(
                                 poolKey.tenant,
                                 poolKey.pool,
                                 nodeId,
-                                clientSql,
+                                activeSql,
                                 patId
                               )
                           )
@@ -1380,7 +1434,7 @@ final class FlightSqlRouter(
                                 poolKey,
                                 kind,
                                 finalSql,
-                                clientSql = clientSql,
+                                clientSql = activeSql,
                                 exclude = nodeId,
                                 send = send,
                                 principal = principal,
@@ -1517,9 +1571,10 @@ final class FlightSqlRouter(
 
   /** One more try of a statement that failed in transport, on another node (never inside a client
     * transaction). Mirrors the primary path: `sql` (the fully rewritten statement) runs, the kill
-    * registry shows `clientSql`, the entry is registered before the send so a kill reaches the
-    * retry from its first wire byte, and the manager's own reads (`internal`) are registered too, a
-    * kill while one runs stopping the statement that would use its value.
+    * registry shows `clientSql` (the caller's text, a system statement's values masked), the entry
+    * is registered before the send so a kill reaches the retry from its first wire byte, and the
+    * manager's own reads (`internal`) are registered too, a kill while one runs stopping the
+    * statement that would use its value.
     */
   private def retryOnce[A](
       connectionId: String,
@@ -1619,6 +1674,14 @@ final class FlightSqlRouter(
     else RouterFailure.BadRequest(full)
 
 object FlightSqlRouter:
+
+  /** `UNDROP TABLE` inside a client transaction (review M5): refused on both doors, since its
+    * recovery commits on a connection of its own and the client's ROLLBACK would not undo it.
+    */
+  val UndropInTransaction: RouterFailure = RouterFailure.BadRequest(
+    "UNDROP TABLE cannot run inside a transaction: its recovery commits on its own; COMMIT or " +
+      "ROLLBACK first"
+  )
 
   /** How qod-node words a statement it refused because no verdict could be had (the decision
     * replica unreachable, slow or answering 503): retryable, unlike every other node refusal.

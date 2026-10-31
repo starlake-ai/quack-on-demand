@@ -1091,6 +1091,27 @@ export interface RecoverableTableEntry {
   lastLiveSnapshot: number;
   droppedAt?: string | null;   // ISO-8601; absent once the drop snapshot itself expired
   recoverable: boolean;
+  tableId: number;             // DuckLake table id: a name dropped twice is two entries
+}
+
+/** One pool the caller may connect to (`GET /api/profile/pools`). */
+export interface ProfilePool {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  status: string;
+}
+
+export interface ProfilePoolsResponse {
+  pools: ProfilePool[];
+}
+
+/** Self-service undrop (`POST /api/profile/undrop`): the caller's own tenant, never named. */
+export interface ProfileUndropRequest {
+  tenantDb: string;
+  schema: string;
+  table: string;
+  asName?: string;
 }
 
 export interface RecoverableListResponse {
@@ -1491,6 +1512,9 @@ export interface BranchTableChange {
   updated: number;
   mergeable: boolean;
   reason?: string | null;
+  // The counts were asked for and refused to the viewer (no read grant) or failed: the zeros are
+  // no counts.
+  countsUnavailable?: boolean;
 }
 
 export interface BranchConflictEntry {

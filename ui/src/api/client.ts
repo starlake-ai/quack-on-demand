@@ -137,8 +137,7 @@ import type {
   // Persisted statement search
   StatementSearchResponse,
   // Usage and accounting
-  UsageResponse,
-} from './types';
+  UsageResponse, ProfilePoolsResponse, ProfileUndropRequest } from './types';
 import { actionLines } from './errorActions';
 
 const BASE = '/api';
@@ -221,6 +220,12 @@ export const api = {
   // tenant_forbidden) before the handler even runs.
   profileUsage:      (days?: number)  => get<UsageResponse>('/profile/usage' + (days ? `?days=${days}` : '')),
   profileStatements: (limit?: number) => get<StatementHistoryResponse>('/profile/statements' + (limit ? `?limit=${limit}` : '')),
+  profilePools:      () => get<ProfilePoolsResponse>('/profile/pools'),
+  // Self-service undrop: the dropped tables of one of the caller's own databases they may recover,
+  // and the recovery itself, run as them (the node judges the read and the create).
+  profileRecoverable: (tenantDb: string) =>
+    get<RecoverableListResponse>(`/profile/recoverable?tenantDb=${encodeURIComponent(tenantDb)}`),
+  profileUndrop:      (req: ProfileUndropRequest) => post<UndropResponse>('/profile/undrop', req),
   // ----- pats -----
   // Self-scoped like the profile routes above: identity comes from the session
   // cookie, so there is NO tenant param anywhere (a stray one would trip the

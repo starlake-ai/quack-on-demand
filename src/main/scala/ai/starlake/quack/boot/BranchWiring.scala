@@ -78,9 +78,9 @@ object BranchWiring extends LazyLogging:
           body.guarantee(backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit))
       }
 
-  /** Counts through the same executor the catalog data-diff uses, under the system identity (the
-    * change-feed table function is refused by the ACL parser for non-superusers, as documented on
-    * the restore dry run).
+  /** Counts through the same executor the catalog data-diff uses, as the caller the service hands
+    * it: the requester for counts asked over REST or MCP, the system caller only for propose's
+    * summary. Never a fallback to the system caller: a refused count is the caller's answer.
     */
   def changeCounter(
       executor: CatalogPreviewHandlers.PreviewExecutor,
@@ -88,6 +88,7 @@ object BranchWiring extends LazyLogging:
       timeout: FiniteDuration
   ): ChangeCounter = new ChangeCounter:
     def count(
+        caller: ExecCaller,
         tenant: String,
         branch: Branch,
         alias: String,
@@ -96,9 +97,6 @@ object BranchWiring extends LazyLogging:
         head: Long
     ): IO[Either[String, (Long, Long, Long)]] =
       val sql = DataDiffSql.summarySql(alias, change.schema, change.table, fork, head)
-      // System caller: aggregate change counts over the branch's own catalog, run for the
-      // lifecycle (propose / merge validation), not on behalf of a statement author.
-      val caller = ExecCaller.system(s"branch-counts-$tenant")
       executor(caller, poolKeyOf(branch), sql).timeout(timeout).attempt.map {
         case Left(e)          => Left(e.getMessage)
         case Right(Left(f))   => Left(f.reason)

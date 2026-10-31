@@ -7,7 +7,13 @@ import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
+import ai.starlake.quack.ondemand.state.{
+  RbacRole,
+  RbacUser,
+  RoleColumnPolicy,
+  RolePermission,
+  RoleRowPolicy
+}
 import io.circe.parser.parse
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -377,6 +383,91 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
       plan(objects = List(obj("x", "insert", catalog = "system"))),
       "insert in the system catalog is superuser-only"
     )
+  }
+
+  // qod-node describes a DuckLake read at any snapshot under the table's current name and columns
+  // (review M1), `renamed` when the statement named it, or a column, otherwise. The manager's column
+  // and row policies match the names the statement wrote, so they cannot follow such a read.
+  "a DuckLake read renamed since its snapshot" should "be decided on the current table's grant" in {
+    val renamed = obj("orders", columns = List("id", "v")).copy(renamed = true)
+    allow(plan(objects = List(renamed)))
+    refused(
+      plan(objects = List(obj("customers").copy(renamed = true))),
+      "user:alice lacks grants on acme_lake.main.customers:read"
+    )
+  }
+
+  it should "be refused to a principal with column or row policies, whatever the table" in {
+    val renamed =
+      plan(objects = List(obj("orders", columns = List("id", "v")).copy(renamed = true)))
+    val mask =
+      RoleColumnPolicy("cp-1", "r-1", "*", "*", "customers", "email", "mask", Some("'***'"))
+    val row    = RoleRowPolicy("rp-1", "r-1", "*", "*", "customers", "region = 'X'")
+    val reason =
+      "acme_lake.main.orders was named otherwise at the snapshot it is read at, and column and row " +
+        "policies match the names a statement writes; not available to principals with column or " +
+        "row policies"
+    refused(renamed, reason, principal(eff().copy(columnPolicies = List(mask))))
+    refused(renamed, reason, principal(eff().copy(rowPolicies = List(row))))
+    // The same read under its own name: their policies apply by name, as for any read.
+    allow(
+      plan(objects = List(obj("orders", columns = List("id", "v")))),
+      principal(eff().copy(columnPolicies = List(mask)))
+    )
+  }
+
+  "a DuckLake read of a dropped or replaced table" should "be decided on the name it is described under" in {
+    allow(plan(objects = List(obj("orders", columns = List("id")).copy(dropped = true))))
+    allow(plan(objects = List(obj("orders", columns = List("id")).copy(replaced = true))))
+    refused(
+      plan(objects = List(obj("customers").copy(dropped = true))),
+      "user:alice lacks grants on acme_lake.main.customers:read"
+    )
+  }
+
+  it should "be refused to a principal with column or row policies" in {
+    val mask =
+      RoleColumnPolicy("cp-1", "r-1", "*", "*", "customers", "email", "mask", Some("'***'"))
+    val p = principal(eff().copy(columnPolicies = List(mask)))
+    refused(
+      plan(objects = List(obj("orders", columns = List("id")).copy(dropped = true))),
+      "acme_lake.main.orders is read as it was before it was dropped, and column and row policies " +
+        "match the names a statement writes; not available to principals with column or row policies",
+      p
+    )
+    refused(
+      plan(objects = List(obj("orders", columns = List("id")).copy(replaced = true))),
+      "acme_lake.main.orders is read as it was before it was replaced, and column and row policies " +
+        "match the names a statement writes; not available to principals with column or row policies",
+      p
+    )
+  }
+
+  it should "tell an OPA policy which history the read crossed" in {
+    val f = new Fixture()
+    f.decider.decidePlan(
+      OpaAlice,
+      plan(objects =
+        List(
+          obj("orders", catalog = "opaco_lake", columns = List("id"))
+            .copy(renamed = true, replaced = true)
+        )
+      )
+    ) shouldBe Decision.Allow
+    val access = parse(f.opaBodies.head).toOption.get.hcursor
+      .downField("input")
+      .downField("accesses")
+      .downN(0)
+    access.get[List[String]]("history") shouldBe Right(List("renamed", "replaced"))
+    // A current read carries none.
+    val g = new Fixture()
+    g.decider.decidePlan(OpaAlice, plan(objects = List(obj("orders", catalog = "opaco_lake"))))
+    parse(g.opaBodies.head).toOption.get.hcursor
+      .downField("input")
+      .downField("accesses")
+      .downN(0)
+      .downField("history")
+      .succeeded shouldBe false
   }
 
   "DuckLake catalog metadata" should "be refused even under *.*.* ALL" in {

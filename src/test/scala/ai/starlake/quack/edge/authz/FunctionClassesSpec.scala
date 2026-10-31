@@ -109,6 +109,8 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     "duckdb_secret_types",
     "duckdb_variables",
     "ducklake_set_commit_message",
+    "ducklake_table_deletions",
+    "ducklake_table_insertions",
     "generate_series",
     "icu_calendar_names",
     "json_each",
@@ -303,6 +305,12 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     tableClass("ducklake_set_commit_message") shouldBe Some(Allowed)
     tableClass("scan_data_from_quack_client") shouldBe Some(Allowed)
     tableClass("qod_session") shouldBe Some(Allowed)
+    // The data diff and the branch change counts, run as the caller: the change feed's plan is a read
+    // of the table its literals name, decided on that table's grant (the parse screen requires them).
+    tableClass("ducklake_table_insertions") shouldBe Some(Allowed)
+    tableClass("ducklake_table_deletions") shouldBe Some(Allowed)
+    FunctionClasses.of("system", "main", "ducklake_table_changes", "table_macro") shouldBe
+      Some(Allowed)
   }
 
   it should "keep the nearest relatives of admitted functions superuser" in {
@@ -316,6 +324,8 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       ("duckdb_columns", "table", Listing)              -> ("pragma_table_info", "table"),
       ("duckdb_views", "table", Listing)                -> ("duckdb_functions", "table"),
       ("ducklake_set_commit_message", "table", Allowed) -> ("ducklake_set_option", "table"),
+      ("ducklake_table_insertions", "table", Allowed)   -> ("ducklake_table_info", "table"),
+      ("ducklake_table_deletions", "table", Allowed)    -> ("ducklake_list_files", "table"),
       ("pragma_version", "table", Allowed)              -> ("pragma_storage_info", "table"),
       ("duckdb_variables", "table", Allowed)            -> ("duckdb_settings", "table"),
       ("duckdb_dialects", "table", Allowed)             -> ("duckdb_connection_count", "table"),
@@ -335,10 +345,13 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  private val FamilyExceptions =
+    Set("ducklake_set_commit_message", "ducklake_table_deletions", "ducklake_table_insertions")
+
   it should "reserve whole families to superusers" in {
     val families = FunctionClasses.all.collect {
       case (k, c)
-          if k.tpe == "table" && k.name != "ducklake_set_commit_message" &&
+          if k.tpe == "table" && !FamilyExceptions(k.name) &&
             Seq("ducklake_", "iceberg_", "postgres_", "quack_").exists(k.name.startsWith) =>
         k.name -> c
     }

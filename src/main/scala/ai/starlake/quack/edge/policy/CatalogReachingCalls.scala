@@ -21,7 +21,11 @@ import ai.starlake.quack.edge.sql.{FunctionCalls, StatementHead}
   *     the rewriters never parse.
   *
   * Every other principal is judged by the node alone: its describer reads what these calls resolve
-  * to, and a superuser keeps the raw passthrough (owner ruling 2026-10-11).
+  * to, and a superuser keeps the raw passthrough (owner ruling 2026-10-11). That includes
+  * DuckLake's change feed (`ducklake_table_changes` / `_insertions` / `_deletions` with the table
+  * named by literals: the data diff and the branch change counts), which the node admits as a read
+  * of the named table on its grant; its change rows are no relation the rewriters can mask or
+  * filter, so it stays refused here to a principal with column or row policies, on any table.
   *
   * Lexical on purpose, not an AST walk: an unparseable statement reaches the wildcard-coverable
   * parse-error arm with no AST at all. Calls are read from DuckDB 2.0's own tokens by

@@ -3131,6 +3131,54 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/recoverable:
+    get:
+      description: 'Self-service: the dropped tables of your own database you may
+        recover (their name is free and your grants cover a read of it).'
+      operationId: getApiProfileRecoverable
+      parameters:
+      - name: tenantDb
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoverableListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenantDb, Invalid value
+            for: query parameter limit, Invalid value for: header X-API-Key, Invalid
+            value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/profile/statements:
     get:
       operationId: getApiProfileStatements
@@ -6426,6 +6474,49 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/undrop:
+    post:
+      description: 'Self-service: recover a dropped table of your own database as
+        you, optionally under a new name (asName). The node judges the read and the
+        create.'
+      operationId: postApiProfileUndrop
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUndropRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UndropResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/role/column-policy/create:
     post:
       operationId: postApiRoleColumn-policyCreate
@@ -7748,6 +7839,7 @@ components:
       - deleted
       - updated
       - mergeable
+      - countsUnavailable
       properties:
         schema:
           type: string
@@ -7768,6 +7860,8 @@ components:
           type: boolean
         reason:
           type: string
+        countsUnavailable:
+          type: boolean
     CatalogAttachFailureDto:
       title: CatalogAttachFailureDto
       type: object
@@ -9965,6 +10059,22 @@ components:
       properties:
         id:
           type: string
+    ProfileUndropRequest:
+      title: ProfileUndropRequest
+      type: object
+      required:
+      - tenantDb
+      - schema
+      - table
+      properties:
+        tenantDb:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        asName:
+          type: string
     RdbmsConfig:
       title: RdbmsConfig
       type: object
@@ -10006,6 +10116,7 @@ components:
       - droppedAtSnapshot
       - lastLiveSnapshot
       - recoverable
+      - tableId
       properties:
         schema:
           type: string
@@ -10021,6 +10132,9 @@ components:
           type: string
         recoverable:
           type: boolean
+        tableId:
+          type: integer
+          format: int64
     RemoveTenantLocationRequest:
       title: RemoveTenantLocationRequest
       type: object

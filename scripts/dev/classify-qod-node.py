@@ -79,6 +79,11 @@ ALLOWED_TABLE = {
     "pragma_platform", "pragma_user_agent", "pragma_version", "qod_session", "query", "query_table",
     "range", "repeat", "repeat_row", "scan_data_from_quack_client", "sql_tokenize", "summary",
     "test_all_types", "test_vector_types", "unnest",
+    # DuckLake's change feed (ducklake_table_changes, the table macro over these two, is classed from
+    # its body): the bind swaps in the named table's own scan, so the plan holds a read of that table,
+    # judged on its grant like any read of it. The parse screen admits them only with the catalog,
+    # schema and table as literals (screen_rules.cpp, ChangeFeed).
+    "ducklake_table_deletions", "ducklake_table_insertions",
 }
 
 # Superusers only. Listed for review; any table function no set names is superuser anyway.

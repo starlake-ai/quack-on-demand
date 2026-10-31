@@ -58,7 +58,9 @@ final class AuthzStack(
     /** What this stack's tenants and source databases are named with, before a run's hex: the
       * databases [[boot]] drops when an earlier run of this stack left them.
       */
-    stackPrefixes: List[String] = Nil
+    stackPrefixes: List[String] = Nil,
+    /** Manager modules booted with the stack, as `ModuleLoader.discover()` hands them to Main. */
+    modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
 ):
   import Main.given
 
@@ -136,6 +138,7 @@ final class AuthzStack(
         authCfg,
         metrics,
         opa,
+        modules = modules,
         quackCfg = Some(quackCfg)
       )
       .attempt
@@ -225,6 +228,34 @@ final class AuthzStack(
     val (code, body) = postStatus(path, json, token)
     if code < 200 || code >= 300 then throw new IllegalStateException(s"POST $path -> $code $body")
     if body.isBlank then Json.Null else parse(body).fold(e => throw e, identity)
+
+  /** A GET as the seeded admin; throws on a non-2xx answer. */
+  def get(path: String): Json =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$restPort$path"))
+        .timeout(Duration.ofSeconds(30))
+        .header("X-API-Key", session)
+        .GET()
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    if r.statusCode() < 200 || r.statusCode() >= 300 then
+      throw new IllegalStateException(s"GET $path -> ${r.statusCode()}")
+    parse(r.body()).fold(e => throw e, identity)
+
+  /** A GET with the session `token`: (status, body). */
+  def getStatus(path: String, token: String): (Int, String) =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$restPort$path"))
+        .timeout(Duration.ofSeconds(30))
+        .header("X-API-Key", token)
+        .GET()
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    (r.statusCode(), r.body())
 
   /** A PUT as the seeded admin (the federated-secret upsert); throws on a non-2xx answer. */
   def put(path: String, json: String): Unit =
@@ -500,6 +531,34 @@ final class AuthzStack(
   /** `sql` through MCP's `run_sql` with personal access token `pat`: the tool's text (Right), or
     * its error text (Left).
     */
+  /** MCP tool `name` with `arguments` under the bearer `pat`: its text (Right), or the error text.
+    */
+  def mcpTool(pat: String, name: String, arguments: Json): Either[String, String] =
+    val body = Json
+      .obj(
+        "jsonrpc" -> Json.fromString("2.0"),
+        "id"      -> Json.fromInt(1),
+        "method"  -> Json.fromString("tools/call"),
+        "params"  -> Json.obj("name" -> Json.fromString(name), "arguments" -> arguments)
+      )
+      .noSpaces
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$restPort/mcp"))
+        .timeout(Duration.ofSeconds(30))
+        .header("Content-Type", "application/json")
+        .header("Authorization", s"Bearer $pat")
+        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    val result = parse(r.body()).toOption.map(_.hcursor.downField("result"))
+    val text   = result
+      .flatMap(_.downField("content").downN(0).get[String]("text").toOption)
+      .getOrElse(r.body())
+    if result.flatMap(_.get[Boolean]("isError").toOption).contains(false) then Right(text)
+    else Left(text)
+
   def mcp(pat: String, sql: String, database: String): Either[String, String] =
     val body = Json
       .obj(

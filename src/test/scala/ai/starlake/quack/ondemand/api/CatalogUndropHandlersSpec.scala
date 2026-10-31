@@ -89,11 +89,13 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         limitSink.set(limit)
         dropped.take(limit)
       override def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
-        dropped.find(e => e.schema == schema && e.table == table)
+        dropped.find(e => e.schema.equalsIgnoreCase(schema) && e.table.equalsIgnoreCase(table))
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
         tableExistsAtFn match
           case Some(f) => f(schema, table, snapshotId)
           case None    => liveTables.contains((schema, table))
+      override def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean =
+        tableExistsAt(schema, name, snapshotId)
 
   trait Stubs:
     val (sup, store)                  = supervisor()
@@ -102,8 +104,9 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     var seenSql: Option[String]       = None
     var seenPoolKey: Option[PoolKey]  = None
     var seenCallers: List[ExecCaller] = Nil
-    var closed                        = false
-    var executorResult: IO[Either[RouterFailure, QueryResult]] =
+    var seenSession: Option[(String, String, ai.starlake.quack.ondemand.rbac.EffectiveSet)] = None
+    var closed                                                                              = false
+    var executorResult: IO[Either[RouterFailure, QueryResult]]                              =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
     val executor: CatalogPreviewHandlers.PreviewExecutor =
       (caller, poolKey, sql) =>
@@ -124,7 +127,11 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         (_, _) => readerOverride,
         cfgOverride,
         IdentityFixtures.restCaller(sessionsOverride, patsOverride),
-        audit = audit
+        audit = audit,
+        sessionExecutor = (connectionId, user, poolKey, sql, eff) =>
+          seenSql = Some(sql)
+          seenSession = Some((connectionId, user, eff))
+          executorResult
       )
 
     def undrop(
@@ -140,6 +147,37 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
       h.undrop(UndropRequest(tenant, tenantDb, schema, table, asName, fromSnapshot), apiKey)(
         SuperuserScope
       ).unsafeRunSync()
+
+  "UNDROP TABLE" should "run its CTAS as the session itself, its claims included (review I3)" in new Stubs:
+    val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-carol", Some("acme"), "carol", kind = "user"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      claims = Map("contractor" -> "true")
+    )
+    val out = handlers()
+      .undropStatement(
+        "conn-7",
+        "carol",
+        PoolKey("acme", "acme_tpch1", "bi"),
+        Some(eff),
+        Some("TPCH1"),
+        "DOOMED",
+        Some("back")
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    out.foreach(_.close())
+    // The session's own effective set, never a re-resolved caller: its claims reach the node and OPA.
+    seenSession.map(_._1) shouldBe Some("conn-7/undrop")
+    seenSession.map(_._3.claims) shouldBe Some(Map("contractor" -> "true"))
+    seenCallers shouldBe Nil
+    // Names compare without case (review M6): the stored names are what the CTAS names.
+    seenSql shouldBe Some(
+      """CREATE TABLE "tpch1"."back" AS SELECT * FROM "tpch1"."doomed" AT (VERSION => 39)"""
+    )
 
   "recoverable" should "return the reader's dropped tables" in new Stubs:
     val out =

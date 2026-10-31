@@ -1563,13 +1563,17 @@ final case class DataDiffResponse(
 )
 
 // ----- Undrop (Spec 03) -----
+/** `table` is the table's last live name; `tableId` its DuckLake table id (a name dropped twice is
+  * listed once per table).
+  */
 final case class RecoverableTableEntry(
     schema: String,
     table: String,
     droppedAtSnapshot: Long,
     lastLiveSnapshot: Long,
     droppedAt: Option[String],
-    recoverable: Boolean
+    recoverable: Boolean,
+    tableId: Long = 0L
 )
 
 final case class RecoverableListResponse(tables: List[RecoverableTableEntry])
@@ -1581,6 +1585,16 @@ final case class UndropRequest(
     table: String,
     asName: Option[String] = None,
     fromSnapshot: Option[Long] = None
+)
+
+/** The self-service undrop (`POST /api/profile/undrop`, MCP `undrop_table` for a non-admin): the
+  * caller's own tenant, never named here.
+  */
+final case class ProfileUndropRequest(
+    tenantDb: String,
+    schema: String,
+    table: String,
+    asName: Option[String] = None
 )
 
 final case class UndropResponse(
@@ -1704,7 +1718,10 @@ final case class BranchMergeEntry(
 
 final case class BranchDetailResponse(branch: BranchEntry, merges: List[BranchMergeEntry])
 
-/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed. */
+/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed;
+  * `countsUnavailable`: they were asked for and refused to the requester or failed, so the zeros
+  * are no counts.
+  */
 final case class BranchTableChange(
     schema: String,
     table: String,
@@ -1713,7 +1730,8 @@ final case class BranchTableChange(
     deleted: Long = 0L,
     updated: Long = 0L,
     mergeable: Boolean = true,
-    reason: Option[String] = None
+    reason: Option[String] = None,
+    countsUnavailable: Boolean = false
 )
 
 final case class BranchConflictEntry(schema: String, table: String, reason: String)
@@ -2045,6 +2063,7 @@ object Dtos:
   given Codec[RecoverableTableEntry]      = deriveCodec
   given Codec[RecoverableListResponse]    = deriveCodec
   given Codec[UndropRequest]              = deriveCodec
+  given Codec[ProfileUndropRequest]       = ConfiguredCodec.derived
   given Codec[UndropResponse]             = deriveCodec
   given Codec[RestoreRequest]             = deriveCodec
   given Codec[RestoreResponse]            = deriveCodec

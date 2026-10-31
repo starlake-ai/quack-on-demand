@@ -168,6 +168,9 @@ final class ManagerServer(
     path == "/api/auth/whoami" || path == "/api/auth/logout" ||
       path == "/api/profile/usage" || path == "/api/profile/statements" ||
       path == "/api/profile/pools" ||
+      // Self-service undrop: the caller's own tenant only (no tenant input), run as them, so the
+      // node judges the read of the dropped table and the create.
+      path == "/api/profile/recoverable" || path == "/api/profile/undrop" ||
       // A user's own S3 credentials: the handlers act on the caller's own user row only.
       path == "/api/profile/s3/list" || path == "/api/profile/s3/add" ||
       path == "/api/profile/s3/remove" ||
@@ -510,7 +513,11 @@ final class ManagerServer(
         },
         UndropEndpoints.undropEndpoint.serverLogic { case (req, token) =>
           h.undrop(req, token)(scopeOfToken)
-        }
+        },
+        ProfileEndpoints.recoverable.serverLogic { case (tenantDb, limit, token) =>
+          h.recoverableMine(tenantDb, limit, token)
+        },
+        ProfileEndpoints.undrop.serverLogic { case (req, token) => h.undropMine(req, token) }
       )
     }
 

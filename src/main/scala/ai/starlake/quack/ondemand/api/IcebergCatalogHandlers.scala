@@ -391,7 +391,12 @@ final class IcebergCatalogHandlers(
         )
       case Some(poolKey) =>
         // 401 on an unresolvable token: the executor is never called, never as the superuser.
-        callerOf(s"$label-${t.tid}-${t.db}", apiKey) match
+        callerOf(s"$label-${t.tid}-${t.db}", apiKey).flatMap(caller =>
+          // A token's databases and pools axes (review N5).
+          TokenScope
+            .refusal(sup, t.tid, caller, t.db, Some(poolKey), writes = false)
+            .toLeft(caller)
+        ) match
           case Left(e)       => IO.pure(denied(e))
           case Right(caller) => run(caller, poolKey)
 

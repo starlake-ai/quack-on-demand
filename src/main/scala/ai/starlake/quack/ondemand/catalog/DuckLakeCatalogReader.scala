@@ -48,7 +48,8 @@ final case class TableHistoryPage(
 /** One dropped-but-maybe-recoverable table (Spec 03 undrop). `lastLiveSnapshot` is the snapshot the
   * table can be read AT to reconstruct its final state (`droppedAtSnapshot - 1`); `recoverable` is
   * false once that snapshot has been expired. `droppedAt` is the drop snapshot's ISO-8601 commit
-  * time when that snapshot itself still exists.
+  * time when that snapshot itself still exists. `table` is the table's last live name (a table
+  * renamed and then dropped is listed once, under that name); `tableId` its DuckLake table id.
   */
 final case class DroppedTableEntry(
     schema: String,
@@ -56,7 +57,8 @@ final case class DroppedTableEntry(
     droppedAtSnapshot: Long,
     lastLiveSnapshot: Long,
     droppedAt: Option[String],
-    recoverable: Boolean
+    recoverable: Boolean,
+    tableId: Long = 0L
 )
 
 /** One `ducklake_table` row: a table version under a stable `tableId`, live from `begin`
@@ -184,6 +186,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
   private val droppedTablesSelect =
     """SELECT s.schema_name,
       |       t.table_name,
+      |       t.table_id,
       |       t.end_snapshot AS dropped_at_snapshot,
       |       sn.snapshot_time AS dropped_at,
       |       EXISTS(SELECT 1 FROM ducklake_snapshot e
@@ -193,7 +196,9 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       |  LEFT JOIN ducklake_snapshot sn ON sn.snapshot_id = t.end_snapshot
       | WHERE t.end_snapshot IS NOT NULL
       |   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
-      |                    WHERE l.table_id = t.table_id AND l.end_snapshot IS NULL)""".stripMargin
+      |                    WHERE l.table_id = t.table_id AND l.end_snapshot IS NULL)
+      |   AND t.end_snapshot = (SELECT max(m.end_snapshot) FROM ducklake_table m
+      |                          WHERE m.table_id = t.table_id)""".stripMargin
 
   private def droppedEntry(rs: ResultSet): DroppedTableEntry =
     val d = rs.getLong("dropped_at_snapshot")
@@ -203,7 +208,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       droppedAtSnapshot = d,
       lastLiveSnapshot = d - 1,
       droppedAt = Option(rs.getTimestamp("dropped_at")).map(_.toInstant.toString),
-      recoverable = rs.getBoolean("recoverable")
+      recoverable = rs.getBoolean("recoverable"),
+      tableId = rs.getLong("table_id")
     )
 
   /** Discovery list only: a drop whose (schema, name) is live again - an undrop recovery re-created
@@ -214,9 +220,14 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
   private val nameNotLiveAgain =
     """   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
       |                    JOIN ducklake_schema ls ON ls.schema_id = l.schema_id
-      |                   WHERE ls.schema_name = s.schema_name
-      |                     AND l.table_name  = t.table_name
-      |                     AND l.end_snapshot IS NULL)""".stripMargin
+      |                   WHERE translate(ls.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+      |                     AND translate(l.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')  = translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+      |                     AND l.end_snapshot IS NULL)
+      |   AND NOT EXISTS (SELECT 1 FROM ducklake_view v
+      |                    JOIN ducklake_schema vs ON vs.schema_id = v.schema_id
+      |                   WHERE translate(vs.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+      |                     AND translate(v.view_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')   = translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+      |                     AND v.end_snapshot IS NULL)""".stripMargin
 
   def listDroppedTables(limit: Int = 50): List[DroppedTableEntry] =
     query(
@@ -232,7 +243,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
   def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
     query(
       droppedTablesSelect +
-        "\n   AND s.schema_name = ? AND t.table_name = ?\n ORDER BY t.end_snapshot DESC\n LIMIT 1",
+        "\n   AND translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')" +
+        "\n ORDER BY t.end_snapshot DESC\n LIMIT 1",
       schema,
       table
     )(droppedEntry).headOption
@@ -947,6 +959,28 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     */
   def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
     tableIdAt(schema, table, snapshotId).isDefined
+
+  /** Whether a live table or view holds `schema.name` at snapshot `snapshotId`, compared without
+    * case for ASCII letters only, as DuckDB resolves names (translate(), never lower(), which a
+    * Postgres locale may extend to other letters: review 5 R3): what an undrop's target name and
+    * the node's dropped-table rule must find free.
+    */
+  def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean =
+    val (sPred, sArgs) = visible("s", Some(snapshotId))
+    val (tPred, tArgs) = visible("t", Some(snapshotId))
+    val (vPred, vArgs) = visible("v", Some(snapshotId))
+    query(
+      s"""SELECT 1 FROM ducklake_schema s
+         |  JOIN ducklake_table t ON t.schema_id = s.schema_id
+         | WHERE translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+         |   AND $sPred AND $tPred
+         | UNION ALL
+         |SELECT 1 FROM ducklake_schema s
+         |  JOIN ducklake_view v ON v.schema_id = s.schema_id
+         | WHERE translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(v.view_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+         |   AND $sPred AND $vPred""".stripMargin,
+      (List(schema, name) ++ sArgs ++ tArgs ++ List(schema, name) ++ sArgs ++ vArgs)*
+    )(_ => 1).nonEmpty
 
   /** Columns visible at snapshot `n` for a table pinned by `table_id` (not name) - the rename-proof
     * counterpart to `listColumns`/`columnsAt`, used internally by `schemaDiff`.

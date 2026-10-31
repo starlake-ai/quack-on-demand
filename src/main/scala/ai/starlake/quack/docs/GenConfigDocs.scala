@@ -37,12 +37,30 @@ object GenConfigDocs:
   private def escape(s: String): String =
     s.replace("|", "\\|").replace("\n", " ")
 
-  /** Like [[escape]] but also neutralizes MDX-significant characters for prose cells that are NOT
-    * wrapped in a code span. Docusaurus parses Markdown as MDX, so a bare `{tenant}` or `<x>` in a
-    * description would be read as a JSX expression/element and break the build.
+  /** A description cell. Docusaurus parses Markdown as MDX, so the description's prose is
+    * neutralized: a bare `{tenant}` or `<x>` would be read as a JSX expression or element, and a
+    * bare URL (`http://...`, `www.`) is autolinked, which a placeholder URL such as
+    * `http://<pod IP>:<port>` breaks. The braces and `<` become entities, and the URL prefixes lose
+    * their autolink shape (`&#58;//`, `www&#46;`) while rendering the same. A code span (a pair of
+    * backticks) is literal to MDX, so it is emitted verbatim, only its table pipes escaped: put a
+    * URL or a placeholder in backticks to show it exactly. An unpaired backtick is prose.
     */
-  private def escapeText(s: String): String =
-    escape(s).replace("{", "&#123;").replace("}", "&#125;").replace("<", "&lt;")
+  private[docs] def escapeText(s: String): String =
+    val parts = escape(s).split("`", -1).toList
+    // Odd parts sit between two backticks, except a trailing odd part with no closing backtick.
+    val paired = parts.length % 2 == 1
+    parts.zipWithIndex.map { (part, i) =>
+      val inCode = i % 2 == 1 && (paired || i < parts.length - 1)
+      if inCode then s"`$part`"
+      else (if i % 2 == 1 then "`" else "") + escapeProse(part)
+    }.mkString
+
+  private def escapeProse(s: String): String =
+    s.replace("{", "&#123;")
+      .replace("}", "&#125;")
+      .replace("<", "&lt;")
+      .replace("://", "&#58;//")
+      .replace("www.", "www&#46;")
 
   def render: String =
     val cfg = ConfigFactory.load()

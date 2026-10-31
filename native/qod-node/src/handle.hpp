@@ -29,7 +29,7 @@ struct Principal {
 
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
-//! {"v":3,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
+//! {"v":4,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
 //!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"readOnly":[..],"nonce":..,"exp":..},
 //! every member required ("ctx", "creds" and "path" since node protocol 3, "readOnly" since 5). The MAC
 //! covers the payload bytes as sent, so no canonical form has to agree between the two sides.
@@ -64,10 +64,12 @@ struct Handle {
 //! The handle version this node reads, and the only one. A node reads exactly one version and refuses
 //! every other, the probe's handle included: version 1 is node protocol 2's (no enforcement in the
 //! engine), version 2 is protocols 3 and 4's (no readOnly, so a superuser could write into a
-//! read-only catalog there). Bumping it keeps such a node unhealthy and never routed to on every
-//! backend. Bump it with the manager's NodeHandles.Version whenever a node that ignores a new member
-//! must not serve.
-constexpr int64_t kHandleVersion = 3;
+//! read-only catalog there), version 3 is protocol 5's (a DuckLake read at an earlier snapshot described
+//! under the name it had then, so another table's grant could cover it: review M1). Bumping it keeps
+//! such a node unhealthy and never routed to on every backend. Bump it with the manager's
+//! NodeHandles.Version whenever a node that ignores a new member, or describes differently, must not
+//! serve.
+constexpr int64_t kHandleVersion = 4;
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
 //! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it

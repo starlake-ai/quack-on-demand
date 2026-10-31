@@ -37,6 +37,15 @@ import scala.util.Try
   *   - erin (acme): a tenant admin (kind `admin`) with the default memberships;
   *   - olga (acme): role `e2e_one_table` (RO lake events, nothing else), group `qod_all_pools`;
   *   - pete (acme): role `e2e_all_ro` (`*.*.* RO`, nothing named), group `qod_all_pools`;
+  *   - fran (acme): role `e2e_feed` (RO lake `feed_a`, nothing else), group `qod_all_pools`; tess
+  *     (acme): a tenant admin with only that role and group (the REST data diff); mona (acme): role
+  *     `e2e_feed_masked` (RO lake `feed_a` with a mask on its `email`, and RO lake `vault_now`),
+  *     group `qod_all_pools`;
+  *   - nico (acme): role `e2e_vault` (RO lake `vault`, the table created after the first `vault`
+  *     was renamed `vault_now`), group `qod_all_pools`; vera (acme): role `e2e_vault_now` (RO lake
+  *     `vault_now`), group `qod_all_pools`;
+  *   - dina (acme): role `e2e_drop` (RO lake `drop_free`, `drop_reused` and `rn_final`, tables
+  *     dropped by the dropped-table cases), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -69,6 +78,12 @@ abstract class AuthzEndToEndCases(
   private val ErinPw    = "erin-e2e-pw-1"
   private val OlgaPw    = "olga-e2e-pw-1"
   private val PetePw    = "pete-e2e-pw-1"
+  private val FranPw    = "fran-e2e-pw-1"
+  private val TessPw    = "tess-e2e-pw-1"
+  private val MonaPw    = "mona-e2e-pw-1"
+  private val NicoPw    = "nico-e2e-pw-1"
+  private val VeraPw    = "vera-e2e-pw-1"
+  private val DinaPw    = "dina-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -76,7 +91,13 @@ abstract class AuthzEndToEndCases(
     "dave"  -> DavePw,
     "erin"  -> ErinPw,
     "olga"  -> OlgaPw,
-    "pete"  -> PetePw
+    "pete"  -> PetePw,
+    "fran"  -> FranPw,
+    "tess"  -> TessPw,
+    "mona"  -> MonaPw,
+    "nico"  -> NicoPw,
+    "vera"  -> VeraPw,
+    "dina"  -> DinaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -363,6 +384,54 @@ abstract class AuthzEndToEndCases(
         "groups"   -> Json.arr(s("qod_all_pools"))
       )
     )
+    // DuckLake's change feed: RO on lake feed_a alone, as a user, as a tenant admin (the REST data
+    // diff) and under a mask on its email.
+    val feed = createRole("e2e_feed")
+    grant(lake, "main", "feed_a", "RO", feed)
+    val feedMasked = createRole("e2e_feed_masked")
+    grant(lake, "main", "feed_a", "RO", feedMasked)
+    grant(lake, "main", "vault_now", "RO", feedMasked)
+    // A table renamed since a snapshot: `vault` (the new one) alone, and `vault_now` (the old) alone.
+    val vault = createRole("e2e_vault")
+    grant(lake, "main", "vault", "RO", vault)
+    grant(lake, "main", "rn_first", "RO", vault)
+    val drop = createRole("e2e_drop")
+    List("drop_free", "drop_reused", "rn_final").foreach(t => grant(lake, "main", t, "RO", drop))
+    grant(lake, "main", "rorders", "RO", feed)
+    val vaultNow = createRole("e2e_vault_now")
+    grant(lake, "main", "vault_now", "RO", vaultNow)
+    stack.post(
+      "/api/role/column-policy/create",
+      obj(
+        "roleId"       -> s(feedMasked),
+        "catalogName"  -> s(lake),
+        "schemaName"   -> s("main"),
+        "tableName"    -> s("feed_a"),
+        "columnName"   -> s("email"),
+        "action"       -> s("mask"),
+        "transformSql" -> s("'***'")
+      )
+    )
+    List(
+      ("fran", FranPw, "user", "e2e_feed"),
+      ("tess", TessPw, "admin", "e2e_feed"),
+      ("mona", MonaPw, "user", "e2e_feed_masked"),
+      ("nico", NicoPw, "user", "e2e_vault"),
+      ("vera", VeraPw, "user", "e2e_vault_now"),
+      ("dina", DinaPw, "user", "e2e_drop")
+    ).foreach { (user, pw, kind, role) =>
+      stack.post(
+        "/api/user/create",
+        obj(
+          "tenant"   -> s(Acme),
+          "username" -> s(user),
+          "password" -> s(pw),
+          "kind"     -> s(kind),
+          "roles"    -> Json.arr(s(role)),
+          "groups"   -> Json.arr(s("qod_all_pools"))
+        )
+      )
+    }
     // A tenant admin, with the default memberships: no superuser on the node (decision 29).
     stack.post(
       "/api/user/create",
@@ -1851,6 +1920,587 @@ abstract class AuthzEndToEndCases(
     finally admin("lake", s"DROP VIEW IF EXISTS $view")
     // The data tables stay readable with an ordinary grant.
     allowed("alice", "lake", s"SELECT count(*) FROM $lake.main.orders", Some(List("10")))
+  }
+
+  // ---------- DuckLake's change feed: the data diff and the branch change counts ----------
+
+  /** feed_a and feed_b on the lake, and the snapshot range `(from, to]` of their writes: three rows
+    * inserted into feed_a, one updated, one deleted; one row inserted into feed_b. Written once by
+    * the superuser.
+    */
+  private lazy val feedRange: (Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.feed_a (id INTEGER, v VARCHAR, email VARCHAR)")
+    admin("lake", s"CREATE TABLE $lake.main.feed_b (id INTEGER, v VARCHAR)")
+    val from = head()
+    admin(
+      "lake",
+      s"INSERT INTO $lake.main.feed_a VALUES (1, 'a', 'a@x.io'), (2, 'b', 'b@x.io'), " +
+        "(3, 'c', 'c@x.io')"
+    )
+    admin("lake", s"UPDATE $lake.main.feed_a SET v = 'B' WHERE id = 2")
+    admin("lake", s"DELETE FROM $lake.main.feed_a WHERE id = 3")
+    admin("lake", s"INSERT INTO $lake.main.feed_b VALUES (9, 'z')")
+    (from, head())
+
+  /** The data diff's and the branch change counter's statement (DataDiffSql.summarySql). */
+  private def feedSummary(table: String): String =
+    val (from, to) = feedRange
+    ai.starlake.quack.ondemand.api.DataDiffSql.summarySql(lake, "main", table, from, to)
+
+  /** The data diff's page statement's shape, over its own change feed call. */
+  private def feedPage(table: String, columns: String = "change_type, id, v"): String =
+    val (from, to) = feedRange
+    s"SELECT $columns FROM " +
+      ai.starlake.quack.ondemand.api.DataDiffSql.diffFn(lake, "main", table, from, to) +
+      " ORDER BY snapshot_id, rowid, change_type"
+
+  private def restDataDiff(user: String, table: String): (Int, String) =
+    val (from, to) = feedRange
+    stack.getStatus(
+      s"/api/catalog/tenant/$Acme/database/$lake/schemas/main/tables/$table/data-diff" +
+        s"?from=$from&to=$to",
+      session(user)
+    )
+
+  "DuckLake's change feed" should "give a user the data diff and change counts of a table they may read" in {
+    ready()
+    // The superuser's answer, the reference: three inserts, one update (pre and post), one delete.
+    val counts = admin("lake", feedSummary("feed_a")).sorted
+    counts shouldBe List("delete,1", "insert,3", "update_postimage,1", "update_preimage,1")
+    doors.foreach { d =>
+      withClue(s"[$d] fran: the counts of feed_a -> ") {
+        as(d, "fran", "lake", feedSummary("feed_a")).map(_.sorted) shouldBe Right(counts)
+      }
+    }
+    allowed("fran", "lake", feedPage("feed_a"), Some(admin("lake", feedPage("feed_a"))))
+    // The REST data diff runs the same statements as its caller: a tenant admin holding only
+    // feed_a's grant gets feed_a's.
+    val (code, body) = restDataDiff("tess", "feed_a")
+    withClue(body)(code shouldBe 200)
+    val summary = io.circe.parser.parse(body).toOption.get.hcursor.downField("summary")
+    summary.get[Long]("inserted") shouldBe Right(3L)
+    summary.get[Long]("deleted") shouldBe Right(1L)
+    summary.get[Long]("updated") shouldBe Right(1L)
+  }
+
+  it should "refuse a table the user holds no grant on, and a table named by anything but literals" in {
+    ready()
+    admin("lake", feedSummary("feed_b")) shouldBe List("insert,1")
+    refused("fran", "lake", feedSummary("feed_b"), node = s"lacks grants on $lake.main.feed_b:read")
+    refused("fran", "lake", feedPage("feed_b"), node = s"lacks grants on $lake.main.feed_b:read")
+    val (from, to) = feedRange
+    List(
+      s"SELECT count(*) FROM ducklake_table_changes('$lake', 'main', 'feed_' || 'a', $from, $to)",
+      s"SELECT count(*) FROM ducklake_table_insertions('$lake', lower('MAIN'), 'feed_a', $from, $to)",
+      s"SELECT count(*) FROM ducklake_table_deletions(current_database(), 'main', 'feed_a', $from, $to)"
+    ).foreach(sql => refused("fran", "lake", sql, node = "as literals"))
+    // DuckLake's per-schema macro and the rest of its family stay the superusers'.
+    refused("fran", "lake", s"SELECT count(*) FROM $lake.table_changes('feed_a', $from, $to)")
+    refused("fran", "lake", s"SELECT * FROM ducklake_table_info('$lake')")
+    val (code, body) = restDataDiff("tess", "feed_b")
+    withClue(body)(code should not be 200)
+    body should include(s"lacks grants on $lake.main.feed_b:read")
+  }
+
+  it should "never hand a user under a mask unmasked change data" in {
+    ready()
+    feedRange
+    // The mask holds on a plain read of feed_a.
+    allowed("mona", "lake", s"SELECT email FROM $lake.main.feed_a WHERE id = 1", Some(List("***")))
+    // The change rows are no relation the policy rewriters can mask: refused to her before the
+    // node, whatever columns the statement names.
+    List(
+      feedSummary("feed_a"),
+      feedPage("feed_a", "email"),
+      feedPage("feed_a", "*"),
+      s"SELECT email FROM ducklake_table_insertions('$lake', 'main', 'feed_a', ${feedRange._1}, " +
+        s"${feedRange._2})"
+    ).foreach { sql =>
+      doors.foreach { d =>
+        withClue(s"[$d] mona: $sql -> ") {
+          as(d, "mona", "lake", sql) match
+            case Left(err) =>
+              err should include("ducklake_table_")
+              err should include("not available to tenant-scoped principals")
+            case Right(rows) => fail(s"expected a refusal, got rows $rows")
+        }
+      }
+    }
+  }
+
+  // ---------- a DuckLake table at an earlier snapshot: judged as the table it is now (review M1) ----------
+
+  /** `vault` with one row, renamed `vault_now` (its `email` renamed `contact`), then a new `vault`
+    * with another row; and `gone_t`, dropped. The snapshot of the old vault's row and of gone_t's.
+    * Written once by the superuser.
+    */
+  private lazy val vaultHistory: (Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.vault (id INTEGER, email VARCHAR)")
+    admin("lake", s"INSERT INTO $lake.main.vault VALUES (1, 'old@x.io')")
+    val old = head()
+    admin("lake", s"ALTER TABLE $lake.main.vault RENAME TO vault_now")
+    admin("lake", s"ALTER TABLE $lake.main.vault_now RENAME COLUMN email TO contact")
+    admin("lake", s"CREATE TABLE $lake.main.vault (id INTEGER, email VARCHAR)")
+    admin("lake", s"INSERT INTO $lake.main.vault VALUES (2, 'new@x.io')")
+    admin("lake", s"CREATE TABLE $lake.main.gone_t (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.gone_t VALUES (3)")
+    val gone = head()
+    admin("lake", s"DROP TABLE $lake.main.gone_t")
+    (old, gone)
+
+  "a DuckLake table read at an earlier snapshot" should "be judged as the table it is now, never the one holding its old name" in {
+    ready()
+    val (old, _) = vaultHistory
+    val atOld    = s"SELECT id, email FROM $lake.main.vault AT (VERSION => $old)"
+    val feedOld  =
+      s"SELECT id, email FROM ducklake_table_insertions('$lake', 'main', 'vault', 1, $old)"
+    // nico holds only the new vault: its old name's history is vault_now's.
+    refused("nico", "lake", atOld, node = s"lacks grants on $lake.main.vault_now:read")
+    refused("nico", "lake", feedOld, node = s"lacks grants on $lake.main.vault_now:read")
+    allowed("nico", "lake", s"SELECT id, email FROM $lake.main.vault", Some(List("2,new@x.io")))
+    // vera holds vault_now: its history is hers under either name (the rule judges the table, not
+    // the name the statement wrote).
+    allowed("vera", "lake", atOld, Some(List("1,old@x.io")))
+    allowed("vera", "lake", feedOld, Some(List("1,old@x.io")))
+    allowed(
+      "vera",
+      "lake",
+      s"SELECT id, contact FROM $lake.main.vault_now",
+      Some(List("1,old@x.io"))
+    )
+    refused(
+      "vera",
+      "lake",
+      s"SELECT id FROM $lake.main.vault",
+      node = s"lacks grants on $lake.main.vault:read"
+    )
+  }
+
+  it should "be judged by its last name when the table was dropped since, a wildcard grant included" in {
+    ready()
+    val (_, gone) = vaultHistory
+    val sql       = s"SELECT id FROM $lake.main.gone_t AT (VERSION => $gone)"
+    // bob holds `*.*.* ALL`, which covers the free name gone_t; nico holds no grant on it.
+    allowed("bob", "lake", sql, Some(List("3")))
+    refused("nico", "lake", sql, node = s"lacks grants on $lake.main.gone_t:read")
+    admin("lake", sql) shouldBe List("3")
+  }
+
+  it should "be refused under an old name to a principal with column or row policies" in {
+    ready()
+    val (old, _) = vaultHistory
+    // mona's mask is on feed_a, and she holds vault_now: its current name reads, its old one cannot
+    // carry her policies.
+    // The column policy rewriter cannot parse an AT clause and refuses it first (fail closed); the
+    // node's `renamed` rule stands behind it (AuthzDeciderSpec).
+    allowed("mona", "lake", s"SELECT id FROM $lake.main.vault_now", Some(List("1")))
+    doors.foreach { d =>
+      withClue(s"[$d] mona: an AT read under the old name -> ") {
+        as(d, "mona", "lake", s"SELECT id FROM $lake.main.vault AT (VERSION => $old)") match
+          case Left(err) =>
+            err should (include("column policy rewrite could not parse statement") or
+              include("not available to principals with column or row policies"))
+          case Right(rows) => fail(s"expected a refusal, got rows $rows")
+      }
+    }
+  }
+
+  // ---------- a dropped DuckLake table: judged by its last live name; a replace is the same table ----------
+
+  /** The snapshots before each drop: `drop_free` (dropped, its name free), `drop_reused` (dropped,
+    * then a new `drop_reused` created) and `rn_first` (renamed `rn_final`, then dropped). Written
+    * once by the superuser.
+    */
+  private lazy val dropHistory: (Long, Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.drop_free (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.drop_free VALUES (1)")
+    val free = head()
+    admin("lake", s"DROP TABLE $lake.main.drop_free")
+    admin("lake", s"CREATE TABLE $lake.main.drop_reused (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.drop_reused VALUES (2)")
+    val reused = head()
+    admin("lake", s"DROP TABLE $lake.main.drop_reused")
+    admin("lake", s"CREATE TABLE $lake.main.drop_reused (id INTEGER, other VARCHAR)")
+    admin("lake", s"CREATE TABLE $lake.main.rn_first (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.rn_first VALUES (3)")
+    val renamed = head()
+    admin("lake", s"ALTER TABLE $lake.main.rn_first RENAME TO rn_final")
+    admin("lake", s"DROP TABLE $lake.main.rn_final")
+    (free, reused, renamed)
+
+  "a dropped DuckLake table" should "be readable under its free last name with a grant on it, and only so" in {
+    ready()
+    val (free, _, _) = dropHistory
+    val sql          = s"SELECT id FROM $lake.main.drop_free AT (VERSION => $free)"
+    allowed("dina", "lake", sql, Some(List("1")))
+    allowed(
+      "dina",
+      "lake",
+      s"SELECT id FROM ducklake_table_insertions('$lake', 'main', 'drop_free', 1, $free)",
+      Some(List("1"))
+    )
+    refused("olga", "lake", sql, node = s"lacks grants on $lake.main.drop_free:read")
+  }
+
+  it should "be refused once its name belongs to another table, even with a grant on the name" in {
+    ready()
+    val (_, reused, _) = dropHistory
+    refused(
+      "dina",
+      "lake",
+      s"SELECT id FROM $lake.main.drop_reused AT (VERSION => $reused)",
+      node = "its name now belongs to another table"
+    )
+    admin("lake", s"SELECT id FROM $lake.main.drop_reused AT (VERSION => $reused)") shouldBe
+      List("2")
+  }
+
+  it should "be judged on its last name when it was renamed before the drop" in {
+    ready()
+    val (_, _, renamed) = dropHistory
+    val sql             = s"SELECT id FROM $lake.main.rn_first AT (VERSION => $renamed)"
+    allowed("dina", "lake", sql, Some(List("3")))
+    // nico holds the name it had at that snapshot, not its last one.
+    refused("nico", "lake", sql, node = s"lacks grants on $lake.main.rn_final:read")
+  }
+
+  // ---------- a replaced table (CREATE OR REPLACE, QoD's restore) keeps its history ----------
+
+  /** `rorders`, three versions: one row, two rows, three rows, the snapshot after each insert. */
+  private lazy val rordersHistory: (Long, Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.rorders (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.rorders VALUES (1)")
+    val one = head()
+    admin("lake", s"INSERT INTO $lake.main.rorders VALUES (2)")
+    val two = head()
+    admin("lake", s"INSERT INTO $lake.main.rorders VALUES (3)")
+    (one, two, head())
+
+  private def restore(user: String, to: Long): (Int, String) =
+    stack.postStatus(
+      "/api/catalog/restore",
+      obj(
+        "tenant"   -> s(Acme),
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("rorders"),
+        "to"       -> s(to.toString)
+      ),
+      session(user)
+    )
+
+  "a replaced DuckLake table" should "keep its history: a tenant admin restores it twice" in {
+    ready()
+    val (one, two, _) = rordersHistory
+    val (c1, b1)      = restore("erin", two)
+    withClue(b1)(c1 shouldBe 200)
+    admin("lake", s"SELECT count(*) FROM $lake.main.rorders") shouldBe List("2")
+    // The second restore reads rorders before the first one replaced it.
+    val (c2, b2) = restore("erin", one)
+    withClue(b2)(c2 shouldBe 200)
+    admin("lake", s"SELECT count(*) FROM $lake.main.rorders") shouldBe List("1")
+  }
+
+  it should "be previewed and diffed across the replace by a user granted it" in {
+    ready()
+    val (one, two, _) = rordersHistory
+    // After the restores above (or a replace of its own when run alone).
+    admin("lake", s"CREATE OR REPLACE TABLE $lake.main.rorders AS SELECT * FROM $lake.main.rorders")
+    allowed(
+      "fran",
+      "lake",
+      s"SELECT count(*) FROM $lake.main.rorders AT (VERSION => $two)",
+      Some(List("2"))
+    )
+    val token    = session("tess")
+    val base     = s"/api/catalog/tenant/$Acme/database/$lake/schemas/main/tables/rorders"
+    val (pc, pb) = stack.getStatus(s"$base/preview?asOf=$two", token)
+    withClue(pb)(pc shouldBe 200)
+    val now =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    val (dc, db) = stack.getStatus(s"$base/data-diff?from=$one&to=$now", token)
+    withClue(db)(dc shouldBe 200)
+  }
+
+  // ---------- UNDROP TABLE (the gateway's dialect), on both doors, as its caller ----------
+
+  "UNDROP TABLE" should "recover a dropped table as its caller, on both doors" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_t (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.ud_t VALUES (7)")
+    admin("lake", s"DROP TABLE $lake.main.ud_t")
+    doors.foreach { d =>
+      withClue(s"[$d] bob: ") {
+        val back = s"ud_back_${d.toString.toLowerCase(java.util.Locale.ROOT)}"
+        as(d, "bob", "lake", s"UNDROP TABLE main.ud_t AS $back") match
+          case Right(rows) => rows.mkString should include(s"restored as main.$back")
+          case Left(err)   => fail(err)
+        as(d, "bob", "lake", s"SELECT id FROM $lake.main.$back") shouldBe Right(List("7"))
+      }
+    }
+  }
+
+  it should "say in plain words when nothing is dropped, the name is taken, or it is not permitted" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_taken (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_taken")
+    admin("lake", s"CREATE TABLE $lake.main.ud_taken (id INTEGER)")
+    admin("lake", s"CREATE TABLE $lake.main.ud_denied (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_denied")
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        as(d, "bob", "lake", "UNDROP TABLE main.ud_nothing") match
+          case Left(err) => err should include("there is no dropped table main.ud_nothing")
+          case Right(r)  => fail(s"expected a refusal, got $r")
+        as(d, "bob", "lake", "UNDROP TABLE main.ud_taken") match
+          case Left(err) => err should include("use UNDROP TABLE main.ud_taken AS <new name>")
+          case Right(r)  => fail(s"expected a refusal, got $r")
+        // nico holds no grant on ud_denied and no DDL in main.
+        as(d, "nico", "lake", "UNDROP TABLE main.ud_denied AS ud_nico") match
+          case Left(err) => err should include("not permitted")
+          case Right(r)  => fail(s"expected a refusal, got $r")
+      }
+    }
+  }
+
+  // ---------- self-service undrop: a regular user's own profile surface ----------
+
+  private def recoverableOf(user: String): List[String] =
+    val (code, body) = stack.getStatus(s"/api/profile/recoverable?tenantDb=$lake", session(user))
+    withClue(body)(code shouldBe 200)
+    io.circe.parser
+      .parse(body)
+      .toOption
+      .get
+      .hcursor
+      .downField("tables")
+      .values
+      .toList
+      .flatten
+      .flatMap(_.hcursor.get[String]("table").toOption)
+
+  "self-service undrop" should "list to a regular user only the dropped tables they may read" in {
+    ready()
+    dropHistory
+    val dina = recoverableOf("dina")
+    // Granted and free: drop_free, rn_final (its last name). drop_reused's name is taken again.
+    dina should contain allOf ("drop_free", "rn_final")
+    dina should not contain "drop_reused"
+    dina should not contain "gone_t"
+    recoverableOf("olga") should not contain "drop_free"
+  }
+
+  it should "recover a table as the regular user, the node judging the read and the create" in {
+    ready()
+    dropHistory
+    // dina may read drop_free but holds no DDL in main: the create is refused.
+    val (dc, db) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("drop_free"),
+        "asName"   -> s("drop_free_dina")
+      ),
+      session("dina")
+    )
+    withClue(db)(dc shouldBe 403)
+    // The node's refusal of the create (review M8), not a scope or pool refusal.
+    db should include("acl_denied")
+    db should include("drop_free_dina")
+    // bob (`*.*.* ALL`, a regular user) recovers it under a new name, and reads it.
+    val (bc, bb) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("drop_free"),
+        "asName"   -> s("drop_free_bob")
+      ),
+      session("bob")
+    )
+    withClue(bb)(bc shouldBe 200)
+    allowed("bob", "lake", s"SELECT id FROM $lake.main.drop_free_bob", Some(List("1")))
+  }
+
+  private def patOf(user: String, name: String, fields: (String, Json)*): String =
+    stack
+      .post(
+        "/api/auth/pat/create",
+        obj((List("name" -> s(s"$name-$run"), "dropAdmin" -> Json.False) ++ fields)*),
+        token = session(user)
+      )
+      .hcursor
+      .get[String]("token")
+      .fold(e => throw e, identity)
+
+  it should "honour every axis of a token: databases, verb ceiling (review I1)" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_scope (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_scope")
+    val elsewhere = patOf("bob", "ud-elsewhere", "databases" -> Json.arr(s(files)))
+    val (lc, lb)  = stack.getStatus(s"/api/profile/recoverable?tenantDb=$lake", elsewhere)
+    withClue(lb)(lc shouldBe 403)
+    lb should include("token_scope")
+    val undropBody =
+      obj("tenantDb" -> s(lake), "schema" -> s("main"), "table" -> s("ud_scope"))
+    val (uc, ub) = stack.postStatus("/api/profile/undrop", undropBody, elsewhere)
+    withClue(ub)(uc shouldBe 403)
+    ub should include("token_scope")
+    val mcpArgs = Json.obj("database" -> s(lake), "schema" -> s("main"), "table" -> s("ud_scope"))
+    stack.mcpTool(elsewhere, "list_recoverable", Json.obj("database" -> s(lake))) match
+      case Left(err) => err should include("not permitted for this token")
+      case Right(t)  => fail(s"a token scoped elsewhere listed: $t")
+    stack.mcpTool(elsewhere, "undrop_table", mcpArgs) match
+      case Left(err) => err should include("not permitted for this token")
+      case Right(t)  => fail(s"a token scoped elsewhere recovered: $t")
+    // A read-only token may not create the table a recovery creates.
+    val readOnly = patOf("bob", "ud-ro", "verbCeiling" -> s("RO"))
+    val (rc, rb) = stack.postStatus("/api/profile/undrop", undropBody, readOnly)
+    withClue(rb)(rc shouldBe 403)
+    rb should include("verb ceiling")
+    stack.mcpTool(readOnly, "undrop_table", mcpArgs) match
+      case Left(err) => err should include("verb ceiling")
+      case Right(t)  => fail(s"a read-only token recovered: $t")
+  }
+
+  it should "recover through MCP with a regular user's token, and refuse AS on a taken name" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_mcp (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.ud_mcp VALUES (5)")
+    admin("lake", s"DROP TABLE $lake.main.ud_mcp")
+    val pat = patOf("bob", "ud-mcp")
+    // AS on a name a live table holds: refused before anything runs.
+    stack.mcpTool(
+      pat,
+      "undrop_table",
+      Json.obj(
+        "database" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("ud_mcp"),
+        "as_name"  -> s("orders")
+      )
+    ) match
+      case Left(err) => err should include("exists")
+      case Right(t)  => fail(s"recovered over a live table: $t")
+    val (tc, tb) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("ud_mcp"),
+        "asName"   -> s("orders")
+      ),
+      session("bob")
+    )
+    withClue(tb)(tc shouldBe 409)
+    tb should include("name_conflict")
+    stack.mcpTool(
+      pat,
+      "undrop_table",
+      Json.obj("database" -> s(lake), "schema" -> s("main"), "table" -> s("ud_mcp"))
+    ) shouldBe a[Right[?, ?]]
+    allowed("bob", "lake", s"SELECT id FROM $lake.main.ud_mcp", Some(List("5")))
+  }
+
+  it should "refuse AS when the SOURCE name was reused: the node refuses the read (review N6)" in {
+    ready()
+    dropHistory
+    // drop_reused was dropped, then a new drop_reused created: AS frees the target, not the source.
+    val (code, body) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("drop_reused"),
+        "asName"   -> s("drop_reused_back")
+      ),
+      session("bob")
+    )
+    withClue(body)(code shouldBe 403)
+    body should include("acl_denied")
+    body should include("its name now belongs to another table or view")
+  }
+
+  "the catalog REST endpoints that run SQL as the caller" should "honour a token's databases axis and verb ceiling (review N5)" in {
+    ready()
+    val (one, two, _) = rordersHistory
+    val elsewhere     = patOf("erin", "cat-elsewhere", "databases" -> Json.arr(s(files)))
+    val base          = s"/api/catalog/tenant/$Acme/database/$lake/schemas/main/tables/rorders"
+    List(s"$base/preview?asOf=$two", s"$base/data-diff?from=$one&to=$two").foreach { path =>
+      val (c, b) = stack.getStatus(path, elsewhere)
+      withClue(s"$path: $b")(c shouldBe 403)
+      b should include("token_scope")
+    }
+    val restoreBody = obj(
+      "tenant"   -> s(Acme),
+      "tenantDb" -> s(lake),
+      "schema"   -> s("main"),
+      "table"    -> s("rorders"),
+      "to"       -> s(two.toString)
+    )
+    val (rc, rb) = stack.postStatus("/api/catalog/restore", restoreBody, elsewhere)
+    withClue(rb)(rc shouldBe 403)
+    rb should include("token_scope")
+    // A read-only token may preview but not restore (a restore replaces the table).
+    val readOnly = patOf("erin", "cat-ro", "verbCeiling" -> s("RO"))
+    val (pc, pb) = stack.getStatus(s"$base/preview?asOf=$two", readOnly)
+    withClue(pb)(pc shouldBe 200)
+    val (wc, wb) = stack.postStatus("/api/catalog/restore", restoreBody, readOnly)
+    withClue(wb)(wc shouldBe 403)
+    wb should include("verb ceiling")
+  }
+
+  "UNDROP TABLE names" should "compare without case, as DuckDB resolves them (review M6)" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_case (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.ud_case VALUES (8)")
+    admin("lake", s"DROP TABLE $lake.main.ud_case")
+    stack.flight("UNDROP TABLE MAIN.UD_CASE AS ud_case_back", "bob", BobPw, Acme, "lake") match
+      case Right(rows) => rows.mkString should include("restored as main.ud_case_back")
+      case Left(err)   => fail(err)
+    allowed("bob", "lake", s"SELECT id FROM $lake.main.ud_case_back", Some(List("8")))
+  }
+
+  "UNDROP TABLE inside a transaction" should "be refused (review M5)" in {
+    ready()
+    admin("lake", s"CREATE TABLE $lake.main.ud_tx (id INTEGER)")
+    admin("lake", s"DROP TABLE $lake.main.ud_tx")
+    val held = stack.heldFlight("bob", BobPw, Acme, "lake")
+    try
+      held.run("BEGIN TRANSACTION") shouldBe a[Right[?, ?]]
+      held.run("UNDROP TABLE main.ud_tx") match
+        case Left(err) => err should include("cannot run inside a transaction")
+        case Right(r)  => fail(s"UNDROP ran inside a transaction: $r")
+      held.run("ROLLBACK")
+    finally held.close()
+  }
+
+  "a plain view over a renamed table's history" should "be refused by the node to a principal with policies" in {
+    ready()
+    val (old, _) = vaultHistory
+    val view     = s"$lake.main.v_vault_then"
+    try
+      admin(
+        "lake",
+        s"CREATE OR REPLACE VIEW $view AS SELECT id FROM $lake.main.vault AT (VERSION => $old)"
+      )
+      // The policy rewriters see a plain view, no AT clause: only the node's rule stands.
+      refused(
+        "mona",
+        "lake",
+        s"SELECT id FROM $view",
+        node = "not available to principals with column or row policies"
+      )
+    finally admin("lake", s"DROP VIEW IF EXISTS $view")
   }
 
   "DuckLake maintenance, CHECKPOINT and option setting" should "be the superusers'" in {

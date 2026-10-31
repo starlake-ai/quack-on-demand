@@ -167,6 +167,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
           Some(DroppedTableEntry("tpch1", "doomed", 40L, 39L, Some("2026-07-14T00:00:00Z"), true))
         else None
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = false
+      override def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean     = false
 
   private def liveConfigEntries = ConfigRegistry.collect(
     ConfigRegistry.rootsFor(
@@ -307,7 +308,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       args: (String, Json)*
   ): Either[String, Json] =
     val tool = tools.tools.find(_.name == name).getOrElse(fail(s"tool $name not defined"))
-    tool.adminOnly shouldBe true
+    // undrop_table and list_recoverable serve regular users too (their own tenant, as them).
+    tool.adminOnly shouldBe !Set("undrop_table", "list_recoverable").contains(name)
     tool.run(principal, JsonObject(args*)).unsafeRunSync()
 
   "list_recoverable" should "return the recoverable tables list" in withTools { tools =>
@@ -395,7 +397,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         List(("write", ("agent-owner", AgentRestriction, Some("pat-agent"), false)))
     }
 
-  it should "keep its dry run on the system caller (aggregate counts only)" in
+  it should "run its dry run as the PAT's owner too, never the system caller" in
     withRecordingTools { (tools, seen) =>
       val out = call(
         tools,
@@ -408,7 +410,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         "dry_run"  -> Json.True
       )
       withClue(out)(out.isRight shouldBe true)
-      seen.toList.map((leg, c) => (leg, c.system, c.patId)) shouldBe List(("read", true, None))
+      seen.toList.map((leg, c) => (leg, c.system, c.patId)) shouldBe
+        List(("read", false, Some("pat-agent")))
     }
 
   "undrop_table with the superuser PAT" should "run the CTAS as the PAT's owner, not the system caller" in

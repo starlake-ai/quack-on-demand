@@ -330,6 +330,44 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.sql should not include "topsecret"
     latest.status shouldBe "denied"
 
+  it should "mask the values of a system statement and its error in history, keeping user text" in:
+    // The manager's own statements (a module's system SQL) may carry platform credentials, and
+    // history and audit are shown to the tenant's admins: their values are masked as the stdout
+    // sink masks every statement leaving the control plane.
+    val nodeErr = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent("Invalid Input Error: secret 'topsecret' was rejected"),
+        1L
+      )
+    val (router, _, _) = setup(stub = nodeErr)
+    val systemEff      = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("", None, "module:seed", kind = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      system = true
+    )
+    router
+      .execute(
+        "c-sys-mask",
+        "module:seed",
+        poolKey,
+        "CREATE SECRET s3k (TYPE s3, KEY_ID 'AKIAEXAMPLE', SECRET 'topsecret')",
+        effectiveSet = Some(systemEff)
+      )
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = router.history.snapshot(1).head
+    latest.user shouldBe "module:seed"
+    latest.sql should startWith("CREATE SECRET s3k")
+    latest.sql should not include "topsecret"
+    latest.sql should not include "AKIAEXAMPLE"
+    latest.error.getOrElse("") should not include "topsecret"
+    // A user's statement keeps its text, as before.
+    val (plain, _, _) = setup()
+    plain.execute("c-user-text", "alice", poolKey, "SELECT 'hello'").unsafeRunSync()
+    plain.history.snapshot(1).head.sql shouldBe "SELECT 'hello'"
+
   it should "redact both sql and a node's quoted-statement error for an admitted statement" in:
     // The claimed statement is forwarded to the
     // node, whose own parser error quotes the offending line back verbatim - exactly how
@@ -1732,6 +1770,43 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     qr.close()
     registry.list() shouldBe Nil // closed: entry gone
 
+  it should "mask a system statement's values in the registry, which tenant admins list" in:
+    // Review M1: history and audit mask the system principal's statement values, and so must the
+    // active-statement list (ActiveStatementHandlers.list shows `sql` to the tenant's admins).
+    val registry     = new ActiveStatementRegistry()
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      registry = registry,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
+    val systemEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("", None, "module:seed", kind = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      system = true
+    )
+    val result = router
+      .execute(
+        "reg-sys",
+        "module:seed",
+        poolKey,
+        "SELECT 'topsecret' AS k",
+        effectiveSet = Some(systemEff)
+      )
+      .unsafeRunSync()
+    val qr = result.toOption.get
+    registry.list().map(_.sql) should have size 1
+    registry.list().head.sql should not include "topsecret"
+    qr.close()
+
   it should "carry the acting patId into the registry entry" in:
     val registry     = new ActiveStatementRegistry()
     val (base, _, _) = setup()
@@ -2180,6 +2255,49 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     calls.map(_._1).forall(_.isDefined) shouldBe true
 
   // ---------- SPI module events ----------
+
+  "executeOneShot" should "run on a connection of its own, closed after, never metered as a session" in:
+    // Review N2: UNDROP TABLE's CTAS runs on `<id>/undrop`, which nothing else ever closed.
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val eff                    = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-1", Some("acme"), "alice", kind = "user"),
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    val out = router.executeOneShot("c-1/undrop", "alice", poolKey, "SELECT 1", eff).unsafeRunSync()
+    out.foreach(_.close())
+    router.session("c-1/undrop") shouldBe None
+    received.toArray.toList.collect { case e: ManagerEvent.SessionOpened => e } shouldBe Nil
+
+  it should "give two concurrent calls on one connection a session each (review 5 R4)" in:
+    // Without a per-call nonce both register `<id>`: the first one's close drops the second's.
+    @volatile var routerRef: FlightSqlRouter = null
+    val inSend                               = new java.util.concurrent.CountDownLatch(2)
+    val seen = new java.util.concurrent.CopyOnWriteArrayList[Integer]()
+    val stub: () => QuackResponse = () =>
+      inSend.countDown()
+      inSend.await(5, java.util.concurrent.TimeUnit.SECONDS)
+      seen.add(routerRef.sessions.size)
+      defaultStub()
+    val (router, _, _) = setup(stub = stub)
+    routerRef = router
+    val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-1", Some("acme"), "alice", kind = "user"),
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    import cats.syntax.parallel.*
+    val one = router.executeOneShot("c-2/undrop", "alice", poolKey, "SELECT 1", eff)
+    val (a, b) = (one, one).parTupled.unsafeRunSync()
+    List(a, b).foreach(_.foreach(_.close()))
+    seen.toArray.toList shouldBe List(2, 2)
+    router.sessions.size shouldBe 0
 
   "module events" should "emit SessionOpened then StatementExecuted with ok=true on success" in:
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()

@@ -337,6 +337,31 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
 
   // ---- catalog-reaching table functions on the READ path ------------------
   //
+  // The node admits DuckLake's change feed to a principal granted the table it names (its plan is a
+  // read of that table), but the change rows are no relation the rewriters can mask or filter: the
+  // data diff and the branch change counts are refused to any principal with column or row
+  // policies, whichever table they name, on every statement kind.
+  "check on DuckLake's change feed" should "deny it to a principal with a mask or a row policy" in {
+    val feeds = List(
+      ai.starlake.quack.ondemand.api.DataDiffSql.summarySql("acme_tpch", "tpch1", "customer", 1, 3),
+      "SELECT * FROM " +
+        ai.starlake.quack.ondemand.api.DataDiffSql.diffFn("acme_tpch", "tpch1", "customer", 1, 3),
+      "SELECT c_email FROM ducklake_table_insertions('acme_tpch', 'tpch1', 'customer', 1, 3)",
+      "SELECT * FROM ducklake_table_deletions('acme_tpch', 'tpch1', 'orders', 1, 3)"
+    )
+    for
+      sql <- feeds
+      e   <- List(eff(tenantUser, cols = List(maskEmail)), eff(tenantUser, rows = List(rowPolicy)))
+    do
+      withClue(sql) {
+        guardWithCls().check(sql, StatementKind.Select, e, ctx) match
+          case Deny(reason) => reason should include("ducklake_table_")
+          case Allow        => fail(s"allowed: $sql")
+      }
+    // Judged by the node alone otherwise.
+    guardWithCls().check(feeds.head, StatementKind.Select, eff(tenantUser), ctx) shouldBe Allow
+  }
+
   // query() / query_table() name their target in a string, so the RLS / CLS rewriters see a
   // table function, not a base table, and forward the read unfiltered and unmasked.
 

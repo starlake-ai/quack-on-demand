@@ -99,7 +99,9 @@ constexpr int kMaxQueryNesting = 8;
 //! settings decision 23 reserves, json_execute_serialized_sql and the external
 //! resource functions, a table function in table position that is neither a judged reader or query
 //! function nor in kAdmittedTableFunctions, computed reader or COPY file names, a COPY option naming a
-//! path, a computed query() string, unknown statement forms;
+//! path, a computed query() string, a DuckLake change feed call (ducklake_table_changes, _insertions,
+//! _deletions) that is not DuckDB's own or whose catalog, schema and table are not string literals,
+//! unknown statement forms;
 //! a call to a function function-classes.tsv classes superuser, anywhere (function_classes.hpp), and in
 //! the slots DuckDB evaluates while binding (SET values, table-function arguments, EXECUTE parameters,
 //! AT clauses, LIMIT and OFFSET, PIVOT IN lists, COLUMNS(), type expressions, unnest's parameters,

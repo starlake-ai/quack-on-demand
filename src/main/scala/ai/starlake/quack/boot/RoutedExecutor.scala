@@ -18,8 +18,8 @@ import cats.effect.IO
   * registered and enabled, pool access), in the caller's own realm (`superuserAdmissible`); the
   * effective set it gets names that user, a superuser included, and the router makes it the
   * statement's principal on the node (`NodePrincipal.of`). Only an `ExecCaller.system` caller, the
-  * manager's own work (the restore dry run, the branch change counter), skips the gate and runs as
-  * `NodePrincipal.System`.
+  * manager's own work (a branch proposal's stored summary, a module's system SQL), skips the gate
+  * and runs as `NodePrincipal.System`.
   */
 object RoutedExecutor:
 
@@ -60,10 +60,10 @@ object RoutedExecutor:
       recordExecution: Boolean
   ): CatalogPreviewHandlers.PreviewExecutor =
     (caller, poolKey, sql) =>
-      // Privilege from the typed flag ONLY (ExecCaller.system: the restore dry run and the branch
-      // change counter), never from the user name: names are not reserved, and a tenant user
-      // called "superuser" used to match the old `identity == "superuser"` test and run with the
-      // synthetic superuser set.
+      // Privilege from the typed flag ONLY (ExecCaller.system: a branch proposal's stored summary
+      // and a module's system SQL), never from the user name: names are not
+      // reserved, and a tenant user called "superuser" used to match the old
+      // `identity == "superuser"` test and run with the synthetic superuser set.
       val isSuperuser = caller.system
       val effectiveSetIO: IO[Either[ai.starlake.quack.edge.RouterFailure, Option[
         ai.starlake.quack.ondemand.rbac.EffectiveSet

@@ -45,3 +45,23 @@ class DuckLakeCatalogReaderDroppedSpec extends AnyFlatSpec with Matchers with Po
       reader.listDroppedTables().map(_.table) should not contain "revived"
       reader.findDroppedTable("tpch1", "revived") should not be empty
     }
+
+  private val accents =
+    s"""CREATE TABLE lake.tpch1."Ü" (id INTEGER);
+       |DROP TABLE lake.tpch1."Ü";
+       |CREATE TABLE lake.tpch1."ü" (id INTEGER);
+       |CREATE TABLE lake.tpch1.Ascii_Case (id INTEGER);
+       |DROP TABLE lake.tpch1.Ascii_Case;
+       |""".stripMargin
+
+  "the undrop name checks" should "fold ASCII letters only, as DuckDB resolves names (review 5 R3)" in
+    withCatalog("undrop-fold", extraSql = accents) { (reader, _) =>
+      val max = reader.maxSnapshotId().getOrElse(fail("no snapshot"))
+      // "Ü" and "ü" are two names to DuckDB: the live "ü" neither hides nor holds "Ü".
+      reader.listDroppedTables().map(_.table) should contain("Ü")
+      reader.nameHeldAt("tpch1", "Ü", max) shouldBe false
+      reader.nameHeldAt("tpch1", "ü", max) shouldBe true
+      reader.findDroppedTable("tpch1", "ü") shouldBe empty
+      // ASCII letters compare without case.
+      reader.findDroppedTable("TPCH1", "ascii_case").map(_.table) shouldBe Some("Ascii_Case")
+    }

@@ -50,6 +50,43 @@ object ProfileEndpoints:
       .in(authToken)
       .out(jsonBody[StatementHistoryResponse])
 
+  /** The dropped tables of the caller's own DuckLake database `tenantDb` that they may recover: the
+    * name is free and their grants cover a read of it.
+    */
+  val recoverable: PublicEndpoint[
+    (String, Option[Int], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    RecoverableListResponse,
+    Any
+  ] =
+    base.get
+      .in("profile" / "recoverable")
+      .in(query[String]("tenantDb"))
+      .in(query[Option[Int]]("limit"))
+      .in(authToken)
+      .out(jsonBody[RecoverableListResponse])
+      .description(
+        "Self-service: the dropped tables of your own database you may recover (their name is " +
+          "free and your grants cover a read of it)."
+      )
+
+  /** Recovers one of them as the caller (`CREATE TABLE ... AS SELECT ... AT (VERSION => n)`). */
+  val undrop: PublicEndpoint[
+    (ProfileUndropRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    UndropResponse,
+    Any
+  ] =
+    base.post
+      .in("profile" / "undrop")
+      .in(jsonBody[ProfileUndropRequest])
+      .in(authToken)
+      .out(jsonBody[UndropResponse])
+      .description(
+        "Self-service: recover a dropped table of your own database as you, optionally under a " +
+          "new name (asName). The node judges the read and the create."
+      )
+
   /** The pools the calling user may connect to: the handshake's decision, narrowed by a PAT. */
   val pools: PublicEndpoint[
     Option[String],

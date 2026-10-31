@@ -36,5 +36,11 @@ final case class ManagerContext(
       * personal access token included). scopeOf is the scope-only projection; portal-style modules
       * need the caller's username/tenant too. Exempt from the SPI stability promise.
       */
-    sessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session]
+    sessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session],
+    /** Runs one statement on a pool as the manager's system caller, bound to this module's name
+      * (labelled and audited with it). Superuser-level: for the module's own provisioning
+      * statements, never for SQL a user supplied. See [[SystemSql]] for the trust model. Required:
+      * every context is built with a module's own instance (Main builds one context per module).
+      */
+    systemSql: SystemSql
 )

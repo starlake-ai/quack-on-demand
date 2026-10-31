@@ -33,6 +33,10 @@ import scala.collection.mutable
   */
 class BranchServiceSpec extends AnyFlatSpec with Matchers:
 
+  /** Who a proposal's reply counts as; the fake counter answers the same whoever asks. */
+  private val Proposer =
+    ai.starlake.quack.ondemand.api.ExecCaller.unrestricted("propose-spec", "root", true)
+
   /** A metadata reader over hand-built state, so change sets are deterministic. */
   private class FakeReader(
       var head: Long,
@@ -130,7 +134,15 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         def disarm(meta: Map[String, String], message: String) = fenceDisarms += message: Unit
       ,
       counter = new ChangeCounter:
-        def count(t: String, b: Branch, a: String, c: TableChange, f: Long, h: Long) =
+        def count(
+            caller: ai.starlake.quack.ondemand.api.ExecCaller,
+            t: String,
+            b: Branch,
+            a: String,
+            c: TableChange,
+            f: Long,
+            h: Long
+        ) =
           IO.pure(Right((3L, 1L, 2L)))
       ,
       purgeFiles = (path, _) => { purged += path; Right(()) },
@@ -246,7 +258,11 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.create("x")
     f.touchBranch()
     val (b, m, cs) =
-      f.service.propose("acme", f.parent.name, "x", f.admin1, None).unsafeRunSync().toOption.get
+      f.service
+        .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
+        .unsafeRunSync()
+        .toOption
+        .get
     b.status shouldBe BranchStatus.Proposed
     m.status shouldBe BranchMergeStatus.Proposed
     m.proposer shouldBe "root"
@@ -254,7 +270,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     cs.tables.map(t => (t.table, t.kind, t.inserted, t.deleted, t.updated)) shouldBe
       List(("region", ChangeKind.Modified, 3L, 1L, 2L))
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, None)
+      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
       .unsafeRunSync()
       .left
       .map(_.code) shouldBe
@@ -273,7 +289,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       .map(_.code) shouldBe
       Left("not_proposed")
     f.service
-      .propose("acme", f.parent.name, "x", f.alice, None)
+      .propose("acme", f.parent.name, "x", f.alice, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     f.service
@@ -307,7 +323,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.create("x")
     f.touchBranch()
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, None)
+      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     val branchOnlyBoss = BranchActor("boss", isAdmin = true, branchOnly = true)
@@ -328,7 +344,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.create("x")
     f.touchBranch()
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, None)
+      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     val (b, m, _) = f.service
@@ -370,7 +386,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("x")
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, None).unsafeRunSync()
+    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
     f.mergeFails = Some("TransactionContext Error: write-write conflict on table region")
     val res = f.service.merge("acme", f.parent.name, "x", None, f.admin2, None).unsafeRunSync()
     res.left.map(_.code) shouldBe Left("concurrent_write")
@@ -383,7 +399,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("x")
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, None).unsafeRunSync()
+    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
     f.fenceFails = Some("cannot arm the merge fence: connection refused")
     val res = f.service.merge("acme", f.parent.name, "x", None, f.admin2, None).unsafeRunSync()
     res.left.map(_.code) shouldBe Left("merge_failed")
@@ -397,7 +413,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       val f = new Fixture
       f.create("x")
       f.touchBranch()
-      f.service.propose("acme", f.parent.name, "x", f.admin1, None).unsafeRunSync()
+      f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
       f.mergeFails = Some(refused)
       // main commits after validation, while the batch runs
       if mainMoves then f.beforeRun = () => f.mainReader.head += 1
@@ -422,7 +438,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val b = f.store.findBranch(f.parent.id, "x").get
     f.readers.put(b.tenantDbName, altered)
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, None)
+      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     f.service

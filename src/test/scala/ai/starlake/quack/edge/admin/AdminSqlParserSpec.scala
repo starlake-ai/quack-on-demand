@@ -12,7 +12,30 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.claims("DROP ROLE analyst") shouldBe true
     AdminSqlParser.claims("ALTER GROUP g ADD USER u") shouldBe true
 
-  it should "not claim data statements" in:
+  it should "claim UNDROP TABLE, and nothing else that starts with UNDROP" in:
+    AdminSqlParser.claims("UNDROP TABLE t") shouldBe true
+    AdminSqlParser.claims("undrop table main.t as t2") shouldBe true
+    AdminSqlParser.claims("UNDROP t") shouldBe false
+    AdminSqlParser.claims("\"UNDROP\" TABLE t") shouldBe false
+
+  "parse UNDROP TABLE" should "read the table, its optional schema and its optional new name" in:
+    AdminSqlParser.parse("UNDROP TABLE orders") shouldBe
+      Right(AdminCommand.UndropTable(None, "orders", None))
+    AdminSqlParser.parse("undrop table main.orders;") shouldBe
+      Right(AdminCommand.UndropTable(Some("main"), "orders", None))
+    AdminSqlParser.parse("UNDROP TABLE main.orders AS orders_back") shouldBe
+      Right(AdminCommand.UndropTable(Some("main"), "orders", Some("orders_back")))
+    AdminSqlParser.parse("UNDROP TABLE \"Main\".\"Old Orders\" AS \"New\"") shouldBe
+      Right(AdminCommand.UndropTable(Some("Main"), "Old Orders", Some("New")))
+
+  it should "refuse anything else" in:
+    AdminSqlParser.parse("UNDROP TABLE").isLeft shouldBe true
+    AdminSqlParser.parse("UNDROP TABLE t AS").isLeft shouldBe true
+    AdminSqlParser.parse("UNDROP TABLE t x").isLeft shouldBe true
+    AdminSqlParser.parse("UNDROP TABLE a.b.c").isLeft shouldBe true
+    AdminSqlParser.parse("UNDROP VIEW v").isLeft shouldBe true
+
+  "claims" should "not claim data statements" in:
     AdminSqlParser.claims("SELECT 1") shouldBe false
     AdminSqlParser.claims("CREATE TABLE t (a INT)") shouldBe false
     AdminSqlParser.claims("DROP TABLE t") shouldBe false
