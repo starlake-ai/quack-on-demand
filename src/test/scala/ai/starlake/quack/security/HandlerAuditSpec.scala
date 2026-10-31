@@ -340,6 +340,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       tenantIdResolver,
       audit,
       scopeOf = _ => SessionScope.Superuser,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
       catalogAliasOf = _ => None
     )
 

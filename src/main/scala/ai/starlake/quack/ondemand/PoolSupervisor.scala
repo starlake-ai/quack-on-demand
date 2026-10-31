@@ -688,6 +688,16 @@ final class PoolSupervisor(
             "or local mutation runs it"
         )
 
+  /** Run at the end of every [[restore]], in registration order, a failing one logged and the rest
+    * still run: caches kept outside the supervisor that a peer's write can make stale, which the
+    * restore a `qod_topology` / `qod_rbac` NOTIFY or the periodic snapshot refresh runs must drop
+    * too (Main registers the federated-source caches, Task 11 addendum 7).
+    */
+  private val restoreHooks = new java.util.concurrent.CopyOnWriteArrayList[() => Unit]()
+
+  /** Runs `hook` at the end of every later [[restore]] ([[restoreHooks]]). */
+  def onRestore(hook: () => Unit): Unit = restoreHooks.add(hook)
+
   private def restoreUnlocked(): Unit =
     // Read before the snapshot and published once the caches are rebuilt: a version (and a
     // credential digest) must never vouch for state older than itself. A peer's commit between the
@@ -859,6 +869,12 @@ final class PoolSupervisor(
     // Local-only: restore() is called by peer-notification handlers; broadcasting here
     // would cause infinite echo across replicas.
     invalidateEffectiveCacheLocal(versions, credentials)
+    restoreHooks.forEach { hook =>
+      try hook()
+      catch
+        case scala.util.control.NonFatal(e) =>
+          logger.warn(s"restore: a restore hook failed: ${e.getMessage}", e)
+    }
 
   /** Wraps a mutator body so a failure after the store write leaves the caches consistent with the
     * store instead of half-applied. All caches (`tenants`, `tenantDbs`, `poolRows`, `pools`,

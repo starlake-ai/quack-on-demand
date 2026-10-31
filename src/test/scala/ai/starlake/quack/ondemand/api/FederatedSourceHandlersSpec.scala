@@ -83,6 +83,8 @@ class FederatedSourceHandlersSpec
           fs,
           resolver,
           scopeOf = _ => SessionScope.Superuser,
+          invalidateSources = _ => (),
+          publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
           catalogAliasOf = _ => None
         ),
         tdId
@@ -210,7 +212,14 @@ class FederatedSourceHandlersSpec
   private def seedSource(fs: FederatedSourceStore, resolver: (String, String) => Option[String])(
       scopeOf: SessionScope.Resolver
   ): FederatedSourceHandlers =
-    val h = new FederatedSourceHandlers(fs, resolver, scopeOf = scopeOf, catalogAliasOf = _ => None)
+    val h = new FederatedSourceHandlers(
+      fs,
+      resolver,
+      scopeOf = scopeOf,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+      catalogAliasOf = _ => None
+    )
     h.createSource(
       "acme",
       "acme_prod",
@@ -415,6 +424,8 @@ class FederatedSourceHandlersSpec
         fedStore = fs,
         resolver = resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => Some("acme_db")
       )
       val (code, err) = h
@@ -512,6 +523,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -543,6 +556,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -584,6 +599,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -620,6 +637,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -652,6 +671,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       val (code, error) = h
@@ -682,6 +703,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -713,6 +736,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -746,6 +771,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       fs.upsertSource(
@@ -779,6 +806,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
       val cfg = IcebergRestConfig(
@@ -838,6 +867,8 @@ class FederatedSourceHandlersSpec
         fedStore = fs,
         resolver = resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None,
         attachStatusOf = (tenantDbId, alias) =>
           if tenantDbId == tdId && alias == "sales_lake" then Some("failed on 1 of 2 nodes")
@@ -857,6 +888,8 @@ class FederatedSourceHandlersSpec
         fedStore = fs,
         resolver = resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None,
         attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
       )
@@ -996,6 +1029,8 @@ class FederatedSourceHandlersSpec
         fs,
         resolver,
         scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => Some("acme_db")
       )
       h.createSource("acme", "acme_prod", pgReq(alias = "acme_db"), None)
@@ -1027,6 +1062,8 @@ class FederatedSourceHandlersSpec
       fedStore = fs,
       resolver = resolver,
       scopeOf = _ => SessionScope.Superuser,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
       catalogAliasOf = _ => None,
       attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
     )
@@ -1065,7 +1102,14 @@ class FederatedSourceHandlersSpec
   "a sql federated source" should "be refused to a tenant admin on create and on change (403)" in
     withEnv { (fs, resolver, tdId) =>
       val h =
-        new FederatedSourceHandlers(fs, resolver, scopeOf = scopes, catalogAliasOf = _ => None)
+        new FederatedSourceHandlers(
+          fs,
+          resolver,
+          scopeOf = scopes,
+          invalidateSources = _ => (),
+          publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+          catalogAliasOf = _ => None
+        )
       val sql = FederatedSourceCreateRequest(
         alias = "leak",
         setupSql = Some("CREATE SECURE VIEW v AS SELECT * FROM read_text('/etc/passwd');")
@@ -1136,7 +1180,14 @@ class FederatedSourceHandlersSpec
   "a sql source" should "be refused at save with a secret placeholder outside a literal" in
     withEnv { (fs, resolver, tdId) =>
       val h =
-        new FederatedSourceHandlers(fs, resolver, scopeOf = scopes, catalogAliasOf = _ => None)
+        new FederatedSourceHandlers(
+          fs,
+          resolver,
+          scopeOf = scopes,
+          invalidateSources = _ => (),
+          publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+          catalogAliasOf = _ => None
+        )
       val req = FederatedSourceCreateRequest(
         alias = "legacy",
         setupSql = Some("ATTACH 'host=h' AS {{alias}} (TYPE postgres, PORT {{secret.PORT}});")

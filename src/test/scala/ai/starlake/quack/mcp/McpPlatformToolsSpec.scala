@@ -162,6 +162,8 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
               fedStore,
               resolver,
               scopeOf = scopeOf,
+              invalidateSources = _ => (),
+              publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
               catalogAliasOf = _ => None
             )
           )

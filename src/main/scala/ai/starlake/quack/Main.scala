@@ -1377,33 +1377,33 @@ object Main extends IOApp with LazyLogging:
           .increment(n.toDouble)
       })
 
-      // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey.
-      // Disabled sources are included deliberately: their alias stays ATTACHed on
-      // running nodes until the pool recycles, and excluding it would re-open the
-      // two-part-name bypass. No invalidation hook by design: the set reflects what
-      // MAY be attached on any node of the pool.
-      val attachedCatalogsCache =
-        new java.util.concurrent.ConcurrentHashMap[
-          ai.starlake.quack.model.PoolKey,
-          (Long, Set[String])
-        ]()
-      val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
-        val now    = System.currentTimeMillis()
-        val cached = Option(attachedCatalogsCache.get(key)).collect {
-          case (at, set) if now - at < 60000L => set
-        }
-        cached.getOrElse {
-          val builtins = ai.starlake.quack.model.DuckDbCatalogs.Builtins
-          val dbName   =
-            TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
-          val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
-            case (Some(td), Some(fedStore)) =>
-              fedStore.listSources(td.id).map(_.alias).toSet
-            case _ => Set.empty[String]
-          val result = builtins + dbName ++ aliases
-          attachedCatalogsCache.put(key, (now, result))
-          result
-        }
+      // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey and
+      // dropped at once by a federated-source write (federatedSourceCaches below), so a new
+      // alias is known on the next statement. Disabled sources are included deliberately: their
+      // alias stays ATTACHed on running nodes until the pool recycles, and excluding it would
+      // re-open the two-part-name bypass. The set reflects what MAY be attached on any node of
+      // the pool.
+      val attachedCatalogs = new ai.starlake.quack.edge.authz.AttachedCatalogs(key =>
+        val builtins = ai.starlake.quack.model.DuckDbCatalogs.Builtins
+        val dbName   =
+          TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
+        val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
+          case (Some(td), Some(fedStore)) =>
+            fedStore.listSources(td.id).map(_.alias).toSet
+          case _ => Set.empty[String]
+        builtins + dbName ++ aliases
+      )
+      val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] =
+        attachedCatalogs.of
+      // The two per-pool caches a federated source feeds: a stored source write drops them for
+      // its tenant-db's pools on this replica, and every restore (a peer's qod_topology NOTIFY,
+      // the periodic snapshot refresh, a manifest import) drops all of them (Task 11 addendum 7).
+      val federatedSourceCaches = new ai.starlake.quack.edge.authz.FederatedSourceCaches(
+        readOnlyCatalogs,
+        attachedCatalogs,
+        sup.getTenantDbById
+      )
+      sup.onRestore(() => federatedSourceCaches.clear())
 
       // Mirrors attachedCatalogsOf's metastore resolution so the routing parser
       // resolves unqualified table refs the same way the policy steps do.
@@ -1659,6 +1659,8 @@ object Main extends IOApp with LazyLogging:
               sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
             ),
             catalogAliasOf = catalogAliasOf,
+            invalidateSources = federatedSourceCaches.sourcesChanged,
+            publish = publisher,
             attachStatusOf = attachStatusOf
           )
         )

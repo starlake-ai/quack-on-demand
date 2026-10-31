@@ -30,6 +30,15 @@ import sttp.model.StatusCode
   *   resolves a tenantDbId to the tenant-db's own DuckDB catalog alias, or None if not found. Fed
   *   into `extraReserved` so an iceberg_rest source cannot be aliased onto the tenant-db's own
   *   attached name.
+  * @param invalidateSources
+  *   run with the source's tenant-db id after every stored source create, update or delete, before
+  *   the handler answers: drops this replica's read-only and attached-catalog caches for that
+  *   tenant-db's pools ([[ai.starlake.quack.edge.authz.FederatedSourceCaches.sourcesChanged]]), so
+  *   the next statement carries a changed read-only flag and knows a new alias. Required: a no-op
+  *   would leave a source just flagged read-only writable for the caches' TTL (Task 11 addendum 7).
+  * @param publish
+  *   told `topologyChanged` after every stored source write, so every peer's restore drops the same
+  *   caches (`qod_topology`). Required for the same reason.
   * @param attachStatusOf
   *   keyed on (tenantDbId, alias): the live attach state of one federated source aggregated across
   *   its pool's nodes, from the in-memory AttachStatusRegistry (Task 7) -- `"attached"`,
@@ -47,6 +56,8 @@ final class FederatedSourceHandlers(
     audit: AuditRecorder = AuditRecorder.noop,
     scopeOf: SessionScope.Resolver,
     catalogAliasOf: String => Option[String],
+    invalidateSources: String => Unit,
+    publish: ai.starlake.quack.ondemand.ha.StateChangePublisher,
     attachStatusOf: (String, String) => Option[String] = (_, _) => None
 ) extends LazyLogging:
 
@@ -267,6 +278,14 @@ final class FederatedSourceHandlers(
 
   // ---- FederatedSource CRUD -----------------------------------------------
 
+  /** After a stored source write: this replica's caches of the tenant-db's pools first, then the
+    * peers. No policy-version bump: the node refuses a write into a read-only catalog before it
+    * reuses any cached verdict, so a handle carrying the new set is enough.
+    */
+  private def sourcesChanged(tenantDbId: String): Unit =
+    invalidateSources(tenantDbId)
+    publish.topologyChanged()
+
   /** Whether `req` writes a `sql` source: no sourceType (the default) or one naming `sql`. */
   private def writesSqlSource(req: FederatedSourceCreateRequest): Boolean =
     req.sourceType.map(_.trim).filter(_.nonEmpty) match
@@ -327,6 +346,7 @@ final class FederatedSourceHandlers(
                 case Left(e)       => Left(e)
                 case Right(source) =>
                   fedStore.upsertSource(source)
+                  sourcesChanged(tenantDbId)
                   // NEVER include setupSql or config in the audit detail.
                   audit.rest(
                     apiKey,
@@ -386,6 +406,7 @@ final class FederatedSourceHandlers(
                   )
                 case Some(s) =>
                   fedStore.deleteSource(s.id)
+                  sourcesChanged(tenantDbId)
                   audit.rest(
                     apiKey,
                     "control-plane",
