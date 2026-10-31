@@ -32,6 +32,7 @@
 #include "duckdb/function/table_macro_function.hpp"
 #include "duckdb/function/scalar/sequence_utils.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/connection.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -64,6 +65,7 @@
 #include "duckdb/parser/query_node/list.hpp"
 #include "duckdb/parser/tableref/list.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/planner/constraints/bound_check_constraint.hpp"
 #include "duckdb/planner/expression/list.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -1405,7 +1407,7 @@ private:
 	void AddObject(const std::string &kind, const std::string &access, const std::string &catalog,
 	               const std::string &catalog_type, bool temporary, const std::string &schema,
 	               const std::string &name, const std::set<std::string> &columns, const std::string &via,
-	               bool renamed = false);
+	               bool renamed = false, bool dropped = false, bool replaced = false);
 	void InSchema(const std::string &kind, const std::string &access, SchemaCatalogEntry &schema,
 	              const std::string &name, const std::set<std::string> &columns, const std::string &via);
 	void AddEntry(const std::string &kind, const std::string &access, InCatalogEntry &entry,
@@ -1427,6 +1429,8 @@ private:
 	void DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::set<std::string> &columns,
 	                  const std::string &via);
 	optional_ptr<TableCatalogEntry> CurrentDuckLakeTable(TableCatalogEntry &bound);
+	void DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::set<std::string> &columns,
+	                         const std::string &via, const std::string &bound_name);
 	std::string SecureView(LogicalSecureView &view, const std::string &via);
 	void Create(LogicalCreate &create, const std::string &via);
 	void CreateTable(LogicalCreateTable &create, const std::string &via);
@@ -1475,7 +1479,7 @@ private:
 void Walker::AddObject(const std::string &kind, const std::string &access, const std::string &catalog,
                        const std::string &catalog_type, bool temporary, const std::string &schema,
                        const std::string &name, const std::set<std::string> &columns, const std::string &via,
-                       bool renamed) {
+                       bool renamed, bool dropped, bool replaced) {
 	if (!via.empty() && temporary) {
 		Unsupported("a temporary object inside a secure view");
 	}
@@ -1495,6 +1499,14 @@ void Walker::AddObject(const std::string &kind, const std::string &access, const
 	if (renamed) {
 		// Present only when true, so every description without a renamed DuckLake read is unchanged.
 		members.emplace("renamed", JsonBool(true));
+	}
+	if (dropped) {
+		// Likewise: a read of a DuckLake table dropped since, under its last live name.
+		members.emplace("dropped", JsonBool(true));
+	}
+	if (replaced) {
+		// Likewise: a read of a DuckLake table replaced since (CREATE OR REPLACE), under its successor's name.
+		members.emplace("replaced", JsonBool(true));
 	}
 	Add(objects_, JsonObject(std::move(members)));
 }
@@ -1713,11 +1725,11 @@ void Walker::DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::
 	                  Text(bound.name);
 	auto current = CurrentDuckLakeTable(bound);
 	if (!current) {
-		if (!Trusted()) {
-			throw PermissionException("QoD: " + bound_name +
-			                          " at that snapshot is a table dropped since, which only superusers read");
+		if (Trusted()) {
+			AddEntry("table", "read", bound, columns, via);
+		} else {
+			DroppedDuckLakeRead(get, bound, columns, via, bound_name);
 		}
-		AddEntry("table", "read", bound, columns, via);
 		return;
 	}
 	auto renamed =
@@ -1764,6 +1776,185 @@ void Walker::DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::
 	auto &catalog = schema.ParentCatalog();
 	AddObject("table", "read", Text(catalog.GetName()), catalog.GetCatalogType(), catalog.IsTemporaryCatalog(),
 	          Text(schema.name), Text(current->name), described, via, renamed);
+}
+
+//! The snapshots of a DuckLake catalog, oldest first, each with whether it dropped a table: read through
+//! DuckLake's own ducklake_snapshots() on a connection of the node's (not a quack session: nothing on it is
+//! decided or attributed to the client), so the client's statement never reads the metadata catalog.
+std::vector<std::pair<int64_t, bool>> DuckLakeSnapshots(ClientContext &context, const std::string &catalog) {
+	Connection internal(*context.db);
+	auto result = internal.Query("SELECT snapshot_id, coalesce(map_contains(changes, 'tables_dropped'), false) "
+	                             "FROM ducklake_snapshots(" +
+	                             KeywordHelper::WriteQuoted(catalog, '\'') + ") ORDER BY snapshot_id");
+	std::vector<std::pair<int64_t, bool>> snapshots;
+	if (result->HasError()) {
+		return snapshots;
+	}
+	while (auto chunk = result->Fetch()) {
+		for (idx_t row = 0; row < chunk->size(); row++) {
+			snapshots.emplace_back(chunk->GetValue(0, row).GetValue<int64_t>(), chunk->GetValue(1, row).GetValue<bool>());
+		}
+	}
+	return snapshots;
+}
+
+//! Calls `found` with every table of `schemas` of `catalog` at snapshot `version` (DuckLake loads a schema at an
+//! AT clause with that snapshot's tables, each under its stable oid).
+void TablesAt(ClientContext &context, Catalog &catalog, const std::set<std::string> &schemas, int64_t version,
+              const std::function<void(TableCatalogEntry &)> &found) {
+	BoundAtClause at(Identifier("version"), Value::BIGINT(version));
+	for (auto &name : schemas) {
+		optional_ptr<SchemaCatalogEntry> schema;
+		try {
+			schema = catalog.LookupSchema(
+			    catalog.GetCatalogTransaction(context),
+			    EntryLookupInfo(CatalogType::SCHEMA_ENTRY, QualifiedName(Identifier(name)), &at, QueryErrorContext()),
+			    OnEntryNotFound::RETURN_NULL);
+		} catch (std::exception &) {
+			schema = nullptr;
+		}
+		if (!schema) {
+			continue;
+		}
+		schema->Scan(CatalogType::TABLE_ENTRY, [&](CatalogEntry &entry) {
+			if (entry.type == CatalogType::TABLE_ENTRY) {
+				found(entry.Cast<TableCatalogEntry>());
+			}
+		});
+	}
+}
+
+//! A non-superuser's read of a DuckLake table no table of its oid holds now: the table ended (dropped or
+//! replaced) at a snapshot D, the latest snapshot that dropped a table and before which it was live (DuckLake
+//! keeps one oid per table id; an id is live over one interval). Its last live name is its name at the snapshot
+//! before D.
+//! - A replace (owner ruling): when the table that holds that name at D began exactly at D, it is the same
+//!   table (CREATE OR REPLACE, QoD's restore); followed through a chain of replaces to the table its oid names
+//!   now, the read is described under that table's current names, marked `replaced`. A drop and a create in one
+//!   transaction look the same to DuckLake, and so to this rule.
+//! - A drop (a create at a later snapshot is no replace): judged as a read of its last live name, with its last
+//!   live columns (by field id), marked `dropped`, while no live table or view holds that name; refused once
+//!   one does, and when the last live name cannot be found (a drop in the client's own open transaction).
+//! `renamed` when the statement wrote other names. The columns of a replaced table are described as the
+//! statement read them (a replacement's field ids are its own).
+void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::set<std::string> &columns,
+                                 const std::string &via, const std::string &bound_name) {
+	auto &catalog = bound.ParentCatalog();
+	auto catalog_name = Text(catalog.GetName());
+	std::set<std::string> schemas {Text(bound.ParentSchema().name)};
+	catalog.ScanSchemas(context_, [&](SchemaCatalogEntry &schema) { schemas.insert(Text(schema.name)); });
+	auto snapshots = DuckLakeSnapshots(context_, catalog_name);
+	auto oid = bound.oid;
+	auto replaced = false;
+	optional_ptr<TableCatalogEntry> last;
+	int64_t last_version = 0;
+	// Each step ends the table of `oid`; a replace moves to its successor. Bounded by the snapshots.
+	for (idx_t step = 0; step <= snapshots.size(); step++) {
+		last = nullptr;
+		idx_t ended = 0;
+		for (idx_t i = snapshots.size(); !last && i > 1; i--) {
+			if (!snapshots[i - 1].second) {
+				continue;
+			}
+			TablesAt(context_, catalog, schemas, snapshots[i - 2].first, [&](TableCatalogEntry &entry) {
+				if (!last && entry.oid == oid) {
+					last = &entry;
+				}
+			});
+			if (last) {
+				ended = i - 1;
+				last_version = snapshots[i - 2].first;
+			}
+		}
+		if (!last) {
+			throw PermissionException("QoD: " + bound_name +
+			                          " at that snapshot is a table dropped since, whose last name QoD cannot find, "
+			                          "which only superusers read");
+		}
+		// The table holding its last name where it ended, and whether it was live just before.
+		auto schema_name = Text(last->ParentSchema().name);
+		auto table_name = Text(last->name);
+		optional_ptr<TableCatalogEntry> successor;
+		TablesAt(context_, catalog, {schema_name}, snapshots[ended].first, [&](TableCatalogEntry &entry) {
+			if (!successor && Text(entry.name) == table_name) {
+				successor = &entry;
+			}
+		});
+		auto began_there = successor != nullptr;
+		if (successor) {
+			TablesAt(context_, catalog, schemas, last_version, [&](TableCatalogEntry &entry) {
+				began_there = began_there && entry.oid != successor->oid;
+			});
+		}
+		if (!began_there) {
+			break;
+		}
+		replaced = true;
+		oid = successor->oid;
+		auto current = CurrentDuckLakeTable(*successor);
+		if (current) {
+			auto &schema = current->ParentSchema();
+			if (schema.GetParentSchema()) {
+				Unsupported("a nested schema");
+			}
+			auto renamed =
+			    Text(current->name) != Text(bound.name) || Text(schema.name) != Text(bound.ParentSchema().name);
+			AddObject("table", "read", catalog_name, catalog.GetCatalogType(), catalog.IsTemporaryCatalog(),
+			          Text(schema.name), Text(current->name), columns, via, renamed, false, true);
+			return;
+		}
+	}
+	auto &schema = last->ParentSchema();
+	if (schema.GetParentSchema()) {
+		Unsupported("a nested schema");
+	}
+	auto schema_name = Text(schema.name);
+	auto table_name = Text(last->name);
+	auto last_name = catalog_name + "." + schema_name + "." + table_name;
+	optional_ptr<CatalogEntry> holder;
+	try {
+		holder = Catalog::GetEntry(context_,
+		                           EntryLookupInfo(CatalogType::TABLE_ENTRY,
+		                                           QualifiedName(catalog.GetName(), schema.name, last->name)),
+		                           OnEntryNotFound::RETURN_NULL);
+	} catch (std::exception &) {
+		// Something holds the name that is no table: it is taken all the same.
+		holder = &bound;
+	}
+	if (holder) {
+		throw PermissionException("QoD: " + last_name +
+		                          " at that snapshot is a table dropped since, and its name now belongs to another "
+		                          "table, so it cannot be judged by that name; only superusers read it");
+	}
+	auto renamed = table_name != Text(bound.name) || schema_name != Text(bound.ParentSchema().name);
+	std::set<std::string> described = columns;
+	if (!replaced) {
+		std::map<std::string, int64_t> then;
+		std::map<int64_t, std::string> unused;
+		std::map<std::string, int64_t> unused_last;
+		std::map<int64_t, std::string> at_last;
+		unique_ptr<FunctionData> last_data;
+		BoundAtClause at(Identifier("version"), Value::BIGINT(last_version));
+		auto matched = DuckLakeFieldIds(get.bind_data.get(), then, unused);
+		if (matched) {
+			EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(last->name), &at, QueryErrorContext());
+			last->GetScanFunction(context_, last_data, lookup);
+			matched = DuckLakeFieldIds(last_data.get(), unused_last, at_last);
+		}
+		described.clear();
+		for (auto &column : columns) {
+			auto id = then.find(column);
+			auto name = id == then.end() ? at_last.end() : at_last.find(id->second);
+			if (!matched || name == at_last.end()) {
+				Unsupported("a read of " + bound_name +
+				            ", dropped since, whose columns cannot be matched to its last live columns");
+			}
+			renamed = renamed || name->second != column;
+			described.insert(name->second);
+		}
+	}
+	AddObject("table", "read", catalog_name, catalog.GetCatalogType(), catalog.IsTemporaryCatalog(), schema_name,
+	          table_name, described, via, renamed, true, replaced);
 }
 
 //! The boundary is a read of the secure view; everything under it runs with the view owner's

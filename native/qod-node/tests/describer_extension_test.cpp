@@ -281,33 +281,92 @@ int main() {
 	expect_one("the new table at its own latest snapshot",
 	           "SELECT id, email FROM lake.secret AT (VERSION => " + lake_head() + ")",
 	           read_of("secret", "\"email\",\"id\"", false));
-	// A table dropped since: no current table to judge it by, refused to a user, a superuser's to read.
+	// A table dropped since is judged as a read of its last live name (its name at the snapshot before the
+	// drop), with its last live columns, marked `dropped`: readable on that name's grant while no live table
+	// holds the name, refused once one does. A table renamed and then dropped is judged on its last name.
+	std::string reused_at;
+	std::string renamed_at;
+	try {
+		qod::RunStrict(con, "CREATE TABLE lake.reused (id INTEGER)", "create reused");
+		qod::RunStrict(con, "INSERT INTO lake.reused VALUES (1)", "insert reused");
+		reused_at = lake_head();
+		qod::RunStrict(con, "DROP TABLE lake.reused", "drop reused");
+		qod::RunStrict(con, "CREATE TABLE lake.reused (id INTEGER, other VARCHAR)", "reuse the name");
+		qod::RunStrict(con, "CREATE TABLE lake.rn (id INTEGER, mail VARCHAR)", "create rn");
+		qod::RunStrict(con, "INSERT INTO lake.rn VALUES (1, 'm')", "insert rn");
+		renamed_at = lake_head();
+		qod::RunStrict(con, "ALTER TABLE lake.rn RENAME TO rn_last", "rename rn");
+		qod::RunStrict(con, "ALTER TABLE lake.rn_last RENAME COLUMN mail TO email", "rename rn's column");
+		qod::RunStrict(con, "DROP TABLE lake.rn_last", "drop rn_last");
+	} catch (std::exception &error) {
+		Fail(std::string("DuckLake drop setup: ") + error.what());
+	}
+	auto dropped_read = [](const std::string &name, const std::string &columns, bool renamed) {
+		return "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+		       "\"catalogType\":\"ducklake\",\"columns\":[" +
+		       columns + "],\"dropped\":true,\"kind\":\"table\",\"name\":\"" + name + "\"," +
+		       (renamed ? "\"renamed\":true," : "") +
+		       "\"schema\":\"main\",\"via\":null}],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}";
+	};
+	expect_one("a dropped table whose name is free", "SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")",
+	           dropped_read("gone", "\"id\"", false));
+	expect_one("a dropped table's change feed, its name free",
+	           "SELECT id FROM ducklake_table_insertions('lake', 'main', 'gone', 1, " + gone_at + ")",
+	           dropped_read("gone", "\"id\"", false));
+	expect_one("a table renamed, then dropped: its last name and columns",
+	           "SELECT id, mail FROM lake.rn AT (VERSION => " + renamed_at + ")",
+	           dropped_read("rn_last", "\"email\",\"id\"", true));
+	// A replace (CREATE OR REPLACE, QoD's restore): the table that took the name began exactly where the old
+	// one ended, so it is the same table, through a chain of replaces: described under the current name.
+	std::string rep_first;
+	std::string rep_second;
+	try {
+		qod::RunStrict(con, "CREATE TABLE lake.rep (id INTEGER, v VARCHAR)", "create rep");
+		qod::RunStrict(con, "INSERT INTO lake.rep VALUES (1, 'a')", "insert rep");
+		rep_first = lake_head();
+		qod::RunStrict(con, "CREATE OR REPLACE TABLE lake.rep AS SELECT * FROM lake.rep", "replace rep");
+		qod::RunStrict(con, "INSERT INTO lake.rep VALUES (2, 'b')", "insert rep again");
+		rep_second = lake_head();
+		qod::RunStrict(con, "CREATE OR REPLACE TABLE lake.rep AS SELECT * FROM lake.rep", "replace rep again");
+	} catch (std::exception &error) {
+		Fail(std::string("DuckLake replace setup: ") + error.what());
+	}
+	auto replaced_read = [](const std::string &columns) {
+		return "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+		       "\"catalogType\":\"ducklake\",\"columns\":[" +
+		       columns +
+		       "],\"kind\":\"table\",\"name\":\"rep\",\"replaced\":true,\"schema\":\"main\",\"via\":null}],"
+		       "\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}";
+	};
+	expect_one("a table replaced twice, read before the first replace",
+	           "SELECT id, v FROM lake.rep AT (VERSION => " + rep_first + ")", replaced_read("\"id\",\"v\""));
+	expect_one("a table replaced, read between the replaces",
+	           "SELECT id FROM lake.rep AT (VERSION => " + rep_second + ")", replaced_read("\"id\""));
+	expect_one("a replaced table's change feed across the replace",
+	           "SELECT id FROM ducklake_table_insertions('lake', 'main', 'rep', 1, " + rep_first + ")",
+	           replaced_read("\"id\""));
 	{
 		std::string error;
-		auto own = feed("SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")", error);
-		if (error.find("QoD: lake.main.gone at that snapshot is a table dropped since") == std::string::npos ||
+		auto own = feed("SELECT id FROM lake.reused AT (VERSION => " + reused_at + ")", error);
+		if (error.find("QoD: lake.main.reused at that snapshot is a table dropped since, and its name now "
+		               "belongs to another table") == std::string::npos ||
 		    !own.empty()) {
-			Fail("a dropped table's history, read by a user: " + error + (own.empty() ? "" : " " + own[0]));
-		}
-		error.clear();
-		auto own_feed =
-		    feed("SELECT * FROM ducklake_table_insertions('lake', 'main', 'gone', 1, " + gone_at + ")", error);
-		if (error.find("a table dropped since") == std::string::npos || !own_feed.empty()) {
-			Fail("a dropped table's change feed, read by a user: " + error);
+			Fail("a dropped table whose name was reused, read by a user: " + error +
+			     (own.empty() ? "" : " " + own[0]));
 		}
 		capture.principal = qod_test::Root();
 		auto from = capture.all.size();
 		capture.on = true;
-		auto as_root = con.Query("SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")");
+		auto as_root = con.Query("SELECT id FROM lake.reused AT (VERSION => " + reused_at + ")");
 		capture.on = false;
 		auto described = false;
 		for (auto i = from; i < capture.all.size(); i++) {
 			described = described || (capture.contexts[i] == con.context.get() &&
-			                          capture.all[i].find("\"name\":\"gone\"") != std::string::npos);
+			                          capture.all[i].find("\"name\":\"reused\"") != std::string::npos);
 		}
 		if (as_root->HasError() || !described) {
-			Fail("a dropped table's history, read by a superuser: " +
-			     (as_root->HasError() ? as_root->GetError() : std::string("not described as gone")));
+			Fail("a dropped table whose name was reused, read by a superuser: " +
+			     (as_root->HasError() ? as_root->GetError() : std::string("not described")));
 		}
 	}
 	con.Query("DETACH lake");
