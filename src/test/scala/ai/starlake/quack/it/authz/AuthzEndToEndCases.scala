@@ -2347,6 +2347,10 @@ abstract class AuthzEndToEndCases(
         r.contains(marker) || r.contains("__ducklake_metadata") ||
           r.split(',').exists(c => c == "secret" || c == "orders")
       )
+    // Rows whose answer names no table or view SQL the leak check could spot (column names, oids):
+    // only a refusal is safe for them.
+    val refusalOnly =
+      Set("SELECT attname FROM pg_attribute", "SELECT relname FROM pg_catalog.pg_class")
     // olga reaches the pool on every door: a refusal below is a refusal, never a failed sign-in.
     allowed("olga", "lake", s"SELECT count(*) FROM $lake.main.events")
     // Every statement's outcome on every door, so one run shows each that leaks.
@@ -2355,6 +2359,7 @@ abstract class AuthzEndToEndCases(
         as(d, "olga", "lake", sql) match
           // Refused by the node, by the gateway's metadata filter, or by DuckDB itself.
           case Left(_)                      => None
+          case Right(r) if refusalOnly(sql) => Some(s"[$d] $sql -> answered ${r.size} rows")
           case Right(r) if leaks(r).isEmpty => None
           case Right(r)                     => Some(s"[$d] $sql -> ${leaks(r).take(3)}")
       }
