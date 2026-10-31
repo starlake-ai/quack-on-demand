@@ -7,7 +7,13 @@ import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
+import ai.starlake.quack.ondemand.state.{
+  RbacRole,
+  RbacUser,
+  RoleColumnPolicy,
+  RolePermission,
+  RoleRowPolicy
+}
 import io.circe.parser.parse
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -376,6 +382,37 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     refused(
       plan(objects = List(obj("x", "insert", catalog = "system"))),
       "insert in the system catalog is superuser-only"
+    )
+  }
+
+  // qod-node describes a DuckLake read at any snapshot under the table's current name and columns
+  // (review M1), `renamed` when the statement named it, or a column, otherwise. The manager's column
+  // and row policies match the names the statement wrote, so they cannot follow such a read.
+  "a DuckLake read renamed since its snapshot" should "be decided on the current table's grant" in {
+    val renamed = obj("orders", columns = List("id", "v")).copy(renamed = true)
+    allow(plan(objects = List(renamed)))
+    refused(
+      plan(objects = List(obj("customers").copy(renamed = true))),
+      "user:alice lacks grants on acme_lake.main.customers:read"
+    )
+  }
+
+  it should "be refused to a principal with column or row policies, whatever the table" in {
+    val renamed =
+      plan(objects = List(obj("orders", columns = List("id", "v")).copy(renamed = true)))
+    val mask =
+      RoleColumnPolicy("cp-1", "r-1", "*", "*", "customers", "email", "mask", Some("'***'"))
+    val row    = RoleRowPolicy("rp-1", "r-1", "*", "*", "customers", "region = 'X'")
+    val reason =
+      "acme_lake.main.orders was named otherwise at the snapshot it is read at, and column and row " +
+        "policies match the names a statement writes; not available to principals with column or " +
+        "row policies"
+    refused(renamed, reason, principal(eff().copy(columnPolicies = List(mask))))
+    refused(renamed, reason, principal(eff().copy(rowPolicies = List(row))))
+    // The same read under its own name: their policies apply by name, as for any read.
+    allow(
+      plan(objects = List(obj("orders", columns = List("id", "v")))),
+      principal(eff().copy(columnPolicies = List(mask)))
     )
   }
 

@@ -7,7 +7,10 @@ import java.nio.charset.StandardCharsets
 
 /** One object a bound plan touches (description v1, `objects[]`). For `kind = schema`, `schema` is
   * the schema's name and `name` is empty. `via`: the innermost secure view (`catalog.schema.name`)
-  * through which a read reaches it; `columns`: the columns read, sorted.
+  * through which a read reaches it; `columns`: the columns read, sorted. A DuckLake read at any
+  * snapshot is described as the table its stable id names now, under its current names (node
+  * protocol 6); `renamed` (on the wire only when true) when the statement named the table, or a
+  * column read, by a name it had at that snapshot and has no longer.
   */
 final case class DescribedObject(
     kind: String,
@@ -17,7 +20,8 @@ final case class DescribedObject(
     schema: String,
     name: String,
     columns: List[String],
-    via: Option[String]
+    via: Option[String],
+    renamed: Boolean = false
 ):
   def qualified: String =
     if kind == "schema" then s"$catalog.$schema" else s"$catalog.$schema.$name"
@@ -72,7 +76,8 @@ object Description:
       name        <- c.get[String]("name")
       columns     <- c.get[List[String]]("columns")
       via         <- c.get[Option[String]]("via")
-    yield DescribedObject(kind, access, catalog, catalogType, schema, name, columns, via)
+      renamed     <- c.getOrElse[Boolean]("renamed")(false)
+    yield DescribedObject(kind, access, catalog, catalogType, schema, name, columns, via, renamed)
   }
 
   given Decoder[DescribedFunction] = Decoder.instance { c =>

@@ -103,6 +103,7 @@ final class AuthzDecider(
       val writes     = d.objects.exists(writesData) || writesFile
       for
         _ <- all(d.objects)(alwaysOnObject)
+        _ <- all(d.objects)(renamedUnderPolicies(ctx, _))
         _ <- all(d.functions)(alwaysOnFunction)
         _ <- all(d.settings)(alwaysOnSetting)
         _ <- all(d.control)(alwaysOnControl)
@@ -200,6 +201,23 @@ final class AuthzDecider(
     else if o.via.isDefined && o.access != "read" then
       refuse(
         s"${o.qualified} is reached through secure view ${o.via.getOrElse("")} by a ${o.access}"
+      )
+    else Pass
+
+  /** A DuckLake read the statement named by a name the table, or a column read, had at the snapshot
+    * it reads and has no longer (`renamed`, review M1): the node describes it under its current
+    * names, which the grants and OPA judge, but the column and row policy rewriters ran before it
+    * on the names the statement wrote, so they matched another table's policies, or none. Refused
+    * to a principal holding any column or row policy (the rewriters' and the protected-write
+    * guard's switches are not known here: the refusal does not depend on them).
+    */
+  private def renamedUnderPolicies(ctx: DecideContext, o: DescribedObject): Step =
+    val eff = ctx.effective
+    if o.renamed && (eff.columnPolicies.nonEmpty || eff.rowPolicies.nonEmpty) then
+      refuse(
+        s"${o.qualified} was named otherwise at the snapshot it is read at, and column and row " +
+          "policies match the names a statement writes; not available to principals with column " +
+          "or row policies"
       )
     else Pass
 

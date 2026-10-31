@@ -45,6 +45,15 @@ class DescriptionSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "read a DuckLake object's renamed flag, absent as false" in {
+    val renamed = Example.replace("\"name\":\"t\",", "\"name\":\"t\",\"renamed\":true,")
+    Description.decode(bytes(renamed)).map(_.objects.map(_.renamed)) shouldBe Right(List(true))
+    Description.decode(bytes(Example)).map(_.objects.map(_.renamed)) shouldBe Right(List(false))
+    Description
+      .decode(bytes(Example.replace("\"name\":\"t\",", "\"name\":\"t\",\"renamed\":1,")))
+      .isLeft shouldBe true
+  }
+
   it should "refuse another version, a missing field, and what is not JSON" in {
     Description.decode(bytes(Example.replace("\"v\":1", "\"v\":2"))).isLeft shouldBe true
     Description.decode(bytes(Example.replace(",\"v\":1", ""))).isLeft shouldBe true
