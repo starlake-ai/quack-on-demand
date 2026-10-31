@@ -652,7 +652,8 @@ final case class UserS3Config(
       envVar = "QOD_USER_S3_ALLOWED_ENDPOINTS",
       description =
         "S3-compatible endpoints users may name for their own S3 credentials, comma separated: " +
-          "host[:port] (TLS) or http://host[:port] (plain HTTP). Empty: AWS's own endpoint only."
+          "`host[:port]` (TLS) or `http://host[:port]` (plain HTTP). Empty: AWS's own endpoint " +
+          "only."
     )
     allowedEndpoints: String = ""
 ):
@@ -686,9 +687,10 @@ final case class NodeAuthzConfig(
       envVar = "QOD_INTERNAL_URL",
       description =
         "URL nodes reach this replica on, carried in every session handle: nodes call " +
-          "it for their statements' verdicts (plain http). Default http://<QOD_POD_IP>:<manager " +
-          "port> when the pod IP is set, else http://<QOD_ON_DEMAND_HOST>:<manager port> when " +
-          "the manager listens on one specific address, else http://127.0.0.1:<manager port>. " +
+          "it for their statements' verdicts (plain http). Default " +
+          "`http://<QOD_POD_IP>:<manager port>` when the pod IP is set, else " +
+          "`http://<QOD_ON_DEMAND_HOST>:<manager port>` when the manager listens on one specific " +
+          "address, else `http://127.0.0.1:<manager port>`. " +
           "Required in fleet mode (this replica's own address, one per replica, never a load " +
           "balancer); never a loopback URL on Kubernetes."
     )
@@ -696,8 +698,9 @@ final case class NodeAuthzConfig(
     @field @ConfigField(
       envVar = "QOD_POD_IP",
       description = "This replica's pod IP; the Helm chart sets it from the downward API. With " +
-        "QOD_INTERNAL_URL unset, nodes reach this replica on http://<pod IP>:<manager port>, so " +
-        "the replica that minted a handle, not the Service, answers its node."
+        "QOD_INTERNAL_URL unset, nodes reach this replica on " +
+        "`http://<pod IP>:<manager port>`, so the replica that minted a handle, not the " +
+        "Service, answers its node."
     )
     podIp: String = "",
     @field @ConfigField(
