@@ -45,7 +45,13 @@ final class BranchHandlers(
       tenantDb,
       apiKey,
       requireDuckLake = Some("branching requires a ducklake tenant-db")
-    )(scopeOf)
+    )(scopeOf).flatMap { (tid, db) =>
+      // A token's databases axis on the PARENT (review 5 R2): every branch endpoint, REST and MCP.
+      callerOf.resolve(apiKey).toOption.map(RestCaller.callerOf("branch-scope", _)) match
+        case Some(caller) =>
+          TokenScope.databaseRefusal(sup, tid, caller.restriction, db).toLeft((tid, db))
+        case None => Right((tid, db))
+    }
 
   /** [[gate]], then the actor: an unresolvable token is a 401 and never reaches the service. */
   private def gatedActor(rawTenant: String, tenantDb: String, apiKey: Option[String])(

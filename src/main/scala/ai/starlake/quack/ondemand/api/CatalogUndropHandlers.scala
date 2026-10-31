@@ -127,11 +127,12 @@ final class CatalogUndropHandlers(
     * table on `pool`.
     */
   private def tokenRefusal(
+      tid: String,
       caller: ExecCaller,
       db: String,
       pool: PoolKey
   ): Option[(StatusCode, ErrorResponse)] =
-    TokenScope.refusal(caller, db, Some(pool), writes = true)
+    TokenScope.refusal(sup, tid, caller, db, Some(pool), writes = true)
 
   def undrop(req: UndropRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
@@ -145,7 +146,7 @@ final class CatalogUndropHandlers(
         lazy val run: Either[(StatusCode, ErrorResponse), Run] =
           callerOf(s"undrop-$tid-$db", apiKey).flatMap { caller =>
             pool
-              .flatMap(tokenRefusal(caller, db, _))
+              .flatMap(tokenRefusal(tid, caller, db, _))
               .toLeft((k: PoolKey, sql: String) => executor(caller, k, sql))
           }
         recover(tid, db, req.schema, req.table, req.asName, req.fromSnapshot, pool, run).map {
@@ -295,7 +296,7 @@ final class CatalogUndropHandlers(
         (principal, tid, td) <- mine(req.tenantDb, apiKey)
         caller = RestCaller.callerOf(s"undrop-$tid-${td.name}", principal)
         (poolKey, _) <- reachable(caller, tid, td.name)
-        _            <- tokenRefusal(caller, td.name, poolKey).toLeft(())
+        _            <- tokenRefusal(tid, caller, td.name, poolKey).toLeft(())
       yield (tid, td, caller, poolKey)
     ).flatMap {
       case Left(e) =>

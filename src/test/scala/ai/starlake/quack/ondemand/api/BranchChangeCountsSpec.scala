@@ -169,18 +169,41 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       ),
       purgeFiles = (_, _) => Right(())
     )
-    val callers = restCaller(sessionOf, patOf)
+    // Database-scoped PATs of alice (review 5 R2): one on the branch's parent, one elsewhere.
+    private def scopedPat(dbs: Set[String]) =
+      ai.starlake.quack.ondemand.auth.PatPrincipal(
+        user = RbacUser(id = "u-alice", tenant = Some("acme"), username = "alice", kind = "admin"),
+        patId = "pat-scoped",
+        scope = SessionScope(false, Set("acme")),
+        isAdmin = true,
+        restriction =
+          ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted.copy(databases = Some(dbs))
+      )
+    val ParentScopedTok = "qod_pat_parent_scoped"
+    val OtherScopedTok  = "qod_pat_other_scoped"
+    val callers         = restCaller(
+      sessionOf,
+      t =>
+        patOf(t)
+          .orElse(Option.when(t == ParentScopedTok)(scopedPat(Set(parent.name))))
+          .orElse(Option.when(t == OtherScopedTok)(scopedPat(Set("acme_other"))))
+    )
     val preview = new CatalogPreviewHandlers(
       sup,
       store,
       callers,
       executor,
-      (_, _) => new DuckLakeCatalogReader(null),
+      // Every snapshot and table resolves: the diff reaches its token check and its statements.
+      (_, _) =>
+        new DuckLakeCatalogReader(null):
+          override def snapshotExists(id: Long): Boolean                     = true
+          override def tableExistsAt(s: String, t: String, n: Long): Boolean = true
+      ,
       CatalogConfig()
     )
     val handlers =
       new BranchHandlers(sup, service, preview, BranchHandlers.actorResolver(callers), callers)
-    service
+    val feature = service
       .create("acme", parent.name, "feature", None, None, BranchActor("root", true), None)
       .unsafeRunSync()
       .fold(f => fail(s"branch create: $f"), identity)
@@ -253,6 +276,94 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       caller.patId shouldBe Some(PatId)
       principal.name shouldBe "alice"
     }
+  }
+
+  "a token scoped to the branch's parent database" should "count and diff its branches (review 5 R2)" in {
+    val f = new Fixture
+    f.overRest(f.ParentScopedTok, AliceScope) shouldBe Map("region" -> 7L, "nation" -> 0L)
+    // The branch diff checks the branch tenant-db (`<parent>__br_<id8>`) as its parent: never a
+    // token_scope refusal for a token scoped to the parent.
+    val diff = f.handlers
+      .diff(
+        "acme",
+        f.parent.name,
+        "feature",
+        "main",
+        "region",
+        None,
+        None,
+        None,
+        Some(f.ParentScopedTok)
+      )(
+        AliceScope
+      )
+      .attempt
+      .unsafeRunSync()
+    diff match
+      case Right(Left((code, e))) =>
+        withClue(e)(e.error should not be "token_scope")
+      case _ => succeed
+  }
+
+  "a token scoped to another database" should "neither create, list, count nor propose a branch (review 5 R2)" in {
+    val f                                                                  = new Fixture
+    val tok                                                                = Some(f.OtherScopedTok)
+    def refused[A](out: Either[(sttp.model.StatusCode, ErrorResponse), A]) =
+      out match
+        case Left((code, e)) =>
+          code shouldBe sttp.model.StatusCode.Forbidden
+          e.error shouldBe "token_scope"
+        case Right(v) => fail(s"a token scoped elsewhere got $v")
+    refused(
+      f.handlers
+        .create(BranchCreateRequest("acme", f.parent.name, "other"), tok)(AliceScope)
+        .unsafeRunSync()
+    )
+    refused(f.handlers.list("acme", f.parent.name, None, tok)(AliceScope).unsafeRunSync())
+    refused(
+      f.handlers
+        .changes("acme", f.parent.name, "feature", Some(true), tok)(AliceScope)
+        .unsafeRunSync()
+    )
+    refused(
+      f.handlers
+        .propose(BranchOpRequest("acme", f.parent.name, "feature"), tok)(AliceScope)
+        .unsafeRunSync()
+    )
+    // Nothing was counted for it.
+    f.counted shouldBe empty
+  }
+
+  "TokenScope" should "judge a branch by its parent, and let a branch-only token write on a branch pool (review 5 R2, R5)" in {
+    val f          = new Fixture
+    val b          = f.feature
+    val branchOnly = ExecCaller(
+      "c",
+      "alice",
+      ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted
+        .copy(databases = Some(Set(f.parent.name)), branchOnly = true),
+      superuserAdmissible = false
+    )
+    TokenScope.databaseOf(f.sup, "acme", b.tenantDbName) shouldBe f.parent.name
+    val onBranch = PoolKey("acme", b.tenantDbName, b.poolName)
+    TokenScope.refusal(
+      f.sup,
+      "acme",
+      branchOnly,
+      b.tenantDbName,
+      Some(onBranch),
+      writes = true
+    ) shouldBe None
+    TokenScope
+      .refusal(
+        f.sup,
+        "acme",
+        branchOnly,
+        f.parent.name,
+        Some(PoolKey("acme", f.parent.name, "bi")),
+        writes = true
+      )
+      .map(_._2.error) shouldBe Some("write_requires_branch")
   }
 
   "propose" should "store the system's counts and reply with the superuser proposer's own" in {

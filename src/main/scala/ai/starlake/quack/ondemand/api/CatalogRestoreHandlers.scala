@@ -205,7 +205,19 @@ final class CatalogRestoreHandlers(
                       // dry run and the execute run as this caller.
                       callerOf(s"restore-$tid-$db", apiKey).flatMap(caller =>
                         // A token's every axis (review N5): the execute replaces the table.
-                        TokenScope.refusal(caller, db, None, writes = !dryRun).toLeft(caller)
+                        // On the pool the leg runs on (review 5 R5): a branch-only token's
+                        // restore of a branch database writes on its branch pool.
+                        TokenScope
+                          .refusal(
+                            sup,
+                            tid,
+                            caller,
+                            db,
+                            if dryRun then PoolPicks.readPoolKey(sup, tid, db)
+                            else PoolPicks.writePoolKey(sup, tid, db),
+                            writes = !dryRun
+                          )
+                          .toLeft(caller)
                       ) match
                         case Left((code, e)) => IO.pure(denied(code, e.error, e.message))
                         case Right(caller)   =>
