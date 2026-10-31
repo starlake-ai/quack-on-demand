@@ -4,6 +4,8 @@
 
 #include "describe_harness.hpp"
 #include "init_runner.hpp"
+#include "json_writer.hpp"
+#include "locations.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -117,7 +119,16 @@ int main() {
 	          << " plans; " << nested << " read __ducklake_metadata_lake, " << nested_on_client
 	          << " of them on the client's own ClientContext" << std::endl;
 	Expect("DuckLake flush", flush, flush_op);
-	Expect("DuckLake flush", flush, "{\"op\":\"copy_to\",\"target\":\"" + dir + "/lake_data/");
+	// The data folder as the describer renders a COPY target (ResolveLocalPath: '\\' on Windows, where
+	// DuckLake also writes backslash paths), in its JSON spelling, without the closing quote.
+	auto lake_data = qod::ResolveLocalPath(dir + "/lake_data/");
+	if (!lake_data) {
+		Fail("DuckLake flush: the lake's data folder " + dir + "/lake_data/ does not resolve");
+	} else {
+		auto lake_data_json = qod::CanonicalJson(qod::JsonString(*lake_data));
+		lake_data_json.pop_back();
+		Expect("DuckLake flush", flush, "{\"op\":\"copy_to\",\"target\":" + lake_data_json);
+	}
 	Expect("DuckLake flush", flush, "\"catalog\":\"lake\",\"catalogType\":\"ducklake\"");
 	Expect("DuckLake flush", flush, "\"kind\":\"table\",\"name\":\"t\"");
 	con.Query("DETACH lake");
