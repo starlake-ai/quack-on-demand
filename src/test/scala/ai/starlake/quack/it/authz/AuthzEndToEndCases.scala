@@ -2411,6 +2411,54 @@ abstract class AuthzEndToEndCases(
     allowed("bob", "lake", s"SELECT id FROM $lake.main.ud_mcp", Some(List("5")))
   }
 
+  it should "refuse AS when the SOURCE name was reused: the node refuses the read (review N6)" in {
+    ready()
+    dropHistory
+    // drop_reused was dropped, then a new drop_reused created: AS frees the target, not the source.
+    val (code, body) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("drop_reused"),
+        "asName"   -> s("drop_reused_back")
+      ),
+      session("bob")
+    )
+    withClue(body)(code shouldBe 403)
+    body should include("acl_denied")
+    body should include("its name now belongs to another table or view")
+  }
+
+  "the catalog REST endpoints that run SQL as the caller" should "honour a token's databases axis and verb ceiling (review N5)" in {
+    ready()
+    val (one, two, _) = rordersHistory
+    val elsewhere     = patOf("erin", "cat-elsewhere", "databases" -> Json.arr(s(files)))
+    val base          = s"/api/catalog/tenant/$Acme/database/$lake/schemas/main/tables/rorders"
+    List(s"$base/preview?asOf=$two", s"$base/data-diff?from=$one&to=$two").foreach { path =>
+      val (c, b) = stack.getStatus(path, elsewhere)
+      withClue(s"$path: $b")(c shouldBe 403)
+      b should include("token_scope")
+    }
+    val restoreBody = obj(
+      "tenant"   -> s(Acme),
+      "tenantDb" -> s(lake),
+      "schema"   -> s("main"),
+      "table"    -> s("rorders"),
+      "to"       -> s(two.toString)
+    )
+    val (rc, rb) = stack.postStatus("/api/catalog/restore", restoreBody, elsewhere)
+    withClue(rb)(rc shouldBe 403)
+    rb should include("token_scope")
+    // A read-only token may preview but not restore (a restore replaces the table).
+    val readOnly = patOf("erin", "cat-ro", "verbCeiling" -> s("RO"))
+    val (pc, pb) = stack.getStatus(s"$base/preview?asOf=$two", readOnly)
+    withClue(pb)(pc shouldBe 200)
+    val (wc, wb) = stack.postStatus("/api/catalog/restore", restoreBody, readOnly)
+    withClue(wb)(wc shouldBe 403)
+    wb should include("verb ceiling")
+  }
+
   "UNDROP TABLE names" should "compare without case, as DuckDB resolves them (review M6)" in {
     ready()
     admin("lake", s"CREATE TABLE $lake.main.ud_case (id INTEGER)")
