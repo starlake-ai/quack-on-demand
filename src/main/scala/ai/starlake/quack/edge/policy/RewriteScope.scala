@@ -120,7 +120,8 @@ object RewriteScope:
         s"unresolvable table references (deny, fail-closed): ${qualErrors.mkString("; ")}"
       )
     else if catalogFunctions.nonEmpty && !pureRead then
-      // the metadata filter rewrites reads only: a listing riding in a write is no rewrite of its
+      // The metadata filter rewrites reads only: a listing riding in a write would reach the node
+      // unfiltered, so it is refused.
       Scope.Refused(
         "catalog functions are admitted in read-only statements only (deny, fail-closed): " +
           catalogFunctions.mkString(", ")
