@@ -301,3 +301,81 @@ class TenantOidcRegistrySpec extends AnyFlatSpec with Matchers:
     seen.asScala.filterNot(_ eq current).foreach(_.isClosed shouldBe true)
     seen.asScala.foreach(a => a.closeCount should be <= 1)
     current.isClosed shouldBe false
+
+  // -- every key a provider reads is fingerprinted, and only those ----------------
+
+  /** A distinct, well-formed value for `key` (keycloak's baseUrl must be an absolute URL). */
+  private def valueOf(key: String, n: Int): String =
+    if key == "baseUrl" then s"https://kc$n.example.com" else s"$key-$n"
+
+  private def configured(provider: TenantOidcRegistry.Provider): Map[String, String] =
+    provider.keys.map(k => k -> valueOf(k, 1)).toMap
+
+  /** Keys some provider, a secret path or an unrelated setting may carry, none of them read by the
+    * provider under test unless it declares them.
+    */
+  private val CandidateKeys: Set[String] =
+    TenantOidcRegistry.Providers.values.flatMap(_.keys).toSet ++
+      Set("clientSecret", "clientSecretRef", ParkedSecretRefs.ParkedKey, "hd", "issuer", "scope")
+
+  it should "read exactly the keys each provider declares, and nothing else, when building" in:
+    TenantOidcRegistry.Providers.foreach { (name, provider) =>
+      withClue(s"provider $name: ") {
+        val values = configured(provider)
+        val read   = scala.collection.mutable.ListBuffer.empty[String]
+        val auth   = provider.make(
+          k => {
+            read += k
+            values.getOrElse(k, fail(s"read undeclared key '$k'"))
+          },
+          "role"
+        )
+        try read.toSet shouldBe provider.keys.toSet
+        finally auth.close()
+      }
+    }
+
+  it should "rebuild when any key its provider reads changes alone" in:
+    for
+      (name, provider) <- TenantOidcRegistry.Providers.toList
+      key              <- provider.keys
+    do
+      withClue(s"provider $name, key $key: ") {
+        val id     = s"t-fp-$name-$key"
+        val mirror = new TenantMirror(tenant(id, provider = name, cfg = configured(provider)))
+        val r      = mirror.registry()
+        val before = r.forTenant(id)
+        before shouldBe defined
+        mirror.put(
+          tenant(id, provider = name, cfg = configured(provider) + (key -> valueOf(key, 2)))
+        )
+        val after = r.forTenant(id)
+        after shouldBe defined
+        after.get should not be theSameInstanceAs(before.get)
+        before.get.isClosed shouldBe true
+        after.get.isClosed shouldBe false
+      }
+
+  it should "keep the cached instance when a key its provider does not read changes alone" in:
+    // Added, changed, then removed: none of the three rebuilds.
+    for
+      (name, provider) <- TenantOidcRegistry.Providers.toList
+      key              <- (CandidateKeys -- provider.keys).toList.sorted
+    do
+      withClue(s"provider $name, key $key: ") {
+        val id     = s"t-nofp-$name-$key"
+        val base   = configured(provider)
+        val mirror = new TenantMirror(tenant(id, provider = name, cfg = base))
+        val r      = mirror.registry()
+        val before = r.forTenant(id)
+        before shouldBe defined
+        List(base + (key -> valueOf(key, 1)), base + (key -> valueOf(key, 2)), base).foreach {
+          cfg =>
+            mirror.put(tenant(id, provider = name, cfg = cfg))
+            r.forTenant(id).get should be theSameInstanceAs before.get
+        }
+        before.get.isClosed shouldBe false
+      }
+
+  it should "declare every supported provider" in:
+    TenantOidcRegistry.Providers.keySet shouldBe Set("google", "keycloak", "azure", "aws")

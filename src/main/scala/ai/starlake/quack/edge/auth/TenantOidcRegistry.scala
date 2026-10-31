@@ -22,12 +22,12 @@ import java.util.concurrent.ConcurrentHashMap
   *
   *   - Every lookup loads the tenant via `loadTenant` (the supervisor's in-memory tenant mirror,
   *     which `restore()` refreshes on every replica) and compares the fingerprint of its public
-  *     auth fields (the provider plus the [[TenantOidcRegistry.PublicKeys]] the builder reads) with
-  *     the one the cached authenticator was built from. Equal: the cached instance is reused.
-  *     Different: a new authenticator is built and the old one closed. So under HA a tenant's SSO
-  *     change made on one replica applies on every other one once its mirror is refreshed (a
-  *     `qod_topology` NOTIFY, or the periodic refresh when a NOTIFY was missed), with no channel of
-  *     its own.
+  *     auth fields (the provider plus the keys its [[TenantOidcRegistry.Provider]] declares, the
+  *     only ones its builder can read) with the one the cached authenticator was built from. Equal:
+  *     the cached instance is reused. Different: a new authenticator is built and the old one
+  *     closed. So under HA a tenant's SSO change made on one replica applies on every other one
+  *     once its mirror is refreshed (a `qod_topology` NOTIFY, or the periodic refresh when a NOTIFY
+  *     was missed), with no channel of its own.
   *   - A tenant that no longer exists keeps no entry; one whose provider is unsupported or lacks a
   *     required public field caches `None`. Either way the caller falls back to the global chain
   *     and any previous authenticator is closed.
@@ -42,11 +42,10 @@ import java.util.concurrent.ConcurrentHashMap
   *
   * Bearer validation needs public fields only: where the provider publishes its signing keys, and
   * the issuer and client id (the audience) a token must carry. Every builder therefore reads public
-  * `authConfig` keys alone (`keycloak`: baseUrl + realm + clientId; `google`: clientId; `azure`:
-  * tenantId + clientId; `aws`: region + userPoolId + clientId) and resolves no secret. A tenant's
-  * stored client secret and its `clientSecretRef` serve the admin-console SSO code exchange only
-  * ([[OidcEndpointResolver]]); the provider configs built here carry `clientSecret = ""`, a field
-  * [[OidcProviderFactory]] never reads.
+  * `authConfig` keys alone (the ones its [[TenantOidcRegistry.Provider]] declares) and resolves no
+  * secret. A tenant's stored client secret and its `clientSecretRef` serve the admin-console SSO
+  * code exchange only ([[OidcEndpointResolver]]); the provider configs built here carry
+  * `clientSecret = ""`, a field [[OidcProviderFactory]] never reads.
   */
 final class TenantOidcRegistry(
     loadTenant: String => Option[Tenant],
@@ -93,7 +92,7 @@ final class TenantOidcRegistry(
             if current != null && current.fingerprint == fp then current
             else
               superseded = current
-              Entry(fp, build(tenantId, t))
+              Entry(fp, build(tenantId, fp))
     )
     if superseded != null then
       closeEntry(superseded)
@@ -118,105 +117,110 @@ final class TenantOidcRegistry(
       closeEntry(removed)
       logger.info(s"TenantOidcRegistry: invalidated cached OIDC client for tenant '$tenantId'")
 
-  private def build(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
-    t.authProvider match
-      case "google"   => buildGoogle(tenantId, t)
-      case "keycloak" => buildKeycloak(tenantId, t)
-      case "azure"    => buildAzure(tenantId, t)
-      case "aws"      => buildAws(tenantId, t)
-      case _          => None
-
-  private def need(cfg: Map[String, String], key: String): Option[String] =
-    TenantOidcRegistry.need(cfg, key)
-
-  private def buildGoogle(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
-    for cid <- need(t.authConfig, "clientId")
-    yield
-      val cfg = GoogleAuthConfig(
-        enabled = true,
-        clientId = cid,
-        clientSecret = "",
-        groupsLookup = false,
-        serviceAccountKeyPath = "",
-        groupsCacheTtlSeconds = 300L
-      )
-      logger.info(
-        s"TenantOidcRegistry: built per-tenant Google authenticator for tenant '$tenantId' " +
-          s"(clientId=$cid)"
-      )
-      OidcProviderFactory.createGoogle(cfg, roleClaim)
-
-  private def buildKeycloak(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
-    for
-      baseUrl <- need(t.authConfig, "baseUrl")
-      realm   <- need(t.authConfig, "realm")
-      cid     <- need(t.authConfig, "clientId")
-    yield
-      val cfg = KeycloakAuthConfig(
-        enabled = true,
-        baseUrl = baseUrl,
-        realm = realm,
-        clientId = cid,
-        clientSecret = ""
-      )
-      logger.info(
-        s"TenantOidcRegistry: built per-tenant Keycloak authenticator for tenant '$tenantId' " +
-          s"(baseUrl=$baseUrl realm=$realm clientId=$cid)"
-      )
-      OidcProviderFactory.createKeycloak(cfg, roleClaim)
-
-  private def buildAzure(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
-    for
-      aadTenant <- need(t.authConfig, "tenantId")
-      cid       <- need(t.authConfig, "clientId")
-    yield
-      val cfg = AzureAuthConfig(
-        enabled = true,
-        tenantId = aadTenant,
-        clientId = cid,
-        clientSecret = ""
-      )
-      logger.info(
-        s"TenantOidcRegistry: built per-tenant Azure authenticator for tenant '$tenantId' " +
-          s"(aadTenant=$aadTenant clientId=$cid)"
-      )
-      OidcProviderFactory.createAzure(cfg, roleClaim)
-
-  // AWS Cognito: the JWKS URL and the issuer come from region + userPoolId, the audience is the
-  // app client id.
-  private def buildAws(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
-    for
-      region <- need(t.authConfig, "region")
-      pool   <- need(t.authConfig, "userPoolId")
-      cid    <- need(t.authConfig, "clientId")
-    yield
-      val cfg = AwsAuthConfig(
-        enabled = true,
-        region = region,
-        userPoolId = pool,
-        clientId = cid
-      )
-      logger.info(
-        s"TenantOidcRegistry: built per-tenant AWS Cognito authenticator for tenant '$tenantId' " +
-          s"(region=$region userPoolId=$pool clientId=$cid)"
-      )
-      OidcProviderFactory.createAws(cfg, roleClaim)
+  /** Build from the fingerprint alone, so the builder sees exactly the keys the fingerprint covers:
+    * `None` when the provider is unsupported or one of its declared keys is absent.
+    */
+  private def build(tenantId: String, fp: Fingerprint): Option[OidcBearerAuthenticator] =
+    TenantOidcRegistry.Providers.get(fp.provider).flatMap { provider =>
+      val values = fp.fields.collect { case (k, Some(v)) => k -> v }.toMap
+      if values.size != provider.keys.size then None
+      else
+        val auth = provider.make(TenantOidcRegistry.declaredOnly(fp.provider, values), roleClaim)
+        logger.info(
+          s"TenantOidcRegistry: built per-tenant ${fp.provider} authenticator for tenant " +
+            s"'$tenantId' (${provider.keys.map(k => s"$k=${values(k)}").mkString(" ")})"
+        )
+        Some(auth)
+    }
 
   /** Visible for tests. */
   private[auth] def cacheSize: Int = cache.size
 
 object TenantOidcRegistry:
 
-  /** The public `authConfig` keys each provider's builder reads. The fingerprint covers exactly
-    * these, so a change of any of them rebuilds the authenticator; a builder that starts reading a
-    * new key MUST list it here.
+  /** One supported provider: the public `authConfig` keys its builder reads, declared once, and the
+    * builder. The builder receives a lookup over those keys only (any other key fails the build),
+    * and the fingerprint covers exactly those keys, so a key the builder reads is always a key
+    * whose change rebuilds the authenticator.
     */
-  val PublicKeys: Map[String, List[String]] = Map(
-    "google"   -> List("clientId"),
-    "keycloak" -> List("baseUrl", "realm", "clientId"),
-    "azure"    -> List("tenantId", "clientId"),
-    "aws"      -> List("region", "userPoolId", "clientId")
+  private[auth] final class Provider(
+      val keys: List[String],
+      val make: (String => String, String) => OidcBearerAuthenticator
   )
+
+  /** Every supported provider by `authProvider` value. AWS Cognito: the JWKS URL and the issuer
+    * come from region + userPoolId, the audience is the app client id.
+    */
+  private[auth] val Providers: Map[String, Provider] = Map(
+    "google" -> Provider(
+      List("clientId"),
+      (f, roleClaim) =>
+        OidcProviderFactory.createGoogle(
+          GoogleAuthConfig(
+            enabled = true,
+            clientId = f("clientId"),
+            clientSecret = "",
+            groupsLookup = false,
+            serviceAccountKeyPath = "",
+            groupsCacheTtlSeconds = 300L
+          ),
+          roleClaim
+        )
+    ),
+    "keycloak" -> Provider(
+      List("baseUrl", "realm", "clientId"),
+      (f, roleClaim) =>
+        OidcProviderFactory.createKeycloak(
+          KeycloakAuthConfig(
+            enabled = true,
+            baseUrl = f("baseUrl"),
+            realm = f("realm"),
+            clientId = f("clientId"),
+            clientSecret = ""
+          ),
+          roleClaim
+        )
+    ),
+    "azure" -> Provider(
+      List("tenantId", "clientId"),
+      (f, roleClaim) =>
+        OidcProviderFactory.createAzure(
+          AzureAuthConfig(
+            enabled = true,
+            tenantId = f("tenantId"),
+            clientId = f("clientId"),
+            clientSecret = ""
+          ),
+          roleClaim
+        )
+    ),
+    "aws" -> Provider(
+      List("region", "userPoolId", "clientId"),
+      (f, roleClaim) =>
+        OidcProviderFactory.createAws(
+          AwsAuthConfig(
+            enabled = true,
+            region = f("region"),
+            userPoolId = f("userPoolId"),
+            clientId = f("clientId")
+          ),
+          roleClaim
+        )
+    )
+  )
+
+  /** The lookup a builder reads through: a key outside its declaration fails the build (fail
+    * closed) instead of being read unfingerprinted.
+    */
+  private def declaredOnly(provider: String, values: Map[String, String]): String => String =
+    k =>
+      values.getOrElse(
+        k,
+        throw new IllegalStateException(
+          s"TenantOidcRegistry: the $provider builder read authConfig key '$k', which its " +
+            "Provider declaration does not list"
+        )
+      )
 
   /** The provider and its public fields, as the builder reads them (trimmed, empty = absent). */
   private[auth] final case class Fingerprint(
@@ -235,5 +239,5 @@ object TenantOidcRegistry:
   private[auth] def fingerprintOf(t: Tenant): Fingerprint =
     Fingerprint(
       t.authProvider,
-      PublicKeys.getOrElse(t.authProvider, Nil).map(k => k -> need(t.authConfig, k))
+      Providers.get(t.authProvider).fold(Nil)(_.keys).map(k => k -> need(t.authConfig, k))
     )
