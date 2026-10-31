@@ -167,6 +167,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
           Some(DroppedTableEntry("tpch1", "doomed", 40L, 39L, Some("2026-07-14T00:00:00Z"), true))
         else None
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = false
+      override def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean     = false
 
   private def liveConfigEntries = ConfigRegistry.collect(
     ConfigRegistry.rootsFor(

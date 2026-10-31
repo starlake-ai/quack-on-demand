@@ -88,7 +88,7 @@ final class McpPlatformTools(
     run = (principal, args) =>
       (for
         tenant   <- tenantOf(principal, args)
-        database <- required(args, "database")
+        database <- required(args, "database").flatMap(inScope(principal, _))
         schema   <- required(args, "schema")
         table    <- required(args, "table")
         to       <- required(args, "to")
@@ -111,6 +111,13 @@ final class McpPlatformTools(
             .map(res => bridge(res).map(_.asJson))
   )
 
+  /** A token's databases axis (review I1), ahead of the handlers: a token scoped elsewhere neither
+    * lists, recovers nor restores in this database.
+    */
+  private def inScope(principal: McpPrincipal, database: String): Either[String, String] =
+    if principal.restriction.allowsDatabase(database) then Right(database)
+    else Left(s"database '$database' is not permitted for this token")
+
   private val undropTableTool = McpToolDef(
     name = "undrop_table",
     description = "Recover a dropped table from the last snapshot where it was live " +
@@ -132,7 +139,7 @@ final class McpPlatformTools(
     run = (principal, args) =>
       if !principal.isAdmin then
         (for
-          database <- required(args, "database")
+          database <- required(args, "database").flatMap(inScope(principal, _))
           schema   <- required(args, "schema")
           table    <- required(args, "table")
           _        <-
@@ -151,7 +158,7 @@ final class McpPlatformTools(
       else
         (for
           tenant   <- tenantOf(principal, args)
-          database <- required(args, "database")
+          database <- required(args, "database").flatMap(inScope(principal, _))
           schema   <- required(args, "schema")
           table    <- required(args, "table")
         yield (tenant, database, schema, table)) match
@@ -185,7 +192,7 @@ final class McpPlatformTools(
     adminOnly = false,
     run = (principal, args) =>
       if !principal.isAdmin then
-        required(args, "database") match
+        required(args, "database").flatMap(inScope(principal, _)) match
           case Left(err)       => IO.pure(Left(err))
           case Right(database) =>
             undropH
@@ -194,7 +201,7 @@ final class McpPlatformTools(
       else
         (for
           tenant   <- tenantOf(principal, args)
-          database <- required(args, "database")
+          database <- required(args, "database").flatMap(inScope(principal, _))
         yield (tenant, database)) match
           case Left(err)                 => IO.pure(Left(err))
           case Right((tenant, database)) =>

@@ -1337,12 +1337,12 @@ object Main extends IOApp with LazyLogging:
             audit = auditRecorder,
             // UNDROP TABLE runs through the catalog undrop handlers, built after the router they
             // execute on: bound below, once they exist (unwired until then fails closed).
-            undropFn = (user, poolKey, eff, schema, table, asName) =>
+            undropFn = (connectionId, user, poolKey, eff, schema, table, asName) =>
               Option(undropStatement.get()) match
-                case Some(fn) => fn(user, poolKey, eff, schema, table, asName)
+                case Some(fn) => fn(connectionId, user, poolKey, eff, schema, table, asName)
                 case None     =>
                   ai.starlake.quack.edge.admin.AdminStatementExecutor
-                    .unwiredUndrop(user, poolKey, eff, schema, table, asName)
+                    .unwiredUndrop(connectionId, user, poolKey, eff, schema, table, asName)
           )
         )
       if !sqlAdminEnabled then
@@ -1828,7 +1828,18 @@ object Main extends IOApp with LazyLogging:
           catalogReader,
           mgrCfg.catalog,
           restCaller,
-          audit = auditRecorder
+          audit = auditRecorder,
+          // UNDROP TABLE's CTAS, as the session itself: its own effective set, claims included.
+          sessionExecutor = (connectionId, user, poolKey, sql, eff) =>
+            fsRouter.execute(
+              connectionId,
+              user,
+              poolKey,
+              sql,
+              effectiveSet = Some(eff),
+              recordExecution = true,
+              adminDispatch = false
+            )
         )
       )
       undropHandlers.foreach(h => undropStatement.set(h.undropStatement))

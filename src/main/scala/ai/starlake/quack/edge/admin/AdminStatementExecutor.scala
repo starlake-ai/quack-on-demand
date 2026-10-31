@@ -54,7 +54,9 @@ final class AdminStatementExecutor(
       user: String,
       poolKey: PoolKey,
       sql: String,
-      effectiveSet: Option[EffectiveSet]
+      effectiveSet: Option[EffectiveSet],
+      /** The session's connection: UNDROP TABLE runs its CTAS on a connection derived from it. */
+      connectionId: String = ""
   ): IO[Either[RouterFailure, QueryResult]] =
     // Nothing below runs until the returned IO is actually evaluated: parsing, authorization
     // (an in-memory tenant-cache lookup, cheap but still deferred), and the log line all sit
@@ -89,7 +91,7 @@ final class AdminStatementExecutor(
           // Not an admin statement: any signed-in user may ask, and it runs as them, so the node
           // decides the read of the dropped table and the create (no admin gate here).
           logger.info(s"sql-admin user=$user tenant=${poolKey.tenant} cmd=UndropTable")
-          undropFn(user, poolKey, effectiveSet, schema, table, asName)
+          undropFn(connectionId, user, poolKey, effectiveSet, schema, table, asName)
         case Right(cmd) =>
           authorize(user, poolKey, effectiveSet) match
             case Left(f @ RouterFailure.AccessDenied(_)) =>
@@ -888,11 +890,12 @@ final class AdminStatementExecutor(
 
 object AdminStatementExecutor:
 
-  /** (user, poolKey, the session's effective set, schema, table, asName) -> the dialect's row.
-    * `UNDROP TABLE`, wired in Main over `CatalogUndropHandlers.undropStatement`; the default fails
-    * closed.
+  /** (connectionId, user, poolKey, the session's effective set, schema, table, asName) -> the
+    * dialect's row. `UNDROP TABLE`, wired in Main over `CatalogUndropHandlers.undropStatement`; the
+    * default fails closed.
     */
   type UndropFn = (
+      String,
       String,
       PoolKey,
       Option[EffectiveSet],
@@ -902,7 +905,7 @@ object AdminStatementExecutor:
   ) => IO[Either[RouterFailure, QueryResult]]
 
   val unwiredUndrop: UndropFn =
-    (_, _, _, _, _, _) => IO.pure(Left(RouterFailure.Internal("UNDROP TABLE is not wired")))
+    (_, _, _, _, _, _, _) => IO.pure(Left(RouterFailure.Internal("UNDROP TABLE is not wired")))
 
   /** (tenantId, username, password, kind, memberships) -> created user. Wired in Main over
     * PoolSupervisor.createUser + the boot UserStore with failIfExists = true; the default keeps

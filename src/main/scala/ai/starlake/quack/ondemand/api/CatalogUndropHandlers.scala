@@ -32,9 +32,15 @@ final class CatalogUndropHandlers(
     resolveReader: (String, String) => DuckLakeCatalogReader,
     cfg: CatalogConfig,
     callerOf: RestCaller,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    /** `UNDROP TABLE`'s statement leg: the caller's own session effective set, claims, JWT roles
+      * and groups included, so the CTAS is decided exactly like a statement they typed (review I3).
+      */
+    sessionExecutor: CatalogUndropHandlers.SessionExecutor = CatalogUndropHandlers.unwiredSession
 ):
   private type Out[T] = IO[Either[(StatusCode, ErrorResponse), T]]
+  private type Run    =
+    (PoolKey, String) => IO[Either[RouterFailure, ai.starlake.quack.edge.QueryResult]]
 
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
@@ -67,7 +73,12 @@ final class CatalogUndropHandlers(
   def recoverable(tenant: String, tenantDb: String, limit: Option[Int], apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[RecoverableListResponse] =
-    gate(tenant, tenantDb, apiKey)(scopeOf) match
+    gate(tenant, tenantDb, apiKey)(scopeOf).flatMap { (tid, db) =>
+      // A PAT's databases axis (review I1): an admin's token scoped elsewhere lists nothing here.
+      tokenPrincipal(apiKey) match
+        case Some(caller) if !caller.restriction.allowsDatabase(db) => Left(databaseRefused(db))
+        case _                                                      => Right((tid, db))
+    } match
       case Left(e) =>
         if cfg.auditCatalogReads then
           audit.rest(apiKey, "control-plane", AuditActions.CatalogRecoverableRead, "denied")
@@ -75,16 +86,7 @@ final class CatalogUndropHandlers(
       case Right((tid, db)) =>
         val effectiveLimit = limit.map(_.max(1)).getOrElse(50).min(200)
         IO.blocking {
-          val entries = resolveReader(tid, db).listDroppedTables(effectiveLimit).map { e =>
-            RecoverableTableEntry(
-              e.schema,
-              e.table,
-              e.droppedAtSnapshot,
-              e.lastLiveSnapshot,
-              e.droppedAt,
-              e.recoverable
-            )
-          }
+          val entries = resolveReader(tid, db).listDroppedTables(effectiveLimit).map(entryOf)
           if cfg.auditCatalogReads then
             audit.rest(
               apiKey,
@@ -98,6 +100,76 @@ final class CatalogUndropHandlers(
           Right(RecoverableListResponse(entries))
         }
 
+  private def entryOf(e: ai.starlake.quack.ondemand.catalog.DroppedTableEntry) =
+    RecoverableTableEntry(
+      e.schema,
+      e.table,
+      e.droppedAtSnapshot,
+      e.lastLiveSnapshot,
+      e.droppedAt,
+      e.recoverable,
+      e.tableId
+    )
+
+  /** The executor caller a bearer resolves to, when it resolves: its token restriction is what the
+    * PAT axes below read (a session's is unrestricted).
+    */
+  private def tokenPrincipal(apiKey: Option[String]): Option[ExecCaller] =
+    callerOf.resolve(apiKey).toOption.map(RestCaller.callerOf("undrop-scope", _))
+
+  private def databaseRefused(db: String): (StatusCode, ErrorResponse) =
+    (
+      StatusCode.Forbidden,
+      ErrorResponse("token_scope", s"database '$db' is not permitted for this token")
+    )
+
+  /** A token's scope on one recovery, every axis it carries (review I1): its databases, its pools
+    * (the pool the recovery runs on), its verb ceiling (a recovery creates a table: DDL) and
+    * `branchOnly` (a recovery writes; only a branch pool admits a write). None when it may.
+    */
+  private def tokenRefusal(
+      caller: ExecCaller,
+      db: String,
+      pool: PoolKey
+  ): Option[(StatusCode, ErrorResponse)] =
+    val r = caller.restriction
+    if !r.allowsDatabase(db) then Some(databaseRefused(db))
+    else if !r.allowsPool(pool.pool) && !ai.starlake.quack.ondemand.branch.BranchNames
+        .isBranchPool(pool.pool)
+    then
+      Some(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse("token_scope", s"pool '${pool.pool}' is not permitted for this token")
+        )
+      )
+    else if r.verbCeiling.exists(v =>
+        !ai.starlake.quack.ondemand.auth.TokenRestriction.covers(v).contains("Ddl")
+      )
+    then
+      Some(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse(
+            "token_scope",
+            s"this token's verb ceiling (${r.verbCeiling.getOrElse("")}) does not allow creating " +
+              "a table, which a recovery does"
+          )
+        )
+      )
+    else if r.branchOnly && !ai.starlake.quack.ondemand.branch.BranchNames.isBranchPool(pool.pool)
+    then
+      Some(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse(
+            "write_requires_branch",
+            "this token may only write on a branch, and a recovery writes"
+          )
+        )
+      )
+    else None
+
   def undrop(req: UndropRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[UndropResponse] =
@@ -106,34 +178,33 @@ final class CatalogUndropHandlers(
         audit.rest(apiKey, "control-plane", AuditActions.CatalogUndrop, "denied")
         IO.pure(Left(e))
       case Right((tid, db)) =>
-        recover(
-          tid,
-          db,
-          req.schema,
-          req.table,
-          req.asName,
-          req.fromSnapshot,
-          writePoolKey(tid, db),
-          callerOf(s"undrop-$tid-$db", apiKey)
-        ).map { outcome =>
-          auditUndrop(outcome, tid, db, req.schema, req.table) { (outcomeTag, target, detail) =>
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.CatalogUndrop,
-              outcomeTag,
-              tenant = Some(tid),
-              target = Some(target),
-              detail = detail
-            )
+        lazy val pool                                          = writePoolKey(tid, db)
+        lazy val run: Either[(StatusCode, ErrorResponse), Run] =
+          callerOf(s"undrop-$tid-$db", apiKey).flatMap { caller =>
+            pool
+              .flatMap(tokenRefusal(caller, db, _))
+              .toLeft((k: PoolKey, sql: String) => executor(caller, k, sql))
           }
-          outcome
+        recover(tid, db, req.schema, req.table, req.asName, req.fromSnapshot, pool, run).map {
+          outcome =>
+            auditUndrop(outcome, tid, db, req.schema, req.table) { (tag, target, detail) =>
+              audit.rest(
+                apiKey,
+                "control-plane",
+                AuditActions.CatalogUndrop,
+                tag,
+                tenant = Some(tid),
+                target = Some(target),
+                detail = detail
+              )
+            }
+            outcome
         }
 
   // ---------- self-service (the profile surface; MCP for a non-admin) ----------
 
   /** The caller's own tenant and its DuckLake tenant-db `tenantDb`: the self-service routes name no
-    * tenant, so a regular user can only ever reach their own.
+    * tenant, so a regular user can only ever reach their own. A PAT's databases axis applies.
     */
   private def mine(
       tenantDb: String,
@@ -143,6 +214,7 @@ final class CatalogUndropHandlers(
       val own = principal match
         case RestCaller.Principal.Session(s) => s.profile.tenant
         case RestCaller.Principal.Pat(p)     => p.user.tenant
+      val restriction = RestCaller.callerOf("undrop-scope", principal).restriction
       own.flatMap(TenantDbGate.resolveTenantId(sup, _)) match
         case None =>
           err(
@@ -150,7 +222,8 @@ final class CatalogUndropHandlers(
             "tenant_required",
             "a superuser has no tenant of its own: use the catalog undrop endpoints"
           )
-        case Some(tid) =>
+        case Some(_) if !restriction.allowsDatabase(tenantDb) => Left(databaseRefused(tenantDb))
+        case Some(tid)                                        =>
           sup.findTenantDb(tid, tenantDb) match
             case None => err(StatusCode.NotFound, "not_found", s"database '$tenantDb' not found")
             case Some(td) if td.kind != ai.starlake.quack.model.TenantDbKind.DuckLake =>
@@ -158,8 +231,10 @@ final class CatalogUndropHandlers(
             case Some(td) => Right((principal, tid, td))
     }
 
-  /** The first pool of the database the caller may connect to (write-capable first), with the
-    * effective set its handshake decides, narrowed by a token's restriction.
+  /** The first pool of the database the caller may connect to (write-capable first; a token's pools
+    * axis applies), with the effective set its handshake decides, narrowed by a token's
+    * restriction. The authorization service unavailable on a pool before any admits the caller:
+    * 503, as the profile's pool listing answers (review M3).
     */
   private def reachable(
       caller: ExecCaller,
@@ -167,29 +242,35 @@ final class CatalogUndropHandlers(
       db: String
   ): Either[(StatusCode, ErrorResponse), (PoolKey, EffectiveSet)] =
     val writable = PoolPicks.writePoolKey(sup, tid, db)
-    val pools    = sup
+    val decided  = sup
       .list()
       .map(_.key)
       .filter(k => k.tenant == tid && k.tenantDb == db)
-      .sortBy(k => (!writable.contains(k), k.pool))
-    pools.iterator
       .filter(k => caller.restriction.allowsPool(k.pool))
-      .flatMap(k =>
-        sup
-          .authorizeHandshakeDetailed(caller.authzRequest(k))
-          .toOption
-          .map(a =>
-            k -> ai.starlake.quack.ondemand.rbac.Attenuation
-              .attenuatedBy(a.effectiveSet, caller.restriction)
-          )
-      )
-      .nextOption()
-      .toRight(
-        (
-          StatusCode.Forbidden,
-          ErrorResponse("no_pool_access", s"you may connect to no pool of database '$db'")
+      .sortBy(k => (!writable.contains(k), k.pool))
+      .to(LazyList)
+      .map(k => k -> sup.authorizeHandshakeDetailed(caller.authzRequest(k)))
+    decided.collectFirst {
+      case (k, Right(a)) =>
+        Right(
+          k -> ai.starlake.quack.ondemand.rbac.Attenuation
+            .attenuatedBy(a.effectiveSet, caller.restriction)
         )
-      )
+      case (_, Left(ai.starlake.quack.ondemand.rbac.HandshakeDenial.Unavailable(msg))) =>
+        Left(
+          (
+            StatusCode.ServiceUnavailable,
+            ErrorResponse("authz_unavailable", s"authorization service unavailable: $msg")
+          )
+        )
+    } match
+      case Some(result) => result
+      case None         =>
+        err(
+          StatusCode.Forbidden,
+          "no_pool_access",
+          s"you may connect to no pool of database '$db'"
+        )
 
   /** Whether `eff`'s grants cover a read of `schema.table` in `td` (rule 1 of dropped tables: the
     * last live name, which the listing gives, judged like a read of that name). QoD grants only: an
@@ -213,9 +294,14 @@ final class CatalogUndropHandlers(
       ai.starlake.acl.parser.Verb.Read
     )
 
+  /** How many dropped tables the self-service listing reads before its grant filter: the limit is
+    * applied after the filter (review M4), over at most this many.
+    */
+  private val MineScan = 1000
+
   /** `GET /api/profile/recoverable`: the dropped tables of the caller's own database that they may
-    * recover: their name is free (the listing already leaves out a name live again) and their
-    * grants cover a read of it.
+    * recover: their name is free of any live table or view (the listing leaves those out, as the
+    * node refuses them) and their grants cover a read of it. Listed under their last live name.
     */
   def recoverableMine(
       tenantDb: String,
@@ -230,23 +316,15 @@ final class CatalogUndropHandlers(
       yield
         val effectiveLimit = limit.map(_.max(1)).getOrElse(50).min(200)
         val entries        = resolveReader(tid, td.name)
-          .listDroppedTables(effectiveLimit)
+          .listDroppedTables(MineScan)
           .filter(e => readable(eff, tid, td, e.schema, e.table))
-          .map(e =>
-            RecoverableTableEntry(
-              e.schema,
-              e.table,
-              e.droppedAtSnapshot,
-              e.lastLiveSnapshot,
-              e.droppedAt,
-              e.recoverable
-            )
-          )
+          .take(effectiveLimit)
+          .map(entryOf)
         RecoverableListResponse(entries)
     }
 
   /** `POST /api/profile/undrop`: the same recovery as [[undrop]], in the caller's own tenant, as
-    * them, on a pool they may connect to.
+    * them, on a pool they may connect to, within every axis of their token.
     */
   def undropMine(req: ProfileUndropRequest, apiKey: Option[String]): Out[UndropResponse] =
     IO.blocking(
@@ -254,6 +332,7 @@ final class CatalogUndropHandlers(
         (principal, tid, td) <- mine(req.tenantDb, apiKey)
         caller = RestCaller.callerOf(s"undrop-$tid-${td.name}", principal)
         (poolKey, _) <- reachable(caller, tid, td.name)
+        _            <- tokenRefusal(caller, td.name, poolKey).toLeft(())
       yield (tid, td, caller, poolKey)
     ).flatMap {
       case Left(e) =>
@@ -268,7 +347,7 @@ final class CatalogUndropHandlers(
           req.asName,
           None,
           Some(poolKey),
-          Right(caller)
+          Right((k: PoolKey, sql: String) => executor(caller, k, sql))
         ).map { outcome =>
           auditUndrop(outcome, tid, td.name, req.schema, req.table) { (tag, target, detail) =>
             audit.rest(
@@ -286,12 +365,17 @@ final class CatalogUndropHandlers(
     }
 
   /** `UNDROP TABLE [schema.]t [AS new_name]` (the gateway's admin dialect), on the caller's own
-    * session: the same recovery as [[undrop]], run as `user` (`eff` the session's principal) on the
-    * session's pool, so the node decides the read of the dropped table (its last live name's grant)
-    * and the create (DDL in the schema). `schema` defaults to the database's default schema. The
-    * answer is the dialect's (status, detail) row; a refusal is a plain-words [[RouterFailure]].
+    * session: the same recovery as [[undrop]], its CTAS run through [[sessionExecutor]] with the
+    * session's own effective set (claims, JWT roles and groups included, review I3), so the node
+    * decides it exactly like a statement they typed: the read of the dropped table (its last live
+    * name's grant) and the create (DDL in the schema). On a connection of its own (the session's id
+    * with `/undrop`), never inside the client's transaction (the dialect refuses UNDROP there).
+    * `schema` defaults to the database's default schema; names compare as DuckDB resolves them,
+    * without case. The answer is the dialect's (status, detail) row; a refusal is a plain-words
+    * [[RouterFailure]].
     */
   def undropStatement(
+      connectionId: String,
       user: String,
       poolKey: PoolKey,
       eff: Option[EffectiveSet],
@@ -314,13 +398,8 @@ final class CatalogUndropHandlers(
             val s = schema.getOrElse(
               sup.effectiveMetastoreFor(tid, td.name).getOrElse("schemaName", "main")
             )
-            val caller =
-              ExecCaller.unrestricted(
-                s"undrop-$tid-${td.name}",
-                user,
-                superuserAdmissible = e.user.tenant.isEmpty
-              )
-            recover(tid, td.name, s, table, asName, None, Some(poolKey), Right(caller)).map {
+            val run: Run = (k, sql) => sessionExecutor(s"$connectionId/undrop", user, k, sql, e)
+            recover(tid, td.name, s, table, asName, None, Some(poolKey), Right(run)).map {
               outcome =>
                 auditUndrop(outcome, tid, td.name, s, table) { (outcomeTag, target, detail) =>
                   audit.restAs(
@@ -359,7 +438,7 @@ final class CatalogUndropHandlers(
       case "name_conflict" =>
         val target = asName.getOrElse(table)
         RouterFailure.AlreadyExists(
-          s"a table $schema.$target exists; use UNDROP TABLE $schema.$table AS <new name>"
+          s"a table or view $schema.$target exists; use UNDROP TABLE $schema.$table AS <new name>"
         )
       case "acl_denied" =>
         RouterFailure.AccessDenied(s"not permitted: ${err.message}")
@@ -394,9 +473,11 @@ final class CatalogUndropHandlers(
       case Left(_) => write("denied", s"$db/$schema.$table", Map.empty)
 
   /** The recovery itself, shared by the REST endpoint, the MCP tool and `UNDROP TABLE`: name
-    * screen, the dropped table's last live snapshot, the name check, then `CREATE TABLE <target> AS
-    * SELECT * FROM <table> AT (VERSION => n)` as `caller` on `pool`. `pool` and `caller` are
-    * consulted only once the catalog checks pass, in that order. No audit: the callers audit.
+    * screen, the dropped table's last live snapshot (looked up without case, as DuckDB resolves
+    * names: the CTAS then names the table as stored), the target name's check (no live table or
+    * view holds it, without case), then `CREATE TABLE <target> AS SELECT * FROM <table> AT (VERSION
+    * => n)` through `run` on `pool`. `pool` and `run` are consulted only once the catalog checks
+    * pass, in that order. No audit: the callers audit.
     */
   def recover(
       tid: String,
@@ -406,10 +487,10 @@ final class CatalogUndropHandlers(
       asName: Option[String],
       fromSnapshotReq: Option[Long],
       pool: => Option[PoolKey],
-      caller: => Either[(StatusCode, ErrorResponse), ExecCaller]
+      run: => Either[(StatusCode, ErrorResponse), Run]
   ): Out[UndropResponse] =
-    val target = asName.getOrElse(table)
-    if List(schema, table, target).exists(v => v.isEmpty || hasUnsafeChars(v)) then
+    if List(Some(schema), Some(table), asName).flatten.exists(v => v.isEmpty || hasUnsafeChars(v))
+    then
       IO.pure(
         err(
           StatusCode.BadRequest,
@@ -424,6 +505,7 @@ final class CatalogUndropHandlers(
         case None =>
           IO.pure(err(StatusCode.NotFound, "not_found", s"no dropped table '$schema.$table'"))
         case Some(entry) =>
+          val target       = asName.getOrElse(entry.table)
           val fromSnapshot = fromSnapshotReq.getOrElse(entry.lastLiveSnapshot)
           if fromSnapshotReq.exists(_ > entry.lastLiveSnapshot) then
             IO.pure(
@@ -442,13 +524,14 @@ final class CatalogUndropHandlers(
                 s"snapshot $fromSnapshot has been expired; the table is no longer recoverable"
               )
             )
-          else if reader.maxSnapshotId().exists(m => reader.tableExistsAt(schema, target, m)) then
+          else if reader.maxSnapshotId().exists(m => reader.nameHeldAt(entry.schema, target, m))
+          then
             IO.pure(
               err(
                 StatusCode.Conflict,
                 "name_conflict",
-                s"table '$schema.$target' exists; supply asName to restore under a " +
-                  "different name"
+                s"table or view '${entry.schema}.$target' exists; supply asName to restore " +
+                  "under a different name"
               )
             )
           else
@@ -463,16 +546,16 @@ final class CatalogUndropHandlers(
                   )
                 )
               case Some(poolKey) =>
-                caller match
-                  case Left(e)  => IO.pure(Left(e))
-                  case Right(c) =>
+                run match
+                  case Left(e)        => IO.pure(Left(e))
+                  case Right(execute) =>
                     val sql =
-                      s"CREATE TABLE ${quoteIdent(schema)}.${quoteIdent(target)} AS " +
-                        s"SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(table)} " +
+                      s"CREATE TABLE ${quoteIdent(entry.schema)}.${quoteIdent(target)} AS " +
+                        s"SELECT * FROM ${quoteIdent(entry.schema)}.${quoteIdent(entry.table)} " +
                         s"AT (VERSION => $fromSnapshot)"
                     val committed: Either[(StatusCode, ErrorResponse), UndropResponse] =
-                      Right(UndropResponse(schema, table, target, fromSnapshot))
-                    executor(c, poolKey, sql)
+                      Right(UndropResponse(entry.schema, entry.table, target, fromSnapshot))
+                    execute(poolKey, sql)
                       .timeout(cfg.undropTimeoutSec.seconds)
                       .attempt
                       .map {
@@ -482,7 +565,7 @@ final class CatalogUndropHandlers(
                           // catalog before answering so the response and audit reflect reality.
                           if reader
                               .maxSnapshotId()
-                              .exists(m => reader.tableExistsAt(schema, target, m))
+                              .exists(m => reader.tableExistsAt(entry.schema, target, m))
                           then committed
                           else
                             val msg = e match
@@ -499,3 +582,20 @@ final class CatalogUndropHandlers(
                           result.close()
                           committed
                       }
+
+object CatalogUndropHandlers:
+
+  /** `(connectionId, user, poolKey, sql, the session's effective set)`: a statement run as that
+    * session (Main binds FlightSqlRouter.execute with adminDispatch = false).
+    */
+  type SessionExecutor = (
+      String,
+      String,
+      PoolKey,
+      String,
+      EffectiveSet
+  ) => IO[Either[RouterFailure, ai.starlake.quack.edge.QueryResult]]
+
+  val unwiredSession: SessionExecutor =
+    (_, _, _, _, _) =>
+      IO.pure(Left(RouterFailure.Internal("UNDROP TABLE's session executor is not wired")))

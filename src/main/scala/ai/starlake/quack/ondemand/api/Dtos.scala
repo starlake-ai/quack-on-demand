@@ -1563,13 +1563,17 @@ final case class DataDiffResponse(
 )
 
 // ----- Undrop (Spec 03) -----
+/** `table` is the table's last live name; `tableId` its DuckLake table id (a name dropped twice is
+  * listed once per table).
+  */
 final case class RecoverableTableEntry(
     schema: String,
     table: String,
     droppedAtSnapshot: Long,
     lastLiveSnapshot: Long,
     droppedAt: Option[String],
-    recoverable: Boolean
+    recoverable: Boolean,
+    tableId: Long = 0L
 )
 
 final case class RecoverableListResponse(tables: List[RecoverableTableEntry])

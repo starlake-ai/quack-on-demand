@@ -10116,6 +10116,7 @@ components:
       - droppedAtSnapshot
       - lastLiveSnapshot
       - recoverable
+      - tableId
       properties:
         schema:
           type: string
@@ -10131,6 +10132,9 @@ components:
           type: string
         recoverable:
           type: boolean
+        tableId:
+          type: integer
+          format: int64
     RemoveTenantLocationRequest:
       title: RemoveTenantLocationRequest
       type: object

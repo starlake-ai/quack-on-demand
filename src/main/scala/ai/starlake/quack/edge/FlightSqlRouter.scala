@@ -351,10 +351,13 @@ final class FlightSqlRouter(
         // never forwarded to a node - the fail-closed contract of the admin dialect.
         // recordExecution follows the same probe-suppression contract as the routed path
         // (Prepare-time DESCRIBE probes must not show up in the UI's statement list).
-        if !recordExecution then exec.execute(user, poolKey, sql, effectiveSet)
+        if ai.starlake.quack.edge.admin.AdminSqlParser.isUndrop(sql) &&
+          sessions.get(connectionId).exists(_.txOpen)
+        then IO.pure(Left(FlightSqlRouter.UndropInTransaction))
+        else if !recordExecution then exec.execute(user, poolKey, sql, effectiveSet, connectionId)
         else
           IO.monotonic.flatMap { t0 =>
-            exec.execute(user, poolKey, sql, effectiveSet).flatMap { result =>
+            exec.execute(user, poolKey, sql, effectiveSet, connectionId).flatMap { result =>
               IO.monotonic.map { t1 =>
                 recordAdmin(
                   user,
@@ -1640,6 +1643,14 @@ final class FlightSqlRouter(
     else RouterFailure.BadRequest(full)
 
 object FlightSqlRouter:
+
+  /** `UNDROP TABLE` inside a client transaction (review M5): refused on both doors, since its
+    * recovery commits on a connection of its own and the client's ROLLBACK would not undo it.
+    */
+  val UndropInTransaction: RouterFailure = RouterFailure.BadRequest(
+    "UNDROP TABLE cannot run inside a transaction: its recovery commits on its own; COMMIT or " +
+      "ROLLBACK first"
+  )
 
   /** How qod-node words a statement it refused because no verdict could be had (the decision
     * replica unreachable, slow or answering 503): retryable, unlike every other node refusal.

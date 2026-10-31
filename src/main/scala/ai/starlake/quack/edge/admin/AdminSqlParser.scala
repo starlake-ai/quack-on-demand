@@ -60,6 +60,15 @@ object AdminSqlParser:
             (kw(1) == "POOL" && kw(2) == "GRANTS")
           case _ => false
 
+  /** Whether `sql` is the dialect's `UNDROP TABLE`: the one claimed statement that writes data, so
+    * the doors refuse it inside a client transaction (its recovery commits on a connection of its
+    * own, which the client's ROLLBACK would not undo).
+    */
+  def isUndrop(sql: String): Boolean =
+    claims(sql) && (tokenizeUpTo(sql, 1) match
+      case Right(toks) => toks.headOption.exists(t => !t.quoted && t.upper == "UNDROP")
+      case Left(_)     => false)
+
   def parse(sql: String): Either[String, AdminCommand] =
     tokenize(sql).flatMap { all =>
       val toks = if all.nonEmpty && all.last.raw == ";" then all.dropRight(1) else all

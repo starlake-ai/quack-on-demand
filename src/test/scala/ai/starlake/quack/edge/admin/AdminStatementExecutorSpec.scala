@@ -252,7 +252,7 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       scala.collection.mutable.ListBuffer.empty[(String, Option[String], String, Option[String])]
     val exec = new AdminStatementExecutor(
       sup,
-      undropFn = (user, _, eff, schema, table, asName) =>
+      undropFn = (_, user, _, eff, schema, table, asName) =>
         IO {
           seen += ((user, eff.map(_.user.username), table, asName))
           Right(AdminResults.ok(s"table $table restored"))
