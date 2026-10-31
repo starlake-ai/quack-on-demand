@@ -387,6 +387,32 @@ final class FlightSqlRouter(
           purpose = DecidePurpose.Live
         ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
 
+  /** One statement as the session `effectiveSet` (its claims, JWT roles and groups), on a
+    * connection of its own (`connectionId`), opened before it without a SessionOpened event (it is
+    * part of the caller's own session, already metered) and closed after it, whatever the outcome:
+    * UNDROP TABLE's CTAS (review N2). Recorded like any statement; never the admin dialect.
+    */
+  def executeOneShot(
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      effectiveSet: EffectiveSet
+  ): IO[Either[RouterFailure, QueryResult]] =
+    // Deferred: execute opens (and meters) its session while it is built, before this one exists.
+    IO(sessions.open(connectionId, user, poolKey)) *>
+      IO.defer(
+        execute(
+          connectionId,
+          user,
+          poolKey,
+          sql,
+          effectiveSet = Some(effectiveSet),
+          recordExecution = true,
+          adminDispatch = false
+        )
+      ).guarantee(IO(sessions.close(connectionId)))
+
   /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
     * around. `session` is always None on the outbound wire.
     */

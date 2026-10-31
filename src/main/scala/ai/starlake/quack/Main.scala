@@ -1831,15 +1831,7 @@ object Main extends IOApp with LazyLogging:
           audit = auditRecorder,
           // UNDROP TABLE's CTAS, as the session itself: its own effective set, claims included.
           sessionExecutor = (connectionId, user, poolKey, sql, eff) =>
-            fsRouter.execute(
-              connectionId,
-              user,
-              poolKey,
-              sql,
-              effectiveSet = Some(eff),
-              recordExecution = true,
-              adminDispatch = false
-            )
+            fsRouter.executeOneShot(connectionId, user, poolKey, sql, eff)
         )
       )
       undropHandlers.foreach(h => undropStatement.set(h.undropStatement))

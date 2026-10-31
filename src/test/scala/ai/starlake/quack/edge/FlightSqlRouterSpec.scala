@@ -2256,6 +2256,23 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   // ---------- SPI module events ----------
 
+  "executeOneShot" should "run on a connection of its own, closed after, never metered as a session" in:
+    // Review N2: UNDROP TABLE's CTAS runs on `<id>/undrop`, which nothing else ever closed.
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val eff                    = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-1", Some("acme"), "alice", kind = "user"),
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    val out = router.executeOneShot("c-1/undrop", "alice", poolKey, "SELECT 1", eff).unsafeRunSync()
+    out.foreach(_.close())
+    router.session("c-1/undrop") shouldBe None
+    received.toArray.toList.collect { case e: ManagerEvent.SessionOpened => e } shouldBe Nil
+
   "module events" should "emit SessionOpened then StatementExecuted with ok=true on success" in:
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
     val sink: ManagerEventSink = e => { received.add(e); () }
