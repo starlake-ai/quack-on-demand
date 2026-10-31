@@ -412,7 +412,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           </label>
           <button type="button" className="link-button" onClick={reload}>Refresh</button>
         </div>
-        {!formOpen && <button type="button" onClick={openForm}>Create branch</button>}
+        {!formOpen && <button type="button" className="link-button" onClick={openForm}>Create branch</button>}
       </div>
       {error && <div className="login-err">Error: {error}</div>}
       {note && <div className="login-notice" role="status">{note}</div>}

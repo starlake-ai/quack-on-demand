@@ -214,7 +214,7 @@ export function PatSection() {
           {pats && <span className="subtle cred-count">{active} active</span>}
         </div>
         {!creating && (
-          <button type="button" onClick={openCreate} disabled={pats == null}>Create token</button>
+          <button type="button" className="link-button" onClick={openCreate} disabled={pats == null}>Create token</button>
         )}
       </div>
       <p className="subtle">

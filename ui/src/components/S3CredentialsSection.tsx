@@ -105,7 +105,7 @@ export function S3CredentialsSection() {
           {rows && <span className="subtle cred-count">{count} of {MAX_CREDENTIALS}</span>}
         </div>
         {editing == null && (
-          <button type="button" onClick={openAdd} disabled={full || rows == null}
+          <button type="button" className="link-button" onClick={openAdd} disabled={full || rows == null}
             title={full ? `You hold the maximum of ${MAX_CREDENTIALS}; remove one first` : undefined}>
             Add credential
           </button>
