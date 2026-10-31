@@ -35,12 +35,10 @@ class EngineStatsSpec extends AnyFlatSpec with Matchers:
     t.snapshot("live") shouldBe Some(EngineStats(2L, 0L, 0L, 0L))
     t.nodeCount shouldBe 1
 
-  "EngineStatsTracker" should "store, overwrite, and remove samples per node" in:
+  "EngineStatsTracker" should "store and overwrite samples per node" in:
     val t = new EngineStatsTracker
     t.snapshot("n1") shouldBe None
     t.update("n1", EngineStats(10L, 0L, 0L, 0L))
     t.snapshot("n1") shouldBe Some(EngineStats(10L, 0L, 0L, 0L))
     t.update("n1", EngineStats(20L, 5L, 1L, 99L))
     t.snapshot("n1") shouldBe Some(EngineStats(20L, 5L, 1L, 99L))
-    t.remove("n1")
-    t.snapshot("n1") shouldBe None

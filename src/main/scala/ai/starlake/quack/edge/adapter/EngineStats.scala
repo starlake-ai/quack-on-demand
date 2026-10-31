@@ -69,8 +69,6 @@ final class EngineStatsTracker:
 
   def snapshot(nodeId: String): Option[EngineStats] = state.get(nodeId)
 
-  def remove(nodeId: String): Unit = { state.remove(nodeId); () }
-
   /** Forget every node not in `live`. */
   def retain(live: Set[String]): Unit = state.keys.filterNot(live.contains).foreach(state.remove)
 
