@@ -648,7 +648,8 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `statement.text`; names resolved on the pool's real session path). It needs a running pool and
   never wakes one (`409 pool_not_running`), takes one statement (`400 single_statement_required`),
   an OPA tenant (`400 opa_mode_required`) and a tenant user (a superuser is `400
-  refused_before_opa`); a node that cannot reach the manager is `503 authz_unavailable`.
+  refused_before_opa`); a statement with no table or location for OPA to decide on is `400
+  nothing_to_authorize`, and a node that cannot reach the manager is `503 authz_unavailable`.
 - OPA: the `statement` rule is asked only by the node, with the accesses' new `kind`, `columns` and
   `via` and the statement's `locations`; the gateway's parser-extracted statement input is no longer
   sent, and no input carries `statement.text` (`--send-statement-text` has no effect). Existing Rego
