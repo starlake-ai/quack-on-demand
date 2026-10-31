@@ -170,7 +170,7 @@ final class LocalQuackBackend(
       // The OS's own start instant when it reports one: NodeProcess matches the row against it, and
       // on Linux the JVM derives it from a boot time read once, so a wall-clock step after the
       // manager started cannot make this node's own row fail its identity check.
-      startedAt = startInstant.orElse(Instant.now()),
+      startedAt = RunningNode.startStamp(startInstant.orElse(Instant.now())),
       maxConcurrent = spec.maxConcurrent
     )
   }

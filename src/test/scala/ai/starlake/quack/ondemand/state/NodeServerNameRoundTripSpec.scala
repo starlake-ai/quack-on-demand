@@ -74,6 +74,32 @@ class NodeServerNameRoundTripSpec extends AnyFlatSpec with Matchers:
     store.listNodes("p1").map(_.serverName) shouldBe List(Some("srv-07"))
   }
 
+  "a node's start time" should "round-trip exactly once a backend stamped it, so the process still compares as itself" in withStore {
+    store =>
+      seedPool(store)
+      // Postgres keeps microseconds and rounds: a start in the last half microsecond of a millisecond
+      // reads back in the next one, and the node row is what reconcile and restore reload.
+      val raw               = Instant.parse("2026-10-31T12:00:00.999999500Z")
+      def node(at: Instant) = RunningNode(
+        "quack-acme-db-bi-1",
+        PoolKey("acme", "db", "bi"),
+        Role.Dual,
+        "10.0.0.7",
+        21900,
+        "tok",
+        None,
+        None,
+        at
+      )
+      store.upsertNode(node(raw), "p1")
+      store.listNodes("p1").head.sameProcessAs(node(raw)) shouldBe false
+      val stamped = node(RunningNode.startStamp(raw))
+      store.upsertNode(stamped, "p1")
+      val back = store.listNodes("p1").head
+      back.startedAt shouldBe stamped.startedAt
+      back.sameProcessAs(stamped) shouldBe true
+  }
+
   // PoolSupervisor keys pools by tenant id (restore() builds PoolKey(t.id, ...)). A node read back
   // keyed by the display name matched no pool after a manager restart, so every running node was
   // dropped from the in-memory topology while its row stayed.

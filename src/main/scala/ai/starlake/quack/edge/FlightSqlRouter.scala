@@ -1772,6 +1772,12 @@ object FlightSqlRouter:
   val PinLostAnswer: String =
     "transaction aborted: the transaction's node left the pool; ROLLBACK to continue"
 
+  /** The answer to a COMMIT in that state: the fence lifts with it (DuckDB ends a transaction whose
+    * COMMIT fails), so it gives no ROLLBACK advice, only that nothing was committed.
+    */
+  val PinLostCommitAnswer: String =
+    "transaction aborted: the transaction's node left the pool; nothing was committed"
+
   /** Why a statement the manager ran for the client ([[readBack]]) failed when it was killed while
     * the node ran it: the client's statement then stops there.
     */

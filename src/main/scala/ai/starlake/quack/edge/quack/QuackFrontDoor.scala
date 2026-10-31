@@ -234,7 +234,11 @@ final class QuackFrontDoor(
         // failed on the link was sent and may have run before its answer was lost, so `linkFailed`
         // made `answer` say the outcome is unknown.
         s.txAborted.set(None)
-        IO.pure(encodeError(answer))
+        // No ROLLBACK advice once the COMMIT lifted the fence: nothing would be left to roll back.
+        val reply =
+          if answer == FlightSqlRouter.PinLostAnswer then FlightSqlRouter.PinLostCommitAnswer
+          else answer
+        IO.pure(encodeError(reply))
       case _ => IO.pure(encodeError(answer))
 
   /** `reopenTx`: the client's ROLLBACK in a fenced session. Its transaction connection is gone, and
@@ -469,11 +473,11 @@ final class QuackFrontDoor(
     () => router.supervisor.get(node.poolKey).exists(_.nodes.exists(_.sameProcessAs(node)))
 
   /** A statement of a client transaction whose link was opened on a process that no longer serves
-    * the node id the router pinned (a crash respawn, a restart, a resume): nothing is sent on it,
-    * since the old connection id means nothing to the new process, or another client's connection.
-    * The transaction ends ([[abortTx]]; the link closes without a DISCONNECT) and the statement is
-    * answered as a pin to a node that left the pool: aborted, so a COMMIT is told nothing was
-    * committed.
+    * the node id the router pinned (a crash respawn, a restart, a resume): it is not sent on it,
+    * since the old connection id belongs to a process that is gone. The transaction ends
+    * ([[abortTx]]; the link sends only its best-effort DISCONNECT) and the statement is answered as
+    * a pin to a node that left the pool; a COMMIT is told nothing was committed
+    * ([[FlightSqlRouter.PinLostCommitAnswer]]).
     */
   private def replacedTx[A](s: QuackSession, link: QuackNodeLink): IO[NodeOutcome[A]] =
     abortTx(s, link, FlightSqlRouter.PinLostAnswer)

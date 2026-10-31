@@ -1132,10 +1132,9 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       val posted   = fx.transport.posted.size
       val prepared = fx.transport.prepared.size
       errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer
-      // Nothing ran and nothing was sent: no PREPARE, and no DISCONNECT either, since the link's
-      // process no longer serves the pool (its port may host another process by now).
+      // Nothing ran: the transaction's link was DISCONNECTed and no PREPARE went out.
       fx.transport.prepared.size shouldBe prepared
-      postedSince(fx, posted) shouldBe Nil
+      postedSince(fx, posted) shouldBe List((Type.Disconnect, "NODE2"))
       fx.sessions.get(connId).get.txLink.get() shouldBe None
       fx.router.sessions.get(connId).get.txOpen shouldBe false
       // Fenced: the next statement gets the same answer instead of autocommitting on the survivor.
@@ -1494,7 +1493,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     fx.transport.posted.size shouldBe before
     held(fx) shouldBe 0
 
-  "a suspend" should "not wait for an open front-door transaction, whose next statement is told it was aborted" in:
+  "a suspend" should "not wait for an open front-door transaction, whose COMMIT is told nothing was committed" in:
     val fx     = setup()
     val connId = connect(fx)
     prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
@@ -1510,12 +1509,17 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     // the COMMIT is told nothing was committed, and the ROLLBACK runs on a fresh link.
     fx.transport.deadConnections = fx.transport.connectionIds
     val sent = fx.transport.posted.size
-    errorText(prepare(fx, connId, "COMMIT")) shouldBe FlightSqlRouter.PinLostAnswer
-    fx.transport.posted.toList.drop(sent).map(_.header.connectionId).toSet intersect
-      fx.transport.deadConnections shouldBe empty
-    prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe FlightSqlRouter.PinLostCommitAnswer
+    // Only a best-effort DISCONNECT reached a stopped process's connection, never a statement.
+    fx.transport.posted.toList
+      .drop(sent)
+      .filter(f => fx.transport.deadConnections.contains(f.header.connectionId))
+      .map(_.header.msgType)
+      .distinct shouldBe List(Type.Disconnect)
+    // The COMMIT ended the transaction: the session runs on, no ROLLBACK needed.
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(false)
 
-  "an open transaction whose node was respawned under the same id" should "be aborted without a byte to the new process" in:
+  "an open transaction whose node was respawned under the same id" should "be aborted without a statement to the new process" in:
     val fx     = setup()
     val connId = connect(fx)
     prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
@@ -1525,12 +1529,15 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     fx.router.supervisor.restartNode(poolKey, txNode).unsafeRunSync().isRight shouldBe true
     fx.router.supervisor.get(poolKey).get.nodes.map(_.nodeId) should contain(txNode)
     val sent = fx.transport.posted.size
-    // Its next statement is not relayed on the old connection, whose id the new process might
-    // hand to another client: the transaction ends, the session is fenced.
+    // Its next statement is not relayed on the old connection: the transaction ends, the session
+    // is fenced, and only a best-effort DISCONNECT goes out on it (a random id the new process
+    // does not know), so a process that survived its stop would not keep the transaction open.
+    val oldConn = fx.sessions.get(connId).get.txLink.get().get._2.nodeConnectionId
     errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer
-    // The COMMIT is told nothing was committed, never that its outcome is unknown.
-    errorText(prepare(fx, connId, "COMMIT")) shouldBe FlightSqlRouter.PinLostAnswer
-    fx.transport.posted.size shouldBe sent
+    // The COMMIT is told nothing was committed, never that its outcome is unknown, and is not
+    // advised to ROLLBACK: the transaction is over.
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe FlightSqlRouter.PinLostCommitAnswer
+    postedSince(fx, sent) shouldBe List((Type.Disconnect, oldConn))
     held(fx) shouldBe 0
     // Out of the transaction, the session carries on on the new process.
     prepare(fx, connId, "SELECT 2") shouldBe prepareResp(false)

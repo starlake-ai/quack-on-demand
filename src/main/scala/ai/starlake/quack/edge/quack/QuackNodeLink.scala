@@ -285,22 +285,20 @@ final class QuackNodeLink(
   private def errorText(resp: Array[Byte]): String =
     QuackWire.decodeErrorText(resp).getOrElse("node error")
 
-  /** Best-effort DISCONNECT; a half-dead node must not fail the caller. Sent only while the link's
-    * process still serves its node (`stillServes`): the old connection id means nothing to its
-    * replacement, or another client's connection. Releases the link's hold on its node, whatever
-    * the DISCONNECT did.
+  /** Release the link's hold on its node, then a best-effort DISCONNECT, sent even when the process
+    * was replaced (`stillServes`): it carries no statement, and the random 128-bit connection id
+    * matches nothing on a replacement or a stranger on the port, while a process that survived its
+    * stop would otherwise keep the client's transaction open. A failing or hanging DISCONNECT never
+    * fails the caller and never holds the release back.
     */
   def close(): IO[Unit] =
-    IO.defer {
-      if !stillServes() then IO.unit
-      else
-        transport
-          .post(url, QuackWire.encodeDisconnect(nodeConnectionId))
-          .void
-          .handleError { e =>
-            logger.debug(s"DISCONNECT for $nodeConnectionId failed (ignored): ${e.getMessage}")
-          }
-    }.guarantee(IO(hold.release()))
+    (IO(hold.release()) *>
+      transport
+        .post(url, QuackWire.encodeDisconnect(nodeConnectionId))
+        .void
+        .handleError { e =>
+          logger.debug(s"DISCONNECT for $nodeConnectionId failed (ignored): ${e.getMessage}")
+        }).guarantee(IO(hold.release()))
 
 object QuackNodeLink:
 
@@ -334,9 +332,10 @@ object QuackNodeLink:
     * when the link closes, or here when no link comes of the call. [[NodeHold.none]] only for a
     * link that runs no client statement.
     *
-    * `stillServes` tells whether `node`'s process still serves its node id; the link sends nothing
-    * once it does not ([[ProcessReplaced]]). [[AlwaysServes]] only for a link that cannot outlive
-    * its call (the handshake's version probe).
+    * `stillServes` tells whether `node`'s process still serves its node id; once it does not, the
+    * link sends no statement, FETCH or heartbeat ([[ProcessReplaced]]), only its closing
+    * DISCONNECT. [[AlwaysServes]] only for a link that cannot outlive its call (the handshake's
+    * version probe).
     */
   def open(
       transport: QuackTransport,

@@ -183,9 +183,46 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
       Left(LinkFailure.Permanent(QuackNodeLink.ProcessReplaced))
     link.prepare(PrepareRequest("SELECT 1", None, None), 3L).unsafeRunSync().isLeft shouldBe true
     link.close().unsafeRunSync()
-    // Only the CONNECTION_REQUEST went out: no statement, no handle, no DISCONNECT.
-    t.posted should have size 1
+    // No statement and no handle went out: only the CONNECTION_REQUEST and a best-effort DISCONNECT,
+    // whose random id means nothing to another process.
+    t.posted.map(p => frame(p._2).toOption.get.header.msgType).toList shouldBe
+      List(Type.ConnectionRequest, Type.Disconnect)
     tracker.snapshot(node.nodeId).held shouldBe 0
+
+  it should "give its hold back at once on close, whatever its DISCONNECT does" in:
+    val tracker = new ai.starlake.quack.edge.adapter.NodeLoadTracker
+    val hangs   = new QuackTransport:
+      private var first                                      = true
+      def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] =
+        if first then IO { first = false; connResp("NODE1") } else IO.never
+    val link = QuackNodeLink
+      .open(
+        hangs,
+        node,
+        hello,
+        1L,
+        authorize,
+        tracker.tryHold(node.nodeId).getOrElse(fail("refused")),
+        QuackNodeLink.AlwaysServes
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+      ._1
+    val closing  = link.close().start.unsafeRunSync()
+    val deadline = System.nanoTime() + 3_000_000_000L
+    while tracker.snapshot(node.nodeId).held != 0 && System.nanoTime() < deadline do Thread.sleep(5)
+    tracker.snapshot(node.nodeId).held shouldBe 0
+    closing.cancel.unsafeRunSync()
+    // A DISCONNECT that fails is swallowed.
+    val fails = new FakeTransport(connResp("NODE2"), QuackWireError.Transient("HTTP 503"))
+    val l2    = QuackNodeLink
+      .open(fails, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
+      .unsafeRunSync()
+      .toOption
+      .get
+      ._1
+    l2.close().attempt.unsafeRunSync() shouldBe Right(())
 
   "forward" should "rewrite the header to the node connection id and return the node's bytes" in:
     val t    = new FakeTransport(connResp("NODE1"), fetchResp(true))
