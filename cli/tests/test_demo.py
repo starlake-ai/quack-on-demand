@@ -666,6 +666,10 @@ def test_demo_provisions_app_home_and_passes_env(runner, monkeypatch, tmp_path, 
     monkeypatch.setattr(launcher, "default_cache_dir", lambda: tmp_path / "cache")
     # The real ensure_* over a provisioned cache: the demo must provision libduckdb too.
     bin_dir, lib_dir = _duckdb_cache.plant(tmp_path / "cache")
+    # On Windows the demo also provisions the release's qod-node.exe; stand one in.
+    node_exe = tmp_path / "qod-node.exe"
+    node_exe.write_text("")
+    monkeypatch.setattr(launcher, "ensure_windows_qod_node", lambda *a, **k: node_exe)
     monkeypatch.setattr(
         launcher,
         "materialize_spawn_scripts",
