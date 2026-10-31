@@ -78,6 +78,50 @@ class PoolSetCacheSpec extends AnyFlatSpec with Matchers:
     cache.get(A)(value.get()) shouldBe Set("new")
   }
 
+  // Final review A567-m3: the straddling set was put, then taken back once the drop was seen; a
+  // lookup in between read it, though it started after the drop (decision 24's "next statement").
+  // Each round's computation reads its set, then a write drops the pool before the set is kept; a
+  // reader that saw that drop must never be served that round's set.
+  it should "never serve a set computed before a drop to a lookup that starts after it" in {
+    val cache   = new PoolSetCache(() => 0L, ttlMs = 60_000L)
+    val dropped = new java.util.concurrent.atomic.AtomicLong(-1L)
+    val stop    = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val served  = new AtomicReference[Option[String]](None)
+    val reader  = new Thread(() =>
+      while !stop.get() && served.get().isEmpty do
+        val round = dropped.get()
+        val got   = cache.get(A)(Set("fresh"))
+        if round >= 0 && got == Set(s"stale-$round") then served.set(Some(s"stale-$round"))
+    )
+    reader.start()
+    val deadline = System.nanoTime() + 3_000_000_000L
+    var round    = 0L
+    try
+      while System.nanoTime() < deadline && served.get().isEmpty do
+        val r = round
+        cache.invalidate(_ == A)
+        cache.get(A) {
+          cache.invalidate(_ == A)
+          dropped.set(r)
+          Set(s"stale-$r")
+        }
+        round += 1
+    finally
+      stop.set(true)
+      reader.join(10_000L)
+    withClue(s"after $round rounds: ")(served.get() shouldBe None)
+  }
+
+  it should "not let a later drop of another pool revive a set that straddled an earlier one" in {
+    val cache = new PoolSetCache(() => 0L, ttlMs = 60_000L)
+    cache.get(A) {
+      cache.invalidate(_ == A)
+      Set("stale")
+    }
+    cache.invalidate(_ == B)
+    cache.get(A)(Set("new")) shouldBe Set("new")
+  }
+
   it should "keep nothing when the computation throws" in {
     val cache = new PoolSetCache(() => 0L, ttlMs = 60_000L)
     intercept[IllegalStateException](cache.get(A)(throw new IllegalStateException("down")))

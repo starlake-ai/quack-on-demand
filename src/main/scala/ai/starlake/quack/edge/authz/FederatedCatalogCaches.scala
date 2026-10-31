@@ -8,32 +8,45 @@ import scala.jdk.CollectionConverters.*
 
 /** A set per pool, computed on demand and kept for `ttlMs`, that a write drops at once
   * ([[invalidate]], [[invalidateAll]]: Task 11 addendum 7). A computation that started before a
-  * drop is never kept after it: the drop moves a generation first, and a value put under an older
-  * one is removed again, so the next lookup reads the state the write left rather than the one
-  * before it. A computation that throws keeps nothing.
+  * drop is never served after it: the drop moves a generation first, a value is kept under the
+  * generation its computation started in, and only an entry of the current generation is served, so
+  * the next lookup reads the state the write left rather than the one before it. A computation that
+  * throws keeps nothing.
   */
 final class PoolSetCache(clock: () => Long, ttlMs: Long):
-  private final case class Entry(at: Long, set: Set[String])
+  /** A kept set, with the generation read before it was computed. */
+  private final case class Entry(at: Long, generation: Long, set: Set[String])
   private val generation = new AtomicLong(0L)
   private val cache      = new ConcurrentHashMap[PoolKey, Entry]()
 
-  /** The set kept for `key` while fresh, else `compute`'s, then kept. */
+  /** The set kept for `key` while fresh, else `compute`'s, then kept. An entry of an older
+    * generation is a miss: a computation that straddled a drop is kept under the generation it
+    * started in, so no lookup that starts after the drop is ever served it (final review A567-m3:
+    * putting it and then taking it back left a window where one was).
+    */
   def get(key: PoolKey)(compute: => Set[String]): Set[String] =
-    val now = clock()
-    Option(cache.get(key)).collect { case e if now - e.at < ttlMs => e.set }.getOrElse {
-      val before = generation.get()
-      val set    = compute
-      val entry  = Entry(now, set)
-      cache.put(key, entry)
-      // A drop since `before` may have run before the put above: take the entry back out.
-      if generation.get() != before then cache.remove(key, entry)
-      set
-    }
+    val now     = clock()
+    val current = generation.get()
+    Option(cache.get(key))
+      .collect { case e if e.generation == current && now - e.at < ttlMs => e.set }
+      .getOrElse {
+        val set = compute
+        cache.put(key, Entry(now, current, set))
+        set
+      }
 
-  /** Drops the set of every pool `keys` accepts. */
+  /** Drops the set of every pool `keys` accepts. The others current until now are kept under the
+    * new generation (one a lookup reads in between is a miss, computed again). Only those: an entry
+    * of an older generation may be a computation that straddled an earlier drop, which no later
+    * drop may revive.
+    */
   def invalidate(keys: PoolKey => Boolean): Unit =
-    generation.incrementAndGet()
-    cache.keySet.asScala.toList.filter(keys).foreach(cache.remove)
+    val next = generation.incrementAndGet()
+    cache.asScala.toList.foreach { (key, entry) =>
+      if keys(key) then cache.remove(key)
+      else if entry.generation == next - 1 then
+        cache.replace(key, entry, entry.copy(generation = next))
+    }
 
   /** Drops every pool's set. */
   def invalidateAll(): Unit =
