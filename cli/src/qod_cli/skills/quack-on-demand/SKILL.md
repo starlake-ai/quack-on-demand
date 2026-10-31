@@ -778,7 +778,7 @@ Retrieve `<userId>` and `<poolId>` from `qod user list --tenant acme` and `qod p
 
 ### DML and DDL grants
 
-Use the same `qod role permission grant` command with `--verb RW` for DML writes (covers reads too), `--verb DDL` for CREATE / DROP / ALTER, or `--verb ALL` to cover everything on a table at once. The verb vocabulary is deliberately coarse (`RO` / `RW` / `DDL` / `ALL`, matching what the validator enforces per table); granular SQL keywords like `SELECT` or `INSERT` are only accepted by the SQL admin dialect (below), which maps them onto these four at parse time.
+Use the same `qod role permission grant` command with `--verb RW` for DML writes (covers reads too), `--verb DDL` for CREATE / DROP / ALTER, or `--verb ALL` to cover everything on a table at once. The verb vocabulary is deliberately coarse (`RO` / `RW` / `DDL` / `ALL`, matching what the node enforces per table); granular SQL keywords like `SELECT` or `INSERT` are only accepted by the SQL admin dialect (below), which maps them onto these four at parse time.
 
 ### Metadata browsing (information_schema)
 
