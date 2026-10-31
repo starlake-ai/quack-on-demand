@@ -51,11 +51,13 @@ object NodeHandles:
   /** The handle version this manager writes and reads (qod-node's kHandleVersion). A node reads
     * exactly one version and refuses every other, the health probe's handle included: version 1 is
     * node protocol 2's (no enforcement in the engine), version 2 is protocols 3 and 4's (no
-    * `readOnly`, so a superuser could write into a read-only catalog there). Writing 3 keeps such a
-    * node unhealthy and never routed to on every backend (Kubernetes pods and fleet servers are not
-    * checked by [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
+    * `readOnly`, so a superuser could write into a read-only catalog there), version 3 is protocol
+    * 5's (a DuckLake read at an earlier snapshot described under the name it had then, so another
+    * table's grant could cover it: review M1). Writing 4 keeps such a node unhealthy and never
+    * routed to on every backend (Kubernetes pods and fleet servers are not checked by
+    * [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
     */
-  val Version: Int = 3
+  val Version: Int = 4
 
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.

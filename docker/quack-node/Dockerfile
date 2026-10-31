@@ -26,7 +26,7 @@ ARG DUCKDB_VERSION=2.0.0
 # The node protocol of this build (QOD_NODE_PROTOCOL in native/qod-node/CMakeLists.txt, which
 # QodNodeBinarySpec pins): a vendored qod-node of another protocol fails the build. Pods never pass
 # through the manager's QodNodeBinary check, so this is theirs.
-ARG QOD_NODE_PROTOCOL=5
+ARG QOD_NODE_PROTOCOL=6
 
 RUN <<EOF
 set -eu

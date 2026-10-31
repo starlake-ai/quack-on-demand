@@ -39,7 +39,7 @@ During the upgrade:
 
 After upgrading:
 
-10. Restart every node. Nodes speak protocol 5 with session handle v3; a node started by an earlier
+10. Restart every node. Nodes speak protocol 6 with session handle v4; a node started by an earlier
     release, or an earlier node image, does not work with this manager. On Kubernetes pull this
     release's node image.
 11. Read the boot log. Review the WARNs about untrusted initSql and `sql` federation sources (a
@@ -398,7 +398,7 @@ After upgrading:
     not know `qod_session` and is never routed to.
 
 - **Security: BREAKING: the nodes decide every tenant statement on what DuckDB resolved.** Each
-  node (qod-node, node protocol 5) now judges a statement of a user who is not a superuser on the
+  node (qod-node, node protocol 6) now judges a statement of a user who is not a superuser on the
   plan DuckDB bound for it, before it runs: the tables, views and columns it reads or writes, the
   functions and settings it calls, the files it names. It asks the manager replica that minted the
   session for a verdict (`POST /api/internal/authz/decide`, signed with the node's key, never in
@@ -435,9 +435,9 @@ After upgrading:
     any backend: session handles are now version 3, and such a node refuses every one, the health
     probe's included, so it stays unhealthy. Release note: the vendored qod-node binaries
     (`native/qod-node/binaries/`, the qod wheel's bundled copies for `qod fleet join`, the Windows
-    downloads and the Kubernetes node image) move to node protocol 5 with this release; a manager
+    downloads and the Kubernetes node image) move to node protocol 6 with this release; a manager
     that starts nodes on its host refuses to boot on a binary of another protocol, `qod fleet join`
-    refuses to run one (exit 2), the node image build fails on one, and protocol 5 nodes refuse an
+    refuses to run one (exit 2), the node image build fails on one, and protocol 6 nodes refuse an
     init stream without this release's nonce line.
 
 - **BREAKING: statements tenant users can no longer run.** To keep the node's decision sound, a
@@ -677,7 +677,7 @@ In-engine authorization, Phase D: the node decides every statement alone.
   log line are gone, the configuration page and generated configuration docs lose the three
   `quack-flightsql.acl.*` keys and the lockdown key, and `GET /api/audit/actions` no longer lists
   `pool.setLockdown` (stored audit rows keep it).
-- Every node must restart: node protocol 5 and session handle v3; earlier node images, vendored
+- Every node must restart: node protocol 6 and session handle v4; earlier node images, vendored
   binaries and fleet wheels do not work with this manager.
 - Upgrade the `qod` CLI with the manager: an older `qod serve` always exports `QOD_ACL_ENABLED`,
   which this manager refuses (`qod serve` no longer sets it). A value stored by `qod setup --set`

@@ -24,7 +24,7 @@ option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
-set(QOD_NODE_PROTOCOL 5)
+set(QOD_NODE_PROTOCOL 6)
 
 if(NOT DUCKDB_HOME)
   set(DUCKDB_HOME $ENV{DUCKDB_HOME})
@@ -234,7 +234,7 @@ if(QOD_NODE_TESTS)
   qod_node_test(crypto_test)
   add_test(NAME crypto COMMAND crypto_test)
   qod_node_test(handle_test)
-  add_test(NAME handle COMMAND handle_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/handle-v3.txt)
+  add_test(NAME handle COMMAND handle_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/handle-v4.txt)
   qod_node_test(authz_test)
   add_test(NAME authz COMMAND authz_test)
   qod_node_test(authz_engine_test)

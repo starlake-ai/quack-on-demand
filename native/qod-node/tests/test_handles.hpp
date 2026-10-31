@@ -51,7 +51,7 @@ inline std::string MintWith(const MintSpec &spec) {
 	static int counter = 0;
 	char nonce[33];
 	std::snprintf(nonce, sizeof(nonce), "%032x", ++counter);
-	auto payload = std::string("{\"v\":3,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
+	auto payload = std::string("{\"v\":4,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
 	               "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
 	               "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
 	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +

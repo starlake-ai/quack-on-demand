@@ -136,12 +136,12 @@ every statement on a quack connection without one. A refused handle drops the co
 (retryable). The health probe's canary runs a handle-less `SELECT 1`: a node that answers it is
 unhealthy and never routed to. A node started before session handles does not know `qod_session` and
 is never routed to either. Nor is a node of an earlier node protocol, on any backend: the handle's
-`v` is 3 (`NodeHandles.Version` = qod-node's `kHandleVersion`, node protocol 5), and such a node
-refuses every handle of another version, the probe's included (and a protocol 5 node refuses theirs).
+`v` is 4 (`NodeHandles.Version` = qod-node's `kHandleVersion`, node protocol 6), and such a node
+refuses every handle of another version, the probe's included (and a protocol 6 node refuses theirs).
 Restart every node after upgrading. What a principal may do is decided on
 the node (below).
 
-**Node-side authorization (node protocol 5).** A non-superuser statement is decided on what
+**Node-side authorization (node protocol 6).** A non-superuser statement is decided on what
 DuckDB resolved for it, on the node, before it runs, and nowhere else. The parse screen re-parses every PREPARE with
 DuckDB's own parser and refuses what binding would already do outside the node (IMPORT, CONNECT,
 DESCRIBE / SHOW / SUMMARIZE of a table or query (the listing forms such as SHOW TABLES stay), PRAGMAs
@@ -155,6 +155,10 @@ COPY, ATTACH, IMPORT, EXPORT, LOAD) is sent to the manager as a `kind = screen` 
 binding. Replacement scans are off for such a session (`ClientConfig::use_replacement_scans`, no SQL
 reaches it): `FROM 'x.csv'` is "table not found". Every node opens with `remote_pushdown` in
 `disabled_optimizers` (DuckLake-on-Postgres folded constant calls before `post_bind`).
+A DuckLake read at any snapshot (current, `AT (...)`, the change feed) is described as the table its
+stable id names now (DuckLake keeps one oid per table id), under its current names, columns matched
+by field id, `renamed: true` when the statement wrote an old name (the decider then refuses it to a
+principal with column or row policies); a table dropped since is refused to non-superusers.
 Every principal, superusers and the manager included, is refused SET / RESET of
 `disabled_optimizers`, `enable_optimizer`, `debug_disable_optimizer`,
 `quack_authentication_function` and `quack_authorization_function` on a quack connection (`QoD:
@@ -352,7 +356,7 @@ with a WARN. Manifests carry `initSqlTrusted` and `setupSqlTrusted`.
 
 **Read-only federated catalogs bind every principal (decision 24).** A federated source's `readOnly`
 flag is enforced on the node, superusers and the system principal included: since the node never asks
-the manager about a superuser's statement, the set travels in the signed handle (handle v3's required
+the manager about a superuser's statement, the set travels in the signed handle (the handle's required
 `readOnly`, the pool's aliases folded with `Locale.ROOT`, sorted; `ReadOnlyCatalogs` /
 `FederatedReadOnlyCatalogs`, disabled sources included, the system principal's handles carry `[]`).
 qod-node refuses, in `post_bind` and `pre_optimize`, before the verdict cache and any decide call, a
