@@ -112,6 +112,8 @@ class StatementIdentitySpec
         Option.when(schema == "main" && table == "orders")(40L)
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
         schema == "main" && table == "orders"
+      override def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean =
+        schema == "main" && name == "orders"
       override def listDroppedTables(limit: Int): List[DroppedTableEntry] =
         List(doomed).take(limit)
       override def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
