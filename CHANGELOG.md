@@ -593,14 +593,18 @@ In-engine authorization, Phase D: the node decides every statement alone.
   and a string naming a listing (`query('... information_schema./**/tables')`) are refused.
   DuckDB's SHOW family is refused the same way, at top level or nested (a subquery, a CTE, a
   `query()` string): bare `SHOW` and `DESCRIBE` / `DESC`, `SHOW TABLES FROM ...`, `SHOW SCHEMAS`,
-  `SHOW DATABASES` and `SHOW VARIABLES`. A top-level `SHOW TABLES` / `SHOW ALL TABLES` keeps working
+  `SHOW DATABASES` and `SHOW VARIABLES` (`SELECT * FROM duckdb_variables()` lists the session's
+  variables instead). A top-level `SHOW TABLES` / `SHOW ALL TABLES` keeps working
   for every tenant user, answered from the filtered listings, and `DESCRIBE <table>` of a granted
   table keeps working. Two refusals are deliberate, to fail closed: a CTE named like a built-in
   view (`WITH pg_tables AS (...) SELECT * FROM pg_tables`), and a user's plain view over
   `information_schema` (a secure view, created by a superuser, still reads it). The filtered
-  `information_schema` listings are now pinned to the session catalog, as `duckdb_tables()` and
-  its siblings already were: a grant on `lake.main.*` no longer lists another attached catalog's
-  `main` objects or their view SQL, and a wildcard grant lists the session catalog only.
+  `information_schema` listings and `duckdb_tables()` and its siblings now pin each grant to the
+  catalog it covers: a grant on `lake.main.*` no longer lists another attached catalog's `main`
+  objects or their view SQL; a grant naming a federated catalog (`pgsrc.public.*`) lists that
+  catalog's objects, in `information_schema`, FlightSQL GetCatalogs / GetDbSchemas / GetTables and
+  `DESCRIBE pgsrc.public.t`; a wildcard catalog (`*.*.*`) lists the pool's own catalog, the one it
+  covers on the node, never a federated one.
 - `QOD_ACL_ENABLED` / `quack-flightsql.acl.enabled` is removed: enforcement is always on, and the
   manager refuses to start while the variable (any value, empty included) or the path is set.
 - `QOD_ACL_FILTERED_METADATA` / `quack-flightsql.acl.filteredMetadata` is removed: a tenant user's
