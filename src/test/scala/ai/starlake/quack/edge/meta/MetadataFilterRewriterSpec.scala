@@ -356,6 +356,40 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
     go("SELECT * FROM acme_tpch.information_schema.tables", e) shouldBe a[Rewritten]
   }
 
+  // A statement jsqlparser cannot read (`^@`) comes back as an opaque statement whose text keeps
+  // the caller's comments, and a comment between `information_schema` and the dot hid the name
+  // from the serialized-text count: the node then read the listing unfiltered (re-review C1-a).
+  // Counted on DuckDB's own tokens, comments dropped, it is refused.
+  it should "refuse a commented listing name in a statement it cannot parse" in {
+    val e = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    for
+      view    <- List("tables", "columns", "views")
+      comment <- List("/**/", "--x\n", "/* a */ ")
+    do
+      val sql =
+        s"SELECT table_catalog, table_name FROM information_schema${comment}.$view " +
+          "WHERE table_name ^@ ''"
+      withClue(sql)(go(sql, e) shouldBe a[Denied])
+    go(
+      "SELECT table_name FROM information_schema --x\n . /* y */ \"schemata\" WHERE 1 ^@ 1",
+      e
+    ) shouldBe a[Denied]
+    go(
+      "SELECT table_catalog, table_name, view_definition FROM information_schema/**/.views " +
+        "WHERE table_name ^@ ''",
+      eff(tenantUser, grant("lake", "main", "events"))
+    ) shouldBe a[Denied]
+    // Text the gateway cannot even render (a quote or dollar string left open) is counted on its
+    // own text: there the comment hid the name, and the filter passed it through.
+    List(
+      "SELECT table_name FROM information_schema/**/.tables WHERE x = '''",
+      "SELECT table_name FROM information_schema--x\n.views WHERE x = E'\\\\''",
+      "SELECT table_name FROM information_schema/* y */.columns WHERE 1 ^@ 1 AND $$ = 'x'"
+    ).foreach(sql => withClue(sql)(go(sql, e) shouldBe a[Denied]))
+    // The nearest admitted: the same unreadable shape naming no listing passes untouched.
+    go("SELECT v FROM tpch1.customer WHERE v ^@ ''", e) shouldBe Passthrough
+  }
+
   // A string names a listing to whatever parses it on the node (query(), query_table()): refused
   // however the name is spelled inside it, a comment, an E-string escape or a nested literal
   // included, where the serialized-text count alone saw no reference (C1).

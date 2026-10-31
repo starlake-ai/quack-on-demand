@@ -138,7 +138,9 @@ final class MetadataFilterRewriter(
               // statement identically - the time-travel strip was the counterexample. The fail-closed reading is structural
               // now: text this filter could not analyse, naming a filterable table, is refused
               // rather than forwarded on trust. Text naming none still passes, so an ordinary
-              // unsupported statement is unaffected.
+              // unsupported statement is unaffected. Counted on DuckDB's own tokens too: this is
+              // the caller's text, where a comment between the schema and the dot hides the name
+              // from the regex (re-review C1-a).
               if textualRefCount(sql) > 0 then Denied(AnalysisRefusal) else Passthrough
             case Some((stmts, exact)) =>
               val parts = stmts.asScala.toList.map(processOne(_, grants, ctx))
@@ -586,8 +588,25 @@ object MetadataFilterRewriter:
     * The AST occurrence count is kept alongside it, since the two are blind to different things.
     */
   private def textualRefCount(normalizedSql: String): Int =
-    TextualRefRe.findAllMatchIn(normalizedSql).size +
-      FunctionRefRe.findAllMatchIn(normalizedSql).size + literalMentions(normalizedSql)
+    math.max(spelledRefCount(normalizedSql), spelledRefCount(commentFree(normalizedSql)))
+
+  private def spelledRefCount(text: String): Int =
+    TextualRefRe.findAllMatchIn(text).size + FunctionRefRe.findAllMatchIn(text).size +
+      literalMentions(text)
+
+  /** `text` as DuckDB's tokenizer splits it, comments dropped and tokens joined by one space (a
+    * literal kept whole). The serialization of a statement jsqlparser read holds no comment, but
+    * the caller's own text, counted when it could not be read at all, may: there
+    * `information_schema/**/.views` would name the listing to DuckDB and nothing to the regex
+    * (re-review C1-a). The larger of the two counts is taken, over-counting being the safe side.
+    */
+  private def commentFree(text: String): String =
+    val view = ai.starlake.sql.SqlLexer.engineView(Option(text).getOrElse(""))
+    ai.starlake.sql.SqlLexer
+      .tokens(view)
+      .filterNot(_.isTrivia)
+      .map(t => view.substring(t.start, t.end))
+      .mkString(" ")
 
   /** How many string literals of `text` name a filterable listing however the name is spelled
     * inside them. A literal survives serialization verbatim, comments and escapes included, and

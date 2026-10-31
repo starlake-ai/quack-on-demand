@@ -35,7 +35,7 @@ import scala.util.Try
   *     included), RO the aliased and s3lake tables), group `qod_all_pools`;
   *   - bob, carol, dave (acme): the defaults, `qod_all_tables` (`*.*.* ALL`) and `qod_all_pools`;
   *   - erin (acme): a tenant admin (kind `admin`) with the default memberships;
-  *   - frank (acme): role `e2e_one_table` (RO lake events, nothing else), group `qod_all_pools`;
+  *   - olga (acme): role `e2e_one_table` (RO lake events, nothing else), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -66,14 +66,14 @@ abstract class AuthzEndToEndCases(
   private val CarolPw   = "carol-e2e-pw-1"
   private val DavePw    = "dave-e2e-pw-1"
   private val ErinPw    = "erin-e2e-pw-1"
-  private val FrankPw   = "frank-e2e-pw-1"
+  private val OlgaPw    = "olga-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
     "carol" -> CarolPw,
     "dave"  -> DavePw,
     "erin"  -> ErinPw,
-    "frank" -> FrankPw
+    "olga"  -> OlgaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -339,8 +339,8 @@ abstract class AuthzEndToEndCases(
       "/api/user/create",
       obj(
         "tenant"   -> s(Acme),
-        "username" -> s("frank"),
-        "password" -> s(FrankPw),
+        "username" -> s("olga"),
+        "password" -> s(OlgaPw),
         "kind"     -> s("user"),
         "roles"    -> Json.arr(s("e2e_one_table")),
         "groups"   -> Json.arr(s("qod_all_pools"))
@@ -2280,7 +2280,7 @@ abstract class AuthzEndToEndCases(
     val marker = s"qod-c1-$run"
     admin("lake", s"CREATE OR REPLACE VIEW $lake.main.v_c1 AS SELECT '$marker' AS m")
     // Each lists every attached catalog on DuckDB 2.0.0 as the superuser sees it: pg_views prints
-    // every view's SQL, the others the names of tables frank holds no grant on.
+    // every view's SQL, the others the names of tables olga holds no grant on.
     val listings = List(
       "SELECT viewname, definition FROM pg_catalog.pg_views",
       "SELECT viewname, definition FROM pg_views",
@@ -2300,8 +2300,16 @@ abstract class AuthzEndToEndCases(
       "SELECT * FROM query('SELECT view_definition FROM information_schema.\"views\"')",
       "SELECT * FROM query_table('information_schema.tables')",
       "SELECT * FROM query('SELECT definition FROM pg_views')"
-    )
-    // The superuser's probe sees what frank must not, so a refusal or an empty answer is sound.
+    ) ++
+      // Re-review C1-a: a comment inside the name, in a statement jsqlparser cannot parse (`^@`).
+      (for
+        view    <- List("tables", "columns", "views")
+        comment <- List("/**/", "--x\n")
+      yield
+        val cols = if view == "views" then "table_name, view_definition" else "table_name"
+        s"SELECT table_catalog, $cols FROM information_schema$comment.$view " +
+          "WHERE table_name ^@ ''")
+    // The superuser's probe sees what olga must not, so a refusal or an empty answer is sound.
     admin("lake", "SELECT viewname, definition FROM pg_catalog.pg_views")
       .exists(_.contains(marker)) shouldBe true
     def leaks(rows: List[String]): List[String] =
@@ -2309,28 +2317,32 @@ abstract class AuthzEndToEndCases(
         r.contains(marker) || r.contains("__ducklake_metadata") ||
           r.split(',').exists(c => c == "secret" || c == "orders")
       )
-    doors.foreach { d =>
-      // Every statement's outcome, so one run shows each that leaks.
-      val leaked = listings.flatMap { sql =>
-        as(d, "frank", "lake", sql) match
+    // olga reaches the pool on every door: a refusal below is a refusal, never a failed sign-in.
+    allowed("olga", "lake", s"SELECT count(*) FROM $lake.main.events")
+    // Every statement's outcome on every door, so one run shows each that leaks.
+    val leaked = doors.flatMap { d =>
+      listings.flatMap { sql =>
+        as(d, "olga", "lake", sql) match
           // Refused by the node, by the gateway's metadata filter, or by DuckDB itself.
           case Left(_)                      => None
           case Right(r) if leaks(r).isEmpty => None
-          case Right(r)                     => Some(s"$sql -> ${leaks(r).take(3)}")
+          case Right(r)                     => Some(s"[$d] $sql -> ${leaks(r).take(3)}")
       }
-      withClue(s"[$d] frank:\n${leaked.mkString("\n")}\n")(leaked shouldBe empty)
-      // The nearest admitted: the filtered listings, which name only frank's table.
-      withClue(s"[$d] frank: the filtered listings -> ") {
+    }
+    withClue(s"olga:\n${leaked.mkString("\n")}\n")(leaked shouldBe empty)
+    doors.foreach { d =>
+      // The nearest admitted: the filtered listings, which name only olga's table.
+      withClue(s"[$d] olga: the filtered listings -> ") {
         as(
           d,
-          "frank",
+          "olga",
           "lake",
           s"SELECT table_name FROM information_schema.tables " +
             s"WHERE table_catalog = '$lake' ORDER BY 1"
         ) shouldBe Right(List("events"))
         as(
           d,
-          "frank",
+          "olga",
           "lake",
           s"SELECT table_name FROM duckdb_tables() " +
             s"WHERE database_name = '$lake' ORDER BY 1"
