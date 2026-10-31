@@ -1828,6 +1828,12 @@ std::string DuckLakeMetadataPrefix(ClientContext &context, const std::string &ca
 	return KeywordHelper::WriteQuoted(metadata, '"') + "." + KeywordHelper::WriteQuoted(Text(*schema), '"');
 }
 
+//! `column` folded as DuckDB folds identifiers, ASCII letters only (review 5 R3: SQL lower() folds Unicode
+//! too, which would merge schemas DuckDB keeps apart, "é" and "É").
+std::string AsciiFolded(const std::string &column) {
+	return "translate(" + column + ", 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+}
+
 //! The versions of every table of schema `schema` (its name compared without case) of the DuckLake catalog
 //! whose metadata tables `prefix` names, by table id then begin, read from `ducklake_table` and
 //! `ducklake_schema` on a connection of the node's (not a quack session: nothing on it is decided or
@@ -1844,9 +1850,9 @@ std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, 
 	Connection internal(*context.db);
 	auto result = internal.Query(
 	    "SELECT t.table_id, t.begin_snapshot, coalesce(t.end_snapshot, -1), t.table_name FROM " + prefix +
-	    ".ducklake_table t WHERE t.schema_id IN (SELECT schema_id FROM " + prefix +
-	    ".ducklake_schema WHERE lower(schema_name) = lower(" + KeywordHelper::WriteQuoted(schema, '\'') +
-	    ")) ORDER BY t.table_id, t.begin_snapshot LIMIT " + std::to_string(kMaxDuckLakeHistory + 1));
+	    ".ducklake_table t WHERE t.schema_id IN (SELECT schema_id FROM " + prefix + ".ducklake_schema WHERE " +
+	    AsciiFolded("schema_name") + " = " + KeywordHelper::WriteQuoted(StringUtil::Lower(schema), '\'') +
+	    ") ORDER BY t.table_id, t.begin_snapshot LIMIT " + std::to_string(kMaxDuckLakeHistory + 1));
 	if (result->HasError()) {
 		return versions;
 	}
@@ -1867,12 +1873,24 @@ std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, 
 }
 
 //! The snapshot an `AT (TIMESTAMP => ts)` reads (the latest committed at or before `ts`, as DuckLake picks
-//! it), from `ducklake_snapshot`; -1 when none.
+//! it), from `ducklake_snapshot`; -1 when none. A naive timestamp or a string is read as DuckLake reads it,
+//! in the client session's TimeZone and Calendar (review 5 R1), which the internal connection takes on.
 int64_t DuckLakeSnapshotAt(ClientContext &context, const std::string &prefix, const Value &ts) {
 	if (prefix.empty() || ts.IsNull()) {
 		return -1;
 	}
 	Connection internal(*context.db);
+	for (auto setting : {"TimeZone", "Calendar"}) {
+		Value value;
+		auto found = context.TryGetCurrentSetting(Identifier(setting), value);
+		if (found && !value.IsNull()) {
+			auto set = internal.Query(std::string("SET SESSION ") + setting + " = " +
+			                          KeywordHelper::WriteQuoted(value.ToString(), '\''));
+			if (set->HasError()) {
+				return -1;
+			}
+		}
+	}
 	auto result = internal.Query("SELECT coalesce(max(snapshot_id), -1) FROM " + prefix +
 	                             ".ducklake_snapshot WHERE snapshot_time <= " +
 	                             KeywordHelper::WriteQuoted(ts.ToString(), '\'') + "::TIMESTAMPTZ");
@@ -1987,6 +2005,19 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 		for (auto &version : versions) {
 			if (SameName(version.name, written) && version.begin <= at && (version.end < 0 || version.end > at)) {
 				table_id = version.id;
+			}
+		}
+		if (table_id >= 0) {
+			// The direct pick must be the table DuckLake bound (review 5 R1): the entry holding the bound name
+			// at that snapshot carries the bound oid, else the read is not told apart and is refused.
+			auto holds = false;
+			TablesAt(context_, catalog, {schema_name}, at, [&](TableCatalogEntry &entry) {
+				holds = holds || (entry.oid == bound.oid && SameName(Text(entry.name), written));
+			});
+			if (!holds) {
+				throw PermissionException("QoD: " + bound_name +
+				                          " at that snapshot cannot be told apart from another table that held the "
+				                          "name; only superusers read it");
 			}
 		}
 	}

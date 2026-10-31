@@ -13,6 +13,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <process.h>
@@ -409,6 +410,74 @@ int main() {
 		expect_one("a dropped table read past a spoofing schema (review N4)",
 		           "SELECT id FROM lake.gone AT (VERSION => " + gone_at + ")", dropped_read("gone", "\"id\"", false));
 		con.Query("DROP SCHEMA memory.__ducklake_metadata_lake");
+	}
+	// Review 5 R1: DuckLake reads a naive TIMESTAMP in the session's TimeZone, so the describer must too.
+	// The history is spread over hours (snapshot times rewritten in the metadata): C holds tz_t from 10:00Z
+	// to 10:30Z, T from 13:00Z to 14:00Z (then secret3, dropped at 14:30Z). In a UTC-3 session, a naive
+	// '10:10' is 13:10Z: T's stretch, which DuckLake reads; read in UTC it would be C's.
+	{
+		std::vector<std::pair<std::string, std::string>> spread; // snapshot id, its new time
+		auto shift = [&](const std::string &hhmm) {
+			spread.emplace_back(lake_head(), "2001-01-01 " + hhmm + ":00+00");
+		};
+		try {
+			qod::RunStrict(con, "CREATE TABLE lake.tz_c (id INTEGER, cv VARCHAR)", "create tz_c");
+			qod::RunStrict(con, "INSERT INTO lake.tz_c VALUES (1, 'c')", "insert tz_c");
+			qod::RunStrict(con, "CREATE TABLE lake.tz_x (id INTEGER, tv VARCHAR)", "create tz_x");
+			qod::RunStrict(con, "INSERT INTO lake.tz_x VALUES (2, 't')", "insert tz_x");
+			qod::RunStrict(con, "ALTER TABLE lake.tz_c RENAME TO tz_t", "rename C to tz_t");
+			shift("10:00");
+			qod::RunStrict(con, "DROP TABLE lake.tz_t", "drop C");
+			shift("10:30");
+			qod::RunStrict(con, "ALTER TABLE lake.tz_x RENAME TO tz_t", "rename T to tz_t");
+			shift("13:00");
+			qod::RunStrict(con, "ALTER TABLE lake.tz_t RENAME TO secret3", "rename T to secret3");
+			shift("14:00");
+			qod::RunStrict(con, "DROP TABLE lake.secret3", "drop T");
+			shift("14:30");
+			for (auto &entry : spread) {
+				qod::RunStrict(con,
+				               "UPDATE __ducklake_metadata_lake.main.ducklake_snapshot SET snapshot_time = TIMESTAMPTZ '" +
+				                   entry.second + "' WHERE snapshot_id = " + entry.first,
+				               "spread the history");
+			}
+			// The node's own (global) TimeZone UTC, the client's session UTC-3.
+			qod::RunStrict(con, "SET GLOBAL TimeZone = 'UTC'", "a UTC node");
+			qod::RunStrict(con, "SET SESSION TimeZone = 'Etc/GMT+3'", "a UTC-3 session");
+		} catch (std::exception &error) {
+			Fail(std::string("review 5 R1 setup: ") + error.what());
+		}
+		expect_one("a naive TIMESTAMP read in the session's TimeZone (review 5 R1)",
+		           "SELECT id FROM lake.tz_t AT (TIMESTAMP => TIMESTAMP '2001-01-01 10:10:00')",
+		           "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+		           "\"catalogType\":\"ducklake\",\"columns\":[\"id\"],\"dropped\":true,\"kind\":\"table\","
+		           "\"name\":\"secret3\",\"renamed\":true,\"schema\":\"main\",\"via\":null}],\"settings\":[],"
+		           "\"statement\":\"PROJECTION\",\"v\":1}");
+		con.Query("RESET SESSION TimeZone");
+		con.Query("RESET GLOBAL TimeZone");
+	}
+	// Review 5 R3: DuckDB folds ASCII only, so schemas "é" and "É" are two schemas; the walk reads the bound
+	// schema's tables only. Each has a dropped t, the other's created later, with another second column.
+	{
+		std::string accent_at;
+		try {
+			qod::RunStrict(con, "CREATE SCHEMA lake.\"é\"", "schema e-acute");
+			qod::RunStrict(con, "CREATE SCHEMA lake.\"É\"", "schema E-acute");
+			qod::RunStrict(con, "CREATE TABLE lake.\"é\".t (id INTEGER, a VARCHAR)", "create e.t");
+			qod::RunStrict(con, "INSERT INTO lake.\"é\".t VALUES (1, 'x')", "insert e.t");
+			qod::RunStrict(con, "CREATE TABLE lake.\"É\".t (id INTEGER, b VARCHAR)", "create E.t");
+			accent_at = lake_head();
+			qod::RunStrict(con, "DROP TABLE lake.\"é\".t", "drop e.t");
+			qod::RunStrict(con, "DROP TABLE lake.\"É\".t", "drop E.t");
+		} catch (std::exception &error) {
+			Fail(std::string("review 5 R3 setup: ") + error.what());
+		}
+		expect_one("a dropped table of one of two schemas DuckDB tells apart (review 5 R3)",
+		           "SELECT a FROM lake.\"é\".t AT (VERSION => " + accent_at + ")",
+		           "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+		           "\"catalogType\":\"ducklake\",\"columns\":[\"a\"],\"dropped\":true,\"kind\":\"table\","
+		           "\"name\":\"t\",\"schema\":\"é\",\"via\":null}],\"settings\":[],"
+		           "\"statement\":\"PROJECTION\",\"v\":1}");
 	}
 	// Review N3: names compare as DuckDB resolves them, without case: CREATE OR REPLACE TABLE RC over rc is a
 	// replace, and the read is the replacement's.
