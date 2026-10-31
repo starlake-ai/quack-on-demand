@@ -886,3 +886,37 @@ table.catalog-columns tbody tr { border-top: 1px solid var(--border); }
   .catalog-tree { border-right: none; border-bottom: 1px solid var(--border); max-height: 40vh; }
   .catalog-detail { border-radius: 0 0 var(--radius) var(--radius); }
 }
+
+/* ----- Profile credential sections (S3CredentialsSection, PatSection) -----
+   The list of what the user holds first, then a create/replace form opened on demand. */
+.cred-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.cred-count { margin-left: .6rem; font-weight: 400; }
+.cred-actions { display: flex; gap: .5rem; justify-content: flex-end; white-space: nowrap; }
+.cred-actions button { padding: .35rem .75rem; }
+tbody tr.cred-editing { background: rgba(245, 158, 11, .08); }
+.cred-form {
+  margin-top: 1rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.cred-form-title { font-weight: 600; margin-bottom: .75rem; }
+.cred-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem 1rem;
+  max-width: 720px;
+}
+.cred-grid .cred-wide { grid-column: 1 / -1; }
+.cred-grid input[readonly] { color: var(--text-mute); }
+.cred-form-actions { display: flex; gap: .5rem; margin-top: 1rem; }
+.cred-form-subtitle { margin: 1rem 0 .5rem; color: var(--text-mute); font-size: .85rem; }
+.cred-grid .cred-check { align-self: end; padding-bottom: .55rem; }
+tbody tr.cred-inactive td { opacity: .6; }
+.cred-minted { margin-bottom: 12px; }
+.cred-minted code { display: block; margin: 8px 0; padding: 6px 8px; word-break: break-all; user-select: all; }
+@media (max-width: 760px) {
+  .cred-grid { grid-template-columns: 1fr; }
+}
