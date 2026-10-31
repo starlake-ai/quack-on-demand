@@ -17,6 +17,8 @@ export default function Catalog() {
   // snapshots panel below refetches and shows the new recovery snapshot.
   const [catalogGen, setCatalogGen] = useState(0);
 
+  const kind = tenantDbs.find(d => d.name === tenantDb)?.kind ?? 'ducklake';
+
   function pickTenantDb(td: string) {
     setTenantDbState(td);
     setSearchParams({ tenantDb: td });
@@ -57,10 +59,13 @@ export default function Catalog() {
             <CatalogBrowser
               tenant={tenant}
               tenantDb={tenantDb}
+              kind={kind}
               onCatalogMutated={() => setCatalogGen(g => g + 1)}
             />
             <IcebergCatalogBrowser tenant={tenant} tenantDb={tenantDb} />
-            <CatalogSnapshotsPanel tenant={tenant} tenantDb={tenantDb} refreshToken={catalogGen} />
+            {kind === 'ducklake' && (
+              <CatalogSnapshotsPanel tenant={tenant} tenantDb={tenantDb} refreshToken={catalogGen} />
+            )}
           </>
         )}
       </div>

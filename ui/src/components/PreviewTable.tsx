@@ -55,14 +55,14 @@ export default function PreviewTable({
                   {columns.map(c => (
                     <th key={c.name} align="left">
                       {c.name}<br />
-                      <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
+                      <span className="subtle preview-col-type" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((row, i) => (
-                  <tr key={i} style={{ borderTop: '1px solid #eee' }}>
+                  <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
                     {leadingCell && <td>{leadingCell(row, i)}</td>}
                     {row.map((v, j) => <td key={j}>{renderCell(v)}</td>)}
                   </tr>

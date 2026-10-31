@@ -283,23 +283,29 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
 
   // Browsing-a-database mode: full-width catalog browser scoped to that DB.
   if (browsing != null) {
+    const browsedKind = dbs.find(d => d.name === browsing)?.kind ?? 'ducklake';
     return (
       <div className="card">
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.75rem' }}>
           <div className="card-title" style={{ margin: 0 }}>
-            Catalog: <code>{browsing}</code>
+            <code>{browsing}</code>
+            <span className="subtle" style={{ marginLeft: 8, fontWeight: 400 }}>{browsedKind}</span>
           </div>
-          <button type="button" className="link-button" onClick={() => setBrowsing(null)}>&larr; Back to databases</button>
+          <button type="button" className="link-button" onClick={() => setBrowsing(null)}>Back to databases</button>
         </div>
         <CatalogBrowser
           tenant={tenant}
           tenantDb={browsing}
+          kind={browsedKind}
           onCatalogMutated={() => setCatalogGen(g => g + 1)}
         />
         {/* External Iceberg catalogs declared on this database (renders nothing when there are
             none), so they are reachable from the database view and not only from /catalog. */}
         <IcebergCatalogBrowser tenant={tenant} tenantDb={browsing} />
-        <CatalogSnapshotsPanel tenant={tenant} tenantDb={browsing} refreshToken={catalogGen} />
+        {/* Snapshots exist only in a DuckLake catalog. */}
+        {browsedKind === 'ducklake' && (
+          <CatalogSnapshotsPanel tenant={tenant} tenantDb={browsing} refreshToken={catalogGen} />
+        )}
       </div>
     );
   }
