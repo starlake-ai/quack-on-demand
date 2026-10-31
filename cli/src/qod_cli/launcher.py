@@ -610,7 +610,8 @@ def runtime_env(
 
     `libduckdb_lib` is required: every launcher path boots a manager whose only
     client to its nodes is the native one, which cannot load without it."""
-    env = dict(base_env)
+    # The static API key was removed: never pass one on (warn_on_static_api_key told the user).
+    env = {k: v for k, v in base_env.items() if k != "QOD_API_KEY"}
     env["QOD_SPAWN_SCRIPT"] = str(spawn_sh)
     env["QOD_SPAWN_SCRIPT_WINDOWS"] = str(spawn_ps1)
     if qod_node_bin is not None:

@@ -276,7 +276,7 @@ printf '%s\n' "$ADMIN_PASSWORD" | qod login --username admin --password-stdin
 qod pool list
 ```
 
-There is no static API key and no open mode: every non-public `/api/...` call needs a session or a PAT, and a call without one answers 401. The manager refuses to boot while `QOD_API_KEY` is set (see "Typical failure modes"). For automation, mint a PAT once from a session (`qod auth pat create`) and hand it over as `QOD_TOKEN`.
+There is no static API key and no open mode: every non-public `/api/...` call needs a session or a PAT, and a call without one answers 401. A `QOD_API_KEY` still set is ignored, with a warning at boot (see "Typical failure modes"). For automation, mint a PAT once from a session (`qod auth pat create`) and hand it over as `QOD_TOKEN`.
 
 ### Regular-user login (profile only)
 
@@ -742,7 +742,8 @@ tenants on manager boot):
 - Upgrade note: the user field formerly called `role` (admin | user) is now `kind` everywhere:
   REST, CLI `--kind` (`--role` now means an RBAC role), MCP, the manifest `kind` key, custom
   `QOD_AUTH_DB_*_QUERY` overrides (which must project `kind`), and `QOD_ADMIN_KIND` (formerly
-  `QOD_ADMIN_ROLE`) for the seeded admin. New tenants no longer get an `admin` role.
+  `QOD_ADMIN_ROLE`, now ignored with a warning at boot) for the seeded admin. New tenants no
+  longer get an `admin` role.
 
 ### Grant a team read access (6-step flow)
 
@@ -866,7 +867,7 @@ qod pool permission revoke <poolPermissionId>
 
 The EffectiveSet cache is invalidated on every RBAC mutation, so changes take effect on the next statement, with no TTL window to wait for: an open FlightSQL or native Quack session resolves its grants again on its first statement after the change, so a revoke reaches it there and a re-grant restores it without a reconnect.
 
-There is no switch that turns the grant check off: the nodes check every tenant statement against the grants (or the tenant's OPA), always. `QOD_ACL_ENABLED` was removed, and set to any value it makes the manager refuse to start (`qod setup --unset QOD_ACL_ENABLED` removes a persisted one).
+There is no switch that turns the grant check off: the nodes check every tenant statement against the grants (or the tenant's OPA), always. `QOD_ACL_ENABLED` was removed: set to `false` it makes the manager refuse to start, set to anything else it is ignored with a warning (`qod setup --unset QOD_ACL_ENABLED` removes a persisted one).
 
 ### Force a password change at next login
 
@@ -2332,9 +2333,9 @@ library):
 
 Self-serve / hosted deployments need a tighter isolation posture than the OSS
 default (single trusted-operator assumption). What the nodes enforce is always on:
-there is no ACL switch and no per-pool lockdown any more (`QOD_ACL_ENABLED` and
-`QOD_NODE_LOCKDOWN` set to any value make the manager refuse to start, naming the
-variable to unset). Pod security is always on too; network policy and reader
+there is no ACL switch and no per-pool lockdown any more (`QOD_ACL_ENABLED` or
+`QOD_NODE_LOCKDOWN` set to `false` makes the manager refuse to start, naming the
+variable to unset; set to anything else, it is ignored with a warning). Pod security is always on too; network policy and reader
 eviction are opt-in knobs.
 
 - **Always on, superuser-only (no flag)** - whatever the tenant's mode (QoD grants
@@ -2495,8 +2496,8 @@ eviction are opt-in knobs.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/api/*` returns 401 (the CLI adds "run qod login, or set QOD_TOKEN to a personal access token") | No valid credential on the call: none sent, an expired or revoked session or PAT, or a former static API key | `qod login`, or set `QOD_TOKEN` to a personal access token (`X-API-Key: <token>` on raw REST calls) |
-| Manager refuses to boot: `QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static API key. Use a personal access token (qod auth pat create) or a qod login session, and unset QOD_API_KEY.` | `QOD_API_KEY` is set to a non-empty value (shell, container env, chart `env`, or `quack-on-demand.apiKey` in an operator config file); the manager no longer accepts a static API key | Unset it everywhere it is set. Mint a personal access token for automation (`qod login`, then `qod auth pat create`) and point scripts (`QOD_TOKEN`), MCP clients and SCIM connectors at it |
-| `qod start` / `qod serve` (with or without `--demo`) refuse to launch, naming `QOD_API_KEY` | The key is in your shell, or an earlier `qod setup` stored it in the `[start]` table of the CLI profile file | `unset QOD_API_KEY`, or `qod setup --unset QOD_API_KEY --non-interactive` (or delete the line from the `[start]` table of the file the message names) |
+| Manager boots with `WARNING: QOD_API_KEY (quack-on-demand.apiKey) was removed and is ignored`, and clients sending the key get 401 | `QOD_API_KEY` is set to a non-empty value (shell, container env, chart `env`, or `quack-on-demand.apiKey` in an operator config file); the manager no longer accepts a static API key | Unset it everywhere it is set. Mint a personal access token for automation (`qod login`, then `qod auth pat create`) and point scripts (`QOD_TOKEN`), MCP clients and SCIM connectors at it |
+| `qod start` / `qod serve` (with or without `--demo`) print `warning: QOD_API_KEY is set` | The key is in your shell, or an earlier `qod setup` stored it in the `[start]` table of the CLI profile file; it is ignored and never passed to the manager | `unset QOD_API_KEY`, or `qod setup --unset QOD_API_KEY --non-interactive` (or delete the line from the `[start]` table of the file the message names) |
 | Manager refuses to boot: `the FlightSQL edge and the Quack front door have no authenticator: ...` | `QOD_AUTH_DB_ENABLED=false` and no other `quack-flightsql.auth` provider: the FlightSQL edge and the Quack front door would refuse every client. System-scope OIDC (`QOD_MGMT_OIDC_*`) does not count: it signs in to the admin UI and REST only | `QOD_AUTH_DB_ENABLED=true`, or a Keycloak or Azure password backend (`QOD_AUTH_KEYCLOAK_ENABLED=true` / `QOD_AUTH_AZURE_ENABLED=true` with their settings), or a bearer provider (`JWT_SECRET_KEY` or `JWT_PUBLIC_KEY_PATH`, `QOD_AUTH_GOOGLE_ENABLED=true`, `QOD_AUTH_AWS_ENABLED=true`) |
 | Manager refuses to boot: `nothing can sign in to this manager: ...`, naming `QOD_AUTH_DB_ENABLED` and `QOD_MGMT_IDENTITY_SOURCE` / `QOD_MGMT_OIDC_ISSUER_URL` / `QOD_MGMT_OIDC_CLIENT_ID` | FlightSQL has only a bearer provider, and there is no password backend (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in, which counts only with `QOD_MGMT_IDENTITY_SOURCE=oidc` and both the issuer and the client id set: nobody could ever log in | Turn database auth back on (`QOD_AUTH_DB_ENABLED=true`), or configure system-scope OIDC sign-in: `QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL`, `QOD_MGMT_OIDC_CLIENT_ID` and `QOD_MGMT_OIDC_CLIENT_SECRET` |
 | `helm install` / `helm upgrade` fails: `apiKey was removed: the manager no longer accepts a static API key; use a personal access token` | The chart values still carry a non-empty `apiKey` (an all-empty block left from an older values file passes) | Delete `apiKey` from the values (and the Secret it named); give automation a personal access token |
@@ -2506,7 +2507,7 @@ eviction are opt-in knobs.
 | `qod serve: provisioning failed: the manager answers /ready but wrote no provisioning outcome within --ready-timeout (<N>s)`, then three `finish by hand:` lines; or `... could not read the provisioning file the launcher wrote` | The manager release does not provision at boot, or is not the one this CLI expects (a launcher/manager version mismatch), or it did not reach its boot provisioning in time | Run the manager release matching this CLI (drop an older `--jar` or `--version`), or `qod login` and run the printed commands; a slow first boot needs a larger `--ready-timeout`. The manager log says what it did |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `qod stop` + `qod start` (reconcile respawns) |
 | `QoD: user:<name> lacks grants on ...` naming the table (FlightSQL `UNAUTHORIZED`) | The user has no matching grant. The nodes always check grants; there is no switch to turn that off | Add the grant via `qod role permission grant` |
-| The manager refuses to start naming `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` or `QOD_NODE_LOCKDOWN` | That setting was removed: the nodes enforce always, and listings are always filtered | Unset it (`qod setup --unset <NAME>` for a persisted one; remove it from the Helm values or env), and upgrade `qod` with the manager (an older `qod serve` exports `QOD_ACL_ENABLED`) |
+| The manager refuses to start naming `QOD_ACL_ENABLED` or `QOD_NODE_LOCKDOWN` set to `false`, or `QOD_ACL_FILTERED_METADATA` or `QOD_ACL_DIALECT` set at all (set to anything but `false`, the first two only print a warning at boot) | That setting was removed: the nodes enforce always, and listings are always filtered | Unset it (`qod setup --unset <NAME>` for a persisted one; remove it from the Helm values or env), and upgrade `qod` with the manager (an older `qod serve` exports `QOD_ACL_ENABLED`) |
 | `QoD: statement uses a secure view while the session holds variables` / `... has changed the setting <name>` / `... search path differs from the one it was given` / `... holds temporary entries ...`, `which QoD does not support` | The session set a variable, changed a setting other than `schema` / `search_path` (a client's `SET TimeZone` on connect included), ran `USE` of another schema, or created a temporary view, macro or type: any of them could change what a secure view's body reads | Open a new session (or reconnect) without that state, and read the secure view there; set time zones and other settings in a session that reads no secure view |
 | `QoD: function <name> is not classified` | A tenant user called a name the node's classification does not list: a typo, a function of an extension the node loaded later, a macro a superuser created, or a catalog macro named like a built-in (also reached through a view, a default or a built-in macro's body) | Check the spelling; call DuckDB's own with `system.main.<name>`; have a superuser drop or rename the shadowing macro. A new extension's functions need a manager release that classifies them |
 | `QoD: authorization unavailable, retry` (FlightSQL `UNAVAILABLE`) | The node could not get a verdict from the manager replica that minted the session's handle in time (`QOD_AUTHZ_DECIDE_TIMEOUT_MS`, default 2000): that replica restarted, is down or unreachable from the nodes. A multi-statement submission so refused is not retryable as a whole (FlightSQL `INVALID_ARGUMENT`, "not retryable as a whole: the statements before the refused one may have run") | Retry a single statement. For a batch, check which of its statements ran before resubmitting. If it persists, check that the nodes reach `QOD_INTERNAL_URL` (boot prints `node decide URL: ...`), and on Kubernetes that the NetworkPolicy lets node pods reach the manager on 20900 |
@@ -2535,7 +2536,7 @@ eviction are opt-in knobs.
 ## When operating
 
 - There is no built-in admin password: it is chosen at the first `qod start` / `qod serve` and the admin row is never rewritten on restart. Rotate with `qod auth change-password`; recover a lost or locked password with `qod admin reset-password`, and a disabled superuser with `qod admin reset-password --username <name>`. With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one).
-- There is no static API key: people log in (`qod login`, the UI) and automation uses personal access tokens (`qod auth pat create`). Upgrading from a release that had one: mint the PATs first, point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every environment, chart value and Compose file (a set key refuses boot).
+- There is no static API key: people log in (`qod login`, the UI) and automation uses personal access tokens (`qod auth pat create`). Upgrading from a release that had one: mint the PATs first, point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every environment, chart value and Compose file (a set key is ignored, with a warning at boot).
 - `QOD_SESSION_JWT_SECRET` is optional: when it is unset, the first boot generates the session secret and stores it in the control-plane database, so sessions survive restarts and every HA replica shares it (boot prints only where it came from, never the value). Set it only when another service must verify the sessions, as the Starflow pairing does. To rotate the stored one, run `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` against the control-plane database and restart the manager (every replica): every session and password-reset link ends. The stored secret makes a read-only copy of the control-plane database (a `pg_dump` backup, a snapshot, a read replica, a SELECT-only role) able to forge a superuser session, on top of the credentials it already holds (among them tenant catalog passwords, object-store keys, inline federation secrets, node bearer tokens, tenant OIDC client secrets and OPA tokens): protect those copies like the secret, or, when they are less trusted than the manager, pin `QOD_SESSION_JWT_SECRET` from an external secret store so nothing is persisted.
 - All config scalars have matching `QOD_*` env-var overrides. Prefer env vars over editing `application.conf` (it is bundled into the jar at build time).
 

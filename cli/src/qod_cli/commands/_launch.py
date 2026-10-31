@@ -19,14 +19,13 @@ def _is_win32() -> bool:
     return sys.platform == "win32"
 
 
-def refuse_a_static_api_key() -> None:
-    """Exit 1 when a non-empty QOD_API_KEY sits in the shell or in the profile
-    file's [start] table, naming each source and its fix.
+def warn_on_static_api_key() -> None:
+    """Warn (stderr) when a non-empty QOD_API_KEY sits in the shell or in the
+    profile file's [start] table, naming each source and its fix, and carry on.
 
-    The static API key was removed, so the CLI never launches a manager with
-    one: launcher.runtime_env copies both sources into the manager's
-    environment, and this check runs before anything launches. An empty value
-    passes. Never prints the value."""
+    The static API key was removed: the manager ignores it, and the CLI never
+    passes it on (launcher.runtime_env drops it), so this warning is the only
+    one printed. An empty value passes silently. Never prints the value."""
     sources = []
     if (os.environ.get(REMOVED_API_KEY) or "").strip():
         sources.append(f"  - your shell: run `unset {REMOVED_API_KEY}`")
@@ -39,8 +38,8 @@ def refuse_a_static_api_key() -> None:
         typer.echo(
             "\n".join(
                 [
-                    f"error: {REMOVED_API_KEY} is set, but the static API key was removed and "
-                    "qod no longer launches a manager with one. Remove it from:",
+                    f"warning: {REMOVED_API_KEY} is set, but the static API key was removed: "
+                    "it is ignored and clients sending it are refused. Remove it from:",
                     *sources,
                     "Then use qod login, or a personal access token (qod auth pat create) "
                     "in QOD_TOKEN.",
@@ -48,7 +47,6 @@ def refuse_a_static_api_key() -> None:
             ),
             err=True,
         )
-        raise typer.Exit(1)
 
 
 def _exec(cmd: list[str], env: dict) -> None:

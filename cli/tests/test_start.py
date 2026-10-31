@@ -321,7 +321,7 @@ def test_start_real_env_var_wins_over_setup_config(runner, wired, monkeypatch):
 
 
 @pytest.mark.parametrize("demo", [False, True])
-def test_start_refuses_a_static_api_key_in_the_shell(runner, wired, monkeypatch, demo):
+def test_start_warns_on_a_static_api_key_in_the_shell_and_launches(runner, wired, monkeypatch, demo):
     # `qod start --demo` (the demo's deprecated alias) goes through the same check.
     import qod_cli.commands.demo as demo_mod
     from qod_cli.main import app
@@ -331,27 +331,33 @@ def test_start_refuses_a_static_api_key_in_the_shell(runner, wired, monkeypatch,
     monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
     args = ["start", "--jar", str(wired["jar"])] + (["--demo"] if demo else [])
     result = runner.invoke(app, args)
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
+    assert "warning: QOD_API_KEY is set" in result.output
     assert "your shell: run `unset QOD_API_KEY`" in result.output
     assert "stale-key-value" not in result.output
-    assert "cmd" not in wired
-    assert ran == []
+    if demo:
+        assert ran == [1]
+    else:
+        # Booleans only: a failing assertion must never print an environment.
+        key_in_manager_env = "QOD_API_KEY" in wired["env"]
+        assert not key_in_manager_env
 
 
-def test_start_refuses_a_static_api_key_in_the_start_table(runner, wired):
+def test_start_warns_on_a_static_api_key_in_the_start_table(runner, wired):
     from qod_cli.config import config_path, save_start_env
     from qod_cli.main import app
 
     save_start_env({"QOD_API_KEY": "stale-key-value"})
     result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert (
         f"the [start] table of {config_path()}: delete its QOD_API_KEY line, or run "
         "qod setup --unset QOD_API_KEY --non-interactive"
     ) in result.output
     assert "your shell" not in result.output
     assert "stale-key-value" not in result.output
-    assert "cmd" not in wired
+    key_in_manager_env = "QOD_API_KEY" in wired["env"]
+    assert not key_in_manager_env
 
 
 def test_start_names_every_source_of_a_static_api_key(runner, wired, monkeypatch):
@@ -361,13 +367,13 @@ def test_start_names_every_source_of_a_static_api_key(runner, wired, monkeypatch
     monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
     save_start_env({"QOD_API_KEY": "stale-key-value"})
     result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert "your shell" in result.output
     assert "the [start] table of" in result.output
 
 
 def test_start_accepts_an_empty_static_api_key(runner, wired, monkeypatch):
-    # The manager accepts an empty value (older Compose files render API_KEY= as one).
+    # An empty value passes silently (older Compose files render API_KEY= as one).
     from qod_cli.config import save_start_env
     from qod_cli.main import app
 
@@ -376,6 +382,7 @@ def test_start_accepts_an_empty_static_api_key(runner, wired, monkeypatch):
     result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
     assert result.exit_code == 0, result.output
     assert "cmd" in wired
+    assert "QOD_API_KEY" not in result.output
 
 
 def test_start_load_flags_warn_and_skip_on_windows(runner, wired, monkeypatch, tmp_path):

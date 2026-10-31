@@ -352,7 +352,7 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 | Admin password | `QOD_ADMIN_PASSWORD` | none; used on first boot only (`qod start` / `qod serve` prompt for it). The Docker launchers default it to `admin` (`ADMIN_PASSWORD`) |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
 
-There is no static API key: a set `QOD_API_KEY` refuses boot. People log in (`qod login`,
+There is no static API key: a set `QOD_API_KEY` is ignored, with a warning at boot. People log in (`qod login`,
 the admin UI) and automation uses personal access tokens (`qod auth pat create`).
 
 Full reference: [Configuration](https://docs.starlake.ai/qod/reference/configuration).

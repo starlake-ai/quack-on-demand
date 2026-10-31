@@ -1622,7 +1622,7 @@ def test_serve_migrates_a_stored_admin_password_out_of_the_config(runner, wired,
 
 
 @pytest.mark.parametrize("demo", [False, True])
-def test_serve_refuses_a_static_api_key_in_the_shell(
+def test_serve_warns_on_a_static_api_key_in_the_shell_and_launches(
     runner, wired, tmp_path, monkeypatch, demo
 ):
     # `qod serve --demo` goes through the same check before anything launches.
@@ -1634,27 +1634,32 @@ def test_serve_refuses_a_static_api_key_in_the_shell(
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     result = _invoke(runner, wired, *(["--demo"] if demo else [str(f)]))
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
+    assert "warning: QOD_API_KEY is set" in result.output
     assert "your shell: run `unset QOD_API_KEY`" in result.output
     assert "stale-key-value" not in result.output
-    assert "cmd" not in wired
-    assert "provision" not in wired
-    assert ran == []
+    if demo:
+        assert ran == [1]
+    else:
+        # Booleans only: a failing assertion must never print an environment.
+        key_in_manager_env = "QOD_API_KEY" in wired["env"]
+        assert not key_in_manager_env
 
 
-def test_serve_refuses_a_static_api_key_in_the_start_table(runner, wired, tmp_path):
+def test_serve_warns_on_a_static_api_key_in_the_start_table(runner, wired, tmp_path):
     from qod_cli.config import config_path, save_start_env
 
     save_start_env({"QOD_API_KEY": "stale-key-value"})
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     result = _invoke(runner, wired, str(f))
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert f"the [start] table of {config_path()}: delete its QOD_API_KEY line" in result.output
-    assert "cmd" not in wired
+    key_in_manager_env = "QOD_API_KEY" in wired["env"]
+    assert not key_in_manager_env
 
 
-def test_serve_attach_mode_refuses_a_static_api_key_too(
+def test_serve_attach_mode_warns_on_a_static_api_key_and_provisions(
     runner, wired, respx_mock, tmp_path, monkeypatch
 ):
     from qod_cli.commands import serve as serve_cmd
@@ -1667,6 +1672,5 @@ def test_serve_attach_mode_refuses_a_static_api_key_too(
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     result = _invoke(runner, wired, str(f))
-    assert result.exit_code == 1
     assert "unset QOD_API_KEY" in result.output
-    assert called == []
+    assert called == [1]
