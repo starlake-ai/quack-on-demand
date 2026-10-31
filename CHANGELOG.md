@@ -631,8 +631,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
   (`postgres_execute`, `postgres_query`, `mysql_*`), a maintenance function taking a catalog name,
   an ATTACH of the same source under another alias, CHECKPOINT / VACUUM (all superuser-only).
 - Trigger DDL is superuser-only: tenant admins lose it.
-- Superusers may now set parser and credential settings (`redact_http_logs`, ...) and run
-  `IMPORT DATABASE`, and are unrestricted on every pool (lockdown applied to them too).
+- Superusers may now set parser and credential settings (`redact_http_logs`, ...), run
+  `IMPORT DATABASE` and `shell_history()`, and are unrestricted on every pool (lockdown used to
+  restrict them too).
 - Tenant users are now refused `LOAD` of an installed extension by bare name, `pg_get_viewdef`
   (`*.*.* ALL` included: it would print every view's SQL), `current_setting()`, `duckdb_memory()`,
   `SET s3_*` and `SET pg_oauth_token`.
