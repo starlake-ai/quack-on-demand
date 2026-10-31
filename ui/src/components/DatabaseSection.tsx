@@ -390,6 +390,13 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 <td>
                   {d.tableCount == null ? (
                     <span>-</span>
+                  ) : d.tableCount < 0 ? (
+                    // duckdb-file / memory: the catalog lives inside the node, so it is not
+                    // counted on list; browsing reads it from a node (waking a suspended pool).
+                    <a href="#" title="Browse the tables (reads the catalog from a node of this database's pool)"
+                      onClick={ev => { ev.preventDefault(); setBrowsing(d.name); }}>
+                      Browse
+                    </a>
                   ) : (
                     <a href="#" onClick={ev => { ev.preventDefault(); setBrowsing(d.name); }}>
                       {d.tableCount}

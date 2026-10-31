@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.model.TenantDbKind
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, NodeCatalog, NodeCatalogFailure}
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import sttp.model.StatusCode
@@ -15,10 +15,11 @@ import sttp.model.StatusCode
   *
   * Every read is session-gated (Spec 00 closed the former ungated drift): tenant resolve ->
   * [[TenantScopeCheck]] -> tenant-db lookup, mirroring [[TagHandlers]]' gate. Unlike tags, a
-  * non-DuckLake tenant-db is NOT rejected with `invalid_kind`: `kindOf` short-circuits the DuckLake
-  * JDBC query for `duckdb-file` / `memory` kinds (those have no `ducklake_schema` metadata table to
-  * query, so the reader would 500 with a Postgres "relation does not exist" error) and the browser
-  * keeps its empty-result UX; admins can still browse via FlightSQL.
+  * non-DuckLake tenant-db is NOT rejected with `invalid_kind`: a `duckdb-file` / `memory` catalog
+  * lives inside the node (no `ducklake_*` tables to query in Postgres), so `kindOf` routes its
+  * schema, table and column reads to `nodeCatalog`, which asks a node of the database's pool
+  * (waking a suspended one). Snapshots stay empty for those kinds and a time-travel selector is a
+  * 400: they have no snapshot history. Without a `nodeCatalog` the reads keep the empty-result UX.
   *
   * When `auditReads` is on, each gated read emits one
   * [[ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogRead AuditActions.CatalogRead]] event
@@ -29,6 +30,7 @@ final class CatalogHandlers(
     sup: PoolSupervisor,
     store: ControlPlaneStore,
     kindOf: (String, String) => Option[TenantDbKind] = (_, _) => Some(TenantDbKind.DuckLake),
+    nodeCatalog: Option[NodeCatalog] = None,
     audit: AuditRecorder = AuditRecorder.noop,
     auditReads: Boolean = false
 ):
@@ -40,6 +42,12 @@ final class CatalogHandlers(
 
   private def isDuckLake(tenant: String, tenantDb: String): Boolean =
     kindOf(tenant, tenantDb).contains(TenantDbKind.DuckLake)
+
+  /** A node-held catalog read (`duckdb-file` / `memory`), or `empty` without a [[NodeCatalog]]. */
+  private def fromNode[T](empty: => T)(
+      read: NodeCatalog => Either[NodeCatalogFailure, T]
+  ): Res[T] =
+    nodeCatalog.fold[Res[T]](Right(empty))(nc => read(nc).left.map(CatalogHandlers.nodeFailure))
 
   /** [[TenantDbGate]] shared by the four reads. Left = ready-made rejection; Right = (tenantId,
     * tenantDbName).
@@ -86,14 +94,16 @@ final class CatalogHandlers(
       scopeOf: SessionScope.Resolver
   ): Res[List[CatalogSchemaEntry]] =
     gated("schemas", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
-      Right(listSchemasUnscoped(tid, db))
+      if isDuckLake(tid, db) then Right(resolveReader(tid, db).listSchemas())
+      else fromNode(List.empty[CatalogSchemaEntry])(_.listSchemas(tid, db))
     }
 
   def listTables(tenant: String, tenantDb: String, schema: String, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Res[List[CatalogTableEntry]] =
     gated("tables", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
-      Right(if !isDuckLake(tid, db) then Nil else resolveReader(tid, db).listTables(schema))
+      if isDuckLake(tid, db) then Right(resolveReader(tid, db).listTables(schema))
+      else fromNode(List.empty[CatalogTableEntry])(_.listTables(tid, db, schema))
     }
 
   def listSnapshots(
@@ -139,15 +149,18 @@ final class CatalogHandlers(
   )(scopeOf: SessionScope.Resolver): Res[CatalogTableDetailResponse] =
     gated("table", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
       if !isDuckLake(tid, db) then
-        val detail = resolveReader(tid, db).getTable(schema, table, None)
-        detail match
-          case Some(d) => Right(d)
-          case None    =>
-            err(
-              StatusCode.NotFound,
-              "not_found",
-              s"table $schema.$table not found"
-            )
+        if asOf.isDefined || asOfTag.isDefined || asOfTs.isDefined then
+          err(
+            StatusCode.BadRequest,
+            "invalid_selector",
+            "time travel (asOf / asOfTag / asOfTs) requires a ducklake tenant-db"
+          )
+        else
+          fromNode(Option.empty[CatalogTableDetailResponse])(_.getTable(tid, db, schema, table))
+            .flatMap {
+              case Some(d) => Right(d)
+              case None => err(StatusCode.NotFound, "not_found", s"table $schema.$table not found")
+            }
       else
         val reader      = resolveReader(tid, db)
         val selectorRes = SnapshotSelector.resolve(
@@ -196,3 +209,26 @@ final class CatalogHandlers(
     */
   private[api] def listSchemasUnscoped(tenant: String, tenantDb: String): List[CatalogSchemaEntry] =
     if !isDuckLake(tenant, tenantDb) then Nil else resolveReader(tenant, tenantDb).listSchemas()
+
+object CatalogHandlers:
+
+  /** REST shape of a node-held catalog read failure: no pool is a 404 like the preview's `no_pool`;
+    * a node error or timeout is a 502, the catalog being unreachable rather than the request being
+    * wrong.
+    */
+  def nodeFailure(f: NodeCatalogFailure): (StatusCode, ErrorResponse) = f match
+    case NodeCatalogFailure.NoPool =>
+      (
+        StatusCode.NotFound,
+        ErrorResponse(
+          "no_pool",
+          "this database has no pool; its catalog is read from a node of one of its pools"
+        )
+      )
+    case NodeCatalogFailure.TimedOut =>
+      (
+        StatusCode.BadGateway,
+        ErrorResponse("catalog_unavailable", "reading the catalog from the node timed out")
+      )
+    case NodeCatalogFailure.Failed(message) =>
+      (StatusCode.BadGateway, ErrorResponse("catalog_unavailable", message))
