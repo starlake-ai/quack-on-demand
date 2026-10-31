@@ -1,5 +1,6 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { branchCount } from '../api/branchCounts';
 import type {
   BranchChangesResponse,
   BranchDetailResponse,
@@ -242,9 +243,10 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                     <tr key={`${t.schema}.${t.table}`} style={{ borderTop: '1px solid #eee' }}>
                       <td><code>{t.schema}.{t.table}</code></td>
                       <td>{kindChip(t)}</td>
-                      <td align="right">{t.inserted}</td>
-                      <td align="right">{t.deleted}</td>
-                      <td align="right">{t.updated}</td>
+                      {(['inserted', 'deleted', 'updated'] as const).map(f => {
+                        const c = branchCount(t, f);
+                        return <td key={f} align="right" title={c.title}>{c.text}</td>;
+                      })}
                       <td>{t.mergeable ? 'ok' : <span style={{ color: '#b91c1c' }}>{t.reason ?? 'refused'}</span>}</td>
                       <td>
                         {(t.kind === 'modified' || t.kind === 'created' || t.kind === 'recreated') && (

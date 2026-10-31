@@ -1491,6 +1491,9 @@ export interface BranchTableChange {
   updated: number;
   mergeable: boolean;
   reason?: string | null;
+  // The counts were asked for and refused to the viewer (no read grant) or failed: the zeros are
+  // no counts.
+  countsUnavailable?: boolean;
 }
 
 export interface BranchConflictEntry {
