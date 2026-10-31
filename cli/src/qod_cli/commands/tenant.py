@@ -144,7 +144,9 @@ def set_acl(
     opa_policy_path: str = typer.Option(None, "--opa-policy-path", help="Default qod/authz; '' clears."),
     opa_token: str = typer.Option(None, "--opa-token", help="Bearer for OPA; write-only; '' clears."),
     send_statement_text: bool = typer.Option(
-        None, "--send-statement-text/--no-send-statement-text", help="Include SQL text in the OPA input."
+        None,
+        "--send-statement-text/--no-send-statement-text",
+        help="Kept for compatibility, no effect: the node never sends SQL text in the OPA input.",
     ),
 ):
     """Set the tenant's data-access authorization (QoD grants or the tenant's OPA). Omitted options keep their value."""

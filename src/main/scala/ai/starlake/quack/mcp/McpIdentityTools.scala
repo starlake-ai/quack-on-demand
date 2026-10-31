@@ -157,7 +157,9 @@ final class McpIdentityTools(
       "opa_url"             -> strProp("OPA base URL."),
       "opa_policy_path"     -> strProp("Policy package path, default qod/authz."),
       "opa_token"           -> strProp("Bearer token for OPA (write-only)."),
-      "send_statement_text" -> boolProp("Include SQL text in the OPA input.")
+      "send_statement_text" -> boolProp(
+        "Kept for compatibility, no effect: the node never sends SQL text in the OPA input."
+      )
     ),
     adminOnly = true,
     run = (principal, args) =>
