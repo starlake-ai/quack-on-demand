@@ -39,7 +39,11 @@ import scala.util.Try
   *   - pete (acme): role `e2e_all_ro` (`*.*.* RO`, nothing named), group `qod_all_pools`;
   *   - fran (acme): role `e2e_feed` (RO lake `feed_a`, nothing else), group `qod_all_pools`; tess
   *     (acme): a tenant admin with only that role and group (the REST data diff); mona (acme): role
-  *     `e2e_feed_masked` (RO lake `feed_a` with a mask on its `email`), group `qod_all_pools`;
+  *     `e2e_feed_masked` (RO lake `feed_a` with a mask on its `email`, and RO lake `vault_now`),
+  *     group `qod_all_pools`;
+  *   - nico (acme): role `e2e_vault` (RO lake `vault`, the table created after the first `vault`
+  *     was renamed `vault_now`), group `qod_all_pools`; vera (acme): role `e2e_vault_now` (RO lake
+  *     `vault_now`), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -75,6 +79,8 @@ abstract class AuthzEndToEndCases(
   private val FranPw    = "fran-e2e-pw-1"
   private val TessPw    = "tess-e2e-pw-1"
   private val MonaPw    = "mona-e2e-pw-1"
+  private val NicoPw    = "nico-e2e-pw-1"
+  private val VeraPw    = "vera-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -85,7 +91,9 @@ abstract class AuthzEndToEndCases(
     "pete"  -> PetePw,
     "fran"  -> FranPw,
     "tess"  -> TessPw,
-    "mona"  -> MonaPw
+    "mona"  -> MonaPw,
+    "nico"  -> NicoPw,
+    "vera"  -> VeraPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -378,6 +386,12 @@ abstract class AuthzEndToEndCases(
     grant(lake, "main", "feed_a", "RO", feed)
     val feedMasked = createRole("e2e_feed_masked")
     grant(lake, "main", "feed_a", "RO", feedMasked)
+    grant(lake, "main", "vault_now", "RO", feedMasked)
+    // A table renamed since a snapshot: `vault` (the new one) alone, and `vault_now` (the old) alone.
+    val vault = createRole("e2e_vault")
+    grant(lake, "main", "vault", "RO", vault)
+    val vaultNow = createRole("e2e_vault_now")
+    grant(lake, "main", "vault_now", "RO", vaultNow)
     stack.post(
       "/api/role/column-policy/create",
       obj(
@@ -393,7 +407,9 @@ abstract class AuthzEndToEndCases(
     List(
       ("fran", FranPw, "user", "e2e_feed"),
       ("tess", TessPw, "admin", "e2e_feed"),
-      ("mona", MonaPw, "user", "e2e_feed_masked")
+      ("mona", MonaPw, "user", "e2e_feed_masked"),
+      ("nico", NicoPw, "user", "e2e_vault"),
+      ("vera", VeraPw, "user", "e2e_vault_now")
     ).foreach { (user, pw, kind, role) =>
       stack.post(
         "/api/user/create",
@@ -2001,6 +2017,88 @@ abstract class AuthzEndToEndCases(
               err should include("not available to tenant-scoped principals")
             case Right(rows) => fail(s"expected a refusal, got rows $rows")
         }
+      }
+    }
+  }
+
+  // ---------- a DuckLake table at an earlier snapshot: judged as the table it is now (review M1) ----------
+
+  /** `vault` with one row, renamed `vault_now` (its `email` renamed `contact`), then a new `vault`
+    * with another row; and `gone_t`, dropped. The snapshot of the old vault's row and of gone_t's.
+    * Written once by the superuser.
+    */
+  private lazy val vaultHistory: (Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.vault (id INTEGER, email VARCHAR)")
+    admin("lake", s"INSERT INTO $lake.main.vault VALUES (1, 'old@x.io')")
+    val old = head()
+    admin("lake", s"ALTER TABLE $lake.main.vault RENAME TO vault_now")
+    admin("lake", s"ALTER TABLE $lake.main.vault_now RENAME COLUMN email TO contact")
+    admin("lake", s"CREATE TABLE $lake.main.vault (id INTEGER, email VARCHAR)")
+    admin("lake", s"INSERT INTO $lake.main.vault VALUES (2, 'new@x.io')")
+    admin("lake", s"CREATE TABLE $lake.main.gone_t (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.gone_t VALUES (3)")
+    val gone = head()
+    admin("lake", s"DROP TABLE $lake.main.gone_t")
+    (old, gone)
+
+  "a DuckLake table read at an earlier snapshot" should "be judged as the table it is now, never the one holding its old name" in {
+    ready()
+    val (old, _) = vaultHistory
+    val atOld    = s"SELECT id, email FROM $lake.main.vault AT (VERSION => $old)"
+    val feedOld  =
+      s"SELECT id, email FROM ducklake_table_insertions('$lake', 'main', 'vault', 1, $old)"
+    // nico holds only the new vault: its old name's history is vault_now's.
+    refused("nico", "lake", atOld, node = s"lacks grants on $lake.main.vault_now:read")
+    refused("nico", "lake", feedOld, node = s"lacks grants on $lake.main.vault_now:read")
+    allowed("nico", "lake", s"SELECT id, email FROM $lake.main.vault", Some(List("2,new@x.io")))
+    // vera holds vault_now: its history is hers under either name (the rule judges the table, not
+    // the name the statement wrote).
+    allowed("vera", "lake", atOld, Some(List("1,old@x.io")))
+    allowed("vera", "lake", feedOld, Some(List("1,old@x.io")))
+    allowed(
+      "vera",
+      "lake",
+      s"SELECT id, contact FROM $lake.main.vault_now",
+      Some(List("1,old@x.io"))
+    )
+    refused(
+      "vera",
+      "lake",
+      s"SELECT id FROM $lake.main.vault",
+      node = s"lacks grants on $lake.main.vault:read"
+    )
+  }
+
+  it should "be refused when the table was dropped since, to anyone but a superuser" in {
+    ready()
+    val (_, gone) = vaultHistory
+    val sql       = s"SELECT id FROM $lake.main.gone_t AT (VERSION => $gone)"
+    refused(
+      "bob",
+      "lake",
+      sql,
+      node = s"$lake.main.gone_t at that snapshot is a table dropped since"
+    )
+    admin("lake", sql) shouldBe List("3")
+  }
+
+  it should "be refused under an old name to a principal with column or row policies" in {
+    ready()
+    val (old, _) = vaultHistory
+    // mona's mask is on feed_a, and she holds vault_now: its current name reads, its old one cannot
+    // carry her policies.
+    // The column policy rewriter cannot parse an AT clause and refuses it first (fail closed); the
+    // node's `renamed` rule stands behind it (AuthzDeciderSpec).
+    allowed("mona", "lake", s"SELECT id FROM $lake.main.vault_now", Some(List("1")))
+    doors.foreach { d =>
+      withClue(s"[$d] mona: an AT read under the old name -> ") {
+        as(d, "mona", "lake", s"SELECT id FROM $lake.main.vault AT (VERSION => $old)") match
+          case Left(err) =>
+            err should (include("column policy rewrite could not parse statement") or
+              include("not available to principals with column or row policies"))
+          case Right(rows) => fail(s"expected a refusal, got rows $rows")
       }
     }
   }
