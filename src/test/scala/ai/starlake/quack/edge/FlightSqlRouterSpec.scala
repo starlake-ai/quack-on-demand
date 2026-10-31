@@ -2273,6 +2273,32 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.session("c-1/undrop") shouldBe None
     received.toArray.toList.collect { case e: ManagerEvent.SessionOpened => e } shouldBe Nil
 
+  it should "give two concurrent calls on one connection a session each (review 5 R4)" in:
+    // Without a per-call nonce both register `<id>`: the first one's close drops the second's.
+    @volatile var routerRef: FlightSqlRouter = null
+    val inSend                               = new java.util.concurrent.CountDownLatch(2)
+    val seen = new java.util.concurrent.CopyOnWriteArrayList[Integer]()
+    val stub: () => QuackResponse = () =>
+      inSend.countDown()
+      inSend.await(5, java.util.concurrent.TimeUnit.SECONDS)
+      seen.add(routerRef.sessions.size)
+      defaultStub()
+    val (router, _, _) = setup(stub = stub)
+    routerRef = router
+    val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-1", Some("acme"), "alice", kind = "user"),
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    import cats.syntax.parallel.*
+    val one = router.executeOneShot("c-2/undrop", "alice", poolKey, "SELECT 1", eff)
+    val (a, b) = (one, one).parTupled.unsafeRunSync()
+    List(a, b).foreach(_.foreach(_.close()))
+    seen.toArray.toList shouldBe List(2, 2)
+    router.sessions.size shouldBe 0
+
   "module events" should "emit SessionOpened then StatementExecuted with ok=true on success" in:
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
     val sink: ManagerEventSink = e => { received.add(e); () }

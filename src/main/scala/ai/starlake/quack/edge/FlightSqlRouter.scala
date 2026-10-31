@@ -399,19 +399,24 @@ final class FlightSqlRouter(
       sql: String,
       effectiveSet: EffectiveSet
   ): IO[Either[RouterFailure, QueryResult]] =
-    // Deferred: execute opens (and meters) its session while it is built, before this one exists.
-    IO(sessions.open(connectionId, user, poolKey)) *>
-      IO.defer(
-        execute(
-          connectionId,
-          user,
-          poolKey,
-          sql,
-          effectiveSet = Some(effectiveSet),
-          recordExecution = true,
-          adminDispatch = false
-        )
-      ).guarantee(IO(sessions.close(connectionId)))
+    // A per-call nonce (review 5 R4): two concurrent calls on one connection get a session each, so
+    // the first one's close never drops the second's. Deferred: execute opens (and meters) its
+    // session while it is built, before this one exists.
+    // The nonce is drawn per run of the returned IO, never once per call to this method.
+    IO(s"$connectionId#${java.util.UUID.randomUUID()}").flatMap { oneShot =>
+      IO(sessions.open(oneShot, user, poolKey)) *>
+        IO.defer(
+          execute(
+            oneShot,
+            user,
+            poolKey,
+            sql,
+            effectiveSet = Some(effectiveSet),
+            recordExecution = true,
+            adminDispatch = false
+          )
+        ).guarantee(IO(sessions.close(oneShot)))
+    }
 
   /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
     * around. `session` is always None on the outbound wire.
