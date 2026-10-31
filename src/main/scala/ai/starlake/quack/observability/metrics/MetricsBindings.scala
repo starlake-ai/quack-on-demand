@@ -18,15 +18,18 @@ import scala.jdk.CollectionConverters._
   * at startup); each call updates the row set of every MultiGauge so dynamic membership (createPool
   * / scale / stopPool) is reflected automatically without leaving stale series behind. qod-node's
   * authorization counters (NodeAuthzStatsTracker, from the probe's reads) are exported as counters,
-  * one series set per node the probe has read.
+  * one series set per node the probe has read, by the HA leader only (`isLeader`): every replica
+  * probes every node, so N replicas exporting would multiply each node's counts by N. Required, so
+  * no construction exports from every replica by omission; a single manager passes always-leader.
   */
 final class MetricsBindings(
     registry: MeterRegistry,
     tracker: NodeLoadTracker,
     sessions: SessionRegistry,
     listPools: () => List[PoolState],
-    engineStats: EngineStatsTracker = new EngineStatsTracker,
-    authzStats: NodeAuthzStatsTracker = new NodeAuthzStatsTracker
+    authzStats: NodeAuthzStatsTracker,
+    isLeader: () => Boolean,
+    engineStats: EngineStatsTracker = new EngineStatsTracker
 ):
 
   // Per-node MultiGauges. Each row carries (tenant, pool, node_id, role) tags.
@@ -139,30 +142,35 @@ final class MetricsBindings(
     nodeDuckSpillBytes.register(spillByteRows.asJava, true)
     refreshAuthzCounters(nodes)
 
-  /** `qod_node_authz_<counter>_total{tenant,pool,node}` for every listed node the probe has read:
-    * counters, since the tracker's totals only grow. A node no longer listed loses its series and
-    * its totals. Synchronized: two scrapes may refresh at once.
+  /** `qod_node_authz_<counter>_total{tenant,pool,node}` for every listed node the probe has read,
+    * while this replica leads: counters, since the tracker's totals only grow. A node no longer
+    * listed loses its series and its totals. A replica that does not lead (a follower, or a leader
+    * demoted since the last refresh) removes every series and forgets every total, so it exports
+    * none, and once it leads its first export is the node's current reading, taken whole (the
+    * tracker's first reading of a node). Synchronized: two scrapes may refresh at once.
     */
   private def refreshAuthzCounters(nodes: List[(String, String, RunningNode)]): Unit =
     synchronized {
-      val live = nodes.map(_._3.nodeId).toSet
+      val leads = isLeader()
+      val live  = if leads then nodes.map(_._3.nodeId).toSet else Set.empty[String]
       authzCounters.keySet.toList.filterNot(live).foreach { id =>
         authzCounters.remove(id).foreach(_.foreach(c => registry.remove(c)))
       }
       authzStats.retain(live)
-      nodes.foreach { case (t, p, n) =>
-        val id = n.nodeId
-        if !authzCounters.contains(id) && authzStats.total(id).isDefined then
-          val counters = NodeAuthzStats.Counters.zipWithIndex.map { (name, i) =>
-            FunctionCounter
-              .builder(
-                s"qod_node_authz_${name}_total",
-                authzStats,
-                (s: NodeAuthzStatsTracker) => s.total(id).fold(0.0)(_.values(i).toDouble)
-              )
-              .tags("tenant", t, "pool", p, "node", id)
-              .register(registry)
-          }
-          authzCounters.update(id, counters)
-      }
+      if leads then
+        nodes.foreach { case (t, p, n) =>
+          val id = n.nodeId
+          if !authzCounters.contains(id) && authzStats.total(id).isDefined then
+            val counters = NodeAuthzStats.Counters.zipWithIndex.map { (name, i) =>
+              FunctionCounter
+                .builder(
+                  s"qod_node_authz_${name}_total",
+                  authzStats,
+                  (s: NodeAuthzStatsTracker) => s.total(id).fold(0.0)(_.values(i).toDouble)
+                )
+                .tags("tenant", t, "pool", p, "node", id)
+                .register(registry)
+            }
+            authzCounters.update(id, counters)
+        }
     }

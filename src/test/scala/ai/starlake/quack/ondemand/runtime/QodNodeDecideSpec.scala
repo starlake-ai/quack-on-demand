@@ -277,8 +277,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       new SessionRegistry,
       () =>
         List(PoolState(MemoryPool, List(onPool), RoleDistribution(0, 0, 1), Map.empty, Map.empty)),
-      new EngineStatsTracker,
-      stats
+      stats,
+      isLeader = () => true
     ).refresh()
     registry
       .find("qod_node_authz_plan_cache_hits_total")

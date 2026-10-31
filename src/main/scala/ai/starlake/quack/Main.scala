@@ -469,7 +469,8 @@ object Main extends IOApp with LazyLogging:
     val tracker            = new NodeLoadTracker
     val engineStatsTracker = new EngineStatsTracker
     // Each node's authorization counters (decision 26): the health probe reads them on healthy
-    // ticks, MetricsBindings exports them as qod_node_authz_<counter>_total.
+    // ticks on every replica, MetricsBindings exports them as qod_node_authz_<counter>_total from
+    // the HA leader only.
     val nodeAuthzStats = new NodeAuthzStatsTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
@@ -1177,10 +1178,13 @@ object Main extends IOApp with LazyLogging:
         }
       },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
-      // The per-node maps only the probe writes follow the nodes it lists, on every replica.
+      // The per-node maps only the probe writes follow the nodes it lists, on every replica (a
+      // follower keeps reading the authz counters it does not export, so they are pruned here
+      // too, not only on a leader's scrape).
       afterTick = live => {
         engineStatsTracker.retain(live)
         schemaInited.retain(live)
+        nodeAuthzStats.retain(live)
       },
       // Piggyback the engine-stats scrape, the Iceberg attach verifier and the node's
       // authorization counters (decision 26: after the probe and its canary, on a connection of
@@ -2402,8 +2406,11 @@ object Main extends IOApp with LazyLogging:
               tracker,
               sessions,
               () => sup.list(),
-              engineStatsTracker,
-              nodeAuthzStats
+              nodeAuthzStats,
+              // Only the HA leader exports the node authz counters (every replica probes every
+              // node); a single manager has no coordinator and always leads.
+              isLeader = () => coordinator.forall(_.isLeader),
+              engineStatsTracker
             )
           val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
           val stmtInstruments = new StatementInstruments(metricsReg.composite)
