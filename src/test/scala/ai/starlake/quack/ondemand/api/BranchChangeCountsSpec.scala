@@ -121,6 +121,10 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     private val aliceRow =
       RbacUser(id = "u-alice", tenant = Some("acme"), username = "alice", kind = "admin")
     store.upsertUserIdentity(aliceRow)
+    // root: a superuser (no tenant), whose own counts the REST propose replies with.
+    store.upsertUserIdentity(
+      RbacUser(id = "u-root", tenant = None, username = "root", kind = "admin")
+    )
     sup.grantPoolPermission("acme", None, Some(aliceRow.id), None).unsafeRunSync()
 
     private val mainReader   = new FakeReader(10L, Nil)
@@ -251,25 +255,21 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     }
   }
 
-  "propose" should "still count every modified table as the system caller" in {
-    val f          = new Fixture
-    val (_, m, cs) = f.service
-      .propose(
-        "acme",
-        f.parent.name,
-        "feature",
-        BranchActor("root", true),
-        ExecCaller.system("spec-root"),
-        None
-      )
+  "propose" should "store the system's counts and reply with the superuser proposer's own" in {
+    // Review M3: through the REST handler as a superuser session, so the reply is counted as that
+    // superuser (their own row through the handshake), the stored summary as the system.
+    val f     = new Fixture
+    val reply = f.handlers
+      .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(RootScope)
       .unsafeRunSync()
       .fold(e => fail(s"propose: $e"), identity)
-    cs.tables.map(t => t.table -> t.inserted).toMap shouldBe Map("region" -> 7L, "nation" -> 5L)
-    nationIn(tablesOf(io.circe.parser.parse(m.summaryJson).toOption.get)) shouldBe (5L, false)
-    f.counted.map(c => (c._1, c._3.system, c._2)).toSet shouldBe Set(
-      ("region", true, NodePrincipal.System),
-      ("nation", true, NodePrincipal.System)
-    )
+    reply.changes.tables.map(t => t.table -> t.inserted).toMap shouldBe
+      Map("region" -> 7L, "nation" -> 5L)
+    nationIn(tablesOf(reply.merge.summary)) shouldBe (5L, false)
+    val byCaller = f.counted.toList.map(c => (c._1, c._3.system, c._2.name))
+    byCaller.filter(_._2).map(_._1).toSet shouldBe Set("region", "nation")
+    byCaller.filterNot(_._2).map(c => (c._1, c._3)).toSet shouldBe
+      Set(("region", "root"), ("nation", "root"))
   }
 
   /** nation's counts as a summary or change-set JSON carries them: (inserted, countsUnavailable).
