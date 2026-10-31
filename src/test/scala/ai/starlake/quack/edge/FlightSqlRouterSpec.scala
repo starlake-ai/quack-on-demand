@@ -1770,6 +1770,43 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     qr.close()
     registry.list() shouldBe Nil // closed: entry gone
 
+  it should "mask a system statement's values in the registry, which tenant admins list" in:
+    // Review M1: history and audit mask the system principal's statement values, and so must the
+    // active-statement list (ActiveStatementHandlers.list shows `sql` to the tenant's admins).
+    val registry     = new ActiveStatementRegistry()
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      registry = registry,
+      metadataFilterRewriter = mountedFilter,
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+    )
+    val systemEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("", None, "module:seed", kind = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      system = true
+    )
+    val result = router
+      .execute(
+        "reg-sys",
+        "module:seed",
+        poolKey,
+        "SELECT 'topsecret' AS k",
+        effectiveSet = Some(systemEff)
+      )
+      .unsafeRunSync()
+    val qr = result.toOption.get
+    registry.list().map(_.sql) should have size 1
+    registry.list().head.sql should not include "topsecret"
+    qr.close()
+
   it should "carry the acting patId into the registry entry" in:
     val registry     = new ActiveStatementRegistry()
     val (base, _, _) = setup()
