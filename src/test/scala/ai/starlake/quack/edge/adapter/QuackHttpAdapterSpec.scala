@@ -42,7 +42,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     )
     var called = false
     val out    = adapter
-      .tracked[String](node("draining"), recordLoad = true)(IO {
+      .tracked[String](node("draining"), recordLoad = true, admitDraining = false)(IO {
         called = true
         NodeOutcome.Permanent("should not be sent", 1L)
       })
@@ -379,7 +379,9 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       .Deferred[IO, Unit]
       .flatMap { started =>
         adapter
-          .tracked[Unit](n, recordLoad = true)(started.complete(()) *> IO.never)
+          .tracked[Unit](n, recordLoad = true, admitDraining = false)(
+            started.complete(()) *> IO.never
+          )
           .start
           .flatMap(f => started.get *> f.cancel)
       }
@@ -397,7 +399,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     val n    = node("n-raise")
     val boom = new RuntimeException("boom")
     adapter
-      .tracked[Unit](n, recordLoad = true)(IO.raiseError(boom))
+      .tracked[Unit](n, recordLoad = true, admitDraining = false)(IO.raiseError(boom))
       .attempt
       .unsafeRunSync() shouldBe
       Left(boom)

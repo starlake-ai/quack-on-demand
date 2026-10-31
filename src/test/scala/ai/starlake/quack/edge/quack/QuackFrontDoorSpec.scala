@@ -25,6 +25,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.duration.*
 
 /** The front door against a scripted node transport: every message type, the statement lifecycle
   * around the relayed node connection, and the policy, audit and kill hooks the pipeline provides.
@@ -211,7 +212,12 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       ttlSec: Long = 3600,
       maxConcurrent: Int = 0,
       stamping: Boolean = false,
-      auth: AuthenticationService = InMemoryAuthService.acceptingAnyPassword()
+      auth: AuthenticationService = InMemoryAuthService.acceptingAnyPassword(),
+      drainTimeout: FiniteDuration = 10.seconds,
+      /** Runs once the router holds the pool snapshot it picks from, before it picks: a teardown
+        * that starts draining there plays the race of a route chosen just before the drain.
+        */
+      beforePick: NodeLoadTracker => Unit = _ => ()
   ): Fixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -241,7 +247,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       backend,
       tracker,
       new InMemoryControlPlaneStore(),
-      duckLakeInitializer = (_, _) => ()
+      duckLakeInitializer = (_, _) => (),
+      drainTimeout = drainTimeout
     )
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
     val (kind, metastore, dataPath) =
@@ -271,7 +278,10 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
         if withAdmin then Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(sup))
         else None,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
-      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
+      refsConfigFor = _ =>
+        beforePick(tracker)
+        ai.starlake.acl.model.Config.forDuckDB(None, None)
     )
     val user      = RbacUser("u-1", if superuser then None else Some("t-1"), "alice", kind = "user")
     val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)
@@ -1225,3 +1235,80 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     QuackFrontDoor.readsCatalog("SELECT 1 /* duckdb_schemas() */") shouldBe false
     QuackFrontDoor.readsCatalog("SELECT duckdb_x.a FROM t") shouldBe false
     QuackFrontDoor.readsCatalog("") shouldBe false
+
+  // -- drain: a non-force teardown waits for the front door's work on the node ------------------
+
+  /** Polls `cond` for up to 3 s. */
+  private def awaitTrue(what: String)(cond: => Boolean): Unit =
+    val deadline = System.nanoTime() + 3.seconds.toNanos
+    while !cond && System.nanoTime() < deadline do Thread.sleep(5)
+    withClue(what)(cond shouldBe true)
+
+  /** Whether `fiber` is still running after `wait`. */
+  private def stillRunning(fiber: cats.effect.FiberIO[Unit], wait: FiniteDuration): Boolean =
+    IO.race(fiber.joinWithNever, IO.sleep(wait)).unsafeRunSync().isRight
+
+  "a non-force teardown" should "wait for a front-door statement whose result the client still reads" in:
+    val fx = setup()
+    fx.transport.prepareNeedsMore = true
+    val connId = connect(fx)
+    prepare(fx, connId, "SELECT * FROM big") shouldBe prepareResp(true)
+    val served = lastPrepareNode(fx)
+    val stop   = fx.router.supervisor.stopPool(poolKey, force = false).start.unsafeRunSync()
+    awaitTrue("the statement's node is draining")(fx.tracker.snapshot(served).draining)
+    // The PREPARE has answered, but the node still holds the result the client fetches: the
+    // drain must not stop it under the client.
+    stillRunning(stop, 300.millis) shouldBe true
+    fetch(fx, connId) shouldBe fetchResp(true)
+    fetch(fx, connId) shouldBe fetchResp(false)
+    stillRunning(stop, 200.millis) shouldBe true
+    // The client is done and the sweeper releases the drained statement: the stop goes on.
+    fx.door.sweep(Instant.now().plusSeconds(10)).unsafeRunSync()
+    stop.joinWithNever.timeout(3.seconds).unsafeRunSync()
+    fx.router.supervisor.get(poolKey).get.nodes shouldBe empty
+
+  it should "refuse, retryably and before any byte reaches it, a statement routed to a node that started draining" in:
+    // Armed with the pool's nodes: every node starts draining after the router took the snapshot
+    // it routes from, which still shows them routable.
+    val draining = new java.util.concurrent.atomic.AtomicReference(List.empty[String])
+    val fx     = setup(beforePick = tracker => draining.get().foreach(tracker.setDraining(_, true)))
+    val connId = connect(fx)
+    val before = fx.transport.posted.size
+    val loads  = fx.nodes.map(n => n.nodeId -> fx.tracker.snapshot(n.nodeId)).toMap
+    draining.set(fx.nodes.map(_.nodeId))
+    val answer = errorText(prepare(fx, connId, "SELECT 1"))
+    answer should include("no fallback node")
+    fx.transport.posted.size shouldBe before
+    fx.nodes.foreach { n =>
+      val after = fx.tracker.snapshot(n.nodeId)
+      after.copy(draining = false) shouldBe loads(n.nodeId)
+    }
+    fx.router.history.snapshot(10).head.error.getOrElse("") should include("is draining")
+    // Nothing of the session was spent: once the drain is called off, the same statement runs.
+    draining.set(Nil)
+    fx.nodes.foreach(n => fx.tracker.setDraining(n.nodeId, false))
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(false)
+
+  it should "keep running an open transaction's statements on its draining node and stop it after COMMIT" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    val txNode =
+      fx.sessions.get(connId).flatMap(_.txLink.get()).map(_._1).getOrElse(fail("no transaction"))
+    val stop = fx.router.supervisor.stopPool(poolKey, force = false).start.unsafeRunSync()
+    awaitTrue("the transaction's node is draining")(fx.tracker.snapshot(txNode).draining)
+    // The transaction was admitted before the drain: its statements still run, on its link.
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(false)
+    lastPrepareNode(fx) shouldBe txNode
+    stillRunning(stop, 300.millis) shouldBe true
+    prepare(fx, connId, "COMMIT") shouldBe prepareResp(false)
+    stop.joinWithNever.timeout(3.seconds).unsafeRunSync()
+    fx.router.supervisor.get(poolKey).get.nodes shouldBe empty
+
+  it should "stop an open transaction's node at the drain timeout, its next statement told the node left" in:
+    val fx     = setup(drainTimeout = 300.millis)
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    fx.router.supervisor.stopPool(poolKey, force = false).timeout(5.seconds).unsafeRunSync()
+    fx.router.supervisor.get(poolKey).get.nodes shouldBe empty
+    errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer

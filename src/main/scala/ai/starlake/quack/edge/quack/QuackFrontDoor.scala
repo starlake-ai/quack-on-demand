@@ -9,12 +9,18 @@ import ai.starlake.quack.edge.{
   Routed,
   RouterFailure
 }
-import ai.starlake.quack.edge.adapter.{NodeOutcome, QuackNativeBridge, QuackTransport}
+import ai.starlake.quack.edge.adapter.{
+  NodeHold,
+  NodeOutcome,
+  QuackHttpAdapter,
+  QuackNativeBridge,
+  QuackTransport
+}
 import ai.starlake.quack.edge.admin.AdminSqlParser
 import ai.starlake.quack.model.{PoolKey, RunningNode, SqlLiterals, StatementKind}
 import ai.starlake.quack.route.{Router, RoutingDecision}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
-import cats.effect.IO
+import cats.effect.{IO, Outcome}
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
@@ -171,14 +177,16 @@ final class QuackFrontDoor(
     node match
       case None    => IO.pure(Right(None))
       case Some(n) =>
-        QuackNodeLink.open(transport, n, hello, InvalidIndex, QuackNodeLink.NoStatements).flatMap {
-          case Right((link, r)) =>
-            link.close().as(Right(Some(r.serverDuckdbVersion).filter(_.nonEmpty)))
-          case Left(LinkFailure.Permanent(m))
-              if m.toLowerCase(Locale.ROOT).contains("unsupported quack version") =>
-            IO.pure(Left(m))
-          case Left(_) => IO.pure(Right(None))
-        }
+        QuackNodeLink
+          .open(transport, n, hello, InvalidIndex, QuackNodeLink.NoStatements, NodeHold.none)
+          .flatMap {
+            case Right((link, r)) =>
+              link.close().as(Right(Some(r.serverDuckdbVersion).filter(_.nonEmpty)))
+            case Left(LinkFailure.Permanent(m))
+                if m.toLowerCase(Locale.ROOT).contains("unsupported quack version") =>
+              IO.pure(Left(m))
+            case Left(_) => IO.pure(Right(None))
+          }
 
   // -------------------------------------------------------------------------------------------
   // PREPARE_REQUEST
@@ -444,6 +452,41 @@ final class QuackFrontDoor(
           case _ => ()
     else () => link.close().unsafeRunSync()
 
+  /** Admission of a front-door statement to `node` ([[NodeHold]]), taken before anything is sent to
+    * it. On a fresh link the statement holds the node until the link closes, and a draining node
+    * refuses it: None, answered Transient (nothing sent, so the router tries another node, as for
+    * the Arrow transport). On the link of the session's client transaction it is admitted even
+    * while the node drains: the transaction holds the node already, and the drain waits for it
+    * (`drainTimeout`) rather than strand it mid-way.
+    */
+  private def admit(node: RunningNode, txLink: Boolean): Option[NodeHold] =
+    if txLink then Some(NodeHold.none) else router.tracker.tryHold(node.nodeId)
+
+  /** Run `use` with the statement's admission to `node` ([[admit]]), the in-flight bookkeeping of
+    * the adapter around it. The hold goes to the link `use` opens with it, released when the link
+    * closes. It is released here too, as a backstop, whenever `use` leaves no statement on the
+    * link: any outcome but Ok, a raise, a cancel.
+    */
+  private def admitted[A](node: RunningNode, recordLoad: Boolean, txLink: Boolean)(
+      use: NodeHold => IO[NodeOutcome[A]]
+  ): IO[NodeOutcome[A]] =
+    IO.defer {
+      admit(node, txLink) match
+        case None =>
+          IO.pure(NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L))
+        case Some(hold) =>
+          router.adapter
+            .tracked(node, recordLoad, admitDraining = true)(use(hold))
+            .guaranteeCase {
+              case Outcome.Succeeded(fa) =>
+                fa.flatMap {
+                  case NodeOutcome.Ok(_, _, _) => IO.unit
+                  case _                       => IO(hold.release())
+                }
+              case _ => IO(hold.release())
+            }
+    }
+
   /** Open (or reuse, inside a client transaction) a node link, run the stamping prelude, then hand
     * the link to `body`. The rule is the Arrow path's (`QuackHttpClient.queryStamped`): a failure
     * of the stamp SQL itself is fail-open, the write proceeds unstamped on a fresh link; a failed
@@ -451,54 +494,62 @@ final class QuackFrontDoor(
     * and ends the transaction on a reused one ([[linkFailed]]). A handle that cannot be minted
     * would fail open too, but a front door session always has a principal bound, and the write's
     * own mint would then fail Permanent, so nothing would go out. Load bookkeeping goes through the
-    * adapter exactly as for the Arrow transport.
+    * adapter exactly as for the Arrow transport; admission to the node, and the hold a fresh link
+    * keeps on it until it closes, are [[admitted]]'s.
     */
   private def onLink[A](s: QuackSession, cq: Long)(
       body: (QuackNodeLink, Boolean, Boolean, () => IO[Long]) => IO[NodeOutcome[A]]
   ): FlightSqlRouter.NodeSend[A] =
     (node, _, prelude, recordLoad, principal) =>
-      router.adapter.tracked(node, recordLoad) {
-        IO.monotonic.flatMap { t0 =>
-          val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
-          // A reused transaction link was opened by this same session for an earlier statement,
-          // whose grants this one's may no longer be (SessionGrants): it mints for this
-          // statement's principal from now on.
-          val authorize = router.adapter.authorizer(node, principal)
-          val reuse     = s.txLink.get().filter(_._1 == node.nodeId).map(_._2)
-          val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] = reuse match
-            case Some(l) => IO { l.mintWith(authorize); Right((l, true)) }
-            case None    =>
-              QuackNodeLink
-                .open(transport, node, s.hello, cq, authorize)
-                .map(_.map { case (l, _) => (l, false) })
-          openIO.flatMap {
-            case Left(fail)            => elapsed().map(ms => toOutcome[A](fail, ms))
-            case Right((link, reused)) =>
-              val stampedPrelude                           = prelude.filter(_ => stampOnQuack.get())
-              val preludeIO: IO[Either[LinkFailure, Unit]] = stampedPrelude match
-                case None    => IO.pure(Right(()))
-                case Some(p) => link.runDiscard(p, cq)
-              preludeIO.flatMap {
-                case Right(()) => body(link, stampedPrelude.isDefined, reused, elapsed)
-                // A failed handle is never fail-open: the write is not sent, whatever the cause.
-                // The statement behind a stamp is a write, never a COMMIT.
-                case Left(fail: LinkFailure.HandleFailed) =>
-                  linkFailed[A](s, link, reused, fail, elapsed, clientCommit = false)
-                case Left(fail) =>
-                  // The stamp SQL itself failed: fail open like the Arrow path, the write proceeds
-                  // unstamped on a fresh link whose own PREPAREs each follow a handle. (A mint
-                  // failure would land here as well, but never for a front door session, whose
-                  // principal is always bound; and the write's own mint would fail Permanent.)
-                  logger.warn(
-                    s"stamping prelude failed on ${node.nodeId}; write proceeds unstamped: ${fail.message}"
-                  )
-                  dropLink(link, reused) *> QuackNodeLink
-                    .open(transport, node, s.hello, cq, authorize)
-                    .flatMap {
-                      case Left(fail2)    => elapsed().map(ms => toOutcome[A](fail2, ms))
-                      case Right((l2, _)) => body(l2, false, false, elapsed)
-                    }
-              }
+      IO.defer {
+        val reuse = s.txLink.get().filter(_._1 == node.nodeId).map(_._2)
+        admitted(node, recordLoad, txLink = reuse.isDefined) { hold =>
+          IO.monotonic.flatMap { t0 =>
+            val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
+            // A reused transaction link was opened by this same session for an earlier statement,
+            // whose grants this one's may no longer be (SessionGrants): it mints for this
+            // statement's principal from now on.
+            val authorize = router.adapter.authorizer(node, principal)
+            val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] = reuse match
+              case Some(l) => IO { l.mintWith(authorize); Right((l, true)) }
+              case None    =>
+                QuackNodeLink
+                  .open(transport, node, s.hello, cq, authorize, hold)
+                  .map(_.map { case (l, _) => (l, false) })
+            openIO.flatMap {
+              case Left(fail)            => elapsed().map(ms => toOutcome[A](fail, ms))
+              case Right((link, reused)) =>
+                val stampedPrelude = prelude.filter(_ => stampOnQuack.get())
+                val preludeIO: IO[Either[LinkFailure, Unit]] = stampedPrelude match
+                  case None    => IO.pure(Right(()))
+                  case Some(p) => link.runDiscard(p, cq)
+                preludeIO.flatMap {
+                  case Right(()) => body(link, stampedPrelude.isDefined, reused, elapsed)
+                  // A failed handle is never fail-open: the write is not sent, whatever the cause.
+                  // The statement behind a stamp is a write, never a COMMIT.
+                  case Left(fail: LinkFailure.HandleFailed) =>
+                    linkFailed[A](s, link, reused, fail, elapsed, clientCommit = false)
+                  case Left(fail) =>
+                    // The stamp SQL itself failed: fail open like the Arrow path, the write proceeds
+                    // unstamped on a fresh link whose own PREPAREs each follow a handle. (A mint
+                    // failure would land here as well, but never for a front door session, whose
+                    // principal is always bound; and the write's own mint would fail Permanent.)
+                    logger.warn(
+                      s"stamping prelude failed on ${node.nodeId}; write proceeds unstamped: ${fail.message}"
+                    )
+                    // The fresh link is admitted again: dropping the first one released its hold.
+                    dropLink(link, reused) *> (router.tracker.tryHold(node.nodeId) match
+                      case None =>
+                        IO.pure(NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L))
+                      case Some(hold2) =>
+                        QuackNodeLink
+                          .open(transport, node, s.hello, cq, authorize, hold2)
+                          .flatMap {
+                            case Left(fail2)    => elapsed().map(ms => toOutcome[A](fail2, ms))
+                            case Right((l2, _)) => body(l2, false, false, elapsed)
+                          })
+                }
+            }
           }
         }
       }
@@ -550,46 +601,49 @@ final class QuackFrontDoor(
     */
   private def evaluateSend(s: QuackSession, cq: Long): FlightSqlRouter.NodeSend[NodeRows] =
     (node, wrappedSql, _, recordLoad, principal) =>
-      router.adapter.tracked(node, recordLoad) {
-        IO.monotonic.flatMap { t0 =>
-          val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
-          val authorize               = router.adapter.authorizer(node, principal)
-          val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] =
-            s.txLink.get() match
-              case Some((id, l)) if id == node.nodeId =>
-                IO { l.mintWith(authorize); Right((l, true)) }
-              case Some((id, _)) =>
-                IO.pure(
-                  Left(
-                    LinkFailure.Permanent(
-                      s"the client transaction's node connection is on $id, not ${node.nodeId}: " +
-                        "a statement of the transaction is never computed outside it"
+      IO.defer {
+        val tx = s.txLink.get()
+        admitted(node, recordLoad, txLink = tx.exists(_._1 == node.nodeId)) { hold =>
+          IO.monotonic.flatMap { t0 =>
+            val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
+            val authorize               = router.adapter.authorizer(node, principal)
+            val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] =
+              tx match
+                case Some((id, l)) if id == node.nodeId =>
+                  IO { l.mintWith(authorize); Right((l, true)) }
+                case Some((id, _)) =>
+                  IO.pure(
+                    Left(
+                      LinkFailure.Permanent(
+                        s"the client transaction's node connection is on $id, not ${node.nodeId}: " +
+                          "a statement of the transaction is never computed outside it"
+                      )
                     )
                   )
-                )
-              case None =>
-                QuackNodeLink
-                  .open(transport, node, s.hello, cq, authorize)
-                  .map(_.map { case (l, _) => (l, false) })
-          openIO.flatMap {
-            case Left(fail)            => elapsed().map(ms => toOutcome[NodeRows](fail, ms))
-            case Right((link, reused)) =>
-              link.collect(wrappedSql, cq).flatMap {
-                case Left(fail) =>
-                  linkFailed[NodeRows](s, link, reused, fail, elapsed, clientCommit = false)
-                case Right(Left(nodeError)) =>
-                  dropLink(link, reused) *> elapsed()
-                    .map(ms => NodeOutcome.Permanent(nodeError, ms))
-                case Right(Right(messages)) =>
-                  dropLink(link, reused) *> IO.blocking(decoded(messages)).flatMap { rows =>
-                    elapsed().map { ms =>
-                      rows.fold(
-                        why => NodeOutcome.Permanent(why, ms),
-                        NodeOutcome.Ok(_, ms, () => ())
-                      )
+                case None =>
+                  QuackNodeLink
+                    .open(transport, node, s.hello, cq, authorize, hold)
+                    .map(_.map { case (l, _) => (l, false) })
+            openIO.flatMap {
+              case Left(fail)            => elapsed().map(ms => toOutcome[NodeRows](fail, ms))
+              case Right((link, reused)) =>
+                link.collect(wrappedSql, cq).flatMap {
+                  case Left(fail) =>
+                    linkFailed[NodeRows](s, link, reused, fail, elapsed, clientCommit = false)
+                  case Right(Left(nodeError)) =>
+                    dropLink(link, reused) *> elapsed()
+                      .map(ms => NodeOutcome.Permanent(nodeError, ms))
+                  case Right(Right(messages)) =>
+                    dropLink(link, reused) *> IO.blocking(decoded(messages)).flatMap { rows =>
+                      elapsed().map { ms =>
+                        rows.fold(
+                          why => NodeOutcome.Permanent(why, ms),
+                          NodeOutcome.Ok(_, ms, () => ())
+                        )
+                      }
                     }
-                  }
-              }
+                }
+            }
           }
         }
       }
@@ -662,9 +716,12 @@ final class QuackFrontDoor(
             finally qr.close()
           }.flatMap { case (cols, rows) =>
             val rendered = renderValues(cols, rows)
-            pickReadNode(s.bound.poolKey) match
-              case None       => IO.pure(encodeError("no routable node to render the result"))
-              case Some(node) =>
+            pickReadNode(s.bound.poolKey).map(n => (n, router.tracker.tryHold(n.nodeId))) match
+              case None => IO.pure(encodeError("no routable node to render the result"))
+              // Picked just before a drain began: nothing was sent, the client may retry.
+              case Some((node, None)) =>
+                IO.pure(encodeError(s"${QuackHttpAdapter.draining(node.nodeId)}; retry"))
+              case Some((node, Some(hold))) =>
                 QuackNodeLink
                   .open(
                     transport,
@@ -672,7 +729,8 @@ final class QuackFrontDoor(
                     s.hello,
                     cq,
                     router.adapter
-                      .authorizer(node, ai.starlake.quack.edge.authz.NodePrincipal.System)
+                      .authorizer(node, ai.starlake.quack.edge.authz.NodePrincipal.System),
+                    hold
                   )
                   .flatMap {
                     case Left(fail)       => IO.pure(encodeError(fail.message))

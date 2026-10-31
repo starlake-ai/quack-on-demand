@@ -22,7 +22,10 @@ import scala.concurrent.duration.*
 class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
   private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
 
-  private def fixture =
+  private def fixture: IO[(PoolSupervisor, NodeLoadTracker, String, Deferred[IO, String])] =
+    fixtureWith(PoolSupervisor.DefaultDrainTimeout)
+
+  private def fixtureWith(drainTimeout: FiniteDuration) =
     for
       stopped <- Deferred[IO, String]
       backend = new QuackBackend:
@@ -46,7 +49,7 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
         def cleanup(): IO[Unit]                       = IO.unit
       tracker    = new NodeLoadTracker
       store      = new InMemoryControlPlaneStore
-      supervisor = new PoolSupervisor(backend, tracker, store)
+      supervisor = new PoolSupervisor(backend, tracker, store, drainTimeout = drainTimeout)
       _ <- supervisor.createTenant(Tenant("acme"))
       _ <- supervisor.createTenantDb(
         "acme",
@@ -138,6 +141,16 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
     (for
       f <- fixture
       (sup, _, id, stopped) = f
+      _      <- sup.stopPool(key, force = false).timeout(3.seconds)
+      actual <- stopped.get
+      _      <- IO(actual shouldBe id)
+    yield ()).timeout(10.seconds).unsafeRunSync()
+
+  "A drain" should "stop the node once the drain timeout passes, whatever is still in flight" in:
+    (for
+      f <- fixtureWith(200.millis)
+      (sup, tracker, id, stopped) = f
+      _      <- IO(tracker.onStart(id))
       _      <- sup.stopPool(key, force = false).timeout(3.seconds)
       actual <- stopped.get
       _      <- IO(actual shouldBe id)

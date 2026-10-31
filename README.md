@@ -232,11 +232,16 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | Self-healing on restart | The registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience) | Nothing in DuckDB restarts a crashed engine for you |
 | Resume-on-query | A suspended pool wakes on the first statement with a bounded hold | Scale-to-zero without client-side retry logic |
 
-Non-force scale-down, stop, delete and suspension wait for the current manager's tracked node
-requests to finish. New tracked calls to a draining node are rejected before dispatch. The wait
-has no automatic timeout and can be cancelled; `force=true` skips it on scale, stop and delete.
-This is a local request drain, not coordination across manager replicas, open transactions or
-consumption of results after the adapter has returned a stream.
+Non-force scale-down, stop, delete and suspension wait for the current manager's work on the
+draining nodes to finish: FlightSQL statements in flight, and on the native front door the
+statements whose result the client is still fetching and the open client transactions. New
+statements to a draining node are refused before dispatch and go to another node; statements of
+an open native transaction still run on its node until COMMIT or ROLLBACK. The wait is bounded by
+`QOD_DRAIN_TIMEOUT_SEC` (default 60 s): past it the nodes are stopped anyway, and a native
+transaction left open on one is answered "the transaction's node left the pool" on its next
+statement. `force=true` skips the wait on scale, stop and delete. This is a local drain, not
+coordination across manager replicas, and a FlightSQL result stream is not waited for once the
+node has answered.
 
 ### Multi-tenancy and isolation
 

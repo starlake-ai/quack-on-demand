@@ -47,9 +47,9 @@ final class QuackHttpAdapter(
         case Some(p) => client.queryStamped(endpoint, node.token, authorize, p, sql)
         case None    => client.query(endpoint, node.token, sql, session, authorize)
     }
-    withLoad(node, recordLoad)(
+    withLoad(node, recordLoad, admitDraining = false)(
       call,
-      QuackResponse.Failed(QuackError.Transient(s"node ${node.nodeId} is draining"))
+      QuackResponse.Failed(QuackError.Transient(QuackHttpAdapter.draining(node.nodeId)))
     )(NodeOutcome.fromQuackResponse)
 
   /** The prelude producer for statements of `principal` on `node`: a fresh session handle each
@@ -70,34 +70,43 @@ final class QuackHttpAdapter(
     * the native Quack relay wraps its per-statement node connection in, so both transports feed the
     * per-node dashboard stats identically. `recordLoad=false` skips every side effect, as for
     * [[send]].
+    *
+    * A draining node refuses the call (Transient, nothing sent), unless `admitDraining`: the native
+    * front door sets it once it admitted the call itself, holding the node ([[NodeHold]]) or riding
+    * a client transaction the drain waits for.
     */
-  def tracked[A](node: RunningNode, recordLoad: Boolean)(
+  def tracked[A](node: RunningNode, recordLoad: Boolean, admitDraining: Boolean)(
       call: IO[NodeOutcome[A]]
   ): IO[NodeOutcome[A]] =
-    withLoad(node, recordLoad)(
+    withLoad(node, recordLoad, admitDraining)(
       call,
-      NodeOutcome.Transient(s"node ${node.nodeId} is draining", 0L)
+      NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L)
     )(identity)
 
   /** The in-flight bracket around one node call. `tryStart` and the release are the acquire and
     * release of a `bracketCase`, so a cancelled or raised call still gives its slot back: it is
-    * released without a latency sample, since there is no outcome to book.
+    * released without a latency sample, since there is no outcome to book. A call refused because
+    * the node is draining answers `onDraining` and touches nothing.
     */
-  private def withLoad[A](node: RunningNode, recordLoad: Boolean)(
+  private def withLoad[A](node: RunningNode, recordLoad: Boolean, admitDraining: Boolean)(
       call: IO[A],
       onDraining: A
   )(outcome: A => NodeOutcome[?]): IO[A] =
     if !recordLoad then call
     else
-      IO.delay(tracker.tryStart(node.nodeId))
-        .bracketCase { admitted =>
-          if admitted then call else IO.pure(onDraining)
-        } {
-          case (false, _)                    => IO.unit
-          case (true, Outcome.Succeeded(fa)) =>
-            fa.flatMap(a => IO.delay(bookkeep(node, outcome(a))))
-          case (true, _) => IO.delay(tracker.onAbort(node.nodeId))
-        }
+      IO.delay {
+        if admitDraining then
+          tracker.onStart(node.nodeId)
+          true
+        else tracker.tryStart(node.nodeId)
+      }.bracketCase { admitted =>
+        if admitted then call else IO.pure(onDraining)
+      } {
+        case (false, _)                    => IO.unit
+        case (true, Outcome.Succeeded(fa)) =>
+          fa.flatMap(a => IO.delay(bookkeep(node, outcome(a))))
+        case (true, _) => IO.delay(tracker.onAbort(node.nodeId))
+      }
 
   private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =
     tracker.onFinish(node.nodeId, out.latency)
@@ -197,3 +206,10 @@ final class QuackHttpAdapter(
         IO(logger.debug(s"authzStats ${node.nodeId}: read raised ${t.getClass.getSimpleName}"))
           .as(None)
       }
+
+object QuackHttpAdapter:
+
+  /** Why a call to a draining node was refused before anything was sent: Transient, so the router
+    * tries another node.
+    */
+  def draining(nodeId: String): String = s"node $nodeId is draining"

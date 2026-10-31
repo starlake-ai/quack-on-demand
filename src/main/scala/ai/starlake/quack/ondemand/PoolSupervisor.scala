@@ -158,7 +158,12 @@ final class PoolSupervisor(
     /** The user S3 credential cache Main shares with NodeKeys (handle digests) and the internal
       * credentials endpoint. None (tests) still keeps a real cache, over this supervisor's store.
       */
-    sharedUserS3: Option[ai.starlake.quack.edge.authz.UserS3CredentialCache] = None
+    sharedUserS3: Option[ai.starlake.quack.edge.authz.UserS3CredentialCache] = None,
+    /** The longest a non-force teardown (scale-down, stop, delete, suspend) waits for a draining
+      * node to go idle before it stops the node anyway (`QOD_DRAIN_TIMEOUT_SEC`). Zero or less
+      * stops at once.
+      */
+    drainTimeout: scala.concurrent.duration.FiniteDuration = PoolSupervisor.DefaultDrainTimeout
 ) extends LazyLogging:
 
   /** Each tenant's policy version (Liquibase 0050), refreshed after every local RBAC or ACL
@@ -3102,10 +3107,7 @@ final class PoolSupervisor(
               toRemove.foldLeft(IO.unit)((acc, n) =>
                 acc *> stopNodeBestEffort(key, n.nodeId, "scale-down")
               )
-            else
-              toRemove.foldLeft(IO.unit) { (acc, n) =>
-                acc *> drainAndStop(key, n)
-              }
+            else drainAndStop(key, toRemove)
           val deleteRemoved =
             // Drop both the store row and the tracker entry now the node is stopped. setDraining
             // (force=false above) created the entry; without this remove it lingers in snapshotAll
@@ -3276,10 +3278,7 @@ final class PoolSupervisor(
             state.nodes.foldLeft(IO.unit)((acc, n) =>
               acc *> stopNodeBestEffort(key, n.nodeId, "pool-delete")
             )
-          else
-            state.nodes.foldLeft(IO.unit) { (acc, n) =>
-              acc *> drainAndStop(key, n)
-            }
+          else drainAndStop(key, state.nodes)
         stopAll *>
           state.nodes.foldLeft(IO.unit)((acc, n) =>
             // Store row and tracker entry both go now the node is stopped, so a drained-then-deleted
@@ -3303,31 +3302,62 @@ final class PoolSupervisor(
             events.emit(ManagerEvent.PoolDeleted(key.tenant, key.tenantDb, key.pool))
           }
 
-  private def drainAndStop(key: PoolKey, n: RunningNode, reason: String = "drain"): IO[Unit] =
+  /** Drain `nodes`, then stop them: mark them all draining at once, so no new statement lands on
+    * one of them while another drains, wait until none has a statement in flight or a front-door
+    * connection held ([[ai.starlake.quack.route.NodeLoad.idle]]), then stop each. The wait is
+    * bounded by `drainTimeout`: past it the nodes are stopped anyway, with a warning naming what
+    * was still running, so a client that never finishes (an open transaction left idle, a result
+    * never fetched) cannot hold a teardown, and the pool lock it runs under, forever.
+    *
+    * The wait sees this replica's statements only: under HA, another replica's are not waited for.
+    * Cancelling the wait clears the draining flags, so the nodes stay routable. Once the wait ends
+    * the stops run uncancelable: no cancellation gap can leave a stopped node routable again.
+    */
+  private def drainAndStop(
+      key: PoolKey,
+      nodes: List[RunningNode],
+      reason: String = "drain"
+  ): IO[Unit] =
+    def busy: List[(String, ai.starlake.quack.route.NodeLoad)] =
+      nodes.map(n => n.nodeId -> tracker.snapshot(n.nodeId)).filterNot(_._2.idle)
     def awaitIdle: IO[Unit] = IO.defer {
-      if tracker.snapshot(n.nodeId).inFlight == 0 then IO.unit
-      else IO.sleep(25.millis) *> awaitIdle
+      if busy.isEmpty then IO.unit else IO.sleep(25.millis) *> awaitIdle
     }
-    // Install cancellation cleanup before exposing the draining flag. Once idle, finish the stop
-    // without a cancellation gap that could make a stopped node routable again.
-    IO.uncancelable { poll =>
-      IO.delay(tracker.setDraining(n.nodeId, true)) *>
-        poll(awaitIdle).onCancel(IO.delay(tracker.setDraining(n.nodeId, false))) *>
-        stopNodeBestEffort(key, n.nodeId, reason)
-    }
+    val bounded =
+      if drainTimeout <= scala.concurrent.duration.Duration.Zero then IO.unit
+      else
+        awaitIdle.timeoutTo(
+          drainTimeout,
+          IO.delay {
+            val left = busy
+              .map { case (id, l) => s"$id (in flight ${l.inFlight}, held ${l.held})" }
+              .mkString(", ")
+            if left.nonEmpty then
+              logger.warn(
+                s"drain of $key timed out after $drainTimeout; stopping anyway: $left"
+              )
+          }
+        )
+    if nodes.isEmpty then IO.unit
+    else
+      // Install cancellation cleanup before exposing the draining flags.
+      IO.uncancelable { poll =>
+        IO.delay(nodes.foreach(n => tracker.setDraining(n.nodeId, true))) *>
+          poll(bounded).onCancel(
+            IO.delay(nodes.foreach(n => tracker.setDraining(n.nodeId, false)))
+          ) *>
+          nodes.traverse_(n => stopNodeBestEffort(key, n.nodeId, reason))
+      }
 
-  /** Drain-stop then forget each node (mark draining, [[drainAndStop]] with reason "suspend", then
-    * delete the store row + tracker entry). Shared by [[suspendPool]] and reconcile's
-    * suspended-pool heal so the per-node sequence can't drift.
+  /** Drain-stop then forget `nodes` ([[drainAndStop]] with reason "suspend", then delete the store
+    * rows + tracker entries). Shared by [[suspendPool]] and reconcile's suspended-pool heal so the
+    * sequence can't drift.
     */
   private def drainAndForgetNodes(key: PoolKey, nodes: List[RunningNode]): IO[Unit] =
-    val drainIO = nodes.foldLeft(IO.unit) { (acc, n) =>
-      acc *> drainAndStop(key, n, reason = "suspend")
-    }
     val forgetIO = nodes.foldLeft(IO.unit) { (acc, n) =>
       acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
     }
-    drainIO *> forgetIO
+    drainAndStop(key, nodes, reason = "suspend") *> forgetIO
 
   /** Operator restart of a single node: stop it (in-flight statements fail to their clients),
     * respawn through reconcile's NodeSpec path, clear any quarantine so the fresh node is routable,
@@ -4553,6 +4583,10 @@ object PoolSupervisor:
     */
   val NodeStartupGrace: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(120).seconds
+
+  /** Default [[PoolSupervisor]] `drainTimeout`: `QOD_DRAIN_TIMEOUT_SEC`'s own default. */
+  val DefaultDrainTimeout: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(60).seconds
 
   /** Effective sets kept at most, one per (user, JWT roles, JWT groups). */
   val EffectiveCacheMaxEntries: Long = 10_000L

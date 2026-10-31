@@ -545,7 +545,12 @@ final case class ManagerConfig(
     spawnScriptWindows: String,
     @field @ConfigField(
       envVar = "QOD_DRAIN_TIMEOUT_SEC",
-      description = "Seconds to wait for in-flight statements during graceful pool shutdown."
+      description =
+        "Seconds to wait for in-flight statements before stopping nodes: on manager shutdown, " +
+          "and on each non-force pool teardown (scale-down, stop, delete, suspend), where it " +
+          "bounds the wait for FlightSQL statements and native front-door statements and open " +
+          "transactions on the draining nodes. Past it the nodes are stopped anyway. 0 or less " +
+          "stops a teardown's nodes at once."
     )
     drainTimeoutSec: Int,
     @field @ConfigField(

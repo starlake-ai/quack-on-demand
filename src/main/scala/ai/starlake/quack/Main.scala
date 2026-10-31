@@ -712,7 +712,8 @@ object Main extends IOApp with LazyLogging:
       events = supEvents,
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore),
       sharedPolicyVersions = Some(policyVersions),
-      sharedUserS3 = Some(userS3)
+      sharedUserS3 = Some(userS3),
+      drainTimeout = scala.concurrent.duration.DurationInt(mgrCfg.drainTimeoutSec).seconds
     )
     supRef.set(sup)
     usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
