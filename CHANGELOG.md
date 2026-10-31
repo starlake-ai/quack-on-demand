@@ -599,6 +599,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `QOD_NODE_ALLOW_*` / `QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS` on every pool.
 - Fleet: the heartbeat reply's `lockdownSql` is gone and the spawn scripts no longer read it (an
   older `qod fleet join` still works).
+- The startup banner's SQL ACL line is now constant (`ENFORCED on every node (QoD grants, or the
+  tenant's OPA in opa mode)`), the NODE LOCKDOWN line and the `node lockdown: enabled|disabled` boot
+  log line are gone, the configuration page and generated configuration docs lose the three
+  `quack-flightsql.acl.*` keys and the lockdown key, and `GET /api/audit/actions` no longer lists
+  `pool.setLockdown` (stored audit rows keep it).
 - Every node must restart: node protocol 5 and session handle v3; earlier node images, vendored
   binaries and fleet wheels do not work with this manager.
 - Upgrade the `qod` CLI with the manager: an older `qod serve` always exports `QOD_ACL_ENABLED`,
