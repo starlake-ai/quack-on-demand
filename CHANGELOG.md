@@ -770,6 +770,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
   bind; a batch that moves the schema or search path, quoted names holding a dot and two-part names
   headed by an attached catalog are admitted to principals without column or row policies, judged as
   DuckDB binds them.
+- Tenant users may read the change data of tables they may read: the data diff and branch change
+  counts (`ducklake_table_changes` / `_insertions` / `_deletions` naming the table by literals) are
+  judged as a read of that table; refused under column or row policies.
 - Module SPI: `ManagerContext.systemSql` (required) runs one statement on a pool as the manager's
   system caller, for a module's own provisioning statements, never SQL a user supplied; each is
   labelled `module:<name>` in statement history and audited as `module.sql`.
@@ -779,8 +782,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Security: branch change counts (`GET /api/branch/.../changes`, MCP `branch_changes`) ran as the
   manager's system caller, so anyone allowed to use a branch read insert, delete and update counts
   of tables they hold no grant on. They now run as the requester, as the "REST and MCP data
-  statements run as their caller" entry above says; a table whose count the node refuses them shows
-  zero counts, as a failed count always has. Propose still counts every table as the system caller.
+  statements run as their caller" entry above says. A table whose count the node refuses them, or
+  whose count fails, is no longer a fake 0: it carries `countsUnavailable: true` (its zeros are no
+  counts). Propose still counts every table as the system caller.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is
