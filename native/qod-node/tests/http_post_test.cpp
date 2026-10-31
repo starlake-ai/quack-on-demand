@@ -173,9 +173,10 @@ int main() {
 	Expect(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(900),
 	       "within the deadline, not the server's delay");
 	answer.delay_ms = 0;
-	Expect(PostFailure("http://127.0.0.1:" + std::to_string(qod_test::UnusedPort()), 2000)
-	               .find("cannot connect") != std::string::npos,
-	       "nothing listening");
+	// 10 s: on Windows a refused connect is retried for about 2 s before it fails, so a 2 s deadline
+	// ran out first and the call failed "timed out connecting" instead.
+	auto unanswered = PostFailure("http://127.0.0.1:" + std::to_string(qod_test::UnusedPort()), 10000);
+	Expect(unanswered.find("cannot connect") != std::string::npos, "nothing listening: " + unanswered);
 	try {
 		qod::HttpPost(qod::ParseHttpUrl(server.Url()), "/x", {{"X-QoD-Node", "n\r\nX-Injected: 1"}}, "{}", 2000);
 		Expect(false, "a header holding a line break is refused");
