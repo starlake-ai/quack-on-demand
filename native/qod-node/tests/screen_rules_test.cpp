@@ -378,6 +378,55 @@ int main() {
 	Refused("SELECT * FROM query_table('t', getvariable('b'))", "query_table() needs literal table names",
 	        "a computed by_name flag");
 
+	// ---- DuckLake's change feed: admitted when the table is named by literals (its bind scans that table,
+	// which the plan then describes as a read of it), refused for anything computed or shaped otherwise
+	for (auto feed : {"SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, 3)",
+	                  "SELECT change_type, count(*) AS n FROM ducklake_table_changes('lake', 'main', 't', 2, 3) "
+	                  "GROUP BY change_type",
+	                  "SELECT * FROM ducklake_table_insertions('lake', 'main', 't', 1, 3)",
+	                  "FROM ducklake_table_deletions('lake', 'main', 't', 1, 3)",
+	                  "SELECT * FROM system.main.ducklake_table_changes('lake', 'main', 't', 1, 3)",
+	                  "SELECT * FROM \"DuckLake_Table_Changes\"('lake', 'main', 't', 1, 3)",
+	                  "SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, 1 + 2)",
+	                  "SELECT * FROM ducklake_table_changes('lake', 'main', 't', TIMESTAMPTZ '2026-01-01', now())",
+	                  "SELECT rowid FROM ducklake_table_changes('lake', 'main', 't', 1, 3) "
+	                  "WHERE change_type IN ('delete', 'update_preimage')",
+	                  "PREPARE p AS SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, 3)",
+	                  "WITH c AS (SELECT * FROM ducklake_table_insertions('lake', 'main', 't', 1, 3)) SELECT * FROM c"}) {
+		Admitted(feed, 0, feed);
+	}
+	for (auto computed : {"SELECT * FROM ducklake_table_changes('la' || 'ke', 'main', 't', 1, 3)",
+	                      "SELECT * FROM ducklake_table_changes('lake', lower('MAIN'), 't', 1, 3)",
+	                      "SELECT * FROM ducklake_table_changes('lake', 'main', getvariable('t'), 1, 3)",
+	                      "SELECT * FROM ducklake_table_changes('lake', 'main', 't'::VARCHAR, 1, 3)",
+	                      "SELECT * FROM ducklake_table_changes('lake', 'main', NULL, 1, 3)",
+	                      "SELECT * FROM ducklake_table_insertions(current_database(), 'main', 't', 1, 3)",
+	                      "PREPARE p AS SELECT * FROM ducklake_table_deletions('lake', 'main', ?, 1, 3)",
+	                      "SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1)",
+	                      "SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, 3, 4)",
+	                      "SELECT * FROM ducklake_table_changes(catalog := 'lake', 'main', 't', 1, 3)"}) {
+		Refused(computed, "needs its catalog, schema and table as literals", computed);
+	}
+	Refused("SELECT * FROM ducklake_table_changes('lake', 'main', 't', nextval('s'), 3)",
+	        "nextval is not allowed in a table function's arguments", "a sequence call in a snapshot bound");
+	// Nothing for the screen to judge: DuckDB 2.0 keeps a table function's subquery argument in the plan,
+	// where its reads are described (range), or refuses it at bind, as it does the change feed's
+	// ("Table function cannot contain subqueries", describer_extension_test).
+	Admitted("SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, (SELECT max(id) FROM t))", 0,
+	         "a snapshot bound read from a table");
+	// Anything that is not DuckDB's own name for the three: a catalog's (DuckLake resolves its per-schema
+	// table_changes macros in every schema of a lake), or a qualification outside system.main.
+	Refused("SELECT * FROM lake.main.ducklake_table_changes('lake', 'main', 't', 1, 3)",
+	        "is not DuckDB's own", "the change feed qualified with a user catalog");
+	Refused("SELECT * FROM lake.table_changes('t', 1, 3)", "table function table_changes is not available",
+	        "DuckLake's per-schema table_changes macro");
+	Refused("SELECT * FROM table_insertions('t', 1, 3)", "table function table_insertions is not available",
+	        "DuckLake's per-schema table_insertions macro, bare");
+	Refused("SELECT ducklake_table_insertions('lake', 'main', 't', 1, 3)", "is a table function",
+	        "the change feed called as a scalar");
+	Refused("SELECT * FROM ducklake_table_info('lake')", "table function ducklake_table_info is not available",
+	        "the rest of DuckLake's family stays superuser-only");
+
 	// ---- wrappers and multi-statement requests
 	Refused("EXPLAIN SELECT * FROM read_csv('x.csv')", "QoD: x.csv ", "EXPLAIN");
 	Admitted("PREPARE p AS SELECT * FROM read_csv('s3://acme-etl/x.csv')", 1, "PREPARE");

@@ -131,6 +131,102 @@ int main() {
 	}
 	Expect("DuckLake flush", flush, "\"catalog\":\"lake\",\"catalogType\":\"ducklake\"");
 	Expect("DuckLake flush", flush, "\"kind\":\"table\",\"name\":\"t\"");
+	// ---- DuckLake's change feed, for a tenant user: the bind swaps in the named table's own scan, so the
+	// client's plan is a read of exactly that table (the catalog and table it bound, at its end snapshot),
+	// with no function and no __ducklake_metadata_ object: DuckLake's metadata reads bind on its own
+	// ClientContexts. The manager decides it on that table's grant.
+	try {
+		qod::RunStrict(con, "CREATE TABLE lake.u (id INTEGER, secret VARCHAR)", "create u");
+		qod::RunStrict(con, "INSERT INTO lake.u VALUES (7, 'x')", "insert u");
+		qod::RunStrict(con, "UPDATE lake.t SET v = 'c' WHERE id = 2", "update t");
+		qod::RunStrict(con,
+		               "ATTACH 'ducklake:" + dir + "/other.ducklake' AS other_lake (DATA_PATH '" + dir +
+		                   "/other_data/')",
+		               "attach other");
+		qod::RunStrict(con, "CREATE TABLE other_lake.t (id INTEGER, w VARCHAR)", "create other t");
+	} catch (std::exception &error) {
+		Fail(std::string("DuckLake change feed setup: ") + error.what());
+	}
+	auto snapshots = con.Query("SELECT max(snapshot_id) FROM ducklake_snapshots('lake')");
+	auto last = snapshots->HasError() ? nullptr : snapshots->Fetch();
+	auto head = last && last->size() > 0 ? last->GetValue(0, 0).ToString() : "0";
+	// The descriptions a statement bound on the client's own context, and whether any reads the metadata.
+	auto feed = [&](const std::string &sql, std::string &error) {
+		capture.principal = qod_test::Alice();
+		auto from = capture.all.size();
+		capture.on = true;
+		auto result = con.Query(sql);
+		capture.on = false;
+		capture.principal = qod_test::Root();
+		error = result->HasError() ? result->GetError() : "";
+		std::vector<std::string> own;
+		for (auto i = from; i < capture.all.size(); i++) {
+			if (capture.contexts[i] == con.context.get()) {
+				own.push_back(capture.all[i]);
+			}
+		}
+		return own;
+	};
+	auto expect_one = [&](const std::string &what, const std::string &sql, const std::string &golden) {
+		std::string error;
+		auto own = feed(sql, error);
+		if (!error.empty() || own.size() != 1 || own[0] != golden) {
+			std::string got = error;
+			for (auto &d : own) {
+				got += "\n  " + d;
+			}
+			Fail(what + ":\n  expected " + golden + "\n  got      " + got);
+		}
+	};
+	const std::string t_read = "{\"access\":\"read\",\"catalog\":\"lake\",\"catalogType\":\"ducklake\","
+	                           "\"columns\":[\"id\",\"v\"],\"kind\":\"table\",\"name\":\"t\","
+	                           "\"schema\":\"main\",\"via\":null}";
+	const std::string t_rowids = "{\"access\":\"read\",\"catalog\":\"lake\",\"catalogType\":\"ducklake\","
+	                             "\"columns\":[],\"kind\":\"table\",\"name\":\"t\",\"schema\":\"main\","
+	                             "\"via\":null}";
+	expect_one("the change feed of lake.main.t",
+	           "SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, " + head + ")",
+	           "{\"control\":[],\"functions\":[],\"objects\":[" + t_read + "," + t_rowids +
+	               "],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}");
+	// DataDiffSql.summarySql's shape
+	expect_one("the data diff summary of lake.main.t",
+	           "SELECT change_type, count(*) AS n FROM ducklake_table_changes('lake', 'main', 't', 2, " + head +
+	               ") GROUP BY change_type",
+	           "{\"control\":[],\"functions\":[{\"args\":[],\"catalog\":\"system\",\"name\":\"count_star\","
+	           "\"schema\":\"main\",\"type\":\"aggregate\",\"via\":null}],\"objects\":[" +
+	               t_read + "," + t_rowids + "],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}");
+	expect_one("the insertions of lake.main.t",
+	           "SELECT * FROM ducklake_table_insertions('lake', 'main', 't', 1, " + head + ")",
+	           "{\"control\":[],\"functions\":[],\"objects\":[" + t_read +
+	               "],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}");
+	// The read is the table the literals name, never another: u's feed is a read of u (whose grant the
+	// manager checks), and another lake's t is that lake's.
+	expect_one("the change feed of lake.main.u",
+	           "SELECT * FROM ducklake_table_deletions('lake', 'main', 'u', 1, " + head + ")",
+	           "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":\"lake\","
+	           "\"catalogType\":\"ducklake\",\"columns\":[\"id\",\"secret\"],\"kind\":\"table\","
+	           "\"name\":\"u\",\"schema\":\"main\",\"via\":null}],\"settings\":[],"
+	           "\"statement\":\"PROJECTION\",\"v\":1}");
+	expect_one("the change feed of other_lake.main.t",
+	           "SELECT * FROM ducklake_table_insertions('other_lake', 'main', 't', 1, 1)",
+	           "{\"control\":[],\"functions\":[],\"objects\":[{\"access\":\"read\",\"catalog\":"
+	           "\"other_lake\",\"catalogType\":\"ducklake\",\"columns\":[\"id\",\"w\"],\"kind\":\"table\","
+	           "\"name\":\"t\",\"schema\":\"main\",\"via\":null}],\"settings\":[],"
+	           "\"statement\":\"PROJECTION\",\"v\":1}");
+	// Nothing reaches the metadata catalog through the feed: it is no DuckLake catalog, and a snapshot
+	// bound cannot be a subquery.
+	for (auto *refused : {"SELECT * FROM ducklake_table_changes('__ducklake_metadata_lake', 'main', "
+	                      "'ducklake_snapshot', 1, 2)",
+	                      "SELECT * FROM ducklake_table_insertions('lake', 'main', 't', 1, "
+	                      "(SELECT max(snapshot_id) FROM __ducklake_metadata_lake.main.ducklake_snapshot))"}) {
+		std::string error;
+		auto own = feed(refused, error);
+		if (error.find("Binder Error") == std::string::npos || !own.empty()) {
+			Fail(std::string("a change feed that would reach the metadata catalog binds: ") + refused + " -> " +
+			     error + (own.empty() ? "" : " " + own[0]));
+		}
+	}
+	con.Query("DETACH other_lake");
 	con.Query("DETACH lake");
 	fs::remove_all(scratch);
 

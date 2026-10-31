@@ -455,10 +455,10 @@ ducklake_set_commit_message	main	table	allowed
 ducklake_set_option	main	table	superuser
 ducklake_settings	main	table	superuser
 ducklake_snapshots	main	table	superuser
-ducklake_table_changes	main	table_macro	superuser
-ducklake_table_deletions	main	table	superuser
+ducklake_table_changes	main	table_macro	allowed
+ducklake_table_deletions	main	table	allowed
 ducklake_table_info	main	table	superuser
-ducklake_table_insertions	main	table	superuser
+ducklake_table_insertions	main	table	allowed
 editdist3	main	scalar	allowed
 element_at	main	scalar	allowed
 enable_checkpoint_on_shutdown	main	pragma	superuser

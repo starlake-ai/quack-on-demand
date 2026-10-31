@@ -225,9 +225,23 @@ bool IsReservedSetting(const std::string &name) {
 	       Contains(kReservedSettings, name);
 }
 
+//! DuckLake's change feed (ducklake_table_insertions.cpp, ducklake_table_changes.cpp of the DuckLake built
+//! for the 2.0 pin): five positional arguments, catalog, schema_name, table_name, start_snapshot and
+//! end_snapshot. The two table functions' bind looks the table up in the named DuckLake catalog at the end
+//! snapshot and swaps in that table's own scan, so the bound plan holds a read of that table, which the
+//! describer names and the manager decides on the table's grant like any read of it (the metadata
+//! catalog reads DuckLake runs for it bind on DuckLake's own connections, never in this plan). The table
+//! macro over the two expands at bind into those two calls on the same arguments.
+const char *const kChangeFeedCalls[] = {"ducklake_table_changes", "ducklake_table_deletions",
+                                        "ducklake_table_insertions"};
+
+bool IsChangeFeedCall(const std::string &name) {
+	return Contains(kChangeFeedCalls, name);
+}
+
 //! The calls the screen judges by their arguments.
 bool IsJudgedCall(const std::string &name) {
-	return name == "query" || name == "query_table" || Contains(kFileFunctions, name);
+	return name == "query" || name == "query_table" || Contains(kFileFunctions, name) || IsChangeFeedCall(name);
 }
 
 std::string TokenText(const std::string &sql, const vector<SimplifiedToken> &tokens, idx_t i) {
@@ -1136,7 +1150,9 @@ private:
 		}
 		judged_.back()[name]++;
 		auto positional = Positional(call);
-		if (name == "query") {
+		if (IsChangeFeedCall(name)) {
+			ChangeFeed(call, name, positional, table_position);
+		} else if (name == "query") {
 			if (positional.size() != 1 || !IsStringLiteral(*positional[0])) {
 				Refuse("query() needs a literal SQL string");
 			}
@@ -1181,6 +1197,32 @@ private:
 			} else {
 				Refuse(name + " needs a literal file name");
 			}
+		}
+	}
+
+	//! A change feed call (kChangeFeedCalls) in table position, DuckDB's own (unqualified or system.main: a
+	//! user catalog's macro of that name is no feed, and DuckLake's per-schema table_changes macros are not
+	//! admitted), with exactly its five arguments, positional, and the catalog, schema and table as string
+	//! literals: the table it reads is the one its text names, never a computed one. The snapshot bounds are
+	//! the table function's arguments, a bind-time slot (TableFunction walks them).
+	static void ChangeFeed(const FunctionExpression &call, const std::string &name,
+	                       const std::vector<const ParsedExpression *> &positional, bool table_position) {
+		if (!table_position) {
+			Refuse(name + " is a table function");
+		}
+		auto &qualified = call.GetQualifiedName();
+		auto catalog = StringUtil::Lower(qualified.Catalog().GetIdentifierName());
+		auto schema = StringUtil::Lower(qualified.Schema().GetIdentifierName());
+		if (!(catalog.empty() || catalog == "system") || !(schema.empty() || schema == "main")) {
+			Refuse(name + " qualified with " + (catalog.empty() ? "" : catalog + ".") + schema +
+			       " is not DuckDB's own change feed");
+		}
+		auto literal = call.GetArguments().size() == 5 && positional.size() == 5;
+		for (idx_t i = 0; literal && i < 3; i++) {
+			literal = IsStringLiteral(*positional[i]);
+		}
+		if (!literal) {
+			Refuse(name + " needs its catalog, schema and table as literals, and its two snapshot bounds");
 		}
 	}
 

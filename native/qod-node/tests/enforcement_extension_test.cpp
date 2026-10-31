@@ -137,6 +137,29 @@ int main() {
 	expect("uma reads through the secure view after the prelude",
 	       Run(uma, "USE lake.main; SELECT count(*) FROM memory.main.sv"), "2");
 
+	// DuckLake's change feed with the table named by literals: decided as a read of that table (the data
+	// diff summary's shape), never of DuckLake's metadata. (The parse screen, which refuses a computed name,
+	// runs as quack's authorization callback, which this harness does not drive: screen_rules_test.)
+	expect("tina updates", as_tina("UPDATE t SET v = 'c' WHERE id = 2"), "1");
+	auto before = decided.size();
+	auto head = Run(internal, "SELECT max(snapshot_id) FROM ducklake_snapshots('lake')");
+	expect("tina counts t's changes",
+	       as_tina("SELECT string_agg(change_type || ':' || n, ',' ORDER BY change_type) FROM (SELECT change_type, "
+	               "count(*) AS n FROM ducklake_table_changes('lake', 'main', 't', 2, " + head +
+	               ") GROUP BY change_type)"),
+	       "insert:2,update_postimage:1,update_preimage:1");
+	expect("tina reads t's insertions",
+	       as_tina("SELECT count(*) FROM ducklake_table_insertions('lake', 'main', 't', 2, " + head + ")"), "3");
+	auto feed_read = false;
+	for (auto i = before; i < decided.size(); i++) {
+		feed_read = feed_read || decided[i].find("\"catalog\":\"lake\",\"catalogType\":\"ducklake\","
+		                                         "\"columns\":[\"id\",\"v\"],\"kind\":\"table\","
+		                                         "\"name\":\"t\"") != std::string::npos;
+	}
+	if (!feed_read) {
+		Fail("tina's change feed was not decided as a read of lake.main.t");
+	}
+
 	size_t on_metadata = 0;
 	bool flush_decided = false;
 	for (auto &description : decided) {
