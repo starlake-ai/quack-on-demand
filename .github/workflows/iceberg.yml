@@ -121,7 +121,9 @@ jobs:
       SL_TEST_PG_PORT: "5432"
       SL_TEST_PG_USER: postgres
       SL_TEST_PG_PASSWORD: azizam
-      SBT_OPTS: -Xmx4G
+      # -Xss8M as in release.yml and snapshot.yml: Main.scala overflows the compiler's default
+      # stack in the splicing phase.
+      SBT_OPTS: "-Xss8M -Xmx4G"
       # Kept in one place so the run step and the verify step cannot drift apart.
       SPECS: >-
         ai.starlake.quack.ondemand.federation.IcebergRestE2ESpec
