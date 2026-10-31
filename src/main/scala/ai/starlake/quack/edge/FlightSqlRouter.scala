@@ -96,7 +96,12 @@ final class FlightSqlRouter(
       * `metadataFilterRewriter` / `protectedWriteGuard`: `Main` passes the leading arguments
       * positionally.
       */
-    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
+    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None,
+    /** The wake hold's readiness check (see `resolveSnapshot`). None, the default, is the real one,
+      * [[QuackHttpAdapter.answers]]; only a spec whose nodes answer through a scripted transport
+      * rather than the adapter's client replaces it.
+      */
+    val nodeAnswers: Option[ai.starlake.quack.model.RunningNode => IO[Boolean]] = None
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -1544,6 +1549,9 @@ final class FlightSqlRouter(
     * poll either sees a node or times out. With `wake` false (the OPA dry run) a suspended pool is
     * answered [[FlightSqlRouter.PoolNotWoken]] instead.
     */
+  private def answers(n: ai.starlake.quack.model.RunningNode): IO[Boolean] =
+    nodeAnswers.fold(adapter.answers(n))(_(n))
+
   private def resolveSnapshot(
       poolKey: PoolKey,
       wake: Boolean
@@ -1560,7 +1568,7 @@ final class FlightSqlRouter(
           snap.nodes
             .filter(n => snap.loadOf(n.nodeId).routable)
             .foldLeft(IO.pure(false))((acc, n) =>
-              acc.flatMap(ok => if ok then IO.pure(true) else adapter.answers(n))
+              acc.flatMap(ok => if ok then IO.pure(true) else answers(n))
             )
         def poll(deadline: FiniteDuration): IO[Either[RouterFailure, PoolSnapshot]] =
           IO.defer {

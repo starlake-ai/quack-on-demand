@@ -323,7 +323,10 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
       refsConfigFor = _ =>
         beforePick(tracker)
-        ai.starlake.acl.model.Config.forDuckDB(None, None)
+        ai.starlake.acl.model.Config.forDuckDB(None, None),
+      // The nodes answer through the scripted transport, never the adapter's client, so the wake
+      // hold's readiness probe would never see them answer: a respawned node is ready at once.
+      nodeAnswers = Some(_ => IO.pure(true))
     )
     val user      = RbacUser("u-1", if superuser then None else Some("t-1"), "alice", kind = "user")
     val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)

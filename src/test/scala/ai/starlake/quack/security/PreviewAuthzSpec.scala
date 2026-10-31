@@ -28,7 +28,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
 
   // Tenant-A's own DuckLake tenant-db + pool, seeded directly on the store (bypassing
   // PoolSupervisor.createTenantDb / createPool, which would provision a real Postgres
-  // database): a data preview needs a DuckLake kind to clear the handler's invalid_kind gate,
+  // database): a DuckLake kind exercises the snapshot-selector path of a data preview,
   // and a registered pool (even with zero live nodes -- PoolSupervisor.restore() still
   // materializes a PoolState from the row) to clear the no_pool gate and reach the injected
   // executor stub.
@@ -38,7 +38,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
   private val DuckLakePoolName   = "dlbi"
 
   /** DuckLake tenant-db + pool under tenant A (acme), so preview calls against it clear the gate
-    * (invalid_kind, no_pool) and reach the injected [[CatalogPreviewHandlers.PreviewExecutor]]
+    * (no_pool) and reach the injected [[CatalogPreviewHandlers.PreviewExecutor]]
     * stub. Nodes are intentionally NOT seeded: `firstPoolKey`'s ReadOnly/Dual preference degrades
     * to "first candidate by name" when no node exists in the snapshot, so an authz-only spec (which
     * never cares about routing) doesn't need a fake [[ai.starlake.quack.model.RunningNode]] too.
@@ -150,11 +150,12 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
         h.baseUrl + previewUrl(GlobexTenantId, GlobexTenantDb, "main", "region"),
         apiKey = Some(token)
       )
-      // globex_main is an InMemory tenant-db, so a superuser who passes the scope gate hits
-      // the handler's invalid_kind (400) arm -- proves the handler was reached: NOT 401/403.
+      // globex_main is an InMemory tenant-db with no pool, so a superuser who passes the scope
+      // gate hits the handler's no_pool (404) arm, past the tenant-db lookup -- proves the
+      // handler was reached: NOT 401/403, and not the gate's not_found.
       withClue(s"superuser -> tenant-B /preview body: ${resp.body()}") {
-        resp.statusCode() shouldBe 400
-        errorCode(resp.body()) shouldBe Some("invalid_kind")
+        resp.statusCode() shouldBe 404
+        errorCode(resp.body()) shouldBe Some("no_pool")
       }
     finally h.shutdown()
   }
