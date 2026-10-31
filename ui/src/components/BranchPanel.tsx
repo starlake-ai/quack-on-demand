@@ -17,13 +17,13 @@ const chipBtn: CSSProperties = {
 
 function statusChip(status: string) {
   const palette: Record<string, { bg: string; fg: string }> = {
-    open:      { bg: 'rgba(59, 130, 246, 0.15)', fg: '#1d4ed8' },
-    proposed:  { bg: 'rgba(251, 191, 36, 0.15)', fg: '#a16207' },
-    merged:    { bg: 'rgba(34, 197, 94, 0.15)',  fg: '#15803d' },
-    discarded: { bg: 'rgba(107, 114, 128, 0.15)',fg: '#4b5563' },
-    expired:   { bg: 'rgba(107, 114, 128, 0.15)',fg: '#4b5563' },
-    failed:    { bg: 'rgba(239, 68, 68, 0.15)',  fg: '#b91c1c' },
-    abandoned: { bg: 'rgba(107, 114, 128, 0.15)',fg: '#4b5563' },
+    open:      { bg: 'rgba(59, 130, 246, 0.15)', fg: 'var(--link)' },
+    proposed:  { bg: 'rgba(251, 191, 36, 0.15)', fg: 'var(--warn)' },
+    merged:    { bg: 'rgba(34, 197, 94, 0.15)',  fg: 'var(--good)' },
+    discarded: { bg: 'rgba(107, 114, 128, 0.15)',fg: 'var(--text-mute)' },
+    expired:   { bg: 'rgba(107, 114, 128, 0.15)',fg: 'var(--text-mute)' },
+    failed:    { bg: 'rgba(239, 68, 68, 0.15)',  fg: 'var(--bad)' },
+    abandoned: { bg: 'rgba(107, 114, 128, 0.15)',fg: 'var(--text-mute)' },
   };
   const c = palette[status] ?? palette.discarded;
   return (
@@ -141,7 +141,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
                 if (e.changeType === 'update') {
                   return (
                     <Fragment key={i}>
-                      <tr style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                      <tr style={{ borderTop: '1px solid var(--border)', background: 'rgba(251, 191, 36, 0.1)' }}>
                         <td rowSpan={2}>update</td>
                         <td rowSpan={2} align="right">{e.snapshotId}</td>
                         {(e.before ?? []).map((v, j) => cell(v, j, { opacity: 0.6, textDecoration: 'line-through' }))}
@@ -156,7 +156,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
                   ? 'rgba(34, 197, 94, 0.1)'
                   : e.changeType === 'delete' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(148, 163, 184, 0.1)';
                 return (
-                  <tr key={i} style={{ borderTop: '1px solid #eee', background: bg }}>
+                  <tr key={i} style={{ borderTop: '1px solid var(--border)', background: bg }}>
                     <td>{e.changeType}</td>
                     <td align="right">{e.snapshotId}</td>
                     {(e.row ?? []).map((v, j) => cell(v, j))}
@@ -220,7 +220,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
               branch head {changes.headSnapshot}, main at {changes.mainSnapshot}
             </span>
             {changes.mergeable
-              ? <span style={{ color: '#15803d', fontWeight: 600 }}>fast-forward possible</span>
+              ? <span style={{ color: 'var(--good)', fontWeight: 600 }}>fast-forward possible</span>
               : <span style={{ color: '#b91c1c', fontWeight: 600 }}>not mergeable as is</span>}
           </div>
           {changes.tables.length === 0
@@ -240,7 +240,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                 </thead>
                 <tbody>
                   {changes.tables.map(t => (
-                    <tr key={`${t.schema}.${t.table}`} style={{ borderTop: '1px solid #eee' }}>
+                    <tr key={`${t.schema}.${t.table}`} style={{ borderTop: '1px solid var(--border)' }}>
                       <td><code>{t.schema}.{t.table}</code></td>
                       <td>{kindChip(t)}</td>
                       {(['inserted', 'deleted', 'updated'] as const).map(f => {
@@ -296,7 +296,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
             </thead>
             <tbody>
               {detail.merges.map(m => (
-                <tr key={m.id} style={{ borderTop: '1px solid #eee' }}>
+                <tr key={m.id} style={{ borderTop: '1px solid var(--border)' }}>
                   <td>{statusChip(m.status)}{m.error && <span className="subtle" title={m.error}> (error)</span>}</td>
                   <td><code>{m.proposer}</code></td>
                   <td>{m.approver ? <code>{m.approver}</code> : '-'}</td>
@@ -328,8 +328,18 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
   const [diffTarget, setDiffTarget] = useState<{ branch: string; schema: string; table: string } | null>(null);
   const [fName, setFName] = useState('');
   const [fTtl, setFTtl] = useState('');
+  // The create form opens on demand below the list; `creating` is its request in flight.
+  const [formOpen, setFormOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+
+  function openForm() {
+    setFName('');
+    setFTtl('');
+    setCreateError(null);
+    setNote(null);
+    setFormOpen(true);
+  }
 
   function reload() {
     setError(null);
@@ -351,6 +361,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         setNote(`branch '${b.name}' created at snapshot ${b.forkSnapshot} (pool ${b.pool})`);
         setFName('');
         setFTtl('');
+        setFormOpen(false);
         reload();
       })
       .catch(e => setCreateError(errText(e)))
@@ -393,25 +404,18 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
 
   return (
     <div>
-      <form onSubmit={create} className="row" style={{ gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <span className="subtle">New branch name</span>
-          <input value={fName} onChange={ev => setFName(ev.target.value)} placeholder="feature-x" pattern="[a-z][a-z0-9_-]{0,47}" required />
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <span className="subtle">TTL hours (blank = default, 0 = never)</span>
-          <input value={fTtl} onChange={ev => setFTtl(ev.target.value)} type="number" min={0} style={{ width: 120 }} />
-        </label>
-        <button type="submit" disabled={creating || fName.trim() === ''}>{creating ? 'Creating...' : 'Create branch'}</button>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-          <input type="checkbox" checked={showAll} onChange={ev => setShowAll(ev.target.checked)} />
-          <span className="subtle">include merged / discarded / expired</span>
-        </label>
-        <button type="button" className="copy-btn" onClick={reload}>refresh</button>
-      </form>
-      {createError && <div className="login-err">Create failed: {createError}</div>}
+      <div className="cred-head branch-head">
+        <div className="branch-list-controls">
+          <label className="checkbox-label">
+            <input type="checkbox" checked={showAll} onChange={ev => setShowAll(ev.target.checked)} />
+            {' '}<span className="subtle">Include merged, discarded and expired</span>
+          </label>
+          <button type="button" className="link-button" onClick={reload}>Refresh</button>
+        </div>
+        {!formOpen && <button type="button" onClick={openForm}>Create branch</button>}
+      </div>
       {error && <div className="login-err">Error: {error}</div>}
-      {note && <p className="subtle" style={{ color: '#15803d' }}>{note}</p>}
+      {note && <div className="login-notice" role="status">{note}</div>}
 
       {!rows && <p className="subtle">Loading branches...</p>}
       {rows && rows.length === 0 && (
@@ -438,7 +442,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
               const isOpen = expanded === b.name;
               return (
                 <Fragment key={b.id}>
-                  <tr style={{ borderTop: '1px solid #eee' }}>
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
                     <td>
                       <button type="button" style={chipBtn} onClick={() => setExpanded(isOpen ? null : b.name)}>
                         {isOpen ? '▾' : '▸'} <code>{b.name}</code>
@@ -478,6 +482,28 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
             })}
           </tbody>
         </table>
+      )}
+      {formOpen && (
+        <form onSubmit={create} className="cred-form">
+          <div className="cred-form-title">New branch</div>
+          <div className="cred-grid">
+            <label>
+              Name
+              <input value={fName} onChange={ev => setFName(ev.target.value)} placeholder="feature-x"
+                pattern="[a-z][a-z0-9_-]{0,47}" title="Lowercase letter first, then letters, digits, _ or -" required autoFocus />
+            </label>
+            <label>
+              Time to live, hours (optional)
+              <input value={fTtl} onChange={ev => setFTtl(ev.target.value)} type="number" min={0}
+                placeholder="blank = default, 0 = never" />
+            </label>
+          </div>
+          {createError && <div className="login-err" style={{ marginTop: '.75rem' }}>{createError}</div>}
+          <div className="cred-form-actions">
+            <button type="submit" disabled={creating || fName.trim() === ''}>{creating ? 'Creating...' : 'Create branch'}</button>
+            <button type="button" className="secondary" onClick={() => setFormOpen(false)} disabled={creating}>Cancel</button>
+          </div>
+        </form>
       )}
       {diffTarget && (
         <BranchDiffModal

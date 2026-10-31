@@ -920,3 +920,7 @@ tbody tr.cred-inactive td { opacity: .6; }
 @media (max-width: 760px) {
   .cred-grid { grid-template-columns: 1fr; }
 }
+/* Branches panel: list controls on the left of the header, the create action on the right. */
+.branch-head { margin-bottom: .75rem; flex-wrap: wrap; }
+.branch-list-controls { display: flex; align-items: center; gap: 1rem; }
+.branch-list-controls .checkbox-label { margin: 0; }
