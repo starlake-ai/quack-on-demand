@@ -63,7 +63,10 @@ final class QuackNodeLink(
     val url: URI,
     val nodeConnectionId: String,
     authorize: () => String,
-    hold: NodeHold
+    hold: NodeHold,
+    /** The node process the link was opened on ([[RunningNode.sameProcessAs]]). */
+    val node: RunningNode,
+    stillServes: () => Boolean
 ) extends LazyLogging:
 
   private val minter = new java.util.concurrent.atomic.AtomicReference(authorize)
@@ -79,6 +82,13 @@ final class QuackNodeLink(
     * out are [[forward]] (which refuses a PREPARE), [[prepare]] and [[runDiscard]].
     */
   private def relay(bytes: Array[Byte]): IO[Either[LinkFailure, Array[Byte]]] =
+    // Never a byte to a process that replaced the link's under the same node id (`stillServes`):
+    // the connection id is the old process's, and the new one may have handed it to another
+    // client.
+    if !stillServes() then IO.pure(Left(LinkFailure.Permanent(QuackNodeLink.ProcessReplaced)))
+    else relayNow(bytes)
+
+  private def relayNow(bytes: Array[Byte]): IO[Either[LinkFailure, Array[Byte]]] =
     transport.post(url, bytes).attempt.map {
       case Right(resp)                       => Right(resp)
       case Left(e: QuackWireError.Transient) => Left(LinkFailure.Transient(e.msg))
@@ -275,17 +285,22 @@ final class QuackNodeLink(
   private def errorText(resp: Array[Byte]): String =
     QuackWire.decodeErrorText(resp).getOrElse("node error")
 
-  /** Best-effort DISCONNECT; a half-dead node must not fail the caller. Releases the link's hold on
-    * its node, whatever the DISCONNECT did.
+  /** Best-effort DISCONNECT; a half-dead node must not fail the caller. Sent only while the link's
+    * process still serves its node (`stillServes`): the old connection id means nothing to its
+    * replacement, or another client's connection. Releases the link's hold on its node, whatever
+    * the DISCONNECT did.
     */
   def close(): IO[Unit] =
-    transport
-      .post(url, QuackWire.encodeDisconnect(nodeConnectionId))
-      .void
-      .handleError { e =>
-        logger.debug(s"DISCONNECT for $nodeConnectionId failed (ignored): ${e.getMessage}")
-      }
-      .guarantee(IO(hold.release()))
+    IO.defer {
+      if !stillServes() then IO.unit
+      else
+        transport
+          .post(url, QuackWire.encodeDisconnect(nodeConnectionId))
+          .void
+          .handleError { e =>
+            logger.debug(s"DISCONNECT for $nodeConnectionId failed (ignored): ${e.getMessage}")
+          }
+    }.guarantee(IO(hold.release()))
 
 object QuackNodeLink:
 
@@ -299,6 +314,13 @@ object QuackNodeLink:
     val u = java.util.UUID.randomUUID()
     QuackWire.Hugeint(u.getMostSignificantBits, u.getLeastSignificantBits)
 
+  /** Why a link sent nothing: the node process it was opened on was replaced under its node id. */
+  val ProcessReplaced: String =
+    "the node was restarted since this connection was opened: the connection is gone"
+
+  /** The `stillServes` of a link that cannot outlive its call (the handshake's version probe). */
+  val AlwaysServes: () => Boolean = () => true
+
   /** The `authorize` of a link that sends no statement (the handshake's version probe). */
   val NoStatements: () => String =
     () => throw new IllegalStateException("this node link sends no statement")
@@ -311,6 +333,10 @@ object QuackNodeLink:
     * `hold` is the caller's admission to the node ([[NodeHold]]); the link takes it over: released
     * when the link closes, or here when no link comes of the call. [[NodeHold.none]] only for a
     * link that runs no client statement.
+    *
+    * `stillServes` tells whether `node`'s process still serves its node id; the link sends nothing
+    * once it does not ([[ProcessReplaced]]). [[AlwaysServes]] only for a link that cannot outlive
+    * its call (the handshake's version probe).
     */
   def open(
       transport: QuackTransport,
@@ -318,11 +344,13 @@ object QuackNodeLink:
       hello: QuackWire.ConnectionRequest,
       clientQueryId: Long,
       authorize: () => String,
-      hold: NodeHold
+      hold: NodeHold,
+      stillServes: () => Boolean
   ): IO[Either[LinkFailure, (QuackNodeLink, QuackWire.ConnectionResponse)]] =
     val url  = QuackProtocol.endpointToHttp(s"quack:${node.host}:${node.port}")
     val body = QuackWire.encodeConnectionRequest(hello.copy(authString = node.token), clientQueryId)
-    val probe  = new QuackNodeLink(transport, url, "", NoStatements, NodeHold.none)
+    val probe =
+      new QuackNodeLink(transport, url, "", NoStatements, NodeHold.none, node, AlwaysServes)
     val opened = probe.relay(body).map {
       case Left(f)     => Left(f)
       case Right(resp) =>
@@ -330,7 +358,9 @@ object QuackNodeLink:
           case QuackWire.Type.ConnectionResponse =>
             QuackWire.decodeConnectionResponse(resp) match
               case Right((connId, r)) if connId.nonEmpty =>
-                Right((new QuackNodeLink(transport, url, connId, authorize, hold), r))
+                Right(
+                  (new QuackNodeLink(transport, url, connId, authorize, hold, node, stillServes), r)
+                )
               case Right(_) => Left(LinkFailure.Permanent("node answered without a connection id"))
               case Left(e)  =>
                 Left(LinkFailure.Permanent(s"unreadable CONNECTION_RESPONSE: ${e.message}"))

@@ -56,7 +56,8 @@ class HibernationWiringSpec extends AnyFlatSpec with Matchers:
     w.sweep().unsafeRunSync()
     calls shouldBe 2
 
-  it should "retry a pool its suspend found busy on the next sweep" in:
+  it should "retry a pool its suspend found busy on the next sweep, as a skip, not a failure" in:
+    import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
     var calls = 0
     val w     = wiring(
       leader = true,
@@ -67,9 +68,20 @@ class HibernationWiringSpec extends AnyFlatSpec with Matchers:
           else IO.pure(Right(()))
         }
     )
-    w.sweep().unsafeRunSync()
+    val (_, events) =
+      LogCapture.logged(classOf[HibernationWiring].getName)(w.sweep().unsafeRunSync())
+    // A failed suspend warns; a busy pool is only noted.
+    events.filter(_.getLevel == ch.qos.logback.classic.Level.WARN) shouldBe empty
+    events.map(_.getFormattedMessage).exists(_.contains("is busy")) shouldBe true
     w.sweep().unsafeRunSync()
     calls shouldBe 2
+
+  it should "warn when a suspend throws for any other reason" in:
+    import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+    val w = wiring(leader = true, suspend = _ => IO.raiseError(new RuntimeException("boom")))
+    val (_, events) =
+      LogCapture.logged(classOf[HibernationWiring].getName)(w.sweep().unsafeRunSync())
+    events.exists(_.getLevel == ch.qos.logback.classic.Level.WARN) shouldBe true
 
   it should "drop a suspended pool's first-seen baseline" in:
     // Never-active pool: first sweep baselines, a later sweep suspends and clears.

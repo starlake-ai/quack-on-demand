@@ -138,6 +138,8 @@ spec:
             {{- end }}
             - name: QOD_DRAIN_TIMEOUT_SEC
               value: {{ .Values.drainTimeoutSec | quote }}
+            - name: QOD_POOL_DRAIN_TIMEOUT_SEC
+              value: {{ .Values.poolDrainTimeoutSec | quote }}
             {{- if gt (.Values.replicaCount | int) 1 }}
             - name: QOD_HA_ENABLED
               value: "true"

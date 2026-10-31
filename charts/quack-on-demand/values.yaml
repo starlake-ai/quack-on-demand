@@ -68,6 +68,11 @@ priorityClassName: ""
 # terminationGracePeriodSeconds is derived as drainTimeoutSec + 15 so Kubernetes
 # never SIGKILLs a still-draining manager. Raise for long-running queries.
 drainTimeoutSec: 60
+# Seconds a non-force pool teardown (scale-down, stop, delete, suspend) waits for
+# the draining nodes' work before stopping them anyway. The teardown holds the
+# pool's lock meanwhile and a REST call blocks for it: keep it below the qod CLI's
+# 30 s REST timeout. 0 stops at once.
+poolDrainTimeoutSec: 20
 
 # --- Services (REST/UI + FlightSQL) -----------------------------------------
 service:

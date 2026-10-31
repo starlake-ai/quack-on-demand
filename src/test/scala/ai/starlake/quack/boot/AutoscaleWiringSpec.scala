@@ -80,6 +80,7 @@ class AutoscaleWiringSpec extends AnyFlatSpec with Matchers:
       isLeader = () => true
     )
     w.sweep().unsafeRunSync()
+    w.failuresForTest shouldBe empty
     w.backoffForTest shouldBe empty
     w.sweep().unsafeRunSync()
     calls shouldBe 2

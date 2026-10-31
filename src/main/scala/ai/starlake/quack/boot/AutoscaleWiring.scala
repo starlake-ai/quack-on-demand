@@ -42,6 +42,7 @@ final class AutoscaleWiring(
 
   private[boot] def stateForTest: Map[PoolKey, PoolAutoState] = state
   private[boot] def backoffForTest: Map[PoolKey, Int]         = backoff
+  private[boot] def failuresForTest: Map[PoolKey, Int]        = failures
 
   private def keyOf(a: AutoscaleAction): PoolKey = a match
     case AutoscaleAction.ScaleOut(k, _, _) => k

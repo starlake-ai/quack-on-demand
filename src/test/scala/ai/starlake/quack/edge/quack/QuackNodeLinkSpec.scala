@@ -61,7 +61,9 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
 
   "open" should "post the client's hello with the node token and adopt the node connection id" in:
     val t   = new FakeTransport(connResp("NODE1"))
-    val out = QuackNodeLink.open(t, node, hello, 5L, authorize, NodeHold.none).unsafeRunSync()
+    val out = QuackNodeLink
+      .open(t, node, hello, 5L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
+      .unsafeRunSync()
     val (link, resp) = out.toOption.get
     link.nodeConnectionId shouldBe "NODE1"
     link.url shouldBe URI.create("http://127.0.0.1:21999/quack")
@@ -78,7 +80,8 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
         hello,
         1L,
         authorize,
-        NodeHold.none
+        NodeHold.none,
+        QuackNodeLink.AlwaysServes
       )
       .unsafeRunSync()
     out match
@@ -93,7 +96,8 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
         hello,
         1L,
         authorize,
-        NodeHold.none
+        NodeHold.none,
+        QuackNodeLink.AlwaysServes
       )
       .unsafeRunSync()
     out shouldBe Left(LinkFailure.Transient("HTTP 503"))
@@ -103,14 +107,24 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     def hold    = tracker.tryHold(node.nodeId).getOrElse(fail("refused"))
     val t       = new FakeTransport(connResp("NODE1"), encodeSuccess())
     val link    =
-      QuackNodeLink.open(t, node, hello, 1L, authorize, hold).unsafeRunSync().toOption.get._1
+      QuackNodeLink
+        .open(t, node, hello, 1L, authorize, hold, QuackNodeLink.AlwaysServes)
+        .unsafeRunSync()
+        .toOption
+        .get
+        ._1
     tracker.snapshot(node.nodeId).held shouldBe 1
     link.close().unsafeRunSync()
     tracker.snapshot(node.nodeId).held shouldBe 0
     // A DISCONNECT that fails still releases the hold, and a second close releases nothing more.
     val t2    = new FakeTransport(connResp("NODE2"), QuackWireError.Transient("HTTP 503"))
     val link2 =
-      QuackNodeLink.open(t2, node, hello, 1L, authorize, hold).unsafeRunSync().toOption.get._1
+      QuackNodeLink
+        .open(t2, node, hello, 1L, authorize, hold, QuackNodeLink.AlwaysServes)
+        .unsafeRunSync()
+        .toOption
+        .get
+        ._1
     val other = hold
     tracker.snapshot(node.nodeId).held shouldBe 2
     link2.close().unsafeRunSync()
@@ -119,7 +133,15 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     other.release()
     // Refused or failed in transport, the open leaves no link: its hold is released at once.
     QuackNodeLink
-      .open(new FakeTransport(errorResp("Authentication failed")), node, hello, 1L, authorize, hold)
+      .open(
+        new FakeTransport(errorResp("Authentication failed")),
+        node,
+        hello,
+        1L,
+        authorize,
+        hold,
+        QuackNodeLink.AlwaysServes
+      )
       .unsafeRunSync()
       .isLeft shouldBe true
     QuackNodeLink
@@ -129,16 +151,46 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
         hello,
         1L,
         authorize,
-        hold
+        hold,
+        QuackNodeLink.AlwaysServes
       )
       .unsafeRunSync()
       .isLeft shouldBe true
     tracker.snapshot(node.nodeId).held shouldBe 0
 
+  it should "send nothing once its node's process was replaced, and still give its hold back" in:
+    val tracker = new ai.starlake.quack.edge.adapter.NodeLoadTracker
+    val serves  = new java.util.concurrent.atomic.AtomicBoolean(true)
+    val t       = new FakeTransport(connResp("NODE1"))
+    val link    = QuackNodeLink
+      .open(
+        t,
+        node,
+        hello,
+        1L,
+        authorize,
+        tracker.tryHold(node.nodeId).getOrElse(fail("refused")),
+        () => serves.get()
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+      ._1
+    link.node shouldBe node
+    serves.set(false)
+    val fetch = frame(encodeFetchRequest("CLIENT", 3L, Hugeint(1L, 2L), 4L)).toOption.get
+    link.forward(fetch).unsafeRunSync() shouldBe
+      Left(LinkFailure.Permanent(QuackNodeLink.ProcessReplaced))
+    link.prepare(PrepareRequest("SELECT 1", None, None), 3L).unsafeRunSync().isLeft shouldBe true
+    link.close().unsafeRunSync()
+    // Only the CONNECTION_REQUEST went out: no statement, no handle, no DISCONNECT.
+    t.posted should have size 1
+    tracker.snapshot(node.nodeId).held shouldBe 0
+
   "forward" should "rewrite the header to the node connection id and return the node's bytes" in:
     val t    = new FakeTransport(connResp("NODE1"), fetchResp(true))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -153,7 +205,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   "forward" should "never relay a PREPARE" in:
     val t    = new FakeTransport(connResp("NODE1"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -167,7 +219,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   "prepare" should "relay the request after a session handle on the same connection" in:
     val t    = new FakeTransport(connResp("NODE1"), prepareResp(false), prepareResp(false))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -189,7 +241,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   it should "send nothing and fail HandleFailed when the node refuses the handle" in:
     val t    = new FakeTransport(connResp("NODE1"), errorResp("session handle refused: expired"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -210,7 +262,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   it should "send nothing and fail HandleFailed when the handle never reaches the node" in:
     val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("HTTP 503"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -233,7 +285,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val excerpt = "\n\nLINE 1: CALL system.main.qod_session('eyJ2IjoxfQ.0123abcd')\n  ^"
     val t       = new FakeTransport(connResp("NODE1"), errorResp(refusal + excerpt))
     val link    = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -249,7 +301,12 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val t       = new FakeTransport(connResp("NODE1"))
     val unbound = () => NodeKeys.ephemeral().prelude(node, NodePrincipal.Unbound)
     val link    =
-      QuackNodeLink.open(t, node, hello, 1L, unbound, NodeHold.none).unsafeRunSync().toOption.get._1
+      QuackNodeLink
+        .open(t, node, hello, 1L, unbound, NodeHold.none, QuackNodeLink.AlwaysServes)
+        .unsafeRunSync()
+        .toOption
+        .get
+        ._1
     link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
       case Left(LinkFailure.Permanent(m)) => m should include("no principal is bound")
       case other                          => fail(s"expected Permanent, got $other")
@@ -261,7 +318,12 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val fresh  = () => s"CALL system.main.qod_session('h${minted.incrementAndGet()}')"
     val t      = new FakeTransport((connResp("NODE1") +: List.fill(6)(prepareResp(false)))*)
     val link   =
-      QuackNodeLink.open(t, node, hello, 1L, fresh, NodeHold.none).unsafeRunSync().toOption.get._1
+      QuackNodeLink
+        .open(t, node, hello, 1L, fresh, NodeHold.none, QuackNodeLink.AlwaysServes)
+        .unsafeRunSync()
+        .toOption
+        .get
+        ._1
     link.runDiscard("BEGIN", 1L).unsafeRunSync() shouldBe Right(())
     link.prepare(PrepareRequest("SELECT 1", None, None), 2L).unsafeRunSync().isRight shouldBe true
     link.runDiscard("COMMIT", 3L).unsafeRunSync() shouldBe Right(())
@@ -285,7 +347,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
       fetchResp(false)
     )
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -324,7 +386,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
       prepareResp(false)
     )
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -337,7 +399,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   it should "not fetch when the prepare response is complete" in:
     val t    = new FakeTransport(connResp("NODE1"), prepareResp(false), prepareResp(false))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -348,7 +410,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   it should "surface a node error as Permanent" in:
     val t    = new FakeTransport(connResp("NODE1"), prepareResp(false), errorResp("conflict"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -358,7 +420,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   it should "send nothing and fail HandleFailed when the node refuses the handle" in:
     val t    = new FakeTransport(connResp("NODE1"), errorResp("session handle refused: expired"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -377,7 +439,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   it should "send nothing and fail HandleFailed when the handle never reaches the node" in:
     val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("HTTP 503"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get
@@ -396,7 +458,7 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   "close" should "post a DISCONNECT and swallow failures" in:
     val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("gone"))
     val link = QuackNodeLink
-      .open(t, node, hello, 1L, authorize, NodeHold.none)
+      .open(t, node, hello, 1L, authorize, NodeHold.none, QuackNodeLink.AlwaysServes)
       .unsafeRunSync()
       .toOption
       .get

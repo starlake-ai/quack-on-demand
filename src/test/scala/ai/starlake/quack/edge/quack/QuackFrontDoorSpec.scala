@@ -258,17 +258,20 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
   ): Fixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
+      private val spawns     = new AtomicInteger(0)
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
           s.nodeId,
           s.poolKey,
           s.role,
           "127.0.0.1",
-          21800 + n.size,
+          // Each spawn is a new process, as on a real backend: a port and a start time of its own,
+          // under the node id it replaces when it is a respawn.
+          21800 + spawns.get(),
           "nodetok",
           Some(1L),
           None,
-          Instant.EPOCH,
+          Instant.EPOCH.plusSeconds(spawns.getAndIncrement().toLong),
           maxConcurrent = s.maxConcurrent
         )
         n.put(s.nodeId, r); r
@@ -1129,9 +1132,10 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       val posted   = fx.transport.posted.size
       val prepared = fx.transport.prepared.size
       errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer
-      // Nothing ran: the transaction's link was DISCONNECTed and no PREPARE went out.
+      // Nothing ran and nothing was sent: no PREPARE, and no DISCONNECT either, since the link's
+      // process no longer serves the pool (its port may host another process by now).
       fx.transport.prepared.size shouldBe prepared
-      postedSince(fx, posted) shouldBe List((Type.Disconnect, "NODE2"))
+      postedSince(fx, posted) shouldBe Nil
       fx.sessions.get(connId).get.txLink.get() shouldBe None
       fx.router.sessions.get(connId).get.txOpen shouldBe false
       // Fenced: the next statement gets the same answer instead of autocommitting on the survivor.
@@ -1502,10 +1506,31 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .isRight shouldBe true
     // The COMMIT wakes the pool. A resume respawns the nodes under their node ids, so the pin
-    // finds its node again, but the new process refuses the stopped one's connection: the client
-    // is told its transaction was aborted, and its ROLLBACK runs on a fresh link.
+    // finds its node id again, but on a new process: the stopped one's connection is never used,
+    // the COMMIT is told nothing was committed, and the ROLLBACK runs on a fresh link.
     fx.transport.deadConnections = fx.transport.connectionIds
-    val answer = errorText(prepare(fx, connId, "COMMIT"))
-    answer should startWith("transaction aborted")
-    answer should endWith("ROLLBACK to continue")
+    val sent = fx.transport.posted.size
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe FlightSqlRouter.PinLostAnswer
+    fx.transport.posted.toList.drop(sent).map(_.header.connectionId).toSet intersect
+      fx.transport.deadConnections shouldBe empty
     prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+
+  "an open transaction whose node was respawned under the same id" should "be aborted without a byte to the new process" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    val txNode =
+      fx.sessions.get(connId).flatMap(_.txLink.get()).map(_._1).getOrElse(fail("no transaction"))
+    // A crash respawn, a restart, a resume: same node id, new process.
+    fx.router.supervisor.restartNode(poolKey, txNode).unsafeRunSync().isRight shouldBe true
+    fx.router.supervisor.get(poolKey).get.nodes.map(_.nodeId) should contain(txNode)
+    val sent = fx.transport.posted.size
+    // Its next statement is not relayed on the old connection, whose id the new process might
+    // hand to another client: the transaction ends, the session is fenced.
+    errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer
+    // The COMMIT is told nothing was committed, never that its outcome is unknown.
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe FlightSqlRouter.PinLostAnswer
+    fx.transport.posted.size shouldBe sent
+    held(fx) shouldBe 0
+    // Out of the transaction, the session carries on on the new process.
+    prepare(fx, connId, "SELECT 2") shouldBe prepareResp(false)
