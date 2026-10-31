@@ -5,7 +5,8 @@ import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.model.TenantDbKind
+import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, NodeCatalog}
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -38,12 +39,14 @@ object CatalogPreviewHandlers:
   val SuperuserIdentity = "superuser"
 
 /** Bounded, ACL-routed snapshot preview (Spec 00 time-travel viewer). `preview` runs the same
-  * tenant-resolve -> [[TenantScopeCheck]] -> tenant-db-lookup gate as [[TagHandlers]] (a non-
-  * DuckLake tenant-db is rejected with 400 `invalid_kind`: previews need the DuckLake `AT (VERSION
-  * => n)` clause, unlike the catalog browser's tolerant empty-result UX), then resolves the
-  * snapshot selector via [[SnapshotSelector]], picks the tenant-db's first pool (404 `no_pool` when
-  * none is running), builds a bounded `SELECT * FROM "schema"."table" [AT (VERSION => n)] LIMIT k`
-  * statement, and forwards it to the injected [[CatalogPreviewHandlers.PreviewExecutor]].
+  * tenant-resolve -> [[TenantScopeCheck]] -> tenant-db-lookup gate as [[TagHandlers]] (kind-
+  * tolerant: a `duckdb-file` / `memory` database previews its current state, its table qualified
+  * with the node's catalog, and a time-travel selector on it is a 400 `invalid_selector`; the
+  * schema and data diffs still need DuckLake snapshots and reject other kinds with 400
+  * `invalid_kind`), then resolves the snapshot selector via [[SnapshotSelector]], picks the
+  * tenant-db's first pool (404 `no_pool` when none exists; the router wakes a suspended one),
+  * builds a bounded `SELECT * FROM "schema"."table" [AT (VERSION => n)] LIMIT k` statement, and
+  * forwards it to the injected [[CatalogPreviewHandlers.PreviewExecutor]].
   *
   * The executor's `ArrowReader` is decoded through [[ArrowRowsDecoder]] with `maxRows =
   * cfg.previewMaxRows` (the request `limit`, when given, further clamps that cap downward, never
@@ -55,8 +58,9 @@ object CatalogPreviewHandlers:
   * so it is audited every time, on both "denied" (gate rejection) and "ok" (success, with
   * `rowsReturned` in the detail map) outcomes. A post-gate SQL failure surfaces as a REST error but
   * is still recorded "ok" from the gate's perspective (mirrors [[CatalogHandlers]]'s "the audit
-  * outcome tracks the gate, not the read" convention) -- the 403 `acl_denied` / 502 `preview_failed`
-  * distinction is carried in the HTTP response, not duplicated into a second audit outcome value.
+  * outcome tracks the gate, not the read" convention) -- the 403 `acl_denied` / 502
+  * `preview_failed` distinction is carried in the HTTP response, not duplicated into a second audit
+  * outcome value.
   */
 final class CatalogPreviewHandlers(
     sup: PoolSupervisor,
@@ -97,8 +101,8 @@ final class CatalogPreviewHandlers(
       case Some("update") => Right(Some(DataDiffSql.UpdateTypes))
       case Some(_)        => Left(())
 
-  /** [[TenantDbGate]] with the kind check: previews require a DuckLake tenant-db (400
-    * `invalid_kind` otherwise), unlike the catalog browser's kind-tolerant reads.
+  /** [[TenantDbGate]] with the kind check: the schema and data diffs compare DuckLake snapshots, so
+    * they require a DuckLake tenant-db (400 `invalid_kind` otherwise). `preview` gates without it.
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
@@ -108,20 +112,26 @@ final class CatalogPreviewHandlers(
       rawTenant,
       tenantDb,
       apiKey,
-      requireDuckLake = Some("data preview requires a ducklake tenant-db")
+      requireDuckLake = Some("snapshot diffs require a ducklake tenant-db")
     )(scopeOf)
 
   /** Pool pick for `(tenant, tenantDb)`; delegates to [[PoolPicks.readPoolKey]]. */
   private def firstPoolKey(tenant: String, tenantDb: String): Option[PoolKey] =
     PoolPicks.readPoolKey(sup, tenant, tenantDb)
 
+  /** The previewed relation: `"schema"."table"` for DuckLake (the router's USE prelude names its
+    * catalog), fully qualified with the node's catalog for a `duckdb-file` / `memory` database.
+    */
+  private def targetOf(tid: String, db: String, kind: TenantDbKind, schema: String, table: String) =
+    val st = s"${quoteIdent(schema)}.${quoteIdent(table)}"
+    if kind == TenantDbKind.DuckLake then st
+    else s"${quoteIdent(NodeCatalog.aliasFor(kind, catalogAlias(tid, db)))}.$st"
+
   private def buildSql(
-      schema: String,
-      table: String,
+      target: String,
       snapshotId: Option[Long],
       limit: Int
   ): String =
-    val target   = s"${quoteIdent(schema)}.${quoteIdent(table)}"
     val atClause = snapshotId.fold("")(id => s" AT (VERSION => $id)")
     s"SELECT * FROM $target$atClause LIMIT $limit"
 
@@ -259,24 +269,42 @@ final class CatalogPreviewHandlers(
       limit: Option[Int],
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[PreviewResponse] =
-    gate(tenant, tenantDb, apiKey)(scopeOf) match
+    // Kind-tolerant gate: a duckdb-file / memory database previews its current state (no
+    // snapshot history, so a time-travel selector is a 400 below).
+    TenantDbGate(sup, tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogPreviewRead, "denied")
         IO.pure(Left(e))
       case Right((tid, db)) =>
-        val reader      = resolveReader(tid, db)
-        val selectorRes = SnapshotSelector.resolve(
-          asOf,
-          asOfTag,
-          asOfTs,
-          maxId = () => reader.maxSnapshotId(),
-          atOrBefore = (ts: Instant) => reader.snapshotAtOrBefore(ts),
-          tagSnapshot = (tag: String) => store.findSnapshotTag(tid, db, tag).map(_.snapshotId),
-          exists = (id: Long) => reader.snapshotExists(id)
-        )
+        val kind        = sup.findTenantDb(tid, db).map(_.kind).getOrElse(TenantDbKind.DuckLake)
+        val selectorRes =
+          if kind != TenantDbKind.DuckLake then
+            if asOf.isDefined || asOfTag.isDefined || asOfTs.isDefined then
+              Left(
+                (
+                  StatusCode.BadRequest,
+                  "invalid_selector",
+                  "time travel (asOf / asOfTag / asOfTs) requires a ducklake tenant-db"
+                )
+              )
+            else Right(SnapshotSelector.Resolution.Current)
+          else
+            val reader = resolveReader(tid, db)
+            SnapshotSelector
+              .resolve(
+                asOf,
+                asOfTag,
+                asOfTs,
+                maxId = () => reader.maxSnapshotId(),
+                atOrBefore = (ts: Instant) => reader.snapshotAtOrBefore(ts),
+                tagSnapshot =
+                  (tag: String) => store.findSnapshotTag(tid, db, tag).map(_.snapshotId),
+                exists = (id: Long) => reader.snapshotExists(id)
+              )
+              .left
+              .map(selectorError)
         selectorRes match
-          case Left(se) =>
-            val (sc, code, msg) = selectorError(se)
+          case Left((sc, code, msg)) =>
             audit.rest(
               apiKey,
               "control-plane",
@@ -323,13 +351,25 @@ final class CatalogPreviewHandlers(
                     )
                     IO.pure(Left(e))
                   case Right(caller) =>
-                    runPreview(tid, db, schema, table, resolution, limit, poolKey, caller, apiKey)
+                    runPreview(
+                      tid,
+                      db,
+                      schema,
+                      table,
+                      targetOf(tid, db, kind, schema, table),
+                      resolution,
+                      limit,
+                      poolKey,
+                      caller,
+                      apiKey
+                    )
 
   private def runPreview(
       tid: String,
       db: String,
       schema: String,
       table: String,
+      target: String,
       resolution: SnapshotSelector.Resolution,
       limit: Option[Int],
       poolKey: PoolKey,
@@ -349,7 +389,7 @@ final class CatalogPreviewHandlers(
     // stream that never has more rows than the cap, so `truncated` could never be
     // true no matter how large the underlying table is. `decode` still stops
     // collecting at `effectiveLimit` -- the response never carries the extra row.
-    val sql = buildSql(schema, table, snapshotId, effectiveLimit + 1)
+    val sql = buildSql(target, snapshotId, effectiveLimit + 1)
 
     executor(caller, poolKey, sql)
       .timeout(cfg.previewTimeoutSec.seconds)

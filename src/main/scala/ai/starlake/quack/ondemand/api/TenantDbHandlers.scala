@@ -101,11 +101,13 @@ final class TenantDbHandlers(
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)
 
-  /** Sum of per-schema table counts via the catalog reader. None for non-DuckLake kinds and on any
-    * reader failure: the list call must never fail because a catalog is unreachable.
+  /** Sum of per-schema table counts via the catalog reader; None on any reader failure: the list
+    * call must never fail because a catalog is unreachable. A `duckdb-file` / `memory` catalog
+    * lives inside the node, so it is `-1` (unknown, still browsable): counting would cost a node
+    * query per database on every list, and wake its pool when suspended.
     */
   private def tableCountFor(tenantName: String, td: TenantDb): Option[Int] =
-    if td.kind != TenantDbKind.DuckLake then None
+    if td.kind != TenantDbKind.DuckLake then catalog.map(_ => TenantDbHandlers.UnknownTableCount)
     else
       catalog.flatMap { c =>
         // Unscoped on purpose: the calling handler has already scope-checked
@@ -461,3 +463,10 @@ final class TenantDbHandlers(
               case Left(err) =>
                 IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
             }
+
+object TenantDbHandlers:
+
+  /** `tableCount` of a database whose catalog lives inside its node (`duckdb-file`, `memory`): not
+    * counted, but browsable through the catalog endpoints.
+    */
+  val UnknownTableCount: Int = -1

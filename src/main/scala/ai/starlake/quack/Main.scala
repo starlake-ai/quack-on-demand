@@ -843,6 +843,25 @@ object Main extends IOApp with LazyLogging:
     ): Option[ai.starlake.quack.model.TenantDbKind] =
       sup.findTenantDb(tenant, tenantDb).map(_.kind)
 
+    // The node-held catalog (duckdb-file / memory) is read through the routed executor, built
+    // further down (after the router); until it is set every read is "manager starting".
+    val nodeCatalogQuery = new java.util.concurrent.atomic.AtomicReference[
+      (ai.starlake.quack.model.PoolKey, String) => IO[
+        Either[RouterFailure, List[List[io.circe.Json]]]
+      ]
+    ]((_, _) => IO.pure(Left(RouterFailure.Unavailable("the manager is starting, retry shortly"))))
+    val nodeCatalog = new ai.starlake.quack.ondemand.catalog.RoutedNodeCatalog(
+      pickPool = (t, td) => PoolPicks.readPoolKey(sup, t, td),
+      aliasOf = (t, td) =>
+        ai.starlake.quack.ondemand.catalog.NodeCatalog.aliasFor(
+          tenantDbKindOf(t, td).getOrElse(ai.starlake.quack.model.TenantDbKind.DuckDbFile),
+          TenantDb.catalogAlias(sup.effectiveMetastoreFor(t, td), td)
+        ),
+      query = (key, sql) => nodeCatalogQuery.get()(key, sql),
+      // A browse wakes a suspended pool, which the router holds for up to resumeHoldTimeoutSec.
+      timeoutSec = mgrCfg.catalog.previewTimeoutSec + edgeCfg.resumeHoldTimeoutSec.toInt
+    )
+
     val catalogHandlers: Option[CatalogHandlers] =
       Some(
         new CatalogHandlers(
@@ -850,6 +869,7 @@ object Main extends IOApp with LazyLogging:
           sup,
           store,
           tenantDbKindOf,
+          nodeCatalog = Some(nodeCatalog),
           audit = auditRecorder,
           auditReads = mgrCfg.catalog.auditCatalogReads
         )
@@ -1700,6 +1720,22 @@ object Main extends IOApp with LazyLogging:
 
       val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
         routedExecutor(recordExecution = false)
+
+      // Node-held catalog reads run as the manager's system caller (see RoutedNodeCatalog): the
+      // REST gate has scoped the caller, and the DuckLake browser reads grants-blind too.
+      nodeCatalogQuery.set { (key, sql) =>
+        previewExecutor(
+          ExecCaller.system(s"catalog-${key.tenant}-${key.tenantDb}"),
+          key,
+          sql
+        ).flatMap {
+          case Left(failure) => IO.pure(Left(failure))
+          case Right(result) =>
+            IO.blocking(ArrowRowsDecoder.decode(result.rows, 100000)._2)
+              .guarantee(IO(result.close()))
+              .map(Right(_))
+        }
+      }
 
       // SPI contract: moduleStart runs m.start(ctx) for every module BEFORE the
       // ManagerServer is constructed, so routes built inside start() are honored. One context per

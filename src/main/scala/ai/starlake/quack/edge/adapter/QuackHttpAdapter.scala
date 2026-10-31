@@ -132,6 +132,27 @@ final class QuackHttpAdapter(
       case QuackResponse.Failed(err, _) => IO.pure(ProbeVerdict.Failed(err.toString))
     }
 
+  /** Whether the node answers a statement right now: the wake hold's readiness check
+    * ([[ai.starlake.quack.edge.FlightSqlRouter]]). A node the supervisor just respawned is routable
+    * by default ([[ai.starlake.quack.route.NodeLoad]] starts healthy) before its process listens,
+    * so the hold asks the node itself. Same bookkeeping-free path as [[probe]], without the canary:
+    * the periodic probe still judges enforcement. Never fails: any error is "not yet".
+    */
+  def answers(node: RunningNode): IO[Boolean] =
+    client
+      .query(
+        s"quack:${node.host}:${node.port}",
+        node.token,
+        "SELECT 1",
+        None,
+        authorizer(node, NodePrincipal.System)
+      )
+      .flatMap {
+        case QuackResponse.Ok(_, _, close) => IO(close()).as(true)
+        case QuackResponse.Failed(_, _)    => IO.pure(false)
+      }
+      .handleError(_ => false)
+
   /** Node ids whose canary ran: reported once until they enforce again. */
   private val unenforced = scala.collection.concurrent.TrieMap.empty[String, Unit]
 

@@ -2362,8 +2362,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   private def setupWithSupervisor(
       failResumeStarts: Boolean = false,
       resumeHoldTimeout: FiniteDuration = 60.seconds,
-      resumePollInterval: FiniteDuration = 250.millis
+      resumePollInterval: FiniteDuration = 250.millis,
+      refusedQueries: Int = 0
   ) =
+    // The first `refusedQueries` node calls fail as a connect refusal would: a respawned node whose
+    // process does not listen yet.
+    val refusals  = new java.util.concurrent.atomic.AtomicInteger(refusedQueries)
+    val queries   = new java.util.concurrent.atomic.AtomicInteger(0)
     val failStart = new java.util.concurrent.atomic.AtomicBoolean(false)
     val backend   = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -2407,7 +2412,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           session: Option[String],
           authorize: () => String
       ) =
-        IO.pure(TestArrow.okResponse())
+        IO {
+          queries.incrementAndGet()
+          if refusals.getAndDecrement() > 0 then
+            QuackResponse.Failed(QuackError.Transient("connect refused (test)"))
+          else TestArrow.okResponse()
+        }
     val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup,
@@ -2420,10 +2430,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       metadataFilterRewriter = mountedFilter,
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
-    (router, sup)
+    (router, sup, queries)
 
   "execute on a suspended pool" should "wake the pool and run the statement" in:
-    val (router, sup) = setupWithSupervisor()
+    val (router, sup, _) = setupWithSupervisor()
     sup.suspendPool(poolKey, "rest").unsafeRunSync()
     sup.get(poolKey).get.suspended shouldBe true
     val r = router
@@ -2433,8 +2443,32 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.get(poolKey).get.suspended shouldBe false
     sup.get(poolKey).get.nodes should not be empty
 
+  it should "hold the statement until the respawned node answers, not just until it is routable" in:
+    val (router, sup, queries) = setupWithSupervisor(resumePollInterval = 20.millis, refusedQueries = 3)
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val r = router
+      .execute("wake-5", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isRight shouldBe true
+    // Three refused readiness checks, the one that answered, then the statement itself.
+    queries.get() shouldBe 5
+
+  it should "time out when the respawned node never answers" in:
+    val (router, sup, _) = setupWithSupervisor(
+      resumeHoldTimeout = 300.millis,
+      resumePollInterval = 20.millis,
+      refusedQueries = Int.MaxValue
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val r = router
+      .execute("wake-6", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r match
+      case Left(RouterFailure.Unavailable(msg)) => msg should include("resuming")
+      case other => fail(s"expected Unavailable('pool is resuming...'), got $other")
+
   it should "time out with a retryable error when no node comes up" in:
-    val (router, sup) = setupWithSupervisor(
+    val (router, sup, _) = setupWithSupervisor(
       failResumeStarts = true,
       resumeHoldTimeout = 500.millis,
       resumePollInterval = 50.millis
@@ -2448,7 +2482,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Unavailable('pool is resuming...'), got $other")
 
   it should "not wake a disabled pool" in:
-    val (router, sup) = setupWithSupervisor()
+    val (router, sup, _) = setupWithSupervisor()
     sup.suspendPool(poolKey, "rest").unsafeRunSync()
     sup.setPoolDisabled(poolKey, disabled = true).unsafeRunSync()
     val r = router
@@ -2459,7 +2493,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.get(poolKey).get.suspended shouldBe true
 
   "execute on a stopPool'ed pool" should "fail immediately without waking" in:
-    val (router, sup) = setupWithSupervisor()
+    val (router, sup, _) = setupWithSupervisor()
     sup.stopPool(poolKey, force = true).unsafeRunSync()
     val t0 = System.nanoTime()
     val r  = router

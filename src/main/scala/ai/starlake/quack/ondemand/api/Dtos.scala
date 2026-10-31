@@ -669,8 +669,9 @@ final case class TenantDbResponse(
     // Resolved data path (stored value, or default base + db name when stored
     // is empty), so the UI can show the real location instead of a dash.
     effectiveDataPath: String = "",
-    // Tables across all schemas via the DuckLake catalog reader; None for
-    // non-DuckLake kinds or when the catalog is unreachable.
+    // Tables across all schemas via the DuckLake catalog reader; -1 (not counted, still
+    // browsable) for duckdb-file / memory, whose catalog lives inside the node; None when the
+    // catalog is unreachable.
     tableCount: Option[Int] = None,
     encrypted: Boolean = false,
     // Read-only: whether initSql was written by a superuser or the manager (nodes run it as

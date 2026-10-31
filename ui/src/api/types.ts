@@ -491,8 +491,9 @@ export interface TenantDbResponse {
   /** Data path resolved through the default-metastore chain.
     * Present even when the tenant-db has no explicit dataPath. */
   effectiveDataPath: string;
-  /** Total table count in the DuckLake catalog; null when unavailable
-    * (memory kind, duckdb-file without a live pool, etc.). */
+  /** Total table count in the DuckLake catalog; -1 for duckdb-file / memory
+    * (catalog lives inside the node: not counted, but browsable); null when
+    * the catalog is unreachable. */
   tableCount: number | null;
   encrypted: boolean;
   /** Whether initSql was written by a superuser or the manager (nodes run it as written) rather

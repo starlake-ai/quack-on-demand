@@ -285,29 +285,51 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.get._1 shouldBe StatusCode.Forbidden
 
-  it should "400 invalid_kind for a non-DuckLake tenant-db" in new Stubs:
-    val (nonDuckLakeSup, nonDuckLakeStore) = supervisor(withPool = false)
-    nonDuckLakeSup
+  /** A `duckdb-file` tenant-db `acme_files` (catalog alias `filesdb`) and a `memory` one
+    * `acme_mem1`, each with a pool, on the Stubs' supervisor.
+    */
+  private def addNodeHeldDbs(sup: PoolSupervisor): Unit =
+    sup
       .createTenantDb(
         "acme",
-        "mem1",
-        TenantDbKind.InMemory,
-        Map.empty,
-        ""
+        "files",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "filesdb", "schemaName" -> "main"),
+        "/tmp/qod-preview-test/files.db"
       )
       .unsafeRunSync()
-    val h = new CatalogPreviewHandlers(
-      nonDuckLakeSup,
-      nonDuckLakeStore,
-      RestCaller(),
-      executor,
-      (_, _) => stubReader(),
-      cfg,
-      audit = audit
-    )
-    val out = preview(h, tenantDb = "acme_mem1")
+    sup.createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
+    sup.createPool(PoolKey("acme", "acme_mem1", "mem_bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
+
+  it should "preview a duckdb-file table qualified with the node's catalog alias" in new Stubs:
+    addNodeHeldDbs(sup)
+    val out =
+      preview(handlers(), tenantDb = "acme_files", schema = "main", table = "t", limit = Some(10))
+    out.isRight shouldBe true
+    seenSql shouldBe Some("""SELECT * FROM "filesdb"."main"."t" LIMIT 11""")
+    seenPoolKey shouldBe Some(PoolKey("acme", "acme_files", "files_bi"))
+
+  it should "preview a memory table through DuckDB's built-in memory catalog" in new Stubs:
+    addNodeHeldDbs(sup)
+    preview(handlers(), tenantDb = "acme_mem1", schema = "main", table = "t", limit = Some(10))
+    seenSql shouldBe Some("""SELECT * FROM "memory"."main"."t" LIMIT 11""")
+
+  it should "400 invalid_selector for time travel on a non-DuckLake tenant-db, without a query" in new Stubs:
+    addNodeHeldDbs(sup)
+    val out =
+      preview(handlers(), tenantDb = "acme_files", schema = "main", table = "t", asOf = Some(42L))
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_selector"
+    seenSql shouldBe None
+
+  it should "keep the diffs DuckLake-only (400 invalid_kind)" in new Stubs:
+    addNodeHeldDbs(sup)
+    val out = schemaDiff(handlers(), tenantDb = "acme_files", schema = "main", table = "t")
     out.left.toOption.get._1 shouldBe StatusCode.BadRequest
     out.left.toOption.get._2.error shouldBe "invalid_kind"
+    val data = dataDiff(handlers(), tenantDb = "acme_files", schema = "main", table = "t")
+    data.left.toOption.get._2.error shouldBe "invalid_kind"
 
   it should "400 when both asOf and asOfTag are supplied" in new Stubs:
     val h   = handlers()

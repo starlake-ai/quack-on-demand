@@ -354,6 +354,18 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     td.tableCount shouldBe None
     td.effectiveDataPath shouldBe ""
 
+  it should "report an unknown (-1, browsable) tableCount for node-held kinds when the catalog is wired" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val h = new TenantDbHandlers(
+      sup,
+      catalog = Some(new CatalogHandlers((_, _) => null, sup, store)),
+      requireEncryption = false
+    )
+    val td = h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem7", kind = "memory"), None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
+    td.tableCount shouldBe Some(TenantDbHandlers.UnknownTableCount)
+
   "TenantDbHandlers.createTenantDb (mutation gates)" should
     "map a gate refusal to 429 quota_exceeded for tenant sessions" in:
     val (sup, h) = freshHandlersWithSupervisor()
