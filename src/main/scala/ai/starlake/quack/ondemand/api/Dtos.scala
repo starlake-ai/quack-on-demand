@@ -1583,6 +1583,16 @@ final case class UndropRequest(
     fromSnapshot: Option[Long] = None
 )
 
+/** The self-service undrop (`POST /api/profile/undrop`, MCP `undrop_table` for a non-admin): the
+  * caller's own tenant, never named here.
+  */
+final case class ProfileUndropRequest(
+    tenantDb: String,
+    schema: String,
+    table: String,
+    asName: Option[String] = None
+)
+
 final case class UndropResponse(
     schema: String,
     table: String,
@@ -2049,6 +2059,7 @@ object Dtos:
   given Codec[RecoverableTableEntry]      = deriveCodec
   given Codec[RecoverableListResponse]    = deriveCodec
   given Codec[UndropRequest]              = deriveCodec
+  given Codec[ProfileUndropRequest]       = ConfiguredCodec.derived
   given Codec[UndropResponse]             = deriveCodec
   given Codec[RestoreRequest]             = deriveCodec
   given Codec[RestoreResponse]            = deriveCodec

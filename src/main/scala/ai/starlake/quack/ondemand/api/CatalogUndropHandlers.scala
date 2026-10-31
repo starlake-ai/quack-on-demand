@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
-import ai.starlake.quack.model.PoolKey
+import ai.starlake.quack.model.{PoolKey, TenantDb}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -129,6 +129,161 @@ final class CatalogUndropHandlers(
           }
           outcome
         }
+
+  // ---------- self-service (the profile surface; MCP for a non-admin) ----------
+
+  /** The caller's own tenant and its DuckLake tenant-db `tenantDb`: the self-service routes name no
+    * tenant, so a regular user can only ever reach their own.
+    */
+  private def mine(
+      tenantDb: String,
+      apiKey: Option[String]
+  ): Either[(StatusCode, ErrorResponse), (RestCaller.Principal, String, TenantDb)] =
+    callerOf.resolve(apiKey).flatMap { principal =>
+      val own = principal match
+        case RestCaller.Principal.Session(s) => s.profile.tenant
+        case RestCaller.Principal.Pat(p)     => p.user.tenant
+      own.flatMap(TenantDbGate.resolveTenantId(sup, _)) match
+        case None =>
+          err(
+            StatusCode.BadRequest,
+            "tenant_required",
+            "a superuser has no tenant of its own: use the catalog undrop endpoints"
+          )
+        case Some(tid) =>
+          sup.findTenantDb(tid, tenantDb) match
+            case None => err(StatusCode.NotFound, "not_found", s"database '$tenantDb' not found")
+            case Some(td) if td.kind != ai.starlake.quack.model.TenantDbKind.DuckLake =>
+              err(StatusCode.BadRequest, "invalid_kind", "undrop requires a ducklake database")
+            case Some(td) => Right((principal, tid, td))
+    }
+
+  /** The first pool of the database the caller may connect to (write-capable first), with the
+    * effective set its handshake decides, narrowed by a token's restriction.
+    */
+  private def reachable(
+      caller: ExecCaller,
+      tid: String,
+      db: String
+  ): Either[(StatusCode, ErrorResponse), (PoolKey, EffectiveSet)] =
+    val writable = PoolPicks.writePoolKey(sup, tid, db)
+    val pools    = sup
+      .list()
+      .map(_.key)
+      .filter(k => k.tenant == tid && k.tenantDb == db)
+      .sortBy(k => (!writable.contains(k), k.pool))
+    pools.iterator
+      .filter(k => caller.restriction.allowsPool(k.pool))
+      .flatMap(k =>
+        sup
+          .authorizeHandshakeDetailed(caller.authzRequest(k))
+          .toOption
+          .map(a =>
+            k -> ai.starlake.quack.ondemand.rbac.Attenuation
+              .attenuatedBy(a.effectiveSet, caller.restriction)
+          )
+      )
+      .nextOption()
+      .toRight(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse("no_pool_access", s"you may connect to no pool of database '$db'")
+        )
+      )
+
+  /** Whether `eff`'s grants cover a read of `schema.table` in `td` (rule 1 of dropped tables: the
+    * last live name, which the listing gives, judged like a read of that name). QoD grants only: an
+    * OPA tenant's listing is narrowed by them too, as the filtered metadata is.
+    */
+  private def readable(
+      eff: EffectiveSet,
+      tid: String,
+      td: TenantDb,
+      schema: String,
+      table: String
+  ) =
+    val alias    = TenantDb.catalogAlias(sup.effectiveMetastoreFor(tid, td.name), td.name)
+    val catalogs = sup.listTenantDbsByTenant(tid).map(_.name).toSet + alias
+    ai.starlake.quack.edge.sql.GrantMatch.covers(
+      eff.permissions,
+      catalogs,
+      alias,
+      schema,
+      table,
+      ai.starlake.acl.parser.Verb.Read
+    )
+
+  /** `GET /api/profile/recoverable`: the dropped tables of the caller's own database that they may
+    * recover: their name is free (the listing already leaves out a name live again) and their
+    * grants cover a read of it.
+    */
+  def recoverableMine(
+      tenantDb: String,
+      limit: Option[Int],
+      apiKey: Option[String]
+  ): Out[RecoverableListResponse] =
+    IO.blocking {
+      for
+        (principal, tid, td) <- mine(tenantDb, apiKey)
+        caller = RestCaller.callerOf(s"undrop-$tid-${td.name}", principal)
+        (_, eff) <- reachable(caller, tid, td.name)
+      yield
+        val effectiveLimit = limit.map(_.max(1)).getOrElse(50).min(200)
+        val entries        = resolveReader(tid, td.name)
+          .listDroppedTables(effectiveLimit)
+          .filter(e => readable(eff, tid, td, e.schema, e.table))
+          .map(e =>
+            RecoverableTableEntry(
+              e.schema,
+              e.table,
+              e.droppedAtSnapshot,
+              e.lastLiveSnapshot,
+              e.droppedAt,
+              e.recoverable
+            )
+          )
+        RecoverableListResponse(entries)
+    }
+
+  /** `POST /api/profile/undrop`: the same recovery as [[undrop]], in the caller's own tenant, as
+    * them, on a pool they may connect to.
+    */
+  def undropMine(req: ProfileUndropRequest, apiKey: Option[String]): Out[UndropResponse] =
+    IO.blocking(
+      for
+        (principal, tid, td) <- mine(req.tenantDb, apiKey)
+        caller = RestCaller.callerOf(s"undrop-$tid-${td.name}", principal)
+        (poolKey, _) <- reachable(caller, tid, td.name)
+      yield (tid, td, caller, poolKey)
+    ).flatMap {
+      case Left(e) =>
+        audit.rest(apiKey, "control-plane", AuditActions.CatalogUndrop, "denied")
+        IO.pure(Left(e))
+      case Right((tid, td, caller, poolKey)) =>
+        recover(
+          tid,
+          td.name,
+          req.schema,
+          req.table,
+          req.asName,
+          None,
+          Some(poolKey),
+          Right(caller)
+        ).map { outcome =>
+          auditUndrop(outcome, tid, td.name, req.schema, req.table) { (tag, target, detail) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.CatalogUndrop,
+              tag,
+              tenant = Some(tid),
+              target = Some(target),
+              detail = detail
+            )
+          }
+          outcome
+        }
+    }
 
   /** `UNDROP TABLE [schema.]t [AS new_name]` (the gateway's admin dialect), on the caller's own
     * session: the same recovery as [[undrop]], run as `user` (`eff` the session's principal) on the

@@ -29,6 +29,37 @@ def pools(ctx: typer.Context):
     call(ctx, "GET", "/api/profile/pools")
 
 
+@app.command()
+@covers("GET", "/api/profile/recoverable", {"tenantDb": "--db", "limit": "--limit"})
+def recoverable(
+    ctx: typer.Context,
+    db: str = typer.Option(..., "--db", help="Database (tenant-db) of your own tenant."),
+    limit: int = typer.Option(None, "--limit", help="Max entries (default 50)."),
+):
+    """Dropped tables of your own database you may recover (free name, a grant on it)."""
+    call(ctx, "GET", "/api/profile/recoverable", params={"tenantDb": db, "limit": limit})
+
+
+@app.command()
+@covers(
+    "POST",
+    "/api/profile/undrop",
+    {"tenantDb": "--db", "schema": "--schema", "table": "--table", "asName": "--as-name"},
+)
+def undrop(
+    ctx: typer.Context,
+    db: str = typer.Option(..., "--db", help="Database (tenant-db) of your own tenant."),
+    schema: str = typer.Option(..., "--schema"),
+    table: str = typer.Option(..., "--table"),
+    as_name: str = typer.Option(None, "--as-name", help="Recover under a different name."),
+):
+    """Recover a dropped table of your own database, as you (needs a read grant on its last name and DDL in the schema)."""
+    body: dict = {"tenantDb": db, "schema": schema, "table": table}
+    if as_name is not None:
+        body["asName"] = as_name
+    call(ctx, "POST", "/api/profile/undrop", body=body)
+
+
 s3_app = typer.Typer(help="Your own S3 credentials: the keys your statements reach S3 with, each under a scope.")
 app.add_typer(s3_app, name="s3")
 

@@ -2271,6 +2271,63 @@ abstract class AuthzEndToEndCases(
     }
   }
 
+  // ---------- self-service undrop: a regular user's own profile surface ----------
+
+  private def recoverableOf(user: String): List[String] =
+    val (code, body) = stack.getStatus(s"/api/profile/recoverable?tenantDb=$lake", session(user))
+    withClue(body)(code shouldBe 200)
+    io.circe.parser
+      .parse(body)
+      .toOption
+      .get
+      .hcursor
+      .downField("tables")
+      .values
+      .toList
+      .flatten
+      .flatMap(_.hcursor.get[String]("table").toOption)
+
+  "self-service undrop" should "list to a regular user only the dropped tables they may read" in {
+    ready()
+    dropHistory
+    val dina = recoverableOf("dina")
+    // Granted and free: drop_free, rn_final (its last name). drop_reused's name is taken again.
+    dina should contain allOf ("drop_free", "rn_final")
+    dina should not contain "drop_reused"
+    dina should not contain "gone_t"
+    recoverableOf("olga") should not contain "drop_free"
+  }
+
+  it should "recover a table as the regular user, the node judging the read and the create" in {
+    ready()
+    dropHistory
+    // dina may read drop_free but holds no DDL in main: the create is refused.
+    val (dc, db) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("drop_free"),
+        "asName"   -> s("drop_free_dina")
+      ),
+      session("dina")
+    )
+    withClue(db)(dc shouldBe 403)
+    // bob (`*.*.* ALL`, a regular user) recovers it under a new name, and reads it.
+    val (bc, bb) = stack.postStatus(
+      "/api/profile/undrop",
+      obj(
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("drop_free"),
+        "asName"   -> s("drop_free_bob")
+      ),
+      session("bob")
+    )
+    withClue(bb)(bc shouldBe 200)
+    allowed("bob", "lake", s"SELECT id FROM $lake.main.drop_free_bob", Some(List("1")))
+  }
+
   "a plain view over a renamed table's history" should "be refused by the node to a principal with policies" in {
     ready()
     val (old, _) = vaultHistory

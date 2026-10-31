@@ -307,7 +307,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       args: (String, Json)*
   ): Either[String, Json] =
     val tool = tools.tools.find(_.name == name).getOrElse(fail(s"tool $name not defined"))
-    tool.adminOnly shouldBe true
+    // undrop_table and list_recoverable serve regular users too (their own tenant, as them).
+    tool.adminOnly shouldBe !Set("undrop_table", "list_recoverable").contains(name)
     tool.run(principal, JsonObject(args*)).unsafeRunSync()
 
   "list_recoverable" should "return the recoverable tables list" in withTools { tools =>

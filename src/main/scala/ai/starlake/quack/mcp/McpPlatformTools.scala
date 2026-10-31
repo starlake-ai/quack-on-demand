@@ -13,6 +13,7 @@ import ai.starlake.quack.ondemand.api.{
   PatDeleteRequest,
   PatHandlers,
   PatRevokeRequest,
+  ProfileUndropRequest,
   RestoreRequest,
   UndropRequest,
   UsageHandlers
@@ -113,61 +114,93 @@ final class McpPlatformTools(
   private val undropTableTool = McpToolDef(
     name = "undrop_table",
     description = "Recover a dropped table from the last snapshot where it was live " +
-      "(see list_recoverable). as_name restores under a different name.",
+      "(see list_recoverable). as_name restores under a different name. A regular user " +
+      "recovers in their own tenant, as themselves (the read needs a grant on the table's last " +
+      "name, the create DDL in the schema).",
     inputSchema = objectSchema(
       required = List("database", "schema", "table"),
       props = "database" -> strProp("Database (tenant-db) name."),
       "schema"        -> strProp("Schema the table lived in."),
       "table"         -> strProp("Dropped table name."),
       "as_name"       -> strProp("Restore under this name instead."),
-      "from_snapshot" -> intProp("Recover from this snapshot id instead of the last live."),
+      "from_snapshot" -> intProp(
+        "Recover from this snapshot id instead of the last live (admins only)."
+      ),
       tenantProp
     ),
-    adminOnly = true,
+    adminOnly = false,
     run = (principal, args) =>
-      (for
-        tenant   <- tenantOf(principal, args)
-        database <- required(args, "database")
-        schema   <- required(args, "schema")
-        table    <- required(args, "table")
-      yield (tenant, database, schema, table)) match
-        case Left(err)                                => IO.pure(Left(err))
-        case Right((tenant, database, schema, table)) =>
-          undropH
-            .undrop(
-              UndropRequest(
-                tenant = tenant,
-                tenantDb = database,
-                schema = schema,
-                table = table,
-                asName = str(args, "as_name"),
-                fromSnapshot = long(args, "from_snapshot")
-              ),
-              keyOf(principal)
-            )(scopeOf)
-            .map(res => bridge(res).map(_.asJson))
+      if !principal.isAdmin then
+        (for
+          database <- required(args, "database")
+          schema   <- required(args, "schema")
+          table    <- required(args, "table")
+          _        <-
+            if long(args, "from_snapshot").isDefined then
+              Left("from_snapshot is for admins; a regular user recovers the last live version")
+            else Right(())
+        yield (database, schema, table)) match
+          case Left(err)                        => IO.pure(Left(err))
+          case Right((database, schema, table)) =>
+            undropH
+              .undropMine(
+                ProfileUndropRequest(database, schema, table, str(args, "as_name")),
+                keyOf(principal)
+              )
+              .map(res => bridge(res).map(_.asJson))
+      else
+        (for
+          tenant   <- tenantOf(principal, args)
+          database <- required(args, "database")
+          schema   <- required(args, "schema")
+          table    <- required(args, "table")
+        yield (tenant, database, schema, table)) match
+          case Left(err)                                => IO.pure(Left(err))
+          case Right((tenant, database, schema, table)) =>
+            undropH
+              .undrop(
+                UndropRequest(
+                  tenant = tenant,
+                  tenantDb = database,
+                  schema = schema,
+                  table = table,
+                  asName = str(args, "as_name"),
+                  fromSnapshot = long(args, "from_snapshot")
+                ),
+                keyOf(principal)
+              )(scopeOf)
+              .map(res => bridge(res).map(_.asJson))
   )
 
   private val listRecoverableTool = McpToolDef(
     name = "list_recoverable",
-    description = "List dropped tables still recoverable via undrop_table.",
+    description = "List dropped tables still recoverable via undrop_table. A regular user sees " +
+      "those of their own tenant they may recover: the name is free and their grants cover it.",
     inputSchema = objectSchema(
       required = List("database"),
       props = "database" -> strProp("Database (tenant-db) name."),
       "limit" -> intProp("Max entries."),
       tenantProp
     ),
-    adminOnly = true,
+    adminOnly = false,
     run = (principal, args) =>
-      (for
-        tenant   <- tenantOf(principal, args)
-        database <- required(args, "database")
-      yield (tenant, database)) match
-        case Left(err)                 => IO.pure(Left(err))
-        case Right((tenant, database)) =>
-          undropH
-            .recoverable(tenant, database, int(args, "limit"), keyOf(principal))(scopeOf)
-            .map(res => bridge(res).map(_.asJson))
+      if !principal.isAdmin then
+        required(args, "database") match
+          case Left(err)       => IO.pure(Left(err))
+          case Right(database) =>
+            undropH
+              .recoverableMine(database, int(args, "limit"), keyOf(principal))
+              .map(res => bridge(res).map(_.asJson))
+      else
+        (for
+          tenant   <- tenantOf(principal, args)
+          database <- required(args, "database")
+        yield (tenant, database)) match
+          case Left(err)                 => IO.pure(Left(err))
+          case Right((tenant, database)) =>
+            undropH
+              .recoverable(tenant, database, int(args, "limit"), keyOf(principal))(scopeOf)
+              .map(res => bridge(res).map(_.asJson))
   )
 
   // ---------- federation ----------
