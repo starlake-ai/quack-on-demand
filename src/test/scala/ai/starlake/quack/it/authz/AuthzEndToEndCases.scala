@@ -2308,7 +2308,20 @@ abstract class AuthzEndToEndCases(
       yield
         val cols = if view == "views" then "table_name, view_definition" else "table_name"
         s"SELECT table_catalog, $cols FROM information_schema$comment.$view " +
-          "WHERE table_name ^@ ''")
+          "WHERE table_name ^@ ''") ++ List(
+        // Re-review C1-b: DuckDB's SHOW family binds PragmaShowTables over the listing functions.
+        "SHOW",
+        "DESCRIBE",
+        "DESC",
+        s"SHOW TABLES FROM $lake.main",
+        "SHOW TABLES FROM main",
+        "SELECT * FROM (SHOW ALL TABLES)",
+        "SELECT * FROM (SHOW)",
+        "SELECT * FROM (SHOW TABLES FROM main)",
+        "WITH x AS (DESCRIBE) SELECT * FROM x",
+        "SELECT * FROM query('SHOW ALL TABLES')",
+        "SELECT * FROM query('DESCRIBE')"
+      )
     // The superuser's probe sees what olga must not, so a refusal or an empty answer is sound.
     admin("lake", "SELECT viewname, definition FROM pg_catalog.pg_views")
       .exists(_.contains(marker)) shouldBe true
@@ -2347,6 +2360,27 @@ abstract class AuthzEndToEndCases(
           s"SELECT table_name FROM duckdb_tables() " +
             s"WHERE database_name = '$lake' ORDER BY 1"
         ) shouldBe Right(List("events"))
+      }
+    }
+  }
+
+  it should "keep SHOW TABLES and SHOW ALL TABLES for every tenant user, filtered to their grants" in {
+    ready()
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        as(d, "olga", "lake", "SHOW TABLES") shouldBe Right(List("events"))
+        val all = as(d, "olga", "lake", "SHOW ALL TABLES")
+        all shouldBe a[Right[?, ?]]
+        all.toOption.get.map(_.split(',').take(3).mkString(",")) shouldBe List(s"$lake,main,events")
+        // A wildcard-ALL principal, whose listings the filter leaves whole, keeps both forms.
+        val bobs = as(d, "bob", "lake", "SHOW TABLES")
+        bobs shouldBe a[Right[?, ?]]
+        bobs.toOption.get should contain allOf ("events", "orders", "secret")
+        as(d, "bob", "lake", "SHOW ALL TABLES") shouldBe a[Right[?, ?]]
+        // DESCRIBE of a granted table still answers; of an ungranted one the node refuses.
+        as(d, "olga", "lake", "DESCRIBE events").map(_.map(_.split(',').head)) shouldBe
+          Right(List("id", "v"))
+        as(d, "olga", "lake", "DESCRIBE secret") shouldBe a[Left[?, ?]]
       }
     }
   }

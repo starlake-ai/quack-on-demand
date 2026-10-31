@@ -640,11 +640,6 @@ final class FlightSqlRouter(
             sql,
             supervisor.get(poolKey).flatMap(FlightSqlRouter.sessionPath),
             name => ai.starlake.quack.edge.authz.SettingClasses.of(name).isDefined,
-            // The listing rewrites stand on the metadata filter narrowing them; without it the
-            // node's own SHOW TABLES runs as before.
-            listingsNarrowed = effectiveSet.exists(eff =>
-              metadataFilterRewriter.narrows(eff, metadataSchemaContext(poolKey))
-            ),
             attachedCatalogs = attachedCatalogsOf(poolKey)
           )
         )
@@ -883,15 +878,6 @@ final class FlightSqlRouter(
     (
       maybeState.flatMap(_.defaultDatabase).orElse(perKindDb),
       maybeState.flatMap(_.defaultSchema).orElse(perKindSchema)
-    )
-
-  /** The context the metadata filter judges `poolKey`'s statements in. */
-  private def metadataSchemaContext(poolKey: PoolKey): ai.starlake.quack.edge.cls.SchemaContext =
-    val (db, schema) = defaultsOf(poolKey)
-    ai.starlake.quack.edge.cls.SchemaContext(
-      defaultDatabase = db,
-      defaultSchema = schema,
-      attachedCatalogs = attachedCatalogsOf(poolKey)
     )
 
   /** The router session of `connectionId`, opened (and announced, unless `recordExecution` is

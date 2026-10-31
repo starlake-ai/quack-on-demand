@@ -28,10 +28,11 @@ import java.util.Locale
   * `<catalog>.s.t`, so the EXISTS read and the listing's WHERE always name the same object; a
   * two-part name whose head names a catalog (the session's or an attached one, which DuckDB may
   * bind catalog-first) is left unchanged rather than guessed. SHOW TABLES and SHOW ALL TABLES are
-  * rewritten only when the metadata filter narrows the principal's listings (`listingsNarrowed`),
-  * the reason they are rewritten at all; otherwise the node's own SHOW TABLES runs as before. The
-  * WHERE compares names in lower case, as DuckDB's catalog does (and as its own SHOW TABLES query
-  * does, pragma_queries.cpp).
+  * rewritten for every tenant principal: the node refuses its own (DuckDB's lists every attached
+  * catalog, re-review C1-b), and the rewrite's listings go through the metadata filter, which
+  * narrows them for a principal it narrows and leaves them whole for one it does not. The WHERE
+  * compares names in lower case, as DuckDB's catalog does (and as its own SHOW TABLES query does,
+  * pragma_queries.cpp).
   */
 private[quack] object RefusedForms:
 
@@ -60,7 +61,6 @@ private[quack] object RefusedForms:
       sql: String,
       session: Option[SessionPath],
       isSetting: String => Boolean,
-      listingsNarrowed: Boolean = true,
       attachedCatalogs: Set[String] = Set.empty
   ): Option[Form] =
     val path = session.map(p => p.copy(catalogs = (attachedCatalogs + p.catalog).map(lower)))
@@ -80,9 +80,9 @@ private[quack] object RefusedForms:
         case Some("show") =>
           r.word(1) match
             case Some("tables") if toks.length == 2 =>
-              path.filter(_ => listingsNarrowed).map(p => Form.Rewritten(showTables(p)))
+              path.map(p => Form.Rewritten(showTables(p)))
             case Some("all") if toks.length == 3 && r.word(2).contains("tables") =>
-              path.filter(_ => listingsNarrowed).map(p => Form.Rewritten(showAllTables(p)))
+              path.map(p => Form.Rewritten(showAllTables(p)))
             case _ =>
               // SHOW <name> of a table (DuckDB's AUTO show_behavior describes a table that
               // exists, else shows a setting); DuckDB's own listing names are left alone.

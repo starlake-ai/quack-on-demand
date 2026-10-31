@@ -332,8 +332,14 @@ int main() {
 	                      "SHOW main.t"}) {
 		Refused(describe, "reserved to superusers", describe);
 	}
-	for (auto listing : {"SHOW TABLES", "SHOW DATABASES", "SHOW ALL TABLES", "SHOW TABLES FROM main", "DESCRIBE"}) {
-		Admitted(listing, 0, listing);
+	// The listing forms bind PragmaShowTables / PragmaShowTablesExpanded over the listing functions, which list
+	// every attached catalog (re-review C1-b): refused anywhere, the gateway rewrites a top-level SHOW TABLES and
+	// SHOW ALL TABLES into the filtered listings.
+	for (auto listing :
+	     {"SHOW TABLES", "SHOW DATABASES", "SHOW SCHEMAS", "SHOW ALL TABLES", "SHOW TABLES FROM main", "DESCRIBE",
+	      "DESC", "SHOW", "SELECT * FROM (SHOW ALL TABLES)", "SELECT * FROM (SHOW)", "WITH x AS (DESCRIBE) SELECT * FROM x",
+	      "SELECT * FROM query('SHOW ALL TABLES')", "SELECT * FROM (SELECT * FROM (SHOW TABLES FROM main))"}) {
+		Refused(listing, "reserved to superusers", listing);
 	}
 	Refused("CONNECT", "CONNECT and DISCONNECT are reserved to superusers", "CONNECT");
 	Refused("DISCONNECT", "CONNECT and DISCONNECT are reserved to superusers", "DISCONNECT");

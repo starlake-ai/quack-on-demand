@@ -1024,13 +1024,17 @@ private:
 		}
 		case TableReferenceType::SHOW_REF: {
 			// DESCRIBE / SUMMARIZE / SHOW <name> bind their target and discard it (bind_showref.cpp): no
-			// plan would show what they read. The listing forms stay.
+			// plan would show what they read. The listing forms (bare SHOW and DESCRIBE, SHOW TABLES, SHOW ALL
+			// TABLES, SHOW TABLES FROM, SHOW SCHEMAS, SHOW DATABASES) bind PragmaShowTables and its kin over the
+			// listing functions, which list every attached catalog (re-review C1-b): refused too, wherever they
+			// sit. The gateway rewrites a top-level SHOW TABLES and SHOW ALL TABLES into the filtered listings.
 			auto type = ref.Cast<ShowRef>().show_type;
-			if (type != ShowType::SHOW_SPECIAL && type != ShowType::SHOW_FROM) {
-				Refuse("DESCRIBE, SHOW and SUMMARIZE of a table or query are reserved to superusers (duckdb_tables() "
-				       "and duckdb_columns() list the same)");
+			if (type == ShowType::SHOW_SPECIAL || type == ShowType::SHOW_FROM) {
+				Refuse("SHOW and DESCRIBE listings are reserved to superusers (they list every attached catalog; "
+				       "duckdb_tables() and information_schema.tables list what you are granted)");
 			}
-			break;
+			Refuse("DESCRIBE, SHOW and SUMMARIZE of a table or query are reserved to superusers (duckdb_tables() "
+			       "and duckdb_columns() list the same)");
 		}
 		case TableReferenceType::EMPTY_FROM:
 			break;

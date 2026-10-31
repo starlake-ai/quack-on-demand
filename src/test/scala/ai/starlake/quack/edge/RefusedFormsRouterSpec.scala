@@ -488,7 +488,9 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     write.detail.get("locations").map(_.length) shouldBe Some(500)
   }
 
-  "SHOW TABLES" should "reach the node as written for a principal the filter does not narrow" in {
+  // Re-review C1-b: the node refuses every SHOW listing to a tenant principal (DuckDB's lists every
+  // attached catalog), so the rewrite runs for one the filter does not narrow too.
+  "SHOW TABLES" should "be rewritten for a principal the filter does not narrow too" in {
     val all = EffectiveSet(
       RbacUser("u-2", Some("acme"), "bob", "user"),
       Nil,
@@ -498,9 +500,9 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     )
     val (router, sent) = setup()
     run(router, "SHOW TABLES", all).isRight shouldBe true
-    sent().last should endWith("SHOW TABLES")
+    sent().last should (include("FROM duckdb_tables()") and not include "SHOW TABLES")
     run(router, "SHOW ALL TABLES", all).isRight shouldBe true
-    sent().last should endWith("SHOW ALL TABLES")
+    sent().last should (include("FROM duckdb_tables() t") and not include "SHOW ALL TABLES")
   }
 
   "a two-part name whose head is a catalog" should "reach the node unchanged" in {
