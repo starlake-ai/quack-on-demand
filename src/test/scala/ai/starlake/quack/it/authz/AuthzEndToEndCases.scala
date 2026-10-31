@@ -37,6 +37,9 @@ import scala.util.Try
   *   - erin (acme): a tenant admin (kind `admin`) with the default memberships;
   *   - olga (acme): role `e2e_one_table` (RO lake events, nothing else), group `qod_all_pools`;
   *   - pete (acme): role `e2e_all_ro` (`*.*.* RO`, nothing named), group `qod_all_pools`;
+  *   - fran (acme): role `e2e_feed` (RO lake `feed_a`, nothing else), group `qod_all_pools`; tess
+  *     (acme): a tenant admin with only that role and group (the REST data diff); mona (acme): role
+  *     `e2e_feed_masked` (RO lake `feed_a` with a mask on its `email`), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -69,6 +72,9 @@ abstract class AuthzEndToEndCases(
   private val ErinPw    = "erin-e2e-pw-1"
   private val OlgaPw    = "olga-e2e-pw-1"
   private val PetePw    = "pete-e2e-pw-1"
+  private val FranPw    = "fran-e2e-pw-1"
+  private val TessPw    = "tess-e2e-pw-1"
+  private val MonaPw    = "mona-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -76,7 +82,10 @@ abstract class AuthzEndToEndCases(
     "dave"  -> DavePw,
     "erin"  -> ErinPw,
     "olga"  -> OlgaPw,
-    "pete"  -> PetePw
+    "pete"  -> PetePw,
+    "fran"  -> FranPw,
+    "tess"  -> TessPw,
+    "mona"  -> MonaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -363,6 +372,41 @@ abstract class AuthzEndToEndCases(
         "groups"   -> Json.arr(s("qod_all_pools"))
       )
     )
+    // DuckLake's change feed: RO on lake feed_a alone, as a user, as a tenant admin (the REST data
+    // diff) and under a mask on its email.
+    val feed = createRole("e2e_feed")
+    grant(lake, "main", "feed_a", "RO", feed)
+    val feedMasked = createRole("e2e_feed_masked")
+    grant(lake, "main", "feed_a", "RO", feedMasked)
+    stack.post(
+      "/api/role/column-policy/create",
+      obj(
+        "roleId"       -> s(feedMasked),
+        "catalogName"  -> s(lake),
+        "schemaName"   -> s("main"),
+        "tableName"    -> s("feed_a"),
+        "columnName"   -> s("email"),
+        "action"       -> s("mask"),
+        "transformSql" -> s("'***'")
+      )
+    )
+    List(
+      ("fran", FranPw, "user", "e2e_feed"),
+      ("tess", TessPw, "admin", "e2e_feed"),
+      ("mona", MonaPw, "user", "e2e_feed_masked")
+    ).foreach { (user, pw, kind, role) =>
+      stack.post(
+        "/api/user/create",
+        obj(
+          "tenant"   -> s(Acme),
+          "username" -> s(user),
+          "password" -> s(pw),
+          "kind"     -> s(kind),
+          "roles"    -> Json.arr(s(role)),
+          "groups"   -> Json.arr(s("qod_all_pools"))
+        )
+      )
+    }
     // A tenant admin, with the default memberships: no superuser on the node (decision 29).
     stack.post(
       "/api/user/create",
@@ -1851,6 +1895,114 @@ abstract class AuthzEndToEndCases(
     finally admin("lake", s"DROP VIEW IF EXISTS $view")
     // The data tables stay readable with an ordinary grant.
     allowed("alice", "lake", s"SELECT count(*) FROM $lake.main.orders", Some(List("10")))
+  }
+
+  // ---------- DuckLake's change feed: the data diff and the branch change counts ----------
+
+  /** feed_a and feed_b on the lake, and the snapshot range `(from, to]` of their writes: three rows
+    * inserted into feed_a, one updated, one deleted; one row inserted into feed_b. Written once by
+    * the superuser.
+    */
+  private lazy val feedRange: (Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.feed_a (id INTEGER, v VARCHAR, email VARCHAR)")
+    admin("lake", s"CREATE TABLE $lake.main.feed_b (id INTEGER, v VARCHAR)")
+    val from = head()
+    admin(
+      "lake",
+      s"INSERT INTO $lake.main.feed_a VALUES (1, 'a', 'a@x.io'), (2, 'b', 'b@x.io'), " +
+        "(3, 'c', 'c@x.io')"
+    )
+    admin("lake", s"UPDATE $lake.main.feed_a SET v = 'B' WHERE id = 2")
+    admin("lake", s"DELETE FROM $lake.main.feed_a WHERE id = 3")
+    admin("lake", s"INSERT INTO $lake.main.feed_b VALUES (9, 'z')")
+    (from, head())
+
+  /** The data diff's and the branch change counter's statement (DataDiffSql.summarySql). */
+  private def feedSummary(table: String): String =
+    val (from, to) = feedRange
+    ai.starlake.quack.ondemand.api.DataDiffSql.summarySql(lake, "main", table, from, to)
+
+  /** The data diff's page statement's shape, over its own change feed call. */
+  private def feedPage(table: String, columns: String = "change_type, id, v"): String =
+    val (from, to) = feedRange
+    s"SELECT $columns FROM " +
+      ai.starlake.quack.ondemand.api.DataDiffSql.diffFn(lake, "main", table, from, to) +
+      " ORDER BY snapshot_id, rowid, change_type"
+
+  private def restDataDiff(user: String, table: String): (Int, String) =
+    val (from, to) = feedRange
+    stack.getStatus(
+      s"/api/catalog/tenant/$Acme/database/$lake/schemas/main/tables/$table/data-diff" +
+        s"?from=$from&to=$to",
+      session(user)
+    )
+
+  "DuckLake's change feed" should "give a user the data diff and change counts of a table they may read" in {
+    ready()
+    // The superuser's answer, the reference: three inserts, one update (pre and post), one delete.
+    val counts = admin("lake", feedSummary("feed_a")).sorted
+    counts shouldBe List("delete,1", "insert,3", "update_postimage,1", "update_preimage,1")
+    doors.foreach { d =>
+      withClue(s"[$d] fran: the counts of feed_a -> ") {
+        as(d, "fran", "lake", feedSummary("feed_a")).map(_.sorted) shouldBe Right(counts)
+      }
+    }
+    allowed("fran", "lake", feedPage("feed_a"), Some(admin("lake", feedPage("feed_a"))))
+    // The REST data diff runs the same statements as its caller: a tenant admin holding only
+    // feed_a's grant gets feed_a's.
+    val (code, body) = restDataDiff("tess", "feed_a")
+    withClue(body)(code shouldBe 200)
+    val summary = io.circe.parser.parse(body).toOption.get.hcursor.downField("summary")
+    summary.get[Long]("inserted") shouldBe Right(3L)
+    summary.get[Long]("deleted") shouldBe Right(1L)
+    summary.get[Long]("updated") shouldBe Right(1L)
+  }
+
+  it should "refuse a table the user holds no grant on, and a table named by anything but literals" in {
+    ready()
+    admin("lake", feedSummary("feed_b")) shouldBe List("insert,1")
+    refused("fran", "lake", feedSummary("feed_b"), node = s"lacks grants on $lake.main.feed_b:read")
+    refused("fran", "lake", feedPage("feed_b"), node = s"lacks grants on $lake.main.feed_b:read")
+    val (from, to) = feedRange
+    List(
+      s"SELECT count(*) FROM ducklake_table_changes('$lake', 'main', 'feed_' || 'a', $from, $to)",
+      s"SELECT count(*) FROM ducklake_table_insertions('$lake', lower('MAIN'), 'feed_a', $from, $to)",
+      s"SELECT count(*) FROM ducklake_table_deletions(current_database(), 'main', 'feed_a', $from, $to)"
+    ).foreach(sql => refused("fran", "lake", sql, node = "as literals"))
+    // DuckLake's per-schema macro and the rest of its family stay the superusers'.
+    refused("fran", "lake", s"SELECT count(*) FROM $lake.table_changes('feed_a', $from, $to)")
+    refused("fran", "lake", s"SELECT * FROM ducklake_table_info('$lake')")
+    val (code, body) = restDataDiff("tess", "feed_b")
+    withClue(body)(code should not be 200)
+    body should include(s"lacks grants on $lake.main.feed_b:read")
+  }
+
+  it should "never hand a user under a mask unmasked change data" in {
+    ready()
+    feedRange
+    // The mask holds on a plain read of feed_a.
+    allowed("mona", "lake", s"SELECT email FROM $lake.main.feed_a WHERE id = 1", Some(List("***")))
+    // The change rows are no relation the policy rewriters can mask: refused to her before the
+    // node, whatever columns the statement names.
+    List(
+      feedSummary("feed_a"),
+      feedPage("feed_a", "email"),
+      feedPage("feed_a", "*"),
+      s"SELECT email FROM ducklake_table_insertions('$lake', 'main', 'feed_a', ${feedRange._1}, " +
+        s"${feedRange._2})"
+    ).foreach { sql =>
+      doors.foreach { d =>
+        withClue(s"[$d] mona: $sql -> ") {
+          as(d, "mona", "lake", sql) match
+            case Left(err) =>
+              err should include("ducklake_table_")
+              err should include("not available to tenant-scoped principals")
+            case Right(rows) => fail(s"expected a refusal, got rows $rows")
+        }
+      }
+    }
   }
 
   "DuckLake maintenance, CHECKPOINT and option setting" should "be the superusers'" in {
