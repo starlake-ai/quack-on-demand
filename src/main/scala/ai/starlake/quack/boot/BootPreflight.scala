@@ -22,34 +22,37 @@ import javax.sql.DataSource
   */
 object BootPreflight extends LazyLogging:
 
-  /** The refusal for a removed static API key, verbatim in the boot error. */
-  val RemovedApiKeyMessage: String =
-    "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static " +
-      "API key. Use a personal access token (qod auth pat create) or a qod login session, and " +
-      "unset QOD_API_KEY."
+  /** Printed (stderr) when a static API key is still set: the manager ignores it. */
+  val IgnoredApiKeyWarning: String =
+    "WARNING: QOD_API_KEY (quack-on-demand.apiKey) was removed and is ignored: the manager no " +
+      "longer accepts a static API key, so clients sending it are refused. Use a personal access " +
+      "token (qod auth pat create) or a qod login session, and unset QOD_API_KEY."
 
-  /** Pure gate: the static API key was removed. Refuses when the environment holds a non-empty
-    * (after trimming) `QOD_API_KEY`, or when the loaded configuration holds a non-empty
-    * `quack-on-demand.apiKey` (an operator's own config file, or a `-D` system property). An empty
-    * value passes: older Compose files render `API_KEY=` as one. Both are read directly because,
-    * with the field gone, pureconfig would ignore the key silently and the manager would boot
-    * without the credential its operator relies on. `Main.bootManager` runs it first, before HA
-    * validation and before any I/O.
-    */
-  def checkRemovedApiKey(
-      env: String => Option[String],
-      raw: com.typesafe.config.Config
-  ): Either[String, Unit] =
-    val path     = "quack-on-demand.apiKey"
-    val inEnv    = env("QOD_API_KEY").exists(_.trim.nonEmpty)
-    val inConfig = raw.hasPath(path) && raw.getValue(path).unwrapped().toString.trim.nonEmpty
-    if inEnv || inConfig then Left(RemovedApiKeyMessage) else Right(())
+  /** Printed (stderr) when the authorization switch is set to anything but off. */
+  val IgnoredAclEnabledWarning: String =
+    "WARNING: QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed and is ignored: qod-node " +
+      "checks every statement against the grants (or the tenant's OPA) regardless of this " +
+      "setting. Unset QOD_ACL_ENABLED."
 
-  /** The refusal for the removed SQL ACL switch, verbatim in the boot error. */
-  val RemovedAclEnabledMessage: String =
-    "QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed: qod-node now checks every " +
-      "statement against the grants (or the tenant's OPA) always, and nothing switches that " +
-      "off. Unset QOD_ACL_ENABLED."
+  /** The refusal for an authorization switch set to off, verbatim in the boot error. */
+  val DisabledAclRefusal: String =
+    "QOD_ACL_ENABLED=false (quack-flightsql.acl.enabled) cannot be honored: the setting was " +
+      "removed and qod-node now checks every statement against the grants (or the tenant's OPA) " +
+      "always, so authorization cannot be turned off. Unset QOD_ACL_ENABLED."
+
+  /** Printed (stderr) when the lockdown switch is set to anything but off. */
+  val IgnoredNodeLockdownWarning: String =
+    "WARNING: QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed and is ignored: " +
+      "qod-node refuses ATTACH, INSTALL, LOAD, protected settings and unauthorized files to " +
+      "non-superusers on every pool regardless of this setting. Unset QOD_NODE_LOCKDOWN."
+
+  /** The refusal for a lockdown switch set to off, verbatim in the boot error. */
+  val DisabledNodeLockdownRefusal: String =
+    "QOD_NODE_LOCKDOWN=false (quack-flightsql.nodeLockdown) cannot be honored: the setting was " +
+      "removed and qod-node now refuses ATTACH, INSTALL, LOAD, protected settings and " +
+      "unauthorized files to non-superusers on every pool, always, so lockdown cannot be turned " +
+      "off; the extension settings follow quack-on-demand.nodeExtensions. Unset " +
+      "QOD_NODE_LOCKDOWN."
 
   /** The refusal for the removed metadata filter switch, verbatim in the boot error. */
   val RemovedAclFilteredMetadataMessage: String =
@@ -63,43 +66,114 @@ object BootPreflight extends LazyLogging:
     "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
       "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
 
-  /** The refusal for the removed node lockdown switch, verbatim in the boot error. */
-  val RemovedNodeLockdownMessage: String =
-    "QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed: qod-node now refuses ATTACH, " +
-      "INSTALL, LOAD, protected settings and unauthorized files to non-superusers on every pool, " +
-      "always, and the extension settings follow quack-on-demand.nodeExtensions. Unset " +
-      "QOD_NODE_LOCKDOWN."
+  /** Printed (stderr) when the admin kind is still set under its old name. */
+  val IgnoredAdminRoleWarning: String =
+    "WARNING: QOD_ADMIN_ROLE (quack-on-demand.admin.role) was renamed QOD_ADMIN_KIND " +
+      "(quack-on-demand.admin.kind) and is ignored. It only sets the account kind of an admin " +
+      "created on first boot. Set QOD_ADMIN_KIND instead and unset QOD_ADMIN_ROLE."
 
-  /** A removed enforcement switch: its environment variable, its configuration path, the refusal.
+  /** How a value of a retired switch reads: HOCON's spellings of false. */
+  private val Off: Set[String] = Set("false", "no", "off")
+
+  /** A retired setting and what its value asks at boot: `judge` gets the raw value (an empty string
+    * for an empty variable or a configuration block with no scalar to read) and answers
+    * Left(refusal) or Right(Some(warning)) / Right(None) for a value that asks nothing.
     */
-  private final case class RemovedSwitch(envVar: String, path: String, message: String)
-
-  private val RemovedSwitches: List[RemovedSwitch] = List(
-    RemovedSwitch("QOD_ACL_ENABLED", "quack-flightsql.acl.enabled", RemovedAclEnabledMessage),
-    RemovedSwitch(
-      "QOD_ACL_FILTERED_METADATA",
-      "quack-flightsql.acl.filteredMetadata",
-      RemovedAclFilteredMetadataMessage
-    ),
-    RemovedSwitch("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", RemovedAclDialectMessage),
-    RemovedSwitch("QOD_NODE_LOCKDOWN", "quack-flightsql.nodeLockdown", RemovedNodeLockdownMessage)
+  private final case class Retired(
+      envVar: String,
+      paths: List[String],
+      judge: String => Either[String, Option[String]]
   )
 
-  /** Pure gate (Phase D decisions 28 and 31): the switches the node made obsolete. Refuses when the
-    * environment holds one's variable at all, whatever its value, the empty string included, or
-    * when the loaded configuration holds its path (an operator's own config file, or a `-D` system
-    * property): with the `quack-flightsql.acl` and `quack-flightsql.nodeLockdown` blocks gone,
-    * pureconfig would ignore either silently, and an operator who turned enforcement or the listing
-    * filter off, or lockdown on, would believe it still so. The first switch found wins.
-    * `Main.bootManager` runs it right after [[checkRemovedApiKey]], before any I/O.
+  private def refused(message: String): String => Either[String, Option[String]] =
+    _ => Left(message)
+
+  /** Warned whenever set, an empty value included. */
+  private def warned(message: String): String => Either[String, Option[String]] =
+    _ => Right(Some(message))
+
+  /** Warned when set to a non-blank value: an empty one is tolerated silently (older Compose files
+    * render `API_KEY=` as one).
     */
-  def checkRemovedSwitches(
+  private def warnedIfNonBlank(message: String): String => Either[String, Option[String]] =
+    v => Right(Option.when(v.trim.nonEmpty)(message))
+
+  /** Refused when the setting asks for enforcement off; any other value is ignored, warned. */
+  private def refusedWhenOff(
+      refusal: String,
+      warning: String
+  ): String => Either[String, Option[String]] =
+    v =>
+      if Off.contains(v.trim.toLowerCase(Locale.ROOT)) then Left(refusal) else Right(Some(warning))
+
+  private val RetiredSettings: List[Retired] = List(
+    Retired("QOD_API_KEY", List("quack-on-demand.apiKey"), warnedIfNonBlank(IgnoredApiKeyWarning)),
+    Retired(
+      "QOD_ACL_ENABLED",
+      List("quack-flightsql.acl.enabled"),
+      refusedWhenOff(DisabledAclRefusal, IgnoredAclEnabledWarning)
+    ),
+    Retired(
+      "QOD_NODE_LOCKDOWN",
+      // The released shape was a block, `nodeLockdown { enabled = .. }`; a bare
+      // `nodeLockdown = ..` reads the same.
+      List("quack-flightsql.nodeLockdown.enabled", "quack-flightsql.nodeLockdown"),
+      refusedWhenOff(DisabledNodeLockdownRefusal, IgnoredNodeLockdownWarning)
+    ),
+    Retired(
+      "QOD_ACL_FILTERED_METADATA",
+      List("quack-flightsql.acl.filteredMetadata"),
+      refused(RemovedAclFilteredMetadataMessage)
+    ),
+    Retired(
+      "QOD_ACL_DIALECT",
+      List("quack-flightsql.acl.dialect"),
+      refused(RemovedAclDialectMessage)
+    ),
+    Retired(
+      "QOD_ADMIN_ROLE",
+      List("quack-on-demand.admin.role"),
+      warnedIfNonBlank(IgnoredAdminRoleWarning)
+    )
+  )
+
+  /** The value at `path` as a judge reads it: the scalar's text, or an empty string for a null or a
+    * block. None when the path is absent, or runs through a scalar (`nodeLockdown = true` has no
+    * `nodeLockdown.enabled`).
+    */
+  private def configValue(raw: com.typesafe.config.Config, path: String): Option[String] =
+    scala.util.Try(raw.hasPathOrNull(path)).toOption.filter(identity).map { _ =>
+      if raw.getIsNull(path) then ""
+      else
+        raw.getValue(path) match
+          case _: com.typesafe.config.ConfigObject => ""
+          case v                                   => v.unwrapped().toString
+    }
+
+  /** Pure gate over the settings a release removed or renamed (the static API key, the enforcement
+    * switches the node made obsolete, the admin kind's old name). Each is read from its environment
+    * variable when that is set at all (it overrides the configuration, as `${?VAR}` did), else from
+    * its configuration path (an operator's own config file, or a `-D` system property): with the
+    * fields gone pureconfig would ignore either silently. Left(refusal) for the first setting that
+    * asks for something the manager cannot do (enforcement off, a listing filter or dialect knob
+    * that no longer exists), else Right(warnings), in list order, for the ones it ignores.
+    * `Main.bootManager` runs it first, before any I/O, and prints each warning to stderr: the
+    * default log level is ERROR, so the logger would swallow them.
+    */
+  def checkRetiredSettings(
       env: String => Option[String],
       raw: com.typesafe.config.Config
-  ): Either[String, Unit] =
-    RemovedSwitches
-      .find(s => env(s.envVar).isDefined || raw.hasPathOrNull(s.path))
-      .fold[Either[String, Unit]](Right(()))(s => Left(s.message))
+  ): Either[String, List[String]] =
+    val verdicts = RetiredSettings.flatMap { r =>
+      env(r.envVar)
+        .orElse(r.paths.iterator.map(configValue(raw, _)).collectFirst { case Some(v) =>
+          v
+        })
+        .map(r.judge)
+    }
+    verdicts.collectFirst { case Left(refusal) => refusal } match
+      case Some(refusal) => Left(refusal)
+      case None          => Right(verdicts.collect { case Right(Some(warning)) => warning })
 
   /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
   val NoEdgeAuthMessage: String =

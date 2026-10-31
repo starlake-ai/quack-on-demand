@@ -17,9 +17,12 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import pureconfig.ConfigSource
 
-/** The boot refusals of the static API key removal:
-  *   - a non-empty `QOD_API_KEY` (environment) or `quack-on-demand.apiKey` (loaded configuration)
-  *     stops the boot with the removal message, before HA validation; an empty value passes;
+/** The boot gates around removed settings and authentication:
+  *   - the retired settings (`BootPreflight.checkRetiredSettings`): a switch set to off that the
+  *     node now enforces always (`QOD_ACL_ENABLED`, `QOD_NODE_LOCKDOWN`) and a removed knob
+  *     (`QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT`) stop the boot before HA validation; the
+  *     ignored ones (`QOD_API_KEY`, `QOD_ADMIN_ROLE`, the switches set to anything but off) boot
+  *     with a warning;
   *   - a FlightSQL edge with no authenticator at all (the handshake would refuse every client)
   *     stops the boot, also before HA validation;
   *   - a manager nobody can sign in to (no password provider and no system-scope OIDC sign-in, as
@@ -31,33 +34,31 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   private val noEnv: String => Option[String]             = _ => None
   private def keyEnv(v: String): String => Option[String] = Map("QOD_API_KEY" -> v).get
 
-  "checkRemovedApiKey" should "refuse a non-empty QOD_API_KEY in the environment" in {
-    BootPreflight.checkRemovedApiKey(keyEnv("k1"), ConfigFactory.empty()) shouldBe
-      Left(BootPreflight.RemovedApiKeyMessage)
-  }
-
-  it should "refuse a non-empty quack-on-demand.apiKey in the loaded configuration" in {
+  "checkRetiredSettings" should "warn, not refuse, a non-blank QOD_API_KEY or quack-on-demand.apiKey" in {
+    BootPreflight.checkRetiredSettings(keyEnv("k1"), ConfigFactory.empty()) shouldBe
+      Right(List(BootPreflight.IgnoredApiKeyWarning))
     val raw = ConfigFactory.parseString("quack-on-demand.apiKey = \"k1\"")
-    BootPreflight.checkRemovedApiKey(noEnv, raw) shouldBe Left(BootPreflight.RemovedApiKeyMessage)
+    BootPreflight.checkRetiredSettings(noEnv, raw) shouldBe
+      Right(List(BootPreflight.IgnoredApiKeyWarning))
   }
 
-  it should "accept an empty or blank value, and an absent one" in {
-    BootPreflight.checkRemovedApiKey(keyEnv(""), ConfigFactory.empty()) shouldBe Right(())
-    BootPreflight.checkRemovedApiKey(keyEnv("   "), ConfigFactory.empty()) shouldBe Right(())
+  it should "pass an empty or blank key, and an absent one, silently" in {
+    BootPreflight.checkRetiredSettings(keyEnv(""), ConfigFactory.empty()) shouldBe Right(Nil)
+    BootPreflight.checkRetiredSettings(keyEnv("   "), ConfigFactory.empty()) shouldBe Right(Nil)
     val blank = ConfigFactory.parseString("quack-on-demand.apiKey = \" \"")
-    BootPreflight.checkRemovedApiKey(noEnv, blank) shouldBe Right(())
-    BootPreflight.checkRemovedApiKey(noEnv, ConfigFactory.empty()) shouldBe Right(())
+    BootPreflight.checkRetiredSettings(noEnv, blank) shouldBe Right(Nil)
+    BootPreflight.checkRetiredSettings(noEnv, ConfigFactory.empty()) shouldBe Right(Nil)
   }
 
-  it should "carry the removal message verbatim" in {
-    BootPreflight.RemovedApiKeyMessage shouldBe
-      "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static " +
-      "API key. Use a personal access token (qod auth pat create) or a qod login session, and " +
-      "unset QOD_API_KEY."
+  it should "carry the ignored-key warning verbatim" in {
+    BootPreflight.IgnoredApiKeyWarning shouldBe
+      "WARNING: QOD_API_KEY (quack-on-demand.apiKey) was removed and is ignored: the manager no " +
+      "longer accepts a static API key, so clients sending it are refused. Use a personal access " +
+      "token (qod auth pat create) or a qod login session, and unset QOD_API_KEY."
   }
 
   /** Boots with HA on over the local runtime, which HA validation always refuses: a boot that gets
-    * past the removed-key refusal stops there, before it opens any socket or reaches Postgres (no
+    * past the retired-setting gate stops there, before it opens any socket or reaches Postgres (no
     * probe, no Liquibase).
     */
   private def bootUntilHaRefusal(env: String => Option[String], authOverlay: String = ""): Unit =
@@ -85,9 +86,9 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
     )
     ()
 
-  "Main.bootManager" should "refuse a set QOD_API_KEY before HA validation" in {
+  "Main.bootManager" should "go on to HA validation with a set QOD_API_KEY, warning only" in {
     val err = intercept[RuntimeException](bootUntilHaRefusal(keyEnv("k1")))
-    err.getMessage shouldBe BootPreflight.RemovedApiKeyMessage
+    err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
   }
 
   it should "go on to HA validation with an empty QOD_API_KEY" in {
@@ -314,58 +315,166 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
 
   private def switchEnv(name: String, v: String): String => Option[String] = Map(name -> v).get
 
-  /** Every removed enforcement switch: its environment variable, its configuration path, and the
-    * refusal naming the variable to unset.
+  /** The switches the node now enforces always: the variable, every configuration spelling, the
+    * refusal for off and the warning for anything else.
     */
-  private val removedSwitches = List(
-    ("QOD_ACL_ENABLED", "quack-flightsql.acl.enabled", BootPreflight.RemovedAclEnabledMessage),
+  private val enforcedSwitches = List(
+    (
+      "QOD_ACL_ENABLED",
+      List("quack-flightsql.acl.enabled = %s"),
+      BootPreflight.DisabledAclRefusal,
+      BootPreflight.IgnoredAclEnabledWarning
+    ),
+    (
+      "QOD_NODE_LOCKDOWN",
+      List("quack-flightsql.nodeLockdown { enabled = %s }", "quack-flightsql.nodeLockdown = %s"),
+      BootPreflight.DisabledNodeLockdownRefusal,
+      BootPreflight.IgnoredNodeLockdownWarning
+    )
+  )
+
+  /** The knobs that no longer exist: refused whatever their value. */
+  private val removedKnobs = List(
     (
       "QOD_ACL_FILTERED_METADATA",
       "quack-flightsql.acl.filteredMetadata",
       BootPreflight.RemovedAclFilteredMetadataMessage
     ),
-    ("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", BootPreflight.RemovedAclDialectMessage),
-    (
-      "QOD_NODE_LOCKDOWN",
-      "quack-flightsql.nodeLockdown",
-      BootPreflight.RemovedNodeLockdownMessage
-    )
+    ("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", BootPreflight.RemovedAclDialectMessage)
   )
 
-  "checkRemovedSwitches" should "refuse each removed variable set to any value, empty included" in {
-    for (name, _, message) <- removedSwitches; v <- List("true", "false", "duckdb", "", "  ") do
+  "checkRetiredSettings" should "refuse an enforced switch set to off, in any spelling" in {
+    for (name, paths, refusal, _) <- enforcedSwitches; v <- List("false", "FALSE", " no ", "off") do
       withClue(s"$name='$v' ")(
-        BootPreflight.checkRemovedSwitches(switchEnv(name, v), ConfigFactory.empty()) shouldBe
+        BootPreflight.checkRetiredSettings(switchEnv(name, v), ConfigFactory.empty()) shouldBe
+          Left(refusal)
+      )
+      for p <- paths do
+        withClue(s"${p.format(v.trim)} ")(
+          BootPreflight.checkRetiredSettings(
+            noEnv,
+            ConfigFactory.parseString(p.format(v.trim))
+          ) shouldBe Left(refusal)
+        )
+  }
+
+  it should "boot an enforced switch set to anything but off, warning that it is ignored" in {
+    for (name, paths, _, warning) <- enforcedSwitches; v <- List("true", "yes", "on", "", "  ") do
+      withClue(s"$name='$v' ")(
+        BootPreflight.checkRetiredSettings(switchEnv(name, v), ConfigFactory.empty()) shouldBe
+          Right(List(warning))
+      )
+    for (_, paths, _, warning) <- enforcedSwitches; p <- paths do
+      withClue(s"${p.format("true")} ")(
+        BootPreflight.checkRetiredSettings(
+          noEnv,
+          ConfigFactory.parseString(p.format("true"))
+        ) shouldBe
+          Right(List(warning))
+      )
+  }
+
+  it should "warn on a lockdown block with no enabled key, or a null" in {
+    for body <- List("quack-flightsql.nodeLockdown {}", "quack-flightsql.nodeLockdown = null") do
+      withClue(s"$body ")(
+        BootPreflight.checkRetiredSettings(noEnv, ConfigFactory.parseString(body)) shouldBe
+          Right(List(BootPreflight.IgnoredNodeLockdownWarning))
+      )
+  }
+
+  it should "let the variable override the configuration, as ${?VAR} did" in {
+    val raw = ConfigFactory.parseString("quack-flightsql.acl.enabled = false")
+    BootPreflight.checkRetiredSettings(switchEnv("QOD_ACL_ENABLED", "true"), raw) shouldBe
+      Right(List(BootPreflight.IgnoredAclEnabledWarning))
+  }
+
+  it should "refuse each removed knob set to any value, empty included" in {
+    for (name, path, message) <- removedKnobs; v <- List("true", "false", "duckdb", "", "  ") do
+      withClue(s"$name='$v' ")(
+        BootPreflight.checkRetiredSettings(switchEnv(name, v), ConfigFactory.empty()) shouldBe
+          Left(message)
+      )
+    for (_, path, message) <- removedKnobs; v <- List("true", "false", "duckdb", "null") do
+      withClue(s"$path = $v ")(
+        BootPreflight.checkRetiredSettings(noEnv, ConfigFactory.parseString(s"$path = $v")) shouldBe
           Left(message)
       )
   }
 
-  it should "refuse each removed path in the loaded configuration" in {
-    for (_, path, message) <- removedSwitches; v <- List("true", "false", "duckdb", "null") do
-      withClue(s"$path = $v ")(
-        BootPreflight.checkRemovedSwitches(
-          noEnv,
-          ConfigFactory.parseString(s"$path = $v")
-        ) shouldBe Left(message)
-      )
+  it should "warn on a non-blank QOD_ADMIN_ROLE or quack-on-demand.admin.role, and accept QOD_ADMIN_KIND" in {
+    BootPreflight.checkRetiredSettings(
+      switchEnv("QOD_ADMIN_ROLE", "admin"),
+      ConfigFactory.empty()
+    ) shouldBe
+      Right(List(BootPreflight.IgnoredAdminRoleWarning))
+    BootPreflight.checkRetiredSettings(
+      noEnv,
+      ConfigFactory.parseString("quack-on-demand.admin.role = admin")
+    ) shouldBe Right(List(BootPreflight.IgnoredAdminRoleWarning))
+    BootPreflight.checkRetiredSettings(
+      switchEnv("QOD_ADMIN_ROLE", ""),
+      ConfigFactory.empty()
+    ) shouldBe
+      Right(Nil)
+    BootPreflight.checkRetiredSettings(
+      switchEnv("QOD_ADMIN_KIND", "admin"),
+      ConfigFactory.parseString("quack-on-demand.admin.kind = admin")
+    ) shouldBe Right(Nil)
   }
 
-  it should "accept the bundled configuration and the variables that remain" in {
-    BootPreflight.checkRemovedSwitches(noEnv, ConfigFactory.empty()) shouldBe Right(())
-    // The bundled application.conf must hold no removed key, or every default boot is refused.
-    BootPreflight.checkRemovedSwitches(noEnv, ConfigFactory.load()) shouldBe Right(())
-    // QOD_ACL_MODE (quack-flightsql.opa.defaultMode) picks a tenant's engine: not a removed switch.
-    BootPreflight.checkRemovedSwitches(
+  it should "refuse before warning, and gather every warning in order" in {
+    val both: String => Option[String] =
+      Map("QOD_API_KEY" -> "k1", "QOD_ACL_ENABLED" -> "false").get
+    BootPreflight.checkRetiredSettings(both, ConfigFactory.empty()) shouldBe
+      Left(BootPreflight.DisabledAclRefusal)
+    val many: String => Option[String] =
+      Map("QOD_API_KEY" -> "k1", "QOD_NODE_LOCKDOWN" -> "true", "QOD_ADMIN_ROLE" -> "admin").get
+    BootPreflight.checkRetiredSettings(many, ConfigFactory.empty()) shouldBe Right(
+      List(
+        BootPreflight.IgnoredApiKeyWarning,
+        BootPreflight.IgnoredNodeLockdownWarning,
+        BootPreflight.IgnoredAdminRoleWarning
+      )
+    )
+  }
+
+  it should "pass the bundled configuration and the variables that remain" in {
+    // The bundled application.conf must hold no retired key, or every default boot is refused.
+    BootPreflight.checkRetiredSettings(noEnv, ConfigFactory.load()) shouldBe Right(Nil)
+    // QOD_ACL_MODE (quack-flightsql.opa.defaultMode) picks a tenant's engine: not retired.
+    BootPreflight.checkRetiredSettings(
       switchEnv("QOD_ACL_MODE", "opa"),
       ConfigFactory.parseString("quack-flightsql.opa.defaultMode = opa")
-    ) shouldBe Right(())
+    ) shouldBe Right(Nil)
+    for name <- List(
+        "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS",
+        "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+        "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
+      )
+    do
+      BootPreflight.checkRetiredSettings(switchEnv(name, "true"), ConfigFactory.empty()) shouldBe
+        Right(Nil)
   }
 
-  it should "carry the removal messages verbatim, each naming the variable to unset" in {
-    BootPreflight.RemovedAclEnabledMessage shouldBe
-      "QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed: qod-node now checks every " +
-      "statement against the grants (or the tenant's OPA) always, and nothing switches that " +
-      "off. Unset QOD_ACL_ENABLED."
+  it should "carry the refusals and warnings verbatim, each naming the variable to unset" in {
+    BootPreflight.DisabledAclRefusal shouldBe
+      "QOD_ACL_ENABLED=false (quack-flightsql.acl.enabled) cannot be honored: the setting was " +
+      "removed and qod-node now checks every statement against the grants (or the tenant's OPA) " +
+      "always, so authorization cannot be turned off. Unset QOD_ACL_ENABLED."
+    BootPreflight.IgnoredAclEnabledWarning shouldBe
+      "WARNING: QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed and is ignored: qod-node " +
+      "checks every statement against the grants (or the tenant's OPA) regardless of this " +
+      "setting. Unset QOD_ACL_ENABLED."
+    BootPreflight.DisabledNodeLockdownRefusal shouldBe
+      "QOD_NODE_LOCKDOWN=false (quack-flightsql.nodeLockdown) cannot be honored: the setting was " +
+      "removed and qod-node now refuses ATTACH, INSTALL, LOAD, protected settings and " +
+      "unauthorized files to non-superusers on every pool, always, so lockdown cannot be turned " +
+      "off; the extension settings follow quack-on-demand.nodeExtensions. Unset " +
+      "QOD_NODE_LOCKDOWN."
+    BootPreflight.IgnoredNodeLockdownWarning shouldBe
+      "WARNING: QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed and is ignored: " +
+      "qod-node refuses ATTACH, INSTALL, LOAD, protected settings and unauthorized files to " +
+      "non-superusers on every pool regardless of this setting. Unset QOD_NODE_LOCKDOWN."
     BootPreflight.RemovedAclFilteredMetadataMessage shouldBe
       "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
       "user's catalog listings are narrowed to the objects the user is granted. To give a " +
@@ -374,54 +483,28 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
     BootPreflight.RemovedAclDialectMessage shouldBe
       "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
       "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
+    BootPreflight.IgnoredAdminRoleWarning shouldBe
+      "WARNING: QOD_ADMIN_ROLE (quack-on-demand.admin.role) was renamed QOD_ADMIN_KIND " +
+      "(quack-on-demand.admin.kind) and is ignored. It only sets the account kind of an admin " +
+      "created on first boot. Set QOD_ADMIN_KIND instead and unset QOD_ADMIN_ROLE."
   }
 
-  "Main.bootManager" should "refuse a set removed switch before HA validation" in {
-    for (name, _, message) <- removedSwitches do
+  "Main.bootManager" should "refuse an enforced switch set to off before HA validation" in {
+    for (name, _, refusal, _) <- enforcedSwitches do
+      val err = intercept[RuntimeException](bootUntilHaRefusal(switchEnv(name, "false")))
+      withClue(name)(err.getMessage shouldBe refusal)
+  }
+
+  it should "refuse a removed knob before HA validation" in {
+    for (name, _, message) <- removedKnobs do
       val err = intercept[RuntimeException](bootUntilHaRefusal(switchEnv(name, "true")))
       withClue(name)(err.getMessage shouldBe message)
   }
 
-  it should "refuse QOD_NODE_LOCKDOWN set to any value, empty included" in
-    List("true", "false", "").foreach { v =>
-      withClue(s"QOD_NODE_LOCKDOWN='$v' ")(
-        BootPreflight.checkRemovedSwitches(
-          switchEnv("QOD_NODE_LOCKDOWN", v),
-          ConfigFactory.empty()
-        ) shouldBe
-          Left(BootPreflight.RemovedNodeLockdownMessage)
+  it should "go on to HA validation with an enforced switch set to on, warning only" in {
+    for (name, _, _, _) <- enforcedSwitches do
+      val err = intercept[RuntimeException](bootUntilHaRefusal(switchEnv(name, "true")))
+      withClue(name)(
+        err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
       )
-    }
-
-  it should "refuse the quack-flightsql.nodeLockdown block in the loaded configuration" in
-    List("enabled = true", "enabled = false", "").foreach { body =>
-      val raw = ConfigFactory.parseString(s"quack-flightsql.nodeLockdown { $body }")
-      withClue(s"{ $body } ")(
-        BootPreflight.checkRemovedSwitches(noEnv, raw) shouldBe
-          Left(BootPreflight.RemovedNodeLockdownMessage)
-      )
-    }
-
-  it should "accept the extension policy variables that replaced lockdown's SETs" in
-    List(
-      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS",
-      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
-      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
-    ).foreach { name =>
-      BootPreflight.checkRemovedSwitches(switchEnv(name, "true"), ConfigFactory.empty()) shouldBe
-        Right(())
-    }
-
-  it should "carry the lockdown removal message verbatim" in {
-    BootPreflight.RemovedNodeLockdownMessage shouldBe
-      "QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed: qod-node now refuses ATTACH, " +
-      "INSTALL, LOAD, protected settings and unauthorized files to non-superusers on every pool, " +
-      "always, and the extension settings follow quack-on-demand.nodeExtensions. Unset " +
-      "QOD_NODE_LOCKDOWN."
-  }
-
-  "Main.bootManager" should "refuse a set QOD_NODE_LOCKDOWN before HA validation" in {
-    val err =
-      intercept[RuntimeException](bootUntilHaRefusal(switchEnv("QOD_NODE_LOCKDOWN", "false")))
-    err.getMessage shouldBe BootPreflight.RemovedNodeLockdownMessage
   }

@@ -270,20 +270,20 @@ object Main extends IOApp with LazyLogging:
         * pass one (demo and serve overlays set their system properties before this runs).
         */
       quackCfg: Option[QuackNativeConfig] = None,
-      /** What the removed-key and removed-switch refusals read (`BootPreflight.checkRemovedApiKey`,
-        * `checkRemovedSwitches`): the process environment and the raw configuration. Tests pass
-        * their own.
+      /** What the retired-setting gate reads (`BootPreflight.checkRetiredSettings`): the process
+        * environment and the raw configuration. Tests pass their own.
         */
       env: String => Option[String] = sys.env.get,
       rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
   ): IO[ExitCode] =
-    // The three auth refusals run first, at the top of bootManager, before it opens any socket: they
-    // read the configuration alone. A removed QOD_API_KEY refuses boot before HA validation, so an
-    // upgrade that still sets the key stops with the reason.
-    BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
-    // Then a removed switch (QOD_ACL_ENABLED, QOD_ACL_FILTERED_METADATA, QOD_ACL_DIALECT,
-    // QOD_NODE_LOCKDOWN): the node enforces always and the listing filter is always mounted.
-    BootPreflight.checkRemovedSwitches(env, rawConfig).left.foreach(msg => sys.error(msg))
+    // The retired settings first, at the top of bootManager, before it opens any socket: they read
+    // the configuration alone. One asking for what the manager cannot do (QOD_ACL_ENABLED or
+    // QOD_NODE_LOCKDOWN set to off, QOD_ACL_FILTERED_METADATA, QOD_ACL_DIALECT) refuses boot before
+    // HA validation; the ignored ones (QOD_API_KEY, QOD_ADMIN_ROLE, the switches set to on) are
+    // warned on stderr, which the default ERROR log level cannot swallow.
+    BootPreflight.checkRetiredSettings(env, rawConfig) match
+      case Left(refusal)   => sys.error(refusal)
+      case Right(warnings) => warnings.foreach(w => System.err.println(w))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
