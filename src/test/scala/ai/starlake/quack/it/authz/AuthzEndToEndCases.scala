@@ -44,6 +44,8 @@ import scala.util.Try
   *   - nico (acme): role `e2e_vault` (RO lake `vault`, the table created after the first `vault`
   *     was renamed `vault_now`), group `qod_all_pools`; vera (acme): role `e2e_vault_now` (RO lake
   *     `vault_now`), group `qod_all_pools`;
+  *   - dina (acme): role `e2e_drop` (RO lake `drop_free`, `drop_reused` and `rn_final`, tables
+  *     dropped by the dropped-table cases), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -81,6 +83,7 @@ abstract class AuthzEndToEndCases(
   private val MonaPw    = "mona-e2e-pw-1"
   private val NicoPw    = "nico-e2e-pw-1"
   private val VeraPw    = "vera-e2e-pw-1"
+  private val DinaPw    = "dina-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -93,7 +96,8 @@ abstract class AuthzEndToEndCases(
     "tess"  -> TessPw,
     "mona"  -> MonaPw,
     "nico"  -> NicoPw,
-    "vera"  -> VeraPw
+    "vera"  -> VeraPw,
+    "dina"  -> DinaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -390,6 +394,10 @@ abstract class AuthzEndToEndCases(
     // A table renamed since a snapshot: `vault` (the new one) alone, and `vault_now` (the old) alone.
     val vault = createRole("e2e_vault")
     grant(lake, "main", "vault", "RO", vault)
+    grant(lake, "main", "rn_first", "RO", vault)
+    val drop = createRole("e2e_drop")
+    List("drop_free", "drop_reused", "rn_final").foreach(t => grant(lake, "main", t, "RO", drop))
+    grant(lake, "main", "rorders", "RO", feed)
     val vaultNow = createRole("e2e_vault_now")
     grant(lake, "main", "vault_now", "RO", vaultNow)
     stack.post(
@@ -409,7 +417,8 @@ abstract class AuthzEndToEndCases(
       ("tess", TessPw, "admin", "e2e_feed"),
       ("mona", MonaPw, "user", "e2e_feed_masked"),
       ("nico", NicoPw, "user", "e2e_vault"),
-      ("vera", VeraPw, "user", "e2e_vault_now")
+      ("vera", VeraPw, "user", "e2e_vault_now"),
+      ("dina", DinaPw, "user", "e2e_drop")
     ).foreach { (user, pw, kind, role) =>
       stack.post(
         "/api/user/create",
@@ -2071,16 +2080,13 @@ abstract class AuthzEndToEndCases(
     )
   }
 
-  it should "be refused when the table was dropped since, to anyone but a superuser" in {
+  it should "be judged by its last name when the table was dropped since, a wildcard grant included" in {
     ready()
     val (_, gone) = vaultHistory
     val sql       = s"SELECT id FROM $lake.main.gone_t AT (VERSION => $gone)"
-    refused(
-      "bob",
-      "lake",
-      sql,
-      node = s"$lake.main.gone_t at that snapshot is a table dropped since"
-    )
+    // bob holds `*.*.* ALL`, which covers the free name gone_t; nico holds no grant on it.
+    allowed("bob", "lake", sql, Some(List("3")))
+    refused("nico", "lake", sql, node = s"lacks grants on $lake.main.gone_t:read")
     admin("lake", sql) shouldBe List("3")
   }
 
@@ -2101,6 +2107,146 @@ abstract class AuthzEndToEndCases(
           case Right(rows) => fail(s"expected a refusal, got rows $rows")
       }
     }
+  }
+
+  // ---------- a dropped DuckLake table: judged by its last live name; a replace is the same table ----------
+
+  /** The snapshots before each drop: `drop_free` (dropped, its name free), `drop_reused` (dropped,
+    * then a new `drop_reused` created) and `rn_first` (renamed `rn_final`, then dropped). Written
+    * once by the superuser.
+    */
+  private lazy val dropHistory: (Long, Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.drop_free (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.drop_free VALUES (1)")
+    val free = head()
+    admin("lake", s"DROP TABLE $lake.main.drop_free")
+    admin("lake", s"CREATE TABLE $lake.main.drop_reused (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.drop_reused VALUES (2)")
+    val reused = head()
+    admin("lake", s"DROP TABLE $lake.main.drop_reused")
+    admin("lake", s"CREATE TABLE $lake.main.drop_reused (id INTEGER, other VARCHAR)")
+    admin("lake", s"CREATE TABLE $lake.main.rn_first (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.rn_first VALUES (3)")
+    val renamed = head()
+    admin("lake", s"ALTER TABLE $lake.main.rn_first RENAME TO rn_final")
+    admin("lake", s"DROP TABLE $lake.main.rn_final")
+    (free, reused, renamed)
+
+  "a dropped DuckLake table" should "be readable under its free last name with a grant on it, and only so" in {
+    ready()
+    val (free, _, _) = dropHistory
+    val sql          = s"SELECT id FROM $lake.main.drop_free AT (VERSION => $free)"
+    allowed("dina", "lake", sql, Some(List("1")))
+    allowed(
+      "dina",
+      "lake",
+      s"SELECT id FROM ducklake_table_insertions('$lake', 'main', 'drop_free', 1, $free)",
+      Some(List("1"))
+    )
+    refused("olga", "lake", sql, node = s"lacks grants on $lake.main.drop_free:read")
+  }
+
+  it should "be refused once its name belongs to another table, even with a grant on the name" in {
+    ready()
+    val (_, reused, _) = dropHistory
+    refused(
+      "dina",
+      "lake",
+      s"SELECT id FROM $lake.main.drop_reused AT (VERSION => $reused)",
+      node = "its name now belongs to another table"
+    )
+    admin("lake", s"SELECT id FROM $lake.main.drop_reused AT (VERSION => $reused)") shouldBe
+      List("2")
+  }
+
+  it should "be judged on its last name when it was renamed before the drop" in {
+    ready()
+    val (_, _, renamed) = dropHistory
+    val sql             = s"SELECT id FROM $lake.main.rn_first AT (VERSION => $renamed)"
+    allowed("dina", "lake", sql, Some(List("3")))
+    // nico holds the name it had at that snapshot, not its last one.
+    refused("nico", "lake", sql, node = s"lacks grants on $lake.main.rn_final:read")
+  }
+
+  // ---------- a replaced table (CREATE OR REPLACE, QoD's restore) keeps its history ----------
+
+  /** `rorders`, three versions: one row, two rows, three rows, the snapshot after each insert. */
+  private lazy val rordersHistory: (Long, Long, Long) =
+    def head(): Long =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    admin("lake", s"CREATE TABLE $lake.main.rorders (id INTEGER)")
+    admin("lake", s"INSERT INTO $lake.main.rorders VALUES (1)")
+    val one = head()
+    admin("lake", s"INSERT INTO $lake.main.rorders VALUES (2)")
+    val two = head()
+    admin("lake", s"INSERT INTO $lake.main.rorders VALUES (3)")
+    (one, two, head())
+
+  private def restore(user: String, to: Long): (Int, String) =
+    stack.postStatus(
+      "/api/catalog/restore",
+      obj(
+        "tenant"   -> s(Acme),
+        "tenantDb" -> s(lake),
+        "schema"   -> s("main"),
+        "table"    -> s("rorders"),
+        "to"       -> s(to.toString)
+      ),
+      session(user)
+    )
+
+  "a replaced DuckLake table" should "keep its history: a tenant admin restores it twice" in {
+    ready()
+    val (one, two, _) = rordersHistory
+    val (c1, b1)      = restore("erin", two)
+    withClue(b1)(c1 shouldBe 200)
+    admin("lake", s"SELECT count(*) FROM $lake.main.rorders") shouldBe List("2")
+    // The second restore reads rorders before the first one replaced it.
+    val (c2, b2) = restore("erin", one)
+    withClue(b2)(c2 shouldBe 200)
+    admin("lake", s"SELECT count(*) FROM $lake.main.rorders") shouldBe List("1")
+  }
+
+  it should "be previewed and diffed across the replace by a user granted it" in {
+    ready()
+    val (one, two, _) = rordersHistory
+    // After the restores above (or a replace of its own when run alone).
+    admin("lake", s"CREATE OR REPLACE TABLE $lake.main.rorders AS SELECT * FROM $lake.main.rorders")
+    allowed(
+      "fran",
+      "lake",
+      s"SELECT count(*) FROM $lake.main.rorders AT (VERSION => $two)",
+      Some(List("2"))
+    )
+    val token    = session("tess")
+    val base     = s"/api/catalog/tenant/$Acme/database/$lake/schemas/main/tables/rorders"
+    val (pc, pb) = stack.getStatus(s"$base/preview?asOf=$two", token)
+    withClue(pb)(pc shouldBe 200)
+    val now =
+      admin("lake", s"SELECT max(snapshot_id) FROM ducklake_snapshots('$lake')").head.toLong
+    val (dc, db) = stack.getStatus(s"$base/data-diff?from=$one&to=$now", token)
+    withClue(db)(dc shouldBe 200)
+  }
+
+  "a plain view over a renamed table's history" should "be refused by the node to a principal with policies" in {
+    ready()
+    val (old, _) = vaultHistory
+    val view     = s"$lake.main.v_vault_then"
+    try
+      admin(
+        "lake",
+        s"CREATE OR REPLACE VIEW $view AS SELECT id FROM $lake.main.vault AT (VERSION => $old)"
+      )
+      // The policy rewriters see a plain view, no AT clause: only the node's rule stands.
+      refused(
+        "mona",
+        "lake",
+        s"SELECT id FROM $view",
+        node = "not available to principals with column or row policies"
+      )
+    finally admin("lake", s"DROP VIEW IF EXISTS $view")
   }
 
   "DuckLake maintenance, CHECKPOINT and option setting" should "be the superusers'" in {
