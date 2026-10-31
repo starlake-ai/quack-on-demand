@@ -2,6 +2,8 @@
 
 ## 0.10.2
 
+### Phases A-C
+
 - **Security: upgrade promptly, and rotate the manager's secrets if tenant admins are not fully
   trusted.** A manager where tenant admins are not fully trusted, and where tenants could set their
   own sign-in configuration, should upgrade to this release promptly and then rotate every secret
@@ -747,7 +749,7 @@ In-engine authorization, Phase D: the node decides every statement alone.
 
 ### Upgrading
 
-- **Upgrading:** mint PATs for automation before upgrading (`qod login`, then
+- Mint PATs for automation before upgrading (`qod login`, then
   `qod auth pat create`), point MCP clients and SCIM connectors at them, then remove
   `QOD_API_KEY` from every environment, chart value and Compose file. In fleet mode set
   `QOD_INTERNAL_URL` on every manager and upgrade `qod` on every server; on Kubernetes without the
