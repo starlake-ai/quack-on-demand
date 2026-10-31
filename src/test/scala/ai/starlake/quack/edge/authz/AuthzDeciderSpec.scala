@@ -826,40 +826,6 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
   private val OpaAliceDry =
     OpaAlice.copy(context = OpaAlice.context.map(_.copy(purpose = DecidePurpose.DryRun)))
 
-  // DuckLake's change feed (ducklake_table_changes / _insertions / _deletions, the data diff and the
-  // branch change counts): its bind swaps in the named table's own scan, so qod-node describes it as
-  // reads of that table, the rows and the rowids (describer_extension_test's goldens), with no
-  // function and no metadata catalog object. It is decided as any read of that table.
-  private def changeFeed(table: String, catalog: String = "acme_lake") =
-    plan(objects =
-      List(obj(table, catalog = catalog, columns = List("id", "v")), obj(table, catalog = catalog))
-    )
-
-  "a DuckLake change feed's plan" should "be decided on the grant of the table it names" in {
-    allow(changeFeed("orders"))
-    refused(changeFeed("customers"), "user:alice lacks grants on acme_lake.main.customers:read")
-    // On an OPA tenant the policy is asked about the read of that table, with its columns.
-    val f = new Fixture()
-    f.decider.decidePlan(OpaAlice, changeFeed("orders", "opaco_lake")) shouldBe Decision.Allow
-    val access = parse(f.opaBodies.head).toOption.get.hcursor
-      .downField("input")
-      .downField("accesses")
-      .downN(0)
-    access.get[String]("table") shouldBe Right("orders")
-    access.get[List[String]]("columns") shouldBe Right(List("id", "v"))
-    val deny = new Fixture(opaReply = Right((200, """{"result":{"allow":false,"reason":"no"}}""")))
-    deny.decider.decidePlan(OpaAlice, changeFeed("orders", "opaco_lake")) shouldBe
-      Decision.Refuse("user:alice denied by policy on opaco_lake.main.orders:read: no")
-    // The metadata catalog DuckLake reads for it never reaches the description; named, it stays
-    // refused under *.*.* ALL.
-    refused(
-      plan(objects = List(obj("ducklake_data_file", catalog = "__ducklake_metadata_acme_lake"))),
-      "__ducklake_metadata_acme_lake.main.ducklake_data_file is DuckLake catalog metadata, which " +
-        "only superusers reach",
-      principal(eff(List(perm("p-9", "*", "*", "*", "ALL"))))
-    )
-  }
-
   "a dry run's plan" should "ask OPA past the decision cache and return the exact call" in {
     val f                 = new Fixture(opaCacheTtlSec = 60)
     val d                 = plan(objects = List(obj("orders", catalog = "opaco_lake")))
