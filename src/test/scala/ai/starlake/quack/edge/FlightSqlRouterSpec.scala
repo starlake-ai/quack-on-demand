@@ -2576,7 +2576,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_name AS name")
     capturedSql() should include("lower(schema_name) = lower('main')")
-    capturedSql() should include("duckdb_tables() WHERE database_name = 'memory'")
+    capturedSql() should include("duckdb_tables() WHERE (lower(database_name) = 'memory'")
 
   it should "deny a SHOW TABLES variant without ever reaching a node" in:
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)

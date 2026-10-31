@@ -36,6 +36,7 @@ import scala.util.Try
   *   - bob, carol, dave (acme): the defaults, `qod_all_tables` (`*.*.* ALL`) and `qod_all_pools`;
   *   - erin (acme): a tenant admin (kind `admin`) with the default memberships;
   *   - olga (acme): role `e2e_one_table` (RO lake events, nothing else), group `qod_all_pools`;
+  *   - pete (acme): role `e2e_all_ro` (`*.*.* RO`, nothing named), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -67,13 +68,15 @@ abstract class AuthzEndToEndCases(
   private val DavePw    = "dave-e2e-pw-1"
   private val ErinPw    = "erin-e2e-pw-1"
   private val OlgaPw    = "olga-e2e-pw-1"
+  private val PetePw    = "pete-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
     "carol" -> CarolPw,
     "dave"  -> DavePw,
     "erin"  -> ErinPw,
-    "olga"  -> OlgaPw
+    "olga"  -> OlgaPw,
+    "pete"  -> PetePw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -330,6 +333,20 @@ abstract class AuthzEndToEndCases(
         "password" -> s(CarolPw),
         "kind"     -> s("user"),
         "roles"    -> Json.arr(s("qod_all_tables"), s("e2e_pg_owner"))
+      )
+    )
+    // RO on everything the wildcard covers, nothing named: the filtered wildcard reader.
+    val allRo = createRole("e2e_all_ro")
+    grant("*", "*", "*", "RO", allRo)
+    stack.post(
+      "/api/user/create",
+      obj(
+        "tenant"   -> s(Acme),
+        "username" -> s("pete"),
+        "password" -> s(PetePw),
+        "kind"     -> s("user"),
+        "roles"    -> Json.arr(s("e2e_all_ro")),
+        "groups"   -> Json.arr(s("qod_all_pools"))
       )
     )
     // RO on one table, nothing else: the reader of the catalog listing cases.
@@ -2426,6 +2443,48 @@ abstract class AuthzEndToEndCases(
         }
       }
     finally admin("lake", "DROP VIEW IF EXISTS memory.main.events")
+  }
+
+  // Re-review I-a2: one session-catalog pin for every grant hid a granted federated catalog from
+  // the listings, GetTables and DESCRIBE. A grant naming the catalog lists its objects there; the
+  // wildcard catalog covers the pool's own catalog only, on the node and so in the listings.
+  it should "list a granted federated catalog's tables, and nothing of it to anyone else" in {
+    ready()
+    val inPgfed = "SELECT table_catalog, table_schema, table_name FROM information_schema.tables " +
+      "WHERE table_catalog = 'pgfed' ORDER BY 3"
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        // alice holds RW on pgfed.e2e.orders by name, and nothing else of pgfed.
+        as(d, "alice", "fed", inPgfed) shouldBe Right(List("pgfed,e2e,orders"))
+        as(
+          d,
+          "alice",
+          "fed",
+          "SELECT table_name FROM duckdb_tables() " +
+            "WHERE database_name = 'pgfed'"
+        ) shouldBe Right(List("orders"))
+        val described = as(d, "alice", "fed", "DESCRIBE pgfed.e2e.orders")
+        described shouldBe a[Right[?, ?]]
+        described.toOption.get should not be empty
+        // The wildcard covers the pool's own catalog, never a federated one: pete reads none of
+        // pgfed, so none of it is listed to him; olga holds nothing on this pool's catalogs.
+        as(d, "pete", "fed", "SELECT count(*) FROM pgfed.e2e.orders") shouldBe a[Left[?, ?]]
+        as(d, "pete", "fed", inPgfed) shouldBe Right(Nil)
+        as(d, "olga", "fed", inPgfed) shouldBe Right(Nil)
+        as(
+          d,
+          "olga",
+          "fed",
+          "SELECT table_name FROM duckdb_tables() " +
+            "WHERE database_name = 'pgfed'"
+        ) shouldBe Right(Nil)
+      }
+    }
+    val tables = stack.flightTables("alice", AlicePw, Acme, "fed")
+    tables shouldBe a[Right[?, ?]]
+    tables.toOption.get.filter(_.startsWith("pgfed,")) shouldBe List("pgfed,e2e,orders,TABLE")
+    stack.flightTables("olga", OlgaPw, Acme, "fed").map(_.filter(_.startsWith("pgfed,"))) shouldBe
+      Right(Nil)
   }
 
   "a view's definition" should "not be readable through pg_get_viewdef without being a superuser" in {

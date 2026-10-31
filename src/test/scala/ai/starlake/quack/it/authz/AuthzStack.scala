@@ -320,6 +320,46 @@ final class AuthzStack(
       raw.close()
       allocator.close()
 
+  /** FlightSQL GetTables as `user` on `pool`: every row as `catalog,schema,table,type` (Right), or
+    * the error the client got (Left).
+    */
+  def flightTables(
+      user: String,
+      password: String,
+      tenant: String,
+      pool: String
+  ): Either[String, List[String]] =
+    val allocator = new RootAllocator()
+    val raw       =
+      FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", flightPort)).build()
+    try
+      val hdrs = new FlightCallHeaders()
+      hdrs.insert("tenant", tenant)
+      hdrs.insert("pool", pool)
+      hdrs.insert(
+        "authorization",
+        "Basic " + Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))
+      )
+      val opt  = new HeaderCallOption(hdrs)
+      val fsql = new FlightSqlClient(raw)
+      try
+        val info   = fsql.getTables(null, null, null, null, false, opt)
+        val stream = fsql.getStream(info.getEndpoints.get(0).getTicket, opt)
+        try
+          val out = ListBuffer.empty[String]
+          while stream.next() do
+            val root = stream.getRoot
+            for i <- 0 until root.getRowCount do
+              out += root.getFieldVectors.asScala
+                .map((v: FieldVector) => String.valueOf(v.getObject(i)))
+                .mkString(",")
+          Right(out.toList)
+        finally stream.close()
+      catch case e: FlightRuntimeException => Left(e.getMessage)
+    finally
+      raw.close()
+      allocator.close()
+
   /** One FlightSQL connection of `user` on `pool`, held open: [[HeldFlight.run]]'s first statement
     * makes the handshake (Basic), every later one replays the session's bearer, so they all run on
     * the one session the handshake bound.

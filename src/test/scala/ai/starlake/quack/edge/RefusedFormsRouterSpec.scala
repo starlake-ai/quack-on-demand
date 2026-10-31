@@ -116,8 +116,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     // The rewrite's own predicate, then the filter's derived table around each catalog function:
     // the filter saw the rewritten statement, so it ran after the rewriter.
     sql should include("lower(schema_name) = lower('main')")
-    sql should include("(SELECT * FROM duckdb_tables() WHERE database_name = 'memory'")
-    sql should include("(SELECT * FROM duckdb_views() WHERE database_name = 'memory'")
+    sql should include("(SELECT * FROM duckdb_tables() WHERE (lower(database_name) = 'memory'")
+    sql should include("(SELECT * FROM duckdb_views() WHERE (lower(database_name) = 'memory'")
     sql should include("table_name = 't'")
   }
 

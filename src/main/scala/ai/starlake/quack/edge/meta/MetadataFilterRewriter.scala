@@ -116,12 +116,12 @@ final class MetadataFilterRewriter(
     else TooDeep.orElse(Denied(TooDeep.Reason))(filtered(sql, eff, ctx))
 
   private def filtered(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
-    val grants = readGrants(eff, ctx)
-    if grants.exists(_.schemaName.equalsIgnoreCase(InformationSchema)) then
+    if readGrants(eff, ctx).exists(_.schemaName.equalsIgnoreCase(InformationSchema)) then
       // Operator escape hatch: an EXPLICIT (schema named literally) information_schema
       // grant keeps today's unfiltered read.
       Passthrough
     else
+      val grants = listedGrants(eff)
       // Fast path for a bare SHOW TABLES, which never reaches the parse path below.
       ShowTables.replace(sql, grants, ctx) match
         case Some(outcome) => outcome
@@ -268,13 +268,25 @@ final class MetadataFilterRewriter(
       }
 
   /** Session-catalog Read-covering grants: verb RO/RW/ALL and catalog wildcard-or-equal to the
-    * session database.
+    * session database. What decides whether the filter narrows at all (an explicit
+    * information_schema grant among them opens the unfiltered listing).
     */
   private def readGrants(eff: EffectiveSet, ctx: SchemaContext): List[RolePermission] =
     val sessionCat = ctx.defaultDatabase.getOrElse("")
     eff.permissions.filter { p =>
       ReadCoveringVerbs.contains(p.verb.toUpperCase(Locale.ROOT)) &&
       (p.catalogName == RolePermission.Wildcard || p.catalogName.equalsIgnoreCase(sessionCat))
+    }
+
+  /** The Read-covering grants a filtered listing shows rows of: the wildcard catalog's and every
+    * named catalog's (a federated one the pool attaches included, re-review I-a2), but never the
+    * system catalog's, temp's or a DuckLake metadata catalog's, which the node never grants.
+    */
+  private def listedGrants(eff: EffectiveSet): List[RolePermission] =
+    eff.permissions.filter { p =>
+      val catalog = p.catalogName.toLowerCase(Locale.ROOT)
+      ReadCoveringVerbs.contains(p.verb.toUpperCase(Locale.ROOT)) &&
+      catalog != "system" && catalog != "temp" && !catalog.startsWith(DuckLakeMetadataPrefix)
     }
 
   /** How many filterable references the statement carries, counted as table OCCURRENCES on
@@ -435,10 +447,11 @@ object MetadataFilterRewriter:
   val FilterableFunctions: Set[String] =
     ai.starlake.acl.parser.TableExtractor.DuckDbCatalogFunctions
 
-  private val InformationSchema   = "information_schema"
-  private val ReadCoveringVerbs   = Set("RO", "RW", "ALL")
-  private val SystemRowClauseTab  = "table_schema IN ('information_schema', 'pg_catalog')"
-  private val SystemRowClauseSchm = "schema_name IN ('information_schema', 'pg_catalog')"
+  private val InformationSchema      = "information_schema"
+  private val DuckLakeMetadataPrefix = "__ducklake_metadata_"
+  private val ReadCoveringVerbs      = Set("RO", "RW", "ALL")
+  private val SystemRowClauseTab     = "table_schema IN ('information_schema', 'pg_catalog')"
+  private val SystemRowClauseSchm    = "schema_name IN ('information_schema', 'pg_catalog')"
 
   private def lit(s: String): String = "'" + s.replace("'", "''") + "'"
 
@@ -757,11 +770,39 @@ object MetadataFilterRewriter:
               s"$schemaCol = ${lit(g.schemaName)} AND $tCol = ${lit(g.tableName)}"
         }
 
-  /** Disjunction: the system catalog's own rows, plus the session catalog's rows one clause per
-    * grant covers. Both are pinned to their catalog, as the catalog functions' `database_name` is
-    * ([[functionPredicateFor]]): information_schema lists every attached catalog, and a grant read
-    * for the session catalog (`readGrants`) covers that catalog only, so a schema-and-name clause
-    * alone also listed another catalog's same-named objects, view SQL included (re-review I-a).
+  /** One clause per catalog a grant covers, each pinned to that catalog (`catalogCol`) and holding
+    * the schema-and-name clauses of the grants on it: information_schema and the catalog functions
+    * list every attached catalog, so a clause without its catalog also listed another catalog's
+    * same-named objects, view SQL included (re-review I-a). A wildcard catalog covers the session
+    * catalog, the node's rule for an attached catalog (the tenant's database catalogs, never a
+    * federated one, `AuthzDecider.sessionCatalogs`); a named one covers itself (re-review I-a2: one
+    * session pin for every grant hid a granted federated catalog). Catalogs compare in lower case,
+    * as the node's grant match does.
+    */
+  private def catalogClauses(
+      grants: List[RolePermission],
+      sessionCat: String,
+      catalogCol: String,
+      schemaCol: String,
+      tableCol: Option[String]
+  ): List[String] =
+    grants
+      .groupBy { g =>
+        if g.catalogName == RolePermission.Wildcard then sessionCat.toLowerCase(Locale.ROOT)
+        else g.catalogName.toLowerCase(Locale.ROOT)
+      }
+      .toList
+      .filter((catalog, _) => catalog.nonEmpty)
+      .sortBy(_._1)
+      .map { (catalog, onIt) =>
+        val clauses = grantClauses(onIt, schemaCol, tableCol)
+        val pin     = s"lower($catalogCol) = ${lit(catalog)}"
+        if clauses.contains("TRUE") then pin
+        else s"$pin AND ${clauses.distinct.mkString("((", ") OR (", "))")}"
+      }
+
+  /** Disjunction: the system catalog's own rows, plus the rows each grant covers in its catalog
+    * ([[catalogClauses]]).
     */
   private[meta] def predicateFor(
       meta: String,
@@ -770,26 +811,24 @@ object MetadataFilterRewriter:
   ): String =
     val (catalogCol, systemRows, clauses) =
       if meta == "schemata" then
-        ("catalog_name", SystemRowClauseSchm, grantClauses(grants, "schema_name", None))
+        (
+          "catalog_name",
+          SystemRowClauseSchm,
+          catalogClauses(grants, sessionCat, "catalog_name", "schema_name", None)
+        )
       else
         (
           "table_catalog",
           SystemRowClauseTab,
-          grantClauses(grants, "table_schema", Some("table_name"))
+          catalogClauses(grants, sessionCat, "table_catalog", "table_schema", Some("table_name"))
         )
-    val system = s"$catalogCol = 'system' AND $systemRows"
-    if clauses.isEmpty then s"($system)"
-    else
-      val objects =
-        if clauses.contains("TRUE") then ""
-        else clauses.distinct.mkString(" AND ((", ") OR (", "))")
-      s"($system) OR ($catalogCol = ${lit(sessionCat)}$objects)"
+    (s"$catalogCol = 'system' AND $systemRows" :: clauses).mkString("(", ") OR (", ")")
 
-  /** The WHERE of a filtered catalog function call: `database_name` pinned to the session catalog
-    * (the functions list every attached catalog, including the DuckLake metadata one), then one
-    * clause per grant. No system-row clause: the internal views live in the `system` catalog, which
-    * the pin already excludes. A zero-grant principal gets `FALSE`, i.e. an empty listing rather
-    * than a denial, which is what lets a fresh ATTACH complete.
+  /** The WHERE of a filtered catalog function call: the rows each grant covers in its catalog
+    * ([[catalogClauses]] on `database_name`; the functions list every attached catalog, the
+    * DuckLake metadata one included). No system-row clause: the internal views live in the `system`
+    * catalog, which no grant clause names. A zero-grant principal gets `FALSE`, i.e. an empty
+    * listing rather than a denial, which is what lets a fresh ATTACH complete.
     */
   private[meta] def functionPredicateFor(
       fn: String,
@@ -797,14 +836,13 @@ object MetadataFilterRewriter:
       sessionCat: String
   ): String =
     val clauses = fn match
-      case "duckdb_schemas" => grantClauses(grants, "schema_name", None)
-      case "duckdb_views"   => grantClauses(grants, "schema_name", Some("view_name"))
-      case _                => grantClauses(grants, "schema_name", Some("table_name"))
-    val objects =
-      if clauses.contains("TRUE") then "TRUE"
-      else if clauses.isEmpty then "FALSE"
-      else clauses.distinct.mkString("(", ") OR (", ")")
-    s"database_name = ${lit(sessionCat)} AND ($objects)"
+      case "duckdb_schemas" =>
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", None)
+      case "duckdb_views" =>
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", Some("view_name"))
+      case _ =>
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", Some("table_name"))
+    if clauses.isEmpty then "FALSE" else clauses.mkString("(", ") OR (", ")")
 
   /** SHOW TABLES handling (jsqlparser models it as a statement the filter walker never sees). Plain
     * SHOW TABLES is replaced by the filtered listing matching DuckDB's native single-column `name`
@@ -847,10 +885,14 @@ object MetadataFilterRewriter:
       * scoped to the session schema.
       */
     def filteredListingSql(grants: List[RolePermission], ctx: SchemaContext): String =
-      val pred   = predicateFor("tables", grants, ctx.defaultDatabase.getOrElse(""))
-      val schema = lit(ctx.defaultSchema.getOrElse("main"))
+      val session = ctx.defaultDatabase.getOrElse("")
+      val pred    = predicateFor("tables", grants, session)
+      val schema  = lit(ctx.defaultSchema.getOrElse("main"))
+      // The session schema of the session catalog only: a grant on another catalog lists it in
+      // the predicate, never here.
       s"SELECT table_name AS name FROM information_schema.tables " +
-        s"WHERE table_schema = $schema AND ($pred) ORDER BY name"
+        s"WHERE lower(table_catalog) = ${lit(session.toLowerCase(Locale.ROOT))} " +
+        s"AND table_schema = $schema AND ($pred) ORDER BY name"
 
     val VariantRefusal: String =
       "SHOW TABLES variants are not supported with filtered metadata; " +
