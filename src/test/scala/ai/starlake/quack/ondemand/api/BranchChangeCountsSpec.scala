@@ -253,13 +253,83 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
 
   "propose" should "still count every modified table as the system caller" in {
     val f          = new Fixture
-    val (_, _, cs) = f.service
-      .propose("acme", f.parent.name, "feature", BranchActor("root", true), None)
+    val (_, m, cs) = f.service
+      .propose(
+        "acme",
+        f.parent.name,
+        "feature",
+        BranchActor("root", true),
+        ExecCaller.system("spec-root"),
+        None
+      )
       .unsafeRunSync()
       .fold(e => fail(s"propose: $e"), identity)
     cs.tables.map(t => t.table -> t.inserted).toMap shouldBe Map("region" -> 7L, "nation" -> 5L)
+    nationIn(tablesOf(io.circe.parser.parse(m.summaryJson).toOption.get)) shouldBe (5L, false)
     f.counted.map(c => (c._1, c._3.system, c._2)).toSet shouldBe Set(
       ("region", true, NodePrincipal.System),
       ("nation", true, NodePrincipal.System)
     )
+  }
+
+  /** nation's counts as a summary or change-set JSON carries them: (inserted, countsUnavailable).
+    */
+  private def nationIn(tables: List[Json]): (Long, Boolean) =
+    tables
+      .find(_.hcursor.get[String]("table").toOption.contains("nation"))
+      .map(t =>
+        (
+          t.hcursor.get[Long]("inserted").getOrElse(-1L),
+          t.hcursor.get[Boolean]("countsUnavailable").getOrElse(false)
+        )
+      )
+      .getOrElse(fail("no nation entry"))
+
+  private def tablesOf(j: Json): List[Json] = j.hcursor.downField("tables").values.toList.flatten
+
+  "a proposal" should "never hand the proposer the system's counts of a table they may not count, over REST" in {
+    val f     = new Fixture
+    val reply = f.handlers
+      .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    val changes = reply.changes.tables.map(t => t.table -> (t.inserted, t.countsUnavailable)).toMap
+    changes shouldBe Map("region" -> (7L, false), "nation" -> (0L, true))
+    nationIn(tablesOf(reply.merge.summary)) shouldBe (0L, true)
+    // Every later read of the proposal, by the same tenant admin.
+    val detail = f.handlers
+      .get("acme", f.parent.name, "feature", Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"get: $e"), identity)
+    detail.merges.map(m => nationIn(tablesOf(m.summary))) shouldBe List((0L, true))
+    // The stored summary keeps the system's counts, which a superuser still reads.
+    val asRoot = f.handlers
+      .get("acme", f.parent.name, "feature", Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"get: $e"), identity)
+    asRoot.merges.map(m => nationIn(tablesOf(m.summary))) shouldBe List((5L, false))
+  }
+
+  it should "never hand them to the proposer over MCP either" in {
+    val f     = new Fixture
+    val pat   = patOf(PatTok).get
+    val tool  = new McpBranchTools(f.handlers, AliceScope).tools.find(_.name == "propose_merge").get
+    val reply = tool
+      .run(
+        new McpPrincipal.Pat(pat, PatTok),
+        JsonObject(
+          "database" -> Json.fromString(f.parent.name),
+          "branch"   -> Json.fromString("feature")
+        )
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose_merge: $e"), identity)
+    nationIn(tablesOf(reply.hcursor.downField("changes").focus.get)) shouldBe (0L, true)
+    nationIn(tablesOf(reply.hcursor.downField("merge").downField("summary").focus.get)) shouldBe
+      (0L, true)
+    val detail = f.handlers
+      .get("acme", f.parent.name, "feature", Some(PatTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"get: $e"), identity)
+    detail.merges.map(m => nationIn(tablesOf(m.summary))) shouldBe List((0L, true))
   }

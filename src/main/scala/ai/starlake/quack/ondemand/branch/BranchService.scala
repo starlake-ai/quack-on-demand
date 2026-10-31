@@ -501,35 +501,47 @@ final class BranchService(
       val br = resolveReader(tenant, b.tenantDbName)
       val mr = resolveReader(tenant, parent.name)
       BranchChanges.compute(br, mr, b.forkSnapshot)
-    }.flatMap { cs =>
-      countsAs match
-        case None         => IO.pure(cs)
-        case Some(caller) =>
-          val alias = parentAliasOf(tenant, parent)
-          cs.tables
-            .foldLeft(IO.pure(List.empty[TableChange])) { (acc, t) =>
-              acc.flatMap { done =>
-                if t.kind != ChangeKind.Modified then IO.pure(done :+ t)
-                else
-                  counter.count(caller, tenant, b, alias, t, cs.forkSnapshot, cs.headSnapshot).map {
-                    case Right((ins, del, upd)) =>
-                      done :+ t.copy(inserted = ins, deleted = del, updated = upd)
-                    case Left(err) =>
-                      logger.warn(s"branch changes: counts for ${t.schema}.${t.table} failed: $err")
-                      done :+ t.copy(countsUnavailable = true)
-                  }
-              }
+    }.flatMap(cs => countsAs.fold(IO.pure(cs))(caller => countAs(tenant, parent, b, cs, caller)))
+
+  /** `cs` with change-feed counts of its modified tables, each counted as `caller`. */
+  private def countAs(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch,
+      cs: BranchChangeSet,
+      caller: ai.starlake.quack.ondemand.api.ExecCaller
+  ): IO[BranchChangeSet] =
+    val alias = parentAliasOf(tenant, parent)
+    cs.tables
+      .foldLeft(IO.pure(List.empty[TableChange])) { (acc, t) =>
+        acc.flatMap { done =>
+          if t.kind != ChangeKind.Modified then IO.pure(done :+ t)
+          else
+            counter.count(caller, tenant, b, alias, t, cs.forkSnapshot, cs.headSnapshot).map {
+              case Right((ins, del, upd)) =>
+                done :+ t.copy(inserted = ins, deleted = del, updated = upd)
+              case Left(err) =>
+                logger.warn(s"branch changes: counts for ${t.schema}.${t.table} failed: $err")
+                done :+ t.copy(countsUnavailable = true)
             }
-            .map(ts => cs.copy(tables = ts))
-    }
+        }
+      }
+      .map(ts => cs.copy(tables = ts))
 
   // ---------- propose ----------
 
+  /** Records a merge proposal. Its stored summary (`summaryJson`, the merge row) counts every
+    * modified table as the system caller: the lifecycle's own record, shown in full to superusers
+    * only (`BranchHandlers` strips its counts for anyone else). The change set returned to the
+    * proposer counts as `countsAs`, the requester, like [[changes]]: a table the node refuses them
+    * is flagged `countsUnavailable`, never filled from the system's counts.
+    */
   def propose(
       tenant: String,
       parentDb: String,
       name: String,
       actor: BranchActor,
+      countsAs: ai.starlake.quack.ondemand.api.ExecCaller,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
     val pre = for
@@ -555,14 +567,14 @@ final class BranchService(
         IO.pure(Left(f))
       case Right((parent, b)) =>
         // The lifecycle's own summary (stored on the merge row): every modified table, counted
-        // as the system caller, whoever proposes.
-        computeChanges(
-          tenant,
-          parent,
-          b,
-          countsAs =
-            Some(ai.starlake.quack.ondemand.api.ExecCaller.system(s"branch-counts-$tenant"))
-        ).flatMap { cs =>
+        // as the system caller, whoever proposes. The proposer's reply counts as the proposer.
+        val system = ai.starlake.quack.ondemand.api.ExecCaller.system(s"branch-counts-$tenant")
+        (for
+          shape  <- computeChanges(tenant, parent, b, countsAs = None)
+          stored <- countAs(tenant, parent, b, shape, system)
+          reply  <-
+            if countsAs.system then IO.pure(stored) else countAs(tenant, parent, b, shape, countsAs)
+        yield (stored, reply)).flatMap { (cs, reply) =>
           IO.blocking {
             val merge = store.createBranchMerge(
               BranchMerge(
@@ -591,7 +603,7 @@ final class BranchService(
                 "mergeable" -> cs.mergeable.toString
               )
             )
-            Right((updated, merge, cs))
+            Right((updated, merge, reply))
           }
         }
 

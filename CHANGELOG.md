@@ -784,7 +784,10 @@ In-engine authorization, Phase D: the node decides every statement alone.
   of tables they hold no grant on. They now run as the requester, as the "REST and MCP data
   statements run as their caller" entry above says. A table whose count the node refuses them, or
   whose count fails, is no longer a fake 0: it carries `countsUnavailable: true` (its zeros are no
-  counts). Propose still counts every table as the system caller.
+  counts). A proposal's reply (REST, MCP `propose_merge`) counts as the proposer too. The summary
+  stored on the merge row is still counted as the system caller, but `get`, propose and merge
+  replies show its per-table counts to superusers only; anyone else, tenant admins included (the
+  nodes judge them by their grants), gets them zeroed and flagged `countsUnavailable`.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

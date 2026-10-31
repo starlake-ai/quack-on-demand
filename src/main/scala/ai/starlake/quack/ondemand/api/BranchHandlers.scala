@@ -72,7 +72,14 @@ final class BranchHandlers(
       updatedAt = b.updatedAt
     )
 
-  private def mergeEntry(m: BranchMerge): BranchMergeEntry =
+  /** A merge row as the wire shows it. Its stored summary was counted as the system caller (the
+    * lifecycle's record, `BranchService.propose`), so its per-table counts are shown only to a
+    * superuser (`systemCounts`): everyone else reaching here is a tenant admin, whom the nodes
+    * judge by their grants like any tenant user (Phase D), so they get the counts zeroed and
+    * flagged `countsUnavailable` and ask `changes` for the ones they may read.
+    */
+  private def mergeEntry(m: BranchMerge, systemCounts: Boolean): BranchMergeEntry =
+    val summary = io.circe.parser.parse(m.summaryJson).getOrElse(io.circe.Json.Null)
     BranchMergeEntry(
       id = m.id,
       status = m.status.wire,
@@ -82,7 +89,7 @@ final class BranchHandlers(
       mainSnapshotAfter = m.mainSnapshotAfter,
       tagName = m.tagName,
       error = m.error,
-      summary = io.circe.parser.parse(m.summaryJson).getOrElse(io.circe.Json.Null),
+      summary = if systemCounts then summary else BranchHandlers.withoutCounts(summary),
       conflicts = io.circe.parser.parse(m.conflictsJson).getOrElse(io.circe.Json.Null),
       createdAt = m.createdAt,
       decidedAt = m.decidedAt
@@ -144,7 +151,8 @@ final class BranchHandlers(
   ): Out[BranchDetailResponse] = IO.blocking {
     gate(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db) =>
       service.get(tid, db, branch).left.map(toErr).map { case (b, merges) =>
-        BranchDetailResponse(entry(b), merges.map(mergeEntry))
+        val systemCounts = scopeOf(apiKey).superuser
+        BranchDetailResponse(entry(b), merges.map(mergeEntry(_, systemCounts)))
       }
     }
   }
@@ -237,13 +245,19 @@ final class BranchHandlers(
   def propose(req: BranchOpRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchProposeResponse] =
-    gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
+    // The reply's change set counts as the proposer (resolved like `changes`); the stored summary
+    // keeps the system's counts, shown to superusers only (mergeEntry).
+    (for
+      (tid, db, actor) <- gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf)
+      countsAs         <- callerOf(s"branch-propose-$tid-$db", apiKey)
+    yield (tid, db, actor, countsAs)) match
+      case Left(e)                           => IO.pure(Left(e))
+      case Right((tid, db, actor, countsAs)) =>
+        val systemCounts = scopeOf(apiKey).superuser
         service
-          .propose(tid, db, req.branch, actor, apiKey)
+          .propose(tid, db, req.branch, actor, countsAs, apiKey)
           .map(_.left.map(toErr).map { case (b, m, cs) =>
-            BranchProposeResponse(entry(b), mergeEntry(m), changesResponse(b, cs))
+            BranchProposeResponse(entry(b), mergeEntry(m, systemCounts), changesResponse(b, cs))
           })
 
   def merge(req: BranchMergeRequest, apiKey: Option[String])(
@@ -255,7 +269,11 @@ final class BranchHandlers(
         service
           .merge(tid, db, req.branch, req.expectedMainSnapshot, actor, apiKey)
           .map(_.left.map(toErr).map { case (b, m, cs) =>
-            BranchMergeResponse(entry(b), mergeEntry(m), changesResponse(b, cs))
+            BranchMergeResponse(
+              entry(b),
+              mergeEntry(m, scopeOf(apiKey).superuser),
+              changesResponse(b, cs)
+            )
           })
 
   def discard(req: BranchOpRequest, apiKey: Option[String])(
@@ -269,6 +287,27 @@ final class BranchHandlers(
           .map(_.left.map(toErr).map(entry))
 
 object BranchHandlers:
+
+  /** A stored merge summary with every table's counts zeroed and flagged `countsUnavailable`, the
+    * shape a refused count has in a change set.
+    */
+  def withoutCounts(summary: io.circe.Json): io.circe.Json =
+    summary.hcursor
+      .downField("tables")
+      .withFocus(
+        _.mapArray(
+          _.map(
+            _.mapObject(t =>
+              t.add("inserted", io.circe.Json.fromLong(0L))
+                .add("deleted", io.circe.Json.fromLong(0L))
+                .add("updated", io.circe.Json.fromLong(0L))
+                .add("countsUnavailable", io.circe.Json.True)
+            )
+          )
+        )
+      )
+      .top
+      .getOrElse(summary)
 
   /** The branch actor a bearer resolves to, through [[RestCaller.resolve]] (the one resolution): a
     * session -> its user, admin when it manages a tenant; a PAT -> its owner, admin per the PAT,
