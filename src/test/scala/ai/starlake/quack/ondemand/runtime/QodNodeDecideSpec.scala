@@ -84,7 +84,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     FlightSqlRouter.usePath(pools(pool)).fold(sql)(path => s"USE $path; $sql")
 
   private val secret         = NodeKeys.randomSecret()
-  private val minted         = new MintedHandles()
+  private val minted         = new MintedHandles(maxEntries = 200_000L)
   private var keys: NodeKeys = null
 
   private val decider = new AuthzDecider(
@@ -243,7 +243,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
 
   "qod_authz_stats" should "be read by the system principal only" in {
     raw(NodePrincipal.System, NodeAuthzStats.sql) match
-      case Right(List(row)) => row.split(',').length shouldBe NodeAuthzStats.Counters.size
+      case Right(List(row)) => row.split(',').length shouldBe NodeAuthzStats.Columns.size
       case other            => fail(s"the system principal's read: $other")
     // A tenant user: the node's parse screen refuses a superuser-class table function first, with
     // its own text.
@@ -267,6 +267,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     val reading = adapter.authzStats(node.node).unsafeRunSync()
     reading.map(_.planCacheHits).getOrElse(0L) should be > 0L
     reading.map(_.decideCalls).getOrElse(0L) should be > 0L
+    // The second statement was answered from the verdict cache, which holds its verdict.
+    reading.map(_.verdictCacheSize).getOrElse(0L) should be > 0L
     val stats = new NodeAuthzStatsTracker
     reading.foreach(stats.update(node.node.nodeId, _))
     val registry = new SimpleMeterRegistry
@@ -285,4 +287,9 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       .tags("tenant", "acme", "pool", "bi", "node", onPool.nodeId)
       .functionCounter()
       .count() should be > 0.0
+    registry
+      .find("qod_node_authz_verdict_cache_size")
+      .tags("tenant", "acme", "pool", "bi", "node", onPool.nodeId)
+      .gauge()
+      .value() should be > 0.0
   }

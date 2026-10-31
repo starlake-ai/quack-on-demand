@@ -110,10 +110,10 @@ bool VerdictCache::Find(const std::string &principal, int64_t policy_version, co
 	return true;
 }
 
-void VerdictCache::Put(const Verdict &verdict, int64_t now_ms) {
+size_t VerdictCache::Put(const Verdict &verdict, int64_t now_ms) {
 	if (capacity_ == 0 || verdict.kind != "plan" || (!verdict.allow && verdict.retryable) ||
 	    verdict.expires_at <= now_ms) {
-		return;
+		return 0;
 	}
 	auto until = std::min(verdict.expires_at, now_ms + kMaxCachedVerdictMs);
 	auto key = Key(verdict.principal, verdict.policy_version, verdict.ctx, verdict.fingerprint);
@@ -125,10 +125,13 @@ void VerdictCache::Put(const Verdict &verdict, int64_t now_ms) {
 	}
 	entries_.push_front(Entry {key, verdict, until});
 	index_[key] = entries_.begin();
+	size_t evicted = 0;
 	while (entries_.size() > capacity_) {
 		index_.erase(entries_.back().key);
 		entries_.pop_back();
+		evicted++;
 	}
+	return evicted;
 }
 
 size_t VerdictCache::Size() {

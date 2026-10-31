@@ -9,7 +9,7 @@ class IssuedHandlesSpec extends AnyFlatSpec with Matchers:
 
   "IssuedHandles" should "keep a nonce until DecideGraceMs past its handle's expiry" in {
     val clock = new AtomicLong(1000L)
-    val r     = new IssuedHandles(clock = () => clock.get())
+    val r     = new IssuedHandles(maxEntries = 200_000L, clock = () => clock.get())
     r.put("n-1", "node-1", "u-1", expiresAt = 61_000L)
     r.get("n-1") shouldBe Some(IssuedHandles.Issued("node-1", "u-1"))
     clock.set(61_000L + NodeHandles.DecideGraceMs)

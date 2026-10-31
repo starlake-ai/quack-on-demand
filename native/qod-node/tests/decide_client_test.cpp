@@ -306,6 +306,20 @@ int main() {
 	           server.Last().path == "/qod/api/internal/authz/decide",
 	       "the decide path goes under the replica's own path");
 
+	// ---- the verdict cache's evictions (Task 11 addendum 6): entries pushed out for room
+	{
+		qod::AuthzStats small_stats;
+		qod::DecideClient small(kNode, kKey, qod::AuthzLimits {300, 1}, [] { return now_ms.load(); }, small_stats);
+		Expect(small.Decide(Call(server.Url())).status == DecideResult::Status::Allow, "a first plan, cached");
+		Expect(small_stats.verdict_cache_evictions.load() == 0 && small.Cache().Size() == 1,
+		       "one verdict held, none evicted");
+		Expect(small.Decide(Call(server.Url())).status == DecideResult::Status::Allow, "a second plan, cached");
+		Expect(small_stats.verdict_cache_evictions.load() == 1 && small.Cache().Size() == 1,
+		       "the first verdict evicted for the second: one eviction counted");
+		small.Decide(Call(server.Url(), "screen"));
+		Expect(small_stats.verdict_cache_evictions.load() == 1, "a screen verdict is never cached, so evicts none");
+	}
+
 	// ---- limits from the env
 	auto limits = qod::ParseAuthzLimits([](const char *) { return std::string(); });
 	Expect(limits.decide_timeout_ms == 2000 && limits.cache_entries == 10000, "the defaults");

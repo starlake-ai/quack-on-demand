@@ -31,14 +31,28 @@ struct AuthzStats {
 	//! Statements quack submitted to the parse screen (qod_screen): client statements, the manager's
 	//! preludes and its probe's statements.
 	std::atomic<int64_t> screen_calls {0};
+	//! Plan verdicts the verdict cache evicted for room (least recently used first), never one it replaced
+	//! or one that expired: a count that keeps rising means QOD_AUTHZ_CACHE_ENTRIES is too small.
+	std::atomic<int64_t> verdict_cache_evictions {0};
+};
+
+//! What qod_authz_stats() reports beside the counters: sizes as of the read (Task 11 addendum 6), which go
+//! up and down.
+struct AuthzStatsSizes {
+	//! Plan verdicts the verdict cache holds, expired ones not looked up since included.
+	int64_t verdict_cache_size = 0;
+	//! S3 credential sets the node keeps (decision 23).
+	int64_t credential_sets_size = 0;
 };
 
 //! The columns of qod_authz_stats(), in order: the manager reads them in this order
-//! (NodeAuthzStats.Counters, which a spec pins against this list).
+//! (NodeAuthzStats.Columns, which a spec pins against this list). Task 8's seven counters first, then
+//! verdict_cache_size, verdict_cache_evictions and credential_sets_size: a new column is appended, never
+//! inserted.
 const std::vector<std::string> &AuthzStatsColumns();
 
-//! Every counter of `stats`, in AuthzStatsColumns' order. Each is loaded on its own: the row is not one
-//! instant, which an increase does not need.
-std::vector<int64_t> AuthzStatsValues(const AuthzStats &stats);
+//! Every counter of `stats` and every size of `sizes`, in AuthzStatsColumns' order. Each is loaded on its
+//! own: the row is not one instant, which an increase does not need.
+std::vector<int64_t> AuthzStatsValues(const AuthzStats &stats, const AuthzStatsSizes &sizes);
 
 } // namespace qod

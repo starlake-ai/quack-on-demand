@@ -91,7 +91,7 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
       endpoints: List[String] = List("http://127.0.0.1:9000", "minio.internal:9000")
   ):
     val clock  = new AtomicLong(1_761_200_000_000L)
-    val issued = new IssuedHandles(clock = () => clock.get())
+    val issued = new IssuedHandles(maxEntries = 200_000L, clock = () => clock.get())
     val fails  = new AtomicBoolean(false)
     val cache  = new UserS3CredentialCache(
       () => if fails.get() then throw new RuntimeException("pg down") else Creds,

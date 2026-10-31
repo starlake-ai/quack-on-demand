@@ -429,7 +429,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     val digests: UserS3Credentials = new UserS3Credentials:
       def of(userId: String)     = Nil
       def digest(userId: String) = if userId == "u-1" then "d" * 64 else ""
-    val issued = new IssuedHandles(clock = () => 5000L)
+    val issued = new IssuedHandles(maxEntries = 200_000L, clock = () => 5000L)
     val keys   = new NodeKeys(
       "k" * 32,
       "http://127.0.0.1:20900",

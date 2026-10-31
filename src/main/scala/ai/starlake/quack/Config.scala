@@ -699,8 +699,25 @@ final case class NodeAuthzConfig(
         "QOD_INTERNAL_URL unset, nodes reach this replica on http://<pod IP>:<manager port>, so " +
         "the replica that minted a handle, not the Service, answers its node."
     )
-    podIp: String = ""
+    podIp: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUTHZ_HANDLE_CONTEXTS_MAX",
+      description =
+        "How many session handle contexts this replica keeps for its nodes' verdict and " +
+          "credential calls (at least 1000). Each is kept 360 s whatever the statement's " +
+          "duration, so this caps the replica's sustained tenant statements at about this / 360 " +
+          "per second (about 555 at the default); past it a statement can be refused with " +
+          "'authorization context expired; retry'. Watch " +
+          "cache_evictions_total{cache=\"qod_minted_handles\"}."
+    )
+    handleContextsMax: Int = 200000
 ):
+  require(
+    handleContextsMax >= NodeAuthzConfig.HandleContextsFloor,
+    s"nodeAuthz.handleContextsMax (QOD_AUTHZ_HANDLE_CONTEXTS_MAX) must be at least " +
+      s"${NodeAuthzConfig.HandleContextsFloor}, got $handleContextsMax"
+  )
+
   /** [[internalUrl]]; else this pod's address on `restPort`; else, when the manager listens on one
     * specific address (`bindHost`, QOD_ON_DEMAND_HOST, neither a wildcard nor `localhost` /
     * `127.0.0.1`), that address; else this host's loopback URL on `restPort`. An IPv6 address goes
@@ -723,6 +740,11 @@ final case class NodeAuthzConfig(
   private def specificBindHost(host: String): Boolean =
     !Set("", "*", "0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0", "localhost", "127.0.0.1")
       .contains(host.toLowerCase(java.util.Locale.ROOT))
+
+object NodeAuthzConfig:
+
+  /** The least [[NodeAuthzConfig.handleContextsMax]] accepted. */
+  val HandleContextsFloor: Int = 1000
 
 /** The three extension settings qod-node fixes in a node's database config before it opens (spec
   * decision 17). Off unless turned on here: DuckDB refuses to turn either `allow_*` setting on

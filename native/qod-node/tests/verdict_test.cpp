@@ -225,6 +225,23 @@ int main(int argc, char **argv) {
 	Expect(!lru.Find("u-11", 1, kCtx, a, kNow, found) && !lru.Find("u", 11, kCtx, a, kNow, found),
 	       "an id cannot run into the policy version");
 
+	// Evictions: an entry pushed out for room (LRU), never one replaced or one that expired.
+	qod::VerdictCache counted(2);
+	Expect(counted.Put(Plan("u-1", 1, kCtx, a, kNow + 60000), kNow) == 0 &&
+	           counted.Put(Plan("u-1", 1, kCtx, b, kNow + 60000), kNow) == 0,
+	       "no eviction below capacity");
+	Expect(counted.Put(Plan("u-1", 1, kCtx, a, kNow + 60000), kNow) == 0, "replacing an entry evicts none");
+	Expect(counted.Put(Plan("u-1", 1, kCtx, c, kNow + 60000), kNow) == 1, "one entry evicted past capacity");
+	Expect(counted.Size() == 2, "and the cache stays at its capacity");
+	auto uncached = Plan("u-1", 1, kCtx, a, kNow + 60000);
+	uncached.kind = "screen";
+	Expect(counted.Put(uncached, kNow) == 0, "a verdict not cached evicts none");
+	qod::VerdictCache lapsing(2);
+	lapsing.Put(Plan("u-1", 1, kCtx, a, kNow + 1000), kNow);
+	Expect(!lapsing.Find("u-1", 1, kCtx, a, kNow + 1000, found) && lapsing.Size() == 0 &&
+	           lapsing.Put(Plan("u-1", 1, kCtx, b, kNow + 60000), kNow + 1000) == 0,
+	       "an expired entry dropped on lookup is no eviction");
+
 	qod::VerdictCache timed(10);
 	timed.Put(Plan("u-1", 1, kCtx, a, kNow + 1000), kNow);
 	Expect(timed.Find("u-1", 1, kCtx, a, kNow + 999, found), "valid until its expiresAt");

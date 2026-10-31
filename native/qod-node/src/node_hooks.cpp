@@ -482,7 +482,11 @@ unique_ptr<FunctionData> StatsBind(ClientContext &context, TableFunctionBindInpu
 //! Read when the statement runs, not at bind: a prepared statement executed again reads them again.
 unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto state = make_uniq<StatsScanState>();
-	state->values = AuthzStatsValues(input.bind_data->Cast<StatsBindData>().authz->Stats());
+	auto &authz = *input.bind_data->Cast<StatsBindData>().authz;
+	AuthzStatsSizes sizes;
+	sizes.verdict_cache_size = static_cast<int64_t>(authz.Decider().Cache().Size());
+	sizes.credential_sets_size = static_cast<int64_t>(authz.Credentials().CachedSets());
+	state->values = AuthzStatsValues(authz.Stats(), sizes);
 	return std::move(state);
 }
 

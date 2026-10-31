@@ -9,7 +9,14 @@ import ai.starlake.quack.edge.adapter.{
 }
 import ai.starlake.quack.model.RunningNode
 import ai.starlake.quack.ondemand.PoolState
-import io.micrometer.core.instrument.{FunctionCounter, MeterRegistry, MultiGauge, Tags}
+import io.micrometer.core.instrument.{
+  FunctionCounter,
+  Gauge,
+  Meter,
+  MeterRegistry,
+  MultiGauge,
+  Tags
+}
 
 import scala.jdk.CollectionConverters._
 
@@ -50,8 +57,9 @@ final class MetricsBindings(
     MultiGauge.builder("node_duckdb_spill_bytes").register(registry)
 
   // qod-node's authorization counters per node (decision 26): one FunctionCounter per counter over
-  // the tracker's totals, registered once the probe has read the node and removed with it.
-  private val authzCounters = scala.collection.mutable.Map.empty[String, List[FunctionCounter]]
+  // the tracker's totals and one Gauge per size over its latest reading (addendum 6), registered
+  // once the probe has read the node and removed with it.
+  private val authzCounters = scala.collection.mutable.Map.empty[String, List[Meter]]
 
   // Free JVM metrics -- operators expect these and Micrometer ships them.
   new io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics().bindTo(registry)
@@ -143,11 +151,12 @@ final class MetricsBindings(
     refreshAuthzCounters(nodes)
 
   /** `qod_node_authz_<counter>_total{tenant,pool,node}` for every listed node the probe has read,
-    * while this replica leads: counters, since the tracker's totals only grow. A node no longer
-    * listed loses its series and its totals. A replica that does not lead (a follower, or a leader
-    * demoted since the last refresh) removes every series and forgets every total, so it exports
-    * none, and once it leads its first export is the node's current reading, taken whole (the
-    * tracker's first reading of a node). Synchronized: two scrapes may refresh at once.
+    * while this replica leads: counters, since the tracker's totals only grow; and the gauges
+    * `qod_node_authz_<size>{tenant,pool,node}`, the latest reading's sizes. A node no longer listed
+    * loses its series and its totals. A replica that does not lead (a follower, or a leader demoted
+    * since the last refresh) removes every series and forgets every total, so it exports none, and
+    * once it leads its first export is the node's current reading, taken whole (the tracker's first
+    * reading of a node). Synchronized: two scrapes may refresh at once.
     */
   private def refreshAuthzCounters(nodes: List[(String, String, RunningNode)]): Unit =
     synchronized {
@@ -161,7 +170,7 @@ final class MetricsBindings(
         nodes.foreach { case (t, p, n) =>
           val id = n.nodeId
           if !authzCounters.contains(id) && authzStats.total(id).isDefined then
-            val counters = NodeAuthzStats.Counters.zipWithIndex.map { (name, i) =>
+            val counters: List[Meter] = NodeAuthzStats.Counters.zipWithIndex.map { (name, i) =>
               FunctionCounter
                 .builder(
                   s"qod_node_authz_${name}_total",
@@ -171,6 +180,16 @@ final class MetricsBindings(
                 .tags("tenant", t, "pool", p, "node", id)
                 .register(registry)
             }
-            authzCounters.update(id, counters)
+            val sizes: List[Meter] = NodeAuthzStats.Sizes.zipWithIndex.map { (name, i) =>
+              Gauge
+                .builder(
+                  s"qod_node_authz_$name",
+                  authzStats,
+                  (s: NodeAuthzStatsTracker) => s.total(id).fold(0.0)(_.sizes(i).toDouble)
+                )
+                .tags("tenant", t, "pool", p, "node", id)
+                .register(registry)
+            }
+            authzCounters.update(id, counters ++ sizes)
         }
     }

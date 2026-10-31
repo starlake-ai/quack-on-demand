@@ -21,7 +21,7 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
 
   "MintedHandles" should "keep a context until DecideGraceMs past its handle's expiry" in {
     val clock  = new AtomicLong(1000L)
-    val m      = new MintedHandles(clock = () => clock.get())
+    val m      = new MintedHandles(maxEntries = 200_000L, clock = () => clock.get())
     val digest = NodeHandles.contextDigest(Some(Ctx))
     m.put("n-1", Ctx, digest, expiresAt = 61_000L)
     m.get("n-1") shouldBe Some(MintedHandles.Minted(Ctx, digest))
@@ -39,7 +39,7 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
   }
 
   "NodeKeys.handle" should "register the context of a principal that carries one, by nonce" in {
-    val m    = new MintedHandles()
+    val m    = new MintedHandles(maxEntries = 200_000L)
     val keys = new NodeKeys(
       "k" * 32,
       "http://127.0.0.1:20900",
@@ -97,7 +97,7 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
   }
 
   "NodeKeys.mint" should "be the handle, with the nonce its context is registered under" in {
-    val m    = new MintedHandles()
+    val m    = new MintedHandles(maxEntries = 200_000L)
     val keys = new NodeKeys(
       "s" * 40,
       "http://127.0.0.1:20900",

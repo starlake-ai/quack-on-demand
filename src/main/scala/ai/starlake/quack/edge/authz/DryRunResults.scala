@@ -1,8 +1,10 @@
 package ai.starlake.quack.edge.authz
 
 import ai.starlake.quack.edge.opa.Decision as PolicyDecision
+import ai.starlake.quack.observability.metrics.CacheMetrics
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
 import io.circe.Json
+import io.micrometer.core.instrument.MeterRegistry
 
 import java.util.concurrent.TimeUnit
 
@@ -45,6 +47,7 @@ final class DryRunResults(
       .maximumSize(maxEntries)
       .expireAfterWrite(DryRunResults.RetentionMs, TimeUnit.MILLISECONDS)
       .executor(_.run())
+      .recordStats()
       .build[String, (DryRunOutcome, Long)]()
 
   /** Records `o` for the statement decided under handle `nonce`; a later call replaces it. */
@@ -55,6 +58,12 @@ final class DryRunResults(
     Option(cache.asMap().remove(nonce)).collect {
       case (o, recordedAt) if clock() <= recordedAt + DryRunResults.RetentionMs => o
     }
+
+  /** Its size, evictions and capacity under `cache=qod_dry_run_results` (a take is no lookup, so
+    * its hits and misses stay at zero).
+    */
+  def bindMetrics(registry: MeterRegistry): Unit =
+    CacheMetrics.bind(registry, DryRunResults.MetricName, cache, maxEntries)
 
   /** How many outcomes are held, after pending evictions ran. */
   def size: Long =
@@ -69,3 +78,6 @@ object DryRunResults:
 
   /** Outcomes kept at most. */
   val MaxEntries: Long = 10_000L
+
+  /** The `cache` tag of its meters. */
+  val MetricName: String = "qod_dry_run_results"

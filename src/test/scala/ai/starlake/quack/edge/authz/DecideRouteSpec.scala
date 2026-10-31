@@ -115,7 +115,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
   ):
     val registry = new SimpleMeterRegistry
     val clock    = new AtomicLong(1_761_200_000_000L)
-    val minted   = new MintedHandles(clock = () => clock.get())
+    val minted   = new MintedHandles(maxEntries = 200_000L, clock = () => clock.get())
     val dryRuns  = new DryRunResults(clock = () => clock.get())
     val opaPosts = new java.util.concurrent.atomic.AtomicInteger(0)
     val keys     =

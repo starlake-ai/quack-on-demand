@@ -850,14 +850,26 @@ int main() {
 		auto result = probe.Query(stats_sql);
 		auto &expected = qod::AuthzStatsColumns();
 		auto shaped = !result->HasError() && result->RowCount() == 1 && result->GetNames().size() == expected.size() &&
-		              expected.size() == 7;
+		              expected.size() == 10;
 		for (size_t i = 0; shaped && i < expected.size(); i++) {
 			shaped = result->GetNames()[i].GetIdentifierName() == expected[i] &&
 			         result->GetTypes()[i] == duckdb::LogicalType::BIGINT;
 		}
 		Check(result->HasError() ? result->GetError() : "", !shaped, "",
-		      "the system principal reads one row of seven BIGINT counters, by name, in order");
+		      "the system principal reads one row of ten BIGINT columns, by name, in order");
+		// Task 8's seven counters keep their place; the cache columns come after them (addendum 6).
+		const std::vector<std::string> order = {"plan_cache_hits",    "plan_cache_misses",       "decide_calls",
+		                                        "decide_unavailable", "decide_refused",          "local_refusals",
+		                                        "screen_calls",       "verdict_cache_size",      "verdict_cache_evictions",
+		                                        "credential_sets_size"};
+		Check("", expected != order, "", "the columns, Task 8's first and the cache columns appended");
 	}
+	Check("", Counter(probe, "verdict_cache_size") != static_cast<int64_t>(authz->Decider().Cache().Size()), "",
+	      "verdict_cache_size is the size of the node's verdict cache");
+	Check("", Counter(probe, "verdict_cache_evictions") != stats.verdict_cache_evictions.load(), "",
+	      "verdict_cache_evictions is the node's counter");
+	Check("", Counter(probe, "credential_sets_size") != static_cast<int64_t>(authz->Credentials().CachedSets()), "",
+	      "credential_sets_size is the number of credential sets the node keeps");
 	Check("", Counter(probe, "local_refusals") != stats.local_refusals.load(), "",
 	      "local_refusals is the node's counter");
 	Check("", Counter(probe, "screen_calls") != stats.screen_calls.load(), "", "and so is screen_calls");

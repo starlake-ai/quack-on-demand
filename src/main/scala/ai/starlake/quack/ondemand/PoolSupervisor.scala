@@ -302,8 +302,21 @@ final class PoolSupervisor(
     com.github.benmanes.caffeine.cache.Caffeine
       .newBuilder()
       .expireAfterWrite(java.time.Duration.ofSeconds(EffectiveCacheTtl.toSeconds))
-      .maximumSize(10_000L)
+      .maximumSize(PoolSupervisor.EffectiveCacheMaxEntries)
+      .recordStats()
       .build[EffectiveCacheKey, CachedEffective]()
+
+  /** The effective-set cache's size, hits, misses, evictions and capacity under
+    * `cache=qod_effective_sets`. A hit counts a lookup that found an entry, also one computed under
+    * an older policy generation and so not served.
+    */
+  def bindEffectiveSetCacheMetrics(registry: io.micrometer.core.instrument.MeterRegistry): Unit =
+    ai.starlake.quack.observability.metrics.CacheMetrics.bind(
+      registry,
+      PoolSupervisor.EffectiveCacheMetricName,
+      effectiveCache,
+      PoolSupervisor.EffectiveCacheMaxEntries
+    )
 
   /** Drop every cached `EffectiveSet` and reload the tenants' policy versions and the users' S3
     * credentials, without broadcasting. Used by [[restore]] and by peer notification handlers:
@@ -4513,6 +4526,12 @@ object PoolSupervisor:
     */
   val NodeStartupGrace: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(120).seconds
+
+  /** Effective sets kept at most, one per (user, JWT roles, JWT groups). */
+  val EffectiveCacheMaxEntries: Long = 10_000L
+
+  /** The `cache` tag of the effective-set cache's meters. */
+  val EffectiveCacheMetricName: String = "qod_effective_sets"
 
   /** The permits of the versions lock: one per local mutation, every one for a restore. */
   val VersionsLockPermits: Int = 1 << 20

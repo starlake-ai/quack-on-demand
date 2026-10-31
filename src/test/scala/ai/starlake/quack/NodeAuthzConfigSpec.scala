@@ -121,3 +121,32 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
         NodeAuthzConfig().replicaUrl(bind, 20900) shouldBe "http://127.0.0.1:20900"
       )
   }
+
+  // How many handle contexts (MintedHandles) and nonces (IssuedHandles) one replica keeps: each is
+  // kept a handle's lifetime plus its grace (360 s) whatever the statement's duration, so the bound
+  // caps a replica's sustained tenant statements at about capacity / 360 per second.
+  "NodeAuthzConfig.handleContextsMax" should "default to 200000" in {
+    NodeAuthzConfig().handleContextsMax shouldBe 200000
+    load().nodeAuthz.handleContextsMax shouldBe 200000
+  }
+
+  it should "take QOD_AUTHZ_HANDLE_CONTEXTS_MAX" in {
+    load(Map("QOD_AUTHZ_HANDLE_CONTEXTS_MAX" -> "1000000")).nodeAuthz.handleContextsMax shouldBe
+      1000000
+    load(Map("QOD_AUTHZ_HANDLE_CONTEXTS_MAX" -> "1000")).nodeAuthz.handleContextsMax shouldBe 1000
+  }
+
+  it should "refuse boot below its floor of 1000, naming the variable" in
+    List("999", "0", "-1", "lots").foreach { v =>
+      withClue(v) {
+        val e = intercept[Exception](load(Map("QOD_AUTHZ_HANDLE_CONTEXTS_MAX" -> v)))
+        if v != "lots" then e.getMessage should include("QOD_AUTHZ_HANDLE_CONTEXTS_MAX")
+      }
+    }
+
+  it should "register under its variable, not sensitive" in {
+    ConfigRegistry
+      .collect(List("quack-on-demand" -> classOf[ManagerConfig]))
+      .find(_.path == "quack-on-demand.nodeAuthz.handleContextsMax")
+      .map(e => (e.envVar, e.sensitive)) shouldBe Some(("QOD_AUTHZ_HANDLE_CONTEXTS_MAX", false))
+  }

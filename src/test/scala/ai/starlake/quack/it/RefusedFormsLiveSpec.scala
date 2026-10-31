@@ -91,7 +91,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     Map("alice" -> alice, "bob" -> bob, "carol" -> carol, "dave" -> dave, "root" -> root)
 
   private val secret                 = NodeKeys.randomSecret()
-  private val minted                 = new MintedHandles()
+  private val minted                 = new MintedHandles(maxEntries = 200_000L)
   private var dir: Path              = null
   private var live: LiveQodNode      = null
   private var decide: HttpServer     = null

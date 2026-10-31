@@ -499,10 +499,13 @@ object Main extends IOApp with LazyLogging:
         mgrCfg.userS3.endpoints
       )
     // The nonces of the handles this replica mints: the credentials endpoint answers only those.
-    val issuedHandles = new ai.starlake.quack.edge.authz.IssuedHandles()
+    // Both bounded by QOD_AUTHZ_HANDLE_CONTEXTS_MAX, kept 360 s each.
+    val issuedHandles =
+      new ai.starlake.quack.edge.authz.IssuedHandles(mgrCfg.nodeAuthz.handleContextsMax.toLong)
     // The authorization context of every handle this replica mints, by nonce: the decision
     // endpoint judges a node's statement with the context its handle was minted for.
-    val mintedHandles = new ai.starlake.quack.edge.authz.MintedHandles()
+    val mintedHandles =
+      new ai.starlake.quack.edge.authz.MintedHandles(mgrCfg.nodeAuthz.handleContextsMax.toLong)
     // What the tenant's OPA was asked and answered for each OPA dry-run statement, by handle nonce:
     // the decision endpoint records, the dry-run handler takes (decision 25).
     val dryRunResults = new ai.starlake.quack.edge.authz.DryRunResults()
@@ -1204,13 +1207,22 @@ object Main extends IOApp with LazyLogging:
       val classifier = EdgeRewriters.statementClassifier()
       // ONE OPA authorizer per manager (one HttpClient, one decision cache), shared by the
       // decision pipeline below, the handshake and the admin dry-run.
+      val opaDecisions = new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec)
+      // Every bounded authorization cache reports its size, hits, misses, evictions and capacity
+      // (cache_*{cache=...}, qod_cache_capacity{cache=...}), on every replica: each is this
+      // replica's own.
+      mintedHandles.bindMetrics(metricsReg.composite)
+      issuedHandles.bindMetrics(metricsReg.composite)
+      dryRunResults.bindMetrics(metricsReg.composite)
+      sup.bindEffectiveSetCacheMetrics(metricsReg.composite)
+      opaDecisions.bindMetrics(metricsReg.composite)
       val opaAuthorizer = new ai.starlake.quack.edge.opa.OpaAuthorizer(
         opaCfg,
         new ai.starlake.quack.edge.opa.OpaClient(
           opaCfg.timeoutMs,
           ai.starlake.quack.edge.opa.OpaClient.jdkPost(opaCfg.timeoutMs)
         ),
-        new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec),
+        opaDecisions,
         new ai.starlake.quack.observability.metrics.OpaInstruments(metricsReg.composite)
       )
       // Handshake gate 4 for opa tenants; wired before any edge starts so no handshake ever sees

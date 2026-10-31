@@ -116,7 +116,7 @@ DecideResult DecideClient::Decide(const DecideCall &call) {
 		stats_.decide_refused++;
 	}
 	if (result.has_verdict) {
-		cache_.Put(result.verdict, clock_());
+		stats_.verdict_cache_evictions += static_cast<int64_t>(cache_.Put(result.verdict, clock_()));
 	}
 	return result;
 }

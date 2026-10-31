@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.quack.observability.metrics.CacheMetrics
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
+import io.micrometer.core.instrument.MeterRegistry
 
 import java.util.concurrent.TimeUnit
 
@@ -10,13 +12,18 @@ import java.util.concurrent.TimeUnit
   * digests (`ctx`). That is why a node calls the replica its handle names.
   *
   * A context is kept, with the `ctx` digest its handle carries (computed once, at mint), until
-  * [[NodeHandles.DecideGraceMs]] past its handle's expiry. Bounded by `maxEntries`: past the bound
-  * Caffeine evicts by W-TinyLFU, not oldest first, so some contexts go early (a just-minted one
-  * among them), and their decide calls get a retryable 503. Superusers and the system principal
-  * need no context and are never registered (NodeKeys). In memory only.
+  * [[NodeHandles.DecideGraceMs]] past its handle's expiry. Bounded by `maxEntries`
+  * (`QOD_AUTHZ_HANDLE_CONTEXTS_MAX`, required: no construction gets a bound by omission): past the
+  * bound Caffeine evicts by W-TinyLFU, not oldest first, so some contexts go early (a just-minted
+  * one among them), and their decide calls get a retryable 503 (`authorization context expired;
+  * retry`). A context is kept a handle's lifetime plus its grace (360 s) whatever the statement's
+  * duration, so the bound caps a replica's sustained tenant statements at about `maxEntries / 360`
+  * per second (about 555 at the default 200000);
+  * `cache_evictions_total{cache="qod_minted_handles"}` shows it being reached. Superusers and the
+  * system principal need no context and are never registered (NodeKeys). In memory only.
   */
 final class MintedHandles(
-    maxEntries: Long = MintedHandles.MaxEntries,
+    maxEntries: Long,
     clock: () => Long = () => System.currentTimeMillis()
 ):
   private val cache: Cache[String, (MintedHandles.Minted, Long)] =
@@ -25,6 +32,7 @@ final class MintedHandles(
       .maximumSize(maxEntries)
       .expireAfterWrite(NodeHandles.LifetimeMs + NodeHandles.DecideGraceMs, TimeUnit.MILLISECONDS)
       .executor(_.run())
+      .recordStats()
       .build[String, (MintedHandles.Minted, Long)]()
 
   /** Registers the context the handle `nonce` was minted with, and that handle's `ctx`. */
@@ -39,6 +47,10 @@ final class MintedHandles(
       case (minted, expiresAt) if clock() <= expiresAt + NodeHandles.DecideGraceMs => minted
     }
 
+  /** Its size, hits, misses, evictions and capacity under `cache=qod_minted_handles`. */
+  def bindMetrics(registry: MeterRegistry): Unit =
+    CacheMetrics.bind(registry, MintedHandles.MetricName, cache, maxEntries)
+
   /** How many contexts are held, after pending evictions ran. */
   def size: Long =
     cache.cleanUp()
@@ -49,7 +61,5 @@ object MintedHandles:
   /** A registered context and the `ctx` digest of it the handle carries. */
   final case class Minted(context: DecideContext, ctx: String)
 
-  /** Contexts kept at most. Decide calls follow their prelude within milliseconds; this many covers
-    * 550 statements a second for a handle's lifetime plus its grace.
-    */
-  val MaxEntries: Long = 200_000L
+  /** The `cache` tag of its meters. */
+  val MetricName: String = "qod_minted_handles"
