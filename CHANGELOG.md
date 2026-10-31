@@ -1,6 +1,52 @@
 # Changelog
 
-## 0.10.2
+## 0.11.0
+
+### Upgrading from 0.10.x (read first)
+
+0.11.0 moves every authorization decision into the node. It is not a drop-in upgrade: a manager
+still carrying a removed setting refuses to boot, every node must restart, and tenant users lose
+access the old switches used to grant. Work through these steps in order; the sections below give
+the details.
+
+Before upgrading:
+
+1. Back up the control-plane database. Liquibase `0047` to `0055` run at boot, and `0055` drops
+   the `qodstate_pool.lockdown` column the previous release reads.
+2. Replace the static API key: mint PATs for automation (`qod login`, then `qod auth pat create`),
+   point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every
+   environment, chart value and Compose file. A manager with it set refuses to boot.
+3. Unset `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` and `QOD_NODE_LOCKDOWN`
+   everywhere (`qod setup --unset <NAME>` for a persisted one), and drop the Helm values
+   `security.aclEnabled` and `security.nodeLockdown`. Boot refuses each of them.
+4. Grant tenant users what they read: enforcement can no longer be turned off, and per-pool
+   lockdown is gone.
+5. On OPA tenants, update the policies for the node's input (`columns`, `via`, `locations`).
+6. If users load files, set `QOD_TENANT_FILES_ROOT`, and list in `QOD_USER_S3_ALLOWED_ENDPOINTS`
+   any endpoint other than AWS that users' own S3 keys target.
+7. In fleet mode set `QOD_INTERNAL_URL` on every manager; on Kubernetes without the chart set
+   `QOD_POD_IP`. Under HA, set `QOD_NODE_KEY_SECRET` to the same value on every replica, or leave
+   it unset on all.
+
+During the upgrade:
+
+8. Upgrade every HA replica together: scale to one replica or use a `Recreate` rollout, since
+   `0055` drops a column the previous release reads.
+9. Upgrade the `qod` CLI with the manager, and in fleet mode upgrade `qod` on every server.
+
+After upgrading:
+
+10. Restart every node. Nodes speak protocol 5 with session handle v3; a node started by an earlier
+    release, or an earlier node image, does not work with this manager. On Kubernetes pull this
+    release's node image.
+11. Read the boot log. Review the WARNs about untrusted initSql and `sql` federation sources (a
+    superuser re-saves what should stay trusted), and the ERROR lines naming tenants whose
+    sign-in `clientSecretRef` was parked (a superuser restores each one).
+12. If tenant admins are not fully trusted, rotate the manager's secrets as described under
+    "Security: upgrade promptly" below.
+13. Tell tenant users that DuckDB's built-in listing views are now refused to them
+    (`pg_catalog.*`, `sqlite_master`, bare `SHOW` / `DESCRIBE`, `system.information_schema.*`).
+    They keep `information_schema.*`, `SHOW TABLES` and `duckdb_*()`, filtered to their grants.
 
 ### Phases A-C
 
@@ -762,22 +808,6 @@ In-engine authorization, Phase D: the node decides every statement alone.
   pools that are gone; HA peers also forget the load figures of nodes another replica removed.
 - `qod_node_authz_*` are exported by the HA leader only, so `sum by (node)` no longer multiplies by
   the replica count.
-
-### Upgrading
-
-- Mint PATs for automation before upgrading (`qod login`, then
-  `qod auth pat create`), point MCP clients and SCIM connectors at them, then remove
-  `QOD_API_KEY` from every environment, chart value and Compose file. In fleet mode set
-  `QOD_INTERNAL_URL` on every manager and upgrade `qod` on every server; on Kubernetes without the
-  chart set `QOD_POD_IP`. Grant tenant users what they read (the ACL can no longer be turned off),
-  unset `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` and `QOD_NODE_LOCKDOWN`
-  everywhere (`qod setup --unset <NAME>` for a persisted one) and upgrade the `qod` CLI with the
-  manager, update OPA policies for the node input (`columns`, `via`, `locations`), upgrade every HA
-  replica together (Liquibase `0055` drops a column the previous release reads: scale to one or use a
-  `Recreate` rollout), set `QOD_TENANT_FILES_ROOT` / `QOD_USER_S3_ALLOWED_ENDPOINTS` if users
-  load files, review the boot WARNs about untrusted initSql and `sql` federation sources (a superuser
-  re-saves what should stay), and restart every node. Under HA, set `QOD_NODE_KEY_SECRET` the same on
-  every replica or leave it unset on all.
 
 ## 0.10.1
 

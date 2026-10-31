@@ -179,8 +179,8 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                     <code>{parkedRefShown(storedParked)}</code>{' '}
                     <span className="subtle">
                       {isSecretReference(storedParked)
-                        ? '(saved before 0.10.2; unused until a superuser saves it again. '
-                        : '(saved before 0.10.2 and unused; it is not a secret reference, so set a client secret or a reference instead. '}
+                        ? '(saved before 0.11.0; unused until a superuser saves it again. '
+                        : '(saved before 0.11.0 and unused; it is not a secret reference, so set a client secret or a reference instead. '}
                       Entering a client secret or changing the issuer URL drops it)
                     </span>
                   </td>
@@ -282,7 +282,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                   )}
                   {formParked && (
                     <p className="subtle">
-                      The client secret ref saved before 0.10.2 is parked and unused:{' '}
+                      The client secret ref saved before 0.11.0 is parked and unused:{' '}
                       <code>{parkedRefShown(formParked)}</code>.{' '}
                       {parkedAdvice(formParked)}{' '}
                       Entering a client secret, or changing the issuer URL, drops it.

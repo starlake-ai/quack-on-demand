@@ -28,7 +28,7 @@ export const ISSUER_KEY = 'issuerUrl';
 export const SECRET_REF_KEY = 'clientSecretRef';
 
 /** `authConfig` key under which Liquibase 0048 parked a reference saved
-  * before 0.10.2. Nothing reads it. The server drops it once a save holds a
+  * before 0.11.0. Nothing reads it. The server drops it once a save holds a
   * secret source or moves the issuer, and keeps it only while a save carries
   * it unchanged. */
 export const PARKED_SECRET_REF_KEY = 'clientSecretRefUnconfirmed';
