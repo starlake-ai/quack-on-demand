@@ -1093,6 +1093,26 @@ export interface RecoverableTableEntry {
   recoverable: boolean;
 }
 
+/** One pool the caller may connect to (`GET /api/profile/pools`). */
+export interface ProfilePool {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  status: string;
+}
+
+export interface ProfilePoolsResponse {
+  pools: ProfilePool[];
+}
+
+/** Self-service undrop (`POST /api/profile/undrop`): the caller's own tenant, never named. */
+export interface ProfileUndropRequest {
+  tenantDb: string;
+  schema: string;
+  table: string;
+  asName?: string;
+}
+
 export interface RecoverableListResponse {
   tables: RecoverableTableEntry[];
 }
