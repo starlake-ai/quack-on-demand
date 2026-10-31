@@ -1704,7 +1704,10 @@ final case class BranchMergeEntry(
 
 final case class BranchDetailResponse(branch: BranchEntry, merges: List[BranchMergeEntry])
 
-/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed. */
+/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed;
+  * `countsUnavailable`: they were asked for and refused to the requester or failed, so the zeros
+  * are no counts.
+  */
 final case class BranchTableChange(
     schema: String,
     table: String,
@@ -1713,7 +1716,8 @@ final case class BranchTableChange(
     deleted: Long = 0L,
     updated: Long = 0L,
     mergeable: Boolean = true,
-    reason: Option[String] = None
+    reason: Option[String] = None,
+    countsUnavailable: Boolean = false
 )
 
 final case class BranchConflictEntry(schema: String, table: String, reason: String)

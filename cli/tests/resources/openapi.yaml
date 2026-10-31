@@ -7748,6 +7748,7 @@ components:
       - deleted
       - updated
       - mergeable
+      - countsUnavailable
       properties:
         schema:
           type: string
@@ -7768,6 +7769,8 @@ components:
           type: boolean
         reason:
           type: string
+        countsUnavailable:
+          type: boolean
     CatalogAttachFailureDto:
       title: CatalogAttachFailureDto
       type: object

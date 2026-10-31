@@ -103,7 +103,8 @@ final class BranchHandlers(
           deleted = t.deleted,
           updated = t.updated,
           mergeable = t.mergeable,
-          reason = t.reason
+          reason = t.reason,
+          countsUnavailable = t.countsUnavailable
         )
       ),
       conflicts = cs.conflicts.map(c => BranchConflictEntry(c.schema, c.table, c.reason)),

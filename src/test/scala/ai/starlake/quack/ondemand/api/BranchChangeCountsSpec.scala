@@ -182,15 +182,26 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       .fold(f => fail(s"branch create: $f"), identity)
 
     def overRest(token: String, scope: SessionScope.Resolver): Map[String, Long] =
+      restTables(token, scope).map(t => t.table -> t.inserted).toMap
+
+    def restTables(token: String, scope: SessionScope.Resolver): List[BranchTableChange] =
       handlers
         .changes("acme", parent.name, "feature", Some(true), Some(token))(scope)
         .unsafeRunSync()
         .fold(e => fail(s"changes: $e"), identity)
         .tables
-        .map(t => t.table -> t.inserted)
-        .toMap
 
     def overMcp(): Map[String, Long] =
+      mcpTables()
+        .map(t =>
+          t.hcursor
+            .get[String]("table")
+            .toOption
+            .get -> t.hcursor.get[Long]("inserted").toOption.get
+        )
+        .toMap
+
+    def mcpTables(): List[Json] =
       val pat  = patOf(PatTok).get
       val tool = new McpBranchTools(handlers, AliceScope).tools.find(_.name == "branch_changes").get
       val out  = tool
@@ -203,18 +214,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
         )
         .unsafeRunSync()
         .fold(e => fail(s"branch_changes: $e"), identity)
-      out.hcursor
-        .downField("tables")
-        .values
-        .toList
-        .flatten
-        .map(t =>
-          t.hcursor
-            .get[String]("table")
-            .toOption
-            .get -> t.hcursor.get[Long]("inserted").toOption.get
-        )
-        .toMap
+      out.hcursor.downField("tables").values.toList.flatten
 
   "branch change counts over REST" should "run as the requester: no count of a table the node refuses them" in {
     val f = new Fixture
@@ -226,6 +226,18 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       principal.name shouldBe "alice"
       principal should not be NodePrincipal.System
     }
+  }
+
+  "a count the node refuses" should "be reported unavailable, not as a real zero" in {
+    val f    = new Fixture
+    val rest = f.restTables(SessionTok, AliceScope).map(t => t.table -> t.countsUnavailable).toMap
+    rest shouldBe Map("region" -> false, "nation" -> true)
+    f.mcpTables()
+      .map(t =>
+        t.hcursor.get[String]("table").toOption.get ->
+          t.hcursor.get[Boolean]("countsUnavailable").toOption.get
+      )
+      .toMap shouldBe Map("region" -> false, "nation" -> true)
   }
 
   "branch change counts over MCP" should "run as the PAT's owner, with the PAT, never as system" in {

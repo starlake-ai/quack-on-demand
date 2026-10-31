@@ -456,8 +456,9 @@ final class BranchService(
   /** The change set of a live branch against main, with change-feed counts for modified tables when
     * `countsAs` names a caller: each count is one statement on the branch pool run as that caller
     * (the requester, never the system caller: the node decides which tables they may count). A
-    * failed or refused count degrades to zeroes with a WARN, so the listing never fails on a
-    * hibernated pool or a table the requester holds no grant on. `None`: no counts.
+    * failed or refused count degrades to zeroes flagged `countsUnavailable`, with a WARN, so the
+    * listing never fails on a hibernated pool or a table the requester holds no grant on. `None`:
+    * no counts.
     */
   def changes(
       tenant: String,
@@ -515,7 +516,7 @@ final class BranchService(
                       done :+ t.copy(inserted = ins, deleted = del, updated = upd)
                     case Left(err) =>
                       logger.warn(s"branch changes: counts for ${t.schema}.${t.table} failed: $err")
-                      done :+ t
+                      done :+ t.copy(countsUnavailable = true)
                   }
               }
             }
