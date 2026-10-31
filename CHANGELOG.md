@@ -17,8 +17,11 @@ Before upgrading:
    point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every
    environment, chart value and Compose file. A manager with it set refuses to boot.
 3. Unset `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` and `QOD_NODE_LOCKDOWN`
-   everywhere (`qod setup --unset <NAME>` for a persisted one), and drop the Helm values
-   `security.aclEnabled` and `security.nodeLockdown`. Boot refuses each of them.
+   everywhere (`qod setup --unset <NAME>` for a persisted one), with their HOCON keys
+   (`quack-flightsql.acl.*`, `quack-flightsql.nodeLockdown`): boot refuses each of them, in either
+   form. Drop the Helm values `security.aclEnabled` and `security.nodeLockdown` too: the chart no
+   longer reads them, so they change nothing, but the same variables set through the chart's `env`
+   are refused at boot like any other.
 4. Grant tenant users what they read: enforcement can no longer be turned off, and per-pool
    lockdown is gone.
 5. On OPA tenants, update the policies for the node's input (`columns`, `via`, `locations`).
@@ -536,14 +539,13 @@ After upgrading:
   add`) or create a scoped secret; an initSql that reads other buckets needs its own `CREATE
   SECRET`.
 
-- **Iceberg tables on S3 are read-only through QoD for every principal, superusers included.** A
-  catalog that neither vends credentials nor has AWS credentials of its own now reads its tables
-  with each reading user's own S3 keys, which qod-node installs as connection secrets, and DuckDB's
-  Iceberg extension (v2.0.0) commits its manifest files without connection secrets, so a write
-  fails with HTTP 403 at commit, a superuser's too. This lasts until upstream duckdb-iceberg signs
-  its commits with connection secrets. The raw files
-  of a warehouse bucket are not data folders QoD knows: a user holding keys for it can read them
-  directly.
+- **Iceberg tables on S3 read with users' own S3 keys are read-only through QoD, for superusers
+  too.** A catalog that neither vends credentials nor has AWS credentials of its own now reads its
+  tables with each reading user's own S3 keys, which qod-node installs as connection secrets, and
+  DuckDB's Iceberg extension (v2.0.0) commits its manifest files without connection secrets, so a
+  write fails with HTTP 403 at commit, a superuser's too. This lasts until upstream duckdb-iceberg
+  signs its commits with connection secrets. The raw files of a warehouse bucket are not data
+  folders QoD knows: a user holding keys for it can read them directly.
 
 - **BREAKING: extension settings are fixed when a node starts.** `allow_community_extensions`,
   `allow_unsigned_extensions` and `autoinstall_known_extensions` are false on every node, set before
