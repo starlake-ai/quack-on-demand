@@ -29,7 +29,7 @@ struct Principal {
 
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
-//! {"v":3,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
+//! {"v":4,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
 //!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"readOnly":[..],"nonce":..,"exp":..},
 //! every member required ("ctx", "creds" and "path" since node protocol 3, "readOnly" since 5). The MAC
 //! covers the payload bytes as sent, so no canonical form has to agree between the two sides.
