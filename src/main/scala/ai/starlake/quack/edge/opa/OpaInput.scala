@@ -21,7 +21,10 @@ final case class OpaUser(
 )
 
 /** One access of a node decision: what DuckDB resolved, with the object's kind, the columns read
-  * (sorted) and the secure view it comes through.
+  * (sorted) and the secure view it comes through. `history`: for a DuckLake read at an earlier
+  * snapshot that crossed a change of the table, which ones (`renamed`, `dropped`, `replaced`,
+  * sorted); in the input only when non-empty. A plain earlier-snapshot or change-feed read of a
+  * table that did not change carries none: the node cannot tell it from a current read.
   */
 final case class OpaAccess(
     catalog: String,
@@ -30,7 +33,8 @@ final case class OpaAccess(
     kind: String,
     verb: Verb,
     columns: List[String],
-    via: Option[String]
+    via: Option[String],
+    history: List[String] = Nil
 )
 
 /** One file location a node decision names: `access` read or write, `scope` the principal's own S3
@@ -103,15 +107,20 @@ object OpaInput:
   /** `client.edge` of a node decision. */
   val NodeEdge: String = "node"
 
-  private def decideAccessJson(a: OpaAccess): Json = Json.obj(
-    "catalog" -> Json.fromString(a.catalog),
-    "schema"  -> Json.fromString(a.schema),
-    "table"   -> Json.fromString(a.table),
-    "verb"    -> Json.fromString(verbName(a.verb)),
-    "kind"    -> Json.fromString(a.kind),
-    "columns" -> Json.arr(a.columns.sorted.map(Json.fromString)*),
-    "via"     -> a.via.fold(Json.Null)(Json.fromString)
-  )
+  private def decideAccessJson(a: OpaAccess): Json =
+    val base = List(
+      "catalog" -> Json.fromString(a.catalog),
+      "schema"  -> Json.fromString(a.schema),
+      "table"   -> Json.fromString(a.table),
+      "verb"    -> Json.fromString(verbName(a.verb)),
+      "kind"    -> Json.fromString(a.kind),
+      "columns" -> Json.arr(a.columns.sorted.map(Json.fromString)*),
+      "via"     -> a.via.fold(Json.Null)(Json.fromString)
+    )
+    val history =
+      if a.history.isEmpty then Nil
+      else List("history" -> Json.arr(a.history.sorted.map(Json.fromString)*))
+    Json.obj((base ++ history)*)
 
   private def locationJson(l: OpaLocation): Json = Json.obj(
     "access"   -> Json.fromString(l.access),

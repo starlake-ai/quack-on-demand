@@ -103,7 +103,7 @@ final class AuthzDecider(
       val writes     = d.objects.exists(writesData) || writesFile
       for
         _ <- all(d.objects)(alwaysOnObject)
-        _ <- all(d.objects)(renamedUnderPolicies(ctx, _))
+        _ <- all(d.objects)(historyUnderPolicies(ctx, _))
         _ <- all(d.functions)(alwaysOnFunction)
         _ <- all(d.settings)(alwaysOnSetting)
         _ <- all(d.control)(alwaysOnControl)
@@ -204,22 +204,30 @@ final class AuthzDecider(
       )
     else Pass
 
-  /** A DuckLake read the statement named by a name the table, or a column read, had at the snapshot
-    * it reads and has no longer (`renamed`, review M1): the node describes it under its current
-    * names, which the grants and OPA judge, but the column and row policy rewriters ran before it
-    * on the names the statement wrote, so they matched another table's policies, or none. Refused
-    * to a principal holding any column or row policy (the rewriters' and the protected-write
-    * guard's switches are not known here: the refusal does not depend on them).
+  /** A DuckLake read across a change of the table (review M1, owner rulings): `renamed` (the
+    * statement wrote a name the table, or a column read, had at that snapshot and has no longer),
+    * `dropped` (a table dropped since, read under its last live name) or `replaced` (a table
+    * replaced since, read under its successor's name). The node describes it under the names the
+    * grants and OPA judge, but the column and row policy rewriters ran before it on the names the
+    * statement wrote, against the tables as they are now, so they matched another table's policies,
+    * or none. Refused to a principal holding any column or row policy (the rewriters' and the
+    * protected-write guard's switches are not known here: the refusal does not depend on them).
     */
-  private def renamedUnderPolicies(ctx: DecideContext, o: DescribedObject): Step =
-    val eff = ctx.effective
-    if o.renamed && (eff.columnPolicies.nonEmpty || eff.rowPolicies.nonEmpty) then
-      refuse(
-        s"${o.qualified} was named otherwise at the snapshot it is read at, and column and row " +
-          "policies match the names a statement writes; not available to principals with column " +
-          "or row policies"
-      )
-    else Pass
+  private def historyUnderPolicies(ctx: DecideContext, o: DescribedObject): Step =
+    val eff      = ctx.effective
+    val policies = eff.columnPolicies.nonEmpty || eff.rowPolicies.nonEmpty
+    val why      =
+      if o.renamed then Some(s"${o.qualified} was named otherwise at the snapshot it is read at")
+      else if o.dropped then Some(s"${o.qualified} is read as it was before it was dropped")
+      else if o.replaced then Some(s"${o.qualified} is read as it was before it was replaced")
+      else None
+    why.filter(_ => policies) match
+      case Some(reason) =>
+        refuse(
+          s"$reason, and column and row policies match the names a statement writes; not " +
+            "available to principals with column or row policies"
+        )
+      case None => Pass
 
   private def alwaysOnFunction(f: DescribedFunction): Step =
     if !FunctionTypes.contains(f.tpe) then
@@ -431,7 +439,9 @@ final class AuthzDecider(
               o.kind,
               verbOf(o.access),
               o.columns.map(low),
-              o.via.map(v => low(outermostView(v, d)))
+              o.via.map(v => low(outermostView(v, d))),
+              List("renamed" -> o.renamed, "dropped" -> o.dropped, "replaced" -> o.replaced)
+                .collect { case (h, true) => h }
             )
           }
           val located = planLocations(d, rules)

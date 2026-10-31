@@ -10,7 +10,10 @@ import java.nio.charset.StandardCharsets
   * through which a read reaches it; `columns`: the columns read, sorted. A DuckLake read at any
   * snapshot is described as the table its stable id names now, under its current names (node
   * protocol 6); `renamed` (on the wire only when true) when the statement named the table, or a
-  * column read, by a name it had at that snapshot and has no longer.
+  * column read, by a name it had at that snapshot and has no longer. `dropped`: a table dropped
+  * since, described under its last live name; `replaced`: a table replaced since (CREATE OR
+  * REPLACE), described under the name of the table that replaced it. Each on the wire only when
+  * true.
   */
 final case class DescribedObject(
     kind: String,
@@ -21,7 +24,9 @@ final case class DescribedObject(
     name: String,
     columns: List[String],
     via: Option[String],
-    renamed: Boolean = false
+    renamed: Boolean = false,
+    dropped: Boolean = false,
+    replaced: Boolean = false
 ):
   def qualified: String =
     if kind == "schema" then s"$catalog.$schema" else s"$catalog.$schema.$name"
@@ -77,7 +82,21 @@ object Description:
       columns     <- c.get[List[String]]("columns")
       via         <- c.get[Option[String]]("via")
       renamed     <- c.getOrElse[Boolean]("renamed")(false)
-    yield DescribedObject(kind, access, catalog, catalogType, schema, name, columns, via, renamed)
+      dropped     <- c.getOrElse[Boolean]("dropped")(false)
+      replaced    <- c.getOrElse[Boolean]("replaced")(false)
+    yield DescribedObject(
+      kind,
+      access,
+      catalog,
+      catalogType,
+      schema,
+      name,
+      columns,
+      via,
+      renamed,
+      dropped,
+      replaced
+    )
   }
 
   given Decoder[DescribedFunction] = Decoder.instance { c =>

@@ -416,6 +416,60 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  "a DuckLake read of a dropped or replaced table" should "be decided on the name it is described under" in {
+    allow(plan(objects = List(obj("orders", columns = List("id")).copy(dropped = true))))
+    allow(plan(objects = List(obj("orders", columns = List("id")).copy(replaced = true))))
+    refused(
+      plan(objects = List(obj("customers").copy(dropped = true))),
+      "user:alice lacks grants on acme_lake.main.customers:read"
+    )
+  }
+
+  it should "be refused to a principal with column or row policies" in {
+    val mask =
+      RoleColumnPolicy("cp-1", "r-1", "*", "*", "customers", "email", "mask", Some("'***'"))
+    val p = principal(eff().copy(columnPolicies = List(mask)))
+    refused(
+      plan(objects = List(obj("orders", columns = List("id")).copy(dropped = true))),
+      "acme_lake.main.orders is read as it was before it was dropped, and column and row policies " +
+        "match the names a statement writes; not available to principals with column or row policies",
+      p
+    )
+    refused(
+      plan(objects = List(obj("orders", columns = List("id")).copy(replaced = true))),
+      "acme_lake.main.orders is read as it was before it was replaced, and column and row policies " +
+        "match the names a statement writes; not available to principals with column or row policies",
+      p
+    )
+  }
+
+  it should "tell an OPA policy which history the read crossed" in {
+    val f = new Fixture()
+    f.decider.decidePlan(
+      OpaAlice,
+      plan(objects =
+        List(
+          obj("orders", catalog = "opaco_lake", columns = List("id"))
+            .copy(renamed = true, replaced = true)
+        )
+      )
+    ) shouldBe Decision.Allow
+    val access = parse(f.opaBodies.head).toOption.get.hcursor
+      .downField("input")
+      .downField("accesses")
+      .downN(0)
+    access.get[List[String]]("history") shouldBe Right(List("renamed", "replaced"))
+    // A current read carries none.
+    val g = new Fixture()
+    g.decider.decidePlan(OpaAlice, plan(objects = List(obj("orders", catalog = "opaco_lake"))))
+    parse(g.opaBodies.head).toOption.get.hcursor
+      .downField("input")
+      .downField("accesses")
+      .downN(0)
+      .downField("history")
+      .succeeded shouldBe false
+  }
+
   "DuckLake catalog metadata" should "be refused even under *.*.* ALL" in {
     val all = principal(eff(List(perm("p-9", "*", "*", "*", "ALL"))))
     refused(
