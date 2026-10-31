@@ -283,6 +283,25 @@ class LocationCheckerSpec extends AnyFlatSpec with Matchers:
     ok("C:\\qod\\files\\acme\\db\\other\\x.parquet", Windows)
   }
 
+  it should "be refused onto a database configured with backslashes, as qod-node resolves it" in {
+    // qod-node's ResolveLocalPath joins with '\' on Windows (a DuckLake flush's COPY target reads
+    // C:\...\lake_data\main\t), and an operator may write the data path either way.
+    val rules = Windows.copy(dataFolders =
+      DataFolders.of("C:\\qod\\files\\acme\\db\\lake2\\", false, identity) ++
+        DataFolders.of(
+          "C:\\qod\\files\\acme\\db\\x.duckdb" + DataFolders.NamePrefixMarker,
+          false,
+          identity
+        )
+    )
+    dataFolder("C:\\qod\\files\\acme\\db\\lake2\\main\\t", rules)
+    dataFolder("C:/qod/files/acme/db/lake2/main/t", rules)
+    dataFolder("C:\\qod\\files\\acme\\db\\x.duckdb", rules)
+    dataFolder("C:\\qod\\files\\acme\\db\\x.duckdb.wal", rules)
+    dataFolder("c:\\QOD\\files\\acme\\db\\X.DUCKDB2\\f.parquet", rules)
+    ok("C:\\qod\\files\\acme\\db\\y.duckdb", rules)
+  }
+
   it should "refuse streams, trailing dots and spaces, short names and device names" in
     List(
       "C:\\qod\\files\\acme\\in\\x.csv:stream",
