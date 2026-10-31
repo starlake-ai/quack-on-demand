@@ -69,6 +69,9 @@ struct ReachedName {
 	//! Whether `scope` is set: a table on whose search path DuckDB may bind this name too.
 	bool scoped = false;
 	duckdb::QualifiedName scope;
+	//! Whether the name comes from a string rather than from the statement's own text: a query() literal
+	//! (at any depth) or a query_table() name, which the gateway's metadata filter never rewrites.
+	bool literal = false;
 };
 
 //! Every name the screen's walk reaches in `statement` and the query() literals it holds, for the

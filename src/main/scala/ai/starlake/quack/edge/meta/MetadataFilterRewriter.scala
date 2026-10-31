@@ -78,12 +78,20 @@ enum MetadataFilterOutcome:
   * Neither tier subsumes the other: the serialized text sees positions the traversal skips, the AST
   * sees quoting forms the regex cannot read through.
   *
-  * A count that cannot be taken is also a denial. Three consequences are accepted deliberately: a
-  * reference in an unsupported position is denied rather than filtered; a statement that merely
+  * A count that cannot be taken is also a denial. Two consequences are accepted deliberately: a
+  * reference in an unsupported position is denied rather than filtered; and a statement that merely
   * MENTIONS a filterable table inside a STRING LITERAL is denied on the phantom match (literals
-  * survive serialization, comments do not); and a CROSS-CATALOG filterable reference sitting in a
-  * traversal blind spot is denied even though the walk leaves cross-catalog metadata alone on
-  * purpose (rare, fail-closed, and the node grant-gates that reference anyway).
+  * survive serialization, comments do not), the name read through any comment or E-string escape
+  * inside the literal ([[literalMentions]]), since query() and query_table() hand a string to
+  * DuckDB's parser.
+  *
+  * A filterable reference of any other catalog is refused, never left alone: DuckDB resolves
+  * `system.information_schema.tables` to the very view this filter narrows, and no other catalog
+  * has an information_schema. Neither these nor DuckDB's other built-in views (pg_catalog's,
+  * `sqlite_master`, the parenless `duckdb_tables`) reach a node unrefused: qod-node refuses a
+  * non-superuser's read of any built-in view but the four filtered ones, and of those any name but
+  * `information_schema.<view>` in the statement's own text (a search path through
+  * information_schema, a string, a view's body), which is the one spelling this filter rewrites.
   */
 final class MetadataFilterRewriter(
     /** False only in specs isolating the node: production (`Main`) always mounts it enabled. */
@@ -212,14 +220,16 @@ final class MetadataFilterRewriter(
         val normalized = sel.toString
         val walker     = new Walker(grants, ctx)
         walker.walkSelect(sel)
-        // Cross-catalog references are left alone on purpose (they stay grant-gated by the
-        // node), so they are accounted for rather than counted as unfiltered leftovers.
-        val accounted = walker.substitutions + refs.crossCatalog
         walker.failure match
           case Some(reason) => StmtOutcome.Refused(reason)
           case None         =>
-            if refs.nodes > walker.substitutions || textualRefCount(normalized) > accounted then
-              StmtOutcome.Refused(UnsupportedPositionRefusal)
+            // Another catalog's reference (system.information_schema.tables lists every catalog
+            // unfiltered) is refused, wherever it sits: one the AST count missed still trips the
+            // textual count, which nothing but a substitution accounts for.
+            if refs.crossCatalog > 0 then StmtOutcome.Refused(CrossCatalogRefusal)
+            else if refs.nodes > walker.substitutions ||
+              textualRefCount(normalized) > walker.substitutions
+            then StmtOutcome.Refused(UnsupportedPositionRefusal)
             else if walker.substitutions > 0 then StmtOutcome.Changed(sel.toString)
             else StmtOutcome.Kept(normalized)
 
@@ -228,9 +238,9 @@ final class MetadataFilterRewriter(
     * instead of failing the whole parse and blinding the filter. Mirrors `SqlParser.extract`
     * exactly - same time-travel strip, same lexer-canonical input, same feature configuration -
     * because any difference in how the policy screens and this filter read a statement is a
-    * statement one of them admits and the other never sees. None when the input cannot be rendered or parsed;
-    * otherwise the statements and whether their re-serialization is the caller's statement
-    * (`ParserInput.Rendered.exact`).
+    * statement one of them admits and the other never sees. None when the input cannot be rendered
+    * or parsed; otherwise the statements and whether their re-serialization is the caller's
+    * statement (`ParserInput.Rendered.exact`).
     */
   private def parseBatch(sql: String): Option[(net.sf.jsqlparser.statement.Statements, Boolean)] =
     // DuckLake's `AT (VERSION => n)` is not in the grammar, and a clause sitting AFTER a
@@ -435,6 +445,10 @@ object MetadataFilterRewriter:
       "this filter cannot rewrite (or mentioned in a string literal); query it directly in the " +
       "FROM clause instead"
 
+  private[meta] val CrossCatalogRefusal: String =
+    "information_schema is filtered only as the session catalog's (information_schema.tables, " +
+      "...); system.information_schema and other catalogs' are refused"
+
   private[meta] val AnalysisRefusal: String =
     "cannot analyse the system-catalog references in this statement"
 
@@ -536,9 +550,8 @@ object MetadataFilterRewriter:
       if filterableFunction(tf).isDefined then fnSeen.add(tf)
       super.visit(tf, context)
 
-  /** A filterable information_schema table of some OTHER catalog. The substitution walk leaves
-    * these alone by design (cross-catalog metadata stays grant-gated by the node rather than
-    * filtered), so the textual tripwire must not read them as unfiltered leftovers.
+  /** A filterable information_schema table of some OTHER catalog (`system.` included): refused,
+    * since the substitution walk rewrites the session catalog's only.
     */
   private def crossCatalogFilterable(t: Table, sessionCat: String): Boolean =
     val schema = Option(t.getSchemaName).getOrElse("")
@@ -574,7 +587,119 @@ object MetadataFilterRewriter:
     */
   private def textualRefCount(normalizedSql: String): Int =
     TextualRefRe.findAllMatchIn(normalizedSql).size +
-      FunctionRefRe.findAllMatchIn(normalizedSql).size
+      FunctionRefRe.findAllMatchIn(normalizedSql).size + literalMentions(normalizedSql)
+
+  /** How many string literals of `text` name a filterable listing however the name is spelled
+    * inside them. A literal survives serialization verbatim, comments and escapes included, and
+    * query() / query_table() hand it to DuckDB's parser, which reads
+    * `information_schema./**/tables` or `E'information\x5fschema.tables'` as the listing while
+    * [[TextualRefRe]] does not. So a literal is read as words instead: it names a listing when it
+    * holds the word `information_schema` and one of the filterable view names, or a catalog
+    * function's name, in its text or in its text with backslash escapes decoded (an E-string, at
+    * any nesting depth). A comment cannot split a word, so no spelling escapes; a literal that only
+    * mentions both words is over-denied, the accepted direction.
+    *
+    * Where a literal ends depends on whether a backslash escapes the quote after it (jsqlparser
+    * reads it so, DuckDB does not), so the literals of both readings are judged.
+    */
+  private def literalMentions(text: String): Int =
+    (Literals
+      .of(text, backslashEscapes = true) ++ Literals.of(text, backslashEscapes = false)).distinct
+      .count(namesListing)
+
+  private def namesListing(literal: String): Boolean =
+    val decoded = Iterator.iterate(literal)(Literals.decodeEscapes).take(4).toList
+    decoded.exists { t =>
+      (InformationSchemaWord.findFirstIn(t).isDefined && ListingWord.findFirstIn(t).isDefined) ||
+      FunctionWord.findFirstIn(t).isDefined
+    }
+
+  private val InformationSchemaWord = """(?i)\binformation_schema\b""".r
+  private val ListingWord           = """(?i)\b(?:schemata|tables|columns|views)\b""".r
+  private val FunctionWord          = """(?i)\bduckdb_(?:tables|views|schemas|columns)\b""".r
+
+  /** The string literals of a statement's text: `'...'` (`''` a quote, optionally `\'`),
+    * `$tag$...$tag$`, skipping comments and quoted identifiers outside them. An unterminated
+    * literal runs to the end.
+    */
+  private[meta] object Literals:
+    def of(text: String, backslashEscapes: Boolean): List[String] =
+      val out = List.newBuilder[String]
+      val n   = text.length
+      var i   = 0
+      while i < n do
+        val c = text.charAt(i)
+        if c == '-' && text.startsWith("--", i) then
+          val eol = text.indexOf('\n', i)
+          i = if eol < 0 then n else eol + 1
+        else if c == '/' && text.startsWith("/*", i) then
+          val end = text.indexOf("*/", i + 2)
+          i = if end < 0 then n else end + 2
+        else if c == '"' then
+          // A quoted identifier (`""` a quote): a quote or comment marker inside it is a name.
+          var j    = i + 1
+          var open = true
+          while open && j < n do
+            if text.charAt(j) == '"' && j + 1 < n && text.charAt(j + 1) == '"' then j += 2
+            else if text.charAt(j) == '"' then
+              open = false
+              j += 1
+            else j += 1
+          i = j
+        else if c == '\'' then
+          val sb   = new StringBuilder
+          var j    = i + 1
+          var open = true
+          while open && j < n do
+            val d = text.charAt(j)
+            if d == '\\' && backslashEscapes && j + 1 < n then
+              sb.append(d).append(text.charAt(j + 1))
+              j += 2
+            else if d == '\'' && j + 1 < n && text.charAt(j + 1) == '\'' then
+              sb.append('\'')
+              j += 2
+            else if d == '\'' then
+              open = false
+              j += 1
+            else
+              sb.append(d)
+              j += 1
+          out += sb.toString
+          i = j
+        else if c == '$' then
+          DollarTag.findPrefixOf(text.substring(i)) match
+            case Some(tag) =>
+              val end = text.indexOf(tag, i + tag.length)
+              out += (if end < 0 then text.substring(i + tag.length)
+                      else text.substring(i + tag.length, end))
+              i = if end < 0 then n else end + tag.length
+            case None => i += 1
+        else i += 1
+      out.result()
+
+    private val DollarTag = """^\$[A-Za-z_]*\$""".r
+
+    /** One level of backslash escapes decoded as DuckDB's E-strings read them: `\xHH`, `\uHHHH`,
+      * `\UHHHHHHHH`, octal, and any other character as itself.
+      */
+    def decodeEscapes(s: String): String =
+      EscapeRe.replaceAllIn(
+        s,
+        m =>
+          val body    = m.group(1)
+          val decoded = Try {
+            val code =
+              if body.length > 1 && "xuU".contains(body.head) then
+                Integer.parseInt(body.drop(1), 16)
+              else if body.forall(c => c >= '0' && c <= '7') then Integer.parseInt(body, 8)
+              else body.head.toInt
+            new String(Character.toChars(code))
+          }.getOrElse(m.matched)
+          scala.util.matching.Regex.quoteReplacement(decoded)
+      )
+
+    private val EscapeRe =
+      """\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[0-7]{1,3}|.)""".r
 
   /** Tolerates every quote form the printer can emit around either identifier. */
   private val TextualRefRe =

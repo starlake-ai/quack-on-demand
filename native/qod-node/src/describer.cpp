@@ -758,7 +758,7 @@ private:
 	void Reached(const ReachedName &reached, CatalogEntryRetriever &retriever) {
 		switch (reached.kind) {
 		case ReachedName::Kind::RELATION:
-			Relation(reached.name, retriever, Rules {});
+			Relation(reached.name, retriever, Rules {}, !reached.literal);
 			break;
 		case ReachedName::Kind::INSERT_TARGET:
 			Written(reached.name, retriever, Write::INSERT);
@@ -913,13 +913,21 @@ private:
 		path_.erase(&entry);
 	}
 
-	void Relation(const QualifiedName &name, CatalogEntryRetriever &retriever, Rules rules) {
+	//! A relation a statement or a body reads. `own`: named in the statement's own text, outside any query()
+	//! literal or query_table() name.
+	void Relation(const QualifiedName &name, CatalogEntryRetriever &retriever, Rules rules, bool own = false) {
 		auto entry = Lookup(retriever, CatalogType::TABLE_ENTRY, name);
 		if (entry && entry->type == CatalogType::TABLE_ENTRY) {
 			Generated(entry->Cast<TableCatalogEntry>(), retriever, Rules {rules.secure, false});
 			return;
 		}
-		if (!entry || entry->type != CatalogType::VIEW_ENTRY || BuiltIn(*entry)) {
+		if (!entry || entry->type != CatalogType::VIEW_ENTRY) {
+			return;
+		}
+		if (BuiltIn(*entry)) {
+			if (!rules.secure) {
+				BuiltInView(*entry, name, own);
+			}
 			return;
 		}
 		auto &view = entry->Cast<ViewCatalogEntry>();
@@ -939,6 +947,36 @@ private:
 		      Rules {rules.secure || view.security_type == ViewSecurityType::SECURE_VIEW, false});
 		path_.erase(entry.get());
 	}
+
+	//! DuckDB's own views (the system catalog's information_schema, pg_catalog and main views, all listings
+	//! of every attached catalog, pg_views and information_schema.views with every view's SQL) are inlined
+	//! into the plan as calls of the listing functions, so no description names them: they are judged here,
+	//! by the entry the name resolves to. A non-superuser reads only the four information_schema views the
+	//! gateway's metadata filter narrows to their grants (schemata, tables, columns, views), and only as the
+	//! filter leaves them: named information_schema.<view> in the statement's own text. A one-part name (a
+	//! search path through information_schema), system.information_schema.<view>, a query() literal or a
+	//! query_table() name, and a view's or a macro's body are never filtered, so they are refused. Inside a
+	//! secure view's boundary a body runs with its owner's rights (the caller skips this).
+	void BuiltInView(CatalogEntry &view, const QualifiedName &name, bool own) {
+		auto schema = StringUtil::Lower(Text(view.ParentSchema().name));
+		auto lower = StringUtil::Lower(Text(view.name));
+		auto qualified = schema + "." + lower;
+		if (schema == "information_schema" && kFilteredListings.count(lower) != 0) {
+			auto &path = name.Path();
+			if (own && path.size() == 2 && StringUtil::Lower(Text(path[0])) == "information_schema") {
+				return;
+			}
+			throw PermissionException("QoD: " + qualified +
+			                          " is filtered to your grants only when the statement itself names it " +
+			                          qualified);
+		}
+		throw PermissionException("QoD: " + qualified +
+		                          " is reserved to superusers: it lists the objects of every catalog");
+	}
+
+	//! The information_schema views the gateway's metadata filter narrows (MetadataFilterRewriter
+	//! .FilterableTables).
+	const std::set<std::string> kFilteredListings = {"schemata", "tables", "columns", "views"};
 
 	// ---- a table's stored expressions (item 32a)
 

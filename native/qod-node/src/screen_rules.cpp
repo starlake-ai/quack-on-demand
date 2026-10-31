@@ -517,10 +517,12 @@ private:
 		}
 	}
 
-	//! Records a name the walk reached, when a caller collects them (ReachedNames).
-	void Reach(ReachedName::Kind kind, const QualifiedName &name) {
+	//! Records a name the walk reached, when a caller collects them (ReachedNames). `named`: a query_table()
+	//! name; inside a query() literal (nesting above 0) every name comes from a string.
+	void Reach(ReachedName::Kind kind, const QualifiedName &name, bool named = false) {
 		if (reached_) {
-			reached_->push_back(ReachedName {kind, name, scope_ != nullptr, scope_ ? *scope_ : QualifiedName()});
+			reached_->push_back(ReachedName {kind, name, scope_ != nullptr, scope_ ? *scope_ : QualifiedName(),
+			                                 named || nesting_ > 0});
 		}
 	}
 
@@ -1157,7 +1159,7 @@ private:
 				QualifiedName parsed;
 				std::string error;
 				if (QualifiedName::TryParse(table, parsed, error)) {
-					Reach(ReachedName::Kind::RELATION, parsed);
+					Reach(ReachedName::Kind::RELATION, parsed, true);
 				}
 			}
 		} else {

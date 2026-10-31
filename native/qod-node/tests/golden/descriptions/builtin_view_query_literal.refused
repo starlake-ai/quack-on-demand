@@ -1,0 +1,1 @@
+QoD: information_schema.views is filtered to your grants only when the statement itself names it information_schema.views

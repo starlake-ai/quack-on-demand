@@ -337,8 +337,48 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Rewritten, got $other")
   }
 
-  it should "pass a cross-catalog filterable reference through (the validator gates it)" in {
-    go("SELECT * FROM other_db.information_schema.tables", eff(tenantUser)) shouldBe Passthrough
+  // DuckDB resolves `system.information_schema.tables` to the very view the filter narrows, and no
+  // other catalog has an information_schema: a filterable reference of any catalog but the
+  // session's is refused, never left to the node (C1).
+  it should "refuse a filterable reference of the system catalog or of another catalog" in {
+    val e = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    List(
+      "SELECT table_catalog, table_name FROM system.information_schema.tables",
+      "SELECT * FROM \"system\".\"information_schema\".\"columns\"",
+      "SELECT * FROM SYSTEM.INFORMATION_SCHEMA.VIEWS",
+      "SELECT * FROM other_db.information_schema.schemata",
+      "SELECT count(*) FROM tpch1.customer GROUP BY (SELECT count(*) FROM " +
+        "system.information_schema.tables)",
+      "SELECT * FROM information_schema.tables t JOIN system.information_schema.columns c " +
+        "USING (table_name)"
+    ).foreach(sql => withClue(sql)(go(sql, e) shouldBe a[Denied]))
+    // The nearest admitted: the session catalog's own, rewritten.
+    go("SELECT * FROM acme_tpch.information_schema.tables", e) shouldBe a[Rewritten]
+  }
+
+  // A string names a listing to whatever parses it on the node (query(), query_table()): refused
+  // however the name is spelled inside it, a comment, an E-string escape or a nested literal
+  // included, where the serialized-text count alone saw no reference (C1).
+  it should "refuse a string literal that names a listing however it is spelled" in {
+    val e = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    List(
+      "SELECT * FROM query('SELECT table_name FROM information_schema./**/tables')",
+      "SELECT * FROM query('SELECT table_name FROM information_schema . /* x */ \"tables\"')",
+      "SELECT * FROM query('SELECT table_name FROM information_schema.--x\ntables')",
+      "SELECT * FROM query('SELECT ''--'', table_name FROM information_schema.--x\ntables')",
+      "SELECT * FROM query(E'SELECT table_name FROM information\\x5fschema.tables')",
+      "SELECT * FROM query('SELECT * FROM query(''SELECT 1 FROM information_schema./**/views'')')",
+      "SELECT * FROM query(E'SELECT * FROM \\x64uckdb_views()')",
+      "SELECT * FROM query_table('information_schema.\"columns\"')",
+      "SELECT * FROM query_table(['INFORMATION_SCHEMA.SCHEMATA'])"
+    ).foreach(sql => withClue(sql)(go(sql, e) shouldBe a[Denied]))
+    // The nearest admitted: a literal naming the schema, or a listing word, but not both.
+    go("SELECT * FROM tpch1.customer WHERE note = 'information_schema'", e) shouldBe Passthrough
+    go("SELECT * FROM tpch1.customer WHERE note = 'tables and views'", e) shouldBe Passthrough
+    go(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema <> 'information_schema'",
+      e
+    ) shouldBe a[Rewritten]
   }
 
   // Where the tripwire counts decides these two, and the answer has moved twice: it counted a

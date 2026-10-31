@@ -312,15 +312,21 @@ final class AuthzDecider(
       else refuse(s"user:${eff.user.username} lacks grants on ${names(missing)}")
 
   /** The catalogs a wildcard catalog grant covers on this statement: the tenant-db names of the
-    * user's tenant, plus the catalog the pool's node attaches its
-    * database as (`memory` for kind memory, a `catalogAlias` or `dbName`), when the pool is the
-    * user's own tenant's. Per pool, never tenant-wide: on a DuckLake pool the instance-wide
-    * `memory` catalog stays outside every wildcard.
+    * user's tenant, plus the catalog the pool's node attaches its database as (`memory` for kind
+    * memory, a `catalogAlias` or `dbName`), when the pool is the user's own tenant's. Per pool,
+    * never tenant-wide: on a DuckLake pool the instance-wide `memory` catalog stays outside every
+    * wildcard.
     */
   private def sessionCatalogs(eff: EffectiveSet, key: PoolKey): Set[String] =
     eff.user.tenant.map(tenantCatalogs).getOrElse(Set.empty) ++
       (if eff.user.tenant.contains(key.tenant) then poolCatalog(key) else None)
 
+  /** Temporary objects, and reads in the system catalog. DuckDB's built-in views (pg_catalog's,
+    * information_schema's, `sqlite_master`) never reach a description: the binder inlines them as
+    * calls of the listing functions, so qod-node's describer judges them by name instead (it
+    * refuses every one to a non-superuser but the four information_schema views the gateway's
+    * metadata filter narrows).
+    */
   private def admittedWithoutGrant(o: DescribedObject): Boolean =
     o.catalog
       .equalsIgnoreCase("temp") || (o.catalog.equalsIgnoreCase("system") && o.access == "read")

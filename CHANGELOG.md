@@ -580,6 +580,15 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `OpaValidator`, `StatementValidator`) are gone: every table, function, setting and file is judged
   by the node, on the plan DuckDB bound. The manager keeps only the parse screens the column and row
   policy rewriters depend on, for principals holding such policies.
+- DuckDB's built-in catalog views are refused to every non-superuser, as the gateway refused or
+  grant-gated them before: `pg_catalog`'s (`pg_tables`, `pg_views`, `pg_attribute`, ...),
+  `sqlite_master` and the parenless `duckdb_tables` / `duckdb_views`, however they are named (bare,
+  `pg_catalog.`, `system.`), in a `query()` string, a `query_table()` name or a view's body too; a
+  grant covering them (such as `*.*.*`) no longer admits them. The filtered listings stay:
+  `information_schema.schemata` / `tables` / `columns` / `views` named so in the statement itself,
+  and `duckdb_schemas()` / `duckdb_tables()` / `duckdb_views()` / `duckdb_columns()`.
+  `system.information_schema.*`, a bare `tables` through a search path set to `information_schema`,
+  and a string naming a listing (`query('... information_schema./**/tables')`) are refused.
 - `QOD_ACL_ENABLED` / `quack-flightsql.acl.enabled` is removed: enforcement is always on, and the
   manager refuses to start while the variable (any value, empty included) or the path is set.
 - `QOD_ACL_FILTERED_METADATA` / `quack-flightsql.acl.filteredMetadata` is removed: a tenant user's

@@ -35,6 +35,7 @@ import scala.util.Try
   *     included), RO the aliased and s3lake tables), group `qod_all_pools`;
   *   - bob, carol, dave (acme): the defaults, `qod_all_tables` (`*.*.* ALL`) and `qod_all_pools`;
   *   - erin (acme): a tenant admin (kind `admin`) with the default memberships;
+  *   - frank (acme): role `e2e_one_table` (RO lake events, nothing else), group `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -65,8 +66,15 @@ abstract class AuthzEndToEndCases(
   private val CarolPw   = "carol-e2e-pw-1"
   private val DavePw    = "dave-e2e-pw-1"
   private val ErinPw    = "erin-e2e-pw-1"
-  private val Passwords =
-    Map("alice" -> AlicePw, "bob" -> BobPw, "carol" -> CarolPw, "dave" -> DavePw, "erin" -> ErinPw)
+  private val FrankPw   = "frank-e2e-pw-1"
+  private val Passwords = Map(
+    "alice" -> AlicePw,
+    "bob"   -> BobPw,
+    "carol" -> CarolPw,
+    "dave"  -> DavePw,
+    "erin"  -> ErinPw,
+    "frank" -> FrankPw
+  )
 
   private val Rustfs = "http://localhost:9000"
 
@@ -322,6 +330,20 @@ abstract class AuthzEndToEndCases(
         "password" -> s(CarolPw),
         "kind"     -> s("user"),
         "roles"    -> Json.arr(s("qod_all_tables"), s("e2e_pg_owner"))
+      )
+    )
+    // RO on one table, nothing else: the reader of the catalog listing cases.
+    val oneTable = createRole("e2e_one_table")
+    grant(lake, "main", "events", "RO", oneTable)
+    stack.post(
+      "/api/user/create",
+      obj(
+        "tenant"   -> s(Acme),
+        "username" -> s("frank"),
+        "password" -> s(FrankPw),
+        "kind"     -> s("user"),
+        "roles"    -> Json.arr(s("e2e_one_table")),
+        "groups"   -> Json.arr(s("qod_all_pools"))
       )
     )
     // A tenant admin, with the default memberships: no superuser on the node (decision 29).
@@ -2249,6 +2271,70 @@ abstract class AuthzEndToEndCases(
         val all = as(d, "bob", "lake", sql)
         all shouldBe a[Right[?, ?]]
         all.toOption.get should contain("secret")
+      }
+    }
+  }
+
+  it should "not reach other tables' names or view definitions through DuckDB's built-in views" in {
+    ready()
+    val marker = s"qod-c1-$run"
+    admin("lake", s"CREATE OR REPLACE VIEW $lake.main.v_c1 AS SELECT '$marker' AS m")
+    // Each lists every attached catalog on DuckDB 2.0.0 as the superuser sees it: pg_views prints
+    // every view's SQL, the others the names of tables frank holds no grant on.
+    val listings = List(
+      "SELECT viewname, definition FROM pg_catalog.pg_views",
+      "SELECT viewname, definition FROM pg_views",
+      "SELECT schemaname, tablename FROM pg_tables",
+      "SELECT attname FROM pg_attribute",
+      "SELECT relname FROM pg_catalog.pg_class",
+      "SELECT name, sql FROM sqlite_master",
+      "SELECT table_name, sql FROM duckdb_tables",
+      "SELECT view_name, sql FROM system.main.duckdb_views",
+      "SELECT table_catalog, table_name FROM system.information_schema.tables",
+      "SELECT table_name, column_name FROM system.information_schema.columns",
+      "SELECT table_name, view_definition FROM system.information_schema.views",
+      "SET search_path = 'system.information_schema'; SELECT table_name FROM tables",
+      "SELECT * FROM query('SELECT table_name FROM information_schema./**/tables')",
+      "SELECT * FROM query('SELECT table_name FROM information_schema.--x\ntables')",
+      "SELECT * FROM query(E'SELECT table_name FROM information\\x5fschema.tables')",
+      "SELECT * FROM query('SELECT view_definition FROM information_schema.\"views\"')",
+      "SELECT * FROM query_table('information_schema.tables')",
+      "SELECT * FROM query('SELECT definition FROM pg_views')"
+    )
+    // The superuser's probe sees what frank must not, so a refusal or an empty answer is sound.
+    admin("lake", "SELECT viewname, definition FROM pg_catalog.pg_views")
+      .exists(_.contains(marker)) shouldBe true
+    def leaks(rows: List[String]): List[String] =
+      rows.filter(r =>
+        r.contains(marker) || r.contains("__ducklake_metadata") ||
+          r.split(',').exists(c => c == "secret" || c == "orders")
+      )
+    doors.foreach { d =>
+      // Every statement's outcome, so one run shows each that leaks.
+      val leaked = listings.flatMap { sql =>
+        as(d, "frank", "lake", sql) match
+          // Refused by the node, by the gateway's metadata filter, or by DuckDB itself.
+          case Left(_)                      => None
+          case Right(r) if leaks(r).isEmpty => None
+          case Right(r)                     => Some(s"$sql -> ${leaks(r).take(3)}")
+      }
+      withClue(s"[$d] frank:\n${leaked.mkString("\n")}\n")(leaked shouldBe empty)
+      // The nearest admitted: the filtered listings, which name only frank's table.
+      withClue(s"[$d] frank: the filtered listings -> ") {
+        as(
+          d,
+          "frank",
+          "lake",
+          s"SELECT table_name FROM information_schema.tables " +
+            s"WHERE table_catalog = '$lake' ORDER BY 1"
+        ) shouldBe Right(List("events"))
+        as(
+          d,
+          "frank",
+          "lake",
+          s"SELECT table_name FROM duckdb_tables() " +
+            s"WHERE database_name = '$lake' ORDER BY 1"
+        ) shouldBe Right(List("events"))
       }
     }
   }
