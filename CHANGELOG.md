@@ -768,6 +768,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
   bind; a batch that moves the schema or search path, quoted names holding a dot and two-part names
   headed by an attached catalog are admitted to principals without column or row policies, judged as
   DuckDB binds them.
+- Module SPI: `ManagerContext.systemSql` (required) runs one statement on a pool as the manager's
+  system caller, for a module's own provisioning statements, never SQL a user supplied; each is
+  labelled `module:<name>` in statement history and audited as `module.sql`.
 
 ### Fixed
 

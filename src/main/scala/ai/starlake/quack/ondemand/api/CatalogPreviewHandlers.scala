@@ -29,10 +29,11 @@ object CatalogPreviewHandlers:
   type PreviewExecutor = (ExecCaller, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
 
   /** The display label of a system caller ([[ExecCaller.system]]: the restore dry run, the branch
-    * change counter) in logs and statement history. It carries NO privilege: the routed executor
-    * decides on `ExecCaller.system` alone, because user names are not reserved and a tenant user
-    * may be called "superuser". No credential is a system caller: [[RestCaller]] (REST) and
-    * `McpDataTools.callerFor` (MCP) run a session or a PAT as its user.
+    * change counter; a module's system SQL is labelled `module:<name>` instead) in logs and
+    * statement history. It carries NO privilege: the routed executor decides on `ExecCaller.system`
+    * alone, because user names are not reserved and a tenant user may be called "superuser". No
+    * credential is a system caller: [[RestCaller]] (REST) and `McpDataTools.callerFor` (MCP) run a
+    * session or a PAT as its user.
     */
   val SuperuserIdentity = "superuser"
 

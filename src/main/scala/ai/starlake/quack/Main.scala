@@ -799,25 +799,6 @@ object Main extends IOApp with LazyLogging:
     // 128-bit single-use 60s-TTL ticket is already infeasible to brute force without one.
     val ssoTicketStore = new SsoTicketStore()
 
-    // SPI contract: moduleStart runs m.start(ctx) for every module BEFORE the
-    // ManagerServer is constructed, so routes built inside start() are honored.
-    val moduleCtx = ai.starlake.quack.spi.ManagerContext(
-      supervisor = sup,
-      users = userStore,
-      controlPlaneDs = store.jdbcDataSource,
-      rawConfig = com.typesafe.config.ConfigFactory.load(),
-      audit = auditRecorder,
-      singleton = singletonTasks,
-      // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or one that
-      // does not resolve, is SessionScope.NoAccess to a module gate.
-      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-        sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-      ),
-      sessionOf = sessionTokens.get
-    )
-    val moduleStart: IO[Unit] =
-      modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
-
     // Declared here (rather than beside its verifier below) so both the node and federated-source
     // REST responses can read from it: NodeInfo.catalogAttachFailures needs it right away, and
     // IcebergAttachVerifier (further down, once adapter/manifestFedStore exist) writes into this
@@ -1706,6 +1687,36 @@ object Main extends IOApp with LazyLogging:
 
       val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
         routedExecutor(recordExecution = false)
+
+      // SPI contract: moduleStart runs m.start(ctx) for every module BEFORE the
+      // ManagerServer is constructed, so routes built inside start() are honored. One context per
+      // module: its systemSql is bound to that module's name (the label and audit actor of every
+      // statement it runs), so a module cannot act under another's. Built here, after the routed
+      // executor it runs on; recordExecution = true, so its statements reach statement history,
+      // the write audit and the DuckLake commit author like any other write.
+      def moduleCtxFor(
+          m: ai.starlake.quack.spi.ManagerModule
+      ): ai.starlake.quack.spi.ManagerContext =
+        ai.starlake.quack.spi.ManagerContext(
+          supervisor = sup,
+          users = userStore,
+          controlPlaneDs = store.jdbcDataSource,
+          rawConfig = com.typesafe.config.ConfigFactory.load(),
+          audit = auditRecorder,
+          singleton = singletonTasks,
+          // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or one
+          // that does not resolve, is SessionScope.NoAccess to a module gate.
+          scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+            sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+          ),
+          sessionOf = sessionTokens.get,
+          systemSql = ai.starlake.quack.ondemand.module
+            .ModuleSystemSql(m.name, routedExecutor(recordExecution = true), auditRecorder)
+        )
+      val moduleStart: IO[Unit] =
+        modules.traverse_(m =>
+          IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtxFor(m))
+        )
 
       // The executor identity of the catalog preview / data-diff / undrop / restore handlers:
       // session -> its user, PAT -> its owner WITH its restriction and id, anything else (no

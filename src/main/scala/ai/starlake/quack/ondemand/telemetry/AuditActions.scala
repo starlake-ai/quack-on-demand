@@ -126,6 +126,8 @@ object AuditActions:
   val MaintenancePolicyUpsert = "maintenance.policy.upsert"
   val MaintenancePolicyDelete = "maintenance.policy.delete"
   val MaintenanceRunManual    = "maintenance.run.manual"
+  // a manager module's own statement run as the system caller (ManagerContext.systemSql)
+  val ModuleSql = "module.sql"
   // data plane (FlightSQL)
   val SqlDenied = "sql.denied"
   val SqlWrite  = "sql.write"
@@ -237,7 +239,8 @@ object AuditActions:
     MaintenanceRun,
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,
-    MaintenanceRunManual
+    MaintenanceRunManual,
+    ModuleSql
   ).sorted
 
   require(all.distinct.size == all.size, "duplicate audit action in AuditActions.all")
