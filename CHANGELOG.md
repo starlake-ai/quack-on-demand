@@ -788,6 +788,9 @@ In-engine authorization, Phase D: the node decides every statement alone.
   stored on the merge row is still counted as the system caller, but `get`, propose and merge
   replies show its per-table counts to superusers only; anyone else, tenant admins included (the
   nodes judge them by their grants), gets them zeroed and flagged `countsUnavailable`.
+- The restore dry run (REST `POST /api/catalog/restore` with `dryRun`, MCP `restore_snapshot`)
+  counts as the requester instead of the system caller; a table they may not read answers 403
+  `acl_denied`.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

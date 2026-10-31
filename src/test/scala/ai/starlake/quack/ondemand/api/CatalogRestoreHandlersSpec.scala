@@ -287,7 +287,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     restore(handlers(), to = "39", dryRun = Some(true))
     readPool shouldBe Some(PoolKey("acme", "acme_tpch1", "bi"))
 
-  it should "run the dry-run summary under the system identity, but execute under the caller's" in new Stubs:
+  it should "run the dry-run summary and the execute both as the caller, never as system" in new Stubs:
     val profile = AuthenticatedProfile("alice", "user", Set.empty, Map.empty, "db", Some("acme"))
     val session = SessionTokenStore.Session(
       profile,
@@ -296,7 +296,8 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     )
     val h = handlers(sessionsOverride = tok => if tok == "alice-tok" then Some(session) else None)
     restore(h, to = "39", dryRun = Some(true), apiKey = Some("alice-tok"))
-    readUser shouldBe Some(CatalogPreviewHandlers.SuperuserIdentity)
+    readUser shouldBe Some("alice")
+    readCallers.map(_.system) shouldBe List(false)
     restore(h, to = "39", apiKey = Some("alice-tok"))
     writeUser shouldBe Some("alice")
 
@@ -402,7 +403,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     writeCallers.map(c => (c.identity, c.restriction, c.patId)) shouldBe
       List(("alice", IdentityFixtures.PatRestriction, Some(IdentityFixtures.PatId)))
 
-  it should "keep the PAT's dry run on the system identity (aggregate counts only)" in new Stubs:
+  it should "run the PAT's dry run as the PAT's owner, with the PAT" in new Stubs:
     val h = handlers(patsOverride = IdentityFixtures.patOf)
     restore(
       h,
@@ -411,9 +412,17 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       apiKey = Some(IdentityFixtures.PatTok)
     ).isRight shouldBe
       true
-    readCallers.map(c => (c.identity, c.system)) shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, true))
+    readCallers.map(c => (c.identity, c.system, c.patId)) shouldBe
+      List(("alice", false, Some(IdentityFixtures.PatId)))
     writeCallers shouldBe Nil
+
+  it should "answer a dry run the node refuses the caller with 403, never retrying as system" in new Stubs:
+    readResult = IO.pure(Left(RouterFailure.AccessDenied("QoD: access denied: no grant on orders")))
+    val h   = handlers(patsOverride = IdentityFixtures.patOf)
+    val out = restore(h, to = "39", dryRun = Some(true), apiKey = Some(IdentityFixtures.PatTok))
+    out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.Forbidden, "acl_denied"))
+    readCallers.map(_.system) shouldBe List(false)
 
   it should "401 an unresolvable token on both legs without calling either executor" in new Stubs:
     val h = handlers(

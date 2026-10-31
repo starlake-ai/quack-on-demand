@@ -395,7 +395,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         List(("write", ("agent-owner", AgentRestriction, Some("pat-agent"), false)))
     }
 
-  it should "keep its dry run on the system caller (aggregate counts only)" in
+  it should "run its dry run as the PAT's owner too, never the system caller" in
     withRecordingTools { (tools, seen) =>
       val out = call(
         tools,
@@ -408,7 +408,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         "dry_run"  -> Json.True
       )
       withClue(out)(out.isRight shouldBe true)
-      seen.toList.map((leg, c) => (leg, c.system, c.patId)) shouldBe List(("read", true, None))
+      seen.toList.map((leg, c) => (leg, c.system, c.patId)) shouldBe
+        List(("read", false, Some("pat-agent")))
     }
 
   "undrop_table with the superuser PAT" should "run the CTAS as the PAT's owner, not the system caller" in

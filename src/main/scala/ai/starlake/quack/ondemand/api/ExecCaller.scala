@@ -28,12 +28,12 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * `system` is the ONLY privilege signal: a system caller gets the synthetic superuser EffectiveSet
   * in the routed executor (no ACL, no CLS/RLS, never attenuated) and runs on nodes as
   * `NodePrincipal.System`, and `superuserAdmissible` is no route to it. It is set only by
-  * [[ExecCaller.system]], for the manager's own work: the restore dry run
-  * (`CatalogRestoreHandlers`), the branch change counter (`BranchWiring`) and a manager module's
-  * own statements (`ManagerContext.systemSql`, built by `ModuleSystemSql`). No credential is a
-  * system caller: [[RestCaller]] and `McpDataTools.callerFor` run a session or a PAT as its user,
-  * through the handshake gate. `identity` is a label for logs and history; user names are not
-  * reserved (a tenant may have a user called "superuser"), so nothing may decide privilege from it.
+  * [[ExecCaller.system]], for the manager's own work: a branch proposal's stored summary
+  * (`BranchService.propose`) and a manager module's own statements (`ManagerContext.systemSql`,
+  * built by `ModuleSystemSql`). No credential is a system caller: [[RestCaller]] and
+  * `McpDataTools.callerFor` run a session or a PAT as its user, through the handshake gate.
+  * `identity` is a label for logs and history; user names are not reserved (a tenant may have a
+  * user called "superuser"), so nothing may decide privilege from it.
   */
 final case class ExecCaller(
     connectionId: String,
@@ -69,9 +69,9 @@ final case class ExecCaller(
 
 object ExecCaller:
 
-  /** The manager acting for itself (the restore dry run, the branch change counter, a module's
-    * system SQL), never a credential. Labelled with [[CatalogPreviewHandlers.SuperuserIdentity]]
-    * for logs; the privilege is the flag. It never reaches the handshake gate, so its
+  /** The manager acting for itself (a branch proposal's stored summary, a module's system SQL),
+    * never a credential. Labelled with [[CatalogPreviewHandlers.SuperuserIdentity]] for logs; the
+    * privilege is the flag. It never reaches the handshake gate, so its
     * `superuserAdmissible = true` decides nothing.
     */
   def system(connectionId: String): ExecCaller =
