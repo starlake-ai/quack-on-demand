@@ -398,7 +398,8 @@ final class MetadataFilterRewriter(
       */
     private def replacementFor(t: Table, meta: String): Option[FromItem] =
       derivedTable(
-        s"information_schema.$meta WHERE ${predicateFor(meta, grants)}",
+        s"information_schema.$meta WHERE " +
+          predicateFor(meta, grants, ctx.defaultDatabase.getOrElse("")),
         Option(t.getAlias).getOrElse(new Alias(t.getName, false))
       )
 
@@ -756,15 +757,33 @@ object MetadataFilterRewriter:
               s"$schemaCol = ${lit(g.schemaName)} AND $tCol = ${lit(g.tableName)}"
         }
 
-  /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
-    * the whole predicate to keep the SQL readable.
+  /** Disjunction: the system catalog's own rows, plus the session catalog's rows one clause per
+    * grant covers. Both are pinned to their catalog, as the catalog functions' `database_name` is
+    * ([[functionPredicateFor]]): information_schema lists every attached catalog, and a grant read
+    * for the session catalog (`readGrants`) covers that catalog only, so a schema-and-name clause
+    * alone also listed another catalog's same-named objects, view SQL included (re-review I-a).
     */
-  private[meta] def predicateFor(meta: String, grants: List[RolePermission]): String =
-    val (systemRows, clauses) =
-      if meta == "schemata" then (SystemRowClauseSchm, grantClauses(grants, "schema_name", None))
-      else (SystemRowClauseTab, grantClauses(grants, "table_schema", Some("table_name")))
-    if clauses.contains("TRUE") then "TRUE"
-    else (systemRows :: clauses).distinct.mkString("(", ") OR (", ")")
+  private[meta] def predicateFor(
+      meta: String,
+      grants: List[RolePermission],
+      sessionCat: String
+  ): String =
+    val (catalogCol, systemRows, clauses) =
+      if meta == "schemata" then
+        ("catalog_name", SystemRowClauseSchm, grantClauses(grants, "schema_name", None))
+      else
+        (
+          "table_catalog",
+          SystemRowClauseTab,
+          grantClauses(grants, "table_schema", Some("table_name"))
+        )
+    val system = s"$catalogCol = 'system' AND $systemRows"
+    if clauses.isEmpty then s"($system)"
+    else
+      val objects =
+        if clauses.contains("TRUE") then ""
+        else clauses.distinct.mkString(" AND ((", ") OR (", "))")
+      s"($system) OR ($catalogCol = ${lit(sessionCat)}$objects)"
 
   /** The WHERE of a filtered catalog function call: `database_name` pinned to the session catalog
     * (the functions list every attached catalog, including the DuckLake metadata one), then one
@@ -828,7 +847,7 @@ object MetadataFilterRewriter:
       * scoped to the session schema.
       */
     def filteredListingSql(grants: List[RolePermission], ctx: SchemaContext): String =
-      val pred   = predicateFor("tables", grants)
+      val pred   = predicateFor("tables", grants, ctx.defaultDatabase.getOrElse(""))
       val schema = lit(ctx.defaultSchema.getOrElse("main"))
       s"SELECT table_name AS name FROM information_schema.tables " +
         s"WHERE table_schema = $schema AND ($pred) ORDER BY name"

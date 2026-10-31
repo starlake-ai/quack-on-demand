@@ -58,10 +58,11 @@ class OpaMetadataGateSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
         val forwarded = seen.asScala.toList.filter(_.contains("information_schema"))
         forwarded should not be empty
         // The filter replaced the bare reference with a derived table narrowed to the system
-        // rows (bob holds no grant).
+        // rows (bob holds no grant), pinned to the system catalog.
         forwarded.foreach { sql =>
           sql should include(
-            "FROM information_schema.tables WHERE (table_schema IN ('information_schema', 'pg_catalog'))"
+            "FROM information_schema.tables WHERE (table_catalog = 'system' AND " +
+              "table_schema IN ('information_schema', 'pg_catalog'))"
           )
         }
       }

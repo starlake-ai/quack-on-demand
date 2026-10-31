@@ -390,6 +390,29 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
     go("SELECT v FROM tpch1.customer WHERE v ^@ ''", e) shouldBe Passthrough
   }
 
+  // Re-review I-a: the filtered information_schema rows named a schema and a table, never a
+  // catalog, so a grant on the session catalog's main.events also listed another attached
+  // catalog's main.events, view SQL included. Pinned to the session catalog, like duckdb_*().
+  it should "pin the filtered information_schema rows to the session catalog" in {
+    val one = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    val all = eff(tenantUser, grant("*", "*", "*", verb = "RO"))
+    for (meta, col) <- List(
+        "tables"   -> "table_catalog",
+        "columns"  -> "table_catalog",
+        "views"    -> "table_catalog",
+        "schemata" -> "catalog_name"
+      )
+    do
+      List(one, all).foreach { e =>
+        go(s"SELECT * FROM information_schema.$meta", e) match
+          case Rewritten(sql) =>
+            withClue(sql)(sql should include(s"$col = 'acme_tpch'"))
+            // A wildcard grant no longer widens the listing to every catalog.
+            withClue(sql)(sql should not include "WHERE TRUE")
+          case other => fail(s"expected Rewritten for $meta, got $other")
+      }
+  }
+
   // A string names a listing to whatever parses it on the node (query(), query_table()): refused
   // however the name is spelled inside it, a comment, an E-string escape or a nested literal
   // included, where the serialized-text count alone saw no reference (C1).

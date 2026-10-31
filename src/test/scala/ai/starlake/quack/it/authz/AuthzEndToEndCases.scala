@@ -2385,6 +2385,49 @@ abstract class AuthzEndToEndCases(
     }
   }
 
+  // Re-review I-a: the filtered information_schema rows were pinned to a schema and a name, never
+  // to a catalog, so a grant on lake.main.events also listed every other attached catalog's
+  // main.events, its view SQL included.
+  it should "pin the filtered information_schema listings to the granted catalog" in {
+    ready()
+    val marker = s"qod-ia-$run"
+    admin("lake", s"CREATE OR REPLACE VIEW memory.main.events AS SELECT '$marker' AS m")
+    try
+      admin(
+        "lake",
+        "SELECT view_definition FROM information_schema.views WHERE " +
+          "table_catalog = 'memory'"
+      ).exists(_.contains(marker)) shouldBe true
+      doors.foreach { d =>
+        withClue(s"[$d] ") {
+          as(
+            d,
+            "olga",
+            "lake",
+            "SELECT table_catalog, view_definition FROM " +
+              "information_schema.views"
+          ) match
+            case Left(err) => fail(s"the filtered views listing was refused: $err")
+            case Right(r)  => r.filter(_.contains(marker)) shouldBe empty
+          as(
+            d,
+            "olga",
+            "lake",
+            "SELECT DISTINCT table_catalog FROM information_schema.tables " +
+              "WHERE table_name = 'events'"
+          ) shouldBe Right(List(lake))
+          as(
+            d,
+            "olga",
+            "lake",
+            "SELECT DISTINCT table_catalog FROM information_schema.columns " +
+              "WHERE table_name = 'events'"
+          ) shouldBe Right(List(lake))
+        }
+      }
+    finally admin("lake", "DROP VIEW IF EXISTS memory.main.events")
+  }
+
   "a view's definition" should "not be readable through pg_get_viewdef without being a superuser" in {
     ready()
     val marker = s"qod-def-$run"
