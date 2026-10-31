@@ -347,26 +347,27 @@
     not know `qod_session` and is never routed to.
 
 - **Security: BREAKING: the nodes decide every tenant statement on what DuckDB resolved.** Each
-  node (qod-node, node protocol 4) now judges a statement of a user who is not a superuser on the
+  node (qod-node, node protocol 5) now judges a statement of a user who is not a superuser on the
   plan DuckDB bound for it, before it runs: the tables, views and columns it reads or writes, the
   functions and settings it calls, the files it names. It asks the manager replica that minted the
   session for a verdict (`POST /api/internal/authz/decide`, signed with the node's key, never in
   the OpenAPI), and the replica answers from the same grants (or the tenant's OPA policy), the same
-  function and setting classification and the same file rules the gateway uses. Verdicts are cached
+  function and setting classification and the same file rules. Verdicts are cached
   on the node for 60 s (an OPA tenant's for its OPA cache TTL) and dropped as soon as a grant,
   membership, ACL setting or data folder changes (`qodstate_tenant.policy_version`, Liquibase
   `0050` and `0054`); an OPA tenant's policy change, which bumps nothing, takes effect as those
-  verdicts expire. The gateway's own checks still run first. Consequences:
-  - `QOD_ACL_ENABLED=false` no longer opens tables to tenant users: it turns off the gateway's
-    check only, and the node refuses any statement no grant covers. A manager that relied on the
-    ACL being off to let tenant users read everything must grant them first (the built-in
-    `qod_all_tables` role, `*.*.* ALL`, is what an omitted `--role` gives a new user).
+  verdicts expire. The node is the only check: the gateway's own screens and table-ACL check are
+  gone, and so is `QOD_ACL_ENABLED` (see "Breaking" below). Consequences:
+  - A manager that ran with the ACL off to let tenant users read everything must grant them first:
+    the node refuses any statement no grant covers (the built-in `qod_all_tables` role,
+    `*.*.* ALL`, is what an omitted `--role` gives a new user).
   - Plain views run with the reader's rights (the reader needs a grant on what the view reads);
     secure views, which only superusers create, run with their owner's.
   - Node refusals read `QoD: <reason>`. A statement refused because no verdict could be had in time
     (the replica restarted, is down or unreachable from the node) reads `QoD: authorization
-    unavailable, retry` and is retryable: FlightSQL answers it `UNAVAILABLE` (every other node
-    refusal stays a permanent error), and the native front door relays the node's message. Clients
+    unavailable, retry` and is retryable for a single statement: FlightSQL answers it `UNAVAILABLE`
+    (every other node refusal stays a permanent error), and the native front door relays the
+    node's message. Clients
     may retry it as they retry a transient failure.
   - A fresh FlightSQL query costs two verdicts (its schema probe and the statement), about 1.4 ms
     end to end on one host (0.7 to 0.9 ms per verdict); a cached one adds about 0.3 ms per
@@ -380,12 +381,12 @@
   - Operator action: restart every node after upgrading. A node started by an earlier release, or
     running a qod-node of an earlier node protocol (a Kubernetes pod kept across the upgrade, a
     fleet server on an earlier wheel, an image built from stale binaries), is never routed to on
-    any backend: session handles are now version 2, and such a node refuses every one, the health
+    any backend: session handles are now version 3, and such a node refuses every one, the health
     probe's included, so it stays unhealthy. Release note: the vendored qod-node binaries
     (`native/qod-node/binaries/`, the qod wheel's bundled copies for `qod fleet join`, the Windows
-    downloads and the Kubernetes node image) move to node protocol 4 with this release; a manager
+    downloads and the Kubernetes node image) move to node protocol 5 with this release; a manager
     that starts nodes on its host refuses to boot on a binary of another protocol, `qod fleet join`
-    refuses to run one (exit 2), the node image build fails on one, and protocol 4 nodes refuse an
+    refuses to run one (exit 2), the node image build fails on one, and protocol 5 nodes refuse an
     init stream without this release's nonce line.
 
 - **BREAKING: statements tenant users can no longer run.** To keep the node's decision sound, a
@@ -417,9 +418,6 @@
     `s3_*`, `external_file_cache_*`, secret, certificate, proxy, HTTP client and cache settings;
   - a file named in a table position (`FROM 'x.parquet'` is now "table not found": use the reader
     function);
-  - with the ACL on and `QOD_ACL_FILTERED_METADATA` off, `SHOW TABLES` (refused at the gateway; it
-    used to list every table of the session schema unfiltered):
-    turn the filter on, or query `information_schema.tables`;
   - `ALTER TABLE ... ADD COLUMN ... DEFAULT <expr>` without an update grant on the table: it is
     judged as DuckDB's own ADD COLUMN and UPDATE, so it needs `update` as well as `alter`.
   Residuals, not refusals: a constant argument DuckDB folds while binding is evaluated before a
@@ -440,7 +438,7 @@
   row-filtered table, refused before, now runs through the filter.
 
 - **Security: BREAKING: files by path only where the user may reach, with S3 keys of the user's
-  own.** A tenant user (`*.*.* ALL` included, the ACL on or off) reads or writes a file by path only
+  own.** A tenant user (`*.*.* ALL` included) reads or writes a file by path only
   through a file reader or `COPY`, and only:
   - under an `s3://` scope they registered keys of their own for: `qod profile s3 add <scope>
     --access-key-id ... --secret-stdin` (or `--secret-prompt`; `--session-token-stdin`,
@@ -510,7 +508,7 @@
   before the database's `initSql`, so an `extension_directory` or `custom_extension_repository` set
   there does not apply to those two (an air-gapped mirror, or a pod whose HOME is fresh at every
   start, fetches both from DuckDB's default repository); quack installs after the trusted init
-  statements that set those, before a lockdown pool restricts the file system. Every node also runs
+  statements that set those. Every node also runs
   with DuckDB's `remote_pushdown` optimizer off (restored after the init SQL if it dropped it).
 
 - **Security: BREAKING: a tenant admin's `initSql` runs under an allowlist.** A database's or pool's
@@ -573,12 +571,178 @@
   `ManagerContext.scopeOf` resolves every credential to a `SessionScope`, and an absent or
   unresolved one is `NoAccess`, never trusted.
 
+### Breaking
+
+In-engine authorization, Phase D: the node decides every statement alone.
+
+- The gateway's text screens (DuckLake catalog internals, node settings, CHECKPOINT, triggers,
+  files, lockdown, writes into read-only catalogs) and its table-ACL check (`PostgresAclValidator`,
+  `OpaValidator`, `StatementValidator`) are gone: every table, function, setting and file is judged
+  by the node, on the plan DuckDB bound. The manager keeps only the parse screens the column and row
+  policy rewriters depend on, for principals holding such policies.
+- `QOD_ACL_ENABLED` / `quack-flightsql.acl.enabled` is removed: enforcement is always on, and the
+  manager refuses to start while the variable (any value, empty included) or the path is set.
+- `QOD_ACL_FILTERED_METADATA` / `quack-flightsql.acl.filteredMetadata` is removed: a tenant user's
+  catalog listings are always narrowed to the objects the user is granted (an RO grant on
+  `information_schema` gives a principal unfiltered listings), also on installs that ran with the
+  ACL or the filter off; the manager refuses to start while it is set.
+- `QOD_ACL_DIALECT` / `quack-flightsql.acl.dialect` (the whole `quack-flightsql.acl` block) is
+  removed; the manager refuses to start while it is set.
+- Per-pool lockdown is removed: `POST /api/pool/setLockdown`, the `lockdown` field of
+  `POST /api/pool/create` (ignored when sent), `lockdown` and `lockdownEffective` on pool responses,
+  `qod pool set-lockdown`, `qod pool create --lockdown`, MCP `set_pool_lockdown` and `create_pool`'s
+  `lockdown`, the UI's lockdown badge and selector, the manifest pool field (ignored on import), the
+  audit action `pool.setLockdown`, `QOD_NODE_LOCKDOWN` / `quack-flightsql.nodeLockdown` (the manager
+  refuses to start while it is set), the Helm `security.nodeLockdown` and `security.aclEnabled`
+  values, the banner's NODE LOCKDOWN line and the column `qodstate_pool.lockdown` (Liquibase `0055`,
+  one-way). No node runs `disabled_filesystems` any more; extension settings follow
+  `QOD_NODE_ALLOW_*` / `QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS` on every pool.
+- Fleet: the heartbeat reply's `lockdownSql` is gone and the spawn scripts no longer read it (an
+  older `qod fleet join` still works).
+- Every node must restart: node protocol 5 and session handle v3; earlier node images, vendored
+  binaries and fleet wheels do not work with this manager.
+- Upgrade the `qod` CLI with the manager: an older `qod serve` always exports `QOD_ACL_ENABLED`,
+  which this manager refuses (`qod serve` no longer sets it). A value stored by `qod setup --set`
+  is removed with `qod setup --unset QOD_ACL_ENABLED` (likewise the others above).
+- Under HA, upgrade every replica together (scale to one, or a `Recreate` rollout): Liquibase `0055`
+  drops a column the previous release reads.
+- Plain views run with the reader's rights (spec decision 4): a plain view over a DuckLake metadata
+  catalog can be created by a user who may create in the schema, but every read through it by
+  anyone but a superuser is refused ("... is DuckLake catalog metadata, which only superusers
+  reach").
+- Read-only federated catalogs refuse writes, DDL, ATTACH and DETACH to every principal, superusers
+  included (`QoD: catalog <alias> is read-only`). Not covered: a superuser's raw passthrough
+  (`postgres_execute`, `postgres_query`, `mysql_*`), a maintenance function taking a catalog name,
+  an ATTACH of the same source under another alias, CHECKPOINT / VACUUM (all superuser-only).
+- Trigger DDL is superuser-only: tenant admins lose it.
+- Superusers may now set parser and credential settings (`redact_http_logs`, ...) and run
+  `IMPORT DATABASE`, and are unrestricted on every pool (lockdown applied to them too).
+- Tenant users are now refused `LOAD` of an installed extension by bare name, `pg_get_viewdef`
+  (`*.*.* ALL` included: it would print every view's SQL), `current_setting()`, `duckdb_memory()`,
+  `SET s3_*` and `SET pg_oauth_token`.
+- A node refusal is a denial: FlightSQL `UNAUTHORIZED` (was `INVALID_ARGUMENT`), reason
+  `access denied: Permission Error: QoD: ...`, history status `denied`, a `data-denial` audit event
+  (with no `denied`, `authz_source` or `opa_decision_id` key). The gateway's refusal wordings
+  (`node: ...`, `catalog: ...`, `trigger: ...`, `lockdown: ...`, `read_only_catalog: ...`,
+  `lacks grants`) are gone; on the native front door the recorded node error carries its type.
+- `qod tenant opa-test --sql` (`POST /api/tenant/opaTest` with `sql`) runs the statement through a
+  node of the pool, as the named tenant user, and returns the input the node would send OPA
+  (`client.edge` `node`, accesses with `kind`, `columns` and `via`, `locations`, never
+  `statement.text`; names resolved on the pool's real session path). It needs a running pool and
+  never wakes one (`409 pool_not_running`), takes one statement (`400 single_statement_required`),
+  an OPA tenant (`400 opa_mode_required`) and a tenant user (a superuser is `400
+  refused_before_opa`); a node that cannot reach the manager is `503 authz_unavailable`.
+- OPA: the `statement` rule is asked only by the node, with the accesses' new `kind`, `columns` and
+  `via` and the statement's `locations`; the gateway's parser-extracted statement input is no longer
+  sent, and no input carries `statement.text` (`--send-statement-text` has no effect). Existing Rego
+  must handle `via`, or reads through a secure view are denied.
+- A client data scan (`INSERT ... SELECT * FROM <client table>`) is refused off the native front
+  door for every caller, superusers included.
+- For a principal the metadata filter narrows, a COPY the manager cannot read alone (in a batch,
+  under EXPLAIN or PREPARE, from a SHOW / DESCRIBE / SUMMARIZE) is refused.
+- A multi-statement submission the node refuses as "authorization unavailable" is no longer
+  retryable: FlightSQL `INVALID_ARGUMENT`, "not retryable as a whole: the statements before the
+  refused one may have run". A single statement is unchanged.
+- A CREATE VIEW / CREATE TABLE AS / CREATE MACRO, PREPARE or EXPLAIN holding a computed file
+  location is no longer evaluated at submission (a stored definition would freeze today's value):
+  the node refuses it as written. Queries, SUMMARIZE, PIVOT, UNPIVOT, COPY, INSERT, UPDATE, DELETE
+  and MERGE still are.
+- Both spawn scripts refuse a DuckLake or duckdb-file node with no data path (`fatal: kind=<kind>
+  needs a dataPath, ...`) instead of defaulting to a developer path: set the database's `dataPath`
+  or the default metastore's.
+- The manager now reads `QOD_AUTHZ_DECIDE_TIMEOUT_MS` and `QOD_AUTHZ_CACHE_ENTRIES` and refuses to
+  start on a value outside qod-node's ranges (1 to 60000, 0 to 10000000).
+- A FlightSQL session's prepared statements are dropped when the session ends, and one left unused
+  for the session TTL (`QOD_SESSION_TTL_SEC`, default 1 h): using it then answers "no such prepared
+  statement", so the client prepares again.
+- Developers: `scripts/dev/gen-duckdb-setting-scopes.py` and `DuckDbSettingScopes` are gone. A
+  developer shell exporting a removed variable fails every in-process boot test (run them under
+  `env -u`). Manager modules must be recompiled (constructor changes: `FlightSqlRouter`,
+  `NodeKeys`, `QuackHttpAdapter`, the backends, `MetricsBindings`, `FederatedSourceHandlers`, ...).
+
+### Added
+
+- Decision metrics: `qod_authz_decisions_total{tenant, kind=plan|screen,
+  outcome=allow|refuse|unavailable, mode=qod|opa}` and `qod_authz_decide_duration_ms{kind}`
+  (milliseconds, buckets 0.5 to 5000; Prometheus exports `_bucket`, `_count`, `_sum` and `_max`).
+  Dry runs are not counted.
+- Per-node authorization metrics from the health probe, exported by the HA leader only (a single
+  manager always leads), on Prometheus scrapes:
+  `qod_node_authz_{plan_cache_hits,plan_cache_misses,decide_calls,decide_unavailable,decide_refused,local_refusals,screen_calls,verdict_cache_evictions}_total{tenant, pool, node}`
+  and the gauges `qod_node_authz_verdict_cache_size` and `qod_node_authz_credential_sets_size`.
+- Cache metrics per replica: Micrometer's `cache_size`, `cache_gets_total{result}`,
+  `cache_evictions_total`, ... with `cache` = `qod_minted_handles`, `qod_issued_handles`,
+  `qod_dry_run_results`, `qod_effective_sets`, `qod_opa_decisions` (the last while
+  `QOD_OPA_CACHE_TTL_SEC` > 0), and `qod_cache_capacity{cache}`, the configured bound.
+- Node table function `system.main.qod_authz_stats()` (one row of counters and cache sizes since
+  node start; the manager's system principal only).
+- `QOD_AUTHZ_HANDLE_CONTEXTS_MAX` (`quack-on-demand.nodeAuthz.handleContextsMax`, default 200000,
+  at least 1000, boot refused below): the session handle contexts a replica keeps, each for 360 s,
+  which caps it at about this / 360 tenant statements per second. Raise it when
+  `cache_evictions_total{cache="qod_minted_handles"}` rises.
+- The node decide limits (`quack-on-demand.nodeAuthzLimits`, `QOD_AUTHZ_DECIDE_TIMEOUT_MS`,
+  `QOD_AUTHZ_CACHE_ENTRIES`) are forwarded to every node on every runtime: local spawn, Kubernetes
+  pods and fleet nodes (the fleet assignment's new `authzLimits`). Before, Kubernetes pods and fleet
+  nodes always ran qod-node's defaults.
+- A wildcard grant (`*.*.*`) now covers DuckDB's `memory` catalog on a memory database's own pool and
+  a database attached under a custom alias (a `qod serve` `.duckdb` file under its stem).
+- Literal `query('<sql>')` and `query_table('<name>')` are admitted to users and judged on what they
+  bind; a batch that moves the schema or search path, quoted names holding a dot and two-part names
+  headed by an attached catalog are admitted to principals without column or row policies, judged as
+  DuckDB binds them.
+
+### Fixed
+
+- A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
+  native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
+  re-grant restores them without a reconnect; a user disabled, deleted or without the pool is
+  refused on the next statement, and a control-plane outage during that check is a retryable
+  `UNAVAILABLE`.
+- A federated source's read-only flag and new aliases apply on the next statement instead of within
+  60 s (on HA peers, at the `qod_topology` NOTIFY or the next snapshot refresh).
+- On the native front door, a client transaction whose node leaves the pool (scale down, failure,
+  restart) is ended: every later statement answers "transaction aborted: the transaction's node
+  left the pool; ROLLBACK to continue" until ROLLBACK, where before the next statement autocommitted
+  on another node.
+- A user S3 credential whose endpoint is no longer in `QOD_USER_S3_ALLOWED_ENDPOINTS` stops being
+  served at the next statement (one WARN per credential, never a key).
+- Before the user S3 credential cache's first successful load, users' statements answer "S3
+  credentials unavailable, retry" (retryable) instead of a location refusal.
+- A restore (a peer's NOTIFY, the HA snapshot refresh, a recovery, a manifest import) no longer
+  publishes caches while one of this replica's own mutations runs: it waits up to 5 s, else it is
+  skipped with a WARN and runs at the next local mutation, NOTIFY or snapshot refresh. A slow
+  database creation (catalog creation and DuckLake init run inside the mutation) skips restores that
+  way, and the owed restore then runs on the next request's thread.
+- A failed user S3 credential write is logged by exception class and SQLState only; the policy
+  version and credential cache refresh failures name the SQLState.
+- A tenant-db missing from the read-only catalog lookup fails the statement instead of caching "no
+  read-only catalog" for 60 s.
+- A transport retry of a statement is in the kill registry from before its send, under the
+  client's text, so a revoked token stops it.
+- The location rules WARN once, naming the database, when a data path cannot be placed (which
+  refuses every tenant's local file locations).
+- A refused unauthenticated request whose body is left unread (chunked, over 1 MiB,
+  `Expect: 100-continue`) is answered `Connection: close`.
+- Under HA, a tenant's SSO settings change applies on every replica, and a removed override falls
+  back to the global sign-in chain on every replica.
+- The manager no longer keeps per-node, per-client and per-pool bookkeeping (latency rings, engine
+  stats, schema-init flags, audit rate-limit keys, single-manager pool locks) for nodes, clients and
+  pools that are gone; HA peers also forget the load figures of nodes another replica removed.
+- `qod_node_authz_*` are exported by the HA leader only, so `sum by (node)` no longer multiplies by
+  the replica count.
+
+### Upgrading
+
 - **Upgrading:** mint PATs for automation before upgrading (`qod login`, then
   `qod auth pat create`), point MCP clients and SCIM connectors at them, then remove
   `QOD_API_KEY` from every environment, chart value and Compose file. In fleet mode set
   `QOD_INTERNAL_URL` on every manager and upgrade `qod` on every server; on Kubernetes without the
-  chart set `QOD_POD_IP`. Grant tenant users what they read before relying on `QOD_ACL_ENABLED=false`
-  (it no longer opens tables), set `QOD_TENANT_FILES_ROOT` / `QOD_USER_S3_ALLOWED_ENDPOINTS` if users
+  chart set `QOD_POD_IP`. Grant tenant users what they read (the ACL can no longer be turned off),
+  unset `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` and `QOD_NODE_LOCKDOWN`
+  everywhere (`qod setup --unset <NAME>` for a persisted one) and upgrade the `qod` CLI with the
+  manager, update OPA policies for the node input (`columns`, `via`, `locations`), upgrade every HA
+  replica together (Liquibase `0055` drops a column the previous release reads: scale to one or use a
+  `Recreate` rollout), set `QOD_TENANT_FILES_ROOT` / `QOD_USER_S3_ALLOWED_ENDPOINTS` if users
   load files, review the boot WARNs about untrusted initSql and `sql` federation sources (a superuser
   re-saves what should stay), and restart every node. Under HA, set `QOD_NODE_KEY_SECRET` the same on
   every replica or leave it unset on all.

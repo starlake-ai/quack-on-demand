@@ -197,6 +197,20 @@ Two things bound that exposure:
 
 QoD superusers are never screened and can always read the files. Isolating each node to its own catalog needs one Postgres role per catalog database, which is not implemented yet.
 
+There is no switch for that enforcement: the former `security.nodeLockdown` and `security.aclEnabled` values are gone (a release still carrying them renders nothing), and a `QOD_NODE_LOCKDOWN` or `QOD_ACL_ENABLED` set through `env` makes the manager refuse to start.
+
+## Node authorization tuning
+
+Set these through `env` (the chart has no dedicated value for them):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `QOD_AUTHZ_DECIDE_TIMEOUT_MS` | `2000` | How long a node waits for a manager replica's verdict (1 to 60000). The manager forwards it to every node pod; restart the nodes after a change. |
+| `QOD_AUTHZ_CACHE_ENTRIES` | `10000` | How many plan verdicts each node caches (0 to 10000000). Forwarded to every node pod like the timeout. |
+| `QOD_AUTHZ_HANDLE_CONTEXTS_MAX` | `200000` | How many session handle contexts each manager replica keeps, each for 360 s (at least 1000; a lower value refuses boot). Caps a replica at about this / 360 tenant statements per second. |
+
+The manager refuses to start on a value outside those ranges. Watch `cache_evictions_total{cache="qod_minted_handles"}` and `qod_node_authz_verdict_cache_evictions_total` (exported by the HA leader only) to size them.
+
 ## Manager ↔ Quack node TLS
 
 The manager↔node wire is **plain HTTP**: the manager's native Quack client (libquackwire) always speaks `http://<node>/quack`, and the spawn-quack-node.sh script runs `quack_serve()` without TLS. The auth token Quack ships on every request is still required and enforced; only the transport is unencrypted.

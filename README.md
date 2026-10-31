@@ -129,7 +129,7 @@ everything is still there. Re-running adds a second database beside the first,
 so `qod serve ./other.duckdb` extends the same gateway rather than replacing it.
 
 Unlike `--demo`, this keeps the normal secure posture: TLS on, database auth on,
-ACL on, and an admin password you choose on the first run (prompted, or taken
+and an admin password you choose on the first run (prompted, or taken
 from `QOD_ADMIN_PASSWORD`) and never stored; `qod admin reset-password` recovers it.
 If a gateway is already running locally, `qod serve` provisions straight into it
 with your own credential (`QOD_TOKEN`, the session `qod login` saved, or a
@@ -214,11 +214,11 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | Feature | Description | Added value |
 |---|---|---|
 | RBAC graph | Users, roles, groups, role permissions and pool permissions, computed into a cached **EffectiveSet** per session; two gates at handshake (user-scope, pool-access). See the [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model) | Table-level grants for a database that has no `GRANT` statement |
-| Per-statement ACL | SQL is parsed at the edge, table refs extracted, verb collapsed to Read / Write / Ddl and matched against grants | Enforcement is independent of client and node |
+| Per-statement ACL | Each node matches the objects of the plan DuckDB bound (verb collapsed to Read / Write / Ddl) against the session's grants, asking the manager for a signed verdict that it caches; a tenant can hand those decisions to its own OPA policy | Enforcement is independent of the client, and judges what DuckDB actually resolved rather than the SQL text |
 | Row-level security | Predicate filters injected per role by rewriting the statement (`QOD_RLS_ENABLED=false` as kill switch) | Same data, different rows per user, with no views to maintain |
 | Column-level security and masking | Per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied before the node sees the statement (`QOD_CLS_ENABLED=false` as kill switch) | Dynamic masking without copying tables |
 | Protected-write guard | Fail-closed deny on any write that wraps or references a masked or filtered table | Closes the classic "write it somewhere I can read" bypass |
-| Attached-catalog resolution and ATTACH governance | Unqualified refs resolved fail-closed; `ATTACH` for ordinary users constrained to allowed catalogs | Prevents catalog-alias confusion from leaking cross-tenant data |
+| Attached-catalog resolution and ATTACH governance | Names judged as DuckDB binds them, on the node; `ATTACH` reserved to superusers; read-only federated catalogs refuse writes to every principal, superusers included | Prevents catalog-alias confusion from leaking cross-tenant data |
 | Encryption at rest | `qod database create --encrypted` makes a DuckLake database write encrypted Parquet (DuckLake mints a key per file into its own catalog) or a `duckdb-file` database an AES-256-GCM encrypted file. Create-time only, per database, with `QOD_REQUIRE_ENCRYPTION` as the manager-wide policy gate. | DuckLake supports it but nothing forces it. QoD makes it a policy and keeps the key inside the control plane |
 | Audit log | Every statement, admin mutation and autoscale action recorded with its actor, filterable in the console | DuckDB keeps no history of who ran what |
 
@@ -238,7 +238,7 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 |---|---|---|
 | Tenants, tenant-dbs, pools | Registry of tenants, each owning databases (`ducklake`, `duckdb-file`, `memory`) and pools; each DuckLake catalog DB (`${tenant}_${tenantDb}`) is auto-provisioned next to the control-plane DB | DuckLake has no notion of tenant. QoD isolates tenants at the Postgres-database boundary, not just row level |
 | Tenant resource caps and quotas | Per-tenant limits on nodes and pools, enforced on every scale action including autoscale | Shared infrastructure without one tenant starving the others |
-| Per-pool lockdown | Deny-set that blocks node-side escape hatches (file reads, other buckets, extensions) | A DuckDB process can read any path its OS user can. Lockdown closes that for served users |
+| In-engine authorization | Every node decides each tenant statement on the plan DuckDB bound for it (tables, views, columns, functions, settings, files), always on and on every pool, with the grants or the tenant's OPA policy | A DuckDB process can read any path its OS user can and runs any function. The node refuses what the user may not reach, wherever it hides in the statement |
 | Filtered metadata | `information_schema` and `duckdb_*` catalog functions are filtered to what the principal may see | DuckDB shows every table to everyone. QoD hides what you cannot query |
 | Regular-user profile sessions | Non-admin users log into the console for their own usage and statements only | Self-service without exposing the admin plane |
 
@@ -309,8 +309,8 @@ flowchart LR
     end
 
     subgraph server["Quack on Demand · your infrastructure"]
-        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>authn + RBAC"]
-        node["Quack nodes<br/>DuckDB + DuckLake"]
+        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>authn + policies"]
+        node["Quack nodes (qod-node)<br/>DuckDB + DuckLake<br/>per-statement authorization"]
         store[("Postgres catalog +<br/>object storage<br/>S3 · GCS · FS")]
         edge --> node
         node -. data at rest .-> store
@@ -333,7 +333,6 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 | Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset: the first boot generates one and stores it in the control-plane database, and every restart and HA replica reads it, so sessions survive restarts. Rotate it with `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart |
 | Admin password | `QOD_ADMIN_PASSWORD` | none; used on first boot only (`qod start` / `qod serve` prompt for it). The Docker launchers default it to `admin` (`ADMIN_PASSWORD`) |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
-| Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |
 
 There is no static API key: a set `QOD_API_KEY` refuses boot. People log in (`qod login`,
 the admin UI) and automation uses personal access tokens (`qod auth pat create`).
@@ -342,8 +341,7 @@ Full reference: [Configuration](https://docs.starlake.ai/qod/reference/configura
 
 Hosted / self-serve deployments should also harden the data plane:
 
-- **`QOD_NODE_LOCKDOWN=true`** (default off, so first-run smoke tests keep working out of the box) denies `ATTACH`, extension `INSTALL`/`LOAD`, protected `SET`/`PRAGMA`s, and local-file read functions for non-superuser sessions, and freezes the DuckDB engine's settings for the process lifetime
-- **Per-pool override** via `POST /api/pool/setLockdown` (tri-state `inherit`/`on`/`off`, superuser only), which restarts the pool's nodes immediately to apply the change
+- **Node enforcement is always on**: every node refuses `ATTACH`, extension `INSTALL`/`LOAD`, node-wide and protected settings, and files outside the user's authorized locations to non-superusers, on every pool. There is no switch: a set `QOD_ACL_ENABLED` or `QOD_NODE_LOCKDOWN` makes the manager refuse to start. Extension trust is fixed when a node starts (`QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS`, `QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS`, `QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS`, all false by default)
 - **Network policy**: enable `networkPolicy.enabled=true` in the Helm chart to restrict node-pod ingress/egress
 - **Catalog-reader eviction**: tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting
 

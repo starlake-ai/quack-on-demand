@@ -97,8 +97,8 @@ On Kubernetes, the Helm chart is published as an OCI artifact per release:
 `helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand --version <release>`
 (external Postgres required, `postgres.user` must be set to a dedicated
 non-superuser role, and `admin.password` or `admin.existingSecret` is required,
-since nobody could log in without an admin; the chart turns node lockdown on, so tenant users cannot
-read the node's mounted catalog password; see https://docs.starlake.ai/qod). Locally,
+since nobody could log in without an admin; the nodes refuse tenant users every file outside their
+authorized locations, so they cannot read a node's mounted catalog password; see https://docs.starlake.ai/qod). Locally,
 `qod start` supervises the released uber-jar, downloaded and cached on first
 use (Java 21+ required; the `duckdb` CLI and node spawn scripts are
 provisioned automatically):
@@ -191,7 +191,7 @@ key id/secret; az: storage account name/key, both required together) and no
 environment fallback.
 
 Posture, unlike `qod serve --demo` (`qod start --demo` still works too, as a
-deprecated alias): TLS on, DB auth on, ACL on, and an admin password you
+deprecated alias): TLS on, DB auth on (the nodes check grants in every mode), and an admin password you
 choose on the first run (prompted twice, or taken from `QOD_ADMIN_PASSWORD` in
 your shell). It is never stored by the CLI, and later runs do not ask again.
 Rotate with `qod auth change-password`; if it is lost, or the account is locked
@@ -209,9 +209,7 @@ Neither `qod serve` nor `qod start` stores the admin password: it is seeded
 once, when the control plane has no admin row, and a later `qod start` against
 the same control plane keeps it (no prompt). A
 `memory` database whose views point at a remote prefix carries that prefix as
-its object-store scope; under node lockdown such a database loses local file
-reads (`disabled_filesystems`), which is the intended posture for
-remote-only views. `qod status` reports the embedded control plane by probing
+its object-store scope. `qod status` reports the embedded control plane by probing
 its data directory; a custom `--pg-data-dir` run is only visible to `status`
 when `QOD_PG_EMBEDDED_DATA_DIR` is set (env or `qod setup --set`).
 
@@ -329,8 +327,8 @@ further down the chain, never widened back out - the server refuses a widening a
 with `400 pat_scope_widens`.
 
 **`roles` and `verbCeiling` are inert for a token whose owner is a tenant-less
-superuser.** The ACL validator returns `Allowed` for a superuser before it ever looks at
-a permission list, so attenuating an empty permission set changes nothing, and the
+superuser.** A node allows a superuser's statement without asking the manager, so it
+never looks at a permission list, and attenuating an empty permission set changes nothing, and the
 example below (`verbCeiling: "RO"`, `dropAdmin: true`) minted by the default
 `admin@localhost.local` superuser still produces a token that can `DROP TABLE`. For a
 tenant-scoped admin the ceiling does bite, which is exactly what makes this easy to miss
@@ -389,7 +387,7 @@ self/floor guards, mutation gates, audit). Tool families, one line each:
 - **Identity** - tenants, users, groups, roles, memberships
 - **Access** - role table permissions, column/row policies, pool permissions
 - **Pools & nodes** - pool create/scale/suspend/resume/stop/delete, pool settings
-  (resources, pod template, lockdown, autoscale, disabled), node restart/quarantine/
+  (resources, pod template, autoscale, disabled), node restart/quarantine/
   max-concurrent, active statements + kill
 - **Databases** - tenant-db create/update/delete, metastore defaults
 - **Maintenance & tags** - maintenance policies, maintenance runs, tag create/delete/
@@ -805,8 +803,8 @@ denied for anyone without a `*.*.*` ALL grant (`unsupported constructs (deny,
 fail-closed): table function duckdb_tables`). The attached catalog then lists only the
 tables the user is granted; an ungranted table is simply absent (`does not exist` on
 the client), never described. Other table functions stay denied without a wildcard ALL
-grant, and the file-reading ones (`read_parquet`, `read_csv`, `glob`, ...) are refused to
-every tenant user, `*.*.* ALL` included (see "Direct file access" under Hardening).
+grant, and the file-reading ones (`read_parquet`, `read_csv`, `glob`, ...) reach only the
+locations the user may (see "Direct file access" under Hardening).
 
 An **explicit** `information_schema` grant is still meaningful: it is the escape hatch
 that turns the filter off for that principal and restores the unfiltered read (useful
@@ -820,11 +818,11 @@ qod role permission grant --role-id "$ROLE_ID" \
 The grant must name `information_schema` literally (a wildcard schema does not count as
 the escape hatch) and its catalog must be the session database or `*`.
 
-Superusers and holders of a wildcard `ALL` grant are never filtered either. To turn the
-whole feature off manager-wide and go back to the pre-0.6.7 grant-required posture, set
-`QOD_ACL_FILTERED_METADATA=false`.
+Superusers and holders of a wildcard `ALL` grant are never filtered either. There is no
+manager-wide switch: the filter is always on (`QOD_ACL_FILTERED_METADATA` was removed, and
+set to any value it makes the manager refuse to start).
 
-**Denial semantics** (all fail-closed, and all only when ACL is on):
+**Denial semantics** (all fail-closed):
 
 - The filter rewrites `information_schema` references and `duckdb_*()` catalog calls it
   finds in `FROM` position. A reference sitting in `ORDER BY`, `GROUP BY` or a window
@@ -834,17 +832,17 @@ whole feature off manager-wide and go back to the pre-0.6.7 grant-required postu
 - A bare reference to one of DuckDB's system views (`FROM sqlite_master`, `FROM pg_class`,
   `FROM duckdb_databases`, `FROM duckdb_tables` without parentheses, and the other default
   views of `system.main` / `system.pg_catalog`, also spelled `main.X` or `system.main.X`)
-  is denied for every non-wildcard principal, flag on or off: on the node such a name
+  is denied for every non-wildcard principal: on the node such a name
   resolves to the system view unless a real table shadows it, and the manager cannot tell
   which. For the catalog functions, call them as `duckdb_tables()` and they are filtered;
   qualified (`main.duckdb_tables()`) and argument-carrying calls are denied the same way.
   A real table that happens to carry such a name is reachable by its three-part name.
-- `DESCRIBE <t>`, `SHOW <t>` and `SHOW COLUMNS FROM <t>` now require RO on the target
-  table. They previously bypassed the ACL entirely. This applies whenever ACL is on,
-  independent of `QOD_ACL_FILTERED_METADATA`.
-- Plain `SHOW TABLES` answers the filtered listing. The `FROM` / `IN` / `LIKE` variants
-  are denied while the filter is active: query `information_schema.tables` instead.
-  `SHOW ALL TABLES` stays denied under ACL, as before.
+- `DESCRIBE <t>`, `SHOW <t>` and `SHOW COLUMNS FROM <t>` require RO on the target
+  table (for a tenant user they are answered from the filtered listings plus a read of
+  the table).
+- Plain `SHOW TABLES` and `SHOW ALL TABLES` answer the filtered listing. The `FROM` /
+  `IN` / `LIKE` variants are denied while the filter narrows the principal: query
+  `information_schema.tables` instead.
 - Known limitation: when a statement is metadata-rewritten, a DuckLake time-travel
   clause (`AT (VERSION => n)` / `AT (TIMESTAMP => ...)`) on a co-referenced table in the
   same statement is dropped, so that table reads at the current version. This only
@@ -866,9 +864,9 @@ qod membership group-role remove --group-id <groupId> --role-id <roleId>
 qod pool permission revoke <poolPermissionId>
 ```
 
-The EffectiveSet cache is invalidated on every RBAC mutation, so changes take effect on the next handshake - no TTL window to wait for.
+The EffectiveSet cache is invalidated on every RBAC mutation, so changes take effect on the next statement, with no TTL window to wait for: an open FlightSQL or native Quack session resolves its grants again on its first statement after the change, so a revoke reaches it there and a re-grant restores it without a reconnect.
 
-The gateway's ACL check is *off* by default (`acl.enabled=false`; `QOD_ACL_ENABLED=true` turns it on). The nodes enforce the same grants for every tenant user either way, so with it off a statement no grant covers is still refused (`QoD: ...`), by the node instead of the gateway.
+There is no switch that turns the grant check off: the nodes check every tenant statement against the grants (or the tenant's OPA), always. `QOD_ACL_ENABLED` was removed, and set to any value it makes the manager refuse to start (`qod setup --unset QOD_ACL_ENABLED` removes a persisted one).
 
 ### Force a password change at next login
 
@@ -895,7 +893,8 @@ qod auth change-password --username alice --tenant acme
 ### Delegate authorization to OPA (per tenant)
 
 A tenant can hand its data-access decisions to its own Open Policy Agent: pool access at
-handshake (rule `connect`) and table access per statement (rule `statement`), at
+handshake (rule `connect`) and table and file access per statement (rule `statement`,
+asked by the node's decision on the tables, columns and files DuckDB resolved), at
 `POST <opaUrl>/v1/data/<policyPath>/{connect,statement}`. QoD grants are then ignored for
 that tenant (memberships are still sent as roles/groups); superusers never reach OPA.
 
@@ -906,7 +905,7 @@ qod tenant set-acl acme --mode opa --opa-url https://opa.acme.internal:8181 \
 
 # Dry run: prints the exact input and OPA's answer, executes nothing
 qod tenant opa-test acme --pool bi --user alice                              # connect
-qod tenant opa-test acme --pool bi --user alice --sql "SELECT * FROM orders" # statement
+qod tenant opa-test acme --pool bi --user alice --sql "SELECT * FROM orders" # statement (pool must be running)
 
 # Back to QoD grants
 qod tenant set-acl acme --mode qod
@@ -923,6 +922,16 @@ Manager envs: `QOD_ACL_MODE` (default mode, `qod`), `QOD_OPA_URL` (fallback URL)
   in the manager log, as a WARN `OPA <connect|statement> error for tenant=<id>: ...`;
   `qod tenant opa-test` run as a superuser shows it too.
 - `400 opa_url_required`: set `--opa-url` or `QOD_OPA_URL` before `--mode opa`.
+- `opa-test --sql` runs the statement through a node of the pool, as the named tenant user, and
+  reports the exact input that node's decision sends OPA (`client.edge` `node`, each access with
+  `kind`, `columns` and `via`, the `locations`, never the SQL text); the plan is refused, never run.
+  It needs a running pool and never wakes one: `409 pool_not_running` means start or resume the
+  pool first. One statement only (`400 single_statement_required`), OPA tenants only
+  (`400 opa_mode_required`), and the user must be a tenant user, not a superuser
+  (`400 refused_before_opa`, which also carries a refusal the statement met before OPA). What
+  happens while binding (the parse screen, fetching the user's S3 credentials) still runs.
+- Existing Rego must handle the node input: a policy that ignores `via` judges a read through a
+  secure view as a read of the underlying table.
 - Policy changes apply within the cache TTL and never kill running sessions.
 - Catalog listings (`information_schema`, `duckdb_*`) are still filtered by QoD grants, so an
   OPA tenant with no QoD grants sees empty listings in BI tools; queries OPA allows still run.
@@ -1368,8 +1377,9 @@ Two operator cautions:
   the old bucket's objects leak. Purge or migrate before switching buckets.
 - **All managed databases share the operator credential.** Isolation between
   tenants' managed data is prefix-by-convention, enforced by the per-db
-  `CREATE SECRET` scoped to that database's own `dataPath` plus per-pool
-  lockdown, not by store-level ACLs. Per-database credential minting is the
+  `CREATE SECRET` scoped to that database's own `dataPath`, and by the nodes,
+  which refuse every database data folder to tenant users and sign their S3
+  requests with their own keys only; not by store-level ACLs. Per-database credential minting is the
   designed follow-up.
 
 ### Register a federated source
@@ -1426,8 +1436,10 @@ Why it is shaped this way:
   down at node start, say). On the ATTACH's line it would be skipped and the
   secret would stay.
 - **`--read-only`.** A `sql` source defaults to writable: `READ_ONLY` on the
-  ATTACH binds that one attachment only, and `--read-only` makes the edge refuse
-  writes to the catalog too.
+  ATTACH binds that one attachment only, and `--read-only` makes every node
+  refuse writes, DDL, ATTACH and DETACH on the catalog to every principal,
+  superusers included (`QoD: catalog <alias> is read-only`), from the next
+  statement on.
 - **Disabled until its secret exists.** An enabled source whose
   `{{secret.NAME}}` names a missing secret fails the whole tenant-db federation
   blob at node spawn, not just this catalog.
@@ -1515,9 +1527,8 @@ Flags:
 - `--read-only` / `--no-read-only`. **Defaults ON for `iceberg-rest`** (an
   external catalog is one QoD does not own), and it is enforced by the engine:
   the rendered `ATTACH` carries `READ_ONLY`, so writes come back as DuckDB's
-  "attached in read-only mode" error. Note the pool-wide side effect: while any
-  source on the pool is read-only, every write anywhere on that pool must be
-  fully parseable and fully qualified or the edge refuses it.
+  "attached in read-only mode" error, and every node refuses writes into it to
+  every principal, superusers included (`QoD: catalog <alias> is read-only`).
 
 Rules worth knowing before the first create:
 
@@ -1613,18 +1624,14 @@ Then recycle the pool's nodes, as for any new source.
 - `--connection '<json>'` passes the whole object (`host`, `port`, `database`,
   `user`, `password`, `schema`, `sslMode`) instead of the flags.
 - `--read-only` **defaults ON**, enforced by the engine (`READ_ONLY` on the
-  ATTACH) and by the edge. The raw-SQL passthroughs `postgres_execute`,
-  `postgres_query`, `mysql_execute` and `mysql_query` could end the remote's
-  read-only transaction and write, and the SQL ACL and node lockdown are both
-  OFF by default, so while the pool has any read-only catalog the edge
-  refuses, for every caller (superusers included): those four when their
-  first argument names a read-only catalog or is not a plain string literal;
-  `query` / `query_table` with a computed argument; and
-  `json_execute_serialized_sql`. Calls to a writable catalog are unchanged.
-  The screen reads the statement text only: a table macro or view that
-  already wraps a passthrough (for example one created in the DuckLake
-  catalog before the source became read-only), or one in an attached
-  database, is not seen. **Connect as a database user without write
+  ATTACH, bound when a node starts) and by every node for every principal,
+  superusers included (`QoD: catalog <alias> is read-only`, from the next
+  statement on). The raw-SQL passthroughs `postgres_execute`,
+  `postgres_query`, `mysql_execute` and `mysql_query` are superuser-only on the
+  nodes, and the node does not read their SQL argument: a superuser can still
+  end the remote's read-only transaction through one and write (as through a
+  maintenance function taking a catalog name, or an ATTACH of the same source
+  under another alias). **Connect as a database user without write
   privileges**: that is the complete guarantee. For `mysql`, whether
   `READ_ONLY` alone refuses writes is unverified (the extension is not in the
   DuckDB 2.0 toolchain).
@@ -1776,7 +1783,7 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 - **Edits take effect on the next spawn.** Editing or disabling a source affects every Quack node spawned after the commit: idle-timeout replacement, manual restart, scale-up additions, pool recreation. Already-running nodes keep their attached catalogs until they exit.
 - **Boot-time failure is fatal.** If a source's `setupSql` errors at node startup (extension missing, bad credentials, DNS), the spawn script exits 91 and the supervisor surfaces the last lines of stderr.
 - **Disabled sources** are filtered out at blob assembly. No live DETACH.
-- **Deleting a federated source** removes its alias from the ACL ambiguity guard immediately, but running nodes keep the catalog attached until the pool recycles. Recycle the pool right after deleting a source.
+- **Deleting a federated source** removes its alias from the policy holders' ambiguity check immediately, but running nodes keep the catalog attached until the pool recycles. Recycle the pool right after deleting a source.
 
 ### Troubleshooting
 
@@ -1800,7 +1807,7 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 The existing RBAC graph covers federated tables with zero changes:
 - Grant `RO` on `fedpg.public.orders` to role `analyst` via `qod role permission grant` (verb `RO`), exactly like a DuckLake table.
 - Federated writes (INSERT/UPDATE/DELETE on a federated alias) require an `RW` grant on the same triple; otherwise they are denied.
-- Read-only is enforced at ATTACH time, not in the validator: a `sql` source's `setupSql` should include `READ_ONLY` itself, while an `iceberg-rest` source gets it from QoD (`--read-only`, on by default).
+- Read-only (`--read-only`) is enforced by every node for every principal, superusers included, from the next statement after the change; a `sql` source's `setupSql` should also include `READ_ONLY` itself, while typed sources get it on their ATTACH from QoD (bound when a node starts).
 
 ## Node status + metrics
 
@@ -1827,6 +1834,32 @@ Per-node fields surfaced via `/api/pool/list`:
 - `healthy` / `draining` - tracker flags
 
 On object-store pools the router biases toward a node that already has the query's tables cached (cache-aware placement, on by default); local-path pools stay pure least-loaded. `QOD_ROUTING_CACHE_AWARE=false` instantly reverts routing decisions to least-loaded everywhere while the locality metrics keep running.
+
+Authorization metrics (Prometheus sink, the default `QOD_METRICS_SINK=prometheus`):
+
+- `qod_authz_decisions_total{tenant, kind=plan|screen, outcome=allow|refuse|unavailable, mode=qod|opa}`:
+  every verdict a replica gave its nodes (dry runs excluded). Decision rate:
+  `sum(rate(qod_authz_decisions_total[5m])) by (outcome)`.
+- `qod_authz_decide_duration_ms{kind}` (milliseconds, buckets 0.5 to 5000; exported as `_bucket`,
+  `_count`, `_sum` and `_max`). p95:
+  `histogram_quantile(0.95, sum(rate(qod_authz_decide_duration_ms_bucket[5m])) by (le, kind))`.
+- Per node, exported by the HA leader only (a single manager always is), after the node's first
+  healthy probe tick: `qod_node_authz_{plan_cache_hits,plan_cache_misses,decide_calls,decide_unavailable,decide_refused,local_refusals,screen_calls,verdict_cache_evictions}_total{tenant, pool, node}`
+  and the gauges `qod_node_authz_verdict_cache_size` / `qod_node_authz_credential_sets_size`.
+  `screen_calls` includes the manager's own statements (preludes, health probe reads). A rising
+  `qod_node_authz_verdict_cache_evictions_total` means `QOD_AUTHZ_CACHE_ENTRIES` (default 10000) is
+  too small for the node.
+- Per replica, the bounded authorization caches: `cache_size`, `cache_gets_total{result=hit|miss}`,
+  `cache_evictions_total` (and the other `cache_*` meters) with `cache` = `qod_minted_handles`,
+  `qod_issued_handles`, `qod_dry_run_results`, `qod_effective_sets`, `qod_opa_decisions` (the last
+  only while `QOD_OPA_CACHE_TTL_SEC` > 0), plus `qod_cache_capacity{cache}`, the configured bound. Sum
+  them across replicas. Rising `cache_evictions_total{cache="qod_minted_handles"}` means raise
+  `QOD_AUTHZ_HANDLE_CONTEXTS_MAX` (default 200000, at least 1000).
+
+The node limits `QOD_AUTHZ_DECIDE_TIMEOUT_MS` (default 2000, 1 to 60000) and
+`QOD_AUTHZ_CACHE_ENTRIES` (default 10000, 0 to 10000000) are set on the manager, which refuses to
+start on a value outside those ranges and hands both to every node on every runtime (local,
+Kubernetes, fleet); restart the nodes after changing them.
 
 ## Incident response
 
@@ -2058,7 +2091,7 @@ Unqualified table names resolve against the pool's default schema, but the
 FlightSQL prepare-time probe needs a real table - schema-qualify
 (`tpch1.customer`) if you hit "Table … does not exist" at prepare.
 
-Two-part names are only unambiguous when the head is a schema in the pool's default catalog, as in `tpch1.customer` above. When the head instead names an attached catalog (the tenant-db itself, e.g. `acme_tpch`, or a federation alias) under ACL, it's rejected as ambiguous - the engine would bind it catalog-first while the ACL check can't tell which catalog you meant. Write the full three-part form instead: `acme_tpch.tpch1.customer`.
+Two-part names are only unambiguous when the head is a schema in the pool's default catalog, as in `tpch1.customer` above. When the head instead names an attached catalog (the tenant-db itself, e.g. `acme_tpch`, or a federation alias), the node judges it as DuckDB binds it (catalog-first); for a user holding column or row policies it is rejected as ambiguous, since the policy rewriters cannot tell which catalog you meant. Write the full three-part form to be safe: `acme_tpch.tpch1.customer`.
 
 `VARIANT` columns reach FlightSQL clients as the Arrow `arrow.parquet.variant` extension type. A
 client that does not know that extension sees a struct of two binary fields (`metadata`,
@@ -2089,10 +2122,10 @@ SELECT * FROM quack_query('quack:localhost:9494', 'SELECT count(*) FROM tpch1.or
 ```
 
 What applies is exactly what applies to a FlightSQL client: the same handshake gates
-(tenant scope, pool grant), per-statement routing across the pool, the ACL, column masking
-and row filters, metadata filtering, lockdown, author stamping, statement history, audit
-(origin `quack`), kill, and scale-to-zero wake-up. A denied table answers
-`access denied: ...` inside DuckDB's error; a bad token answers `Authentication failed`
+(tenant scope, pool grant), per-statement routing across the pool, the nodes' grant check,
+column masking and row filters, metadata filtering, author stamping, statement history, audit
+(origin `quack`), kill, and scale-to-zero wake-up. A denied table answers the node's
+`QoD: ...` refusal inside DuckDB's error; a bad token answers `Authentication failed`
 at `ATTACH` time.
 
 Things to know:
@@ -2256,24 +2289,32 @@ library):
   `QOD_FLEET_AUTO_APPROVE` admits it; a narrowed list must include that address (`qod fleet servers`
   shows `sourceAddr`).
 
-## Hardening (lockdown, pod security, network policy, reader eviction)
+## Hardening (node enforcement, pod security, network policy, reader eviction)
 
 Self-serve / hosted deployments need a tighter isolation posture than the OSS
-default (single trusted-operator assumption). Four independent knobs, all
-opt-in except pod security:
+default (single trusted-operator assumption). What the nodes enforce is always on:
+there is no ACL switch and no per-pool lockdown any more (`QOD_ACL_ENABLED` and
+`QOD_NODE_LOCKDOWN` set to any value make the manager refuse to start, naming the
+variable to unset). Pod security is always on too; network policy and reader
+eviction are opt-in knobs.
 
-- **Always on, superuser-only (no flag)** - whatever the ACL mode (QoD
-  grants, OPA, ACL off) and the grants (`*.*.* ALL` included), a caller who is
-  not a superuser is refused, and on a locked-down pool so is a superuser:
+- **Always on, superuser-only (no flag)** - whatever the tenant's mode (QoD grants
+  or OPA) and the grants (`*.*.* ALL` included), a caller who is not a superuser is
+  refused, on every pool:
   - the DuckLake metadata catalog `__ducklake_metadata_<alias>` (it holds the
     per-file encryption keys) and `ducklake_list_files` / `ducklake_commit`
-    ("catalog: the DuckLake metadata catalog is internal ...");
+    ("QoD: ... is DuckLake catalog metadata, which only superusers reach"). A user
+    who may create in a schema can still create a plain view over it, but every
+    read through that view by anyone but a superuser is refused the same way: a
+    plain view runs with its reader's rights;
   - node-wide settings in any `SET` / `RESET` / `PRAGMA` form (threads,
     `memory_limit`, `max_temp_directory_size`, `temp_directory`, checkpoint /
     WAL / allocator knobs, logging and profiling, every `quack_*`, `debug_*`,
-    `verify_*`), any `SET GLOBAL` / `RESET GLOBAL`, `FORCE CHECKPOINT`, and the
-    node-control calls (`quack_serve`, `quack_stop`, `enable_logging`, ...)
-    ("node: settings that act on the whole node are reserved to superusers").
+    `verify_*`), any `SET GLOBAL` / `RESET GLOBAL`, `CHECKPOINT` / `FORCE
+    CHECKPOINT`, and the node-control calls (`quack_serve`, `quack_stop`,
+    `enable_logging`, ...) ("QoD: setting <name> is superuser-only", "QoD:
+    setting <name> at global scope is superuser-only", "QoD: function <name> is
+    superuser-only").
     Set resources at node start instead: database / pool `initSql` or
     `qod pool set-resources`. Session settings (`search_path`, `TimeZone`,
     `http_timeout`, `SET VARIABLE`, ...) stay open, but any of them other than
@@ -2281,12 +2322,15 @@ opt-in except pod security:
     or a `USE` of another schema (a search path other than the session's
     default) makes every secure view unreadable for as long as the session holds
     it (`QoD: statement uses a secure view while the session ...`). A client
-    that sets `TimeZone` on connect loses secure views for that session.
-- **Table grants, enforced on the nodes in every mode** - each node decides every tenant statement
+    that sets `TimeZone` on connect loses secure views for that session;
+  - trigger DDL (`CREATE` / `DROP TRIGGER`), tenant admins included, and
+    `pg_get_viewdef` (it would print every view's SQL).
+  Superusers are not restricted by these rules on any pool: they may also set the
+  parser and credential settings and run `IMPORT DATABASE`.
+- **Table grants, enforced on the nodes, always** - each node decides every tenant statement
   on what DuckDB resolved (plain views by the tables they read, secure views by their own grant),
-  whatever `QOD_ACL_ENABLED` says: with the ACL off only the gateway skips its own check, and a
-  statement no grant covers is still refused ("QoD: ..."). Turning the ACL off no longer opens
-  tables to tenant users. Every function and setting a tenant statement calls must be classified:
+  and nothing else checks it: a statement no grant covers is refused ("QoD: ...") as a permission
+  error (FlightSQL `UNAUTHORIZED`, history status `denied`). Every function and setting a tenant statement calls must be classified:
   an unknown name, a misspelled one included, reads `QoD: function <name> is not classified`, and so
   does a macro a superuser created, or a catalog macro named like a built-in, until it is called as
   `system.main.<name>` or classified. Views follow the same rules: a view whose body calls a user
@@ -2297,28 +2341,29 @@ opt-in except pod security:
   A secure view must qualify every table, function, macro, type and sequence its body names, read
   only base tables, other secure views and built-ins (no plain view, no user type), advance no
   sequence and call no `current_setting()`. A wildcard grant (`*.*.*`, `qod_all_tables`) never
-  covers a federated catalog: grant it by its alias. Cost: each plan a node has not judged costs
+  covers a federated catalog: grant it by its alias. It does cover the `memory` catalog on a memory
+  database's own pool and a database attached under a custom alias. Cost: each plan a node has not judged costs
   one call to the manager replica that minted the session (about 0.8 ms per call; a fresh FlightSQL
   query makes two, its schema probe and the statement, about 1.4 ms end to end on one host); the
   verdict is then cached on that node for 60 s (an OPA tenant's for its OPA cache TTL), so a
   statement repeated all day costs one or two calls per minute per node. Sessions of one user with the same grants share
   verdicts; bearer-token sessions share them only within one token, so a client that mints a token
-  per connection pays a call on the first run of every statement.
-- **Direct file access, only where the user may reach** (every mode) - a tenant user, `*.*.* ALL`
+  per connection pays a call on the first run of every statement. A revoke reaches open sessions
+  on their next statement; a re-grant restores them without a reconnect.
+- **Direct file access, only where the user may reach** (always) - a tenant user, `*.*.* ALL`
   included, reads or writes a file by path only through a file reader or `COPY` naming an `s3://`
   location one of their own S3 credentials covers, or a folder the tenant authorized (see "Files and
   S3 for tenant users"), never a database data folder; a path or URL in a table position (`FROM
   's3://b/x.parquet'`), `EXPORT` / `IMPORT DATABASE`, `ATTACH`, `CREATE` / `DROP SECRET` and `SET` of
   the `s3_*`, proxy, certificate and cache settings stay refused. The nodes decide this on what DuckDB
-  parsed and resolved ("QoD: ... is outside the tenant's authorized locations"), sign each user's S3
-  requests with that user's keys only (connection secrets, the file caches off), and the gateway
-  refuses the same forms first. The native front door's client data (`INSERT INTO t SELECT * FROM
-  <client table>`) still flows.
-- **Extensions and path settings, superuser-only in every mode** (ACL on or off) -
+  parsed and resolved ("QoD: ... is outside the tenant's authorized locations") and sign each user's
+  S3 requests with that user's keys only (connection secrets, the file caches off). The native front
+  door's client data (`INSERT INTO t SELECT * FROM <client table>`) still flows; such a scan sent any
+  other way (FlightSQL, MCP) is refused to every caller.
+- **Extensions and path settings, superuser-only** -
   a tenant user cannot `INSTALL` / `FORCE INSTALL` / `UPDATE EXTENSIONS` or `LOAD` an
-  extension from a path or URL ("installing an extension ... is reserved to
-  superusers"); install extensions at node start and `LOAD httpfs` by its bare name
-  (`LOAD 'httpfs'`, quoted, is refused).
+  extension, by bare name included ("QoD: statement uses load, which only superusers may run"):
+  install and load extensions at node start, in a database or pool `initSql`.
   `autoinstall_known_extensions`, `allow_community_extensions` and `allow_unsigned_extensions` are
   false on every node unless the operator sets `QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS`,
   `QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS` or `QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS` (default false,
@@ -2333,15 +2378,15 @@ opt-in except pod security:
   boot). Only a superuser may change them, and DuckDB refuses either `allow_*` setting once a node
   runs. Nor can a tenant user set
   `file_search_path`, `home_directory`, `allow_asterisks_in_http_paths`, `ca_cert_file`
-  or the server certificate verification settings, and `shell_history()` is refused to
-  every caller, superusers included (it held the node's init SQL when nodes read it from
-  stdin; kept as defense in depth).
-- **Node-state introspection, superuser-only in every mode** - a tenant user cannot read
+  or the server certificate verification settings. `shell_history()` does not exist on a node
+  (qod-node is not the DuckDB CLI).
+- **Node-state introspection, superuser-only** - a tenant user cannot read
   `duckdb_secrets()`, `which_secret()`, `whoami()`, `duckdb_settings()` / `pg_settings`,
   `current_setting(..)` of any setting (a node cannot tell which one a call reads), the
   logs (`duckdb_logs*`), `duckdb_external_file_cache()`, `duckdb_temporary_files()`,
   `duckdb_databases()` / `PRAGMA database_list`, `duckdb_extensions()`, or
-  `pragma_storage_info` ("shows node state ... reserved to superusers"). Catalog listings
+  `pragma_storage_info` ("QoD: function <name> is superuser-only", or in a FROM clause "QoD:
+  table function <name> is not available to non-superusers"). Catalog listings
   (`duckdb_tables()`, `duckdb_views()`, `duckdb_schemas()`, `duckdb_columns()`, `information_schema`)
   stay open and filtered; the other catalog-wide listings (`duckdb_constraints()`, `duckdb_indexes()`,
   `duckdb_sequences()`, `duckdb_triggers()`, `duckdb_types()`, `duckdb_functions()`,
@@ -2353,72 +2398,17 @@ opt-in except pod security:
   empty and SUMMARIZE is refused, since the listings are narrowed by QoD grants. Inside a native front
   door transaction a refused DESCRIBE or SUMMARIZE aborts the transaction, like any statement the node
   refuses there.
-- **Node lockdown** - `QOD_NODE_LOCKDOWN=true` (config
-  `quack-on-demand.nodeLockdown.enabled`, default false). Two layers, both
-  gated by the same flag:
-  - Edge denial (first line): for non-superuser sessions, denies `ATTACH` /
-    `DETACH`, `INSTALL` / `LOAD`, `SET`/`RESET`/`PRAGMA` against a
-    protected-settings list (`disabled_filesystems`, `allow_*_extensions`,
-    `autoinstall_known_extensions`, `autoload_known_extensions`,
-    `enable_external_access`, `lock_configuration`, `temp_directory`,
-    `extension_directory`, `secret_directory`, plus the resource settings
-    `memory_limit`, `max_memory`, `threads`, `worker_threads`,
-    `max_temp_directory_size` - a tenant raising them past the spawn-time
-    defaults could OOM the node or pressure the host), and local-machine read
-    functions (`read_text`, `read_blob`, `glob`, `read_csv[_auto]`,
-    `read_parquet`, `read_json[_auto]`, `read_ndjson[_auto]`, `parquet_scan`,
-    `getenv`) unless every path argument is an object-store URL literal
-    (`s3://`, `gs://`, `az://`, `r2://`, `http(s)://`). Denials use the same
-    wire shape as ACL denials ("lockdown: ... is disabled on this
-    deployment") and go through the existing audit path. Superuser sessions
-    bypass the edge arm (operator escape hatch).
-  - Engine lockdown (second line, value-sets only): a lockdown SQL block
-    runs BEFORE `CALL quack_serve(...)` in node init (after catalog ATTACH,
-    pool initSql, and the federation blob) setting `autoinstall_known_extensions
-    = false`, `allow_community_extensions = false`, `allow_unsigned_extensions
-    = false`, and `disabled_filesystems = 'LocalFileSystem'` (only when the
-    tenant-db dataPath is an object store). `autoload_known_extensions` is left
-    ON: quack_serve itself lazily autoloads signed built-in extensions to
-    handle incoming connections, and disabling autoload marks every node
-    unhealthy (the SELECT 1 probe fails). `SET lock_configuration = true` was
-    tried and dropped: it freezes DuckDB's global config outright and is
-    incompatible with quack_serve regardless of which side of quack_serve it
-    runs on, so nodes never come up healthy. It is also redundant - the edge
-    LockdownScreen already denies every protected-setting SET/RESET/PRAGMA for
-    tenant sessions, so nothing short of a superuser bypass could change these
-    values anyway. The real threats (autoinstall fetching arbitrary extensions
-    over the network, community/unsigned extensions) stay blocked; autoloading
-    a signed built-in already on disk is benign.
-  - LOCAL-dataPath lockdown is best-effort: the engine
-    `disabled_filesystems = 'LocalFileSystem'` restriction is NOT applied for
-    a local dataPath (DuckLake data lives there, so the filesystem must stay
-    enabled). The edge screen also denies COPY over local paths and bare
-    filesystem-path FROM (replacement scans), but this protection is
-    best-effort: dollar-quoted (`$$...$$`) and identifier-quoted path forms
-    remain unhandled and may still read local files in LOCAL mode. Production
-    hosted deploys MUST use an object-store dataPath, where the engine
-    `disabled_filesystems` layer is the hard guard; the edge screen alone is
-    not a hard guard for LOCAL mode.
-  - Per-pool override: the global `QOD_NODE_LOCKDOWN` default stays OFF
-    (unchanged by this feature) - it is the fallback for pools that don't set
-    their own value. `POST /api/pool/setLockdown` layers a tri-state
-    `inherit | on | off` on top, superuser only, and restarts the pool's
-    nodes immediately so the new posture takes effect:
-    ```bash
-    # Per-pool override (superuser only; restarts the pool's nodes immediately).
-    # --lockdown: inherit (default, follow QOD_NODE_LOCKDOWN) | on | off
-    qod pool set-lockdown --tenant acme --db acme_tpch --pool bi --lockdown off
-    ```
-  - Verify: with the flag on, `SELECT * FROM read_text('/etc/passwd')` and
-    `ATTACH ':memory:' AS x` are denied for a tenant user, `SET
-    autoinstall_known_extensions=true` is denied, nodes come up healthy, and
-    ordinary TPCH queries still work. With the flag off, behavior is
-    unchanged from pre-lockdown.
-  - `POST /api/pool/create`'s `lockdown` field is gated the same
-    superuser-only way; a tenant admin sending ANY non-`"inherit"` value
-    (including an invalid one like `"banana"`) gets `403 superuser_required`
-    rather than `400 invalid`, because the gate compares the raw string
-    before it is parsed - deliberate fail-closed behavior, not a bug.
+- **No per-pool switch** - the node enforces the rules above on every pool, so there is
+  nothing to turn on per pool or manager-wide (the former per-pool override, its REST
+  endpoint, CLI command and flag, MCP tool and pool field are gone; an old manifest's
+  pool field is ignored on import). Nodes no longer
+  run `disabled_filesystems = 'LocalFileSystem'` on object-store pools; extension
+  settings follow `QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS` /
+  `QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS` / `QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS` on
+  every pool. Verify the posture as a tenant user: `SELECT * FROM
+  read_text('/etc/passwd')`, `ATTACH ':memory:' AS x` and `SET
+  autoinstall_known_extensions=true` are refused (`QoD: ...`), and ordinary queries on
+  granted tables still work.
 
 - **Pod security defaults** (K8s backend only, no flag, always on) - spawned
   node pods get `runAsNonRoot: true`, `runAsUser`/`fsGroup` from
@@ -2476,11 +2466,13 @@ opt-in except pod security:
 | The reason says the database `already serves kind=... dataPath=...`, or that its views point at different data (`initSql differs`), or that the pool name already serves another database; the way out, `serve it under another name: ...`, ends the reason or follows it on its own line, and no `finish by hand:` line follows (a create would collide again) | The tenant already has a database (or pool) of that name for other data; `qod serve` never updates or replaces one | Serve the target under another name: `qod serve <target> --name <other>` (a pool: `--pool <other>`) |
 | `qod serve: provisioning failed: the manager answers /ready but wrote no provisioning outcome within --ready-timeout (<N>s)`, then three `finish by hand:` lines; or `... could not read the provisioning file the launcher wrote` | The manager release does not provision at boot, or is not the one this CLI expects (a launcher/manager version mismatch), or it did not reach its boot provisioning in time | Run the manager release matching this CLI (drop an older `--jar` or `--version`), or `qod login` and run the printed commands; a slow first boot needs a larger `--ready-timeout`. The manager log says what it did |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `qod stop` + `qod start` (reconcile respawns) |
-| `access denied: missing RO grant on ...` (gateway) or `QoD: ...` naming the table (node) | The user has no matching grant. The nodes check grants whatever `QOD_ACL_ENABLED` says, so turning the ACL off does not help | Add the grant via `qod role permission grant` |
-| On a `qod serve` pool, with the ACL on: `lacks grants on <catalog>.main.<table>:Read` although the user holds the default `qod_all_tables` (`*.*.*`) | The served catalog's name is not the database's: a `.duckdb` file is attached under its stem (`sales`, the database being `<tenant>_sales`) and loose files are views in `memory`. The gateway's `*` catalog covers only database names; this lasts until the gateway check is retired | Grant that catalog on a role of your own (the built-in `qod_all_tables` takes no grant: `409 builtin_protected`): `qod role create --tenant <tenant> --name <role>`, then `qod role permission grant --role-id <roleId> --catalog <catalog> --schema '*' --table '*' --verb RO`, then `qod membership user-role add --user-id <userId> --role-id <roleId>` |
+| `QoD: user:<name> lacks grants on ...` naming the table (FlightSQL `UNAUTHORIZED`) | The user has no matching grant. The nodes always check grants; there is no switch to turn that off | Add the grant via `qod role permission grant` |
+| The manager refuses to start naming `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` or `QOD_NODE_LOCKDOWN` | That setting was removed: the nodes enforce always, and listings are always filtered | Unset it (`qod setup --unset <NAME>` for a persisted one; remove it from the Helm values or env), and upgrade `qod` with the manager (an older `qod serve` exports `QOD_ACL_ENABLED`) |
 | `QoD: statement uses a secure view while the session holds variables` / `... has changed the setting <name>` / `... search path differs from the one it was given` / `... holds temporary entries ...`, `which QoD does not support` | The session set a variable, changed a setting other than `schema` / `search_path` (a client's `SET TimeZone` on connect included), ran `USE` of another schema, or created a temporary view, macro or type: any of them could change what a secure view's body reads | Open a new session (or reconnect) without that state, and read the secure view there; set time zones and other settings in a session that reads no secure view |
 | `QoD: function <name> is not classified` | A tenant user called a name the node's classification does not list: a typo, a function of an extension the node loaded later, a macro a superuser created, or a catalog macro named like a built-in (also reached through a view, a default or a built-in macro's body) | Check the spelling; call DuckDB's own with `system.main.<name>`; have a superuser drop or rename the shadowing macro. A new extension's functions need a manager release that classifies them |
-| `QoD: authorization unavailable, retry` (FlightSQL `UNAVAILABLE`) | The node could not get a verdict from the manager replica that minted the session's handle in time (`QOD_AUTHZ_DECIDE_TIMEOUT_MS`, default 2000): that replica restarted, is down or unreachable from the nodes | Retry the statement. If it persists, check that the nodes reach `QOD_INTERNAL_URL` (boot prints `node decide URL: ...`), and on Kubernetes that the NetworkPolicy lets node pods reach the manager on 20900 |
+| `QoD: authorization unavailable, retry` (FlightSQL `UNAVAILABLE`) | The node could not get a verdict from the manager replica that minted the session's handle in time (`QOD_AUTHZ_DECIDE_TIMEOUT_MS`, default 2000): that replica restarted, is down or unreachable from the nodes. A multi-statement submission so refused is not retryable as a whole (FlightSQL `INVALID_ARGUMENT`, "not retryable as a whole: the statements before the refused one may have run") | Retry a single statement. For a batch, check which of its statements ran before resubmitting. If it persists, check that the nodes reach `QOD_INTERNAL_URL` (boot prints `node decide URL: ...`), and on Kubernetes that the NetworkPolicy lets node pods reach the manager on 20900 |
+| `QoD: authorization unavailable, retry: authorization context expired; retry` under load | The replica kept fewer session handle contexts than its statement rate needs (each lives 360 s; about `QOD_AUTHZ_HANDLE_CONTEXTS_MAX / 360` tenant statements per second per replica, about 555 at the default 200000). `cache_evictions_total{cache="qod_minted_handles"}` rises | Raise `QOD_AUTHZ_HANDLE_CONTEXTS_MAX` (at least 1000), or add replicas |
+| `QoD: catalog <alias> is read-only` for a superuser | The federated source is read-only (`--read-only`), which binds every principal | Re-create the source with `--no-read-only` if writes are intended |
 | `QoD: <url> is outside the tenant's authorized locations` / `QoD: <path> is a database data folder` | A tenant user named a file their own S3 credentials or their tenant's folders do not cover, or a database's data folder | `qod profile s3 add` for the user's own bucket or prefix, or `qod tenant location add` for a local folder (see "Files and S3 for tenant users"); a data folder is never reachable |
 | Manager refuses to boot: `fleet mode requires QOD_INTERNAL_URL ...` or `the node decide URL is ..., a loopback address no node pod can reach on the kubernetes runtime ...` | Nodes call the manager back for every statement's verdict, at the URL each handle carries | Fleet: set `QOD_INTERNAL_URL` to this replica's own `http://` address on the servers' network. Kubernetes: the Helm chart sets `QOD_POD_IP`; a hand-written manifest sets `QOD_POD_IP` from the downward API (`status.podIP`) or `QOD_INTERNAL_URL` to the pod's own address |
 | `400 init_sql_refused` on `database create` / `update`, `pool create` / `set-init-sql` | A tenant admin's initSql holds a statement outside the allowlist ("Who may write what in initSql") | Keep only allowlisted SETs, read-only PRAGMAs and extension INSTALL/LOADs, or have a superuser write it |
