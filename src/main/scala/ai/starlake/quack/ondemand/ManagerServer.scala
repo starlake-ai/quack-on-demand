@@ -289,6 +289,12 @@ final class ManagerServer(
       case Some(t)                                       => IO(sessionOfToken(t))
       case None                                          => IO.pure(None)
 
+  /** Writes a denial's audit row, at most one per `key` and interval. The write blocks on the
+    * database, so it runs off the compute threads; a refused one costs no thread hop.
+    */
+  private def auditDenial(key: String)(write: => Unit): OptionT[IO, Unit] =
+    OptionT.liftF(if auditLimiter.allow(key) then IO.blocking(write) else IO.unit)
+
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token or a live personal access token, admitted with exactly its owner's scope (admin
     * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
@@ -398,21 +404,17 @@ final class ManagerServer(
               // Collapsing a flood to one row per interval is deliberate -- the
               // first row is the signal; the rest are the attacker's volume.
               // The write blocks on the database, so it runs off the compute threads.
-              OptionT
-                .liftF(
-                  IO.blocking(
-                    if auditLimiter.allow("session:" + username) then
-                      audit.restAs(
-                        username,
-                        "tenant",
-                        "auth",
-                        AuditActions.AuthAdminRequired,
-                        "denied",
-                        tenant = caller.flatMap(_.tenant),
-                        detail = Map("path" -> safePath)
-                      )
-                  )
+              auditDenial("session:" + username)(
+                audit.restAs(
+                  username,
+                  "tenant",
+                  "auth",
+                  AuditActions.AuthAdminRequired,
+                  "denied",
+                  tenant = caller.flatMap(_.tenant),
+                  detail = Map("path" -> safePath)
                 )
+              )
                 .flatMap(_ =>
                   refuse(
                     req,
@@ -427,20 +429,16 @@ final class ManagerServer(
                 )
             else
               val source = req.remote.map(_.host.toString).getOrElse("unknown")
-              OptionT
-                .liftF(
-                  IO.blocking(
-                    if auditLimiter.allow(source) then
-                      audit.restAs(
-                        "anonymous",
-                        "system",
-                        "auth",
-                        AuditActions.AuthApiKeyFailure,
-                        "denied",
-                        detail = Map("path" -> safePath, "source" -> source)
-                      )
-                  )
+              auditDenial(source)(
+                audit.restAs(
+                  "anonymous",
+                  "system",
+                  "auth",
+                  AuditActions.AuthApiKeyFailure,
+                  "denied",
+                  detail = Map("path" -> safePath, "source" -> source)
                 )
+              )
                 .flatMap(_ => refuse(req, Response[IO](Status.Unauthorized)))
           else
             // Per-request tenant scope check on the admitted credential's scope.

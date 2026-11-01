@@ -38,8 +38,10 @@ final case class McpToolDef(
   *
   * Only a caller whose PAT resolved gets its body read, and the read is bounded (`BoundedBody`, the
   * REST guard's own): past `limits.maxBodyBytes` is `413`, not whole within `limits.bodyTimeoutSec`
-  * is `408` (both say `Connection: close`, as the rest of the body stays unread), and JSON nested
-  * too deep is a JSON-RPC parse error (see `BoundedBody.MaxNesting`). The bytes are read as UTF-8.
+  * is `408` (both say `Connection: close`, as the rest of the body stays unread, and so does the
+  * `401` of a PAT that did not resolve), and JSON nested too deep is a JSON-RPC parse error (see
+  * `BoundedBody.MaxNesting`). The bytes are read as UTF-8. `limits` has no default, so a wiring
+  * cannot forget it.
   *
   * `resolvePat` is the narrow seam (`PatAuthenticator.resolve` in Main) so protocol tests need no
   * store.
@@ -49,7 +51,7 @@ final class McpRoutes(
     resolvePat: String => Option[PatPrincipal],
     tools: List[McpToolDef],
     serverVersion: String,
-    limits: RestLimitsConfig = RestLimitsConfig()
+    limits: RestLimitsConfig
 ) extends LazyLogging:
 
   import McpJsonRpc._
@@ -79,7 +81,7 @@ final class McpRoutes(
               jsonResponse(
                 Status.Unauthorized,
                 Json.obj("error" -> Json.fromString("unauthorized"))
-              )
+              ).putHeaders(org.http4s.headers.Connection.close)
             )
           case Some(principal) =>
             BoundedBody.read(req, limits.maxBodyBytes, limits.bodyTimeoutSec.seconds).flatMap {

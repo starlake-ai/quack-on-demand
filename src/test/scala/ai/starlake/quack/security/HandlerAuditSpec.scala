@@ -11,17 +11,25 @@ import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{FederatedSourceOps, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditEvent, AuditRateLimiter, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{
+  AuditActions,
+  AuditEvent,
+  AuditRateLimiter,
+  AuditRecorder
+}
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import sttp.model.StatusCode
 
 import java.net.URI
 import java.net.http.{HttpRequest, HttpResponse}
 import org.scalatest.OptionValues
 
 import java.sql.DriverManager
+import java.util.concurrent.ConcurrentLinkedQueue
+import scala.jdk.CollectionConverters.*
 
 /** Handler-level audit spec. Tests that [[RoleHandlers]] records control-plane audit events on the
   * two key outcomes:
@@ -448,6 +456,80 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     e.outcome shouldBe "denied"
     e.detail.get("username") shouldBe Some(SecurityFixtures.BobUsername)
     e.detail.keys.exists(k => k.toLowerCase.contains("password")) shouldBe false
+  }
+
+  /** A recording store that also notes the thread each audit row is written on, as (action,
+    * thread): the rows of a handler that blocks on the database must not be written on the compute
+    * threads.
+    */
+  private final class ThreadNotingStore extends RecordingTelemetryStore:
+    val writes = new ConcurrentLinkedQueue[(String, String)]()
+
+    override def appendAudit(es: List[AuditEvent]): Unit =
+      es.foreach(e => writes.add((e.action, Thread.currentThread().getName)))
+      super.appendAudit(es)
+
+  "AuthHandlers.ssoRedeem" should
+    "write at most one denied row per interval, off the compute threads" in {
+      val store         = new ThreadNotingStore
+      val audit         = new AuditRecorder(store, _ => None)
+      val (handlers, _) = buildAuthHandlers(audit)
+      // Three bogus tickets answer 401 invalid_ticket each, and leave one row, written on a thread
+      // that is not io-compute-N.
+      (1 to 3).foreach { i =>
+        handlers.ssoRedeem(SsoRedeemRequest(s"bogus-ticket-$i")).unsafeRunSync() match
+          case Left((status, err)) =>
+            status shouldBe StatusCode.Unauthorized
+            err.error shouldBe "invalid_ticket"
+          case Right(_) => fail(s"bogus ticket $i was redeemed")
+      }
+      val written = store.writes.asScala.toList
+      written.map(_._1) shouldBe List(AuditActions.AuthSsoTicketRedeem)
+      val e = store.events.head
+      e.family shouldBe "auth"
+      e.outcome shouldBe "denied"
+      e.actor shouldBe "anonymous"
+      written.foreach { (action, thread) =>
+        withClue(s"$action was written on $thread: ") {
+          thread should not fullyMatch regex("io-compute-\\d+")
+        }
+      }
+    }
+
+  it should "audit a good ticket as ok, off the compute threads" in {
+    val store         = new ThreadNotingStore
+    val audit         = new AuditRecorder(store, _ => None)
+    val (handlers, _) = buildAuthHandlers(audit)
+    val loginResult   = handlers
+      .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))
+      .unsafeRunSync()
+    val tok = loginResult match
+      case Right(r) => r._2.token
+      case Left(_)  => fail("login failed")
+    // The login wrote audit rows of its own: look at the two the ticket writes only.
+    store.events.clear()
+    store.writes.clear()
+    // Mint through ssoTicket with a real session, redeem it: Right, one AuthSsoTicketRedeem "ok"
+    // row under the grant's username, and neither call's row written on io-compute-N.
+    val minted   = handlers.ssoTicket(Some(tok)).unsafeRunSync().toOption.value
+    val redeemed = handlers.ssoRedeem(SsoRedeemRequest(minted.ticket)).unsafeRunSync()
+    redeemed.toOption.value.token shouldBe tok
+    redeemed.toOption.value.username shouldBe SecurityFixtures.RootUsername
+    val redeemRows = store.events.filter(_.action == AuditActions.AuthSsoTicketRedeem)
+    redeemRows should have size 1
+    redeemRows.head.family shouldBe "auth"
+    redeemRows.head.outcome shouldBe "ok"
+    redeemRows.head.actor shouldBe SecurityFixtures.RootUsername
+    val written = store.writes.asScala.toList
+    written.map(_._1) shouldBe List(
+      AuditActions.AuthSsoTicketMint,
+      AuditActions.AuthSsoTicketRedeem
+    )
+    written.foreach { (action, thread) =>
+      withClue(s"$action was written on $thread: ") {
+        thread should not fullyMatch regex("io-compute-\\d+")
+      }
+    }
   }
 
   "apiKeyGuard" should

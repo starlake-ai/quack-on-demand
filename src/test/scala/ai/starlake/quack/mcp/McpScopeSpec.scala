@@ -1,6 +1,6 @@
 package ai.starlake.quack.mcp
 
-import ai.starlake.quack.McpConfig
+import ai.starlake.quack.{McpConfig, RestLimitsConfig}
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.state.RbacUser
 import cats.effect.IO
@@ -39,7 +39,8 @@ class McpScopeSpec extends AnyFlatSpec with Matchers:
       cfg = McpConfig(),
       resolvePat = t => if t == token then Some(principal) else None,
       tools = List(tool("run_sql"), tool("list_databases")),
-      serverVersion = "test"
+      serverVersion = "test",
+      limits = RestLimitsConfig()
     )
 
   private def rpc(r: McpRoutes, body: String): String =

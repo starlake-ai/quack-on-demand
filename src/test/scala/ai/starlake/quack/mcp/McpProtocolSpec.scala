@@ -69,7 +69,8 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
       cfg = McpConfig(),
       resolvePat = resolvePat,
       tools = List(echoTool, failTool, adminTool),
-      serverVersion = "test"
+      serverVersion = "test",
+      limits = RestLimitsConfig()
     ).routes.orNotFound
 
   private def postWith(body: String, authorization: Option[String]): Response[IO] =
@@ -301,6 +302,8 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     val resp   = app.run(mcpRequest("qod_pat_unknown").withBodyStream(body)).unsafeRunSync()
     resp.status shouldBe Status.Unauthorized
     pulled.get shouldBe false
+    // The body stays unread, so the connection must not be reused.
+    closesConnection(resp) shouldBe true
   }
 
   it should "resolve the PAT off the compute threads" in {

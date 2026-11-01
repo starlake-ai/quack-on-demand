@@ -21,7 +21,7 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.{UserGrant, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRateLimiter, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -138,7 +138,9 @@ final class AuthHandlers(
       * silently drop it; a caller that wires no PAT store passes `_ => None` and answers whoami for
       * session JWTs only.
       */
-    patSessionOf: String => Option[SessionTokenStore.Session]
+    patSessionOf: String => Option[SessionTokenStore.Session],
+    /** One denied SSO redeem row per interval: see [[ssoRedeem]]. */
+    ssoRedeemAudit: AuditRateLimiter = new AuditRateLimiter()
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -892,7 +894,7 @@ final class AuthHandlers(
     * since the caller here is Starlake's redirect target, not a UI that needs to distinguish
     * failure reasons.
     */
-  def ssoTicket(token: Option[String]): Out[SsoTicketResponse] = IO {
+  def ssoTicket(token: Option[String]): Out[SsoTicketResponse] = IO.blocking {
     val t = token.getOrElse("")
     tokens.lookupResult(t) match
       case SessionTokenStore.LookupResult.Ok(session) =>
@@ -926,55 +928,54 @@ final class AuthHandlers(
     * input, the ticket itself is the (single-use, 128-bit random, short-TTL) credential.
     * `401 invalid_ticket` on unknown / expired / already-redeemed.
     *
-    * No rate limiting here on purpose: this endpoint is public and unauthenticated, so any limiter
-    * keyed on caller-supplied input (the ticket string) would itself be an unbounded,
-    * attacker-controlled memory-retention vector while providing no real protection -- a 128-bit
-    * single-use ticket with a 60s TTL is already infeasible to brute force.
+    * Attempts are not limited: a limiter keyed on caller-supplied input (the ticket string) would
+    * itself be an unbounded, attacker-controlled memory-retention vector while providing no real
+    * protection, as a 128-bit single-use ticket with a 60s TTL is already infeasible to brute
+    * force. The audit row of a denied attempt is limited, on one fixed key: it is the detection
+    * signal for ticket-guessing, so the first row per interval says what the rest would, and the
+    * rest would be the sender's volume, kept for the audit retention. The ticket value itself is
+    * never logged. Rows are written off the compute threads, as they block on the database.
     */
-  def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] = IO {
-    ssoTickets.redeem(request.ticket) match
+  def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] =
+    IO(ssoTickets.redeem(request.ticket)).flatMap {
       case Some(grant) =>
         // Identity comes from the redeemed grant, not a caller credential -- redeem
         // is public/unauthenticated. realm mirrors mintSessionFor: an empty tenant
         // means the grant was minted from a system-scope session.
         val realm = if grant.tenant.isEmpty then "system" else "tenant"
-        audit.restAs(
-          grant.username,
-          realm,
-          "auth",
-          AuditActions.AuthSsoTicketRedeem,
-          "ok",
-          tenant = grant.tenant
-        )
-        Right(
-          SsoRedeemResponse(
-            grant.sessionToken,
+        IO.blocking(
+          audit.restAs(
             grant.username,
-            grant.tenant,
-            grant.admin,
-            grant.superuser
+            realm,
+            "auth",
+            AuditActions.AuthSsoTicketRedeem,
+            "ok",
+            tenant = grant.tenant
+          )
+        ).as(
+          Right(
+            SsoRedeemResponse(
+              grant.sessionToken,
+              grant.username,
+              grant.tenant,
+              grant.admin,
+              grant.superuser
+            )
           )
         )
       case None =>
-        // No identity is recoverable from an unknown/expired/already-used ticket, so
-        // this is audited anonymously -- deliberately unconditional (no rate limit):
-        // redeem is intentionally un-rate-limited (see ssoRedeem's doc), so this row
-        // is the only detection signal for ticket-guessing. The ticket value itself
-        // is never logged.
-        audit.restAs(
-          "anonymous",
-          "system",
-          "auth",
-          AuditActions.AuthSsoTicketRedeem,
-          "denied"
-        )
-        Left(
+        val denied: Either[(StatusCode, ErrorResponse), SsoRedeemResponse] = Left(
           (
             StatusCode.Unauthorized,
             ErrorResponse("invalid_ticket", "ticket unknown, expired, or already used")
           )
         )
-  }
+        if ssoRedeemAudit.allow("sso-redeem") then
+          IO.blocking(
+            audit.restAs("anonymous", "system", "auth", AuditActions.AuthSsoTicketRedeem, "denied")
+          ).as(denied)
+        else IO.pure(denied)
+    }
 
   /** Resolve the admin-UI login mode for a scope. Unauthenticated: the SPA calls this before login
     * with the tenant from the URL (absent for the system scope) to decide whether to render the

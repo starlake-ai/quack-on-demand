@@ -753,18 +753,8 @@ object Main extends IOApp with LazyLogging:
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaders.get(tenant, tenantDb)
 
-    val healthCache =
-      new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
-    def dbHealthy(): Boolean =
-      val (ts, ok) = healthCache.get()
-      val now      = System.nanoTime()
-      if now - ts < 5_000_000_000L then ok
-      else
-        val fresh = store.ping()
-        healthCache.set((now, fresh))
-        fresh
-
-    val health = new HealthHandler(sup, dbHealthy)
+    val dbHealth = new CachedDbHealth(() => store.ping())
+    val health   = new HealthHandler(sup, () => dbHealth.healthy())
 
     val sessionTokens = new SessionTokenStore(
       secret = mgrCfg.auth.management.sessionJwtSecret,
