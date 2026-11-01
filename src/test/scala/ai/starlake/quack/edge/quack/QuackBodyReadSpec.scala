@@ -3,14 +3,20 @@ package ai.starlake.quack.edge.quack
 import ai.starlake.quack.QuackNativeConfig
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
-import fs2.Stream
+import fs2.{Chunk, Stream}
 import org.http4s.{Method, Request}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.lang.ref.WeakReference
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import scala.concurrent.Await
+import scala.concurrent.duration.*
+
 /** `QuackBodyRead` on a body that arrives one byte per chunk, the worst case for its bookkeeping:
   * what it admits must be exactly what was sent, and a limit must hold to the byte, however the
-  * body is cut into reads.
+  * body is cut into reads. Also on reads that are views of larger arrays, which the read must not
+  * keep alive.
   */
 class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
 
@@ -40,8 +46,60 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
   private def trickled(bytes: Array[Byte]): Request[IO] =
     Request[IO](Method.POST, body = Stream.emits(bytes).covary[IO].chunkLimit(1).unchunks)
 
+  /** A POST that announces no length and whose reads are `parts`, each one chunk. */
+  private def cut(parts: Array[Byte]*): Request[IO] =
+    Request[IO](
+      Method.POST,
+      body = Stream.emits(parts.map(Chunk.array(_))).covary[IO].flatMap(Stream.chunk)
+    )
+
+  private def read(req: Request[IO], c: QuackNativeConfig): QuackBodyRead.Outcome =
+    QuackBodyRead(req, c, _ == LiveSession).unsafeRunSync()
+
   private def read(bytes: Array[Byte], c: QuackNativeConfig): QuackBodyRead.Outcome =
-    QuackBodyRead(trickled(bytes), c, _ == LiveSession).unsafeRunSync()
+    read(trickled(bytes), c)
+
+  /** A body that sends `prefix`, then `views` single bytes, each a view of an array of `arraySize`
+    * bytes of its own (as Ember frames the chunks of a chunked body), and then goes quiet. Nothing
+    * but the view keeps an array alive: `arrays` holds a weak reference to each, and `sent` opens
+    * once every view has been handed over.
+    */
+  private final class ViewedBody(prefix: Array[Byte], views: Int, arraySize: Int):
+    val arrays = new Array[WeakReference[Array[Byte]]](views)
+    val sent   = new CountDownLatch(1)
+
+    def request: Request[IO] =
+      val viewed = Stream.range(0, views).evalMap { i =>
+        IO {
+          val big = new Array[Byte](arraySize)
+          arrays(i) = new WeakReference(big)
+          // Chunk.array would turn a one byte slice into a copy.
+          Chunk.ArraySlice(big, 7, 1)
+        }
+      }
+      Request[IO](
+        Method.POST,
+        body = Stream.chunk(Chunk.array(prefix)) ++ viewed.flatMap(Stream.chunk) ++
+          Stream.exec(IO(sent.countDown())) ++ Stream.never[IO]
+      )
+
+  /** Reads `body`, which stays open, and waits for the GC to clear what it can: how many of the
+    * arrays were cleared, and whether the read had ended. A read that keeps the arrays its views
+    * point into clears none of them.
+    */
+  private def clearedWhileOpen(body: ViewedBody): (Int, Boolean) =
+    val c                 = cfg(connectTimeout = 120, bodyTimeout = 240)
+    val (outcome, cancel) =
+      QuackBodyRead(body.request, c, _ == LiveSession).unsafeToFutureCancelable()
+    try
+      body.sent.await(10, TimeUnit.SECONDS) shouldBe true
+      val until   = System.nanoTime() + 5.seconds.toNanos
+      def cleared = body.arrays.count(_.get == null)
+      while cleared < body.arrays.length - 1 && System.nanoTime() < until do
+        System.gc()
+        Thread.sleep(50)
+      (cleared, outcome.isCompleted)
+    finally Await.ready(cancel(), 10.seconds)
 
   private val connectMessage: Array[Byte] =
     QuackWire.encodeConnectionRequest(
@@ -117,6 +175,36 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
     atLimit.length.toLong shouldBe limit
     shouldBeSame(admitted(read(atLimit, cfg(maxBody = limit))), atLimit)
     describe(read(over, cfg(maxBody = limit))) shouldBe s"TooLarge($limit)"
+
+  it should "hold a body of unannounced length to its limit, however its reads are cut" in:
+    val c = cfg(maxConnect = 128)
+    // A connect within the limit, as one read and as two.
+    shouldBeSame(admitted(read(cut(connectMessage), c)), connectMessage)
+    shouldBeSame(
+      admitted(read(cut(connectMessage.take(3), connectMessage.drop(3)), c)),
+      connectMessage
+    )
+    // The header is within the limit; the read after it takes the message past it.
+    describe(read(cut(connectMessage, new Array[Byte](1024)), c)) shouldBe "TooLarge(128)"
+
+  it should "not keep the arrays that reads of a message body are views of" in:
+    // 200 single bytes, each a view of 256 KiB: held, they would pin 50 MiB.
+    val body = new ViewedBody(QuackWire.encodeDisconnect(LiveSession), 200, 256 * 1024)
+    val (cleared, finished) = clearedWhileOpen(body)
+    finished shouldBe false
+    withClue(s"$cleared of ${body.arrays.length} arrays were cleared: ") {
+      cleared should be >= body.arrays.length - 1
+    }
+
+  it should "not keep the arrays that reads of a header are views of" in:
+    // Field 2 (connection id) announcing 1 MiB: the header never completes, and stays a peek.
+    val unfinished          = Array[Byte](2, 0, 0x80.toByte, 0x80.toByte, 0x40)
+    val body                = new ViewedBody(unfinished, 200, 256 * 1024)
+    val (cleared, finished) = clearedWhileOpen(body)
+    finished shouldBe false
+    withClue(s"$cleared of ${body.arrays.length} arrays were cleared: ") {
+      cleared should be >= body.arrays.length - 1
+    }
 
   it should "stop at the peek limit on a header that never completes, keeping the bytes read" in:
     // Field 2 (connection id) announcing 1 MiB, of which only a little over the limit ever comes.

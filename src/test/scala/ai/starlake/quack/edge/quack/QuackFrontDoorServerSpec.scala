@@ -12,6 +12,7 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.net.URI
 import java.security.cert.X509Certificate
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.*
 import javax.net.ssl.{SSLContext, TrustManager, X509TrustManager}
 
@@ -32,7 +33,8 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       maxBody: Long = 1 << 20,
       maxConnect: Long = 65536,
       connectTimeout: Long = 30,
-      bodyTimeout: Long = 300
+      bodyTimeout: Long = 300,
+      maxConnections: Int = 1024
   ) =
     QuackNativeConfig(
       enabled = true,
@@ -45,7 +47,8 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       maxBodyBytes = maxBody,
       maxConnectBodyBytes = maxConnect,
       connectBodyTimeoutSec = connectTimeout,
-      bodyTimeoutSec = bodyTimeout
+      bodyTimeoutSec = bodyTimeout,
+      maxConnections = maxConnections
     )
 
   /** Echo handler: answers an ERROR_RESPONSE carrying the request length. */
@@ -54,8 +57,19 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
 
   private val LiveSession = "live-session"
 
-  private def withServer[A](c: QuackNativeConfig)(body: String => A): A =
-    val server = new QuackFrontDoorServer(c, echo, _ == LiveSession, _ => IO.unit, IO.unit)
+  private def withServer[A](
+      c: QuackNativeConfig,
+      handle: Array[Byte] => IO[Array[Byte]] = echo,
+      tlsReadDeadline: FiniteDuration = QuackFrontDoorServer.TlsReadDeadline
+  )(body: String => A): A =
+    val server = new QuackFrontDoorServer(
+      c,
+      handle,
+      _ == LiveSession,
+      _ => IO.unit,
+      IO.unit,
+      tlsReadDeadline = tlsReadDeadline
+    )
     server.start().unsafeRunSync()
     try body(s"${if c.tlsEnabled then "https" else "http"}://127.0.0.1:${c.port}")
     finally server.stop()
@@ -113,18 +127,31 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       readResponse(sock)
     finally sock.close()
 
-  private val CrLf: Array[Byte] = "\r\n".getBytes("ISO-8859-1")
-
-  /** Like [[rawPost]], but with no announced length: each of `chunks` goes out as one HTTP chunk,
-    * `pause` ms apart, so a limit has to hold on the stream itself. The final empty chunk goes out
-    * only when `last` is set: a request that is refused is answered before its body ends.
+  /** A request with just the header lines given and no body: the status line, the lower-cased head
+    * and the body bytes of what the server answers.
     */
-  private def rawChunkedPost(
+  private def rawHead(base: String, headers: String*): (String, String, Array[Byte]) =
+    val uri  = URI.create(base)
+    val sock = new java.net.Socket(uri.getHost, uri.getPort)
+    try
+      sock.setSoTimeout(15000)
+      val head =
+        ("POST /quack HTTP/1.1" +: "Host: localhost" +: headers).mkString("", "\r\n", "\r\n\r\n")
+      sock.getOutputStream.write(head.getBytes("ISO-8859-1"))
+      sock.getOutputStream.flush()
+      readResponse(sock)
+    finally sock.close()
+
+  /** A request announcing `declared` bytes, of which one of `bytes` goes out every `gapMillis`
+    * while the server listens: the status line the server answers, and how many milliseconds after
+    * the request head went out it came.
+    */
+  private def rawTrickle(
       base: String,
-      chunks: Seq[Array[Byte]],
-      last: Boolean,
-      pause: Long = 300
-  ): (String, String, Array[Byte]) =
+      declared: Long,
+      bytes: Array[Byte],
+      gapMillis: Long
+  ): (String, Long) =
     val uri  = URI.create(base)
     val sock = new java.net.Socket(uri.getHost, uri.getPort)
     try
@@ -132,25 +159,39 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       val out = sock.getOutputStream
       out.write(
         ("POST /quack HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" +
-          "Transfer-Encoding: chunked\r\n\r\n").getBytes("ISO-8859-1")
+          s"Content-Length: $declared\r\n\r\n").getBytes("ISO-8859-1")
       )
-      chunks.foreach { c =>
-        // One write per chunk: a trailing CRLF the server never reads would make its close a reset.
-        val framed = s"${c.length.toHexString}\r\n".getBytes("ISO-8859-1") ++ c ++ CrLf
-        out.write(framed)
-        out.flush()
-        Thread.sleep(pause)
-      }
-      if last then
-        out.write("0\r\n\r\n".getBytes("ISO-8859-1"))
-        out.flush()
-      readResponse(sock)
+      out.flush()
+      val start  = System.nanoTime()
+      val writer = new Thread(() =>
+        try
+          bytes.foreach { b =>
+            out.write(b.toInt)
+            out.flush()
+            Thread.sleep(gapMillis)
+          }
+        catch case _: java.io.IOException => () // The server answered, and closed.
+      )
+      writer.setDaemon(true)
+      writer.start()
+      val (status, _, _) = readResponse(sock)
+      (status, (System.nanoTime() - start) / 1000000L)
     finally sock.close()
 
+  /** Everything the server sends until it closes. A close that reaches a client still writing can
+    * arrive as a reset: what came before it is kept.
+    */
   private def readResponse(sock: java.net.Socket): (String, String, Array[Byte]) =
-    val all  = sock.getInputStream.readAllBytes()
+    val received = new java.io.ByteArrayOutputStream()
+    val buffer   = new Array[Byte](4096)
+    val in       = sock.getInputStream
+    try
+      Iterator.continually(in.read(buffer)).takeWhile(_ >= 0).foreach(received.write(buffer, 0, _))
+    catch case _: java.net.SocketException if received.size > 0 => ()
+    val all  = received.toByteArray
     val text = new String(all, "ISO-8859-1")
     val end  = text.indexOf("\r\n\r\n")
+    withClue("the server sent no response head: ")(end should be >= 0)
     (text.takeWhile(_ != '\r'), text.substring(0, end).toLowerCase, all.drop(end + 4))
 
   "POST /quack" should "hand the body to the dispatcher and answer 200 with the wire media type" in:
@@ -223,16 +264,32 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       head should include("connection: close")
     }
 
-  it should "hold a body of unannounced length to its limit on the stream" in:
-    withServer(cfg(freePort(), maxConnect = 128)) { base =>
-      val (ok, _, echoed) = rawChunkedPost(base, Seq(connectMessage(0)), last = true)
-      ok should include("200")
-      QuackWire.decodeErrorMessage(echoed) shouldBe Right(s"len=${connectMessage(0).length}")
-      // The header is within the limit; the second chunk takes the message past it.
-      val (status, head, _) =
-        rawChunkedPost(base, Seq(connectMessage(0), Array.fill[Byte](1024)(0)), last = false)
-      status should include("400")
-      head should include("connection: close")
+  it should "answer 411 to chunked framing, in any spelling, without running the handler" in:
+    val calls = new AtomicInteger(0)
+    withServer(cfg(freePort()), handle = bytes => IO(calls.incrementAndGet()) *> echo(bytes)) {
+      base =>
+        Seq(
+          "Transfer-Encoding: chunked",
+          "transfer-encoding: CHUNKED",
+          "Transfer-Encoding: foo, chunked"
+        ).foreach { header =>
+          withClue(s"$header: ") {
+            val (status, head, _) = rawHead(base, header)
+            status should include("411")
+            head should include("connection: close")
+          }
+        }
+        calls.get shouldBe 0
+    }
+
+  it should "answer 408 at the deadline to a client that keeps sending a byte at a time" in:
+    withServer(cfg(freePort(), connectTimeout = 1)) { base =>
+      // A byte every 200 ms never leaves a read waiting long: only a deadline on the whole body
+      // ends this one, where a timeout on each read would let it send its 47 bytes in 9 s.
+      val message          = connectMessage(0)
+      val (status, millis) = rawTrickle(base, message.length.toLong, message, gapMillis = 200)
+      status should include("408")
+      millis should (be >= 900L and be < 4000L)
     }
 
   it should "read a header that arrives in pieces" in:
@@ -302,7 +359,8 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       resp.headers().firstValue("access-control-allow-origin").orElse("") shouldBe "*"
     }
 
-  "TLS" should "serve the same endpoint from the Flight edge's PEM pair" in:
+  /** A directory holding the PEM pair the TLS listener serves, and a client that trusts it. */
+  private def tlsFixture(): (String, HttpClient) =
     val dir = java.nio.file.Files.createTempDirectory("qod-quack-tls").toString
     CertGen.ensureCertFiles(s"$dir/server-cert.pem", s"$dir/server-key.pem")
     val trustAll = new X509TrustManager:
@@ -311,8 +369,32 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       def getAcceptedIssuers: Array[X509Certificate]                     = Array.empty
     val ctx = SSLContext.getInstance("TLS")
     ctx.init(null, Array[TrustManager](trustAll), new java.security.SecureRandom())
-    val client = HttpClient.newBuilder().sslContext(ctx).build()
+    (dir, HttpClient.newBuilder().sslContext(ctx).build())
+
+  "TLS" should "serve the same endpoint from the Flight edge's PEM pair" in:
+    val (dir, client) = tlsFixture()
     withServer(cfg(freePort(), tls = true, certDir = dir)) { base =>
+      val resp = post(client, base, Array.fill[Byte](3)(7))
+      resp.statusCode() shouldBe 200
+      QuackWire.decodeErrorMessage(resp.body()) shouldBe Right("len=3")
+    }
+
+  it should "close a silent connection, and then serve a client" in:
+    val (dir, client) = tlsFixture()
+    // One slot: a connection that never speaks would hold it for ever, since Ember's own timeouts
+    // start only after the handshake.
+    withServer(
+      cfg(freePort(), tls = true, certDir = dir, maxConnections = 1),
+      tlsReadDeadline = 1.second
+    ) { base =>
+      val uri    = URI.create(base)
+      val silent = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        silent.setSoTimeout(5000)
+        val start = System.nanoTime()
+        silent.getInputStream.read() shouldBe -1
+        (System.nanoTime() - start) / 1000000L should be < 5000L
+      finally silent.close()
       val resp = post(client, base, Array.fill[Byte](3)(7))
       resp.statusCode() shouldBe 200
       QuackWire.decodeErrorMessage(resp.body()) shouldBe Right("len=3")

@@ -3,10 +3,11 @@ package ai.starlake.quack.edge
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import fs2.{Chunk, Stream}
-import org.http4s.{Method, Request, Uri}
+import org.http4s.{Header, Method, Request, Uri}
 import org.http4s.headers.`Content-Length`
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.typelevel.ci.CIString
 
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
@@ -47,6 +48,20 @@ class BoundedBodySpec extends AnyFlatSpec with Matchers:
     run(request(Stream.empty)) match
       case BoundedBody.Outcome.Read(b) => b.length shouldBe 0
       case other                       => fail(s"expected Read, got $other")
+
+  private def encoded(value: String, name: String = "Transfer-Encoding"): Request[IO] =
+    request(bytes(1)).putHeaders(Header.Raw(CIString(name), value))
+
+  "asksChunked" should "see Transfer-Encoding: chunked, however the header is spelled" in:
+    BoundedBody.asksChunked(encoded("chunked")) shouldBe true
+    BoundedBody.asksChunked(encoded("CHUNKED", "transfer-encoding")) shouldBe true
+
+  it should "see a list of codings that ends in chunked" in:
+    BoundedBody.asksChunked(encoded("foo, chunked")) shouldBe true
+
+  it should "see no such header" in:
+    BoundedBody.asksChunked(request(bytes(1))) shouldBe false
+    BoundedBody.asksChunked(request(bytes(1), declared = Some(1L))) shouldBe false
 
   "replay" should "give a route the bytes already read" in:
     val replayed = BoundedBody.replay(request(bytes(1)), Array[Byte](1, 2, 3))

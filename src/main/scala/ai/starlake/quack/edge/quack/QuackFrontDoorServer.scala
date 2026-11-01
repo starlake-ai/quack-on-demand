@@ -1,12 +1,13 @@
 package ai.starlake.quack.edge.quack
 
 import ai.starlake.quack.QuackNativeConfig
-import ai.starlake.quack.edge.CertGen
+import ai.starlake.quack.edge.{BoundedBody, CertGen}
 import cats.effect.{IO, Resource}
 import cats.effect.unsafe.implicits.global
-import com.comcast.ip4s.{Host, Port}
+import com.comcast.ip4s.{Host, Port, SocketAddress}
 import com.typesafe.scalalogging.LazyLogging
-import fs2.io.net.Network
+import fs2.{Chunk, Stream}
+import fs2.io.net.{Network, Socket, SocketGroup, SocketOption}
 import fs2.io.net.tls.{TLSContext, TLSParameters}
 import org.http4s.{Header, HttpRoutes, MediaType, Response, Status}
 import org.http4s.dsl.io.*
@@ -21,13 +22,15 @@ import java.security.cert.{Certificate, CertificateFactory}
 import java.security.spec.PKCS8EncodedKeySpec
 import java.time.Instant
 import java.util.Base64
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
+import scala.annotation.nowarn
 import scala.concurrent.duration.*
 
 /** The HTTP shell of the native Quack front door: `POST /quack` carries protocol messages, `GET /`
   * and `OPTIONS /quack` answer what a node answers (the Wasm client needs the CORS preamble).
-  * Protocol outcomes are always HTTP 200; only an unreadable or oversized body is a 400, and a body
-  * that misses its deadline is a 408.
+  * Protocol outcomes are always HTTP 200; only an unreadable or oversized body is a 400, a body
+  * that misses its deadline is a 408, and chunked framing a 411.
   *
   * A dedicated Ember listener rather than a route on the REST port: the data plane keeps its own
   * port, TLS and lifecycle, as the Flight edge does.
@@ -39,7 +42,9 @@ final class QuackFrontDoorServer(
     isLive: String => Boolean,
     sweep: Instant => IO[Unit],
     closeAll: IO[Unit],
-    sweepEvery: FiniteDuration = 30.seconds
+    sweepEvery: FiniteDuration = 30.seconds,
+    // How long a read on a TLS listener's socket may wait for the client, handshake included.
+    tlsReadDeadline: FiniteDuration = QuackFrontDoorServer.TlsReadDeadline
 ) extends LazyLogging:
 
   private val wireType = `Content-Type`(new MediaType("application", "vnd.duckdb"))
@@ -56,15 +61,20 @@ final class QuackFrontDoorServer(
 
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case req @ POST -> Root / "quack" =>
-      QuackBodyRead(req, cfg, isLive).flatMap {
-        case QuackBodyRead.Outcome.Admitted(body)      => answer(body)
-        case QuackBodyRead.Outcome.NotAdmitted(prefix) =>
-          answer(prefix).map(_.putHeaders(Connection.close))
-        case QuackBodyRead.Outcome.TooLarge(limit) =>
-          BadRequest(s"request body exceeds $limit bytes").map(_.putHeaders(Connection.close))
-        case QuackBodyRead.Outcome.TimedOut =>
-          IO.pure(Response[IO](Status.RequestTimeout).putHeaders(Connection.close))
-      }
+      // No credential has been checked, and no DuckDB client sends chunked: see
+      // BoundedBody.asksChunked.
+      if BoundedBody.asksChunked(req) then
+        IO.pure(Response[IO](Status.LengthRequired).putHeaders(Connection.close))
+      else
+        QuackBodyRead(req, cfg, isLive).flatMap {
+          case QuackBodyRead.Outcome.Admitted(body)      => answer(body)
+          case QuackBodyRead.Outcome.NotAdmitted(prefix) =>
+            answer(prefix).map(_.putHeaders(Connection.close))
+          case QuackBodyRead.Outcome.TooLarge(limit) =>
+            BadRequest(s"request body exceeds $limit bytes").map(_.putHeaders(Connection.close))
+          case QuackBodyRead.Outcome.TimedOut =>
+            IO.pure(Response[IO](Status.RequestTimeout).putHeaders(Connection.close))
+        }
     case OPTIONS -> Root / "quack" =>
       IO.pure(
         Response[IO](Status.NoContent).putHeaders(
@@ -97,7 +107,15 @@ final class QuackFrontDoorServer(
         .withHttpApp(routes.orNotFound)
         .withMaxConnections(cfg.maxConnections)
         .withShutdownTimeout(1.second)
-      built = tls.fold(base)(ctx => base.withTLS(ctx, TLSParameters.Default))
+      built = tls.fold(base)(ctx =>
+        base
+          .withTLS(ctx, TLSParameters.Default)
+          .withSocketGroup(QuackFrontDoorServer.readDeadline(tlsReadDeadline))
+          // Ember logs a connection error as an error with its stack: one per silent connection.
+          .withConnectionErrorHandler { case _: TimeoutException =>
+            IO(logger.debug("Quack front door: closed a TLS connection that went silent"))
+          }
+      )
       server <- built.build
       // The clock is read per tick, and `sweep` builds its IO per tick: a sweep constructed once
       // at listener start would only ever see the sessions that existed then.
@@ -129,6 +147,43 @@ final class QuackFrontDoorServer(
 
 object QuackFrontDoorServer:
   private val StorePass: Array[Char] = "qod-quack-tls".toCharArray
+
+  /** Ember's own idle timeout, so the deadline changes nothing for a client in use. */
+  val TlsReadDeadline: FiniteDuration = 60.seconds
+
+  /** The network's sockets, every read on an accepted connection bounded by `deadline`. Ember
+    * starts its header and idle timeouts once the TLS handshake is over, and the handshake has
+    * none: a connection that never speaks would hold its slot for ever, and `maxConnections` of
+    * them would lock every client out with no traffic at all.
+    */
+  @nowarn("cat=deprecation")
+  private def readDeadline(deadline: FiniteDuration): SocketGroup[IO] =
+    val network                            = Network[IO]
+    def bounded(s: Socket[IO]): Socket[IO] = new Socket[IO]:
+      def address                                          = s.address
+      def peerAddress                                      = s.peerAddress
+      def supportedOptions                                 = s.supportedOptions
+      def getOption[A](key: SocketOption.Key[A])           = s.getOption(key)
+      def setOption[A](key: SocketOption.Key[A], value: A) = s.setOption(key, value)
+      def read(maxBytes: Int)                              = s.read(maxBytes).timeout(deadline)
+      def readN(numBytes: Int)                             = s.readN(numBytes).timeout(deadline)
+      def reads                     = Stream.repeatEval(read(8192)).unNoneTerminate.unchunks
+      def endOfInput                = s.endOfInput
+      def endOfOutput               = s.endOfOutput
+      def write(bytes: Chunk[Byte]) = s.write(bytes)
+      def writes                    = s.writes
+      def isOpen                    = s.isOpen
+      def localAddress              = s.localAddress
+      def remoteAddress             = s.remoteAddress
+    new SocketGroup[IO]:
+      def client(to: SocketAddress[Host], options: List[SocketOption]) =
+        network.client(to, options).map(bounded)
+      def server(address: Option[Host], port: Option[Port], options: List[SocketOption]) =
+        network.server(address, port, options).map(bounded)
+      def serverResource(address: Option[Host], port: Option[Port], options: List[SocketOption]) =
+        network
+          .serverResource(address, port, options)
+          .map((bound, clients) => (bound, clients.map(bounded)))
 
 /** In-memory PKCS12 keystore from a PEM certificate chain and a PKCS8 private key: what fs2's
   * `TLSContext` wants, from the files `CertGen` writes (and what operators supply for the Flight

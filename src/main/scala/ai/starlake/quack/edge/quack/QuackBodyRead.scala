@@ -26,9 +26,9 @@ private[quack] object QuackBodyRead:
     case TooLarge(limit: Long)
     case TimedOut
 
-  /** Reads shorter than this are merged into one array. A client sending one byte per packet would
-    * otherwise cost about 40 bytes of heap per byte, one chunk object per read, before any
-    * credential.
+  /** Reads are copied into one flat array until this many bytes are waiting. A read may be a view
+    * of a much larger socket buffer, and a client sending one byte per packet would otherwise cost
+    * about 40 bytes of heap per byte, one chunk object per read, before any credential.
     */
   val SmallReadBytes: Int = 4096
 
@@ -65,16 +65,18 @@ private[quack] object QuackBodyRead:
       case State.Peeking(seen) =>
         // Flat, not a queue of reads: the header is parsed again on every read, before any
         // credential.
-        val now = Chunk.array((seen ++ chunk).toArray)
-        QuackWire.peekHeader(now.toArray) match
+        val bytes = (seen ++ chunk).toArray
+        val now   = Chunk.array(bytes)
+        QuackWire.peekHeader(bytes) match
           case HeaderPeek.Complete(h) => admit(cfg, isLive, declared, h, now)
-          case HeaderPeek.NeedMore if now.size < PeekMaxBytes => State.Peeking(now)
-          case _ => State.Done(Outcome.NotAdmitted(now.toArray))
+          case HeaderPeek.NeedMore if bytes.length < PeekMaxBytes => State.Peeking(now)
+          case _ => State.Done(Outcome.NotAdmitted(bytes))
       case State.Reading(seen, small, limit, sessionBound) =>
-        val merged = small ++ chunk
+        // Copied now, not at the flush: `chunk` may be a view pinning a whole socket buffer.
+        val merged = (small ++ chunk).compact
         if seen.size.toLong + merged.size > limit then State.Done(Outcome.TooLarge(limit))
         else if merged.size < SmallReadBytes then State.Reading(seen, merged, limit, sessionBound)
-        else State.Reading(seen ++ merged.compact, Chunk.empty, limit, sessionBound)
+        else State.Reading(seen ++ merged, Chunk.empty, limit, sessionBound)
       case done => done
 
   /** The outcome of reading `req`'s body. The clock starts now: `connectBodyTimeoutSec` for the

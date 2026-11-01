@@ -3,6 +3,7 @@ package ai.starlake.quack.edge
 import cats.effect.IO
 import fs2.{Chunk, Stream}
 import org.http4s.Request
+import org.typelevel.ci.CIString
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -39,6 +40,15 @@ object BoundedBody:
           if bytes.length.toLong > maxBytes then Outcome.TooLarge else Outcome.Read(bytes)
         )
         .timeoutTo(deadline, IO.pure(Outcome.TimedOut))
+
+  /** Whether the client asks for chunked framing, read from the raw header so that it covers every
+    * spelling Ember decodes. Ember rescans a chunk-size line on every read, up to 40 KiB of it, and
+    * that line yields no data byte for a limit to count, so a client trickling one burns about a
+    * core per connection until the deadline. So what reads a body before any credential refuses
+    * such a request with 411, before pulling the body.
+    */
+  def asksChunked(req: Request[IO]): Boolean =
+    req.headers.get(CIString("Transfer-Encoding")).isDefined
 
   /** `req` with `bytes` as its body: what a route reads once the listener read the original. */
   def replay(req: Request[IO], bytes: Array[Byte]): Request[IO] =
