@@ -10,6 +10,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.typelevel.ci.CIString
 
+import java.nio.charset.{Charset, StandardCharsets}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
 
@@ -71,3 +72,61 @@ class BoundedBodySpec extends AnyFlatSpec with Matchers:
   "replay" should "give a route the bytes already read" in:
     val replayed = BoundedBody.replay(request(bytes(1)), Array[Byte](1, 2, 3))
     replayed.body.compile.to(Array).unsafeRunSync().toList shouldBe List[Byte](1, 2, 3)
+
+  private def nested(levels: Int): String = "[" * levels + "]" * levels
+
+  private def objects(levels: Int): String = "{\"a\":" * levels + "1" + "}" * levels
+
+  private def reading(
+      text: String,
+      contentType: Option[String] = None,
+      charset: Charset = StandardCharsets.UTF_8
+  ): BoundedBody.Outcome =
+    val base = request(Stream.chunk(Chunk.array(text.getBytes(charset))))
+    val req  =
+      contentType.fold(base)(t => base.putHeaders(Header.Raw(CIString("Content-Type"), t)))
+    run(req, max = 1L << 20)
+
+  private def shouldBeRead(outcome: BoundedBody.Outcome): Unit =
+    outcome match
+      case BoundedBody.Outcome.Read(_) => succeed
+      case other                       => fail(s"expected Read, got $other")
+
+  "read" should "hand back JSON nested to the limit" in:
+    shouldBeRead(reading(nested(BoundedBody.MaxNesting)))
+    shouldBeRead(reading(objects(BoundedBody.MaxNesting)))
+
+  it should "refuse JSON nested past the limit" in:
+    val past = BoundedBody.MaxNesting + 1
+    reading(nested(past)) shouldBe BoundedBody.Outcome.TooDeep
+    reading(objects(past)) shouldBe BoundedBody.Outcome.TooDeep
+    reading("{\"a\":" + nested(past - 1) + "}") shouldBe BoundedBody.Outcome.TooDeep
+    reading("[" * past) shouldBe BoundedBody.Outcome.TooDeep
+    reading(nested(32000)) shouldBe BoundedBody.Outcome.TooDeep
+
+  it should "count only the levels open at once" in:
+    shouldBeRead(reading("[" + "[[]]," * 1000 + "[]]"))
+    // A closer with nothing open banks nothing.
+    shouldBeRead(reading("]" * 1000 + nested(BoundedBody.MaxNesting)))
+    reading("]" * 1000 + nested(BoundedBody.MaxNesting + 1)) shouldBe BoundedBody.Outcome.TooDeep
+
+  it should "not count brackets inside a JSON string" in:
+    shouldBeRead(reading("\"" + "[" * 1000 + "\""))
+    // An escaped quote does not end the string.
+    shouldBeRead(reading("\"\\\"" + "[" * 1000 + "\""))
+    // An escaped backslash does not escape the quote after it, so this string ends there.
+    reading("\"\\\\\"" + nested(BoundedBody.MaxNesting + 1)) shouldBe BoundedBody.Outcome.TooDeep
+
+  it should "read a declared charset both as a route decoding it and as one reading UTF-8" in:
+    assume(Charset.isSupported("IBM037"), "the JDK's extended charsets are required")
+    val past     = nested(BoundedBody.MaxNesting + 1)
+    val ibm037   = Charset.forName("IBM037")
+    val declared = Some("application/json; charset=IBM037")
+    // This body holds no '[' byte: only its decoded text nests.
+    past.getBytes(ibm037).count(_ == '['.toByte) shouldBe 0
+    reading(past, declared, ibm037) shouldBe BoundedBody.Outcome.TooDeep
+    reading(past, Some("application/json; charset=UTF-16"), StandardCharsets.UTF_16) shouldBe
+      BoundedBody.Outcome.TooDeep
+    // This one nests only for a route that reads UTF-8 whatever the header says.
+    reading(past, declared) shouldBe BoundedBody.Outcome.TooDeep
+    shouldBeRead(reading(nested(8), declared, ibm037))

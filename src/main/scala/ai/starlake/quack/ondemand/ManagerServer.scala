@@ -226,6 +226,14 @@ final class ManagerServer(
             s"request body exceeds $maxBytes bytes"
           )
         )
+      case BoundedBody.Outcome.TooDeep =>
+        OptionT.pure[IO](
+          bodyRefusal(
+            Status.BadRequest,
+            "json_too_deep",
+            s"request body nests deeper than ${BoundedBody.MaxNesting} levels"
+          )
+        )
       case BoundedBody.Outcome.TimedOut =>
         OptionT.pure[IO](
           bodyRefusal(
@@ -288,8 +296,9 @@ final class ManagerServer(
     * Request bodies are read here, whole, before a route sees one ([[withBoundedBody]]), within
     * `restLimits.bodyTimeoutSec`. A public route takes no chunked framing, as no credential has
     * been checked: a core one reads at most `restLimits.maxPublicBodyBytes`, a module's and an
-    * admitted caller's at most `restLimits.maxBodyBytes`. No route outside `/api` reads a body
-    * except `/mcp`, which applies the limit itself, so nothing is read here for such a path.
+    * admitted caller's at most `restLimits.maxBodyBytes`. A body nesting too deep is refused there
+    * too (see [[BoundedBody.MaxNesting]]). No route outside `/api` reads a body except `/mcp`,
+    * which applies the limit itself, so nothing is read here for such a path.
     */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     Kleisli { req =>

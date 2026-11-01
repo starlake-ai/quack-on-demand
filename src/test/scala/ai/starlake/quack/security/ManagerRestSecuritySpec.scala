@@ -2,6 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.RestLimitsConfig
+import ai.starlake.quack.edge.BoundedBody
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -1097,5 +1098,41 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
           rawStatus(new java.io.BufferedInputStream(client.getInputStream)) shouldBe 200
         finally client.close()
       finally holder.close()
+    finally h.shutdown()
+  }
+
+  // A depth that overflows the stack must never go through this harness: a regression would then
+  // shut down the test JVM's cats-effect runtime for every later spec. These cases use the depth of
+  // the limit, so a regression fails them and halts nothing.
+  "A request body nested too deep" should "be refused before any route decodes it" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val deep = "[" * (BoundedBody.MaxNesting + 1) + "]" * (BoundedBody.MaxNesting + 1)
+      List(
+        (s"${h.baseUrl}/api/auth/login", deep, None),
+        (s"${h.baseUrl}/api/auth/login", s"""{"username":$deep,"password":"p"}""", None),
+        (s"${h.baseUrl}/api/tenant/create", deep, Some(h.superuserSession()))
+      ).foreach { (url, body, apiKey) =>
+        val resp = post(h.httpClient, url, body, apiKey = apiKey)
+        withClue(url) {
+          resp.statusCode() shouldBe 400
+          resp.body() should include("json_too_deep")
+        }
+      }
+      get(h.httpClient, s"${h.baseUrl}/health").statusCode() shouldBe 200
+    finally h.shutdown()
+  }
+
+  it should "leave a body within the limit to its route" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val login = s"${h.baseUrl}/api/auth/login"
+      val deep  = "[" * BoundedBody.MaxNesting + "]" * BoundedBody.MaxNesting
+      post(h.httpClient, login, deep).body() should not include "json_too_deep"
+      // Brackets in a string are no nesting: this is only a wrong password.
+      val inString = s"""{"username":"nobody","password":"${"[" * 1000}"}"""
+      post(h.httpClient, login, inString).statusCode() shouldBe 401
     finally h.shutdown()
   }
