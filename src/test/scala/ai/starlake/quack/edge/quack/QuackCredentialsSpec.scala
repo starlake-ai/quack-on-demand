@@ -74,3 +74,20 @@ class QuackCredentialsSpec extends AnyFlatSpec with Matchers:
     QuackCredentials.parse("tenant=acme&pool=bi&password=p").swap.toOption.get should include(
       "user"
     )
+
+  it should "refuse more than 32 pairs" in:
+    val many = (1 to 33).map(_ => "pool=x").mkString("&")
+    QuackCredentials.parse(many) shouldBe Left("too many parameters in token")
+
+  it should "accept exactly 32 pairs" in:
+    val pairs = (1 to 30).map(_ => "pool=x") ++ List("user=u", "password=p")
+    QuackCredentials.parse(pairs.mkString("&")).toOption.get.pool shouldBe Some("x")
+
+  it should "keep the last value of a repeated key" in:
+    QuackCredentials.parse("pool=a&pool=b&user=u&password=p").toOption.get.pool shouldBe Some("b")
+
+  it should "turn away a flood of pairs at once" in:
+    val flood = "pool=&" * 10000
+    val start = System.nanoTime()
+    QuackCredentials.parse(flood) shouldBe Left("too many parameters in token")
+    (System.nanoTime() - start) should be < 1000000000L
