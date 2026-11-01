@@ -688,7 +688,9 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
           mainSnapshotAfter = m.mainSnapshotAfter,
           tagName = m.tagName,
           error = m.error,
-          decidedAt = m.decidedAt
+          decidedAt = m.decidedAt,
+          holdWriters = m.holdWriters,
+          attempts = m.attempts
         )
       )
     )

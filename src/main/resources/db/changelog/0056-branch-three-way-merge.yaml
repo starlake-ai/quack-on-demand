@@ -1,0 +1,32 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0056-qodstate-branch-merge-three-way
+      author: qod
+      changes:
+        # What a proposal asked for and saw, and what its merge did (three-way merge). Counts and
+        # rowids only: no cell value is ever stored here.
+        - addColumn:
+            tableName: qodstate_branch_merge
+            columns:
+              - column: { name: on_conflict, type: TEXT }
+              - column:
+                  name: merge_keys_json
+                  type: TEXT
+                  defaultValue: "{}"
+                  constraints: { nullable: false }
+              - column: { name: head_snapshot_at_propose, type: BIGINT }
+              - column:
+                  name: row_conflicts_json
+                  type: TEXT
+                  defaultValue: "[]"
+                  constraints: { nullable: false }
+              - column:
+                  name: hold_writers
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints: { nullable: false }
+              - column:
+                  name: attempts
+                  type: INT
+                  defaultValueNumeric: 0
+                  constraints: { nullable: false }

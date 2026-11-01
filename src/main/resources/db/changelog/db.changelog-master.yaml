@@ -115,3 +115,5 @@ databaseChangeLog:
       file: db/changelog/0054-data-path-policy-version.yaml
   - include:
       file: db/changelog/0055-drop-pool-lockdown.yaml
+  - include:
+      file: db/changelog/0056-branch-three-way-merge.yaml
