@@ -1,6 +1,7 @@
 package ai.starlake.quack.mcp
 
-import ai.starlake.quack.McpConfig
+import ai.starlake.quack.{McpConfig, RestLimitsConfig}
+import ai.starlake.quack.edge.BoundedBody
 import ai.starlake.quack.ondemand.auth.PatPrincipal
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -10,6 +11,9 @@ import org.http4s.{HttpRoutes, MediaType, Response, Status}
 import org.http4s.dsl.io._
 import org.http4s.headers.`Content-Type`
 import org.typelevel.ci.CIString
+
+import java.nio.charset.StandardCharsets.UTF_8
+import scala.concurrent.duration.*
 
 /** One MCP tool: metadata for `tools/list` plus its executable body. `run`'s `Left(message)`
   * becomes a `tools/call` result with `isError: true` (a normal result the agent acts on, per the
@@ -26,10 +30,16 @@ final case class McpToolDef(
 /** The MCP Streamable HTTP endpoint: `POST /mcp`, one JSON-RPC message per request, plain JSON
   * response, no SSE and no session id, so any HA replica answers any request.
   *
-  * Auth first, before the body is even parsed: `Authorization: Bearer <t>` where `t` is a live
+  * Auth first, before the body is even read: `Authorization: Bearer <t>` where `t` is a live
   * personal access token, and nothing else. A session JWT fails by construction (no `qod_pat_`
   * prefix, so the PAT lookup refuses it), which is the design: `/mcp` never admits session
-  * credentials and never runs unauthenticated.
+  * credentials and never runs unauthenticated. A PAT costs database lookups, so it resolves on
+  * `IO.blocking`, off the compute threads.
+  *
+  * Only a caller whose PAT resolved gets its body read, and the read is bounded (`BoundedBody`, the
+  * REST guard's own): past `limits.maxBodyBytes` is `413`, not whole within `limits.bodyTimeoutSec`
+  * is `408` (both say `Connection: close`, as the rest of the body stays unread), and JSON nested
+  * too deep is a JSON-RPC parse error (see `BoundedBody.MaxNesting`). The bytes are read as UTF-8.
   *
   * `resolvePat` is the narrow seam (`PatAuthenticator.resolve` in Main) so protocol tests need no
   * store.
@@ -38,7 +48,8 @@ final class McpRoutes(
     cfg: McpConfig,
     resolvePat: String => Option[PatPrincipal],
     tools: List[McpToolDef],
-    serverVersion: String
+    serverVersion: String,
+    limits: RestLimitsConfig = RestLimitsConfig()
 ) extends LazyLogging:
 
   import McpJsonRpc._
@@ -60,20 +71,43 @@ final class McpRoutes(
 
   def routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case req @ POST -> Root / "mcp" =>
-      authenticate(req.headers.get(CIString("Authorization")).map(_.head.value)) match
-        case None =>
-          IO.pure(
-            jsonResponse(Status.Unauthorized, Json.obj("error" -> Json.fromString("unauthorized")))
-          )
-        case Some(principal) =>
-          req.as[String].flatMap { raw =>
-            decode[Request](raw) match
-              case Left(_) =>
+      // A PAT costs a database lookup, so it resolves off the compute threads.
+      IO.blocking(authenticate(req.headers.get(CIString("Authorization")).map(_.head.value)))
+        .flatMap {
+          case None =>
+            IO.pure(
+              jsonResponse(
+                Status.Unauthorized,
+                Json.obj("error" -> Json.fromString("unauthorized"))
+              )
+            )
+          case Some(principal) =>
+            BoundedBody.read(req, limits.maxBodyBytes, limits.bodyTimeoutSec.seconds).flatMap {
+              case BoundedBody.Outcome.Read(bytes) =>
+                decode[Request](new String(bytes, UTF_8)) match
+                  case Left(_) =>
+                    IO.pure(
+                      jsonResponse(Status.Ok, err(None, ParseError, "malformed JSON-RPC request"))
+                    )
+                  case Right(rpc) => dispatch(principal, rpc)
+              case BoundedBody.Outcome.TooDeep =>
+                IO.pure(jsonResponse(Status.Ok, err(None, ParseError, "request nests too deeply")))
+              case BoundedBody.Outcome.TooLarge =>
                 IO.pure(
-                  jsonResponse(Status.Ok, err(None, ParseError, "malformed JSON-RPC request"))
+                  jsonResponse(
+                    Status.PayloadTooLarge,
+                    Json.obj("error" -> Json.fromString("payload_too_large"))
+                  ).putHeaders(org.http4s.headers.Connection.close)
                 )
-              case Right(rpc) => dispatch(principal, rpc)
-          }
+              case BoundedBody.Outcome.TimedOut =>
+                IO.pure(
+                  jsonResponse(
+                    Status.RequestTimeout,
+                    Json.obj("error" -> Json.fromString("request_timeout"))
+                  ).putHeaders(org.http4s.headers.Connection.close)
+                )
+            }
+        }
 
     case GET -> Root / "mcp" =>
       IO.pure(Response[IO](Status.MethodNotAllowed))

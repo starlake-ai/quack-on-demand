@@ -1,16 +1,18 @@
 // src/test/scala/ai/starlake/quack/mcp/McpProtocolSpec.scala
 package ai.starlake.quack.mcp
 
-import ai.starlake.quack.McpConfig
+import ai.starlake.quack.{McpConfig, RestLimitsConfig}
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.state.RbacUser
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import io.circe.{Json, JsonObject}
 import io.circe.parser.parse
-import org.http4s.{Method, Request, Response, Status, Uri}
+import org.http4s.{HttpApp, Method, Request, Response, Status, Uri}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import scala.concurrent.duration.*
 
 /** Route-level contract of the MCP endpoint: the one auth arm (a live PAT as Bearer), the JSON-RPC
   * envelope, and tool tiering. No server boot, no Postgres: `resolvePat` is an injected lookup and
@@ -223,4 +225,94 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     result.get[Boolean]("isError").toOption shouldBe Some(true)
     result.downField("content").downN(0).get[String]("text").toOption.getOrElse("") should
       include("retry in a few seconds")
+  }
+
+  // ------------------------------------------------------------------
+  // request limits: the body is read only once the PAT resolved, and off the compute threads
+  // ------------------------------------------------------------------
+
+  private def routesWith(
+      limits: RestLimitsConfig,
+      resolve: String => Option[PatPrincipal] = resolvePat
+  ): HttpApp[IO] =
+    new McpRoutes(
+      cfg = McpConfig(),
+      resolvePat = resolve,
+      tools = List(echoTool),
+      serverVersion = "test",
+      limits = limits
+    ).routes.orNotFound
+
+  private def mcpRequest(bearer: String): Request[IO] =
+    Request[IO](Method.POST, Uri.unsafeFromString("/mcp"))
+      .putHeaders(
+        org.http4s.Header.Raw(org.typelevel.ci.CIString("Authorization"), s"Bearer $bearer")
+      )
+
+  private def postTo(app: HttpApp[IO], body: String, bearer: String): Response[IO] =
+    app.run(mcpRequest(bearer).withEntity(body)).unsafeRunSync()
+
+  private def closesConnection(resp: Response[IO]): Boolean =
+    resp.headers
+      .get(org.typelevel.ci.CIString("Connection"))
+      .exists(_.exists(_.value.equalsIgnoreCase("close")))
+
+  "POST /mcp" should "answer 413 for a body over the limit, once the PAT resolved" in {
+    val app  = routesWith(RestLimitsConfig(maxBodyBytes = 64))
+    val big  = rpc("ping") + " " * 64
+    val resp = postTo(app, big, AdminPat)
+    resp.status shouldBe Status.PayloadTooLarge
+    // The rest of the body stays unread, so the connection must not be reused.
+    closesConnection(resp) shouldBe true
+    postTo(app, big, "qod_pat_unknown").status shouldBe Status.Unauthorized
+  }
+
+  it should "answer a body within the limit" in {
+    val app  = routesWith(RestLimitsConfig(maxBodyBytes = 4096))
+    val resp = postTo(app, rpc("ping"), AdminPat)
+    resp.status shouldBe Status.Ok
+    bodyJson(resp).hcursor.downField("result").focus shouldBe Some(Json.obj())
+  }
+
+  it should "answer JSON nested too deep, once the PAT resolved" in {
+    val app  = routesWith(RestLimitsConfig())
+    val deep = "[" * 257 + "]" * 257
+    val resp = postTo(app, deep, AdminPat)
+    resp.status shouldBe Status.Ok
+    resp.as[String].unsafeRunSync() should include("request nests too deeply")
+    postTo(app, deep, "qod_pat_unknown").status shouldBe Status.Unauthorized
+  }
+
+  it should "answer 408 for a body that does not arrive in time, once the PAT resolved" in {
+    val app = routesWith(RestLimitsConfig(bodyTimeoutSec = 1))
+    // Bounded here too: without the route's own deadline this body would hold the test forever.
+    val resp = app
+      .run(mcpRequest(AdminPat).withBodyStream(fs2.Stream.never[IO]))
+      .timeout(10.seconds)
+      .unsafeRunSync()
+    resp.status shouldBe Status.RequestTimeout
+    closesConnection(resp) shouldBe true
+  }
+
+  it should "not pull the body of a request whose PAT does not resolve" in {
+    val app    = routesWith(RestLimitsConfig())
+    val pulled = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val body   = fs2.Stream.exec(IO(pulled.set(true)))
+    val resp   = app.run(mcpRequest("qod_pat_unknown").withBodyStream(body)).unsafeRunSync()
+    resp.status shouldBe Status.Unauthorized
+    pulled.get shouldBe false
+  }
+
+  it should "resolve the PAT off the compute threads" in {
+    val thread = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val app    = routesWith(
+      RestLimitsConfig(),
+      t => {
+        thread.set(Thread.currentThread().getName)
+        resolvePat(t)
+      }
+    )
+    postTo(app, rpc("ping"), AdminPat).status shouldBe Status.Ok
+    thread.get should not be empty
+    thread.get should not fullyMatch regex("io-compute-\\d+")
   }

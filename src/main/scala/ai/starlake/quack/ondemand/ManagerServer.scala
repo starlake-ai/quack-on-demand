@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand
 import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.BoundedBody
 import ai.starlake.quack.ondemand.api._
+import ai.starlake.quack.ondemand.state.PatStore
 import ai.starlake.quack.ondemand.telemetry.{
   AuditActions,
   AuditRateLimiter,
@@ -277,6 +278,17 @@ final class ManagerServer(
       else IO.pure(closing)
     )
 
+  /** The session behind `token`. A session JWT needs only an HMAC, so it stays on the compute
+    * thread; a PAT costs database lookups, so it does not.
+    */
+  private def resolveCredential(
+      token: Option[String]
+  ): IO[Option[SessionTokenStore.Session]] =
+    token match
+      case Some(t) if t.startsWith(PatStore.TokenPrefix) => IO.blocking(sessionOfToken(t))
+      case Some(t)                                       => IO(sessionOfToken(t))
+      case None                                          => IO.pure(None)
+
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token or a live personal access token, admitted with exactly its owner's scope (admin
     * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
@@ -299,6 +311,10 @@ final class ManagerServer(
     * admitted caller's at most `restLimits.maxBodyBytes`. A body nesting too deep is refused there
     * too (see [[BoundedBody.MaxNesting]]). No route outside `/api` reads a body except `/mcp`,
     * which applies the limit itself, so nothing is read here for such a path.
+    *
+    * What blocks on the database leaves the compute threads: a PAT is resolved on `IO.blocking`
+    * ([[resolveCredential]]), and so are the two denial audit rows the guard writes. A session JWT
+    * needs only an HMAC and stays where it is.
     */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     Kleisli { req =>
@@ -353,87 +369,101 @@ final class ManagerServer(
         // lookups race a session expiring between them: admitted as admin by the first,
         // then an absent scope skipped the tenant check. A PAT's synthetic session carries
         // role "admin" exactly when PatAuthenticator.isAdmin holds.
-        val resolved        = provided.flatMap(sessionOfToken)
-        val sessionAdmin    = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
-        val tokenScope      = resolved.map(_.scope)
-        val nonAdminSession = resolved.isDefined && !sessionAdmin
+        OptionT.liftF(resolveCredential(provided)).flatMap { resolved =>
+          val sessionAdmin    = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
+          val tokenScope      = resolved.map(_.scope)
+          val nonAdminSession = resolved.isDefined && !sessionAdmin
 
-        val admitted = sessionAdmin || (nonAdminSession && isProfileApi(path))
-        // Strip control characters -- jsonb rejects NUL (0x00); cap length so
-        // detail stays bounded. An unsanitized `%00` in the path would make
-        // the insert throw and the attacker would erase their own trail.
-        // Shared by both denial arms below.
-        val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
-        if !admitted then
-          if nonAdminSession then
-            // A real, valid session without an admin grant. Answer with the
-            // same stable code the login gate uses so clients treat both alike
-            // -- and not with the anonymous 401, which would send a browser
-            // back to the login screen it just came from.
-            //
-            // Audited under the caller's REAL identity (recoverable from the
-            // session), so a low-privilege insider sweeping admin endpoints
-            // leaves a trail.
-            val caller   = resolved.map(_.profile)
-            val username = caller.map(_.username).getOrElse("unknown")
-            // Rate-limited per principal, not per host: the recorder writes
-            // synchronously on the request path, so one authenticated session
-            // could otherwise insert an audit row per request at line rate.
-            // Collapsing a flood to one row per interval is deliberate -- the
-            // first row is the signal; the rest are the attacker's volume.
-            if auditLimiter.allow("session:" + username) then
-              audit.restAs(
-                username,
-                "tenant",
-                "auth",
-                AuditActions.AuthAdminRequired,
-                "denied",
-                tenant = caller.flatMap(_.tenant),
-                detail = Map("path" -> safePath)
-              )
-            refuse(
-              req,
-              Response[IO](Status.Forbidden)
-                .withEntity(
-                  """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
+          val admitted = sessionAdmin || (nonAdminSession && isProfileApi(path))
+          // Strip control characters -- jsonb rejects NUL (0x00); cap length so
+          // detail stays bounded. An unsanitized `%00` in the path would make
+          // the insert throw and the attacker would erase their own trail.
+          // Shared by both denial arms below.
+          val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
+          if !admitted then
+            if nonAdminSession then
+              // A real, valid session without an admin grant. Answer with the
+              // same stable code the login gate uses so clients treat both alike
+              // -- and not with the anonymous 401, which would send a browser
+              // back to the login screen it just came from.
+              //
+              // Audited under the caller's REAL identity (recoverable from the
+              // session), so a low-privilege insider sweeping admin endpoints
+              // leaves a trail.
+              val caller   = resolved.map(_.profile)
+              val username = caller.map(_.username).getOrElse("unknown")
+              // Rate-limited per principal, not per host: the recorder writes
+              // synchronously on the request path, so one authenticated session
+              // could otherwise insert an audit row per request at line rate.
+              // Collapsing a flood to one row per interval is deliberate -- the
+              // first row is the signal; the rest are the attacker's volume.
+              // The write blocks on the database, so it runs off the compute threads.
+              OptionT
+                .liftF(
+                  IO.blocking(
+                    if auditLimiter.allow("session:" + username) then
+                      audit.restAs(
+                        username,
+                        "tenant",
+                        "auth",
+                        AuditActions.AuthAdminRequired,
+                        "denied",
+                        tenant = caller.flatMap(_.tenant),
+                        detail = Map("path" -> safePath)
+                      )
+                  )
                 )
-                .withContentType(
-                  org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                .flatMap(_ =>
+                  refuse(
+                    req,
+                    Response[IO](Status.Forbidden)
+                      .withEntity(
+                        """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
+                      )
+                      .withContentType(
+                        org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                      )
+                  )
                 )
-            )
+            else
+              val source = req.remote.map(_.host.toString).getOrElse("unknown")
+              OptionT
+                .liftF(
+                  IO.blocking(
+                    if auditLimiter.allow(source) then
+                      audit.restAs(
+                        "anonymous",
+                        "system",
+                        "auth",
+                        AuditActions.AuthApiKeyFailure,
+                        "denied",
+                        detail = Map("path" -> safePath, "source" -> source)
+                      )
+                  )
+                )
+                .flatMap(_ => refuse(req, Response[IO](Status.Unauthorized)))
           else
-            val source = req.remote.map(_.host.toString).getOrElse("unknown")
-            if auditLimiter.allow(source) then
-              audit.restAs(
-                "anonymous",
-                "system",
-                "auth",
-                AuditActions.AuthApiKeyFailure,
-                "denied",
-                detail = Map("path" -> safePath, "source" -> source)
-              )
-            refuse(req, Response[IO](Status.Unauthorized))
-        else
-          // Per-request tenant scope check on the admitted credential's scope.
-          // Body-tenant endpoints do their own check via TenantScopeCheck.reject.
-          val queryTenant = req.uri.query.params.get("tenant")
-          val pathTenant  = TenantScopeGuard
-            .extractTenant(path, queryTenant)
-            .map(t => canonicalTenantIdOf(t).getOrElse(t))
-          (tokenScope, pathTenant) match
-            case (Some(scope), Some(t))
-                if !scope.superuser && !scope.manageableTenants.contains(t) =>
-              refuse(
-                req,
-                Response[IO](Status.Forbidden)
-                  .withEntity(
-                    s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""
-                  )
-                  .withContentType(
-                    org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
-                  )
-              )
-            case _ => withBoundedBody(req, limits.maxBodyBytes)(routes)
+            // Per-request tenant scope check on the admitted credential's scope.
+            // Body-tenant endpoints do their own check via TenantScopeCheck.reject.
+            val queryTenant = req.uri.query.params.get("tenant")
+            val pathTenant  = TenantScopeGuard
+              .extractTenant(path, queryTenant)
+              .map(t => canonicalTenantIdOf(t).getOrElse(t))
+            (tokenScope, pathTenant) match
+              case (Some(scope), Some(t))
+                  if !scope.superuser && !scope.manageableTenants.contains(t) =>
+                refuse(
+                  req,
+                  Response[IO](Status.Forbidden)
+                    .withEntity(
+                      s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""
+                    )
+                    .withContentType(
+                      org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                    )
+                )
+              case _ => withBoundedBody(req, limits.maxBodyBytes)(routes)
+        }
     }
 
   def serve: Resource[IO, org.http4s.server.Server] =

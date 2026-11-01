@@ -694,7 +694,8 @@ object ManagerServerHarness:
             dataTools.tools ++ adminTools.tools ++ identityTools.tools ++
               accessTools.tools ++ platformTools.tools ++
               new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
-            serverVersion = "test-harness"
+            serverVersion = "test-harness",
+            limits = mgrCfg.restLimits
           ).routes
 
     val mgr = new ManagerServer(
