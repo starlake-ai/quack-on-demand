@@ -15,6 +15,7 @@ import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.headers.{`Content-Type`, Connection}
 import org.typelevel.ci.CIStringSyntax
 
+import java.io.IOException
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 import java.security.{KeyFactory, KeyStore, PrivateKey}
@@ -24,6 +25,7 @@ import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.SSLException
 import scala.annotation.nowarn
 import scala.concurrent.duration.*
 
@@ -111,9 +113,14 @@ final class QuackFrontDoorServer(
         base
           .withTLS(ctx, TLSParameters.Default)
           .withSocketGroup(QuackFrontDoorServer.readDeadline(tlsReadDeadline))
-          // Ember logs a connection error as an error with its stack: one per silent connection.
-          .withConnectionErrorHandler { case _: TimeoutException =>
-            IO(logger.debug("Quack front door: closed a TLS connection that went silent"))
+          // Ember logs a connection error as an error with its stack. A client needs no credential
+          // to cause one: it goes silent, speaks no TLS, or drops in the handshake.
+          .withConnectionErrorHandler {
+            case _: TimeoutException =>
+              IO(logger.debug("Quack front door: closed a TLS connection that went silent"))
+            case e @ (_: SSLException | _: IOException) =>
+              // Text, not the exception: an exception argument would put its stack in the event.
+              IO(logger.debug(s"Quack front door: a TLS connection failed: ${e.toString}"))
           }
       )
       server <- built.build
@@ -155,6 +162,11 @@ object QuackFrontDoorServer:
     * starts its header and idle timeouts once the TLS handshake is over, and the handshake has
     * none: a connection that never speaks would hold its slot for ever, and `maxConnections` of
     * them would lock every client out with no traffic at all.
+    *
+    * What it leaves open: the deadline is per read, not over the handshake, so a client that sends
+    * one byte just inside it, again and again, keeps its slot (spec section 12). A deadline over
+    * the whole handshake would have to lean on fs2 internals, since `TLSContext` is sealed: a
+    * listener with TLS on needs a proxy or firewall in front that limits this.
     */
   @nowarn("cat=deprecation")
   private def readDeadline(deadline: FiniteDuration): SocketGroup[IO] =

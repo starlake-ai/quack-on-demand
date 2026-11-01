@@ -5,6 +5,7 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import fs2.{Chunk, Stream}
 import org.http4s.{Method, Request}
+import org.http4s.ember.core.EmberException
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -51,6 +52,17 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
     Request[IO](
       Method.POST,
       body = Stream.emits(parts.map(Chunk.array(_))).covary[IO].flatMap(Stream.chunk)
+    )
+
+  /** A POST that announces no length, whose body is one read and then goes quiet. */
+  private def oneRead(bytes: Array[Byte]): Request[IO] =
+    Request[IO](Method.POST, body = Stream.chunk(Chunk.array(bytes)) ++ Stream.never[IO])
+
+  /** A POST that announces no length, whose body sends `first` and then fails with `failure`. */
+  private def failingAfter(first: Array[Byte], failure: Throwable): Request[IO] =
+    Request[IO](
+      Method.POST,
+      body = Stream.chunk(Chunk.array(first)) ++ Stream.raiseError[IO](failure)
     )
 
   private def read(req: Request[IO], c: QuackNativeConfig): QuackBodyRead.Outcome =
@@ -187,6 +199,13 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
     // The header is within the limit; the read after it takes the message past it.
     describe(read(cut(connectMessage, new Array[Byte](1024)), c)) shouldBe "TooLarge(128)"
 
+  it should "refuse at once a message over its limit that arrives in one read, with no announced length" in:
+    // The body stays open after that read, so only the limit check on the bytes already held can
+    // answer before the deadline, which would end the read as TimedOut instead.
+    val c = cfg(maxBody = 512, maxConnect = 128, connectTimeout = 2, bodyTimeout = 4)
+    describe(read(oneRead(connectMessage ++ new Array[Byte](1024)), c)) shouldBe "TooLarge(128)"
+    describe(read(oneRead(sessionMessage(1024)), c)) shouldBe "TooLarge(512)"
+
   it should "not keep the arrays that reads of a message body are views of" in:
     // 200 single bytes, each a view of 256 KiB: held, they would pin 50 MiB.
     val body = new ViewedBody(QuackWire.encodeDisconnect(LiveSession), 200, 256 * 1024)
@@ -222,6 +241,17 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
         shouldBeSame(notAdmitted(read(header.take(n), cfg())), header.take(n))
       }
     }
+
+  it should "answer Ember's idle timeout on a stalled body as a timeout" in:
+    // Ember fails a body that waited its idle timeout (60 s) for the client with this exception,
+    // before a longer deadline of ours is up.
+    val idle = EmberException.ReadTimeout(60.seconds)
+    // Inside the header, and inside a live session's body.
+    describe(read(failingAfter(sessionMessage(0).take(3), idle), cfg())) shouldBe "TimedOut"
+    describe(read(failingAfter(sessionMessage(8), idle), cfg())) shouldBe "TimedOut"
+    // Any other failure of the body stays a failure.
+    an[EmberException.ReachedEndOfStream] should be thrownBy
+      read(failingAfter(sessionMessage(8), EmberException.ReachedEndOfStream()), cfg())
 
   "QuackNativeConfig" should "refuse a body timeout below its connect timeout" in:
     val e = the[IllegalArgumentException] thrownBy cfg(connectTimeout = 10, bodyTimeout = 5)

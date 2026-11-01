@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.quack.QuackWire.HeaderPeek
 import cats.effect.{IO, Ref}
 import fs2.Chunk
 import org.http4s.Request
+import org.http4s.ember.core.EmberException
 
 import scala.concurrent.duration.*
 
@@ -81,6 +82,9 @@ private[quack] object QuackBodyRead:
 
   /** The outcome of reading `req`'s body. The clock starts now: `connectBodyTimeoutSec` for the
     * header and a CONNECTION_REQUEST, `bodyTimeoutSec` in all once the header names a live session.
+    * Ember's idle timeout (`ReadTimeout`: 60 s without a byte from the client) can fail the body
+    * before a longer deadline of ours: that is a `TimedOut` too, since an error would reach Ember
+    * as a bare 500.
     */
   def apply(req: Request[IO], cfg: QuackNativeConfig, isLive: String => Boolean): IO[Outcome] =
     Ref.of[IO, Boolean](false).flatMap { sessionBound =>
@@ -104,6 +108,7 @@ private[quack] object QuackBodyRead:
             case Some(State.Peeking(seen)) => Outcome.NotAdmitted(seen.toArray)
             case None                      => Outcome.NotAdmitted(Array.emptyByteArray)
           }
+          .recover { case _: EmberException.ReadTimeout => Outcome.TimedOut }
       val deadline: IO[Unit] =
         IO.sleep(cfg.connectBodyTimeoutSec.seconds) *> sessionBound.get.flatMap { bound =>
           if bound then IO.sleep((cfg.bodyTimeoutSec - cfg.connectBodyTimeoutSec).seconds)

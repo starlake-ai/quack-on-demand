@@ -194,6 +194,45 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
     withClue("the server sent no response head: ")(end should be >= 0)
     (text.takeWhile(_ != '\r'), text.substring(0, end).toLowerCase, all.drop(end + 4))
 
+  /** Connects and sends one whole request that asks for the connection to be closed after its
+    * answer, then leaves the answer unread: the server serves the connection when it has a slot for
+    * it.
+    */
+  private def sendRequest(base: String, body: Array[Byte]): java.net.Socket =
+    val uri  = URI.create(base)
+    val sock = new java.net.Socket(uri.getHost, uri.getPort)
+    val head =
+      "POST /quack HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" +
+        s"Content-Length: ${body.length}\r\n\r\n"
+    sock.getOutputStream.write(head.getBytes("ISO-8859-1") ++ body)
+    sock.getOutputStream.flush()
+    sock
+
+  /** A connection that has had one request answered and stays open: it holds a connection slot
+    * until the caller closes it. The request names the live session, since the server closes the
+    * connection after the answer to a message it does not admit.
+    */
+  private def answeredAndHeld(base: String): java.net.Socket =
+    val uri  = URI.create(base)
+    val sock = new java.net.Socket(uri.getHost, uri.getPort)
+    sock.setSoTimeout(15000)
+    val body = sessionMessage(LiveSession, 0)
+    sock.getOutputStream.write(
+      s"POST /quack HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${body.length}\r\n\r\n"
+        .getBytes("ISO-8859-1") ++ body
+    )
+    sock.getOutputStream.flush()
+    // The answer is a head that announces its length, and then that many bytes.
+    val in   = sock.getInputStream
+    val head = new StringBuilder
+    while !head.toString.endsWith("\r\n\r\n") do
+      val next = in.read()
+      withClue("the server closed the connection before it answered: ")(next should be >= 0)
+      head.append(next.toChar)
+    val length = """(?i)content-length: (\d+)""".r.findFirstMatchIn(head.toString)
+    in.readNBytes(length.map(_.group(1).toInt).getOrElse(fail(s"the answer has no length: $head")))
+    sock
+
   "POST /quack" should "hand the body to the dispatcher and answer 200 with the wire media type" in:
     withServer(cfg(freePort())) { base =>
       val resp = post(plain, base, Array.fill[Byte](5)(1))
@@ -333,6 +372,27 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
         sock.getInputStream.readAllBytes()
         (System.nanoTime() - start) / 1000000000L should be < 10L
       finally sock.close()
+    }
+
+  "The connection limit" should "hold a client until a connection leaves, then answer it" in:
+    // One slot, held by a connection that is answered and then kept open.
+    withServer(cfg(freePort(), maxConnections = 1)) { base =>
+      val holder  = answeredAndHeld(base)
+      val message = sessionMessage(LiveSession, 5)
+      try
+        val client = sendRequest(base, message)
+        try
+          client.setSoTimeout(1500)
+          // The client connects and sends its request, and is not answered while the slot is taken.
+          a[java.net.SocketTimeoutException] should be thrownBy client.getInputStream.read()
+          // Once the holder leaves, the slot is free and the client is answered.
+          holder.close()
+          client.setSoTimeout(15000)
+          val (status, _, bytes) = readResponse(client)
+          status should include("200")
+          QuackWire.decodeErrorMessage(bytes) shouldBe Right(s"len=${message.length}")
+        finally client.close()
+      finally holder.close()
     }
 
   "GET /" should "identify the endpoint like a node does" in:
