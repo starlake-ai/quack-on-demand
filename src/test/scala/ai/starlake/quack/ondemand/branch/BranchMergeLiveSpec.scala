@@ -204,14 +204,14 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
         val br = branchReader(branchDb)
         try
           val cs = BranchChanges.compute(br, parent, fork)
-          cs.tables.map(t => (t.table, t.kind, t.shadowsRowid)) shouldBe
-            List(("keyed", ChangeKind.Modified, true))
+          cs.tables.map(t => (t.table, t.kind, t.reservedColumn)) shouldBe
+            List(("keyed", ChangeKind.Modified, Some("rowid")))
           cs.mergeable shouldBe false
         finally br.close()
       }
     }
 
-  it should "report a conflict when main touched a branch table after the fork" in
+  it should "mark a table main also changed as three-way, ignoring a flush on main" in
     withCatalog("brconf", extra) { (parent, _) =>
       withBranchDb { (branchDb, branchDir) =>
         val fork = BranchCloner(parentMeta)
@@ -230,9 +230,55 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
         val br = branchReader(branchDb)
         try
           val cs = BranchChanges.compute(br, parent, fork)
-          cs.tables.map(_.table) shouldBe List("region")
+          cs.tables.map(t => (t.table, t.threeWay)) shouldBe List(("region", true))
+          cs.conflicts shouldBe Nil
+          cs.mergeable shouldBe true
+        finally br.close()
+      }
+    }
+
+  it should "report a conflict when main renamed a table the branch changed" in
+    withCatalog("brconf3", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = BranchCloner(parentMeta)
+          .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
+          .toOption
+          .get
+          .forkSnapshot
+        duck(
+          "INSERT INTO qod_branch.tpch1.nation VALUES (2, 'IT');",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        duck("ALTER TABLE lake.tpch1.nation RENAME TO nation2;")
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
           cs.conflicts.map(c => (c.table, c.reason)) shouldBe
-            List(("region", "changed on main since the fork"))
+            List(("nation", "schema changed on main since the fork"))
+        finally br.close()
+      }
+    }
+
+  it should "report a conflict when main dropped a table the branch changed" in
+    withCatalog("brconf2", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = BranchCloner(parentMeta)
+          .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
+          .toOption
+          .get
+          .forkSnapshot
+        duck(
+          "INSERT INTO qod_branch.tpch1.nation VALUES (2, 'IT');",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        duck("DROP TABLE lake.tpch1.nation;")
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.conflicts.map(c => (c.table, c.reason)) shouldBe
+            List(("nation", "dropped on main since the fork"))
           cs.mergeable shouldBe false
         finally br.close()
       }

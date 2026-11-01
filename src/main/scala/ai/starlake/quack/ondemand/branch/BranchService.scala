@@ -731,6 +731,15 @@ final class BranchService(
             cs.conflicts.map(c => s"${c.schema}.${c.table} (${c.reason})").mkString("; ")
         )
       )
+    else if cs.tables.exists(_.threeWay) then
+      // Until the row merge replaces the batch: never fast-forward over main's rows.
+      Some(
+        BranchFailure.conflict(
+          "merge_conflict",
+          "main changed since the fork on: " +
+            cs.tables.filter(_.threeWay).map(t => s"${t.schema}.${t.table}").mkString("; ")
+        )
+      )
     else if cs.unsupported.nonEmpty || cs.tables.exists(!_.mergeable) then
       val alt = cs.tables
         .filterNot(_.mergeable)
@@ -738,7 +747,7 @@ final class BranchService(
       Some(
         BranchFailure.unprocessable(
           "merge_unsupported",
-          "not fast-forwardable in v1: " + (alt ++ cs.unsupported).mkString("; ")
+          "cannot be merged: " + (alt ++ cs.unsupported).mkString("; ")
         )
       )
     else if cs.tables.isEmpty then

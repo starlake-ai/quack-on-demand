@@ -61,9 +61,10 @@ object BranchMergeSql:
       fork: Long,
       head: Long
   ): List[String] =
-    if change.shadowsRowid then
+    if change.reservedColumn.nonEmpty then
       throw new IllegalArgumentException(
-        s"table ${change.schema}.${change.table} has a column named rowid and is not mergeable"
+        s"table ${change.schema}.${change.table} has a column named " +
+          s"${change.reservedColumn.get} and is not mergeable"
       )
     val target = s"${q(parentAlias)}.${q(change.schema)}.${q(change.table)}"
     val source =

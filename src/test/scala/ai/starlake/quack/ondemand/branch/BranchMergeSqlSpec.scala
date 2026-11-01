@@ -84,7 +84,7 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
     an[IllegalArgumentException] should be thrownBy BranchMergeSql.batch(
       "p",
       "b",
-      List(TableChange("s", "t", ChangeKind.Modified, shadowsRowid = true)),
+      List(TableChange("s", "t", ChangeKind.Modified, reservedColumn = Some("rowid"))),
       1L,
       2L,
       "a",

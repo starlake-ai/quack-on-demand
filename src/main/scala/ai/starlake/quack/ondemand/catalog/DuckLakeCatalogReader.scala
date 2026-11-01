@@ -1120,9 +1120,10 @@ object DuckLakeCatalogReader:
   /** `changes_made` verbs that are real engine output but intentionally NOT table-history events:
     * `created_schema` is a schema-level event; `inline_flush` is the flush of inlined INSERTs
     * (maintenance noise - the flush of an inlined DELETE emits `deleted_from_table` instead, which
-    * IS classified). Verified identical on DuckDB 1.5.4 and 1.5.5.
+    * IS classified); `rewrite_delete` is a compaction that keeps every row. Verified identical on
+    * DuckDB 1.5.4 and 1.5.5; `rewrite_delete` seen on 2.0.0.
     */
-  val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush")
+  val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush", "rewrite_delete")
 
   /** Build a reader from a resolved metastore map (the same shape
     * `PoolSupervisor.metastoreFor(tenant)` produces).

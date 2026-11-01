@@ -466,7 +466,8 @@ trait ControlPlaneStore:
   /** Merge rows of a branch, newest first. */
   def listBranchMerges(branchId: String): List[BranchMerge]
 
-  /** Replace the mutable columns (status, approver, mainSnapshotAfter, tagName, error, decidedAt).
+  /** Replace the mutable columns (status, approver, mainSnapshotAfter, tagName, error, decidedAt,
+    * holdWriters, attempts).
     */
   def updateBranchMerge(m: BranchMerge): Option[BranchMerge]
 

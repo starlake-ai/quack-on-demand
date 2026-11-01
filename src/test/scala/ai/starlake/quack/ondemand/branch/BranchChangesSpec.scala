@@ -95,8 +95,8 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
       )
     )
     val (tables, _) = BranchChanges.classify(fake, fork, 11L)
-    tables.map(t => (t.table, t.kind, t.shadowsRowid, t.mergeable)) shouldBe
-      List(("region", ChangeKind.Modified, true, false))
+    tables.map(t => (t.table, t.kind, t.reservedColumn, t.mergeable)) shouldBe
+      List(("region", ChangeKind.Modified, Some("rowid"), false))
     tables.head.reason.get should include("column named rowid")
     // A table without one stays mergeable.
     val plain = new Fake(11L, List(region), List((11L, "inlined_insert:2")))
@@ -129,7 +129,7 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
     unsupported shouldBe List("""created_view:"tpch1"."v1"""")
   }
 
-  "conflicts" should "intersect by name and flag a dropped schema" in {
+  "conflicts" should "leave rows changed on both sides to the row merge and flag a dropped schema" in {
     val branchTables = List(
       TableChange("tpch1", "region", ChangeKind.Modified),
       TableChange("tpch1", "nation", ChangeKind.Modified),
@@ -139,14 +139,182 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
       head = 14L,
       versions = List(region, nation),
       changes = List(
-        (11L, "inlined_insert:2"),                    // touches region
+        (11L, "inlined_insert:2"),                    // touches region: a row merge, no conflict
         (12L, "inline_flush:3,deleted_from_table:3"), // flush of nation: not a touch
         (13L, """dropped_schema:"s2""""),
         (14L, """created_schema:"s3"""")
       )
     )
-    BranchChanges.conflicts(branchTables, main, fork).map(c => (c.schema, c.table)) shouldBe
-      List(("tpch1", "region"), ("s2", "t"))
+    BranchChanges
+      .conflicts(branchTables, main, fork)
+      .map(c => (c.schema, c.table, c.reason)) shouldBe
+      List(("s2", "t", "schema 's2' was dropped on main"))
+  }
+
+  it should "flag a schema change, a drop, a recreate or a same-name create on main" in {
+    val ghost    = TableVersion(4L, "tpch1", "ghost", 3L, Some(12L))
+    val ghostNew = TableVersion(9L, "tpch1", "ghost", 12L, None)
+    val created  = TableVersion(8L, "tpch1", "extra", 13L, None)
+    val main     = new Fake(
+      head = 14L,
+      versions = List(region, nation.copy(end = Some(11L)), ghost, ghostNew, created),
+      changes = List(
+        (11L, "dropped_table:3"),
+        (12L, """dropped_table:4,created_table:"tpch1"."ghost""""),
+        (13L, """created_table:"tpch1"."extra""""),
+        (14L, "altered_table:2")
+      ),
+      columns = Map((2L, 14L) -> List(col("x"), col("y")))
+    )
+    val branchTables = List(
+      TableChange("tpch1", "extra", ChangeKind.Created),
+      TableChange("tpch1", "ghost", ChangeKind.Modified),
+      TableChange("tpch1", "nation", ChangeKind.Modified),
+      TableChange("tpch1", "region", ChangeKind.Modified)
+    )
+    BranchChanges.conflicts(branchTables, main, fork).map(c => (c.table, c.reason)) shouldBe List(
+      ("extra", "also created on main since the fork"),
+      ("ghost", "recreated on main since the fork"),
+      ("nation", "dropped on main since the fork"),
+      ("region", "schema changed on main since the fork")
+    )
+  }
+
+  it should "flag a branch drop, recreate or schema change against rows main changed" in {
+    val main = new Fake(14L, List(region, nation), List((11L, "inlined_insert:2,inlined_insert:3")))
+    val branchTables = List(
+      TableChange("tpch1", "nation", ChangeKind.Dropped),
+      TableChange("tpch1", "region", ChangeKind.Altered)
+    )
+    BranchChanges.conflicts(branchTables, main, fork).map(c => (c.table, c.reason)) shouldBe List(
+      ("nation", "changed on main since the fork"),
+      ("region", "changed on main since the fork")
+    )
+  }
+
+  "compute" should "mark a table both sides changed as three-way, with no conflict" in {
+    val branch = new Fake(12L, List(region), List((11L, "inlined_insert:2")))
+    val main   = new Fake(15L, List(region), List((13L, "inlined_delete:2")))
+    val cs     = BranchChanges.compute(branch, main, fork)
+    cs.conflicts shouldBe Nil
+    cs.tables.map(t => (t.table, t.kind, t.threeWay, t.tableId)) shouldBe
+      List(("region", ChangeKind.Modified, true, Some(2L)))
+    cs.mergeable shouldBe true
+  }
+
+  it should "report a table main renamed as a conflict, under the name the branch changed" in {
+    val branch = new Fake(12L, List(region), List((11L, "inlined_insert:2")))
+    val main   = new Fake(
+      15L,
+      List(
+        TableVersion(2L, "tpch1", "region", 1L, Some(13L)),
+        TableVersion(2L, "tpch1", "region2", 13L, None)
+      ),
+      List((13L, "altered_table:2"))
+    )
+    val cs = BranchChanges.compute(branch, main, fork)
+    cs.conflicts.map(c => (c.table, c.reason)) shouldBe
+      List(("region", "schema changed on main since the fork"))
+    cs.tables.map(_.threeWay) shouldBe List(false)
+  }
+
+  it should "leave a table only the branch changed as a plain row merge" in {
+    val branch = new Fake(12L, List(region), List((11L, "inlined_insert:2")))
+    val main   = new Fake(15L, List(region, nation), List((13L, "inlined_delete:3")))
+    BranchChanges.compute(branch, main, fork).tables.map(_.threeWay) shouldBe List(false)
+  }
+
+  it should "give a created table no id and a dropped table its id at the fork" in {
+    val extra   = TableVersion(4L, "tpch1", "extra", 12L, None)
+    val dropped = nation.copy(end = Some(13L))
+    val branch  = new Fake(
+      13L,
+      List(extra, dropped),
+      List((12L, """created_table:"tpch1"."extra""""), (13L, "dropped_table:3"))
+    )
+    BranchChanges
+      .compute(branch, new Fake(10L, List(nation), Nil), fork)
+      .tables
+      .map(t => (t.table, t.tableId)) shouldBe List(("extra", None), ("nation", Some(3L)))
+  }
+
+  "classify" should "treat a rewrite as maintenance, never a touch" in {
+    val fake = new Fake(11L, List(region), List((11L, "rewrite_delete:2")))
+    BranchChanges.classify(fake, fork, 11L)._1 shouldBe Nil
+  }
+
+  it should "refuse a table with a column named snapshot_id, which the change functions rename" in {
+    val fake = new Fake(
+      head = 11L,
+      versions = List(region),
+      changes = List((11L, "inlined_insert:2")),
+      columns = Map(
+        (2L, fork) -> List(col("Snapshot_Id")),
+        (2L, 11L)  -> List(col("Snapshot_Id"))
+      )
+    )
+    val only = BranchChanges.classify(fake, fork, 11L)._1.head
+    only.reservedColumn shouldBe Some("snapshot_id")
+    only.mergeable shouldBe false
+    only.reason.get should include("column named snapshot_id")
+  }
+
+  private def entries(changes: (Long, String)*) = BranchChanges.parseEntries(changes.toList)
+
+  "readRanges" should "cover every snapshot after the fork except the table's own maintenance" in {
+    val es = entries(
+      (11L, "inserted_into_table:2"),
+      (12L, "rewrite_delete:2"),
+      (13L, "deleted_from_table:2,inline_flush:2"),
+      (14L, "rewrite_delete:3"), // another table's maintenance: read through it
+      (15L, "inlined_insert:2")
+    )
+    BranchChanges.readRanges(es, 2L, 10L, 15L) shouldBe
+      Right(List(SnapshotRange(11L, 11L), SnapshotRange(14L, 15L)))
+  }
+
+  it should "be empty when the side has no commits since the fork" in {
+    BranchChanges.readRanges(Nil, 2L, 10L, 10L) shouldBe Right(Nil)
+  }
+
+  it should "stop at head and ignore later snapshots" in {
+    val es = entries((11L, "inserted_into_table:2"), (12L, "rewrite_delete:2"))
+    BranchChanges.readRanges(es, 2L, 10L, 11L) shouldBe Right(List(SnapshotRange(11L, 11L)))
+  }
+
+  it should "refuse a snapshot mixing maintenance and data on the table" in {
+    BranchChanges.readRanges(
+      entries((11L, "rewrite_delete:2,inserted_into_table:2")),
+      2L,
+      10L,
+      11L
+    ) shouldBe
+      Left(List(11L))
+    BranchChanges.readRanges(
+      entries((11L, "inline_flush:2,inlined_insert:2")),
+      2L,
+      10L,
+      11L
+    ) shouldBe
+      Left(List(11L))
+    // On another table it does not matter.
+    BranchChanges.readRanges(
+      entries((11L, "rewrite_delete:3,inserted_into_table:3")),
+      2L,
+      10L,
+      11L
+    ) shouldBe
+      Right(List(SnapshotRange(11L, 11L)))
+  }
+
+  "historyGap" should "find the first missing snapshot since the fork" in {
+    BranchChanges.historyGap(List((11L, ""), (12L, ""), (13L, "")), 10L, 13L) shouldBe None
+    BranchChanges.historyGap(List((11L, ""), (13L, "")), 10L, 13L) shouldBe Some(12L)
+    BranchChanges.historyGap(List((12L, ""), (13L, "")), 10L, 13L) shouldBe Some(11L)
+    BranchChanges.historyGap(List((11L, "")), 10L, 13L) shouldBe Some(12L)
+    BranchChanges.historyGap(Nil, 10L, 10L) shouldBe None
+    // A snapshot past head is not part of the question.
+    BranchChanges.historyGap(List((11L, ""), (15L, "")), 10L, 11L) shouldBe None
   }
 
   "compute" should "carry fork, head and main snapshot ids" in {
