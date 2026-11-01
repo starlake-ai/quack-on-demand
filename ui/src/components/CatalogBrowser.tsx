@@ -399,6 +399,7 @@ function RecentlyDropped({
       // Pin the picked version: the handler CTAS-reads AT (VERSION => fromSnapshot),
       // so an older drop of a multiply-dropped name recovers that state.
       fromSnapshot: entry.lastLiveSnapshot,
+      tableId: entry.tableId,
     })
       .then(() => {
         setUndropTarget(null);

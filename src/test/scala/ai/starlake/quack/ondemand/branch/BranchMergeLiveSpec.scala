@@ -100,6 +100,117 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
       }
     }
 
+  it should "refuse to commit when the branch moved after validation, leaving main unchanged" in
+    withCatalog("brmoved", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = BranchCloner(parentMeta)
+          .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
+          .toOption
+          .get
+          .forkSnapshot
+        duck(
+          "UPDATE qod_branch.tpch1.region SET r_name = 'VALIDATED' WHERE r_regionkey = 2;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.mergeable shouldBe true
+          // A branch write AFTER validation: the merge must not commit it, nor drop it silently.
+          duck(
+            "UPDATE qod_branch.tpch1.region SET r_name = 'LATER' WHERE r_regionkey = 2;",
+            Some(branchDb),
+            Some(branchDir)
+          )
+          val message = BranchMergeSql.commitMessage("feature", "mg-moved", "alice")
+          val sql     = BranchMergeSql.batch(
+            "lake",
+            BranchMergeSql.BranchAlias,
+            cs.tables,
+            fork,
+            cs.headSnapshot,
+            BranchMergeSql.author("acme", "bob"),
+            message
+          )
+          val out = duckAttempt(sql, Some(branchDb), Some(branchDir))
+          out shouldBe a[Left[?, ?]]
+          out.left.toOption.get should include("branch moved past snapshot")
+          parent.snapshotByCommitMessage(message) shouldBe None
+          duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
+            List("ASIA")
+        finally br.close()
+      }
+    }
+
+  it should "read the branch at the validated head, whatever it holds now" in
+    withCatalog("brpinned", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = BranchCloner(parentMeta)
+          .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
+          .toOption
+          .get
+          .forkSnapshot
+        duck(
+          "UPDATE qod_branch.tpch1.region SET r_name = 'VALIDATED' WHERE r_regionkey = 2;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          duck(
+            "UPDATE qod_branch.tpch1.region SET r_name = 'LATER' WHERE r_regionkey = 2;",
+            Some(branchDb),
+            Some(branchDir)
+          )
+          // The batch's own statements past its head guard, run against the moved branch: the
+          // pinned reads still see the validated row.
+          val body = cs.tables.flatMap(
+            BranchMergeSql.tableStatements(
+              "lake",
+              BranchMergeSql.BranchAlias,
+              _,
+              fork,
+              cs.headSnapshot
+            )
+          )
+          duck(body.mkString("BEGIN;\n", ";\n", ";\nCOMMIT;"), Some(branchDb), Some(branchDir))
+          duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
+            List("VALIDATED")
+        finally br.close()
+      }
+    }
+
+  it should "mark a table with its own rowid column not mergeable" in
+    withCatalog(
+      "brrowid",
+      """CREATE TABLE lake.tpch1.keyed (rowid BIGINT, v VARCHAR);
+        |INSERT INTO lake.tpch1.keyed VALUES (100, 'a'), (200, 'b');
+        |CALL ducklake_flush_inlined_data('lake');
+        |""".stripMargin
+    ) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = BranchCloner(parentMeta)
+          .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
+          .toOption
+          .get
+          .forkSnapshot
+        duck(
+          "UPDATE qod_branch.tpch1.keyed SET v = 'B' WHERE v = 'b';",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.tables.map(t => (t.table, t.kind, t.shadowsRowid)) shouldBe
+            List(("keyed", ChangeKind.Modified, true))
+          cs.mergeable shouldBe false
+        finally br.close()
+      }
+    }
+
   it should "report a conflict when main touched a branch table after the fork" in
     withCatalog("brconf", extra) { (parent, _) =>
       withBranchDb { (branchDb, branchDir) =>
@@ -256,4 +367,51 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
           PostgresMergeFence.disarm(parentMeta, "other")
         finally br.close()
       }
+    }
+
+  // ---- TableCommitFence: a restore's replace held to the table state it validated ----
+
+  private def restoreBatch(message: String, to: Long): String =
+    List(
+      "BEGIN",
+      s"CALL ducklake_set_commit_message('lake', 'tenant:acme/user:bob', '$message')",
+      s"CREATE OR REPLACE TABLE lake.tpch1.region AS SELECT * FROM lake.tpch1.region AT (VERSION => $to)",
+      "COMMIT"
+    ).mkString("", ";\n", ";")
+
+  "TableCommitFence" should "refuse a replace when a row landed in its table after validation" in
+    withCatalog("tfence1", extra) { (parent, _) =>
+      val (tableId, _) = parent.currentTableInfo("tpch1", "region").get
+      val to           = parent.maxSnapshotId().get
+      duck("INSERT INTO lake.tpch1.region VALUES (5, 'BEFORE', 'x');")
+      val base = parent.latestTableSnapshot("tpch1", "region").get
+      // Validated at `base`; another client then commits a row before the replace commits.
+      val message = "restore tpch1.region [live-1]"
+      PostgresMergeFence.arm(parentMeta, message, base, tableId) shouldBe Right(())
+      try
+        duck("INSERT INTO lake.tpch1.region VALUES (6, 'CONCURRENT', 'y');")
+        val out = duckAttempt(restoreBatch(message, to))
+        out shouldBe a[Left[?, ?]]
+        out.left.toOption.get should include("conflict")
+      finally PostgresMergeFence.disarm(parentMeta, message)
+      parent.snapshotByCommitMessage(message) shouldBe None
+      duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 6;") shouldBe
+        List("CONCURRENT")
+    }
+
+  it should "let the replace commit when only other tables moved" in
+    withCatalog("tfence2", extra) { (parent, _) =>
+      val (tableId, _) = parent.currentTableInfo("tpch1", "region").get
+      val to           = parent.maxSnapshotId().get
+      duck("INSERT INTO lake.tpch1.region VALUES (5, 'UNDONE', 'x');")
+      val base    = parent.latestTableSnapshot("tpch1", "region").get
+      val message = "restore tpch1.region [live-2]"
+      PostgresMergeFence.arm(parentMeta, message, base, tableId) shouldBe Right(())
+      try
+        duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');")
+        duck(restoreBatch(message, to))
+      finally PostgresMergeFence.disarm(parentMeta, message)
+      parent.snapshotByCommitMessage(message).isDefined shouldBe true
+      duck("SELECT count(*) FROM lake.tpch1.region WHERE r_regionkey = 5;") shouldBe List("0")
+      duck("SELECT n_name FROM lake.tpch1.nation ORDER BY 1;") shouldBe List("DE", "FR", "IT")
     }

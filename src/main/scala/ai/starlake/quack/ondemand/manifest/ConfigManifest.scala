@@ -100,7 +100,11 @@ final case class ManifestTenantDb(
     // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
     // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
     // (InitSqlTrust.onImport).
-    initSqlTrusted: Option[Boolean] = None
+    initSqlTrusted: Option[Boolean] = None,
+    // The parent tenant-db's name when this database is a branch catalog (TenantDb.branchOf): a
+    // branch shares its parent's files, so it is never maintained. Absent on import keeps a stored
+    // row's own value (a manifest exported before the field turns no branch into a plain database).
+    branchOf: Option[String] = None
 )
 
 final case class ManifestPool(
@@ -252,7 +256,10 @@ final case class ManifestGroup(
     tenant: String,
     name: String,
     description: Option[String] = None,
-    roles: List[String] = Nil
+    roles: List[String] = Nil,
+    // The group's pool permissions, replaced as a whole on import like a user's `poolGrants`.
+    // Always inside the group's own tenant; `pool` absent means every pool of the tenant.
+    poolGrants: List[ManifestPoolGrant] = Nil
 )
 
 /** `tenant` is an optional qualifier naming the tenant the granted pool actually lives in. Absent

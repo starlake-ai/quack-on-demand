@@ -1714,7 +1714,9 @@ object Main extends IOApp with LazyLogging:
               // and the REST preview family share this closure and are not distinguishable from
               // each other, but metering and audit must not move just because OPA needs a tag.
               // Only the OPA input's client.edge is set to "mcp" here.
-              edge = "mcp"
+              edge = "mcp",
+              // A handler's own commit message for its write (undrop), else the verb's.
+              commitMessage = caller.commitMessage
             )
         )(recordExecution)
 
@@ -1867,8 +1869,15 @@ object Main extends IOApp with LazyLogging:
           restCaller,
           audit = auditRecorder,
           // UNDROP TABLE's CTAS, as the session itself: its own effective set, claims included.
-          sessionExecutor = (connectionId, user, poolKey, sql, eff) =>
-            fsRouter.executeOneShot(connectionId, user, poolKey, sql, eff)
+          sessionExecutor = (connectionId, user, poolKey, sql, eff, commitMessage) =>
+            fsRouter.executeOneShot(
+              connectionId,
+              user,
+              poolKey,
+              sql,
+              eff,
+              commitMessage = Some(commitMessage)
+            )
         )
       )
       undropHandlers.foreach(h => undropStatement.set(h.undropStatement))
@@ -1882,6 +1891,7 @@ object Main extends IOApp with LazyLogging:
           catalogReader,
           mgrCfg.catalog,
           restCaller,
+          fence = ai.starlake.quack.ondemand.branch.PostgresMergeFence,
           catalogAlias = (t, td) => TenantDb.catalogAlias(sup.effectiveMetastoreFor(t, td), td),
           audit = auditRecorder
         )

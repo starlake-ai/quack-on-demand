@@ -10077,6 +10077,9 @@ components:
           type: string
         asName:
           type: string
+        tableId:
+          type: integer
+          format: int64
     RdbmsConfig:
       title: RdbmsConfig
       type: object
@@ -11186,6 +11189,9 @@ components:
         asName:
           type: string
         fromSnapshot:
+          type: integer
+          format: int64
+        tableId:
           type: integer
           format: int64
     UndropResponse:

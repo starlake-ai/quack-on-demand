@@ -65,3 +65,24 @@ class DuckLakeCatalogReaderDroppedSpec extends AnyFlatSpec with Matchers with Po
       // ASCII letters compare without case.
       reader.findDroppedTable("TPCH1", "ascii_case").map(_.table) shouldBe Some("Ascii_Case")
     }
+
+  private val twice =
+    s"""CREATE TABLE lake.tpch1.twice (v VARCHAR);
+       |INSERT INTO lake.tpch1.twice VALUES ('old');
+       |DROP TABLE lake.tpch1.twice;
+       |CREATE TABLE lake.tpch1.twice (v VARCHAR);
+       |INSERT INTO lake.tpch1.twice VALUES ('new');
+       |DROP TABLE lake.tpch1.twice;
+       |""".stripMargin
+
+  "findDroppedTableById" should "resolve the older drop of a name dropped twice" in
+    withCatalog("undrop-twice", extraSql = twice) { (reader, _) =>
+      val drops = reader.listDroppedTables().filter(_.table == "twice")
+      drops.map(_.tableId).distinct.size shouldBe 2
+      val newest = reader.findDroppedTable("tpch1", "twice").get
+      val older  = drops.find(_.tableId != newest.tableId).get
+      older.lastLiveSnapshot should be < newest.lastLiveSnapshot
+      reader.findDroppedTableById("tpch1", "TWICE", older.tableId) shouldBe Some(older)
+      reader.findDroppedTableById("tpch1", "twice", newest.tableId) shouldBe Some(newest)
+      reader.findDroppedTableById("tpch1", "other", older.tableId) shouldBe empty
+    }

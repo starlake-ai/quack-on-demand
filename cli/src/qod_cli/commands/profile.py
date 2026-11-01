@@ -44,7 +44,13 @@ def recoverable(
 @covers(
     "POST",
     "/api/profile/undrop",
-    {"tenantDb": "--db", "schema": "--schema", "table": "--table", "asName": "--as-name"},
+    {
+        "tenantDb": "--db",
+        "schema": "--schema",
+        "table": "--table",
+        "asName": "--as-name",
+        "tableId": "--table-id",
+    },
 )
 def undrop(
     ctx: typer.Context,
@@ -52,11 +58,18 @@ def undrop(
     schema: str = typer.Option(..., "--schema"),
     table: str = typer.Option(..., "--table"),
     as_name: str = typer.Option(None, "--as-name", help="Recover under a different name."),
+    table_id: int = typer.Option(
+        None,
+        "--table-id",
+        help="Which drop to recover when the name was dropped more than once (the tableId recoverable lists; default: the newest).",
+    ),
 ):
     """Recover a dropped table of your own database, as you (needs a read grant on its last name and DDL in the schema)."""
     body: dict = {"tenantDb": db, "schema": schema, "table": table}
     if as_name is not None:
         body["asName"] = as_name
+    if table_id is not None:
+        body["tableId"] = table_id
     call(ctx, "POST", "/api/profile/undrop", body=body)
 
 

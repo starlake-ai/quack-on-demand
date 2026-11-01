@@ -48,7 +48,7 @@ export function RecoverTablesSection() {
     setNotice('');
     setBusy(true);
     try {
-      const r = await api.profileUndrop(undropRequest(database, t.schema, t.table, newNames[key(t)] ?? ''));
+      const r = await api.profileUndrop(undropRequest(database, t.schema, t.table, newNames[key(t)] ?? '', t.tableId));
       setNotice(`${r.schema}.${r.table} recovered as ${r.schema}.${r.restoredAs}.`);
       setNewNames(n => ({ ...n, [key(t)]: '' }));
       await reload(database);

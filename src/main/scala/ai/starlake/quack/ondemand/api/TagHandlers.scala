@@ -63,37 +63,51 @@ final class TagHandlers(
           case Some(msg) => err(StatusCode.BadRequest, "invalid_name", msg)
           case None      =>
             val name = req.name.trim
-            if !snapshotExists(tid, db, req.snapshotId) then
-              err(StatusCode.NotFound, "not_found", s"snapshot ${req.snapshotId} not found")
-            else
-              store.createSnapshotTag(
-                SnapshotTag(
-                  Names.newSurrogateId("stag"),
-                  tid,
-                  db,
-                  name,
-                  req.snapshotId,
-                  isProtected = req.isProtected
-                )
-              ) match
-                case Left(_) =>
-                  err(StatusCode.Conflict, "duplicate", s"tag '$name' already exists")
-                case Right(t) =>
-                  val action =
-                    if t.isProtected then AuditActions.TagHoldCreate else AuditActions.TagCreate
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
-                    action,
-                    "ok",
-                    tenant = Some(tid),
-                    target = Some(name),
-                    detail = Map(
-                      "snapshotId" -> t.snapshotId.toString,
-                      "protected"  -> t.isProtected.toString
+            // A protected tag holds the database's snapshot-pin lock from the existence check
+            // through the insert, as maintenance's expiry does from reading the pins through its
+            // expire call: the snapshot is then either found and kept, or already gone and refused.
+            val created =
+              val lock =
+                if req.isProtected then Some(store.lockSnapshotPins(tid, db)) else None
+              try
+                if !snapshotExists(tid, db, req.snapshotId) then None
+                else
+                  Some(
+                    store.createSnapshotTag(
+                      SnapshotTag(
+                        Names.newSurrogateId("stag"),
+                        tid,
+                        db,
+                        name,
+                        req.snapshotId,
+                        isProtected = req.isProtected
+                      )
                     )
                   )
-                  Right(toEntry(t, exists = true))
+              finally lock.foreach(_.close())
+            created match
+              case None =>
+                err(StatusCode.NotFound, "not_found", s"snapshot ${req.snapshotId} not found")
+              case Some(outcome) =>
+                outcome match
+                  case Left(_) =>
+                    err(StatusCode.Conflict, "duplicate", s"tag '$name' already exists")
+                  case Right(t) =>
+                    val action =
+                      if t.isProtected then AuditActions.TagHoldCreate else AuditActions.TagCreate
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      action,
+                      "ok",
+                      tenant = Some(tid),
+                      target = Some(name),
+                      detail = Map(
+                        "snapshotId" -> t.snapshotId.toString,
+                        "protected"  -> t.isProtected.toString
+                      )
+                    )
+                    Right(toEntry(t, exists = true))
   }
 
   def delete(req: TagDeleteRequest, apiKey: Option[String])(
@@ -137,9 +151,18 @@ final class TagHandlers(
         )
         Left(e)
       case Right((tid, db)) =>
-        store.setSnapshotTagProtected(tid, db, req.name.trim, req.isProtected) match
-          case None    => err(StatusCode.NotFound, "not_found", s"tag '${req.name}' not found")
-          case Some(t) =>
+        // Protecting takes the snapshot-pin lock, as a protected create does: an expiry running
+        // now has either finished (the answer shows the snapshot gone) or sees the new pin.
+        val updated =
+          val lock = if req.isProtected then Some(store.lockSnapshotPins(tid, db)) else None
+          try
+            store
+              .setSnapshotTagProtected(tid, db, req.name.trim, req.isProtected)
+              .map(t => (t, snapshotExists(tid, db, t.snapshotId)))
+          finally lock.foreach(_.close())
+        updated match
+          case None => err(StatusCode.NotFound, "not_found", s"tag '${req.name}' not found")
+          case Some((t, exists)) =>
             val action =
               if req.isProtected then AuditActions.TagHoldCreate else AuditActions.TagHoldRemove
             audit.rest(
@@ -154,7 +177,7 @@ final class TagHandlers(
                 "protected"  -> t.isProtected.toString
               )
             )
-            Right(toEntry(t, snapshotExists(tid, db, t.snapshotId)))
+            Right(toEntry(t, exists))
   }
 
   def list(rawTenant: String, tenantDb: String, apiKey: Option[String])(

@@ -2470,17 +2470,20 @@ abstract class AuthzEndToEndCases(
     allowed("bob", "lake", s"SELECT id FROM $lake.main.ud_case_back", Some(List("8")))
   }
 
-  "UNDROP TABLE inside a transaction" should "be refused (review M5)" in {
+  "UNDROP TABLE inside a transaction" should "be out of reach over FlightSQL, which opens none across requests (review M5)" in {
     ready()
     admin("lake", s"CREATE TABLE $lake.main.ud_tx (id INTEGER)")
     admin("lake", s"DROP TABLE $lake.main.ud_tx")
     val held = stack.heldFlight("bob", BobPw, Acme, "lake")
     try
-      held.run("BEGIN TRANSACTION") shouldBe a[Right[?, ?]]
-      held.run("UNDROP TABLE main.ud_tx") match
-        case Left(err) => err should include("cannot run inside a transaction")
-        case Right(r)  => fail(s"UNDROP ran inside a transaction: $r")
-      held.run("ROLLBACK")
+      // Each FlightSQL request runs on a node connection of its own: a BEGIN that would hold a
+      // transaction across requests is refused, so no later UNDROP runs "inside" one.
+      held.run("BEGIN TRANSACTION") match
+        case Left(err) => err should include("opens a transaction it does not end")
+        case Right(r)  => fail(s"a FlightSQL BEGIN was admitted: $r")
+      held.run("ROLLBACK") match
+        case Left(err) => err should include("ends a transaction it did not open")
+        case Right(r)  => fail(s"a FlightSQL ROLLBACK was admitted: $r")
     finally held.close()
   }
 

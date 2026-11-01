@@ -34,6 +34,11 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * `McpDataTools.callerFor` run a session or a PAT as its user, through the handshake gate.
   * `identity` is a label for logs and history; user names are not reserved (a tenant may have a
   * user called "superuser"), so nothing may decide privilege from it.
+  *
+  * `commitMessage` is the DuckLake commit message the router stamps this caller's write with in
+  * place of `flightsql <verb>` (the author stays the caller's). It grants and decides nothing: a
+  * handler sets it on its own write so it can find that commit afterwards by its unique message,
+  * when the answer was lost (undrop). No credential sets it, and it never travels in client SQL.
   */
 final case class ExecCaller(
     connectionId: String,
@@ -41,7 +46,8 @@ final case class ExecCaller(
     restriction: TokenRestriction,
     superuserAdmissible: Boolean,
     patId: Option[String] = None,
-    system: Boolean = false
+    system: Boolean = false,
+    commitMessage: Option[String] = None
 ):
   /** The row cap actually applied: the server cap, the token's cap and the request's, smallest
     * wins. A token can lower the cap and can never raise it.

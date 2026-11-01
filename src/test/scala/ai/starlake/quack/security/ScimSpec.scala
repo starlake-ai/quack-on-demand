@@ -361,3 +361,138 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
     val r = scim("GET", scimUrl("Users?filter=userName%20co%20%22car%22"))
     r.statusCode() shouldBe 400
     r.body() should include("invalidFilter")
+
+  // ---------------- refused writes change nothing ----------------
+
+  private val GhostId = "u-ghost-not-a-user"
+
+  it should "create no group when a POST names an unknown member" in:
+    val r = scim(
+      "POST",
+      scimUrl("Groups"),
+      Some(s"""{"displayName":"half-made","externalId":"okta-hm",
+               |"members":[{"value":"${fix.bobUserId}"},{"value":"$GhostId"}]}""".stripMargin)
+    )
+    r.statusCode() shouldBe 400
+    fix.store.findGroup(TenantId, "half-made") shouldBe None
+
+  private def groupWithBob(name: String): String =
+    val r = scim(
+      "POST",
+      scimUrl("Groups"),
+      Some(s"""{"displayName":"$name","externalId":"ext-$name",
+               |"members":[{"value":"${fix.bobUserId}"}]}""".stripMargin)
+    )
+    withClue(r.body())(r.statusCode() shouldBe 201)
+    field(r.body(), "id").get
+
+  it should "leave members and externalId alone when a PUT names an unknown member" in:
+    val gid = groupWithBob("put-atomic")
+    val r   = scim(
+      "PUT",
+      scimUrl(s"Groups/$gid"),
+      Some(s"""{"displayName":"put-atomic","externalId":"changed",
+               |"members":[{"value":"${fix.aliceUserId}"},{"value":"$GhostId"}]}""".stripMargin)
+    )
+    r.statusCode() shouldBe 400
+    fix.store.listUsersInGroup(gid) shouldBe List(fix.bobUserId)
+    field(scim("GET", scimUrl(s"Groups/$gid")).body(), "externalId") shouldBe Some("ext-put-atomic")
+
+  it should "apply none of a PATCH's operations when a later one is refused" in:
+    val gid = groupWithBob("patch-atomic")
+    val r   = scim(
+      "PATCH",
+      scimUrl(s"Groups/$gid"),
+      Some(s"""{"Operations":[
+               |{"op":"replace","path":"externalId","value":"changed"},
+               |{"op":"remove","path":"members[value eq \\"${fix.bobUserId}\\"]"},
+               |{"op":"add","path":"members","value":[{"value":"$GhostId"}]}]}""".stripMargin)
+    )
+    r.statusCode() shouldBe 400
+    fix.store.listUsersInGroup(gid) shouldBe List(fix.bobUserId)
+    field(scim("GET", scimUrl(s"Groups/$gid")).body(), "externalId") shouldBe
+      Some("ext-patch-atomic")
+
+  // ---------------- PATCH without a path ----------------
+
+  it should "replace the member set on a pathless PATCH replace" in:
+    val gid = groupWithBob("pathless")
+    val r   = scim(
+      "PATCH",
+      scimUrl(s"Groups/$gid"),
+      Some(s"""{"Operations":[{"op":"replace","value":
+               |{"id":"$gid","displayName":"pathless",
+               |"members":[{"value":"${fix.aliceUserId}"}]}}]}""".stripMargin)
+    )
+    withClue(r.body())(r.statusCode() shouldBe 200)
+    fix.store.listUsersInGroup(gid) shouldBe List(fix.aliceUserId)
+
+  it should "add members on a pathless PATCH add" in:
+    val gid = groupWithBob("pathless-add")
+    val r   = scim(
+      "PATCH",
+      scimUrl(s"Groups/$gid"),
+      Some(s"""{"Operations":[{"op":"add","value":
+               |{"members":[{"value":"${fix.aliceUserId}"}]}}]}""".stripMargin)
+    )
+    withClue(r.body())(r.statusCode() shouldBe 200)
+    fix.store.listUsersInGroup(gid).toSet shouldBe Set(fix.bobUserId, fix.aliceUserId)
+
+  it should "refuse a pathless PATCH that renames the group or removes without a target" in:
+    val gid = groupWithBob("pathless-refused")
+    scim(
+      "PATCH",
+      scimUrl(s"Groups/$gid"),
+      Some("""{"Operations":[{"op":"replace","value":{"displayName":"renamed"}}]}""")
+    ).statusCode() shouldBe 400
+    val rm = scim(
+      "PATCH",
+      scimUrl(s"Groups/$gid"),
+      Some(
+        s"""{"Operations":[{"op":"remove","value":{"members":[{"value":"${fix.bobUserId}"}]}}]}"""
+      )
+    )
+    rm.statusCode() shouldBe 400
+    rm.body() should include("noTarget")
+    fix.store.listUsersInGroup(gid) shouldBe List(fix.bobUserId)
+
+  // ---------------- emails ----------------
+
+  private def scimUser(name: String): String =
+    val r = scim(
+      "POST",
+      scimUrl("Users"),
+      Some(s"""{"userName":"$name","emails":[{"value":"$name@old.example","primary":true}]}""")
+    )
+    withClue(r.body())(r.statusCode() shouldBe 201)
+    // Harness artifact (see the deactivate case): seed the control-plane hash the update needs.
+    fix.store.upsertUserWithHash(
+      Some(TenantId),
+      name,
+      "$2a$10$seedseedseedseedseedse",
+      "user",
+      email = Some(s"$name@old.example")
+    )
+    fix.store.findUser(Some(TenantId), name).map(_.id).get
+
+  it should "update the email from a PATCH carrying the emails array" in:
+    val uid = scimUser("erin")
+    val r   = scim(
+      "PATCH",
+      scimUrl(s"Users/$uid"),
+      Some("""{"Operations":[{"op":"replace","path":"emails","value":
+             |[{"value":"erin@new.example","type":"work","primary":"True"}]}]}""".stripMargin)
+    )
+    withClue(r.body())(r.statusCode() shouldBe 200)
+    fix.store.findUser(Some(TenantId), "erin").flatMap(_.email) shouldBe Some("erin@new.example")
+
+  it should "update the email from a PATCH carrying one email object" in:
+    val uid = scimUser("frank")
+    val r   = scim(
+      "PATCH",
+      scimUrl(s"Users/$uid"),
+      Some("""{"Operations":[{"op":"replace","path":"emails","value":
+             |{"value":"frank@new.example","primary":true}}]}""".stripMargin)
+    )
+    withClue(r.body())(r.statusCode() shouldBe 200)
+    fix.store.findUser(Some(TenantId), "frank").flatMap(_.email) shouldBe Some("frank@new.example")

@@ -140,11 +140,27 @@ def _parse_tables(tables: list[str]) -> list[tuple[str, str]]:
     return out
 
 
+def _claim_view_name(seen: dict[str, str], view_name: str, source: str, what: str) -> None:
+    """Refuse a second source for one view name: every view is CREATE OR REPLACE, so the
+    later one would silently hide the earlier. Sanitizing folds case and punctuation, so
+    `sales-2026.csv`, `sales_2026.csv` and `Sales_2026.parquet` all claim one name."""
+    earlier = seen.get(view_name)
+    if earlier is not None:
+        raise TargetError(
+            f"{what} {earlier!r} and {source!r} both become view {_sql_ident(view_name)}, so "
+            "one would hide the other; rename one of them"
+        )
+    seen[view_name] = source
+
+
 def _table_views(tables: list[str]) -> list[str]:
-    return [
-        _view(require_valid_name(sanitize_name(n), n), "read_parquet", g, True)
-        for n, g in _parse_tables(tables)
-    ]
+    seen: dict[str, str] = {}
+    stmts: list[str] = []
+    for n, g in _parse_tables(tables):
+        view_name = require_valid_name(sanitize_name(n), n)
+        _claim_view_name(seen, view_name, n, "--table names")
+        stmts.append(_view(view_name, "read_parquet", g, True))
+    return stmts
 
 
 def _views_for_directory(root: Path) -> list[str]:
@@ -154,6 +170,7 @@ def _views_for_directory(root: Path) -> list[str]:
     _SUCCESS, .DS_Store and friends. An entry whose stem sanitizes to an empty
     name (all-punctuation) is skipped too, rather than emitting `VIEW ""`."""
     stmts: list[str] = []
+    seen: dict[str, str] = {}
     for child in sorted(root.iterdir()):
         if child.name.startswith((".", "_")):
             continue
@@ -164,6 +181,7 @@ def _views_for_directory(root: Path) -> list[str]:
             view_name = sanitize_name(_stem(child.name))
             if not view_name:
                 continue
+            _claim_view_name(seen, view_name, child.name, f"entries of {root}")
             # Local paths are always emitted POSIX-style: the server rejects
             # backslashes in dataPath (TenantDb.DataPathForbiddenChars), and both
             # DuckDB and the JVM accept forward slashes on Windows, so `.as_posix()`
@@ -174,6 +192,7 @@ def _views_for_directory(root: Path) -> list[str]:
             view_name = sanitize_name(child.name)
             if not view_name:
                 continue
+            _claim_view_name(seen, view_name, child.name, f"entries of {root}")
             stmts.append(
                 _view(
                     view_name,
@@ -246,11 +265,30 @@ def _resolve_glob(target: str, name: str | None, object_store: dict) -> ServeTar
     # pattern used to match here MUST be the same absolutized (POSIX-styled)
     # expression that lands in the view, or the node would match nothing.
     pattern = Path(os.path.expanduser(target)).resolve().as_posix()
-    matches = sorted(m for m in _glob.glob(pattern, recursive=True) if _reader_for(m))
+    files = sorted(m for m in _glob.glob(pattern, recursive=True) if os.path.isfile(m))
+    matches = [m for m in files if _reader_for(m)]
     if not matches:
         raise TargetError(
             f"{target} matched no parquet or csv files. Check the pattern, and quote it so "
             "your shell does not expand it first."
+        )
+    # The view hands the WHOLE pattern to one reader, so every file it matches must be
+    # one that reader reads: a stray _SUCCESS or README, or csv beside parquet, would
+    # fail every query on the node instead of here.
+    unreadable = [m for m in files if not _reader_for(m)]
+    if unreadable:
+        raise TargetError(
+            f"{target} also matches {Path(unreadable[0]).name!r}, which is neither parquet "
+            "nor csv; narrow the pattern (for example end it in *.parquet or *.csv)"
+        )
+    by_reader: dict[str, str] = {}
+    for m in matches:
+        by_reader.setdefault(_reader_for(m), Path(m).name)
+    if len(by_reader) > 1:
+        raise TargetError(
+            f"{target} mixes csv and parquet files ({by_reader['read_parquet']!r}, "
+            f"{by_reader['read_csv']!r}); one view reads one format, so serve each with its "
+            "own pattern"
         )
     reader = _reader_for(matches[0])
     db = require_valid_name(name or sanitize_name(_stem(Path(matches[0]).name)), target)

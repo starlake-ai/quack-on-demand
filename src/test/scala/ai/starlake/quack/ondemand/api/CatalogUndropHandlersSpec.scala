@@ -44,6 +44,16 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     root.close()
     new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
 
+  /** A write's result whose stream fails when read to its end: a stamped COMMIT refused there. */
+  private def failingReader(message: String): org.apache.arrow.vector.ipc.ArrowReader =
+    val under = emptyReader()
+    new org.apache.arrow.vector.ipc.ArrowReader(new RootAllocator()):
+      override def loadNextBatch(): Boolean          = throw new java.io.IOException(message)
+      override def getVectorSchemaRoot               = under.getVectorSchemaRoot
+      override def bytesRead(): Long                 = 0L
+      override protected def readSchema(): Schema    = under.getVectorSchemaRoot.getSchema
+      override protected def closeReadSource(): Unit = under.close()
+
   private def stubBackend: QuackBackend =
     StubQuackBackend.noop(portBase = 23000, countingPorts = true)
 
@@ -80,7 +90,9 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       liveTables: Set[(String, String)] = Set.empty,
       limitSink: AtomicInteger = new AtomicInteger(-1),
-      tableExistsAtFn: Option[(String, String, Long) => Boolean] = None
+      tableExistsAtFn: Option[(String, String, Long) => Boolean] = None,
+      // The snapshot a commit message names: none unless a case says this run's commit landed.
+      ownCommit: String => Option[Long] = _ => None
   ): DuckLakeCatalogReader =
     new DuckLakeCatalogReader(null):
       override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
@@ -90,12 +102,26 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         dropped.take(limit)
       override def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
         dropped.find(e => e.schema.equalsIgnoreCase(schema) && e.table.equalsIgnoreCase(table))
+      override def findDroppedTableById(
+          schema: String,
+          table: String,
+          tableId: Long
+      ): Option[DroppedTableEntry] =
+        dropped.find(e =>
+          e.schema.equalsIgnoreCase(schema) && e.table.equalsIgnoreCase(table) &&
+            e.tableId == tableId
+        )
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
         tableExistsAtFn match
           case Some(f) => f(schema, table, snapshotId)
           case None    => liveTables.contains((schema, table))
       override def nameHeldAt(schema: String, name: String, snapshotId: Long): Boolean =
         tableExistsAt(schema, name, snapshotId)
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long] =
+        ownCommit(commitMessage)
+
+  /** The commit message of an undrop of tpch1.doomed under its own name from snapshot 39. */
+  private val DoomedMessage = "undrop tpch1.doomed as tpch1.doomed from snapshot 39 ["
 
   trait Stubs:
     val (sup, store)                  = supervisor()
@@ -105,6 +131,7 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     var seenPoolKey: Option[PoolKey]  = None
     var seenCallers: List[ExecCaller] = Nil
     var seenSession: Option[(String, String, ai.starlake.quack.ondemand.rbac.EffectiveSet)] = None
+    var seenSessionMessage: Option[String]                                                  = None
     var closed                                                                              = false
     var executorResult: IO[Either[RouterFailure, QueryResult]]                              =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
@@ -128,9 +155,10 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         cfgOverride,
         IdentityFixtures.restCaller(sessionsOverride, patsOverride),
         audit = audit,
-        sessionExecutor = (connectionId, user, poolKey, sql, eff) =>
+        sessionExecutor = (connectionId, user, poolKey, sql, eff, message) =>
           seenSql = Some(sql)
           seenSession = Some((connectionId, user, eff))
+          seenSessionMessage = Some(message)
           executorResult
       )
 
@@ -142,11 +170,14 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         table: String = "doomed",
         asName: Option[String] = None,
         fromSnapshot: Option[Long] = None,
-        apiKey: Option[String] = RootKey
+        apiKey: Option[String] = RootKey,
+        tableId: Option[Long] = None
     ) =
-      h.undrop(UndropRequest(tenant, tenantDb, schema, table, asName, fromSnapshot), apiKey)(
-        SuperuserScope
-      ).unsafeRunSync()
+      h.undrop(
+        UndropRequest(tenant, tenantDb, schema, table, asName, fromSnapshot, tableId),
+        apiKey
+      )(SuperuserScope)
+        .unsafeRunSync()
 
   "UNDROP TABLE" should "run its CTAS as the session itself, its claims included (review I3)" in new Stubs:
     val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
@@ -174,6 +205,7 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     seenSession.map(_._1) shouldBe Some("conn-7/undrop")
     seenSession.map(_._3.claims) shouldBe Some(Map("contractor" -> "true"))
     seenCallers shouldBe Nil
+    seenSessionMessage.get should startWith("undrop tpch1.doomed as tpch1.back from snapshot 39 [")
     // Names compare without case (review M6): the stored names are what the CTAS names.
     seenSql shouldBe Some(
       """CREATE TABLE "tpch1"."back" AS SELECT * FROM "tpch1"."doomed" AT (VERSION => 39)"""
@@ -213,6 +245,62 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     )
     closed shouldBe true
 
+  it should "not report success when the CTAS's commit fails while its result is read" in new Stubs:
+    var shut = false
+    executorResult = IO.pure(
+      Right(QueryResult(failingReader("COMMIT failed: boom"), () => shut = true, "node-1", 1L))
+    )
+    val out = undrop(handlers())
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.error shouldBe "undrop_failed"
+    out.left.toOption.get._2.message should include("COMMIT failed: boom")
+    telemetryStore.events.last.outcome should not be "ok"
+    shut shouldBe true
+
+  it should "report success when the result broke after the CTAS committed" in new Stubs:
+    // The catalog shows this run's own commit: it landed, whatever the stream said after.
+    var ran    = false
+    val reader = stubReader(ownCommit = m => Option.when(ran && m.startsWith(DoomedMessage))(43L))
+    executorResult = IO {
+      ran = true
+      Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
+    }
+    undrop(handlers(readerOverride = reader)).isRight shouldBe true
+
+  it should "not report success when only another writer's table holds the name" in new Stubs:
+    // The answer broke; a table now holds tpch1.doomed, but no commit carries this run's message:
+    // another writer created it (or another undrop did). Neither success nor plain failure.
+    var ran    = false
+    val reader = stubReader(tableExistsAtFn = Some((_, _, snapshot) => snapshot != 42L || ran))
+    executorResult = IO {
+      ran = true
+      Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
+    }
+    val out = undrop(handlers(readerOverride = reader))
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.error shouldBe "undrop_outcome_unknown"
+    out.left.toOption.get._2.message should include("tpch1.doomed")
+    telemetryStore.events.last.outcome should not be "ok"
+
+  it should "stamp each run's CTAS with a commit message unique to it" in new Stubs:
+    val h = handlers()
+    undrop(h).isRight shouldBe true
+    undrop(h).isRight shouldBe true
+    val messages = seenCallers.flatMap(_.commitMessage)
+    messages.size shouldBe 2
+    messages.foreach(_ should startWith(DoomedMessage))
+    messages.distinct.size shouldBe 2
+
+  it should "answer a failure as committed when the catalog shows this run's commit" in new Stubs:
+    // The router could not tell (its own outcome-unknown answer); the catalog can.
+    executorResult = IO.pure(
+      Left(ai.starlake.quack.edge.FlightSqlRouter.outcomeUnknown("connection reset"))
+    )
+    val reader = stubReader(ownCommit = m => Option.when(m.startsWith(DoomedMessage))(43L))
+    undrop(handlers(readerOverride = reader)).toOption.get shouldBe
+      UndropResponse("tpch1", "doomed", "doomed", 39L)
+    telemetryStore.events.last.outcome shouldBe "ok"
+
   it should "404 when no such dropped table exists" in new Stubs:
     val out = undrop(handlers(), table = "ghost")
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
@@ -236,6 +324,25 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     val ok = undrop(h, asName = Some("doomed_restored"))
     ok.toOption.get.restoredAs shouldBe "doomed_restored"
     seenSql.get should include(""""tpch1"."doomed_restored" AS SELECT * FROM "tpch1"."doomed"""")
+
+  // `doomed` dropped twice: table 7 (an older version, last live at 12), then table 9 (39).
+  private val droppedTwice = List(
+    DroppedTableEntry("tpch1", "doomed", 40L, 39L, None, true, tableId = 9L),
+    DroppedTableEntry("tpch1", "doomed", 13L, 12L, None, true, tableId = 7L)
+  )
+
+  it should "recover the drop a table id names, at its own last-live snapshot" in new Stubs:
+    val out = undrop(handlers(stubReader(dropped = droppedTwice)), tableId = Some(7L))
+    out.toOption.get.fromSnapshot shouldBe 12L
+    seenSql.get should include("AT (VERSION => 12)")
+
+  it should "recover the newest drop of the name without a table id" in new Stubs:
+    undrop(handlers(stubReader(dropped = droppedTwice))).toOption.get.fromSnapshot shouldBe 39L
+
+  it should "404 a table id that names no drop of that table" in new Stubs:
+    val out = undrop(handlers(stubReader(dropped = droppedTwice)), tableId = Some(8L))
+    out.left.toOption.get._1 shouldBe StatusCode.NotFound
+    seenSql shouldBe None
 
   it should "honor an explicit fromSnapshot when it exists" in new Stubs:
     val out = undrop(handlers(), fromSnapshot = Some(12L))
@@ -281,11 +388,9 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "report success when the CTAS commits despite the timeout (post-timeout probe)" in new Stubs:
     executorResult = IO.never
-    // tableExistsAt: false for the pre-flight collision check, true for the
-    // post-timeout probe (the CTAS committed while the handler was waiting).
-    val calls = new AtomicInteger(0)
-    val h     = handlers(
-      readerOverride = stubReader(tableExistsAtFn = Some((_, _, _) => calls.getAndIncrement() > 0)),
+    // The CTAS committed while the handler was waiting: the catalog holds this run's commit.
+    val h = handlers(
+      readerOverride = stubReader(ownCommit = m => Option.when(m.startsWith(DoomedMessage))(43L)),
       cfgOverride =
         CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, undropTimeoutSec = 1)
     )

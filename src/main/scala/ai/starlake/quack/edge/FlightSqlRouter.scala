@@ -274,7 +274,9 @@ final class FlightSqlRouter(
       txOpen: Boolean,
       user: String,
       tenant: String,
-      sql: String
+      sql: String,
+      // The caller's own commit message (`execute`'s `commitMessage`), in place of the verb's.
+      message: Option[String]
   ): Option[String] =
     val isWrite = kind == StatementKind.Dml || kind == StatementKind.Ddl
     if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
@@ -293,7 +295,7 @@ final class FlightSqlRouter(
         s"BEGIN; CALL ducklake_set_commit_message(" +
           s"${SqlLiterals.duckdbLiteral(db)}, " +
           s"${SqlLiterals.duckdbLiteral(author)}, " +
-          s"${SqlLiterals.duckdbLiteral(s"flightsql $verb")})"
+          s"${SqlLiterals.duckdbLiteral(message.getOrElse(s"flightsql $verb"))})"
       }
 
   def session(connectionId: String) = sessions.get(connectionId)
@@ -348,7 +350,14 @@ final class FlightSqlRouter(
       /** Read by nothing: every statement is the node's to decide, and the node's OPA input carries
         * client.edge `node`. Kept so callers need no change.
         */
-      edge: String = ""
+      edge: String = "",
+      /** The DuckLake commit message a stamped write carries in place of `flightsql <verb>` (the
+        * author is unchanged): set by a manager handler that must find its own commit afterwards
+        * when the answer is lost (undrop's CTAS). The router's own stamp prelude carries it, so it
+        * is never client SQL. Applies only where a write is stamped at all (stampWrites, a ducklake
+        * pool, recordExecution, no open transaction).
+        */
+      commitMessage: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
     adminExecutor match
       case Some(exec) if adminDispatch && ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
@@ -375,22 +384,35 @@ final class FlightSqlRouter(
             }
           }
       case _ =>
-        executeWith(
-          connectionId,
-          user,
-          poolKey,
-          sql,
-          effectiveSet,
-          adapterSend,
-          source = source,
-          edge = edge,
-          preferredNode = preferredNode,
-          recordExecution = recordExecution,
-          prepareDurationMs = prepareDurationMs,
-          patId = patId,
-          evaluate = Some(adapterEvaluate),
-          purpose = DecidePurpose.Live
-        ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
+        // Every request here runs on a node connection of its own (QuackHttpClient), so a
+        // transaction exists only within one request: one that opens a transaction it does not
+        // end, or ends one it did not open, is refused before anything runs, rather than letting
+        // the following statements autocommit while the client believes they are transactional.
+        val tx = FlightSqlRouter.transactionControl(sql, classifier.classify)
+        tx.refusal match
+          case Some(refused) => IO.pure(Left(refused))
+          case None          =>
+            val run = executeWith(
+              connectionId,
+              user,
+              poolKey,
+              sql,
+              effectiveSet,
+              adapterSend,
+              source = source,
+              edge = edge,
+              preferredNode = preferredNode,
+              recordExecution = recordExecution,
+              prepareDurationMs = prepareDurationMs,
+              patId = patId,
+              evaluate = Some(adapterEvaluate),
+              purpose = DecidePurpose.Live,
+              commitMessage = commitMessage
+            ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
+            // The session state follows the request's first statement: `BEGIN; ...; COMMIT`
+            // would leave it "in a transaction" (pinned, writes unstamped) though the request
+            // closed it. No transaction outlives a request here.
+            if tx.present then run.guarantee(IO(sessions.invalidatePin(connectionId))) else run
 
   /** One statement as the session `effectiveSet` (its claims, JWT roles and groups), on a
     * connection of its own (`connectionId`), opened before it without a SessionOpened event (it is
@@ -402,7 +424,9 @@ final class FlightSqlRouter(
       user: String,
       poolKey: PoolKey,
       sql: String,
-      effectiveSet: EffectiveSet
+      effectiveSet: EffectiveSet,
+      // See execute's `commitMessage`: undrop's CTAS finds its own commit by it.
+      commitMessage: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
     // A per-call nonce (review 5 R4): two concurrent calls on one connection get a session each, so
     // the first one's close never drops the second's. Deferred: execute opens (and meters) its
@@ -418,7 +442,8 @@ final class FlightSqlRouter(
             sql,
             effectiveSet = Some(effectiveSet),
             recordExecution = true,
-            adminDispatch = false
+            adminDispatch = false,
+            commitMessage = commitMessage
           )
         ).guarantee(IO(sessions.close(oneShot)))
     }
@@ -455,8 +480,8 @@ final class FlightSqlRouter(
               case Right(read) => NodeOutcome.Ok(read, latency, () => ())
               case Left(why)   => NodeOutcome.Permanent(why, latency)
             }
-          case QuackResponse.Failed(QuackError.Transient(m), latency) =>
-            IO.pure(NodeOutcome.Transient(m, latency))
+          case QuackResponse.Failed(QuackError.Transient(m, notSent), latency) =>
+            IO.pure(NodeOutcome.Transient(m, latency, notSent))
           case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
             IO.pure(NodeOutcome.Permanent(m, latency))
         }
@@ -590,7 +615,10 @@ final class FlightSqlRouter(
         * ([[FlightSqlRouter.DryRunPrincipalRequired]]): a node admits a superuser's or the system's
         * statements without asking the decision endpoint, so it would run.
         */
-      purpose: DecidePurpose
+      purpose: DecidePurpose,
+      /** [[execute]]'s `commitMessage`: the message a stamped write carries in place of the verb's.
+        */
+      commitMessage: Option[String] = None
   ): IO[Either[RouterFailure, Routed[A]]] =
     if purpose == DecidePurpose.DryRun && !FlightSqlRouter.dryRunnable(effectiveSet) then
       IO.pure(Left(FlightSqlRouter.dryRunRefused))
@@ -612,7 +640,8 @@ final class FlightSqlRouter(
         softPinOverCapacity,
         evaluate,
         failInTransaction,
-        purpose
+        purpose,
+        commitMessage
       )
 
   /** [[executeWith]] past its dry-run principal check. */
@@ -633,7 +662,8 @@ final class FlightSqlRouter(
       softPinOverCapacity: Boolean,
       evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]],
       failInTransaction: Option[FlightSqlRouter.TransactionFence],
-      purpose: DecidePurpose
+      purpose: DecidePurpose,
+      commitMessage: Option[String]
   ): IO[Either[RouterFailure, Routed[A]]] =
     def run(
         statement: String,
@@ -658,7 +688,8 @@ final class FlightSqlRouter(
         softPinOverCapacity,
         purpose,
         detail = detail,
-        pinLost = failInTransaction
+        pinLost = failInTransaction,
+        commitMessage = commitMessage
       )
     // The client's statement answered with `failure` before anything ran it: its history row.
     def refused(failure: RouterFailure): IO[Either[RouterFailure, Routed[A]]] =
@@ -853,7 +884,9 @@ final class FlightSqlRouter(
       softPinOverCapacity = false,
       purpose = purpose,
       internal = true,
-      pinLost = pinLost
+      pinLost = pinLost,
+      // An internal read-back is never stamped.
+      commitMessage = None
     ).flatMap {
       case Left(failure) => IO.pure(Left(failure))
       case Right(routed) => IO(routed.close()).as(Right((routed.value, routed.nodeId)))
@@ -878,7 +911,8 @@ final class FlightSqlRouter(
       purpose: DecidePurpose,
       internal: Boolean = false,
       detail: Map[String, String] = Map.empty,
-      pinLost: Option[FlightSqlRouter.TransactionFence]
+      pinLost: Option[FlightSqlRouter.TransactionFence],
+      commitMessage: Option[String]
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Backstop behind the analysis steps' own TooDeep guards: the screens, gates and rewriters run
     // synchronously here, before any IO, so a walk none of them guards that overflows is denied
@@ -905,7 +939,8 @@ final class FlightSqlRouter(
         purpose,
         internal,
         detail,
-        pinLost
+        pinLost,
+        commitMessage
       )
     )
 
@@ -999,7 +1034,8 @@ final class FlightSqlRouter(
       purpose: DecidePurpose,
       internal: Boolean,
       detail: Map[String, String],
-      pinLost: Option[FlightSqlRouter.TransactionFence]
+      pinLost: Option[FlightSqlRouter.TransactionFence],
+      commitMessage: Option[String]
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
     val s    = openSession(connectionId, user, poolKey, recordExecution, source)
@@ -1276,7 +1312,16 @@ final class FlightSqlRouter(
               // Probes never stamp: they must not open transactions on the node.
               val prelude =
                 if recordExecution then
-                  stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
+                  stampPrelude(
+                    kind,
+                    kindWire,
+                    poolMeta,
+                    s.txOpen,
+                    user,
+                    poolKey.tenant,
+                    finalSql,
+                    commitMessage
+                  )
                 else None
               import ai.starlake.quack.route.{PlacementDirectory, PlacementRequest, RoutingRefs}
               val refs =
@@ -1411,7 +1456,7 @@ final class FlightSqlRouter(
                             maybeRecord(nodeId, latency, "ok", None)
                             IO.pure(Right(Routed(reader, closeAndDeregister, nodeId, latency)))
 
-                          case NodeOutcome.Transient(m, latency) =>
+                          case NodeOutcome.Transient(m, latency, notSent) =>
                             stmtId.foreach(registry.deregister)
                             maybeRecord(nodeId, latency, "transient", Some(m))
                             if s.txOpen then
@@ -1429,6 +1474,11 @@ final class FlightSqlRouter(
                                     .Unavailable(s"transient failure inside transaction: $m")
                                 )
                               )
+                            else if !notSent && !FlightSqlRouter.repeatable(kind, finalSql) then
+                              // It may have run (committed, for a write or a whole BEGIN ... COMMIT
+                              // batch) before its answer was lost: sending it again could run it
+                              // twice, so the client is told the outcome is unknown.
+                              IO.pure(Left(FlightSqlRouter.outcomeUnknown(m)))
                             else
                               // Retry MUST send finalSql (CLS + RLS + metadata filter applied):
                               // retrying the caller's text would return rows the row policy
@@ -1650,9 +1700,11 @@ final class FlightSqlRouter(
                       // must have its COMMIT land there too, not be re-routed by load.
                       sessions.onStatement(connectionId, kind, nodeId)
                       Right(Routed(reader, closeAndDeregister, nodeId, latency))
-                    case NodeOutcome.Transient(m, _) =>
+                    case NodeOutcome.Transient(m, _, notSent) =>
                       stmtId.foreach(registry.deregister)
-                      Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
+                      if notSent || FlightSqlRouter.repeatable(kind, sql) then
+                        Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
+                      else Left(FlightSqlRouter.outcomeUnknown(s"retry failed (transient): $m"))
                     case NodeOutcome.Permanent(m, _) =>
                       stmtId.foreach(registry.deregister)
                       Left(
@@ -1701,6 +1753,39 @@ object FlightSqlRouter:
   /** `UNDROP TABLE` inside a client transaction (review M5): refused on both doors, since its
     * recovery commits on a connection of its own and the client's ROLLBACK would not undo it.
     */
+  /** The transaction statements of one request on a front door whose requests share no node
+    * connection: whether it holds any (`present`), and why it cannot run (`refusal`) when they do
+    * not pair up within it.
+    */
+  final case class TransactionControl(present: Boolean, refusal: Option[RouterFailure])
+
+  /** Reads `sql`'s statements, split as DuckDB's lexer splits them and each classified by
+    * `classify`, for BEGIN / START and COMMIT / END / ROLLBACK / ABORT (the classifier's buckets).
+    * A request that ends with a transaction open, or that commits or rolls back with none open, is
+    * refused: the next request would run on another connection, outside it.
+    */
+  def transactionControl(sql: String, classify: String => StatementKind): TransactionControl =
+    val kinds = SqlCommentStripper
+      .splitStatements(sql)
+      .map(classify)
+      .filter(k =>
+        k == StatementKind.Begin || k == StatementKind.Commit || k == StatementKind.Rollback
+      )
+    val (open, strayEnd) = kinds.foldLeft((false, false)) { case ((open, stray), k) =>
+      if k == StatementKind.Begin then (true, stray) else (false, stray || !open)
+    }
+    val why =
+      if strayEnd then Some("it ends a transaction it did not open")
+      else if open then Some("it opens a transaction it does not end")
+      else None
+    TransactionControl(kinds.nonEmpty, why.map(w => RouterFailure.BadRequest(crossRequestTx(w))))
+
+  private def crossRequestTx(why: String): String =
+    s"transaction refused: $why. Each FlightSQL request runs on a node connection of its own, " +
+      "so a transaction cannot span requests: send BEGIN, its statements and COMMIT (or " +
+      "ROLLBACK) as one request, or use the native Quack front door (ATTACH 'quack:<host>:9494') " +
+      "for an interactive transaction"
+
   val UndropInTransaction: RouterFailure = RouterFailure.BadRequest(
     "UNDROP TABLE cannot run inside a transaction: its recovery commits on its own; COMMIT or " +
       "ROLLBACK first"
@@ -1731,6 +1816,26 @@ object FlightSqlRouter:
   /** Whether `sql` holds more than one statement, split as DuckDB's lexer splits it. */
   def isMultiStatement(sql: String): Boolean =
     SqlCommentStripper.splitStatements(sql).lengthCompare(1) > 0
+
+  /** Whether `sql` may be sent again after a transport failure that may have come once it ran: a
+    * lone read (`kind` Select, which an executing EXPLAIN of a write or a data-modifying CTE never
+    * is). A write, DDL, transaction control, `Other` (CALL, SET, ...) or any batch may have
+    * committed before its answer was lost; only a failure that is `notSent` retries those
+    * ([[ai.starlake.quack.edge.adapter.QuackError.Transient]]). Residual: a read calling `nextval`
+    * advances its sequence on both runs.
+    */
+  def repeatable(kind: StatementKind, sql: String): Boolean =
+    kind == StatementKind.Select && !isMultiStatement(sql)
+
+  /** The answer to a statement whose node connection failed after it was sent, when it is not safe
+    * to repeat ([[repeatable]]): INTERNAL rather than UNAVAILABLE, which clients retry on their
+    * own.
+    */
+  def outcomeUnknown(cause: String): RouterFailure =
+    RouterFailure.Internal(
+      s"the statement's outcome is unknown: its node connection failed after it was sent " +
+        s"($cause); it may have run, check the data before retrying"
+    )
 
   /** Whether a node's error `message` is its authorization refusal, other than
     * [[NodeAuthzUnavailable]]: `QoD: ` right after DuckDB's Permission Error, in a statement's or

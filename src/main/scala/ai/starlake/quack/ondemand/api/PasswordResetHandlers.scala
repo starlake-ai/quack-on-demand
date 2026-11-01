@@ -107,17 +107,20 @@ final class PasswordResetHandlers(
       )
     else
       // Two-step: subjectOf (signature + expiry) -> userId; the fingerprint check
-      // needs the row's CURRENT hash, so the row lookup sits between the two. Any
-      // failed step collapses to the same 400 invalid_token -- no differential.
+      // needs the row's CURRENT hash, so the row lookup sits between the two. The
+      // write is conditional on that same hash, so concurrent redemptions of one
+      // link cannot all pass the check before any of them writes: one wins, the
+      // rest find the hash moved. Any failed step, a lost race included, collapses
+      // to the same 400 invalid_token -- no differential.
       val redeemed =
         for
           userId <- tokens.subjectOf(req.token).left.map(_ => ())
           hash   <- users.passwordHashById(userId).toRight(())
           _      <- tokens.verify(req.token, hash).left.map(_ => ())
+          _      <- Either.cond(users.setPasswordById(userId, hash, req.newPassword), (), ())
         yield userId
       redeemed match
-        case Right(userId) =>
-          users.setPasswordById(userId, req.newPassword)
+        case Right(_) =>
           Right(())
         case Left(_) =>
           Left(

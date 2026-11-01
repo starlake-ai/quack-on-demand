@@ -83,6 +83,9 @@ final class MaintenanceHandlers(
       Some(("invalid_value", "cleanupGraceDays must be >= 1"))
     else if req.orphanMinAgeDays.exists(_ < 1) then
       Some(("invalid_value", "orphanMinAgeDays must be >= 1"))
+    // A fraction of deleted rows, handed to ducklake_rewrite_data_files as is (NaN fails both).
+    else if req.rewriteDeleteThreshold.exists(t => !(t >= 0.0 && t <= 1.0)) then
+      Some(("invalid_value", "rewriteDeleteThreshold must be within [0, 1]"))
     else
       req.cron match
         case Some(c) =>
@@ -304,6 +307,18 @@ final class MaintenanceHandlers(
           case None      =>
             validateOperations(req.operations) match
               case Some(msg) => err(StatusCode.BadRequest, "invalid_operations", msg)
+              // A branch reads its parent's Parquet files by absolute path: merging, expiring or
+              // cleaning it would delete files the parent still serves. The scheduler never
+              // maintains one either; its files go with the branch's teardown.
+              case None
+                  if store.listTenantDbs(tid).find(_.name == db).exists(_.branchOf.isDefined) =>
+                audit.rest(apiKey, "control-plane", AuditActions.MaintenanceRunManual, "denied")
+                err(
+                  StatusCode.Conflict,
+                  "branch_database",
+                  s"'$db' is a branch: a branch is never maintained (it shares its parent's " +
+                    "files); maintain the parent database instead"
+                )
               case None if store.hasActiveMaintenanceRun(tid, db) =>
                 audit.rest(apiKey, "control-plane", AuditActions.MaintenanceRunManual, "denied")
                 err(

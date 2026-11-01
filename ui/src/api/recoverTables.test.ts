@@ -14,11 +14,15 @@ describe('databasesOf', () => {
 
 describe('undropRequest', () => {
   it('leaves a blank new name out and trims a given one', () => {
-    expect(undropRequest('lake', 'main', 'orders', '  ')).toEqual({
-      tenantDb: 'lake', schema: 'main', table: 'orders',
+    expect(undropRequest('lake', 'main', 'orders', '  ', 7)).toEqual({
+      tenantDb: 'lake', schema: 'main', table: 'orders', tableId: 7,
     });
-    expect(undropRequest('lake', 'main', 'orders', ' orders_back ')).toEqual({
-      tenantDb: 'lake', schema: 'main', table: 'orders', asName: 'orders_back',
+    expect(undropRequest('lake', 'main', 'orders', ' orders_back ', 7)).toEqual({
+      tenantDb: 'lake', schema: 'main', table: 'orders', asName: 'orders_back', tableId: 7,
     });
+  });
+
+  it('names the listed drop, so an older drop of a name is the one recovered', () => {
+    expect(undropRequest('lake', 'main', 'orders', '', 3).tableId).toBe(3);
   });
 });

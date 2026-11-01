@@ -364,6 +364,8 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
 
   // Regression: BEGIN's real live shape is a ZERO-ROW Success:BOOLEAN result (the rowCount==1
   // gate this test pins against was caught live during #106 verification - see coerceSuccessToCount).
+  // Sent with its COMMIT: a FlightSQL request may not leave a transaction open
+  // (FlightSqlRouter.transactionControl).
   it should "coerce a DDL-advertised statement's zero-row Success:BOOLEAN node reply too" in:
     val (producer, peer) = setupProducer { _ =>
       IO.pure(
@@ -376,7 +378,7 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
     }
     val ticket = FlightSql.TicketStatementQuery
       .newBuilder()
-      .setStatementHandle(com.google.protobuf.ByteString.copyFromUtf8("BEGIN"))
+      .setStatementHandle(com.google.protobuf.ByteString.copyFromUtf8("BEGIN; COMMIT"))
       .build()
     val listener = new CapturingListener
     producer.getStreamStatement(ticket, fakeContext(peer), listener)
@@ -462,7 +464,7 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
     }
     val ticket = FlightSql.TicketStatementQuery
       .newBuilder()
-      .setStatementHandle(com.google.protobuf.ByteString.copyFromUtf8("BEGIN"))
+      .setStatementHandle(com.google.protobuf.ByteString.copyFromUtf8("DROP TABLE IF EXISTS t"))
       .build()
     val listener = new CapturingListener
     producer.getStreamStatement(ticket, fakeContext(peer), listener)

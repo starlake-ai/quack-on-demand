@@ -49,7 +49,9 @@ final class QuackHttpAdapter(
     }
     withLoad(node, recordLoad, admitDraining = false)(
       call,
-      QuackResponse.Failed(QuackError.Transient(QuackHttpAdapter.draining(node.nodeId)))
+      QuackResponse.Failed(
+        QuackError.Transient(QuackHttpAdapter.draining(node.nodeId), notSent = true)
+      )
     )(NodeOutcome.fromQuackResponse)
 
   /** The prelude producer for statements of `principal` on `node`: a fresh session handle each
@@ -80,7 +82,7 @@ final class QuackHttpAdapter(
   ): IO[NodeOutcome[A]] =
     withLoad(node, recordLoad, admitDraining)(
       call,
-      NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L)
+      NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L, notSent = true)
     )(identity)
 
   /** The in-flight bracket around one node call. `tryStart` and the release are the acquire and
@@ -111,9 +113,9 @@ final class QuackHttpAdapter(
   private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =
     tracker.onFinish(node.nodeId, out.latency)
     out match
-      case NodeOutcome.Ok(_, _, _)     => tracker.setHealthy(node.nodeId, true)
-      case NodeOutcome.Transient(_, _) => tracker.setHealthy(node.nodeId, false)
-      case NodeOutcome.Permanent(_, _) => ()
+      case NodeOutcome.Ok(_, _, _)        => tracker.setHealthy(node.nodeId, true)
+      case NodeOutcome.Transient(_, _, _) => tracker.setHealthy(node.nodeId, false)
+      case NodeOutcome.Permanent(_, _)    => ()
 
   /** Liveness and enforcement probe, as the system principal: [[ProbeVerdict.Ok]] iff `sql` runs
     * AND the node refuses a statement with no session handle (the canary). A node that refuses the

@@ -38,7 +38,8 @@ object ManagerEvent:
   final case class PoolDeleted(tenant: String, tenantDb: String, pool: String) extends ManagerEvent
 
   /** `reason` is "rest" (explicit API call), "query" (edge wake path re-suspend guard), "module" (a
-    * ManagerModule asked), or "idle" (the core hibernation sweep).
+    * ManagerModule asked), "idle" (the core hibernation sweep) or "merge" (a branch's pool, frozen
+    * while the branch merges; resumed with reason "merge" when the merge does not complete).
     */
   final case class PoolSuspended(tenant: String, tenantDb: String, pool: String, reason: String)
       extends ManagerEvent

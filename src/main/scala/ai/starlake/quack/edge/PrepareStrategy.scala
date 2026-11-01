@@ -2,6 +2,7 @@ package ai.starlake.quack.edge
 
 import java.util.Locale
 import ai.starlake.quack.model.StatementKind
+import ai.starlake.quack.route.StatementClassifier
 import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 
 /** Decides how the FlightSQL `createPreparedStatement` action should obtain a `dataset_schema` for
@@ -11,8 +12,8 @@ import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
   * (DDL/DML) or actively harmful (an INSERT runs twice).
   *
   *   - [[ai.starlake.quack.edge.PrepareStrategy.SkipExecute SkipExecute]] - the statement has no
-  *     result rows (DML / DDL / transaction control). The producer returns an empty
-  *     `dataset_schema` without touching a Quack node.
+  *     result rows of its own (DML / DDL / transaction control, answered with DuckDB's `Count`).
+  *     The producer advertises that schema without touching a Quack node.
   *   - [[ai.starlake.quack.edge.PrepareStrategy.ProbeWrap ProbeWrap]] - the statement is a
   *     subquery-safe SELECT. Send `SELECT * FROM (<sql>) AS x LIMIT 0` instead; DuckDB plans the
   *     inner query but the executor short-circuits on LIMIT 0, so the Arrow stream comes back with
@@ -24,8 +25,10 @@ import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
   *     run without running its effects: any batch of more than one statement (the node runs every
   *     statement of the text it is sent, so `SELECT 1; INSERT ...` wrote at probe time and again at
   *     Execute) and every `Other`-kind statement but a lone PRAGMA (`CALL postgres_execute(..)`,
-  *     `SET VARIABLE v = (SELECT nextval(..))`, `IMPORT DATABASE`, ...). No node call: the schema
-  *     is advertised as absent and the Execute stream carries it.
+  *     `SET VARIABLE v = (SELECT nextval(..))`, `IMPORT DATABASE`, ...), every EXPLAIN that runs
+  *     the statement it explains (`EXPLAIN ANALYZE`), and every write that answers with rows of its
+  *     own rather than `Count` (`INSERT ... RETURNING`, a WITH-headed write). No node call: the
+  *     schema is advertised as absent and the Execute stream carries it.
   */
 enum PrepareStrategy:
   case SkipExecute
@@ -41,7 +44,12 @@ object PrepareStrategy:
 
   def choose(sql: String, kind: StatementKind): PrepareStrategy =
     kind match
-      case StatementKind.Dml | StatementKind.Ddl                               => SkipExecute
+      // A write that answers with rows of its own (RETURNING, a WITH-headed statement, EXPLAIN
+      // ANALYZE of a write) does not answer the advertised Count: its schema comes from the stream.
+      case StatementKind.Dml =>
+        if StatementClassifier.answersWithRows(sql) then Unprobed else SkipExecute
+      case StatementKind.Ddl =>
+        if StatementClassifier.explainExecutes(sql) then Unprobed else SkipExecute
       case StatementKind.Begin | StatementKind.Commit | StatementKind.Rollback => SkipExecute
       case _ if isMultiStatement(sql)                                          => Unprobed
       case StatementKind.Other  => if verbOf(sql) == "PRAGMA" then FullExecute else Unprobed
@@ -67,7 +75,10 @@ object PrepareStrategy:
         // prepared statement broken by this same class of gap, not fixed by it. `stripped` itself
         // (comment-stripped but NOT trivia-normalized) is still what feeds the actual probe SQL
         // below: only the verb reader may see a normalized copy.
-        if NotSubquerySafe.contains(verbOf(sql)) then FullExecute
+        // EXPLAIN ANALYZE runs the statement it explains: probing it would run it once more than
+        // the client asked (twice in all, sequences and costs included).
+        if StatementClassifier.explainExecutes(sql) then Unprobed
+        else if NotSubquerySafe.contains(verbOf(sql)) then FullExecute
         else
           val inner = stripTrailingSemicolon(stripped)
           ProbeWrap(s"SELECT * FROM ($inner) AS _qod_probe LIMIT 0")

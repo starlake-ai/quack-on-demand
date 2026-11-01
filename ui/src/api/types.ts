@@ -1118,6 +1118,7 @@ export interface ProfileUndropRequest {
   schema: string;
   table: string;
   asName?: string;
+  tableId?: number;            // which drop of the name (RecoverableTableEntry.tableId)
 }
 
 export interface RecoverableListResponse {
@@ -1131,6 +1132,7 @@ export interface UndropRequest {
   table: string;
   asName?: string;
   fromSnapshot?: number;
+  tableId?: number;            // which drop of the name (RecoverableTableEntry.tableId)
 }
 
 export interface UndropResponse {

@@ -91,10 +91,14 @@ open class QuackHttpClient(
         // calls on `loadNextBatch` / `close`. The global runtime is the
         // same one cats-effect IOApp installs for `Main.run`.
         given IORuntime = IORuntime.global
+        // Set right before `sql` goes out: a failure before it (no connection, a refused handle)
+        // is `notSent`, one after it may come once `sql` ran.
+        val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
         nativeProtocol
           .open(endpoint, token)
           .flatMap { conn =>
-            (checkpoint(poll, conn.close()) *> install(poll, conn, authorize) *> conn.execute(sql))
+            (checkpoint(poll, conn.close()) *> install(poll, conn, authorize) *>
+              IO(sent.set(true)) *> conn.execute(sql))
               .handleErrorWith(t => conn.close() *> IO.raiseError(t))
           }
           .attempt
@@ -111,7 +115,7 @@ open class QuackHttpClient(
                   IO.blocking(reader.close())
                 )
               }
-            case Left(t) => mapNativeFailure(t, startNanos)
+            case Left(t) => mapNativeFailure(t, startNanos, sent = sent.get())
           }
       }
     }
@@ -154,13 +158,20 @@ open class QuackHttpClient(
   ): IO[QuackResponse] =
     poll(IO.pure[QuackResponse](ok)).onCancel(release)
 
-  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. */
-  private def mapNativeFailure(t: Throwable, startNanos: FiniteDuration): IO[QuackResponse] =
+  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. `sent`: the
+    * statement went out before `t` (required: a default would either repeat a write that may have
+    * run or never retry one that never left), so a Transient is `notSent` only when it is false.
+    */
+  private def mapNativeFailure(
+      t: Throwable,
+      startNanos: FiniteDuration,
+      sent: Boolean
+  ): IO[QuackResponse] =
     IO.monotonic.map { endNanos =>
       val err = t match
-        case e: QuackWireError.Transient      => QuackError.Transient(e.msg)
+        case e: QuackWireError.Transient      => QuackError.Transient(e.msg, notSent = !sent)
         case e: QuackWireError.Permanent      => QuackError.Permanent(e.msg)
-        case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage)
+        case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage, notSent = true)
         case other                            =>
           QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
       // Without DuckDB's statement excerpt: a failed statement can carry credentials (a node's
@@ -198,12 +209,12 @@ open class QuackHttpClient(
       IO.monotonic.flatMap { startNanos =>
         given IORuntime = IORuntime.global
         nativeProtocol.open(endpoint, token).attempt.flatMap {
-          case Left(t)     => mapNativeFailure(t, startNanos)
+          case Left(t)     => mapNativeFailure(t, startNanos, sent = false)
           case Right(conn) =>
             (checkpoint(poll, conn.close()) *> install(poll, conn, Some(authorize))).attempt
               .flatMap {
                 // A refused handle is never fail-open: the write is not sent at all.
-                case Left(t)   => conn.close() *> mapNativeFailure(t, startNanos)
+                case Left(t)   => conn.close() *> mapNativeFailure(t, startNanos, sent = false)
                 case Right(()) =>
                   conn.executeDiscard(prelude).attempt.flatMap {
                     case Left(t) =>
@@ -213,12 +224,15 @@ open class QuackHttpClient(
                       // Nothing is held once conn is closed, so the fallback may be cancelled whole.
                       conn.close() *> poll(queryNative(endpoint, token, sql, Some(authorize)))
                     case Right(()) =>
+                      val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
                       (checkpoint(poll, conn.close()) *> install(poll, conn, Some(authorize)) *>
-                        conn.execute(sql)).attempt.flatMap {
+                        IO(sent.set(true)) *> conn.execute(sql)).attempt.flatMap {
                         case Left(t) =>
                           // DISCONNECT tears the server session down, rolling the open BEGIN back;
-                          // no explicit ROLLBACK round-trip needed.
-                          conn.close() *> mapNativeFailure(t, startNanos)
+                          // no explicit ROLLBACK round-trip needed. Counted as sent all the same:
+                          // nothing here confirms the rollback, and sent is the side that never
+                          // repeats a write.
+                          conn.close() *> mapNativeFailure(t, startNanos, sent = sent.get())
                         case Right(reader) =>
                           IO.monotonic.flatMap { endNanos =>
                             val committed = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -287,5 +301,5 @@ object QuackHttpClient:
       * from any other failure to name the cause.
       */
     def unapply(err: QuackError): Option[String] = err match
-      case QuackError.Transient(m) if m.startsWith(Prefix) => Some(m.substring(Prefix.length))
-      case _                                               => None
+      case QuackError.Transient(m, _) if m.startsWith(Prefix) => Some(m.substring(Prefix.length))
+      case _                                                  => None

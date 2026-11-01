@@ -21,7 +21,7 @@ import ai.starlake.quack.ondemand.rbac.{AuthzRequest, HandshakeDenial}
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
-import cats.effect.IO
+import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 import io.circe.syntax._
@@ -682,78 +682,166 @@ final class BranchService(
       actor: BranchActor,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
-    computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
-      def refuse(f: BranchFailure): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.BranchMerge,
-          "denied",
-          tenant = Some(tenant),
-          target = Some(s"${parent.name}/${b.name}"),
-          detail = Map("error" -> f.code)
-        )
-        IO.pure(Left(f))
+    def refuse(f: BranchFailure): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+      audit.rest(
+        apiKey,
+        "control-plane",
+        AuditActions.BranchMerge,
+        "denied",
+        tenant = Some(tenant),
+        target = Some(s"${parent.name}/${b.name}"),
+        detail = Map("error" -> f.code)
+      )
+      IO.pure(Left(f))
 
-      if expectedMainSnapshot.exists(_ != cs.mainSnapshot) then
-        refuse(
-          BranchFailure.conflict(
-            "concurrent_write",
-            s"main is at snapshot ${cs.mainSnapshot}, expected ${expectedMainSnapshot.get}"
-          )
-        )
-      else if cs.conflicts.nonEmpty then
-        refuse(
-          BranchFailure.conflict(
-            "merge_conflict",
-            "main changed since the fork on: " +
-              cs.conflicts.map(c => s"${c.schema}.${c.table} (${c.reason})").mkString("; ")
-          )
-        )
-      else if cs.unsupported.nonEmpty || cs.tables.exists(!_.mergeable) then
-        val alt = cs.tables
-          .filterNot(_.mergeable)
-          .map(t => s"${t.schema}.${t.table}: ${t.reason.getOrElse("")}")
-        refuse(
-          BranchFailure.unprocessable(
-            "merge_unsupported",
-            "not fast-forwardable in v1: " + (alt ++ cs.unsupported).mkString("; ")
-          )
-        )
-      else if cs.tables.isEmpty then
-        refuse(
-          BranchFailure.unprocessable("nothing_to_merge", s"branch '${b.name}' has no changes")
-        )
-      else
-        val alias   = parentAliasOf(tenant, parent)
-        val message = BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer)
-        val batch   = BranchMergeSql.batch(
-          parentAlias = alias,
-          branchAlias = BranchMergeSql.BranchAlias,
-          changes = cs.tables,
-          fork = cs.forkSnapshot,
-          head = cs.headSnapshot,
-          author = BranchMergeSql.author(tenant, actor.identity),
-          message = message
-        )
-        sup.mergeNodeSpec(tenant, parent.name, b.tenantDbName, b.dataPath) match
-          case None =>
-            refuse(BranchFailure.upstream("merge_failed", "cannot build the merge node spec"))
-          case Some(spec) =>
-            // The change set was validated against main at cs.mainSnapshot; a main write that
-            // commits between here and the batch's commit would otherwise be built upon or
-            // overwritten. The fence refuses the merge commit unless it lands directly on top.
-            val meta       = sup.effectiveMetastoreFor(tenant, parent.name)
-            val parentMeta = meta.updated("dbName", meta.getOrElse("dbName", parent.name))
-            IO.blocking(mergeFence.arm(parentMeta, message, cs.mainSnapshot)).flatMap {
-              case Left(err) => refuse(BranchFailure.upstream("merge_failed", err))
-              case Right(_)  =>
-                mergeExecutor
-                  .run(spec, batch)
-                  .guarantee(IO.blocking(mergeFence.disarm(parentMeta, message)))
-                  .flatMap(settle(tenant, parent, b, merge, cs, message, actor, apiKey, refuse))
+    // Validated twice: once before the freeze, so a merge refused anyway never restarts the
+    // branch's node, and again on the frozen branch, whose head can no longer move: that second
+    // change set is the one merged.
+    computeChanges(tenant, parent, b, countsAs = None).flatMap { early =>
+      refusalOf(b, early, expectedMainSnapshot) match
+        case Some(f) => refuse(f)
+        case None    =>
+          withFrozenBranch(b) {
+            computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
+              refusalOf(b, cs, expectedMainSnapshot) match
+                case Some(f) => refuse(f)
+                case None    => runBatch(tenant, parent, b, merge, cs, actor, apiKey, refuse)
             }
+          }
     }
+
+  /** Why `cs` cannot be merged, if it cannot. */
+  private def refusalOf(
+      b: Branch,
+      cs: BranchChangeSet,
+      expectedMainSnapshot: Option[Long]
+  ): Option[BranchFailure] =
+    if expectedMainSnapshot.exists(_ != cs.mainSnapshot) then
+      Some(
+        BranchFailure.conflict(
+          "concurrent_write",
+          s"main is at snapshot ${cs.mainSnapshot}, expected ${expectedMainSnapshot.get}"
+        )
+      )
+    else if cs.conflicts.nonEmpty then
+      Some(
+        BranchFailure.conflict(
+          "merge_conflict",
+          "main changed since the fork on: " +
+            cs.conflicts.map(c => s"${c.schema}.${c.table} (${c.reason})").mkString("; ")
+        )
+      )
+    else if cs.unsupported.nonEmpty || cs.tables.exists(!_.mergeable) then
+      val alt = cs.tables
+        .filterNot(_.mergeable)
+        .map(t => s"${t.schema}.${t.table}: ${t.reason.getOrElse("")}")
+      Some(
+        BranchFailure.unprocessable(
+          "merge_unsupported",
+          "not fast-forwardable in v1: " + (alt ++ cs.unsupported).mkString("; ")
+        )
+      )
+    else if cs.tables.isEmpty then
+      Some(BranchFailure.unprocessable("nothing_to_merge", s"branch '${b.name}' has no changes"))
+    else None
+
+  /** Runs `body` with the branch's writes frozen: its pool disabled (no new connection, never woken
+    * by a query) and suspended (its nodes stopped, so no open session writes either), so the branch
+    * head the change set is computed at is the head that merges, and no write lands between the
+    * merge and the teardown that follows it, where it would be lost. Unless `body` merged, the pool
+    * is put back as it was (enabled and resumed only when it was so before). A pool already gone
+    * has nothing to freeze.
+    */
+  private def withFrozenBranch(b: Branch)(
+      body: IO[Res[(Branch, BranchMerge, BranchChangeSet)]]
+  ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+    val key = poolKeyOf(b)
+    sup.get(key) match
+      case None        => body
+      case Some(state) =>
+        val wasDisabled                                                   = state.disabled
+        val wasSuspended                                                  = state.suspended
+        def failed(what: String)(e: Either[SupervisorError, ?]): IO[Unit] = e match
+          case Left(err) => IO.raiseError(new IllegalStateException(s"$what: ${err.message}"))
+          case Right(_)  => IO.unit
+        val freeze =
+          (if wasDisabled then IO.unit
+           else sup.setPoolDisabled(key, disabled = true).flatMap(failed("disable"))) *>
+            (if wasSuspended then IO.unit
+             else sup.suspendPool(key, reason = "merge").flatMap(failed("suspend")))
+        val thaw =
+          (if wasSuspended then IO.unit
+           else sup.resumePool(key, reason = "merge").flatMap(failed("resume"))) *>
+            (if wasDisabled then IO.unit
+             else sup.setPoolDisabled(key, disabled = false).flatMap(failed("enable")))
+        val thawLogged = thaw.handleErrorWith(e =>
+          IO.delay(
+            logger.warn(
+              s"branch merge: pool $key not restored after the merge did not complete: " +
+                s"${e.getMessage}; enable and resume it by hand"
+            )
+          )
+        )
+        freeze.attempt.flatMap {
+          case Left(e) =>
+            thawLogged *> IO.pure(
+              Left(
+                BranchFailure.upstream(
+                  "merge_failed",
+                  s"cannot freeze the branch's writes for the merge: ${e.getMessage}"
+                )
+              )
+            )
+          case Right(_) =>
+            body.guaranteeCase {
+              case Outcome.Succeeded(res) =>
+                res.flatMap {
+                  case Right(_) => IO.unit // merged: the teardown already removed the pool
+                  case Left(_)  => thawLogged
+                }
+              case _ => thawLogged
+            }
+        }
+
+  /** The fenced merge batch for a change set that passed [[refusalOf]], then its settlement. */
+  private def runBatch(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch,
+      merge: BranchMerge,
+      cs: BranchChangeSet,
+      actor: BranchActor,
+      apiKey: Option[String],
+      refuse: BranchFailure => IO[Res[(Branch, BranchMerge, BranchChangeSet)]]
+  ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+    val alias   = parentAliasOf(tenant, parent)
+    val message = BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer)
+    val batch   = BranchMergeSql.batch(
+      parentAlias = alias,
+      branchAlias = BranchMergeSql.BranchAlias,
+      changes = cs.tables,
+      fork = cs.forkSnapshot,
+      head = cs.headSnapshot,
+      author = BranchMergeSql.author(tenant, actor.identity),
+      message = message
+    )
+    sup.mergeNodeSpec(tenant, parent.name, b.tenantDbName, b.dataPath) match
+      case None =>
+        refuse(BranchFailure.upstream("merge_failed", "cannot build the merge node spec"))
+      case Some(spec) =>
+        // The change set was validated against main at cs.mainSnapshot; a main write that
+        // commits between here and the batch's commit would otherwise be built upon or
+        // overwritten. The fence refuses the merge commit unless it lands directly on top.
+        val meta       = sup.effectiveMetastoreFor(tenant, parent.name)
+        val parentMeta = meta.updated("dbName", meta.getOrElse("dbName", parent.name))
+        IO.blocking(mergeFence.arm(parentMeta, message, cs.mainSnapshot)).flatMap {
+          case Left(err) => refuse(BranchFailure.upstream("merge_failed", err))
+          case Right(_)  =>
+            mergeExecutor
+              .run(spec, batch)
+              .guarantee(IO.blocking(mergeFence.disarm(parentMeta, message)))
+              .flatMap(settle(tenant, parent, b, merge, cs, message, actor, apiKey, refuse))
+        }
 
   /** Settles a merge attempt once the batch returned (or timed out): the commit message located on
     * main is the authority on "did it commit".

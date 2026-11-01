@@ -68,6 +68,34 @@ final class PatStore(
     try f(c)
     finally c.close()
 
+  /** `f` in one transaction holding the per-user PAT lock ([[PatStore.UserLockSql]]): a child mint
+    * and a revoke of the same user's tokens never overlap. Without it a revoke reads the subtree in
+    * its statement's snapshot, then waits on the parent row a mint is inserting a child under; the
+    * mint commits, the revoke flips the parent and misses the child, which keeps authenticating
+    * under a revoked parent. With it the revoke reads the subtree only once every such mint has
+    * committed, and a mint that waits on a revoke finds its parent revoked. Transaction-scoped, so
+    * a crash or a closed connection releases it; across HA replicas too (one Postgres).
+    */
+  private def withUserLock[A](userId: String)(f: Connection => A): A =
+    withConn { c =>
+      c.setAutoCommit(false)
+      try
+        val lock = c.prepareStatement(PatStore.UserLockSql)
+        try
+          lock.setInt(1, PatStore.LockClass)
+          lock.setString(2, userId)
+          lock.execute()
+        finally lock.close()
+        val out = f(c)
+        c.commit()
+        out
+      catch
+        case e: Throwable =>
+          scala.util.Try(c.rollback())
+          throw e
+      finally c.setAutoCommit(true)
+    }
+
   /** Release the pool's idle connections. Idempotent. Called from Main's shutdown hook. */
   def close(): Unit = if !dataSource.isClosed then dataSource.close()
 
@@ -152,7 +180,8 @@ final class PatStore(
       depth = depth,
       restriction = effective
     )
-    val inserted = withConn { c =>
+    // A root mint has no parent a revoke could race; a child mint takes the user's PAT lock.
+    val insertRow: Connection => Int = { c =>
       val ps = c.prepareStatement(
         "INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, expires_at, " +
           "parent_id, depth, roles, databases, pools, tools, verb_ceiling, drop_admin, " +
@@ -197,6 +226,8 @@ final class PatStore(
         ps.executeUpdate()
       finally ps.close()
     }
+    val inserted =
+      if parentId.isDefined then withUserLock(userId)(insertRow) else withConn(insertRow)
     if inserted == 0 then throw PatStore.ParentNotLiveException(parentId.getOrElse(""))
     (record, raw)
 
@@ -301,10 +332,12 @@ final class PatStore(
     * than an empty list. That state is unreachable through this store's own API: [[PatStore.mint]]
     * refuses to place a child under a parent that is not live, and a revoke always cascades to
     * every descendant in the same statement, so an already-revoked token can never have a live
-    * child to begin with.
+    * child to begin with. Both hold the user's PAT lock ([[withUserLock]]), so a child whose mint
+    * was under way when the revoke began is committed before the subtree is read, and revoked with
+    * it.
     */
   def revoke(userId: String, patId: String): List[String] =
-    withConn { c =>
+    withUserLock(userId) { c =>
       val ps = c.prepareStatement(
         """WITH RECURSIVE subtree AS (
           |  SELECT id FROM qodstate_pat WHERE id = ? AND user_id = ?
@@ -422,7 +455,17 @@ final class PatStore(
     )
 
 object PatStore:
-  val TokenPrefix = "qod_pat_"
+
+  /** Class of the per-user PAT lock: the two-int advisory key space, which Postgres keeps apart
+    * from the single-key one the manager's other advisory locks (HA leadership, pool locks,
+    * DuckLake init) take with `hashtext`, so no hash collision can make a mint wait on a lock held
+    * for good.
+    */
+  val LockClass: Int = 0x51504154 // "QPAT"
+
+  /** The per-user PAT lock, held until the transaction ends: `(LockClass, hashtext(user id))`. */
+  val UserLockSql: String = "SELECT pg_advisory_xact_lock(?, hashtext(?))"
+  val TokenPrefix         = "qod_pat_"
 
   /** Column list shared by every read path (`verify`'s `RETURNING`, `list`, `findById`,
     * `listSubtree`) so a new scope column added later only needs updating in one place.

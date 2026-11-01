@@ -209,6 +209,32 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers with Eventuall
         case Right(_) => fail("expected 400 invalid_token on reuse")
   }
 
+  it should "let exactly one of several concurrent redemptions of one link through" in withFreshDb {
+    (store, users) =>
+      import cats.effect.IO
+      import cats.syntax.parallel.*
+      val mail = new CapturingMail
+      val h    = handlers(users, mail)
+      users.upsertUser(Some("t1"), "carol", "oldpw", "user", email = Some(Some("carol@x.io")))
+
+      h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync()
+      val token = awaitToken(mail)
+
+      // Each redemption verifies the token against the current hash, then spends a bcrypt hash
+      // (cost 12) before writing: without a conditional write all of them pass the check first.
+      val passwords = (1 to 4).map(i => s"concurrent-$i").toList
+      val results   = passwords
+        .parTraverse(pw => h.resetPassword(ResetPasswordRequest(token, pw)).map(pw -> _))
+        .unsafeRunSync()
+
+      val won = results.collect { case (pw, Right(())) => pw }
+      won should have size 1
+      results.collect { case (_, Left((_, err))) => err.error }.toSet shouldBe Set("invalid_token")
+      // The password in place is the winner's, not a later loser's.
+      val hash = store.getPasswordHash(Some("t1"), "carol").get
+      BCrypt.verifyer().verify(won.head.toCharArray, hash).verified shouldBe true
+  }
+
   it should "400 invalid_password when the new password is empty or over 71 bytes" in withFreshDb {
     (_, users) =>
       val mail = new CapturingMail

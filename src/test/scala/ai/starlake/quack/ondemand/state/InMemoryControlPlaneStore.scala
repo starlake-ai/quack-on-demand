@@ -884,6 +884,20 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   def managedPrefix(id: String): Option[ManagedPrefixRow] = managedPrefixes.get(id)
 
+  /** NOT atomic: this test double has no rollback. Specs that pin a transaction's all-or-nothing
+    * outcome run on Postgres (ManifestImportAtomicitySpec).
+    */
+  def atomically[A](f: => A): A = f
+
+  // A semaphore, not a lock: the holder may release it from another thread (an IO Resource).
+  private val pinLocks = TrieMap.empty[(String, String), java.util.concurrent.Semaphore]
+
+  def lockSnapshotPins(tenant: String, tenantDb: String): AutoCloseable =
+    val l = pinLocks.getOrElseUpdate((tenant, tenantDb), new java.util.concurrent.Semaphore(1))
+    l.acquire()
+    val released = new java.util.concurrent.atomic.AtomicBoolean(false)
+    () => if released.compareAndSet(false, true) then l.release()
+
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants = listTenants(),
     tenantDbs = tenantDbs.values.toList.sortBy(_.name),

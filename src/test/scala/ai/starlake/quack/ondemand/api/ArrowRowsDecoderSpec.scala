@@ -80,6 +80,43 @@ class ArrowRowsDecoderSpec extends AnyFlatSpec with Matchers:
     finally allocator.close()
   }
 
+  it should "render NaN and the infinities as strings, JSON having no number for them" in {
+    val allocator = new RootAllocator()
+    try
+      val field = Field.nullable(
+        "d",
+        new ArrowType.FloatingPoint(
+          org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE
+        )
+      )
+      val root = VectorSchemaRoot.create(new Schema(java.util.List.of(field)), allocator)
+      val out  = new ByteArrayOutputStream()
+      try
+        val vec    = root.getVector("d").asInstanceOf[org.apache.arrow.vector.Float8Vector]
+        val values = List(Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity, 1.5)
+        root.allocateNew()
+        values.zipWithIndex.foreach((v, i) => vec.setSafe(i, v))
+        root.setRowCount(values.size)
+        val writer = new ArrowStreamWriter(root, null, out)
+        try
+          writer.start()
+          writer.writeBatch()
+          writer.end()
+        finally writer.close()
+      finally root.close()
+      val reader = new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
+      try
+        val (_, rows, _) = ArrowRowsDecoder.decode(reader, 10)
+        rows.map(_.head) shouldBe List(
+          io.circe.Json.fromString("NaN"),
+          io.circe.Json.fromString("Infinity"),
+          io.circe.Json.fromString("-Infinity"),
+          io.circe.Json.fromBigDecimal(BigDecimal("1.5"))
+        )
+      finally reader.close()
+    finally allocator.close()
+  }
+
   it should "stop at maxRows and report truncated" in {
     val allocator = new RootAllocator()
     try

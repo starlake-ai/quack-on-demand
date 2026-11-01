@@ -392,6 +392,7 @@ def recoverable(
         "table": "--table",
         "asName": "--as-name",
         "fromSnapshot": "--from-snapshot",
+        "tableId": "--table-id",
     },
 )
 def undrop(
@@ -402,12 +403,19 @@ def undrop(
     table: str = typer.Option(..., "--table"),
     as_name: str = typer.Option(None, "--as-name", help="Recover under a different name."),
     from_snapshot: int = typer.Option(None, "--from-snapshot"),
+    table_id: int = typer.Option(
+        None,
+        "--table-id",
+        help="Which drop to recover when the name was dropped more than once (the tableId recoverable lists; default: the newest).",
+    ),
 ):
     body: dict = {"tenant": tenant, "tenantDb": db, "schema": schema, "table": table}
     if as_name is not None:
         body["asName"] = as_name
     if from_snapshot is not None:
         body["fromSnapshot"] = from_snapshot
+    if table_id is not None:
+        body["tableId"] = table_id
     call(ctx, "POST", "/api/catalog/undrop", body=body)
 
 

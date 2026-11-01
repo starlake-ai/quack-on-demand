@@ -37,15 +37,45 @@ trait MergeFence:
     */
   def disarm(parentMeta: Map[String, String], message: String): Unit
 
-/** [[MergeFence]] over the parent catalog's Postgres database (metastore `pgHost` / `pgPort` /
-  * `pgUser` / `pgPassword` / `dbName`, the credentials DuckLake created its tables with, so they
-  * own `ducklake_snapshot_changes`). Objects live in their own schema, [[FenceSchema]], so
-  * [[BranchCloner]] (which copies the metadata schema only) never carries them into a branch. The
-  * trigger is installed once per catalog and left in place: it is a no-op for every commit whose
-  * message has no fence row, and re-creating it on each merge would take a lock that stalls the
-  * tenant's commits.
+/** Binds a single-table write's commit to the table's state it was validated against: the commit
+  * stamped `message` lands only if no other snapshot after `baseSnapshot` touched table `tableId`.
+  * Commits on other tables go on meanwhile. A restore validates `expectedCurrentSnapshot` before
+  * its replace runs; nothing on the DuckDB side ties that check to the commit, and DuckLake's
+  * conflict check does not see a concurrent write into a table the replace drops, so a row
+  * committed in between would be erased with a success reported.
   */
-object PostgresMergeFence extends MergeFence with LazyLogging:
+trait TableCommitFence:
+
+  /** Arms the fence for the commit stamped `message`. `Left` when it cannot be installed; the
+    * caller must not write.
+    */
+  def arm(
+      catalogMeta: Map[String, String],
+      message: String,
+      baseSnapshot: Long,
+      tableId: Long
+  ): Either[String, Unit]
+
+  /** Removes the fence row for `message`. Best effort: a leftover row only matches that message. */
+  def disarm(catalogMeta: Map[String, String], message: String): Unit
+
+object TableCommitFence:
+
+  /** No fence: only for handlers built without a reachable catalog (unit specs), passed explicitly.
+    */
+  val unfenced: TableCommitFence = new TableCommitFence:
+    def arm(m: Map[String, String], message: String, base: Long, tableId: Long) = Right(())
+    def disarm(m: Map[String, String], message: String): Unit                   = ()
+
+/** [[MergeFence]] and [[TableCommitFence]] over the catalog's Postgres database (metastore `pgHost`
+  * / `pgPort` / `pgUser` / `pgPassword` / `dbName`, the credentials DuckLake created its tables
+  * with, so they own `ducklake_snapshot_changes`). Objects live in their own schema,
+  * [[FenceSchema]], so [[BranchCloner]] (which copies the metadata schema only) never carries them
+  * into a branch. The trigger is installed once per catalog and left in place: it is a no-op for
+  * every commit whose message has no fence row, and re-creating it on each merge would take a lock
+  * that stalls the tenant's commits.
+  */
+object PostgresMergeFence extends MergeFence with TableCommitFence with LazyLogging:
 
   val FenceSchema: String = "qod_merge_fence"
 
@@ -95,15 +125,29 @@ object PostgresMergeFence extends MergeFence with LazyLogging:
         s"CREATE TABLE IF NOT EXISTS $fs.fence " +
           "(commit_message TEXT PRIMARY KEY, base_snapshot BIGINT NOT NULL)"
       )
+      // NULL: the whole catalog (a merge); else the one table the commit is held to (a restore).
+      st.execute(s"ALTER TABLE $fs.fence ADD COLUMN IF NOT EXISTS table_id BIGINT")
+      // A snapshot touched the table when its changes name the table's id after a verb
+      // (inserted_into_table:7, inlined_delete:7, dropped_table:7, ...). A quoted table name that
+      // happens to hold such a text can only make the fence refuse, never admit.
       st.execute(
         s"""CREATE OR REPLACE FUNCTION $fs.check_commit() RETURNS trigger AS $$$$
-           |DECLARE base BIGINT;
+           |DECLARE base BIGINT; tid BIGINT;
            |BEGIN
-           |  SELECT f.base_snapshot INTO base FROM $fs.fence f
+           |  SELECT f.base_snapshot, f.table_id INTO base, tid FROM $fs.fence f
            |    WHERE f.commit_message = NEW.commit_message;
-           |  IF FOUND AND EXISTS (SELECT 1 FROM $ms.ducklake_snapshot s
-           |      WHERE s.snapshot_id > base AND s.snapshot_id <> NEW.snapshot_id) THEN
-           |    RAISE EXCEPTION 'qod merge fence: conflict, main moved past snapshot % before the merge committed', base;
+           |  IF NOT FOUND THEN
+           |    RETURN NEW;
+           |  END IF;
+           |  IF tid IS NULL THEN
+           |    IF EXISTS (SELECT 1 FROM $ms.ducklake_snapshot s
+           |        WHERE s.snapshot_id > base AND s.snapshot_id <> NEW.snapshot_id) THEN
+           |      RAISE EXCEPTION 'qod merge fence: conflict, main moved past snapshot % before the merge committed', base;
+           |    END IF;
+           |  ELSIF EXISTS (SELECT 1 FROM $ms.ducklake_snapshot_changes c
+           |      WHERE c.snapshot_id > base AND c.snapshot_id <> NEW.snapshot_id
+           |        AND c.changes_made ~ ('(^|,)[a-z_]+:' || tid || '(,|$$)')) THEN
+           |    RAISE EXCEPTION 'qod commit fence: conflict, table % changed after snapshot % before the commit', tid, base;
            |  END IF;
            |  RETURN NEW;
            |END $$$$ LANGUAGE plpgsql""".stripMargin
@@ -120,25 +164,45 @@ object PostgresMergeFence extends MergeFence with LazyLogging:
       message: String,
       baseSnapshot: Long
   ): Either[String, Unit] =
+    armRow(parentMeta, message, baseSnapshot, None)
+
+  def arm(
+      catalogMeta: Map[String, String],
+      message: String,
+      baseSnapshot: Long,
+      tableId: Long
+  ): Either[String, Unit] =
+    armRow(catalogMeta, message, baseSnapshot, Some(tableId))
+
+  private def armRow(
+      meta: Map[String, String],
+      message: String,
+      baseSnapshot: Long,
+      tableId: Option[Long]
+  ): Either[String, Unit] =
     try
-      val c = connect(parentMeta)
+      val c = connect(meta)
       try
         metaSchema(c) match
-          case None         => Left("parent catalog has no DuckLake metadata")
+          case None         => Left("catalog has no DuckLake metadata")
           case Some(schema) =>
             install(c, schema)
             val ps = c.prepareStatement(
-              s"INSERT INTO ${q(FenceSchema)}.fence (commit_message, base_snapshot) VALUES (?, ?) " +
-                "ON CONFLICT (commit_message) DO UPDATE SET base_snapshot = EXCLUDED.base_snapshot"
+              s"INSERT INTO ${q(FenceSchema)}.fence (commit_message, base_snapshot, table_id) " +
+                "VALUES (?, ?, ?) ON CONFLICT (commit_message) DO UPDATE SET " +
+                "base_snapshot = EXCLUDED.base_snapshot, table_id = EXCLUDED.table_id"
             )
             try
               ps.setString(1, message)
               ps.setLong(2, baseSnapshot)
+              tableId match
+                case Some(t) => ps.setLong(3, t)
+                case None    => ps.setNull(3, java.sql.Types.BIGINT)
               ps.executeUpdate()
               Right(())
             finally ps.close()
       finally c.close()
-    catch case NonFatal(e) => Left(s"cannot arm the merge fence: ${e.getMessage}")
+    catch case NonFatal(e) => Left(s"cannot arm the commit fence: ${e.getMessage}")
 
   def disarm(parentMeta: Map[String, String], message: String): Unit =
     try

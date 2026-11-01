@@ -3552,121 +3552,150 @@ final class PoolSupervisor(
       failIfExists: Boolean = false
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("createUser") {
-      if username.isEmpty || password.isEmpty then
-        Left(SupervisorError.InvalidArgument("username and password are required"))
-      else
-        tenant match
-          case Some(t) if t.isEmpty =>
-            Left(
-              SupervisorError.InvalidArgument("tenant must be non-empty (use None for superuser)")
-            )
-          case Some(t)
-              if !tenants.values
-                .exists(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT)) =>
-            Left(SupervisorError.NotFound(s"tenant not found: $t"))
-          case _ =>
-            val resolvedTenantId = tenant.flatMap { t =>
-              tenants.values
-                .find(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT))
-                .map(_.id)
-            }
-            // An email-format username IS its own email: derive/verify it here so a
-            // conflicting supplied value is refused instead of persisted.
-            EmailPolicy.resolve(username, email) match
-              case Left(msg)       => Left(SupervisorError.InvalidEmail(msg))
-              case Right(effEmail) =>
-                // An upsert over an existing row (REST create without failIfExists) attaches
-                // only the lists the caller named: the built-in defaults are for a fresh user
-                // and must never widen an existing user's access, so they are not even
-                // resolved for an existing row (a tenant missing a built-in cannot refuse it).
-                val existedBefore =
-                  !failIfExists && store.findUser(resolvedTenantId, username).isDefined
-                // Names are resolved before anything is written: a refused membership leaves
-                // no user row behind.
-                resolveMemberships(resolvedTenantId, memberships, applyDefaults = !existedBefore)
-                  .flatMap { resolved =>
-                    // Create always sets email, even to None (clearing is not meaningful on a
-                    // brand-new row, but a fresh insert with no email is the common case).
-                    val out = userStore.upsertUser(
-                      resolvedTenantId,
-                      username,
-                      password,
-                      kind,
-                      mustChangePassword = Some(mustChangePassword),
-                      email = Some(effEmail),
-                      enabled = Option.when(!enabled)(false),
-                      insertOnly = failIfExists
-                    )
-                    if failIfExists && !out.inserted then
-                      Left(SupervisorError.InvalidArgument(s"user already exists: $username"))
-                    else
-                      // Race guards: a row seen as existing but deleted meanwhile is a fresh
-                      // insert and gets its defaults now; a row seen as fresh but created
-                      // concurrently keeps only the explicit lists.
-                      val toAttach: Either[SupervisorError, (List[RbacRole], List[RbacGroup])] =
-                        if out.inserted && existedBefore then
-                          resolveMemberships(resolvedTenantId, memberships, applyDefaults = true)
-                        else if out.inserted then Right(resolved)
-                        else
-                          memberships match
-                            case UserMemberships.Requested(r, g) =>
-                              Right(
-                                (
-                                  if r.isDefined then resolved._1 else Nil,
-                                  if g.isDefined then resolved._2 else Nil
-                                )
-                              )
-                            case UserMemberships.IdpManaged => Right((Nil, Nil))
-                      val attached: Either[SupervisorError, (List[RbacRole], List[RbacGroup])] =
-                        toAttach.flatMap { case (attachRoles, attachGroups) =>
-                          if attachRoles.isEmpty && attachGroups.isEmpty then
-                            Right((attachRoles, attachGroups))
-                          else
-                            Try(
-                              store.addUserMemberships(
-                                out.id,
-                                attachRoles.map(_.id),
-                                attachGroups.map(_.id)
-                              )
-                            ).toEither.left
-                              .map { t =>
-                                logger.error(
-                                  s"createUser: could not attach memberships to user ${out.id}",
-                                  t
-                                )
-                                SupervisorError.Internal("could not attach memberships")
-                              }
-                              .map(_ => (attachRoles, attachGroups))
-                        }
-                      attached match
-                        case Left(err) =>
-                          // User rows and edges live in two connection pools, so they cannot
-                          // share a transaction: undo the user row we just inserted.
-                          if out.inserted then
-                            Try(store.deleteUser(out.id)).failed.foreach(e =>
-                              logger.error(
-                                s"createUser: could not remove user ${out.id} after a failed " +
-                                  s"membership attach: ${e.getMessage}",
-                                e
+      ai.starlake.quack.ondemand.state.UserKind.normalize(kind) match
+        case Left(msg)             => Left(SupervisorError.InvalidArgument(msg))
+        case Right(normalizedKind) =>
+          createUserOfKind(
+            tenant,
+            username,
+            password,
+            normalizedKind,
+            userStore,
+            memberships,
+            mustChangePassword,
+            email,
+            enabled,
+            failIfExists
+          )
+    }
+  }
+
+  private def createUserOfKind(
+      tenant: Option[String],
+      username: String,
+      password: String,
+      kind: String,
+      userStore: ai.starlake.quack.ondemand.state.UserStore,
+      memberships: UserMemberships,
+      mustChangePassword: Boolean,
+      email: Option[String],
+      enabled: Boolean,
+      failIfExists: Boolean
+  ): Either[SupervisorError, RbacUser] = {
+    if username.isEmpty || password.isEmpty then
+      Left(SupervisorError.InvalidArgument("username and password are required"))
+    else
+      tenant match
+        case Some(t) if t.isEmpty =>
+          Left(
+            SupervisorError.InvalidArgument("tenant must be non-empty (use None for superuser)")
+          )
+        case Some(t)
+            if !tenants.values
+              .exists(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT)) =>
+          Left(SupervisorError.NotFound(s"tenant not found: $t"))
+        case _ =>
+          val resolvedTenantId = tenant.flatMap { t =>
+            tenants.values
+              .find(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT))
+              .map(_.id)
+          }
+          // An email-format username IS its own email: derive/verify it here so a
+          // conflicting supplied value is refused instead of persisted.
+          EmailPolicy.resolve(username, email) match
+            case Left(msg)       => Left(SupervisorError.InvalidEmail(msg))
+            case Right(effEmail) =>
+              // An upsert over an existing row (REST create without failIfExists) attaches
+              // only the lists the caller named: the built-in defaults are for a fresh user
+              // and must never widen an existing user's access, so they are not even
+              // resolved for an existing row (a tenant missing a built-in cannot refuse it).
+              val existedBefore =
+                !failIfExists && store.findUser(resolvedTenantId, username).isDefined
+              // Names are resolved before anything is written: a refused membership leaves
+              // no user row behind.
+              resolveMemberships(resolvedTenantId, memberships, applyDefaults = !existedBefore)
+                .flatMap { resolved =>
+                  // Create always sets email, even to None (clearing is not meaningful on a
+                  // brand-new row, but a fresh insert with no email is the common case).
+                  val out = userStore.upsertUser(
+                    resolvedTenantId,
+                    username,
+                    password,
+                    kind,
+                    mustChangePassword = Some(mustChangePassword),
+                    email = Some(effEmail),
+                    enabled = Option.when(!enabled)(false),
+                    insertOnly = failIfExists
+                  )
+                  if failIfExists && !out.inserted then
+                    Left(SupervisorError.InvalidArgument(s"user already exists: $username"))
+                  else
+                    // Race guards: a row seen as existing but deleted meanwhile is a fresh
+                    // insert and gets its defaults now; a row seen as fresh but created
+                    // concurrently keeps only the explicit lists.
+                    val toAttach: Either[SupervisorError, (List[RbacRole], List[RbacGroup])] =
+                      if out.inserted && existedBefore then
+                        resolveMemberships(resolvedTenantId, memberships, applyDefaults = true)
+                      else if out.inserted then Right(resolved)
+                      else
+                        memberships match
+                          case UserMemberships.Requested(r, g) =>
+                            Right(
+                              (
+                                if r.isDefined then resolved._1 else Nil,
+                                if g.isDefined then resolved._2 else Nil
                               )
                             )
-                          Left(err)
-                        case Right((attachRoles, attachGroups)) =>
-                          if attachRoles.nonEmpty || attachGroups.nonEmpty then
-                            invalidateEffectiveCache()
-                          val u = RbacUser(
-                            out.id,
-                            resolvedTenantId,
-                            username,
-                            kind,
-                            enabled = enabled,
-                            mustChangePassword = mustChangePassword,
-                            email = effEmail
+                          case UserMemberships.IdpManaged => Right((Nil, Nil))
+                    val attached: Either[SupervisorError, (List[RbacRole], List[RbacGroup])] =
+                      toAttach.flatMap { case (attachRoles, attachGroups) =>
+                        if attachRoles.isEmpty && attachGroups.isEmpty then
+                          Right((attachRoles, attachGroups))
+                        else
+                          Try(
+                            store.addUserMemberships(
+                              out.id,
+                              attachRoles.map(_.id),
+                              attachGroups.map(_.id)
+                            )
+                          ).toEither.left
+                            .map { t =>
+                              logger.error(
+                                s"createUser: could not attach memberships to user ${out.id}",
+                                t
+                              )
+                              SupervisorError.Internal("could not attach memberships")
+                            }
+                            .map(_ => (attachRoles, attachGroups))
+                      }
+                    attached match
+                      case Left(err) =>
+                        // User rows and edges live in two connection pools, so they cannot
+                        // share a transaction: undo the user row we just inserted.
+                        if out.inserted then
+                          Try(store.deleteUser(out.id)).failed.foreach(e =>
+                            logger.error(
+                              s"createUser: could not remove user ${out.id} after a failed " +
+                                s"membership attach: ${e.getMessage}",
+                              e
+                            )
                           )
-                          store.upsertUserIdentity(u)
-                          Right(u)
-                  }
-    }
+                        Left(err)
+                      case Right((attachRoles, attachGroups)) =>
+                        if attachRoles.nonEmpty || attachGroups.nonEmpty then
+                          invalidateEffectiveCache()
+                        val u = RbacUser(
+                          out.id,
+                          resolvedTenantId,
+                          username,
+                          kind,
+                          enabled = enabled,
+                          mustChangePassword = mustChangePassword,
+                          email = effEmail
+                        )
+                        store.upsertUserIdentity(u)
+                        Right(u)
+                }
   }
 
   /** Names -> rows for a user create, before anything is written. */
@@ -3757,10 +3786,18 @@ final class PoolSupervisor(
               EmailPolicy.resolve(u.username, inner) match
                 case Left(msg)  => Left(SupervisorError.InvalidEmail(msg))
                 case Right(eff) => Right(Some(eff))
-          emailCheck match
-            case Left(err)       => Left(err)
-            case Right(effEmail) =>
-              val newKind = kind.getOrElse(u.kind)
+          val kindCheck: Either[SupervisorError, Option[String]] = kind match
+            case None    => Right(None)
+            case Some(k) =>
+              ai.starlake.quack.ondemand.state.UserKind
+                .normalize(k)
+                .map(Some(_))
+                .left
+                .map(SupervisorError.InvalidArgument(_))
+          emailCheck.flatMap(e => kindCheck.map(k => (e, k))) match
+            case Left(err)                     => Left(err)
+            case Right((effEmail, normalKind)) =>
+              val newKind = normalKind.getOrElse(u.kind)
               // A rotation always writes the flag: the requested value, or false when
               // absent -- an unflagged admin reset hands out a normal password and
               // clears any pending must-change state. Kind-only updates leave it alone.
@@ -4269,6 +4306,40 @@ final class PoolSupervisor(
         Right(())
       }
     }
+
+  /** Sets a group's members to exactly `members` and, when `externalId` is given, its externalId,
+    * as one write: every joining member is checked (a user of the group's tenant) before anything
+    * is written, and the writes run in one control-plane transaction, so a member deleted in the
+    * meantime refuses the whole write (or, past the check, fails it on the edge's foreign key and
+    * rolls it back) instead of leaving part of it applied. SCIM's group PUT and PATCH.
+    */
+  def setGroupState(
+      groupId: String,
+      members: Set[String],
+      externalId: Option[Option[String]]
+  ): IO[Either[SupervisorError, Unit]] = IO.blocking {
+    withCacheRecovery("setGroupState") {
+      rbacResolver.group(groupId) match
+        case None    => Left(SupervisorError.NotFound(s"group not found: $groupId"))
+        case Some(g) =>
+          store.atomically {
+            val current = store.listUsersInGroup(groupId).toSet
+            val joining = (members -- current).toList.sorted
+            joining.find(uid => store.getUserById(uid).forall(!_.tenant.contains(g.tenantId))) match
+              case Some(uid) =>
+                Left(SupervisorError.InvalidArgument(s"member not found in tenant: $uid"))
+              case None =>
+                joining.foreach(uid => store.addUserGroup(uid, groupId))
+                (current -- members).foreach(uid => store.removeUserGroup(uid, groupId))
+                externalId.foreach(e => store.setGroupExternalId(groupId, e))
+                Right(())
+          } match
+            case Left(e)   => Left(e)
+            case Right(()) =>
+              invalidateEffectiveCache()
+              Right(())
+    }
+  }
 
   def addGroupRole(groupId: String, roleId: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {

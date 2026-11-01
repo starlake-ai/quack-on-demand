@@ -31,3 +31,33 @@ class CronExprSpec extends AnyFlatSpec with Matchers:
       now = Instant.parse("2026-07-08T03:10:00Z")
     ) shouldBe false
   }
+
+  it should "recur weekly: due again once the next week's match passes" in {
+    val cron    = "0 3 * * 0" // Sundays 03:00 UTC; 2026-07-05 and 2026-07-12 are Sundays
+    val lastRun = Some(Instant.parse("2026-07-05T03:00:30Z"))
+    CronExpr.due(cron, 0, lastRun, Instant.parse("2026-07-11T23:59:00Z")) shouldBe false
+    CronExpr.due(cron, 0, lastRun, Instant.parse("2026-07-12T02:59:00Z")) shouldBe false
+    CronExpr.due(cron, 0, lastRun, Instant.parse("2026-07-12T03:00:00Z")) shouldBe true
+    CronExpr.due(cron, 0, lastRun, Instant.parse("2026-07-14T10:00:00Z")) shouldBe true
+  }
+
+  it should "recur monthly: due again once the next month's match passes" in {
+    val cron    = "0 3 1 * *" // the 1st, 03:00 UTC
+    val lastRun = Some(Instant.parse("2026-07-01T03:01:00Z"))
+    CronExpr.due(cron, 0, lastRun, Instant.parse("2026-07-31T23:00:00Z")) shouldBe false
+    CronExpr.due(cron, 0, lastRun, Instant.parse("2026-08-01T03:00:00Z")) shouldBe true
+  }
+
+  it should "apply the stagger to a weekly match" in {
+    val cron    = "0 3 * * 0"
+    val lastRun = Some(Instant.parse("2026-07-05T03:30:00Z"))
+    CronExpr.due(cron, 30, lastRun, Instant.parse("2026-07-12T03:10:00Z")) shouldBe false
+    CronExpr.due(cron, 30, lastRun, Instant.parse("2026-07-12T03:30:00Z")) shouldBe true
+  }
+
+  it should "keep a frequent cadence's window exclusive of the last run's minute" in {
+    val cron = "*/15 * * * *"
+    val last = Some(Instant.parse("2026-07-08T10:00:10Z"))
+    CronExpr.due(cron, 0, last, Instant.parse("2026-07-08T10:14:59Z")) shouldBe false
+    CronExpr.due(cron, 0, last, Instant.parse("2026-07-08T10:15:00Z")) shouldBe true
+  }

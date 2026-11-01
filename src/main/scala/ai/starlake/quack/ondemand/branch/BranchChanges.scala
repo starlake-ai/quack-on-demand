@@ -33,14 +33,24 @@ final case class TableChange(
     /** The counts were asked for and could not be had (the node refused the requester the table, or
       * the count failed): the zeros are no counts.
       */
-    countsUnavailable: Boolean = false
+    countsUnavailable: Boolean = false,
+    /** A `Modified` table with a column of its own named `rowid` (any case): it shadows DuckDB's
+      * row identifier, which the merge's change-feed arithmetic matches on, so the merge would
+      * compare the user's values against row identifiers and silently skip or misapply rows.
+      */
+    shadowsRowid: Boolean = false
 ):
-  def mergeable: Boolean = kind != ChangeKind.Altered
+  def mergeable: Boolean = kind != ChangeKind.Altered && !shadowsRowid
 
-  def reason: Option[String] = kind match
-    case ChangeKind.Altered =>
+  def reason: Option[String] =
+    if kind == ChangeKind.Altered then
       Some("schema change (column add/drop/retype or rename) is not fast-forwardable in v1")
-    case _ => None
+    else if shadowsRowid then
+      Some(
+        "a column named rowid hides the row identifier the merge matches rows on; " +
+          "rename the column to merge this table"
+      )
+    else None
 
 final case class BranchConflict(schema: String, table: String, reason: String)
 
@@ -216,11 +226,18 @@ object BranchChanges:
         case (Some(f), Some(h)) if f != h =>
           Some(TableChange(ref.schema, ref.table, ChangeKind.Recreated))
         case (Some(f), Some(_)) =>
-          val altered =
-            !sameShape(branch.columnsOfTableAt(f, fork), branch.columnsOfTableAt(f, head))
+          val atHeadColumns = branch.columnsOfTableAt(f, head)
+          val altered       = !sameShape(branch.columnsOfTableAt(f, fork), atHeadColumns)
           if altered then Some(TableChange(ref.schema, ref.table, ChangeKind.Altered))
           else if t.dataTouched.contains(ref) then
-            Some(TableChange(ref.schema, ref.table, ChangeKind.Modified))
+            Some(
+              TableChange(
+                ref.schema,
+                ref.table,
+                ChangeKind.Modified,
+                shadowsRowid = atHeadColumns.exists(_.name.equalsIgnoreCase("rowid"))
+              )
+            )
           else None
         case (None, None) =>
           // Created and dropped again within the branch: nothing to merge.

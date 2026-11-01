@@ -45,23 +45,47 @@ object CronExpr:
         mo <- field(parts(3)); w <- field(parts(4))
       yield CronExpr(m, h, d, mo, w)
 
+  /** How far back a match may lie and still be owed: a year and a day, so a yearly cadence is
+    * found. A run that has never happened looks back 48h.
+    */
+  val MaxLookbackDays: Long = 366
+
   /** Cadence due-ness: is there a cron-matching minute (shifted by the stagger offset) in the
-    * window (lastRun, now]? Scans minute-by-minute from lastRun (or now - 48h when never run),
-    * capped at 48h - fine for daily/hourly cadences, and the scheduler ticks every minute anyway.
-    * Unparseable cron: never due (the handler validates on write; this is defense in depth).
+    * window (lastRun, now]? The window starts the minute after lastRun's (or 48h before now when
+    * never run) and reaches back at most [[MaxLookbackDays]]. It is walked day by day, and only a
+    * day the date fields match is expanded to its matching hours and minutes, so a weekly, monthly
+    * or yearly cadence costs at most a few hundred day checks per tick. Unparseable cron: never due
+    * (the handler validates on write; this is defense in depth).
     */
   def due(cron: String, offsetMinutes: Int, lastRun: Option[Instant], now: Instant): Boolean =
     parse(cron) match
       case Left(_)     => false
       case Right(expr) =>
+        import java.time.temporal.ChronoUnit.MINUTES
         val floor = lastRun.getOrElse(now.minusSeconds(48L * 3600))
-        val from  = floor.plusSeconds(60) // window is exclusive of lastRun's minute
-        Iterator
-          .iterate(from.truncatedTo(java.time.temporal.ChronoUnit.MINUTES))(_.plusSeconds(60))
-          .takeWhile(!_.isAfter(now))
-          .take(48 * 60)
-          .exists(t =>
-            expr.matches(
-              ZonedDateTime.ofInstant(t.minusSeconds(offsetMinutes * 60L), ZoneOffset.UTC)
-            )
-          )
+        // Exclusive of lastRun's minute.
+        val from = floor.truncatedTo(MINUTES).plusSeconds(60)
+        // A match at cron time c fires at c + offset: search cron times in the shifted window.
+        val shift = offsetMinutes * 60L
+        val end   = ZonedDateTime.ofInstant(now.minusSeconds(shift), ZoneOffset.UTC)
+        val start =
+          val s   = ZonedDateTime.ofInstant(from.minusSeconds(shift), ZoneOffset.UTC)
+          val cap = end.minusDays(MaxLookbackDays)
+          if s.isBefore(cap) then cap else s
+        if start.isAfter(end) then false
+        else
+          val hours   = (0 to 23).filter(expr.hour.matches)
+          val minutes = (0 to 59).filter(expr.minute.matches)
+          Iterator
+            .iterate(start.toLocalDate)(_.plusDays(1))
+            .takeWhile(!_.isAfter(end.toLocalDate))
+            .exists { day =>
+              expr.dom.matches(day.getDayOfMonth) && expr.month.matches(day.getMonthValue) &&
+              expr.dow.matches(day.getDayOfWeek.getValue % 7) &&
+              hours.exists(h =>
+                minutes.exists { m =>
+                  val t = day.atTime(h, m).atZone(ZoneOffset.UTC)
+                  !t.isBefore(start) && !t.isAfter(end)
+                }
+              )
+            }

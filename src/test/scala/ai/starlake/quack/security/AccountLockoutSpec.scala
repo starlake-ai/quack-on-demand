@@ -191,7 +191,7 @@ class AccountLockoutSpec extends AnyFlatSpec with Matchers:
         Left(AuthFailure.AccountLocked)
 
       // A password write (the reset path) unlocks.
-      users.setPasswordById(id, "brandnew")
+      users.setPasswordById(id, users.passwordHashById(id).get, "brandnew") shouldBe true
       users.isLocked(Some("t1"), "alice") shouldBe false
       auth.authenticate(AuthScope.Tenant("t1"), "alice", "brandnew").isRight shouldBe true
     }
@@ -215,8 +215,20 @@ class AccountLockoutSpec extends AnyFlatSpec with Matchers:
 
       // A self-service reset is a user-chosen credential, so it clears the flag: the user is not
       // forced to immediately change the password they just picked.
-      users.setPasswordById(id, "brandnew")
+      users.setPasswordById(id, users.passwordHashById(id).get, "brandnew") shouldBe true
       auth.authenticate(AuthScope.Tenant("t1"), "alice", "brandnew").isRight shouldBe true
+    }
+
+  it should "leave the row untouched when its hash is no longer the expected one" in
+    withFreshDb(enabledCfg) { (users, auth, _) =>
+      val id =
+        users.upsertUser(Some("t1"), "alice", "pw", "user", email = Some(Some("alice@x.io"))).id
+      val stale = users.passwordHashById(id).get
+      users.setPasswordById(id, stale, "first") shouldBe true
+      // A second redemption checked against the hash the first one replaced writes nothing.
+      users.setPasswordById(id, stale, "second") shouldBe false
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "first").isRight shouldBe true
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "second").isRight shouldBe false
     }
 
   it should "clear the lock on an admin upsertUser password write" in

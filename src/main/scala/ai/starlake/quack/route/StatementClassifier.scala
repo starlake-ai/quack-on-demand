@@ -273,6 +273,23 @@ final class StatementClassifier(
         if stmtAt < toks.length then view.substring(toks(stmtAt).start) else ""
       )
 
+  /** Whether `sql`, a write, answers with rows of its own instead of DuckDB's single `Count` (the
+    * schema FlightSQL advertises for a write it does not run at Prepare): a `RETURNING` clause
+    * anywhere (`INSERT ... RETURNING id`, a data-modifying CTE's), a statement headed by `WITH`
+    * (its rows are the final query's), or an executing EXPLAIN (its rows are the profile). Read on
+    * the lexer's words, so a `RETURNING` inside a literal, a quoted name or a comment is not one.
+    * Errs towards true: a statement it wrongly answers true for only loses its advertised schema.
+    */
+  private[quack] def answersWithRows(sql: String): Boolean =
+    val toks = wordTokens(sql)
+    toks.headOption.exists(t => t.upper == "WITH" || t.upper == "EXPLAIN") ||
+    toks.exists(_.upper == "RETURNING")
+
+  /** Whether `sql` is an EXPLAIN that runs the statement it explains (ANALYZE, see
+    * [[executedByExplain]]).
+    */
+  private[quack] def explainExecutes(sql: String): Boolean = executedByExplain(sql).isDefined
+
   /** The first keyword token at the leading WITH's depth after its CTE list, uppercased: the
     * statement's real verb. Read through [[wordTokens]], so parens or verbs inside a CTE body's
     * literals cannot desync it. The scan starts at the first `WITH` word (the statement's own, or
@@ -371,3 +388,9 @@ object StatementClassifier:
     * operator's tuned keyword lists.
     */
   def classify(sql: String): StatementKind = default.classify(sql)
+
+  /** [[StatementClassifier.answersWithRows]] of [[default]]: it reads no configured keyword. */
+  def answersWithRows(sql: String): Boolean = default.answersWithRows(sql)
+
+  /** [[StatementClassifier.explainExecutes]] of [[default]]: it reads no configured keyword. */
+  def explainExecutes(sql: String): Boolean = default.explainExecutes(sql)

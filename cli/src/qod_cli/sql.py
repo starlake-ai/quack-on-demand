@@ -68,25 +68,49 @@ class SqlClient:
         self.close()
 
 
-def _row(table, index: int) -> dict:
-    out: dict = {}
-    for name in table.column_names:
-        value = table.column(name)[index].as_py()
-        out[name] = value if isinstance(value, (int, float, str, bool, type(None))) else str(value)
+def _unique_names(names: list[str]) -> list[str]:
+    """One key per column, in order: a repeated name gets DuckDB's `_1`, `_2`, ... suffix,
+    skipping any name another column already holds (`SELECT 17 AS id, 23 AS id` is valid SQL,
+    but a row dict holds one value per key)."""
+    taken = set(names)
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        key = name
+        if key in seen:
+            n = 1
+            while f"{name}_{n}" in taken or f"{name}_{n}" in seen:
+                n += 1
+            key = f"{name}_{n}"
+        seen.add(key)
+        out.append(key)
     return out
 
 
+def _cell_value(table, column: int, index: int):
+    # By position: pyarrow refuses a name the schema holds twice.
+    value = table.column(column)[index].as_py()
+    return value if isinstance(value, (int, float, str, bool, type(None))) else str(value)
+
+
+def _row(table, index: int, keys: list[str]) -> dict:
+    return {key: _cell_value(table, i, index) for i, key in enumerate(keys)}
+
+
 def render_table(table, mode: str) -> None:
-    rows = [_row(table, i) for i in range(table.num_rows)]
+    if mode == "csv":
+        # CSV keeps the result's own header, repeated names included.
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(table.column_names)
+        for i in range(table.num_rows):
+            writer.writerow([_cell_value(table, c, i) for c in range(table.num_columns)])
+        sys.stdout.write(buf.getvalue())
+        return
+    keys = _unique_names(table.column_names)
+    rows = [_row(table, i, keys) for i in range(table.num_rows)]
     if mode == "json":
         print(json.dumps(rows, indent=2, default=str))
-        return
-    if mode == "csv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=table.column_names)
-        writer.writeheader()
-        writer.writerows(rows)
-        sys.stdout.write(buf.getvalue())
         return
     from .output import render
 

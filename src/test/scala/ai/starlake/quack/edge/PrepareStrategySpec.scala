@@ -42,6 +42,37 @@ class PrepareStrategySpec extends AnyFlatSpec with Matchers:
     PrepareStrategy.choose("EXPLAIN SELECT 1", StatementKind.Select) shouldBe
       PrepareStrategy.FullExecute
 
+  // EXPLAIN ANALYZE runs the explained statement: probing it ran it once at Prepare and again at
+  // Execute (a nextval() advanced twice).
+  it should "leave an executing EXPLAIN of a read unprobed" in:
+    for sql <- List(
+        "EXPLAIN ANALYZE SELECT nextval('s')",
+        "EXPLAIN ANALYSE SELECT 1",
+        "EXPLAIN (ANALYZE) SELECT 1",
+        "EXPLAIN (FORMAT json, ANALYZE true) SELECT 1"
+      )
+    do PrepareStrategy.choose(sql, StatementKind.Select) shouldBe PrepareStrategy.Unprobed
+
+  // A write that answers with rows of its own does not answer the advertised Count.
+  it should "leave a write answering with rows unprobed" in:
+    for sql <- List(
+        "INSERT INTO t VALUES (1) RETURNING id",
+        "UPDATE t SET x = 1 RETURNING *",
+        "DELETE FROM t RETURNING id",
+        "WITH w AS (DELETE FROM t RETURNING *) SELECT count(*) FROM w",
+        "EXPLAIN ANALYZE INSERT INTO t VALUES (1)"
+      )
+    do PrepareStrategy.choose(sql, StatementKind.Dml) shouldBe PrepareStrategy.Unprobed
+    PrepareStrategy.choose("EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1", StatementKind.Ddl) shouldBe
+      PrepareStrategy.Unprobed
+
+  it should "still skip execute for a write whose RETURNING is only in a literal or a comment" in:
+    PrepareStrategy.choose(
+      "INSERT INTO t VALUES ('RETURNING') -- RETURNING",
+      StatementKind.Dml
+    ) shouldBe
+      PrepareStrategy.SkipExecute
+
   it should "fall back to full execute for DESCRIBE" in:
     PrepareStrategy.choose("DESCRIBE customer", StatementKind.Select) shouldBe
       PrepareStrategy.FullExecute

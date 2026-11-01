@@ -5,5 +5,11 @@ package ai.starlake.quack.edge.adapter
   * ([[QuackResponse]]).
   */
 enum QuackError:
-  case Transient(message: String) // retryable (5xx, connect refused, timeout)
+
+  /** Retryable (5xx, connect refused, timeout). `notSent`: the statement certainly never reached
+    * the node (no connection, a refused session handle, a draining node), so another node may run
+    * it. False means it may have run before its answer was lost: only a statement that is safe to
+    * repeat may be sent again. False is the default, the side that never repeats a write.
+    */
+  case Transient(message: String, notSent: Boolean = false)
   case Permanent(message: String) // not retryable (4xx, auth, parse error)

@@ -69,10 +69,15 @@ class FederatedSourceStore(
   // listEnabledSources/listSecrets, tenantDbIdsWithSources) benefits without a per-call cost.
   private val boundedUrl = FederatedSourceStore.withTimeouts(jdbcUrl)
 
+  // Joins a control-plane transaction of the same database (ControlPlaneStore.atomically), so a
+  // manifest import's federation writes commit or roll back with the rest of it.
   private def withConn[A](f: Connection => A): A =
-    val c = DriverManager.getConnection(boundedUrl, user, password)
-    try f(c)
-    finally c.close()
+    ControlPlaneTx.joined(jdbcUrl) match
+      case Some(tx) => f(tx)
+      case None     =>
+        val c = DriverManager.getConnection(boundedUrl, user, password)
+        try f(c)
+        finally c.close()
 
   // ---------------- FederatedSource ----------------
 

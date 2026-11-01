@@ -262,7 +262,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         writeExecutor,
         (_, _) => restoreReader(),
         CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30),
-        callers
+        callers,
+        ai.starlake.quack.ondemand.branch.TableCommitFence.unfenced
       )
       val undropH = new CatalogUndropHandlers(
         sup,

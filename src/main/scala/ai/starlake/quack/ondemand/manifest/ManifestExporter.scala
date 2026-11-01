@@ -99,6 +99,8 @@ object ManifestExporter extends LazyLogging:
         .view
         .mapValues(_.map(_._2))
         .toMap
+    val poolPermsByGroup =
+      snap.poolPermissions.filter(_.groupId.isDefined).groupBy(_.groupId.get)
     val usersByTenant = snap.users.groupBy(_.tenant)
 
     val tenants = snap.tenants.sortBy(_.displayName).map { t =>
@@ -170,7 +172,20 @@ object ManifestExporter extends LazyLogging:
           initSql = d.initSql,
           federatedSources = fedSources,
           encrypted = d.encrypted,
-          initSqlTrusted = Some(d.initSqlTrusted)
+          initSqlTrusted = Some(d.initSqlTrusted),
+          // By the parent's name. A parent that no longer resolves exports its id, which an import
+          // refuses, rather than nothing, which would make the branch a plain (maintained) database.
+          branchOf = d.branchOf.map { pid =>
+            dbIdToName.getOrElse(
+              pid, {
+                logger.warn(
+                  s"manifest export: tenant-db ${d.name} of tenant ${t.id} is a branch of $pid, " +
+                    "which no longer exists"
+                )
+                pid
+              }
+            )
+          }
         )
       }
 
@@ -262,7 +277,13 @@ object ManifestExporter extends LazyLogging:
           tenant = t.id,
           name = g.name,
           description = g.description.filter(_.nonEmpty),
-          roles = rolesByGroup.getOrElse(g.id, Nil).flatMap(roleIdToName.get).sorted
+          roles = rolesByGroup.getOrElse(g.id, Nil).flatMap(roleIdToName.get).sorted,
+          poolGrants = poolPermsByGroup
+            .getOrElse(g.id, Nil)
+            .flatMap(pp =>
+              poolGrantFor(pp, ownerTenantAddr = Some(t.id), poolTenantAndNameByPoolId)
+            )
+            .sortBy(pg => (pg.tenant, pg.pool))
         )
       }
 
@@ -278,7 +299,9 @@ object ManifestExporter extends LazyLogging:
             groupsByUser.getOrElse(u.id, Nil).flatMap(groupIdToName.get).sorted
           val userPoolGrants = poolPermsByUser
             .getOrElse(u.id, Nil)
-            .map(pp => poolGrantFor(pp, ownerTenantAddr = Some(t.id), poolTenantAndNameByPoolId))
+            .flatMap(pp =>
+              poolGrantFor(pp, ownerTenantAddr = Some(t.id), poolTenantAndNameByPoolId)
+            )
           ManifestUser(
             // Emit the tenant DISPLAY NAME -- manifests are human-facing and
             // keyed by name (matching role/group emission above), not the
@@ -340,7 +363,7 @@ object ManifestExporter extends LazyLogging:
     val superusers = snap.users.filter(_.tenant.isEmpty).sortBy(_.username).map { u =>
       val userPoolGrants = poolPermsByUser
         .getOrElse(u.id, Nil)
-        .map(pp => poolGrantFor(pp, ownerTenantAddr = None, poolTenantAndNameByPoolId))
+        .flatMap(pp => poolGrantFor(pp, ownerTenantAddr = None, poolTenantAndNameByPoolId))
       ManifestUser(
         tenant = None,
         username = u.username,
@@ -405,22 +428,30 @@ object ManifestExporter extends LazyLogging:
     else TenantDb.metastoreKeyRemoval(key)
 
   /** Resolve a single [[ai.starlake.quack.ondemand.state.PoolPermission]] into a
-    * [[ManifestPoolGrant]]. `pool = None` when the permission has no pool id (a tenant-wide
-    * wildcard grant) or the pool id no longer resolves (dangling FK, should not happen). The
-    * `tenant` qualifier is only emitted when the pool's owning tenant differs from
-    * `ownerTenantAddr` -- the common in-tenant case stays qualifier-free so existing manifests
-    * round-trip byte-for-byte; a cross-tenant grant (only possible for a superuser, whose
-    * `ownerTenantAddr` is None) always gets the qualifier so import can resolve back to the exact
-    * same (tenant, pool) pair instead of guessing.
+    * [[ManifestPoolGrant]]. `pool = None` for a tenant-wide grant (no pool id). A grant whose pool
+    * id no longer resolves (deleted while the export ran) is left out, never exported as
+    * `pool = None`, which would widen it to every pool of the tenant on import. The `tenant`
+    * qualifier is only emitted when the grant's tenant differs from `ownerTenantAddr` -- the common
+    * in-tenant case stays qualifier-free so existing manifests round-trip byte-for-byte; a
+    * superuser's grant (whose `ownerTenantAddr` is None) always gets it, tenant-wide ones included,
+    * so import resolves back to the exact same (tenant, pool) pair instead of guessing.
     */
   private def poolGrantFor(
       pp: ai.starlake.quack.ondemand.state.PoolPermission,
       ownerTenantAddr: Option[String],
       poolTenantAndNameByPoolId: Map[String, (String, String)]
-  ): ManifestPoolGrant =
-    pp.poolId.flatMap(poolTenantAndNameByPoolId.get) match
-      case None => ManifestPoolGrant(pool = None)
-      case Some((poolTenantAddr, poolName)) if ownerTenantAddr.contains(poolTenantAddr) =>
-        ManifestPoolGrant(pool = Some(poolName))
-      case Some((poolTenantAddr, poolName)) =>
-        ManifestPoolGrant(pool = Some(poolName), tenant = Some(poolTenantAddr))
+  ): Option[ManifestPoolGrant] =
+    def qualifier(tenant: String): Option[String] =
+      Option.when(!ownerTenantAddr.contains(tenant))(tenant)
+    pp.poolId match
+      case None         => Some(ManifestPoolGrant(pool = None, tenant = qualifier(pp.tenantId)))
+      case Some(poolId) =>
+        poolTenantAndNameByPoolId.get(poolId) match
+          case None =>
+            logger.warn(
+              s"manifest export: pool grant ${pp.id} names pool $poolId, which no longer " +
+                "exists; left out"
+            )
+            None
+          case Some((poolTenantAddr, poolName)) =>
+            Some(ManifestPoolGrant(pool = Some(poolName), tenant = qualifier(poolTenantAddr)))

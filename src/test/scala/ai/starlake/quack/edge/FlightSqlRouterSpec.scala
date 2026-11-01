@@ -28,6 +28,36 @@ import scala.concurrent.duration.*
 
 class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
+  /** `sql` as a front door that holds the client's transaction on its own node link (the native
+    * Quack one) runs it: through `executeWith`, sent like `execute` sends. FlightSQL's `execute`
+    * refuses a transaction that spans requests, so the session's transaction pin is reached here.
+    */
+  private def viaLink(
+      router: FlightSqlRouter,
+      connectionId: String,
+      key: PoolKey,
+      sql: String,
+      preferredNode: Option[String] = None
+  ): Either[RouterFailure, QueryResult] =
+    val send: FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+      (node, wrappedSql, prelude, recordLoad, principal) =>
+        router.adapter
+          .send(node, wrappedSql, principal, None, recordLoad = recordLoad, stampPrelude = prelude)
+          .map(NodeOutcome.fromQuackResponse)
+    router
+      .executeWith(
+        connectionId,
+        "alice",
+        key,
+        sql,
+        None,
+        send,
+        preferredNode = preferredNode,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
+      .unsafeRunSync()
+
   private val poolKey: PoolKey = PoolKey("acme", "acme_default", "sales")
 
   /** The metadata filter as `Main` mounts it: every router here is built with it. */
@@ -458,20 +488,63 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "pin the session inside a BEGIN…COMMIT block" in:
     val (router, sessions, node) = setup()
-    router.execute("c-1", "alice", poolKey, "BEGIN").unsafeRunSync()
+    viaLink(router, "c-1", poolKey, "BEGIN")
     sessions.get("c-1").exists(_.txOpen) shouldBe true
-    router.execute("c-1", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    viaLink(router, "c-1", poolKey, "INSERT INTO t VALUES (1)")
     sessions.get("c-1").map(_.pinnedNodeId) shouldBe Some(Some(node.nodeId))
-    router.execute("c-1", "alice", poolKey, "COMMIT").unsafeRunSync()
+    viaLink(router, "c-1", poolKey, "COMMIT")
     sessions.get("c-1").exists(_.txOpen) shouldBe false
     sessions.get("c-1").flatMap(_.pinnedNodeId) shouldBe None
 
   it should "unpin on ROLLBACK too" in:
     val (router, sessions, _) = setup()
-    router.execute("c-1", "alice", poolKey, "BEGIN").unsafeRunSync()
-    router.execute("c-1", "alice", poolKey, "ROLLBACK").unsafeRunSync()
+    viaLink(router, "c-1", poolKey, "BEGIN")
+    viaLink(router, "c-1", poolKey, "ROLLBACK")
     sessions.get("c-1").exists(_.txOpen) shouldBe false
     sessions.get("c-1").flatMap(_.pinnedNodeId) shouldBe None
+
+  "FlightSQL execute" should "refuse a request that opens a transaction it does not end, sending nothing" in:
+    val calls                 = new java.util.concurrent.atomic.AtomicInteger(0)
+    val (router, sessions, _) = setup(stub = () => { calls.incrementAndGet(); defaultStub() })
+    for sql <- List("BEGIN", "START TRANSACTION", "BEGIN TRANSACTION; INSERT INTO t VALUES (1)") do
+      val out = router.execute("tx-1", "alice", poolKey, sql).unsafeRunSync()
+      out.left.toOption.get shouldBe a[RouterFailure.BadRequest]
+      out.left.toOption.get.reason should include("opens a transaction it does not end")
+      out.left.toOption.get.reason should include("native Quack front door")
+    calls.get() shouldBe 0
+    sessions.get("tx-1").exists(_.txOpen) shouldBe false
+
+  it should "refuse a request that ends a transaction it did not open, sending nothing" in:
+    val calls          = new java.util.concurrent.atomic.AtomicInteger(0)
+    val (router, _, _) = setup(stub = () => { calls.incrementAndGet(); defaultStub() })
+    for sql <- List("COMMIT", "ROLLBACK", "END", "ABORT", "INSERT INTO t VALUES (1); COMMIT") do
+      val out = router.execute("tx-2", "alice", poolKey, sql).unsafeRunSync()
+      out.left.toOption.get.reason should include("ends a transaction it did not open")
+    calls.get() shouldBe 0
+
+  it should "run a whole transaction sent as one request and leave none open" in:
+    val (router, sessions, _) = setup()
+    val out = router
+      .execute("tx-3", "alice", poolKey, "BEGIN; INSERT INTO t VALUES (1); COMMIT")
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    out.foreach(_.close())
+    sessions.get("tx-3").exists(_.txOpen) shouldBe false
+    sessions.get("tx-3").flatMap(_.pinnedNodeId) shouldBe None
+
+  "FlightSqlRouter.transactionControl" should "pair transaction statements within one request" in:
+    def tc(sql: String) =
+      FlightSqlRouter.transactionControl(sql, ai.starlake.quack.route.StatementClassifier.classify)
+    def refused(sql: String) = tc(sql).refusal.isDefined
+    tc("SELECT 1") shouldBe FlightSqlRouter.TransactionControl(present = false, refusal = None)
+    tc("BEGIN; SELECT 1; ROLLBACK").present shouldBe true
+    refused("BEGIN; SELECT 1; ROLLBACK") shouldBe false
+    refused("BEGIN; COMMIT; BEGIN; COMMIT") shouldBe false
+    refused("BEGIN; COMMIT; BEGIN") shouldBe true
+    refused("COMMIT; BEGIN") shouldBe true
+    // A ';' or a keyword inside a literal or a comment is no statement of its own.
+    refused("SELECT 'BEGIN; x'") shouldBe false
+    refused("SELECT 1 -- ; COMMIT") shouldBe false
 
   it should "return Left when no compatible node available (quarantined)" in:
     val (router, _, _) = setup()
@@ -619,7 +692,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
-    router.execute("c-4", "alice", poolKey, "BEGIN").unsafeRunSync()
+    viaLink(router, "c-4", poolKey, "BEGIN")
     sessions.get("c-4").exists(_.txOpen) shouldBe true
 
     // Swap out the adapter behavior to fail transiently for the next call. Easiest path:
@@ -633,13 +706,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "report PinnedNodeGone when the pinned node has been removed from the pool" in:
     val (router, sessions, node) = setup()
-    router.execute("c-5", "alice", poolKey, "BEGIN").unsafeRunSync()
+    viaLink(router, "c-5", poolKey, "BEGIN")
     sessions.get("c-5").map(_.pinnedNodeId) shouldBe Some(Some(node.nodeId))
 
     // Stop the pool - the supervisor removes the node from snapshot.nodes
     router.supervisor.stopPool(poolKey, force = true).unsafeRunSync()
 
-    val out = router.execute("c-5", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    val out = viaLink(router, "c-5", poolKey, "INSERT INTO t VALUES (1)")
     out shouldBe a[Left[_, _]]
     sessions.get("c-5").flatMap(_.pinnedNodeId) shouldBe None
 
@@ -883,12 +956,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val (router, sessions, nodes, key) = setupMultiNode(3)
     // BEGIN pins to whichever node served it; pick a DIFFERENT node as the preferredNode
     // to prove the tx pin wins.
-    router.execute("p-3", "alice", key, "BEGIN").unsafeRunSync()
+    viaLink(router, "p-3", key, "BEGIN")
     val pinned = sessions.get("p-3").flatMap(_.pinnedNodeId).getOrElse(fail("no pin after BEGIN"))
     val different = nodes.map(_.nodeId).find(_ != pinned).getOrElse(fail("need >1 node"))
-    val out       = router
-      .execute("p-3", "alice", key, "INSERT INTO t VALUES (1)", preferredNode = Some(different))
-      .unsafeRunSync()
+    val out       =
+      viaLink(router, "p-3", key, "INSERT INTO t VALUES (1)", preferredNode = Some(different))
     out match
       case Right(qr) =>
         qr.nodeId shouldBe pinned
@@ -2090,6 +2162,34 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.execute("c-s2", "alice", poolKey, "CREATE TABLE t2 (i INT)").unsafeRunSync()
     calls.head._1.get should include("'flightsql create'")
 
+  it should "stamp a write with the caller's own commit message in place of the verb's" in:
+    val (router, _, sup, calls) = stampedSetup()
+    router
+      .execute(
+        "c-s10",
+        "alice",
+        poolKey,
+        "CREATE TABLE t3 AS SELECT 1 AS i",
+        commitMessage = Some("undrop main.t3 as main.t3 from snapshot 7 [u-1]")
+      )
+      .unsafeRunSync()
+    val db = sup.get(poolKey).get.metastore("dbName")
+    calls.head._1.get shouldBe
+      s"BEGIN; CALL ducklake_set_commit_message('$db', 'tenant:acme/user:alice', " +
+      "'undrop main.t3 as main.t3 from snapshot 7 [u-1]')"
+
+  it should "escape a single quote in a caller's commit message" in:
+    val (router, _, _, calls) = stampedSetup()
+    router
+      .execute("c-s11", "alice", poolKey, "INSERT INTO t VALUES (1)", commitMessage = Some("it's"))
+      .unsafeRunSync()
+    calls.head._1.get should include("'it''s')")
+
+  it should "leave a caller's commit message unused on a statement it does not stamp" in:
+    val (router, _, _, calls) = stampedSetup()
+    router.execute("c-s12", "alice", poolKey, "SELECT 1", commitMessage = Some("x")).unsafeRunSync()
+    calls.head._1 shouldBe None
+
   it should "escape a single quote in the user name (injection guard)" in:
     val (router, _, _, calls) = stampedSetup()
     router.execute("c-s3", "o'brien", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
@@ -2102,8 +2202,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "not stamp inside a client-opened transaction" in:
     val (router, _, _, calls) = stampedSetup()
-    router.execute("c-s5", "alice", poolKey, "BEGIN").unsafeRunSync()
-    router.execute("c-s5", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    viaLink(router, "c-s5", poolKey, "BEGIN")
+    viaLink(router, "c-s5", poolKey, "INSERT INTO t VALUES (1)")
     calls.map(_._1).toList shouldBe List(None, None)
 
   it should "not stamp on a memory pool" in:
@@ -2231,7 +2331,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           IO {
             calls += ((Some(prelude), sql))
             if callCount.getAndIncrement() == 0 then
-              QuackResponse.Failed(QuackError.Transient("boom"), 1L)
+              // Not sent (a refused connection): a write that may have run is never retried.
+              QuackResponse.Failed(QuackError.Transient("boom", notSent = true), 1L)
             else TestArrow.okResponse()
           }
 
@@ -2655,11 +2756,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // Open a transaction pinned to the OTHER node, via the preferredNode seam on BEGIN, so the tx
     // pin and the scorer's warm home deliberately disagree.
     val other = nodes.map(_.nodeId).find(_ != homeNode).getOrElse(fail("need >1 node"))
-    router.execute("pin-mv", "alice", poolKey, "BEGIN", preferredNode = Some(other)).unsafeRunSync()
+    viaLink(router, "pin-mv", poolKey, "BEGIN", preferredNode = Some(other))
     router.session("pin-mv").flatMap(_.pinnedNodeId) shouldBe Some(other)
     // A read of the same table inside the tx: the scorer would pick `homeNode`, but the tx pin
     // forces `other`. Assert both the node identity and the pinned-move decision label.
-    val inTx = router.execute("pin-mv", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync()
+    val inTx = viaLink(router, "pin-mv", poolKey, "SELECT * FROM customer")
     inTx.toOption.get.nodeId shouldBe other
     inTx.toOption.get.close()
     decisionCount(reg, "pinned-move") shouldBe 1.0

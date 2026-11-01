@@ -84,6 +84,25 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
     tables.find(_.table == "region").get.mergeable shouldBe false
   }
 
+  it should "mark a modified table with a column named rowid, in any case, as not mergeable" in {
+    val fake = new Fake(
+      head = 11L,
+      versions = List(region),
+      changes = List((11L, "inlined_insert:2")),
+      columns = Map(
+        (2L, fork) -> List(col("RowId"), col("x")),
+        (2L, 11L)  -> List(col("RowId"), col("x"))
+      )
+    )
+    val (tables, _) = BranchChanges.classify(fake, fork, 11L)
+    tables.map(t => (t.table, t.kind, t.shadowsRowid, t.mergeable)) shouldBe
+      List(("region", ChangeKind.Modified, true, false))
+    tables.head.reason.get should include("column named rowid")
+    // A table without one stays mergeable.
+    val plain = new Fake(11L, List(region), List((11L, "inlined_insert:2")))
+    BranchChanges.classify(plain, fork, 11L)._1.map(_.mergeable) shouldBe List(true)
+  }
+
   it should "treat flush snapshots and compaction as no touch, and unknown table verbs as a touch" in {
     val fake = new Fake(
       head = 13L,

@@ -53,8 +53,15 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
           return Left(s"JWT audience mismatch: $audiences (expected: ${config.audience})")
 
       // Check expiry
+      val now = new Date()
       val exp = Option(claims.getExpirationTime)
-      if exp.exists(_.before(new Date())) then return Left("JWT token has expired")
+      if exp.exists(_.before(now)) then return Left("JWT token has expired")
+
+      // Not before (RFC 7519 4.1.5), with the clock skew the OIDC path's nimbus processor allows,
+      // so an issuer whose clock runs a little ahead still signs usable tokens.
+      val nbf = Option(claims.getNotBeforeTime)
+      if nbf.exists(_.getTime > now.getTime + JwtBearerAuthenticator.NotBeforeSkewMs) then
+        return Left("JWT token is not valid yet (nbf is in the future)")
 
       // A token naming no one is refused rather than named "unknown", which a row could hold.
       extractUsername(claims) match
@@ -100,3 +107,10 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     val decoded = Base64.getDecoder.decode(stripped)
     val spec    = new X509EncodedKeySpec(decoded)
     KeyFactory.getInstance("RSA").generatePublic(spec).asInstanceOf[RSAPublicKey]
+
+object JwtBearerAuthenticator:
+
+  /** How far in the future a token's `nbf` may lie and still be accepted: nimbus
+    * `DefaultJWTClaimsVerifier`'s default, which the OIDC bearer path applies.
+    */
+  val NotBeforeSkewMs: Long = 60_000L

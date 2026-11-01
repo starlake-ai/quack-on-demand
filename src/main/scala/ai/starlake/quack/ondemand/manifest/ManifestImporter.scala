@@ -31,7 +31,8 @@ import ai.starlake.quack.ondemand.state.{
   RbacRole,
   RoleColumnPolicy,
   RolePermission,
-  RoleRowPolicy
+  RoleRowPolicy,
+  UserKind
 }
 import com.typesafe.scalalogging.LazyLogging
 
@@ -159,10 +160,10 @@ object ManifestImporter extends LazyLogging:
           "built-ins, and a built-in may only appear in its exact built-in shape"
     }
     m.groups.foreach { g =>
-      val ok = BuiltinRbac.GroupNames.contains(g.name) && g.roles.isEmpty
+      val ok = BuiltinRbac.GroupNames.contains(g.name) && g.roles.isEmpty && g.poolGrants.isEmpty
       if BuiltinRbac.isReserved(g.name) && !ok then
         errs += s"group '${g.name}' in tenant '${g.tenant}': the qod_ prefix is reserved for " +
-          "built-ins, and a built-in group carries no roles"
+          "built-ins, and a built-in group carries no roles and no pool grants"
     }
 
     // The line the node launchers write around a tenant's initSql section (InitSqlTrust).
@@ -229,6 +230,82 @@ object ManifestImporter extends LazyLogging:
           s"location within ${t.name}"
         )
       }
+    }
+
+    // Branches: a branch names its parent among its own tenant's databases in the manifest (a
+    // tenant of the manifest keeps exactly the manifest's databases).
+    m.tenants.foreach { t =>
+      val names = t.tenantDbs.map(_.name).toSet
+      t.tenantDbs.foreach { d =>
+        d.branchOf.foreach { parent =>
+          if parent == d.name then
+            errs += s"tenant '${t.name}' tenant-db '${d.name}': branchOf names itself"
+          else if !names.contains(parent) then
+            errs += s"tenant '${t.name}' tenant-db '${d.name}': branchOf '$parent' is not a " +
+              "tenant-db of this tenant in the manifest"
+        }
+      }
+    }
+
+    // Account kinds, stored in their one spelling: an unknown or padded one (" admin ") would be
+    // no recognized kind once stored.
+    m.users.foreach { u =>
+      UserKind.normalize(u.kind).left.foreach(msg => errs += s"user '${u.username}': $msg")
+    }
+
+    // Database kinds: apply() would refuse one only after the replace passes ran.
+    m.tenants.foreach { t =>
+      t.tenantDbs.foreach { d =>
+        TenantDbKind
+          .fromWire(d.kind)
+          .left
+          .foreach(err => errs += s"tenant '${t.name}' tenant-db '${d.name}': $err")
+      }
+    }
+
+    // Pool grants. apply() stores a grant naming no pool as "every pool of the tenant", so a pool
+    // or tenant name that resolves to nothing must be refused, never stored as a wider grant. A
+    // grant reaches only its owner's own tenant; a superuser's names its tenant. A tenant of the
+    // manifest has exactly the manifest's pools after apply() (its replace pass deletes the rest);
+    // any other tenant keeps the stored ones.
+    def tenantKey(name: String): String =
+      storedTenants
+        .find(x => x.id == name || x.displayName == name)
+        .map(_.id)
+        .getOrElse(name.toLowerCase(Locale.ROOT))
+    def poolsAfterApply(tenantName: String): Set[String] =
+      m.tenants.find(t => tenantKey(t.name) == tenantKey(tenantName)) match
+        case Some(t) => t.pools.map(_.name).toSet
+        case None    =>
+          storedTenants
+            .find(x => x.id == tenantName || x.displayName == tenantName)
+            .toList
+            .flatMap(st => store.listTenantDbs(st.id))
+            .flatMap(d => store.listPools(d.id))
+            .map(_.name)
+            .toSet
+    def grantErrors(owner: String, home: Option[String], g: ManifestPoolGrant): List[String] =
+      (home, g.tenant) match
+        case (Some(h), Some(q)) if tenantKey(h) != tenantKey(q) =>
+          List(s"$owner: pool grant into tenant '$q', outside its own tenant '$h'")
+        case (None, None) =>
+          List(s"$owner: a superuser's pool grant must name its tenant")
+        case _ =>
+          val target = g.tenant.orElse(home).get
+          if !knownTenants.contains(target) then
+            List(s"$owner: pool grant into tenant '$target', which is not in YAML or DB")
+          else
+            g.pool
+              .filterNot(poolsAfterApply(target).contains)
+              .map(p => s"$owner: pool grant names pool '$p', which tenant '$target' does not have")
+              .toList
+    m.users.foreach { u =>
+      u.poolGrants.foreach(g => errs ++= grantErrors(s"user '${u.username}'", u.tenant, g))
+    }
+    m.groups.foreach { g =>
+      g.poolGrants.foreach(pg =>
+        errs ++= grantErrors(s"group '${g.name}' in tenant '${g.tenant}'", Some(g.tenant), pg)
+      )
     }
 
     if errs.isEmpty then Right(()) else Left(errs.toList)
@@ -298,6 +375,32 @@ object ManifestImporter extends LazyLogging:
       tenantFilesRoot: Option[String] = None
   ): ValidationResult =
     validate(m, store, tenantFilesRoot).flatMap { _ =>
+      // One transaction: an error found while applying, or a failed write, rolls back every row
+      // written before it (the deletes of the replace passes included), so a refused import
+      // changes nothing. Errors are thrown out of the transaction to roll it back.
+      try
+        store.atomically {
+          val result = applyValidated(m, store, federatedStore, requireEncryption, tenantFilesRoot)
+          result.left.foreach(errs => throw ApplyRefused(errs))
+          result
+        }
+      catch case ApplyRefused(errs) => Left(errs)
+    }
+
+  private final case class ApplyRefused(errs: List[String])
+      extends RuntimeException(errs.mkString("; "), null, false, false)
+
+  /** The write phase of [[apply]], on a manifest [[validate]] admitted. Runs inside the import's
+    * transaction.
+    */
+  private def applyValidated(
+      m: ConfigManifest,
+      store: ControlPlaneStore,
+      federatedStore: Option[FederatedSourceStore],
+      requireEncryption: Boolean,
+      tenantFilesRoot: Option[String]
+  ): ValidationResult =
+    locally {
       val errs = scala.collection.mutable.ListBuffer.empty[String]
 
       // 0. Snapshot the existing graph ONCE so the per-tenant loops below
@@ -472,13 +575,18 @@ object ManifestImporter extends LazyLogging:
             localDbs.remove(d.name)
             poolsByDb.remove(d.id)
         }
+        // Each database's id, settled before any is written, so a branch resolves its parent's
+        // whatever the order the manifest lists them in.
+        val plannedDbIds = mt.tenantDbs
+          .map(m => m.name -> localDbs.get(m.name).map(_.id).getOrElse(Names.newSurrogateId("td")))
+          .toMap
         mt.tenantDbs.foreach { mtd =>
           TenantDbKind.fromWire(mtd.kind) match
             case Left(err) =>
               errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
             case Right(dbKind) =>
               val existing = localDbs.get(mtd.name)
-              val tdId     = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
+              val tdId     = plannedDbIds(mtd.name)
               if existing.exists(_.encrypted != mtd.encrypted) then
                 // `encrypted` is create-time only and can never be flipped in either direction on
                 // an existing row: neither DuckDB nor DuckLake can encrypt or decrypt data in
@@ -561,7 +669,13 @@ object ManifestImporter extends LazyLogging:
                     mtd.initSqlTrusted,
                     existing.map(e => (e.initSql, e.initSqlTrusted))
                   ),
-                  encrypted = mtd.encrypted
+                  encrypted = mtd.encrypted,
+                  // validate() resolved the parent among this tenant's databases. Absent keeps the
+                  // stored row's own: an older manifest must not turn a branch into a plain
+                  // database, which maintenance would then clean, deleting its parent's files.
+                  branchOf = mtd.branchOf
+                    .flatMap(plannedDbIds.get)
+                    .orElse(existing.flatMap(_.branchOf))
                 )
                 // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
                 // schemaName keys (they are merged from the default metastore at spawn time), so we
@@ -762,6 +876,25 @@ object ManifestImporter extends LazyLogging:
                 if !keepRoleIds.contains(rid) then store.removeGroupRole(groupId, rid)
               }
               keepRoleIds.foreach(rid => store.addGroupRole(groupId, rid))
+              // Pool permissions: full replace, as for users.
+              store
+                .listPoolPermissionsForGroup(groupId)
+                .foreach(p => store.deletePoolPermission(p.id))
+              mg.poolGrants.foreach { mpg =>
+                resolvePoolGrant(store, mpg, Some(tenantId), dbsOf, poolsOf) match
+                  case Left(reason) =>
+                    errs += s"group '${mg.name}' in tenant '${mg.tenant}': $reason"
+                  case Right((grantTenantId, poolId)) =>
+                    store.insertPoolPermission(
+                      PoolPermission(
+                        id = Names.newSurrogateId("pp"),
+                        tenantId = grantTenantId,
+                        poolId = poolId,
+                        userId = None,
+                        groupId = Some(groupId)
+                      )
+                    )
+              }
       }
 
       // 5. Users (with password snapshot fallback).
@@ -799,7 +932,8 @@ object ManifestImporter extends LazyLogging:
                     tenant = tenantId,
                     username = mu.username,
                     passwordHash = hash,
-                    kind = mu.kind,
+                    // validate() admitted only a known kind; stored in its one spelling.
+                    kind = UserKind.normalize(mu.kind).getOrElse(mu.kind),
                     enabled = mu.enabled,
                     mustChangePassword = mu.mustChangePassword,
                     email = effEmail
@@ -830,41 +964,22 @@ object ManifestImporter extends LazyLogging:
                   store.deletePoolPermission(p.id)
                 }
                 mu.poolGrants.foreach { mpg =>
-                  // The grant's pool lives in `mpg.tenant` when set (a cross-tenant
-                  // grant, only meaningful for a superuser -- see ManifestPoolGrant's
-                  // doc comment), otherwise it lives in the grant owner's own tenant
-                  // (the pre-existing, common in-tenant case). Resolving the
-                  // qualifier first is what lets a superuser's cross-tenant grant
-                  // round-trip to the SAME (tenant, pool) pair instead of the old
-                  // behavior of collapsing to a tenant-less `pool = None`.
-                  val grantTenantId: Option[String] =
-                    mpg.tenant.flatMap(t => tenantIdFor(store, t)).orElse(tenantId)
-                  val poolId: Option[String] = mpg.pool.flatMap { pn =>
-                    grantTenantId.flatMap { tid =>
-                      // Walk this tenant's tenant-dbs from the local map and
-                      // search each db's pool map by name -- no store call.
-                      dbsOf(tid).values.iterator
-                        .flatMap(d => poolsOf(d.id).get(pn))
-                        .nextOption()
-                        .map(_.id)
-                    }
-                  }
-                  store.insertPoolPermission(
-                    PoolPermission(
-                      id = Names.newSurrogateId("pp"),
-                      // qodstate_pool_permission.tenant_id FK-references qodstate_tenant
-                      // and must name the pool's OWNING tenant, not necessarily the
-                      // grant owner's tenant. Falling back to "" here (as before this
-                      // qualifier existed) violated that FK for any superuser grant;
-                      // grantTenantId is always the pool's real tenant when the pool
-                      // resolved, so this now names it correctly in both the in-tenant
-                      // and cross-tenant cases.
-                      tenantId = grantTenantId.getOrElse(""),
-                      poolId = poolId,
-                      userId = Some(userId),
-                      groupId = None
-                    )
-                  )
+                  resolvePoolGrant(store, mpg, tenantId, dbsOf, poolsOf) match
+                    case Left(reason) =>
+                      errs += s"users[]: '${mu.username}': $reason"
+                    case Right((grantTenantId, poolId)) =>
+                      store.insertPoolPermission(
+                        PoolPermission(
+                          id = Names.newSurrogateId("pp"),
+                          // The pool's OWNING tenant (qodstate_pool_permission.tenant_id
+                          // FK-references qodstate_tenant), which for a superuser's grant is the
+                          // qualifier's, not the grant owner's.
+                          tenantId = grantTenantId,
+                          poolId = poolId,
+                          userId = Some(userId),
+                          groupId = None
+                        )
+                      )
                 }
       }
 
@@ -877,6 +992,37 @@ object ManifestImporter extends LazyLogging:
     */
   private def tenantIdFor(store: ControlPlaneStore, name: String): Option[String] =
     store.listTenants().find(t => t.id == name || t.displayName == name).map(_.id)
+
+  /** Where a manifest pool grant points once the tenant pass has run: the pool's tenant id and the
+    * pool id, None only for a grant that names no pool (every pool of the tenant). A tenant or pool
+    * name that resolves to nothing is an error, never a wider grant, and a grant reaches only its
+    * owner's own tenant (`ownerTenantId`, None for a superuser, whose grant must name its tenant).
+    * [[validate]] refuses the same cases first; this is the write side's own check.
+    */
+  private def resolvePoolGrant(
+      store: ControlPlaneStore,
+      mpg: ManifestPoolGrant,
+      ownerTenantId: Option[String],
+      dbsOf: String => collection.Map[String, TenantDb],
+      poolsOf: String => collection.Map[String, Pool]
+  ): Either[String, (String, Option[String])] =
+    val target: Either[String, String] = mpg.tenant match
+      case Some(t) =>
+        tenantIdFor(store, t).toRight(s"pool grant names tenant '$t', which does not exist")
+      case None => ownerTenantId.toRight("a superuser's pool grant must name its tenant")
+    target.flatMap { tid =>
+      if ownerTenantId.exists(_ != tid) then
+        Left(s"pool grant into tenant '$tid', outside its own tenant")
+      else
+        mpg.pool match
+          case None     => Right(tid -> None)
+          case Some(pn) =>
+            dbsOf(tid).values.iterator
+              .flatMap(d => poolsOf(d.id).get(pn))
+              .nextOption()
+              .map(p => tid -> Some(p.id))
+              .toRight(s"pool grant names pool '$pn', which tenant '$tid' does not have")
+    }
 
   /** A manifest location as it would be stored: the add rules (TenantLocationRules). */
   private def resolveLocation(

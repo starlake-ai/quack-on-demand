@@ -260,7 +260,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
         val resp   = client.query(endpoint, token, "SELECT 1", None, authorize).unsafeRunSync()
         resp match
-          case QuackResponse.Failed(QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(QuackError.Transient(msg, _), _) =>
             msg should include("HTTP 503")
           case other => fail(s"expected QuackResponse.Failed(Transient, _), got $other")
       finally allocator.close()
@@ -656,7 +656,8 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
         client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
-          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(err @ QuackError.Transient(msg, notSent), _) =>
+            notSent shouldBe true
             msg should include("refused the statement's session handle")
             msg should include("does not verify")
             // What the health probe reads back to name the cause: the node's answer, as it is.
@@ -680,13 +681,46 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
-          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(err @ QuackError.Transient(msg, notSent), _) =>
             msg shouldBe "HTTP 503 from Quack node"
+            notSent shouldBe true
             QuackHttpClient.HandleRefused.unapply(err) shouldBe None
           case other => fail(s"expected Failed(Transient), got $other")
         // The handle never reached the node, so the statement was not sent either.
         transport.count(MessageType.PrepareRequest) shouldBe 0
         transport.count(MessageType.DisconnectMessage) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("marks a transport failure of the statement's own PREPARE as possibly sent") {
+      // The statement went out: its answer may have been lost after it ran, so the router must
+      // not hand a write to another node.
+      val transport =
+        ScriptedTransport(_ => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node")))
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
+          case QuackResponse.Failed(QuackError.Transient(msg, notSent), _) =>
+            msg shouldBe "HTTP 503 from Quack node"
+            notSent shouldBe false
+          case other => fail(s"expected Failed(Transient), got $other")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("marks a refused connection as not sent") {
+      val transport = ScriptedTransport(
+        _ => IO(prepareOk),
+        onConnect = IO.raiseError(QuackWireError.Transient("connection refused"))
+      )
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
+          case QuackResponse.Failed(QuackError.Transient(_, notSent), _) => notSent shouldBe true
+          case other => fail(s"expected Failed(Transient), got $other")
+        transport.count(MessageType.PrepareRequest) shouldBe 0
       finally allocator.close()
     }
 
@@ -734,7 +768,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
         client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
-          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(err @ QuackError.Transient(msg, _), _) =>
             msg should endWith(refusal)
             msg should not include "eyJ2IjoxfQ"
             msg should not include "LINE 1"
@@ -784,7 +818,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         stamped(transport, allocator) match
-          case QuackResponse.Failed(QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(QuackError.Transient(msg, _), _) =>
             msg should include("refused the statement's session handle")
           case other => unexpected(other, "Failed(Transient)")
         // Never fail-open: no unstamped retry on a fresh connection either.
@@ -803,7 +837,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         stamped(transport, allocator) match
-          case QuackResponse.Failed(QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(QuackError.Transient(msg, _), _) =>
             msg should include("refused the statement's session handle")
           case other => unexpected(other, "Failed(Transient)")
         // The stamp ran; the DISCONNECT rolls its BEGIN back, and nothing is retried.

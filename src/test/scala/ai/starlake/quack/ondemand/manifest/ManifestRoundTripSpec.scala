@@ -20,6 +20,7 @@ import ai.starlake.quack.ondemand.state.{
   InMemoryControlPlaneStore,
   InMemoryFederatedSourceStore,
   PoolPermission,
+  RbacGroup,
   RbacRole,
   RolePermission
 }
@@ -1513,4 +1514,134 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     err.exists(e => e.contains("acme") && e.contains("issuerUrl changed")) shouldBe true
     // Refused before any write: the row, secret included, is the one stored at the start.
     cp.listTenants().find(_.id == "acme").get shouldBe stored
+  }
+
+  // ------------------------------------------------------------------
+  // Group pool grants: a custom group's pool permissions are part of the backup, so its members
+  // reach the same pools after a restore into a fresh store.
+  // ------------------------------------------------------------------
+
+  it should "round-trip a custom group's pool grants" in {
+    val src = buildSrc()
+    src.upsertGroup(RbacGroup(id = "g-1", tenantId = "tpch", name = "analysts"))
+    src.insertPoolPermission(
+      PoolPermission(id = "pp-g1", tenantId = "tpch", poolId = Some("p-1"), groupId = Some("g-1"))
+    )
+    src.insertPoolPermission(
+      PoolPermission(id = "pp-g2", tenantId = "tpch", poolId = None, groupId = Some("g-1"))
+    )
+
+    val manifest1 = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    manifest1.groups.find(_.name == "analysts").get.poolGrants should contain theSameElementsAs
+      List(ManifestPoolGrant(pool = Some("sales")), ManifestPoolGrant(pool = None))
+
+    val yaml   = Yaml.pretty(manifest1.asJson)
+    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    val dst    = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
+
+    val group    = dst.listGroups("tpch").find(_.name == "analysts").get
+    val restored = dst.listTenantDbs("tpch").head
+    val sales    = dst.listPools(restored.id).find(_.name == "sales").get
+    dst.listPoolPermissionsForGroup(group.id).map(_.poolId) should contain theSameElementsAs
+      List(Some(sales.id), None)
+
+    val manifest2 = exportOk(ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname))
+    manifest2.groups shouldBe manifest1.groups
+  }
+
+  it should "replace a group's pool grants with the manifest's on re-import" in {
+    val src = buildSrc()
+    src.upsertGroup(RbacGroup(id = "g-1", tenantId = "tpch", name = "analysts"))
+    src.insertPoolPermission(
+      PoolPermission(id = "pp-g1", tenantId = "tpch", poolId = None, groupId = Some("g-1"))
+    )
+    val m        = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    val narrowed = m.copy(groups = m.groups.map { g =>
+      if g.name == "analysts" then g.copy(poolGrants = List(ManifestPoolGrant(Some("sales"))))
+      else g
+    })
+    ManifestImporter.apply(narrowed, src, requireEncryption = false) shouldBe Right(())
+    src.listPoolPermissionsForGroup("g-1").map(_.poolId) shouldBe List(Some("p-1"))
+  }
+
+  it should "round-trip a superuser's tenant-wide pool grant with its tenant" in {
+    val src     = buildSrc()
+    val adminId = src.findUser(None, "admin").get.id
+    src.insertPoolPermission(
+      PoolPermission(id = "pp-all", tenantId = "tpch", poolId = None, userId = Some(adminId))
+    )
+    val manifest1 = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    manifest1.users.find(_.username == "admin").get.poolGrants shouldBe
+      List(ManifestPoolGrant(pool = None, tenant = Some("tpch")))
+
+    val withPasswords = manifest1.copy(users = manifest1.users.map { u =>
+      u.copy(password = Some(if u.username == "admin" then adminHash else aliceHash))
+    })
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(withPasswords, dst, requireEncryption = false) shouldBe Right(())
+    val adminId2 = dst.findUser(None, "admin").get.id
+    dst.listPoolPermissionsForUser(adminId2).map(p => (p.tenantId, p.poolId)) shouldBe
+      List(("tpch", None))
+  }
+
+  // ------------------------------------------------------------------
+  // Branch identity: a branch shares its parent's files and is never maintained, so a round trip
+  // must keep it a branch of the same parent.
+  // ------------------------------------------------------------------
+
+  private def withBranch(): InMemoryControlPlaneStore =
+    val src = buildSrc()
+    src.upsertTenantDb(
+      TenantDb(
+        id = "td-br",
+        tenantId = "tpch",
+        name = "tpch_tpch1__br_ab12cd34",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map("catalogAlias" -> "tpch_tpch1"),
+        dataPath = "/tmp/data__br_ab12cd34/",
+        branchOf = Some("td-1")
+      )
+    )
+    src
+
+  it should "round-trip a branch database's parent" in {
+    val src = withBranch()
+    val m   = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    m.tenants.head.tenantDbs.find(_.name == "tpch_tpch1__br_ab12cd34").get.branchOf shouldBe
+      Some("tpch_tpch1")
+    val withPasswords = m.copy(users = m.users.map(_.copy(password = Some(aliceHash))))
+    val dst           = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(withPasswords, dst, requireEncryption = false) shouldBe Right(())
+    val dbs    = dst.listTenantDbs("tpch")
+    val parent = dbs.find(_.name == "tpch_tpch1").get
+    dbs.find(_.name == "tpch_tpch1__br_ab12cd34").get.branchOf shouldBe Some(parent.id)
+    parent.branchOf shouldBe None
+  }
+
+  it should "keep a stored branch a branch when a manifest predating branchOf is re-imported" in {
+    val src = withBranch()
+    val m   = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    val old = m.copy(
+      tenants = m.tenants.map(t => t.copy(tenantDbs = t.tenantDbs.map(_.copy(branchOf = None)))),
+      users = m.users.map(_.copy(password = Some(aliceHash)))
+    )
+    ManifestImporter.apply(old, src, requireEncryption = false) shouldBe Right(())
+    src.listTenantDbs("tpch").find(_.id == "td-br").get.branchOf shouldBe Some("td-1")
+  }
+
+  it should "refuse a branchOf that names no database of the tenant" in {
+    val src = withBranch()
+    val m   = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    val bad = m.copy(tenants =
+      m.tenants.map(t =>
+        t.copy(tenantDbs =
+          t.tenantDbs.map(d =>
+            if d.branchOf.isDefined then d.copy(branchOf = Some("ghost_db")) else d
+          )
+        )
+      )
+    )
+    val err = ManifestImporter.apply(bad, src, requireEncryption = false).left.toOption.get
+    err.exists(_.contains("ghost_db")) shouldBe true
   }

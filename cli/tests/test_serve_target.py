@@ -344,3 +344,69 @@ def test_glob_target_forwards_object_store(tmp_path):
         data_root=tmp_path,
     )
     assert t.object_store == {"s3_region": "x"}
+
+
+def test_directory_entries_colliding_on_a_view_name_are_an_error(tmp_path):
+    # Both stems sanitize to sales_2026: the second CREATE OR REPLACE would hide the first.
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "sales-2026.csv").write_text("a\n")
+    (data / "sales_2026.csv").write_text("a\n")
+    with pytest.raises(TargetError, match=r"'sales-2026\.csv' and 'sales_2026\.csv'.*\"sales_2026\""):
+        resolve(str(data), data_root=tmp_path)
+
+
+def test_names_differing_only_in_case_or_extension_collide(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "Sales.csv").write_text("a\n")
+    (data / "sales.parquet").write_bytes(b"")
+    with pytest.raises(TargetError, match='"sales"'):
+        resolve(str(data), data_root=tmp_path)
+
+
+def test_a_file_and_a_subdirectory_colliding_on_a_view_name_are_an_error(tmp_path):
+    data = tmp_path / "data"
+    (data / "orders").mkdir(parents=True)
+    (data / "orders" / "part-0.parquet").write_bytes(b"")
+    (data / "orders.csv").write_text("a\n")
+    with pytest.raises(TargetError, match='"orders"'):
+        resolve(str(data), data_root=tmp_path)
+
+
+def test_table_names_colliding_on_a_view_name_are_an_error(tmp_path):
+    with pytest.raises(TargetError, match=r"--table.*'sales-2026' and 'sales_2026'"):
+        resolve(
+            "s3://bucket/wh/",
+            tables=["sales-2026=s3://bucket/a/*.parquet", "sales_2026=s3://bucket/b/*.parquet"],
+            data_root=tmp_path,
+        )
+
+
+def test_glob_matching_both_csv_and_parquet_is_an_error(tmp_path):
+    (tmp_path / "a.parquet").write_bytes(b"")
+    (tmp_path / "b.csv").write_text("a\n")
+    with pytest.raises(TargetError, match=r"mixes csv and parquet.*a\.parquet.*b\.csv"):
+        resolve(str(tmp_path / "*"), name="stuff", data_root=tmp_path)
+
+
+def test_glob_matching_files_no_reader_reads_is_an_error(tmp_path):
+    # read_parquet over the whole pattern would fail on the node on _SUCCESS.
+    (tmp_path / "part-0.parquet").write_bytes(b"")
+    (tmp_path / "_SUCCESS").write_bytes(b"")
+    with pytest.raises(TargetError, match=r"_SUCCESS.*narrow the pattern"):
+        resolve(str(tmp_path / "*"), name="stuff", data_root=tmp_path)
+
+
+def test_glob_csv_and_tsv_share_a_reader(tmp_path):
+    (tmp_path / "a.csv").write_text("a\n")
+    (tmp_path / "b.tsv.gz").write_bytes(b"")
+    t = resolve(str(tmp_path / "*"), name="stuff", data_root=tmp_path)
+    assert "system.main.read_csv(" in t.init_sql
+
+
+def test_glob_double_star_ignores_matched_directories(tmp_path):
+    (tmp_path / "y=2026").mkdir()
+    (tmp_path / "y=2026" / "part-0.parquet").write_bytes(b"")
+    t = resolve(str(tmp_path / "**"), name="stuff", data_root=tmp_path)
+    assert "system.main.read_parquet(" in t.init_sql

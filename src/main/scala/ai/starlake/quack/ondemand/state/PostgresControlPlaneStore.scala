@@ -72,9 +72,44 @@ final class PostgresControlPlaneStore(
   def jdbcDataSource: javax.sql.DataSource = dataSource
 
   private def withConn[A](f: Connection => A): A =
-    val c = dataSource.getConnection
-    try f(c)
-    finally c.close()
+    ControlPlaneTx.joined(jdbcUrl) match
+      case Some(tx) => f(tx)
+      case None     =>
+        val c = dataSource.getConnection
+        try f(c)
+        finally c.close()
+
+  def atomically[A](f: => A): A =
+    ControlPlaneTx.run(jdbcUrl, () => dataSource.getConnection)(f)
+
+  // A session advisory lock on a connection of its own, opened outside the pool: a holder reads
+  // through the pool while it holds the lock (the pins, the catalog), so waiters blocked in
+  // pg_advisory_lock must never sit on pooled connections, or enough of them starve the holder.
+  // Keyed by two ints: a constant for the purpose and the hash of (tenant, tenantDb), slugs that
+  // never hold a '/'. A waiter gives up after SnapshotPinLockTimeout (lock_timeout applies to
+  // advisory locks), failing its request rather than waiting forever behind a stuck holder.
+  def lockSnapshotPins(tenant: String, tenantDb: String): AutoCloseable =
+    val c                       = java.sql.DriverManager.getConnection(jdbcUrl, user, password)
+    def call(sql: String): Unit =
+      val ps = c.prepareStatement(sql)
+      try
+        ps.setString(1, s"$tenant/$tenantDb")
+        ps.executeQuery().close()
+      finally ps.close()
+    try
+      val st = c.createStatement()
+      try st.execute(s"SET lock_timeout = '${PostgresControlPlaneStore.SnapshotPinLockTimeout}'")
+      finally st.close()
+      call("SELECT pg_advisory_lock(hashtext('qod-snapshot-pins'), hashtext(?))")
+    catch
+      case t: Throwable =>
+        c.close()
+        throw t
+    // Closing the session releases its advisory locks; the explicit unlock keeps that true even
+    // if a later change pools this connection.
+    () =>
+      try call("SELECT pg_advisory_unlock(hashtext('qod-snapshot-pins'), hashtext(?))")
+      finally c.close()
 
   /** Release the pool's idle connections. Idempotent. Should be called from the manager shutdown
     * hook before JVM exit; outstanding `withConn` callers fail with the standard HikariCP
@@ -3332,6 +3367,9 @@ final class PostgresControlPlaneStore(
       case None    => ps.setNull(idx, Types.VARCHAR)
 
 object PostgresControlPlaneStore:
+
+  /** How long a snapshot-pin lock waiter waits before its request fails. */
+  val SnapshotPinLockTimeout: String = "300s"
 
   def fromDefaultMetastore(meta: Map[String, String]): PostgresControlPlaneStore =
     def required(k: String): String =

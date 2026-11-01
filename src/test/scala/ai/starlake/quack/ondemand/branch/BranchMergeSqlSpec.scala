@@ -25,23 +25,32 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
     lines(1) shouldBe "BEGIN;"
     lines(2) shouldBe
       "CALL ducklake_set_commit_message('acme_tpch', 'tenant:acme/user:bob', 'merge branch f [mg-1] proposed by alice');"
+    // Inside the transaction and before any write: the branch must still be at the validated head.
+    lines(3) shouldBe
+      """SELECT CASE WHEN (SELECT max(snapshot_id) FROM "qod_branch".snapshots()) <> 15 THEN error('branch moved past snapshot 15 after validation; propose it again') END AS head_guard;"""
     lines.last shouldBe "COMMIT;"
     sql should include(
       "ducklake_table_changes('qod_branch', 'tpch1', 'region', 11, 15) WHERE change_type IN ('delete', 'update_preimage')"
     )
     sql should include(
-      """INSERT INTO "acme_tpch"."tpch1"."region" BY NAME SELECT * FROM "qod_branch"."tpch1"."region" WHERE rowid IN"""
+      """INSERT INTO "acme_tpch"."tpch1"."region" BY NAME SELECT * FROM "qod_branch"."tpch1"."region" AT (VERSION => 15) WHERE rowid IN"""
     )
     sql should include("""CREATE SCHEMA IF NOT EXISTS "acme_tpch"."tpch1";""")
     sql should include(
-      """CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT * FROM "qod_branch"."tpch1"."extra";"""
+      """CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT * FROM "qod_branch"."tpch1"."extra" AT (VERSION => 15);"""
     )
     sql should include("""DROP TABLE "acme_tpch"."tpch1"."nation";""")
     // Recreated: drop first, then create.
     val dropAgain = sql.indexOf("""DROP TABLE "acme_tpch"."tpch1"."again";""")
-    val makeAgain = sql.indexOf("""CREATE TABLE "acme_tpch"."tpch1"."again" AS""")
+    val makeAgain = sql.indexOf(
+      """CREATE TABLE "acme_tpch"."tpch1"."again" AS SELECT * FROM "qod_branch"."tpch1"."again" AT (VERSION => 15);"""
+    )
     dropAgain should be > 0
     makeAgain should be > dropAgain
+    // No branch read at its current state: every one is pinned to the validated head.
+    sql.linesIterator.filter(_.contains("FROM \"qod_branch\".\"tpch1\"")).foreach { l =>
+      l should include("AT (VERSION => 15)")
+    }
   }
 
   it should "quote identifiers and escape literals" in {
@@ -64,6 +73,18 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
       "p",
       "b",
       List(TableChange("s", "t", ChangeKind.Altered)),
+      1L,
+      2L,
+      "a",
+      "m"
+    )
+  }
+
+  it should "refuse a table whose own rowid column hides the row identifier" in {
+    an[IllegalArgumentException] should be thrownBy BranchMergeSql.batch(
+      "p",
+      "b",
+      List(TableChange("s", "t", ChangeKind.Modified, shadowsRowid = true)),
       1L,
       2L,
       "a",

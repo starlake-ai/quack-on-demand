@@ -72,7 +72,16 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       (_, _) => throw new UnsupportedOperationException("not exercised")
     val cfg      = CatalogConfig()
     val restoreH =
-      new CatalogRestoreHandlers(sup, store, boom, boom, reader, cfg, RestCaller())
+      new CatalogRestoreHandlers(
+        sup,
+        store,
+        boom,
+        boom,
+        reader,
+        cfg,
+        RestCaller(),
+        ai.starlake.quack.ondemand.branch.TableCommitFence.unfenced
+      )
     val undropH = new CatalogUndropHandlers(sup, boom, reader, cfg, RestCaller())
     (restoreH, undropH)
 

@@ -26,7 +26,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     adapter
       .send(node("draining"), "SELECT 1", NodePrincipal.System, None)
       .unsafeRunSync() should matchPattern {
-      case QuackResponse.Failed(QuackError.Transient(_), _) =>
+      case QuackResponse.Failed(QuackError.Transient(_, _), _) =>
     }
     called shouldBe false
     tracker.snapshot("draining") shouldBe before
@@ -48,7 +48,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       })
       .unsafeRunSync()
 
-    out should matchPattern { case NodeOutcome.Transient(_, _) => }
+    out should matchPattern { case NodeOutcome.Transient(_, _, _) => }
     called shouldBe false
     tracker.snapshot("draining") shouldBe before
 

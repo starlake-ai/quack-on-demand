@@ -1128,7 +1128,9 @@ The same, from the profile (regular users included): `qod profile recoverable --
 dropped tables of your own database you may recover, `qod profile undrop --db lake --schema main
 --table orders [--as-name orders_back]` recovers one; the UI profile page has a "Recover a dropped
 table" card; MCP `list_recoverable` / `undrop_table` work with a regular user's PAT. Admins keep
-`qod catalog recoverable` / `qod catalog undrop` (any table, `--from-snapshot`).
+`qod catalog recoverable` / `qod catalog undrop` (any table, `--from-snapshot`). A name dropped more
+than once is listed once per drop, each with its `tableId`: pass `--table-id <id>` (MCP `table_id`)
+to recover that drop; the name alone recovers the newest.
 
 **Which history a user may read** (time travel, the data diff, the change feed, undrop):
 - a table renamed since is judged as the table it is now (its current name's grant);

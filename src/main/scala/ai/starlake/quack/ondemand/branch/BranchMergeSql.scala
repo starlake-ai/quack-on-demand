@@ -13,6 +13,15 @@ import ai.starlake.quack.model.SqlLiterals
   *     step inserts nothing for it; a pre-existing row updated then deleted is deleted by the first
   *     step and not re-inserted. `rowid` is stable across the clone (verified live) and DuckLake
   *     keeps it on UPDATE, which is why the feed, not an anti-join, drives the merge.
+  *
+  * Every read of the branch is pinned to `head` (`AT (VERSION => head)`), the snapshot the change
+  * set was validated at: the feed is bounded by it, so a current-state read would pair the feed's
+  * rowids with values written after validation. The batch also refuses to commit when the branch
+  * moved past `head` ([[headGuard]]); the caller freezes the branch's writes for the whole merge.
+  *
+  * A table with a column of its own named `rowid` shadows DuckDB's row identifier, so the rowid
+  * arithmetic would compare that column against the feed's identifiers; [[BranchChanges]] marks
+  * such a table not mergeable and this renderer refuses it.
   */
 object BranchMergeSql:
 
@@ -36,6 +45,15 @@ object BranchMergeSql:
   ): String =
     s"ducklake_table_changes(${lit(branchAlias)}, ${lit(schema)}, ${lit(table)}, ${fork + 1}, $head)"
 
+  /** Fails the batch (inside its transaction, before any write) unless the branch's latest snapshot
+    * is still `head`: a branch write that landed after validation would otherwise be dropped by the
+    * teardown that follows a merge without ever reaching main.
+    */
+  def headGuard(branchAlias: String, head: Long): String =
+    val moved = lit(s"branch moved past snapshot $head after validation; propose it again")
+    s"SELECT CASE WHEN (SELECT max(snapshot_id) FROM ${q(branchAlias)}.snapshots()) <> $head " +
+      s"THEN error($moved) END AS head_guard"
+
   def tableStatements(
       parentAlias: String,
       branchAlias: String,
@@ -43,8 +61,13 @@ object BranchMergeSql:
       fork: Long,
       head: Long
   ): List[String] =
+    if change.shadowsRowid then
+      throw new IllegalArgumentException(
+        s"table ${change.schema}.${change.table} has a column named rowid and is not mergeable"
+      )
     val target = s"${q(parentAlias)}.${q(change.schema)}.${q(change.table)}"
-    val source = s"${q(branchAlias)}.${q(change.schema)}.${q(change.table)}"
+    val source =
+      s"${q(branchAlias)}.${q(change.schema)}.${q(change.table)} AT (VERSION => $head)"
     change.kind match
       case ChangeKind.Created =>
         List(
@@ -92,7 +115,8 @@ object BranchMergeSql:
     (List(
       "SET ducklake_max_retry_count = 0",
       "BEGIN",
-      s"CALL ducklake_set_commit_message(${lit(parentAlias)}, ${lit(author)}, ${lit(message)})"
+      s"CALL ducklake_set_commit_message(${lit(parentAlias)}, ${lit(author)}, ${lit(message)})",
+      headGuard(branchAlias, head)
     ) ++ body ++ List("COMMIT")).mkString("", ";\n", ";")
 
   /** Locates the merge snapshot on the parent by its unique commit message. */

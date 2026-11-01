@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import java.util.Locale
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
+import ai.starlake.quack.model.SqlLiterals
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -39,6 +40,10 @@ final class CatalogRestoreHandlers(
     resolveReader: (String, String) => DuckLakeCatalogReader,
     cfg: CatalogConfig,
     callerOf: RestCaller,
+    /** Holds the replace's commit to the table state the restore validated: required, so no wiring
+      * can leave a restore free to erase a row committed after its check.
+      */
+    fence: ai.starlake.quack.ondemand.branch.TableCommitFence,
     catalogAlias: (String, String) => String = (_, td) => td,
     audit: AuditRecorder = AuditRecorder.noop
 ):
@@ -343,12 +348,26 @@ final class CatalogRestoreHandlers(
           )
         )
       case Some(poolKey) =>
-        val sql =
+        // Its own transaction under a unique commit message, so that (1) the commit fence below
+        // can single out this commit, and (2) the COMMIT runs inside the request and a refused one
+        // comes back as the request's failure, never as a success.
+        val message =
+          s"restore ${req.schema}.${req.table} to snapshot $toSnapshot [${java.util.UUID.randomUUID()}]"
+        val author = s"tenant:$tid/user:${caller.identity}"
+        val sql    = List(
+          "BEGIN",
+          s"CALL ducklake_set_commit_message(${SqlLiterals.duckdbLiteral(catalogAlias(tid, db))}, " +
+            s"${SqlLiterals.duckdbLiteral(author)}, ${SqlLiterals.duckdbLiteral(message)})",
           s"CREATE OR REPLACE TABLE ${quoteIdent(req.schema)}.${quoteIdent(req.table)} AS " +
             s"SELECT * FROM ${quoteIdent(req.schema)}.${quoteIdent(req.table)} " +
-            s"AT (VERSION => $toSnapshot)"
-        def committedResponse(): Either[(StatusCode, ErrorResponse), RestoreResponse] =
-          val newSnapshot = reader.currentTableInfo(req.schema, req.table).map(_._2)
+            s"AT (VERSION => $toSnapshot)",
+          "COMMIT"
+        ).mkString(";\n")
+        def committedResponse(
+            committedAt: Option[Long] = None
+        ): Either[(StatusCode, ErrorResponse), RestoreResponse] =
+          val newSnapshot =
+            committedAt.orElse(reader.currentTableInfo(req.schema, req.table).map(_._2))
           okAudit(
             Map(
               "schema"      -> req.schema,
@@ -369,34 +388,51 @@ final class CatalogRestoreHandlers(
               dryRun = false
             )
           )
-        // Heuristic pinned by Task 1's live probe: DuckLake's optimistic-concurrency loser error
-        // mentions a conflict. A false negative surfaces as 502 instead of 409 (retry guidance is
+        // DuckLake's optimistic-concurrency loser error and the commit fence's refusal both
+        // mention a conflict. A false negative surfaces as 502 instead of 409 (retry guidance is
         // the same); a false positive requires "conflict" in an unrelated engine error.
         def isConflict(reason: String): Boolean =
           reason.toLowerCase(Locale.ROOT).contains("conflict")
-        writeExecutor(caller, poolKey, sql)
-          .timeout(cfg.restoreTimeoutSec.seconds)
-          .attempt
-          .map {
-            case Left(e) =>
-              // Cancellation of the blocking HTTP leg is best-effort, so a replace that outlives
-              // the timeout may still have committed: probe by table_id change before answering.
-              if reader.currentTableInfo(req.schema, req.table).exists(_._1 != preTableId) then
-                committedResponse()
-              else
-                val msg = e match
-                  case _: java.util.concurrent.TimeoutException =>
-                    s"restore timed out after ${cfg.restoreTimeoutSec}s"
-                  case other => s"restore failed: ${other.getMessage}"
-                denied(StatusCode.BadGateway, "restore_failed", msg)
-            case Right(Left(RouterFailure.AccessDenied(reason))) =>
-              denied(StatusCode.Forbidden, "acl_denied", reason)
-            case Right(Left(failure)) if isConflict(failure.reason) =>
-              denied(StatusCode.Conflict, "concurrent_write", failure.reason)
-            case Right(Left(failure)) =>
-              denied(StatusCode.BadGateway, "restore_failed", failure.reason)
-            case Right(Right(result)) =>
-              // A CTAS result stream carries only a row count nobody reads.
-              result.close()
-              committedResponse()
-          }
+        // A write whose outcome the answer cannot tell (a timeout, a broken stream): the catalog
+        // decides, by this restore's own commit, the snapshot its unique message names. A changed
+        // table id proves nothing: another writer's replace changes it too.
+        def settledByCatalog(reason: String): Either[(StatusCode, ErrorResponse), RestoreResponse] =
+          val ours = reader.snapshotByCommitMessage(message)
+          if ours.isDefined then committedResponse(ours)
+          else if isConflict(reason) then denied(StatusCode.Conflict, "concurrent_write", reason)
+          else denied(StatusCode.BadGateway, "restore_failed", reason)
+        // The table as validated: `currentSnapshot` (the expectedCurrentSnapshot when the caller
+        // sent one) is the newest snapshot that touched it, and `preTableId` its id. Any other
+        // commit touching it from here on makes this one's commit refused, atomically with it.
+        val meta        = sup.effectiveMetastoreFor(tid, db)
+        val catalogMeta = meta.updated("dbName", meta.getOrElse("dbName", db))
+        IO.blocking(fence.arm(catalogMeta, message, currentSnapshot, preTableId)).flatMap {
+          case Left(why) =>
+            IO.pure(denied(StatusCode.BadGateway, "restore_failed", why))
+          case Right(_) =>
+            writeExecutor(caller, poolKey, sql)
+              .timeout(cfg.restoreTimeoutSec.seconds)
+              .attempt
+              .map {
+                case Left(e) =>
+                  // Cancellation of the blocking HTTP leg is best-effort, so a replace that
+                  // outlives the timeout may still have committed.
+                  val msg = e match
+                    case _: java.util.concurrent.TimeoutException =>
+                      s"restore timed out after ${cfg.restoreTimeoutSec}s"
+                    case other => s"restore failed: ${other.getMessage}"
+                  settledByCatalog(msg)
+                case Right(Left(RouterFailure.AccessDenied(reason))) =>
+                  denied(StatusCode.Forbidden, "acl_denied", reason)
+                case Right(Left(failure)) if isConflict(failure.reason) =>
+                  denied(StatusCode.Conflict, "concurrent_write", failure.reason)
+                case Right(Left(failure)) =>
+                  denied(StatusCode.BadGateway, "restore_failed", failure.reason)
+                case Right(Right(result)) =>
+                  // Read to its end before answering: a commit failing there is a failure.
+                  WriteResults.drain(result) match
+                    case Right(_)  => committedResponse()
+                    case Left(why) => settledByCatalog(s"restore failed: $why")
+              }
+              .guarantee(IO.blocking(fence.disarm(catalogMeta, message)))
+        }

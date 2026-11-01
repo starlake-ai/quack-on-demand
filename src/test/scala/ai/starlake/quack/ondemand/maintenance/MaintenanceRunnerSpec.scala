@@ -21,13 +21,16 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       cleanupRows: Long = 0L,
       // Answers hasLiveBranchOf, call by call (the last answer repeats): a live branch reads the
       // parent's files by absolute path, so merge and cleanup must not run under it (audit F25).
-      liveBranch: List[Boolean] = List(false)
+      liveBranch: List[Boolean] = List(false),
+      // Snapshots protected while the run goes on: pinned as soon as the flush step ran.
+      pinnedDuringRun: Set[Long] = Set.empty
   ):
     val store    = new InMemoryControlPlaneStore()
     var executed = List.empty[String]
     var stopped  = List.empty[String]
     var started  = 0
     var mergeRan = false
+    var pinsNow  = pinnedSnaps
     val node     = RunningNode(
       "maint-n1",
       PoolKey("acme", "acme_db", "__maint"),
@@ -49,11 +52,12 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
         IO {
           executed = executed :+ sql
           if sql.contains("merge_adjacent_files") then mergeRan = true
+          if sql.contains("flush_inlined_data") then pinsNow = pinsNow ++ pinnedDuringRun
           if failOn.exists(sql.contains) then Left("boom")
           else Right(if sql.contains("cleanup_old_files") then cleanupRows else 0L)
         },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L), // 4 candidates
-      pinnedSnapshotsOf = (_, _) => pinnedSnaps,
+      pinnedSnapshotsOf = (_, _) => pinsNow,
       hasLiveBranchOf = {
         val answers = liveBranch.iterator
         var last    = false
@@ -99,6 +103,73 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     fin.counters.snapshotsSkippedPinned shouldBe 2
   }
 
+  it should "never expire a snapshot protected while the run was under way" in {
+    val f      = new Fixture(pinnedDuringRun = Set(2L))
+    val fin    = f.enqueueAndRun()
+    val expire = f.executed.find(_.contains("expire_snapshots")).get
+    expire should include("[1, 3, 4]")
+    fin.counters.snapshotsSkippedPinned shouldBe 1
+    fin.counters.snapshotsExpired shouldBe 3
+  }
+
+  it should "hold the snapshot-pin lock through the expire call, and only then" in {
+    val f        = new Fixture()
+    val lockedAt = scala.collection.mutable.ListBuffer.empty[String]
+    // A probe store call made while the run executes each statement: can the lock be taken now?
+    val probe = new MaintenanceRunner(
+      store = f.store,
+      spawn = (_, _) => IO.pure(Some(f.node)),
+      stop = _ => IO.unit,
+      exec = (_, sql) =>
+        IO {
+          val free = new java.util.concurrent.Semaphore(0)
+          val t    = new Thread(() => {
+            f.store.lockSnapshotPins("acme", "acme_db").close(); free.release()
+          })
+          t.setDaemon(true)
+          t.start()
+          // Held: the probe thread takes it once the run lets go, so it is not joined here.
+          if free.tryAcquire(200, java.util.concurrent.TimeUnit.MILLISECONDS) then t.join()
+          else lockedAt += sql
+          Right(0L)
+        },
+      snapshotsOlderThan = (_, _, _) => List(1L, 2L),
+      pinnedSnapshotsOf = (_, _) => Set.empty,
+      hasLiveBranchOf = (_, _) => false,
+      totalBytesOf = (_, _) => 0L,
+      effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+      catalogAlias = (_, _) => "acme_db",
+      audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
+    )
+    val r = f.store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    f.store.claimQueuedMaintenanceRun()
+    probe.executeRun(r.copy(status = "running")).unsafeRunSync()
+    lockedAt.toList match
+      case List(sql) => sql should include("expire_snapshots")
+      case other     => fail(s"the lock was held during: $other")
+  }
+
+  it should "start no node and run nothing for a branch database" in {
+    val f = new Fixture()
+    f.store.upsertTenant(Tenant(id = "acme"))
+    f.store.upsertTenantDb(
+      TenantDb(
+        id = "td-br",
+        tenantId = "acme",
+        name = "acme_db",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map.empty,
+        dataPath = "/tmp/x__br_1/",
+        branchOf = Some("td-parent")
+      )
+    )
+    val fin = f.enqueueAndRun()
+    f.started shouldBe 0
+    f.executed shouldBe empty
+    fin.status shouldBe "failed"
+    fin.error.getOrElse("") should include("branch")
+  }
+
   it should "skip expiry entirely when all candidates are pinned" in {
     val f = new Fixture(pinnedSnaps = Set(1L, 2L, 3L, 4L))
     f.enqueueAndRun()
@@ -128,6 +199,29 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     f.executed.exists(_.contains("cleanup_old_files")) shouldBe false
     f.executed.exists(_.contains("rewrite_data_files")) shouldBe true
     f.executed.exists(_.contains("merge_adjacent_files")) shouldBe true
+  }
+
+  it should "merge only the scoped table on a table-scoped run" in {
+    val f = new Fixture()
+    f.enqueueAndRun(scope = "table:tpch1.region")
+    val merge = f.executed.find(_.contains("merge_adjacent_files")).get
+    merge shouldBe MaintenanceChainSql.mergeAdjacentTable("acme_db", "tpch1", "region")
+  }
+
+  it should "merge the whole database on a tenantdb run" in {
+    val f = new Fixture()
+    f.enqueueAndRun()
+    f.executed.find(_.contains("merge_adjacent_files")).get shouldBe
+      MaintenanceChainSql.mergeAdjacent("acme_db")
+  }
+
+  it should "rewrite with the policy's delete threshold" in {
+    val f = new Fixture(policyOf =
+      (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true, rewriteDeleteThreshold = 0.05)
+    )
+    f.enqueueAndRun(scope = "table:tpch1.region")
+    f.executed.find(_.contains("rewrite_data_files")).get should
+      include("delete_threshold => 0.05")
   }
 
   it should "mark the run failed when the node cannot spawn" in {
@@ -160,13 +254,13 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
   }
 
   /** Delegates every [[ControlPlaneStore]] call to a real in-memory store, except
-    * `heartbeatMaintenanceRun`: the first call (the pre-chain heartbeat in `executeRun`) passes
-    * through normally, but every call after that answers `false` -- as if a sweeper reaped the run
-    * as a zombie in between -- while independently flipping the underlying row to `"failed"`, the
-    * status a real sweep would have left behind. This lets a test prove the runner stops the chain
-    * and does not clobber that sweeper-set status (F2).
+    * `heartbeatMaintenanceRun`: the first `passThrough` calls (the first one is the pre-chain
+    * heartbeat in `executeRun`) pass through normally, but every call after that answers `false` --
+    * as if a sweeper reaped the run as a zombie in between -- while independently flipping the
+    * underlying row to `"failed"`, the status a real sweep would have left behind. This lets a test
+    * prove the runner stops the chain and does not clobber that sweeper-set status (F2).
     */
-  private class SweptAfterFirstHeartbeatStore(inner: InMemoryControlPlaneStore)
+  private class SweptAfterFirstHeartbeatStore(inner: InMemoryControlPlaneStore, passThrough: Int)
       extends ControlPlaneStore:
     export inner.{heartbeatMaintenanceRun as _, *}
 
@@ -174,46 +268,53 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
 
     override def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Boolean =
       heartbeatCalls += 1
-      if heartbeatCalls <= 1 then inner.heartbeatMaintenanceRun(id, counters)
+      if heartbeatCalls <= passThrough then inner.heartbeatMaintenanceRun(id, counters)
       else
         inner.finishMaintenanceRun(id, "failed", RunCounters(), Some("stale: heartbeat timeout"))
         false
 
+  /** Runs a tenantdb run on a store swept after `passThrough` heartbeats; returns the statements
+    * executed, the nodes stopped and the run's final row.
+    */
+  private def runSwept(passThrough: Int): (List[String], List[String], MaintenanceRun) =
+    val inner    = new InMemoryControlPlaneStore()
+    val store    = new SweptAfterFirstHeartbeatStore(inner, passThrough)
+    var executed = List.empty[String]
+    var stopped  = List.empty[String]
+    val node     = RunningNode(
+      "maint-n1",
+      PoolKey("acme", "acme_db", "__maint"),
+      Role.Dual,
+      "127.0.0.1",
+      21999,
+      "tok",
+      None,
+      None,
+      Instant.EPOCH,
+      maxConcurrent = 1
+    )
+    val runner = new MaintenanceRunner(
+      store = store,
+      spawn = (_, _) => IO.pure(Some(node)),
+      stop = node => IO { stopped = stopped :+ node.nodeId },
+      exec = (_, sql) => IO { executed = executed :+ sql; Right(0L) },
+      snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
+      pinnedSnapshotsOf = (_, _) => Set.empty,
+      hasLiveBranchOf = (_, _) => false,
+      totalBytesOf = (_, _) => 100L,
+      effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+      catalogAlias = (_, _) => "acme_db",
+      audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
+    )
+
+    val r = inner.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    inner.claimQueuedMaintenanceRun()
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    (executed, stopped, inner.listMaintenanceRuns("acme", "acme_db", 10, None).head)
+
   "executeRun" should "stop the chain at the next heartbeat after a zombie sweep, without " +
     "clobbering the sweeper's status (F2)" in {
-      val inner    = new InMemoryControlPlaneStore()
-      val store    = new SweptAfterFirstHeartbeatStore(inner)
-      var executed = List.empty[String]
-      var stopped  = List.empty[String]
-      val node     = RunningNode(
-        "maint-n1",
-        PoolKey("acme", "acme_db", "__maint"),
-        Role.Dual,
-        "127.0.0.1",
-        21999,
-        "tok",
-        None,
-        None,
-        Instant.EPOCH,
-        maxConcurrent = 1
-      )
-      val runner = new MaintenanceRunner(
-        store = store,
-        spawn = (_, _) => IO.pure(Some(node)),
-        stop = node => IO { stopped = stopped :+ node.nodeId },
-        exec = (_, sql) => IO { executed = executed :+ sql; Right(0L) },
-        snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
-        pinnedSnapshotsOf = (_, _) => Set.empty,
-        hasLiveBranchOf = (_, _) => false,
-        totalBytesOf = (_, _) => 100L,
-        effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
-        catalogAlias = (_, _) => "acme_db",
-        audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
-      )
-
-      val r = inner.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-      inner.claimQueuedMaintenanceRun()
-      runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+      val (executed, stopped, finalRun) = runSwept(passThrough = 1)
 
       // Only the flush step ran: the heartbeat gating step 2 (expire) already reported the run
       // swept, so the chain stopped there.
@@ -225,10 +326,19 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
 
       // The sweeper's status is left exactly as it set it: the runner must not call the
       // store's finish-with-success path or otherwise flip status back.
-      val finalRun = inner.listMaintenanceRuns("acme", "acme_db", 10, None).head
       finalRun.status shouldBe "failed"
       finalRun.error shouldBe Some("stale: heartbeat timeout")
     }
+
+  it should "run no step when the run was swept before its first heartbeat" in {
+    // The sweeper failed the run while the node was starting: no statement may run, cleanup
+    // included, and the sweeper's status stays.
+    val (executed, stopped, finalRun) = runSwept(passThrough = 0)
+    executed shouldBe empty
+    stopped shouldBe List("maint-n1")
+    finalRun.status shouldBe "failed"
+    finalRun.error shouldBe Some("stale: heartbeat timeout")
+  }
 
   // Audit F25: a branch's catalog points at the parent's Parquet files by absolute path, and
   // merge_adjacent_files hard-deletes the merged rows, so no pin derived from the parent can see

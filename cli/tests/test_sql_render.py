@@ -34,3 +34,34 @@ def test_render_table_mode(capsys):
     captured = capsys.readouterr()
     assert "name" in captured.out and "a" in captured.out
     assert "2 rows" in captured.err
+
+
+def duplicate_names_table() -> pa.Table:
+    # SELECT 17 AS id, 23 AS id: a valid result whose column names repeat.
+    return pa.table([pa.array([17]), pa.array([23])], names=["id", "id"])
+
+
+def test_render_json_keeps_every_duplicate_column(capsys):
+    render_table(duplicate_names_table(), "json")
+    rows = json.loads(capsys.readouterr().out)
+    assert rows == [{"id": 17, "id_1": 23}]
+
+
+def test_render_json_skips_a_suffix_another_column_already_has(capsys):
+    table = pa.table([pa.array([1]), pa.array([2]), pa.array([3])], names=["id", "id_1", "id"])
+    render_table(table, "json")
+    rows = json.loads(capsys.readouterr().out)
+    assert rows == [{"id": 1, "id_1": 2, "id_2": 3}]
+
+
+def test_render_csv_keeps_the_result_header(capsys):
+    render_table(duplicate_names_table(), "csv")
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines == ["id,id", "17,23"]
+
+
+def test_render_table_mode_with_duplicate_columns(capsys):
+    render_table(duplicate_names_table(), "table")
+    captured = capsys.readouterr()
+    assert "17" in captured.out and "23" in captured.out
+    assert "1 rows" in captured.err

@@ -383,12 +383,17 @@ final class QuackFrontDoor(
   // Node calls
   // -------------------------------------------------------------------------------------------
 
-  private def toOutcome[A](f: LinkFailure, ms: Long): NodeOutcome[A] = f match
-    case LinkFailure.Transient(m) => NodeOutcome.Transient(m, ms)
+  /** `atOpen`: `f` is the failure to open the link, before any statement went out on it, so a
+    * Transient one is `notSent` and the router may hand the statement to another node. A transport
+    * failure once the link is open may come after the statement ran: it is never `notSent`, and the
+    * router sends it again only when it is safe to repeat.
+    */
+  private def toOutcome[A](f: LinkFailure, ms: Long, atOpen: Boolean): NodeOutcome[A] = f match
+    case LinkFailure.Transient(m) => NodeOutcome.Transient(m, ms, notSent = atOpen)
     case LinkFailure.Permanent(m) => NodeOutcome.Permanent(m, ms)
     // The statement was not sent, so another node may take it, as on the Arrow path. Not on a
     // client transaction's link, which `linkFailed` answers first.
-    case h: LinkFailure.HandleFailed => NodeOutcome.Transient(h.message, ms)
+    case h: LinkFailure.HandleFailed => NodeOutcome.Transient(h.message, ms, notSent = true)
 
   private def dropLink(link: QuackNodeLink, reused: Boolean): IO[Unit] =
     if reused then IO.unit else link.close()
@@ -423,7 +428,7 @@ final class QuackFrontDoor(
     if reused then
       val answer = QuackFrontDoor.txEndedMessage(fail, clientCommit)
       abortTx(s, link, answer) *> elapsed().map(ms => NodeOutcome.Permanent(answer, ms))
-    else dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms))
+    else dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms, atOpen = false))
 
   /** End the client transaction on `link`: DISCONNECT the link, which takes the transaction with it
     * (the node rolls it back), forget it as the session's `txLink`, drop the router's view of the
@@ -504,7 +509,7 @@ final class QuackFrontDoor(
     IO.defer {
       admit(node, txLink) match
         case None =>
-          IO.pure(NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L))
+          IO.pure(NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L, notSent = true))
         case Some(hold) =>
           router.adapter
             .tracked(node, recordLoad, admitDraining = true)(use(hold))
@@ -551,7 +556,8 @@ final class QuackFrontDoor(
                     .open(transport, node, s.hello, cq, authorize, hold, stillServes(node))
                     .map(_.map { case (l, _) => (l, false) })
               openIO.flatMap {
-                case Left(fail)            => elapsed().map(ms => toOutcome[A](fail, ms))
+                case Left(fail) =>
+                  elapsed().map(ms => toOutcome[A](fail, ms, atOpen = true))
                 case Right((link, reused)) =>
                   val stampedPrelude = prelude.filter(_ => stampOnQuack.get())
                   val preludeIO: IO[Either[LinkFailure, Unit]] = stampedPrelude match
@@ -574,12 +580,16 @@ final class QuackFrontDoor(
                       // The fresh link is admitted again: dropping the first one released its hold.
                       dropLink(link, reused) *> (router.tracker.tryHold(node.nodeId) match
                         case None =>
-                          IO.pure(NodeOutcome.Transient(QuackHttpAdapter.draining(node.nodeId), 0L))
+                          IO.pure(
+                            NodeOutcome
+                              .Transient(QuackHttpAdapter.draining(node.nodeId), 0L, notSent = true)
+                          )
                         case Some(hold2) =>
                           QuackNodeLink
                             .open(transport, node, s.hello, cq, authorize, hold2, stillServes(node))
                             .flatMap {
-                              case Left(fail2)    => elapsed().map(ms => toOutcome[A](fail2, ms))
+                              case Left(fail2) =>
+                                elapsed().map(ms => toOutcome[A](fail2, ms, atOpen = true))
                               case Right((l2, _)) =>
                                 // A raise or a cancel leaves no statement on the fresh link: close it,
                                 // which gives its hold back (the backstop in `admitted` holds the
@@ -673,7 +683,8 @@ final class QuackFrontDoor(
                       .open(transport, node, s.hello, cq, authorize, hold, stillServes(node))
                       .map(_.map { case (l, _) => (l, false) })
               openIO.flatMap {
-                case Left(fail)            => elapsed().map(ms => toOutcome[NodeRows](fail, ms))
+                case Left(fail) =>
+                  elapsed().map(ms => toOutcome[NodeRows](fail, ms, atOpen = true))
                 case Right((link, reused)) =>
                   link.collect(wrappedSql, cq).flatMap {
                     case Left(fail) =>

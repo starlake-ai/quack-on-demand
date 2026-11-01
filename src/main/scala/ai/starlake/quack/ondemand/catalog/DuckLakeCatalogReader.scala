@@ -249,6 +249,24 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       table
     )(droppedEntry).headOption
 
+  /** The dropped table `tableId` under its last name `schema.table` (names compared as
+    * [[findDroppedTable]] compares them): the undrop of one listed entry, which a name dropped more
+    * than once needs, since [[findDroppedTable]] answers the newest drop of the name.
+    */
+  def findDroppedTableById(
+      schema: String,
+      table: String,
+      tableId: Long
+  ): Option[DroppedTableEntry] =
+    query(
+      droppedTablesSelect +
+        "\n   AND translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(?, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')" +
+        "\n   AND t.table_id = ?",
+      schema,
+      table,
+      tableId
+    )(droppedEntry).headOption
+
   /** Newest committed snapshot id, or None on an empty (just-attached) catalog. */
   def maxSnapshotId(): Option[Long] =
     query("SELECT max(snapshot_id) AS m FROM ducklake_snapshot") { rs =>

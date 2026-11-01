@@ -595,6 +595,7 @@ object ManagerServerHarness:
       (_, _) => restoreCatalogReader.getOrElse(restoreReader),
       CatalogConfig(),
       restCaller,
+      ai.starlake.quack.ondemand.branch.TableCommitFence.unfenced,
       audit = audit
     )
 

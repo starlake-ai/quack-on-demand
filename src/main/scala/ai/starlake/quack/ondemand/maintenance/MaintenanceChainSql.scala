@@ -8,12 +8,11 @@ package ai.starlake.quack.ondemand.maintenance
   * Expiry deliberately has NO older_than variant: retention holds require explicit versions (an
   * older_than call would expire pinned snapshots).
   *
-  * `rewriteTable`'s table name is a positional argument on the pinned engine (DuckDB 1.5.4,
-  * still true on 1.5.5 per DuckLakeMaintenanceLandmineSpec 2026-07-25 /
-  * DuckLake): `ducklake_rewrite_data_files` has no `table_name` named parameter - only
-  * `(catalog, table, delete_threshold, schema)` positional/named, confirmed via
-  * `duckdb_functions()` and a live probe (see task-1-report.md). Adjusted from the brief's
-  * `table_name => '$table'` form accordingly.
+  * The table name of `rewriteTable` and `mergeAdjacentTable` is a positional argument:
+  * `ducklake_rewrite_data_files` and `ducklake_merge_adjacent_files` have no `table_name` named
+  * parameter, only a table overload `(catalog, table_name, ..., schema)` whose other arguments are
+  * named (`delete_threshold`, `schema`), confirmed via `duckdb_functions()` on DuckDB 2.0.0 and
+  * pinned live by DuckLakeCatalogReaderMaintenanceSpec.
   */
 object MaintenanceChainSql:
 
@@ -33,11 +32,26 @@ object MaintenanceChainSql:
   def expireVersions(alias: String, versions: List[Long]): String =
     s"CALL ducklake_expire_snapshots('${esc(alias)}', versions => [${versions.mkString(", ")}])"
 
+  /** Merges every table of the database: the tenantdb-scoped run's step. */
   def mergeAdjacent(alias: String): String =
     s"CALL ducklake_merge_adjacent_files('${esc(alias)}')"
 
-  def rewriteTable(alias: String, schema: String, table: String): String =
-    s"CALL ducklake_rewrite_data_files('${esc(alias)}', '${esc(table)}', schema => '${esc(schema)}')"
+  /** Merges one table's files only: the table-scoped run's step. Same overload shape as
+    * [[rewriteTable]] (table positional, schema named).
+    */
+  def mergeAdjacentTable(alias: String, schema: String, table: String): String =
+    s"CALL ducklake_merge_adjacent_files('${esc(alias)}', '${esc(table)}', schema => '${esc(schema)}')"
+
+  /** Rewrites the table's files whose deleted rows exceed `deleteThreshold` (a fraction in [0, 1],
+    * the policy's `rewriteDeleteThreshold`); without it DuckLake applies its own default.
+    */
+  def rewriteTable(alias: String, schema: String, table: String, deleteThreshold: Double): String =
+    require(
+      deleteThreshold >= 0.0 && deleteThreshold <= 1.0,
+      s"delete threshold must be within [0, 1], got $deleteThreshold"
+    )
+    s"CALL ducklake_rewrite_data_files('${esc(alias)}', '${esc(table)}', " +
+      s"schema => '${esc(schema)}', delete_threshold => $deleteThreshold)"
 
   def cleanupOldFiles(alias: String, graceDays: Int): String =
     if graceDays <= 0 then s"CALL ducklake_cleanup_old_files('${esc(alias)}', cleanup_all => true)"

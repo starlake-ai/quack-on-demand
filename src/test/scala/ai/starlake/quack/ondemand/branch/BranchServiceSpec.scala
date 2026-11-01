@@ -382,6 +382,76 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "freeze the branch's pool while the batch runs" in {
+    val f = new Fixture
+    val b = f.create("x").toOption.get
+    f.touchBranch()
+    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    val key       = PoolKey("acme", b.tenantDbName, b.poolName)
+    var duringRun = Option.empty[(Boolean, Boolean, Int)]
+    f.beforeRun =
+      () => duringRun = f.sup.get(key).map(st => (st.disabled, st.suspended, st.nodes.size))
+    f.service
+      .merge("acme", f.parent.name, "x", Some(10L), f.admin2, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    // Disabled (no new connection, no wake on a query) and suspended (no node left to write).
+    duringRun shouldBe Some((true, true, 0))
+  }
+
+  it should "merge the change set computed on the frozen branch, not the one seen before it" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    // A branch write lands between the first validation and the freeze: the merged head is the
+    // frozen one.
+    var reads  = 0
+    val moving = new FakeReader(12L, f.branchReader.versions, f.branchReader.changes):
+      override def maxSnapshotId(): Option[Long] =
+        reads += 1
+        Some(if reads == 1 then 12L else 13L)
+    val b = f.store.findBranch(f.parent.id, "x").get
+    f.readers.put(b.tenantDbName, moving)
+    f.service
+      .merge("acme", f.parent.name, "x", Some(10L), f.admin2, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.mergeBatches.head should include("AT (VERSION => 13)")
+    f.mergeBatches.head should not include "AT (VERSION => 12)"
+  }
+
+  it should "put the branch's pool back as it was when the merge does not complete" in {
+    val f = new Fixture
+    val b = f.create("x").toOption.get
+    f.touchBranch()
+    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    val key = PoolKey("acme", b.tenantDbName, b.poolName)
+    f.mergeFails = Some("Binder Error: branch moved past snapshot 12 after validation")
+    f.service
+      .merge("acme", f.parent.name, "x", None, f.admin2, None)
+      .unsafeRunSync()
+      .isLeft shouldBe true
+    f.sup.get(key).map(st => (st.disabled, st.suspended, st.nodes.size)) shouldBe
+      Some((false, false, 1))
+  }
+
+  it should "leave the branch's pool untouched when the merge is refused before it runs" in {
+    val f = new Fixture
+    val b = f.create("x").toOption.get
+    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    val key    = PoolKey("acme", b.tenantDbName, b.poolName)
+    val before = f.sup.get(key).map(_.nodes.map(_.nodeId))
+    // No branch work: nothing_to_merge, decided before any freeze.
+    f.service
+      .merge("acme", f.parent.name, "x", None, f.admin2, None)
+      .unsafeRunSync()
+      .left
+      .map(_.code) shouldBe Left("nothing_to_merge")
+    f.sup.get(key).map(_.nodes.map(_.nodeId)) shouldBe before
+    f.sup.get(key).map(st => (st.disabled, st.suspended)) shouldBe Some((false, false))
+  }
+
   it should "reopen the branch and record the failure when the merge loses a commit race" in {
     val f = new Fixture
     f.create("x")

@@ -29,10 +29,29 @@ class MaintenanceChainSqlSpec extends AnyFlatSpec with Matchers:
       "CALL ducklake_merge_adjacent_files('lake''; drop--')"
   }
 
-  "rewriteTable" should "double quotes embedded in alias, table, and schema" in {
-    MaintenanceChainSql.rewriteTable(evilAlias, evilSchema, evilTable) shouldBe
-      "CALL ducklake_rewrite_data_files('lake''; drop--', 't''); drop--', schema => 's''; drop--')"
+  "mergeAdjacentTable" should "name the table and double quotes in alias, table, and schema" in {
+    MaintenanceChainSql.mergeAdjacentTable(evilAlias, evilSchema, evilTable) shouldBe
+      "CALL ducklake_merge_adjacent_files('lake''; drop--', 't''); drop--', schema => 's''; drop--')"
   }
+
+  "rewriteTable" should "double quotes embedded in alias, table, and schema" in {
+    MaintenanceChainSql.rewriteTable(evilAlias, evilSchema, evilTable, 0.2) shouldBe
+      "CALL ducklake_rewrite_data_files('lake''; drop--', 't''); drop--', " +
+      "schema => 's''; drop--', delete_threshold => 0.2)"
+  }
+
+  it should "pass the configured delete threshold" in {
+    MaintenanceChainSql.rewriteTable("lake", "s", "t", 0.05) should
+      include("delete_threshold => 0.05")
+    MaintenanceChainSql.rewriteTable("lake", "s", "t", 0.0) should
+      include("delete_threshold => 0.0")
+  }
+
+  it should "refuse a threshold outside [0, 1]" in
+    List(-0.1, 1.5, Double.NaN, Double.PositiveInfinity).foreach { t =>
+      an[IllegalArgumentException] should be thrownBy
+        MaintenanceChainSql.rewriteTable("lake", "s", "t", t)
+    }
 
   "cleanupOldFiles" should "double a quote embedded in the alias (both grace-day branches)" in {
     MaintenanceChainSql.cleanupOldFiles(evilAlias, graceDays = 0) shouldBe

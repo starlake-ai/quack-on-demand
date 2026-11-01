@@ -60,15 +60,23 @@ object ArrowRowsDecoder:
     else
       vector match
         case bit: BitVector          => Json.fromBoolean(bit.get(i) != 0)
-        case fp: FloatingPointVector =>
-          Json
-            .fromBigDecimal(java.math.BigDecimal.valueOf(fp.getValueAsDouble(i)))
-        case _ =>
+        case fp: FloatingPointVector => renderDouble(fp.getValueAsDouble(i))
+        case _                       =>
           vector.getObject(i) match
-            case null      => Json.Null
-            case n: Number =>
+            case null                => Json.Null
+            case d: java.lang.Double => renderDouble(d.doubleValue)
+            case f: java.lang.Float  => renderDouble(f.doubleValue)
+            case n: Number           =>
               Json
                 .fromBigDecimal(new java.math.BigDecimal(n.toString))
             case t: Text   => Json.fromString(t.toString)
             case s: String => Json.fromString(s)
             case other     => Json.fromString(other.toString)
+
+  /** A finite double as a JSON number; NaN, Infinity and -Infinity, which DuckDB's DOUBLE and FLOAT
+    * hold but JSON has no number for (and `BigDecimal` refuses), as the strings `"NaN"`,
+    * `"Infinity"` and `"-Infinity"`.
+    */
+  private[api] def renderDouble(d: Double): Json =
+    if d.isNaN || d.isInfinite then Json.fromString(d.toString)
+    else Json.fromBigDecimal(java.math.BigDecimal.valueOf(d))

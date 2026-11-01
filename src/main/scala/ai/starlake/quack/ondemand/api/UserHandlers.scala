@@ -246,15 +246,26 @@ final class UserHandlers(
         // self first (the clearer message when both would apply), then the
         // last-enabled-superuser floor, which is identity-independent so a
         // locked superuser's still-live session is covered.
+        //
+        // A demotion (kind other than admin) takes a superuser off the management plane as surely
+        // as a lock does, so the same two guards apply to it.
+        val demotes = req.kind.exists(k => !k.trim.equalsIgnoreCase("admin"))
         val lockGuard: Option[(StatusCode, ErrorResponse)] =
-          if !req.enabled.contains(false) then None
-          else
+          if req.enabled.contains(false) then
             selfAndFloorGuard(
               apiKey,
               req.id,
               ErrorResponse("cannot_lock_self", "you cannot lock your own account"),
               "cannot lock the last enabled superuser; enable another superuser first"
             )
+          else if demotes then
+            selfAndFloorGuard(
+              apiKey,
+              req.id,
+              ErrorResponse("cannot_demote_self", "you cannot demote your own account"),
+              "cannot demote the last enabled superuser; enable or create another superuser first"
+            )
+          else None
         lockGuard match
           case Some(err) =>
             audit.rest(

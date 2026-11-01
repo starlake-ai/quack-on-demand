@@ -31,6 +31,16 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
   private val RootKey: Option[String]               = Some(IdentityFixtures.RootSessionTok)
   private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
+  /** A write's result whose stream fails when read to its end: a stamped COMMIT refused there. */
+  private def failingReader(message: String): org.apache.arrow.vector.ipc.ArrowReader =
+    val under = emptyReader()
+    new org.apache.arrow.vector.ipc.ArrowReader(new RootAllocator()):
+      override def loadNextBatch(): Boolean          = throw new java.io.IOException(message)
+      override def getVectorSchemaRoot               = under.getVectorSchemaRoot
+      override def bytesRead(): Long                 = 0L
+      override protected def readSchema(): Schema    = under.getVectorSchemaRoot.getSchema
+      override protected def closeReadSource(): Unit = under.close()
+
   private def emptyReader(): org.apache.arrow.vector.ipc.ArrowReader =
     val allocator = new RootAllocator()
     val schema    = new Schema(java.util.List.of())
@@ -119,6 +129,8 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         live.get((schema, table)).map(_ => latest)
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
         live.contains((schema, table)) && existsAt(schema, table, snapshotId)
+      // No commit carries this restore's message unless a case says so.
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long] = None
 
   trait Stubs:
     val (sup, store)               = supervisor()
@@ -151,6 +163,15 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       )
     var writeResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
+    // The commit fence the replace is held by: (message, base snapshot, table id) per arm.
+    val fenceArms    = scala.collection.mutable.ListBuffer.empty[(String, Long, Long)]
+    val fenceDisarms = scala.collection.mutable.ListBuffer.empty[String]
+    var fenceFails   = Option.empty[String]
+    val fence        = new ai.starlake.quack.ondemand.branch.TableCommitFence:
+      def arm(m: Map[String, String], message: String, base: Long, tableId: Long) =
+        fenceArms += ((message, base, tableId))
+        fenceFails.toLeft(())
+      def disarm(m: Map[String, String], message: String): Unit = fenceDisarms += message
     var readCallers: List[ExecCaller]                        = Nil
     var writeCallers: List[ExecCaller]                       = Nil
     val readExecutor: CatalogPreviewHandlers.PreviewExecutor =
@@ -180,6 +201,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         (_, _) => readerOverride,
         cfgOverride,
         IdentityFixtures.restCaller(sessionsOverride, patsOverride),
+        fence,
         audit = audit
       )
 
@@ -302,10 +324,17 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     writeUser shouldBe Some("alice")
 
   it should "execute the CREATE OR REPLACE and report the new snapshot" in new Stubs:
-    val h   = handlers()
-    val out = restore(h, to = "39")
-    writeSql.get shouldBe
-      """CREATE OR REPLACE TABLE "tpch1"."orders" AS SELECT * FROM "tpch1"."orders" AT (VERSION => 39)"""
+    val h               = handlers()
+    val out             = restore(h, to = "39")
+    val (message, _, _) = fenceArms.head
+    // Its own transaction, stamped with the message the fence singles it out by, the COMMIT inside
+    // the request.
+    writeSql.get.split(";\n").toList shouldBe List(
+      "BEGIN",
+      s"CALL ducklake_set_commit_message('acme_tpch1', 'tenant:acme/user:${IdentityFixtures.RootUsername}', '$message')",
+      """CREATE OR REPLACE TABLE "tpch1"."orders" AS SELECT * FROM "tpch1"."orders" AT (VERSION => 39)""",
+      "COMMIT"
+    )
     closed shouldBe true
     val r = out.toOption.get
     r.newSnapshot shouldBe Some(40L)
@@ -314,6 +343,55 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     val ok = telemetryStore.events.last
     ok.outcome shouldBe "ok"
     ok.detail.contains("newSnapshot") shouldBe true
+
+  it should "hold the replace's commit to the validated table state, then release it" in new Stubs:
+    restore(handlers(), to = "39", expected = Some(40L)).isRight shouldBe true
+    // Base: the table's newest snapshot as validated; scope: the table id the replace changes.
+    fenceArms.toList.map(a => (a._2, a._3)) shouldBe List((40L, 7L))
+    fenceArms.head._1 should startWith("restore tpch1.orders to snapshot 39 [")
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+
+  it should "release the fence when the replace fails too" in new Stubs:
+    writeResult = IO.pure(Left(RouterFailure.Internal("boom")))
+    restore(handlers()).isLeft shouldBe true
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+
+  it should "502 without writing when the fence cannot be armed" in new Stubs:
+    fenceFails = Some("cannot arm the commit fence: connection refused")
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._2.error shouldBe "restore_failed"
+    writeSql shouldBe None
+
+  it should "409 when the fence refused the commit because the table changed meanwhile" in new Stubs:
+    writeResult = IO.pure(
+      Left(
+        RouterFailure.Internal(
+          "qod commit fence: conflict, table 7 changed after snapshot 40 before the commit"
+        )
+      )
+    )
+    val out = restore(handlers(), to = "39", expected = Some(40L))
+    out.left.toOption.get._1 shouldBe StatusCode.Conflict
+    out.left.toOption.get._2.error shouldBe "concurrent_write"
+    telemetryStore.events.last.outcome should not be "ok"
+
+  it should "not report success when the commit fails while the result is read" in new Stubs:
+    var shut = false
+    writeResult = IO.pure(
+      Right(QueryResult(failingReader("COMMIT failed: boom"), () => shut = true, "node-1", 1L))
+    )
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.error shouldBe "restore_failed"
+    out.left.toOption.get._2.message should include("COMMIT failed: boom")
+    telemetryStore.events.last.outcome should not be "ok"
+    shut shouldBe true
+
+  it should "409 when the commit read at the end of the result reports a conflict" in new Stubs:
+    writeResult = IO.pure(
+      Right(QueryResult(failingReader("write-write conflict"), () => (), "node-1", 1L))
+    )
+    restore(handlers(), to = "39").left.toOption.get._2.error shouldBe "concurrent_write"
 
   it should "reflect a post-execute begin_snapshot that differs from the pre-capture" in new Stubs:
     var info   = (7L, 40L)
@@ -365,15 +443,16 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "report success when the CTAS commits despite the timeout (post-timeout probe)" in new Stubs:
     writeResult = IO.never
-    var info    = (7L, 40L)
-    val toggled = new java.util.concurrent.atomic.AtomicBoolean(false)
-    val reader  = new DuckLakeCatalogReader(null):
+    val reader = new DuckLakeCatalogReader(null):
       override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
       override def maxSnapshotId(): Option[Long]     = Some(42L)
       override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] =
-        if toggled.get() then Some((8L, 43L)) else { toggled.set(true); Some(info) }
+        Some((7L, 40L))
       override def latestTableSnapshot(schema: String, table: String): Option[Long] = Some(40L)
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = true
+      // This restore's own commit, found by its unique message.
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long] =
+        Option.when(commitMessage.startsWith("restore tpch1.orders to snapshot 39 ["))(43L)
     val h = handlers(
       readerOverride = reader,
       cfgOverride =
@@ -382,6 +461,29 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     val out = restore(h)
     out.toOption.get.newSnapshot shouldBe Some(43L)
     telemetryStore.events.last.outcome shouldBe "ok"
+
+  it should "not report success when only another writer's replace changed the table" in new Stubs:
+    // The answer is lost; meanwhile another writer replaced the table (a new table id), and this
+    // restore's own commit, the one its message names, never landed.
+    writeResult = IO.never
+    val reader = new DuckLakeCatalogReader(null):
+      override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
+      override def maxSnapshotId(): Option[Long]     = Some(42L)
+      private val calls                              = new java.util.concurrent.atomic.AtomicInteger
+      override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] =
+        if calls.getAndIncrement() == 0 then Some((7L, 40L)) else Some((9L, 44L))
+      override def latestTableSnapshot(schema: String, table: String): Option[Long] = Some(40L)
+      override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = true
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long]            = None
+    val h = handlers(
+      readerOverride = reader,
+      cfgOverride =
+        CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, restoreTimeoutSec = 1)
+    )
+    val out = restore(h, to = "39")
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.error shouldBe "restore_failed"
+    telemetryStore.events.last.outcome should not be "ok"
 
   // ---------- executor identity (PAT regression) ----------
 

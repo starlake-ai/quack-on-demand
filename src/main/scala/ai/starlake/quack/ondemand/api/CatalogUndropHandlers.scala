@@ -39,8 +39,9 @@ final class CatalogUndropHandlers(
     sessionExecutor: CatalogUndropHandlers.SessionExecutor = CatalogUndropHandlers.unwiredSession
 ):
   private type Out[T] = IO[Either[(StatusCode, ErrorResponse), T]]
-  private type Run    =
-    (PoolKey, String) => IO[Either[RouterFailure, ai.starlake.quack.edge.QueryResult]]
+  // (pool, the CTAS, the commit message its write is stamped with: see [[recover]]).
+  private type Run =
+    (PoolKey, String, String) => IO[Either[RouterFailure, ai.starlake.quack.edge.QueryResult]]
 
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
@@ -147,22 +148,33 @@ final class CatalogUndropHandlers(
           callerOf(s"undrop-$tid-$db", apiKey).flatMap { caller =>
             pool
               .flatMap(tokenRefusal(tid, caller, db, _))
-              .toLeft((k: PoolKey, sql: String) => executor(caller, k, sql))
-          }
-        recover(tid, db, req.schema, req.table, req.asName, req.fromSnapshot, pool, run).map {
-          outcome =>
-            auditUndrop(outcome, tid, db, req.schema, req.table) { (tag, target, detail) =>
-              audit.rest(
-                apiKey,
-                "control-plane",
-                AuditActions.CatalogUndrop,
-                tag,
-                tenant = Some(tid),
-                target = Some(target),
-                detail = detail
+              .toLeft((k: PoolKey, sql: String, message: String) =>
+                executor(caller.copy(commitMessage = Some(message)), k, sql)
               )
-            }
-            outcome
+          }
+        recover(
+          tid,
+          db,
+          req.schema,
+          req.table,
+          req.asName,
+          req.fromSnapshot,
+          req.tableId,
+          pool,
+          run
+        ).map { outcome =>
+          auditUndrop(outcome, tid, db, req.schema, req.table) { (tag, target, detail) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.CatalogUndrop,
+              tag,
+              tenant = Some(tid),
+              target = Some(target),
+              detail = detail
+            )
+          }
+          outcome
         }
 
   // ---------- self-service (the profile surface; MCP for a non-admin) ----------
@@ -310,8 +322,11 @@ final class CatalogUndropHandlers(
           req.table,
           req.asName,
           None,
+          req.tableId,
           Some(poolKey),
-          Right((k: PoolKey, sql: String) => executor(caller, k, sql))
+          Right((k: PoolKey, sql: String, message: String) =>
+            executor(caller.copy(commitMessage = Some(message)), k, sql)
+          )
         ).map { outcome =>
           auditUndrop(outcome, tid, td.name, req.schema, req.table) { (tag, target, detail) =>
             audit.rest(
@@ -362,8 +377,10 @@ final class CatalogUndropHandlers(
             val s = schema.getOrElse(
               sup.effectiveMetastoreFor(tid, td.name).getOrElse("schemaName", "main")
             )
-            val run: Run = (k, sql) => sessionExecutor(s"$connectionId/undrop", user, k, sql, e)
-            recover(tid, td.name, s, table, asName, None, Some(poolKey), Right(run)).map {
+            val run: Run =
+              (k, sql, message) =>
+                sessionExecutor(s"$connectionId/undrop", user, k, sql, e, message)
+            recover(tid, td.name, s, table, asName, None, None, Some(poolKey), Right(run)).map {
               outcome =>
                 auditUndrop(outcome, tid, td.name, s, table) { (outcomeTag, target, detail) =>
                   audit.restAs(
@@ -440,8 +457,9 @@ final class CatalogUndropHandlers(
     * screen, the dropped table's last live snapshot (looked up without case, as DuckDB resolves
     * names: the CTAS then names the table as stored), the target name's check (no live table or
     * view holds it, without case), then `CREATE TABLE <target> AS SELECT * FROM <table> AT (VERSION
-    * => n)` through `run` on `pool`. `pool` and `run` are consulted only once the catalog checks
-    * pass, in that order. No audit: the callers audit.
+    * => n)` through `run` on `pool`, its commit stamped with a message unique to this run, which
+    * alone settles an answer that was lost. `pool` and `run` are consulted only once the catalog
+    * checks pass, in that order. No audit: the callers audit.
     */
   def recover(
       tid: String,
@@ -450,6 +468,7 @@ final class CatalogUndropHandlers(
       table: String,
       asName: Option[String],
       fromSnapshotReq: Option[Long],
+      tableIdReq: Option[Long],
       pool: => Option[PoolKey],
       run: => Either[(StatusCode, ErrorResponse), Run]
   ): Out[UndropResponse] =
@@ -465,9 +484,16 @@ final class CatalogUndropHandlers(
       )
     else
       val reader = resolveReader(tid, db)
-      reader.findDroppedTable(schema, table) match
+      // A listed entry names its drop by table id: a name dropped twice is two tables, and the
+      // name alone resolves to the newest.
+      tableIdReq.fold(reader.findDroppedTable(schema, table))(
+        reader.findDroppedTableById(schema, table, _)
+      ) match
         case None =>
-          IO.pure(err(StatusCode.NotFound, "not_found", s"no dropped table '$schema.$table'"))
+          val which = tableIdReq.fold("")(id => s" with table id $id")
+          IO.pure(
+            err(StatusCode.NotFound, "not_found", s"no dropped table '$schema.$table'$which")
+          )
         case Some(entry) =>
           val target       = asName.getOrElse(entry.table)
           val fromSnapshot = fromSnapshotReq.getOrElse(entry.lastLiveSnapshot)
@@ -519,47 +545,92 @@ final class CatalogUndropHandlers(
                         s"AT (VERSION => $fromSnapshot)"
                     val committed: Either[(StatusCode, ErrorResponse), UndropResponse] =
                       Right(UndropResponse(entry.schema, entry.table, target, fromSnapshot))
-                    execute(poolKey, sql)
+                    // Unique to this run: the router stamps the CTAS's commit with it in place of
+                    // `flightsql create` (its own prelude, never client SQL, so no policy screen
+                    // sees a commit-message call). A failure that may hide a commit is settled by
+                    // this commit alone, never by whatever table holds the name now: another
+                    // writer's CREATE, or another undrop's, would hold it too.
+                    val message =
+                      s"undrop ${entry.schema}.${entry.table} as ${entry.schema}.$target " +
+                        s"from snapshot $fromSnapshot [${java.util.UUID.randomUUID()}]"
+                    // `lost`: the answer cannot tell whether the CTAS committed (a timeout, a
+                    // broken stream). A definite failure keeps its own words unless the catalog
+                    // shows this commit after all.
+                    def settled(
+                        reason: String,
+                        lost: Boolean
+                    ): Either[(StatusCode, ErrorResponse), UndropResponse] =
+                      scala.util.Try(reader.snapshotByCommitMessage(message)) match
+                        case scala.util.Success(Some(_)) => committed
+                        case scala.util.Success(None)
+                            if lost && scala.util
+                              .Try(
+                                reader
+                                  .maxSnapshotId()
+                                  .exists(m => reader.tableExistsAt(entry.schema, target, m))
+                              )
+                              .getOrElse(false) =>
+                          err(
+                            StatusCode.BadGateway,
+                            "undrop_outcome_unknown",
+                            s"$reason; a table now holds ${entry.schema}.$target, but the " +
+                              "catalog shows no commit by this undrop (another writer may have " +
+                              "created it, or writes are not stamped: QOD_STAMP_WRITES); check " +
+                              "it before retrying"
+                          )
+                        case scala.util.Success(None) =>
+                          err(StatusCode.BadGateway, "undrop_failed", reason)
+                        case scala.util.Failure(t) if lost =>
+                          err(
+                            StatusCode.BadGateway,
+                            "undrop_outcome_unknown",
+                            s"$reason; the catalog could not be read to settle it " +
+                              s"(${t.getMessage}): check ${entry.schema}.$target before retrying"
+                          )
+                        case scala.util.Failure(_) =>
+                          err(StatusCode.BadGateway, "undrop_failed", reason)
+                    execute(poolKey, sql, message)
                       .timeout(cfg.undropTimeoutSec.seconds)
                       .attempt
                       .map {
                         case Left(e) =>
                           // Cancellation of the blocking HTTP leg is best-effort, so a CTAS that
-                          // outlives the timeout may still have committed on the node: probe the
-                          // catalog before answering so the response and audit reflect reality.
-                          if reader
-                              .maxSnapshotId()
-                              .exists(m => reader.tableExistsAt(entry.schema, target, m))
-                          then committed
-                          else
-                            val msg = e match
-                              case _: java.util.concurrent.TimeoutException =>
-                                s"undrop timed out after ${cfg.undropTimeoutSec}s"
-                              case other => s"undrop failed: ${other.getMessage}"
-                            err(StatusCode.BadGateway, "undrop_failed", msg)
+                          // outlives the timeout may still have committed on the node.
+                          val reason = e match
+                            case _: java.util.concurrent.TimeoutException =>
+                              s"undrop timed out after ${cfg.undropTimeoutSec}s"
+                            case other => s"undrop failed: ${other.getMessage}"
+                          settled(reason, lost = true)
                         case Right(Left(RouterFailure.AccessDenied(reason))) =>
                           err(StatusCode.Forbidden, "acl_denied", reason)
                         case Right(Left(failure)) =>
-                          err(StatusCode.BadGateway, "undrop_failed", failure.reason)
+                          // The router's own "outcome is unknown" included: its words say so.
+                          settled(failure.reason, lost = false)
                         case Right(Right(result)) =>
-                          // A CTAS result stream carries only a row count nobody reads.
-                          result.close()
-                          committed
+                          // Read to its end before answering: a stamped CTAS commits when its
+                          // stream is exhausted, and a refused COMMIT fails it there (closing an
+                          // undrained one would only log it). A broken stream after the COMMIT
+                          // went out is settled from the catalog, as a timeout is.
+                          WriteResults.drain(result) match
+                            case Right(_)  => committed
+                            case Left(why) => settled(s"undrop failed: $why", lost = true)
                       }
 
 object CatalogUndropHandlers:
 
-  /** `(connectionId, user, poolKey, sql, the session's effective set)`: a statement run as that
-    * session (Main binds FlightSqlRouter.execute with adminDispatch = false).
+  /** `(connectionId, user, poolKey, sql, the session's effective set, the commit message its write
+    * is stamped with)`: a statement run as that session (Main binds
+    * FlightSqlRouter.executeOneShot).
     */
   type SessionExecutor = (
       String,
       String,
       PoolKey,
       String,
-      EffectiveSet
+      EffectiveSet,
+      String
   ) => IO[Either[RouterFailure, ai.starlake.quack.edge.QueryResult]]
 
   val unwiredSession: SessionExecutor =
-    (_, _, _, _, _) =>
+    (_, _, _, _, _, _) =>
       IO.pure(Left(RouterFailure.Internal("UNDROP TABLE's session executor is not wired")))

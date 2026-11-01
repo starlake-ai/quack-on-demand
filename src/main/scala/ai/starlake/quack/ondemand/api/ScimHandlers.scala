@@ -174,7 +174,7 @@ final class ScimHandlers(
     o("emails").flatMap(_.asArray).flatMap { arr =>
       val objs = arr.toList.flatMap(_.asObject)
       objs
-        .find(_("primary").flatMap(_.asBoolean).contains(true))
+        .find(_("primary").flatMap(asBool).contains(true))
         .orElse(objs.headOption)
         .flatMap(e => e("value").flatMap(_.asString))
     }
@@ -375,9 +375,16 @@ final class ScimHandlers(
                       case (_, Some("username")) =>
                         value.flatMap(_.asString).foreach(v => badRename = v != u.username)
                       case (_, Some(p)) if p.startsWith("emails") =>
+                        // The value is the address itself (`emails[type eq "work"].value`), one
+                        // email object, or the whole `emails` array (Okta, Entra).
                         value
                           .flatMap(_.asString)
-                          .orElse(value.flatMap(_.asObject).flatMap(emailOf))
+                          .orElse(
+                            value.flatMap(_.asObject).flatMap(o => o("value").flatMap(_.asString))
+                          )
+                          .orElse(
+                            value.filter(_.isArray).flatMap(a => emailOf(JsonObject("emails" -> a)))
+                          )
                           .foreach(v => email = Some(Some(v)))
                       case (_, None) =>
                         // No path: value is a partial resource object.
@@ -541,26 +548,36 @@ final class ScimHandlers(
                   )
                 )
               )
+            case Some(name) if unknownMember(tenantId, memberIds(obj)).isDefined =>
+              IO.pure(Left(unknownMember(tenantId, memberIds(obj)).get))
             case Some(name) =>
               sup.createGroup(tenantId, name, None).flatMap {
                 case Left(e)  => IO.pure(Left(supError(e)))
                 case Right(g) =>
-                  str(obj, "externalId").foreach(e => sup.setGroupExternalId(g.id, Some(e)))
-                  val members = memberIds(obj)
-                  setMembers(tenantId, g.id, members).map {
-                    case Left(err) => Left(err)
-                    case Right(()) =>
-                      audit.rest(
-                        apiKey,
-                        "control-plane",
-                        AuditActions.GroupCreate,
-                        "ok",
-                        tenant = Some(tenantId),
-                        target = Some(name),
-                        detail = Map("via" -> "scim")
-                      )
-                      Right(freshGroupJson(tenantRaw, tenantId, g))
-                  }
+                  // Members and externalId in one write; a refused one (a member deleted since
+                  // the check) takes the just-created group back out, so a refused POST leaves
+                  // nothing behind.
+                  sup
+                    .setGroupState(g.id, memberIds(obj).toSet, Some(str(obj, "externalId")))
+                    .flatMap[Either[(StatusCode, String), Unit]] {
+                      case Left(e) =>
+                        sup.deleteGroup(g.id).attempt.as(Left(supError(e)))
+                      case Right(()) => IO.pure(Right(()))
+                    }
+                    .map {
+                      case Left(err) => Left(err)
+                      case Right(()) =>
+                        audit.rest(
+                          apiKey,
+                          "control-plane",
+                          AuditActions.GroupCreate,
+                          "ok",
+                          tenant = Some(tenantId),
+                          target = Some(name),
+                          detail = Map("via" -> "scim")
+                        )
+                        Right(freshGroupJson(tenantRaw, tenantId, g))
+                    }
               }
       }
 
@@ -585,14 +602,18 @@ final class ScimHandlers(
                       )
                     )
                   )
+                case _ if unknownMember(tenantId, memberIds(obj)).isDefined =>
+                  IO.pure(Left(unknownMember(tenantId, memberIds(obj)).get))
                 case _ =>
-                  sup.setGroupExternalId(g.id, str(obj, "externalId"))
-                  replaceMembers(tenantId, g.id, memberIds(obj)).map {
-                    case Left(err) => Left(err)
-                    case Right(()) =>
-                      auditGroupUpdate(apiKey, tenantId, g)
-                      Right(freshGroupJson(tenantRaw, tenantId, g))
-                  }
+                  sup
+                    .setGroupState(g.id, memberIds(obj).toSet, Some(str(obj, "externalId")))
+                    .map(_.left.map(supError))
+                    .map {
+                      case Left(err) => Left(err)
+                      case Right(()) =>
+                        auditGroupUpdate(apiKey, tenantId, g)
+                        Right(freshGroupJson(tenantRaw, tenantId, g))
+                    }
       }
 
   def patchGroup(tenantRaw: String, id: String, body: String, apiKey: Option[String])(
@@ -609,73 +630,19 @@ final class ScimHandlers(
               ops match
                 case None      => IO.pure(Left(missing("Operations")))
                 case Some(ops) =>
-                  // RFC 7644: attribute names and operators are case-insensitive, so the
-                  // path is matched lowercased and the member filter regex carries (?i).
-                  val MemberFilter = """(?i)members\[value eq "([^"]+)"\]""".r
-                  // Fold the ops sequentially; the membership calls are idempotent.
-                  ops
-                    .foldLeft[Out[Unit]](IO.pure(Right(()))) { (acc, op) =>
-                      acc.flatMap {
-                        case Left(err) => IO.pure(Left(err))
+                  // Every op is planned and checked before the first one is applied, so a
+                  // refused PATCH changes nothing (RFC 7644 3.5.2: the operations are atomic).
+                  planGroupPatch(tenantId, g, ops) match
+                    case Left(err)   => IO.pure(Left(err))
+                    case Right(plan) =>
+                      val (members, externalId) =
+                        finalGroupState(sup.usersInGroup(g.id).toSet, plan)
+                      sup.setGroupState(g.id, members, externalId).map(_.left.map(supError)).map {
+                        case Left(err) => Left(err)
                         case Right(()) =>
-                          val kind =
-                            str(op, "op").map(_.toLowerCase(Locale.ROOT)).getOrElse("replace")
-                          val rawPath = str(op, "path").getOrElse("")
-                          // Lowercased for attribute-name comparison ONLY; the member filter
-                          // matches the raw path so a mixed-case member id survives intact.
-                          val path = rawPath.toLowerCase(Locale.ROOT)
-                          val ids  = op("value").map(memberIdsOf).getOrElse(Nil)
-                          (kind, path) match
-                            case ("add", "members") =>
-                              setMembers(tenantId, g.id, ids)
-                            case ("replace", "members") =>
-                              replaceMembers(tenantId, g.id, ids)
-                            case ("remove", _)
-                                if MemberFilter.findFirstMatchIn(rawPath).isDefined =>
-                              val uid = MemberFilter.findFirstMatchIn(rawPath).get.group(1)
-                              sup.removeUserGroup(uid, g.id).map(_.map(_ => ()).left.map(supError))
-                            case ("remove", "members") =>
-                              val victims = if ids.nonEmpty then ids else sup.usersInGroup(g.id)
-                              victims.foldLeft[Out[Unit]](IO.pure(Right(()))) { (a, uid) =>
-                                a.flatMap {
-                                  case Left(e)   => IO.pure(Left(e))
-                                  case Right(()) =>
-                                    sup
-                                      .removeUserGroup(uid, g.id)
-                                      .map(_.map(_ => ()).left.map(supError))
-                                }
-                              }
-                            case (_, "externalid") =>
-                              IO.pure {
-                                val v =
-                                  if kind == "remove" then None
-                                  else op("value").flatMap(_.asString)
-                                sup.setGroupExternalId(g.id, v)
-                                Right(())
-                              }
-                            case (_, "") =>
-                              // No path: value is a partial Group object, the same shape
-                              // patchUser already accepts.
-                              IO.pure {
-                                op("value").flatMap(_.asObject).foreach { vo =>
-                                  str(vo, "externalId")
-                                    .foreach(v => sup.setGroupExternalId(g.id, Some(v)))
-                                }
-                                Right(())
-                              }
-                            case (_, other) =>
-                              IO.pure {
-                                logger.debug(s"scim: ignoring unsupported group patch '$other'")
-                                Right(())
-                              }
+                          auditGroupUpdate(apiKey, tenantId, g)
+                          Right(freshGroupJson(tenantRaw, tenantId, g))
                       }
-                    }
-                    .map {
-                      case Left(err) => Left(err)
-                      case Right(()) =>
-                        auditGroupUpdate(apiKey, tenantId, g)
-                        Right(freshGroupJson(tenantRaw, tenantId, g))
-                    }
       }
 
   def deleteGroup(tenantRaw: String, id: String, apiKey: Option[String])(
@@ -715,6 +682,106 @@ final class ScimHandlers(
       detail = Map("via" -> "scim")
     )
 
+  /** One change a group PATCH makes, planned before any is applied. */
+  private enum GroupStep:
+    case Add(ids: List[String])
+    case Replace(ids: List[String])
+    case Remove(ids: List[String])
+    case RemoveAll
+    case ExternalId(value: Option[String])
+
+  /** The refusal for the first id in `ids` that is no user of the tenant, if any. */
+  private def unknownMember(tenantId: String, ids: List[String]): Option[(StatusCode, String)] =
+    ids
+      .find(uid => userInTenant(tenantId, uid).isEmpty)
+      .map(uid =>
+        scimError(StatusCode.BadRequest, s"member not found in tenant: $uid", Some("invalidValue"))
+      )
+
+  /** A group PATCH's operations as steps, or the refusal of the first op that cannot apply. RFC
+    * 7644: attribute names and operators are case-insensitive, so the path is matched lowercased
+    * and the member filter regex carries (?i); the filter matches the raw path, so a mixed-case
+    * member id survives intact. An op with no path carries a partial Group: its `externalId` and
+    * `members` (replaced, or added for an `add`), and a `displayName`, which may not change.
+    */
+  private def planGroupPatch(
+      tenantId: String,
+      g: RbacGroup,
+      ops: List[JsonObject]
+  ): Either[(StatusCode, String), List[GroupStep]] =
+    val MemberFilter = """(?i)members\[value eq "([^"]+)"\]""".r
+    val planned: Either[(StatusCode, String), List[GroupStep]] =
+      ops.foldLeft[Either[(StatusCode, String), List[GroupStep]]](Right(Nil)) { (acc, op) =>
+        acc.flatMap { steps =>
+          val kind    = str(op, "op").map(_.toLowerCase(Locale.ROOT)).getOrElse("replace")
+          val rawPath = str(op, "path").getOrElse("")
+          val path    = rawPath.toLowerCase(Locale.ROOT)
+          val ids     = op("value").map(memberIdsOf).getOrElse(Nil)
+          val next: Either[(StatusCode, String), List[GroupStep]] = (kind, path) match
+            case ("add", "members")     => Right(List(GroupStep.Add(ids)))
+            case ("replace", "members") => Right(List(GroupStep.Replace(ids)))
+            case ("remove", _) if MemberFilter.findFirstMatchIn(rawPath).isDefined =>
+              Right(
+                List(GroupStep.Remove(List(MemberFilter.findFirstMatchIn(rawPath).get.group(1))))
+              )
+            case ("remove", "members") =>
+              Right(List(if ids.nonEmpty then GroupStep.Remove(ids) else GroupStep.RemoveAll))
+            case (_, "externalid") =>
+              Right(
+                List(
+                  GroupStep.ExternalId(
+                    if kind == "remove" then None else op("value").flatMap(_.asString)
+                  )
+                )
+              )
+            case ("remove", "") =>
+              // RFC 7644 3.5.2.2: a remove names its target.
+              Left(scimError(StatusCode.BadRequest, "remove requires a path", Some("noTarget")))
+            case (_, "") =>
+              val vo = op("value").flatMap(_.asObject)
+              if vo.flatMap(str(_, "displayName")).exists(_ != g.name) then
+                Left(
+                  scimError(StatusCode.BadRequest, "displayName is immutable", Some("mutability"))
+                )
+              else
+                Right(vo.toList.flatMap { o =>
+                  str(o, "externalId").map(v => GroupStep.ExternalId(Some(v))).toList ++
+                    o("members")
+                      .map(memberIdsOf)
+                      .map(m => if kind == "add" then GroupStep.Add(m) else GroupStep.Replace(m))
+                      .toList
+                })
+            case (_, other) =>
+              logger.debug(s"scim: ignoring unsupported group patch '$other'")
+              Right(Nil)
+          next.map(steps ++ _)
+        }
+      }
+    planned.flatMap { steps =>
+      val joining = steps.flatMap {
+        case GroupStep.Add(ids)     => ids
+        case GroupStep.Replace(ids) => ids
+        case _                      => Nil
+      }
+      unknownMember(tenantId, joining).toLeft(steps)
+    }
+
+  /** The group's members and externalId once `steps` applied in order to `current` (externalId None =
+    * unchanged): what [[ai.starlake.quack.ondemand.PoolSupervisor.setGroupState]] writes in one go.
+    */
+  private def finalGroupState(
+      current: Set[String],
+      steps: List[GroupStep]
+  ): (Set[String], Option[Option[String]]) =
+    steps.foldLeft((current, Option.empty[Option[String]])) { case ((members, ext), step) =>
+      step match
+        case GroupStep.Add(ids)      => (members ++ ids, ext)
+        case GroupStep.Replace(ids)  => (ids.toSet, ext)
+        case GroupStep.Remove(ids)   => (members -- ids, ext)
+        case GroupStep.RemoveAll     => (Set.empty, ext)
+        case GroupStep.ExternalId(v) => (members, Some(v))
+    }
+
   private def memberIds(o: JsonObject): List[String] =
     o("members").map(memberIdsOf).getOrElse(Nil)
 
@@ -722,41 +789,6 @@ final class ScimHandlers(
     j.asArray
       .map(_.toList.flatMap(_.asObject).flatMap(m => m("value").flatMap(_.asString)))
       .getOrElse(Nil)
-
-  private def setMembers(tenantId: String, groupId: String, ids: List[String]): Out[Unit] =
-    ids.foldLeft[Out[Unit]](IO.pure(Right(()))) { (acc, uid) =>
-      acc.flatMap {
-        case Left(e)   => IO.pure(Left(e))
-        case Right(()) =>
-          userInTenant(tenantId, uid) match
-            case None =>
-              IO.pure(
-                Left(
-                  scimError(
-                    StatusCode.BadRequest,
-                    s"member not found in tenant: $uid",
-                    Some("invalidValue")
-                  )
-                )
-              )
-            case Some(_) =>
-              sup.addUserGroup(uid, groupId).map(_.map(_ => ()).left.map(supError))
-      }
-    }
-
-  private def replaceMembers(tenantId: String, groupId: String, ids: List[String]): Out[Unit] =
-    val current = sup.usersInGroup(groupId).toSet
-    val target  = ids.toSet
-    val removes = (current -- target).toList.foldLeft[Out[Unit]](IO.pure(Right(()))) { (acc, uid) =>
-      acc.flatMap {
-        case Left(e)   => IO.pure(Left(e))
-        case Right(()) => sup.removeUserGroup(uid, groupId).map(_.map(_ => ()).left.map(supError))
-      }
-    }
-    removes.flatMap {
-      case Left(e)   => IO.pure(Left(e))
-      case Right(()) => setMembers(tenantId, groupId, (target -- current).toList)
-    }
 
   // ---------------- Discovery ----------------
 

@@ -150,6 +150,19 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.error shouldBe "invalid_value"
   }
 
+  it should "reject a rewriteDeleteThreshold outside [0, 1] (invalid_value)" in {
+    val (h, _) = setup()
+    List(-0.1, 1.5, Double.NaN).foreach { t =>
+      val out = h
+        .upsertPolicy(upsertReq().copy(rewriteDeleteThreshold = Some(t)), None)(_ =>
+          SessionScope.Superuser
+        )
+        .unsafeRunSync()
+      out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+      out.left.toOption.get._2.error shouldBe "invalid_value"
+    }
+  }
+
   it should "create then replace a policy row on the same scope" in {
     val (h, store) = setup()
     val created    = h.upsertPolicy(upsertReq(), None)(_ => SessionScope.Superuser).unsafeRunSync()
@@ -311,6 +324,20 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.get._1 shouldBe StatusCode.BadRequest
     out.left.toOption.get._2.error shouldBe "invalid_scope"
+  }
+
+  "triggerRun" should "409 branch_database on a branch, enqueueing nothing" in {
+    val (h, store) = setup()
+    val row        = store.listTenantDbs("acme").find(_.name == tenantDbName).get
+    store.upsertTenantDb(row.copy(branchOf = Some("td-parent")))
+    val out = h
+      .triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, Some("cleanup")), None)(_ =>
+        SessionScope.Superuser
+      )
+      .unsafeRunSync()
+    out.left.toOption.get._1 shouldBe StatusCode.Conflict
+    out.left.toOption.get._2.error shouldBe "branch_database"
+    store.hasActiveMaintenanceRun("acme", tenantDbName) shouldBe false
   }
 
   "triggerRun" should "409 run_active when a run is already queued or running" in {

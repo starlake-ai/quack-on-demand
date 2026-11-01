@@ -1589,7 +1589,9 @@ final case class UndropRequest(
     schema: String,
     table: String,
     asName: Option[String] = None,
-    fromSnapshot: Option[Long] = None
+    fromSnapshot: Option[Long] = None,
+    // Which drop of the name to recover (RecoverableTableEntry.tableId); absent = the newest.
+    tableId: Option[Long] = None
 )
 
 /** The self-service undrop (`POST /api/profile/undrop`, MCP `undrop_table` for a non-admin): the
@@ -1599,7 +1601,10 @@ final case class ProfileUndropRequest(
     tenantDb: String,
     schema: String,
     table: String,
-    asName: Option[String] = None
+    asName: Option[String] = None,
+    // Which drop of the name to recover (RecoverableTableEntry.tableId); absent = the newest. The
+    // recovery still reads that table's own last live snapshot: a regular user picks no snapshot.
+    tableId: Option[Long] = None
 )
 
 final case class UndropResponse(

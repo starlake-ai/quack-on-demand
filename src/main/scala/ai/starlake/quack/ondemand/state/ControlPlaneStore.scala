@@ -402,6 +402,21 @@ trait ControlPlaneStore:
     */
   def snapshot(): ControlPlaneSnapshot
 
+  /** Runs `f` as one control-plane transaction: every write the calling thread makes through this
+    * store inside `f` (and through a [[FederatedSourceStore]] of the same database) commits when
+    * `f` returns and rolls back when it throws. Abstract on purpose: a store that cannot honour it
+    * must say so in its own implementation rather than inherit a silent no-op.
+    */
+  def atomically[A](f: => A): A
+
+  /** Takes the snapshot-pin lock of (tenant, tenantDb), blocking while another holder has it, until
+    * the returned handle is closed. Maintenance's expiry holds it from reading the pinned snapshots
+    * through its expire call, and the creation of a protected tag holds it from checking that its
+    * snapshot exists through its insert: a snapshot a protected tag names is then never expired.
+    * Holds across replicas.
+    */
+  def lockSnapshotPins(tenant: String, tenantDb: String): AutoCloseable
+
   // ---- snapshot tags (EPIC P2 / Spec 06) ----
 
   /** Insert a tag; Left("duplicate") when (tenant, tenantDb, name) already exists. */

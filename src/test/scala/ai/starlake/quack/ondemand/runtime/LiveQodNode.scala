@@ -191,7 +191,7 @@ object LiveQodNode:
 
   /** The rows as `a,b` lines (Right), or the node's error (Left). */
   def lines(resp: QuackResponse): Either[String, List[String]] = resp match
-    case QuackResponse.Failed(QuackError.Permanent(m), _) => Left(m)
-    case QuackResponse.Failed(QuackError.Transient(m), _) => Left(m)
-    case ok: QuackResponse.Ok                             =>
+    case QuackResponse.Failed(QuackError.Permanent(m), _)    => Left(m)
+    case QuackResponse.Failed(QuackError.Transient(m, _), _) => Left(m)
+    case ok: QuackResponse.Ok                                =>
       Right(rows(ok).map(_.map(c => Option(c).map(_.toString).getOrElse("")).mkString(",")))

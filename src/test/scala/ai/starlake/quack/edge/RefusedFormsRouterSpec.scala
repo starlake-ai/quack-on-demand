@@ -268,7 +268,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
             NodeRows.read(rows).fold(NodeOutcome.Permanent(_, ms), NodeOutcome.Ok(_, ms, () => ()))
           finally close()
         case QuackResponse.Failed(QuackError.Permanent(m), ms) => NodeOutcome.Permanent(m, ms)
-        case QuackResponse.Failed(QuackError.Transient(m), ms) => NodeOutcome.Transient(m, ms)
+        case QuackResponse.Failed(QuackError.Transient(m, unsent), ms) =>
+          NodeOutcome.Transient(m, ms, unsent)
       }
     val relay: FlightSqlRouter.NodeSend[Unit] = (node, wrappedSql, _, _, principal) =>
       router.adapter.send(node, wrappedSql, principal, None).map {
@@ -352,9 +353,21 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       rejectedSent.exists(_.endsWith(Computed)) shouldBe false
     }
 
+  /** The session state a front door that holds the client's transaction on its own node link leaves
+    * after BEGIN, for a caller passing no fence: FlightSQL's `execute` itself refuses a transaction
+    * that spans requests.
+    */
+  private def openTransaction(router: FlightSqlRouter, connectionId: String): Unit =
+    router.sessions.open(connectionId, "alice", poolKey)
+    router.sessions.onStatement(
+      connectionId,
+      ai.starlake.quack.model.StatementKind.Begin,
+      router.supervisor.get(poolKey).get.nodes.head.nodeId
+    )
+
   "the Arrow path" should "evaluate in a transaction too, and fall back there on a failure" in {
     val (router, sent) = setup(evaluatesTo("NULL::VARCHAR"))
-    router.execute("c-ftx", "alice", poolKey, "BEGIN", Some(tenantUser)).unsafeRunSync()
+    openTransaction(router, "c-ftx")
     router.sessions.get("c-ftx").exists(_.txOpen) shouldBe true
     router
       .execute("c-ftx", "alice", poolKey, Computed, Some(tenantUser))
@@ -444,7 +457,7 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       if sql.endsWith(" AS location") then QuackResponse.Failed(QuackError.Transient("gone"))
       else TestArrow.okResponse()
     }
-    router.execute("c-pin", "alice", poolKey, "BEGIN", Some(tenantUser)).unsafeRunSync()
+    openTransaction(router, "c-pin")
     val pinned = router.sessions.get("c-pin").flatMap(_.pinnedNodeId)
     pinned should not be None
     router

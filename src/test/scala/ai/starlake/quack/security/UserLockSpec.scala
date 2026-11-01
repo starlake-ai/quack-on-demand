@@ -195,6 +195,83 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     finally h.shutdown()
   }
 
+  it should "never allow the last enabled superuser to be demoted to kind=user" in {
+    val (h, fix) = boot()
+    try
+      fix.store.upsertUserWithHash(
+        tenant = None,
+        username = "root2",
+        passwordHash = at.favre.lib.crypto.bcrypt.BCrypt
+          .withDefaults()
+          .hashToString(10, "root2pw".toCharArray),
+        kind = "admin"
+      )
+      val root2Id = fix.store.findUser(None, "root2").get.id
+      val root    = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val root2   = h.mintToken("root2", "root2pw")
+      def demote(id: String, as: String) =
+        post(
+          h.httpClient,
+          s"${h.baseUrl}/api/user/update",
+          s"""{"id":"$id","kind":"user"}""",
+          apiKey = Some(as)
+        )
+
+      // Self-demotion is refused like a self-lock.
+      val self = demote(fix.rootUserId, root)
+      withClue(s"self-demote body: ${self.body()}") {
+        self.statusCode() shouldBe 400
+        errorCode(self.body()) should contain("cannot_demote_self")
+      }
+
+      // Two enabled superusers: demoting one is fine.
+      demote(root2Id, root).statusCode() shouldBe 200
+
+      // root is now the last enabled superuser: root2's still-live session may not demote it.
+      val viaGhost = demote(fix.rootUserId, root2)
+      withClue(s"ghost-session demote body: ${viaGhost.body()}") {
+        viaGhost.statusCode() shouldBe 400
+        errorCode(viaGhost.body()) should contain("last_superuser")
+      }
+      fix.store.findUser(None, SecurityFixtures.RootUsername).get.kind shouldBe "admin"
+    finally h.shutdown()
+  }
+
+  it should "store a padded kind in its one spelling, and refuse an unknown kind" in {
+    val (h, fix) = boot()
+    try
+      val root = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      def update(kind: String) =
+        post(
+          h.httpClient,
+          s"${h.baseUrl}/api/user/update",
+          s"""{"id":"${fix.rootUserId}","kind":"$kind"}""",
+          apiKey = Some(root)
+        )
+      // " admin " is admin: allowed on the last superuser, and stored as "admin", so the account
+      // stays a recognized admin (a raw " admin " would leave none).
+      val padded = update(" admin ")
+      withClue(padded.body())(padded.statusCode() shouldBe 200)
+      fix.store.findUser(None, SecurityFixtures.RootUsername).get.kind shouldBe "admin"
+      val unknown = update("superadmin")
+      unknown.statusCode() shouldBe 400
+      fix.store.findUser(None, SecurityFixtures.RootUsername).get.kind shouldBe "admin"
+    finally h.shutdown()
+  }
+
+  it should "let a superuser keep kind=admin on an update of the last one" in {
+    val (h, fix) = boot()
+    try
+      val root = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        s"""{"id":"${fix.rootUserId}","kind":"admin"}""",
+        apiKey = Some(root)
+      ).statusCode() shouldBe 200
+    finally h.shutdown()
+  }
+
   it should "apply a lock sent together with a password rotation" in {
     val (h, fix) = boot()
     try

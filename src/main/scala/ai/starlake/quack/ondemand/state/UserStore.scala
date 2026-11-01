@@ -331,19 +331,26 @@ final class UserStore(
     * self-service reset is a user-chosen credential, so a must-change user who recovers this way
     * must not be forced to immediately change the password they just picked (mirrors
     * `changePassword`).
+    *
+    * Conditional on `expectedHash`, the hash the caller verified the reset token against: the write
+    * lands only while the row still holds it, in the same statement, so of several concurrent
+    * redemptions of one token exactly one wins (the others see the hash it wrote). Returns whether
+    * this call changed the password. Required, never defaulted: an unconditional write would make
+    * every outstanding link redeemable until the first one commits.
     */
-  def setPasswordById(id: String, newPlaintext: String): Unit =
+  def setPasswordById(id: String, expectedHash: String, newPlaintext: String): Boolean =
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, newPlaintext.toCharArray)
       val ps   = c.prepareStatement(
         "UPDATE qodstate_user SET password_hash = ?, must_change_password = false, " +
-          "failed_attempts = 0, locked_at = NULL, updated_at = NOW() WHERE id = ?"
+          "failed_attempts = 0, locked_at = NULL, updated_at = NOW() " +
+          "WHERE id = ? AND password_hash = ?"
       )
       try
         ps.setString(1, hash)
         ps.setString(2, id)
-        ps.executeUpdate()
-        ()
+        ps.setString(3, expectedHash)
+        ps.executeUpdate() == 1
       finally ps.close()
     }
 

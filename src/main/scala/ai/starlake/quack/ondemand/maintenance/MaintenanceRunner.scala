@@ -42,37 +42,60 @@ final class MaintenanceRunner(
   private def wants(run: MaintenanceRun, op: String): Boolean =
     run.operations.forall(_.split(",").map(_.trim).contains(op))
 
+  /** Whether the run's database is a branch catalog, which shares its parent's files. */
+  private def isBranch(run: MaintenanceRun): Boolean =
+    store.listTenantDbs(run.tenant).find(_.name == run.tenantDb).exists(_.branchOf.isDefined)
+
   def executeRun(run: MaintenanceRun): IO[Unit] =
     IO.realTimeInstant.flatMap { startedAt =>
+      // Whatever queued it: a branch is never maintained (see MaintenanceScheduler), and no node
+      // is started for one.
+      IO.blocking(isBranch(run)).flatMap { branch =>
+        if branch then
+          val reason = "a branch database is never maintained: it shares its parent's files"
+          IO.blocking(store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(reason)))
+            .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
+        else spawnAndRun(run, startedAt)
+      }
+    }
+
+  private def spawnAndRun(run: MaintenanceRun, startedAt: Instant): IO[Unit] =
+    IO.defer {
       spawn(run.tenant, run.tenantDb).flatMap {
         case None =>
           IO.blocking(
             store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some("node spawn failed"))
           ).flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
         case Some(node) =>
-          IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters())) *>
-            chain(run, node, startedAt)
-              .guarantee(stop(node).handleErrorWith(_ => IO.unit))
-              .handleErrorWith { t =>
-                // Defensive: a synchronous throw from an injected lookup escapes the
-                // step-level Left handling; still record + audit the finished run.
-                //
-                // Note: this same handler also catches the case where the chain ran every
-                // step successfully and only the final store.finishMaintenanceRun call inside
-                // chain() threw (for example a transient store error). When that happens we
-                // land here with just the thrown error, not the real per-step counters the
-                // chain had already accumulated, so the run gets recorded "failed" with zero
-                // counters even though the work actually completed. This is inherent
-                // best-effort behavior given the current design (the counters live in a Ref
-                // local to chain() and are not threaded out to this handler), not a new bug
-                // introduced here; it is called out so a future change that wants exact
-                // counters in that edge case knows where to look.
-                val msg = Option(t.getMessage).getOrElse(t.toString)
-                IO.blocking(
-                  store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
-                ).handleErrorWith(_ => IO.pure(false))
-                  .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
-              }
+          // `false` from the first heartbeat means a sweeper failed the run while its node was
+          // starting: the run is no longer this caller's, so no step may run (cleanup deletes
+          // files), and the sweeper's row stays as it set it.
+          IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters()))
+            .flatMap { stillOwned =>
+              if stillOwned then chain(run, node, startedAt)
+              else finishIfNotSwept(run, "failed", RunCounters(), startedAt)(false)
+            }
+            .guarantee(stop(node).handleErrorWith(_ => IO.unit))
+            .handleErrorWith { t =>
+              // Defensive: a synchronous throw from an injected lookup escapes the
+              // step-level Left handling; still record + audit the finished run.
+              //
+              // Note: this same handler also catches the case where the chain ran every
+              // step successfully and only the final store.finishMaintenanceRun call inside
+              // chain() threw (for example a transient store error). When that happens we
+              // land here with just the thrown error, not the real per-step counters the
+              // chain had already accumulated, so the run gets recorded "failed" with zero
+              // counters even though the work actually completed. This is inherent
+              // best-effort behavior given the current design (the counters live in a Ref
+              // local to chain() and are not threaded out to this handler), not a new bug
+              // introduced here; it is called out so a future change that wants exact
+              // counters in that edge case knows where to look.
+              val msg = Option(t.getMessage).getOrElse(t.toString)
+              IO.blocking(
+                store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
+              ).handleErrorWith(_ => IO.pure(false))
+                .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
+            }
       }
     }
 
@@ -110,7 +133,6 @@ final class MaintenanceRunner(
             tableScope.map(_.table)
           )
         )
-        pinned     <- IO.pure(pinnedSnapshotsOf(run.tenant, run.tenantDb))
         candidates <-
           IO.pure(
             if tableScope.isDefined then Nil
@@ -121,11 +143,7 @@ final class MaintenanceRunner(
                 Instant.now().minusSeconds(pol.retentionDays * 86400L)
               )
           )
-        partitioned <- IO.pure(candidates.partition(v => !pinned.contains(v)))
-        toExpire = partitioned._1
-        skipped  = partitioned._2
-
-        countersRef <- Ref.of[IO, RunCounters](RunCounters(snapshotsSkippedPinned = skipped.size))
+        countersRef <- Ref.of[IO, RunCounters](RunCounters())
         statusRef   <- Ref.of[IO, String]("succeeded")
         errorRef    <- Ref.of[IO, Option[String]](None)
         sweptRef    <- Ref.of[IO, Boolean](false)
@@ -171,14 +189,27 @@ final class MaintenanceRunner(
           else IO.pure(true)
         }
 
+        // The pins are read under the database's snapshot-pin lock, held through the expire call:
+        // a protected tag created while the run went on (the lock serializes it with this step)
+        // is seen here, never expired after the fact.
         expireIO = IO.defer {
-          if tableScope.isDefined || toExpire.isEmpty || !wants(run, "expire") then IO.pure(true)
+          if tableScope.isDefined || candidates.isEmpty || !wants(run, "expire") then IO.pure(true)
           else
-            step(
-              "expire",
-              MaintenanceChainSql.expireVersions(alias, toExpire),
-              (c, _) => c.copy(snapshotsExpired = toExpire.size)
-            )
+            cats.effect.Resource
+              .fromAutoCloseable(IO.blocking(store.lockSnapshotPins(run.tenant, run.tenantDb)))
+              .use { _ =>
+                IO.blocking(pinnedSnapshotsOf(run.tenant, run.tenantDb)).flatMap { pinned =>
+                  val (toExpire, skipped) = candidates.partition(v => !pinned.contains(v))
+                  countersRef.update(_.copy(snapshotsSkippedPinned = skipped.size)) *>
+                    (if toExpire.isEmpty then IO.pure(true)
+                     else
+                       step(
+                         "expire",
+                         MaintenanceChainSql.expireVersions(alias, toExpire),
+                         (c, _) => c.copy(snapshotsExpired = toExpire.size)
+                       ))
+                }
+              }
         }
 
         mergeIO = IO.defer {
@@ -187,7 +218,10 @@ final class MaintenanceRunner(
           else
             step(
               "merge",
-              MaintenanceChainSql.mergeAdjacent(alias),
+              // A table-scoped run compacts its own table only, never its siblings.
+              tableScope.fold(MaintenanceChainSql.mergeAdjacent(alias))(ts =>
+                MaintenanceChainSql.mergeAdjacentTable(alias, ts.schema, ts.table)
+              ),
               (c, _) => c.copy(filesMerged = c.filesMerged + 1)
             )
         }
@@ -197,7 +231,12 @@ final class MaintenanceRunner(
             case Some(ts) if wants(run, "rewrite") =>
               step(
                 "rewrite",
-                MaintenanceChainSql.rewriteTable(alias, ts.schema, ts.table),
+                MaintenanceChainSql.rewriteTable(
+                  alias,
+                  ts.schema,
+                  ts.table,
+                  pol.rewriteDeleteThreshold
+                ),
                 (c, _) => c.copy(filesRewritten = c.filesRewritten + 1)
               )
             case _ => IO.pure(true)

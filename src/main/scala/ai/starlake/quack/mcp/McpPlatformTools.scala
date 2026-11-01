@@ -133,6 +133,10 @@ final class McpPlatformTools(
       "from_snapshot" -> intProp(
         "Recover from this snapshot id instead of the last live (admins only)."
       ),
+      "table_id" -> intProp(
+        "Which drop to recover when the name was dropped more than once: the table_id " +
+          "list_recoverable reports (default: the newest)."
+      ),
       tenantProp
     ),
     adminOnly = false,
@@ -151,7 +155,13 @@ final class McpPlatformTools(
           case Right((database, schema, table)) =>
             undropH
               .undropMine(
-                ProfileUndropRequest(database, schema, table, str(args, "as_name")),
+                ProfileUndropRequest(
+                  database,
+                  schema,
+                  table,
+                  str(args, "as_name"),
+                  long(args, "table_id")
+                ),
                 keyOf(principal)
               )
               .map(res => bridge(res).map(_.asJson))
@@ -172,7 +182,8 @@ final class McpPlatformTools(
                   schema = schema,
                   table = table,
                   asName = str(args, "as_name"),
-                  fromSnapshot = long(args, "from_snapshot")
+                  fromSnapshot = long(args, "from_snapshot"),
+                  tableId = long(args, "table_id")
                 ),
                 keyOf(principal)
               )(scopeOf)

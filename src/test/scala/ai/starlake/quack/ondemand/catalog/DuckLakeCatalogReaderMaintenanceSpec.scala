@@ -61,8 +61,68 @@ class DuckLakeCatalogReaderMaintenanceSpec extends AnyFlatSpec with Matchers wit
       // instead of only against the SQL-string builder.
       noException should be thrownBy runSqlOnCatalog(
         ai.starlake.quack.ondemand.maintenance.MaintenanceChainSql
-          .rewriteTable("lake", "tpch1", "region")
+          .rewriteTable("lake", "tpch1", "region", 0.2)
       )
+    }
+
+  // A sibling table with five small files of its own, beside region's.
+  private val withSibling =
+    extra + "\nCREATE TABLE lake.tpch1.cold (i INTEGER);\n" +
+      (1 to 5)
+        .map(i =>
+          s"INSERT INTO lake.tpch1.cold VALUES ($i); CALL ducklake_flush_inlined_data('lake');"
+        )
+        .mkString("\n")
+
+  "mergeAdjacentTable" should "merge the scoped table's files and leave its siblings' alone" in
+    withCatalog("mreader", extraSql = withSibling) { (reader, _) =>
+      val before = reader.smallFileCounts(maxBytes = 10L * 1024 * 1024)
+      before.getOrElse(("tpch1", "region"), 0) should be >= 5
+      before.getOrElse(("tpch1", "cold"), 0) shouldBe 5
+      runSqlOnCatalog(
+        ai.starlake.quack.ondemand.maintenance.MaintenanceChainSql
+          .mergeAdjacentTable("lake", "tpch1", "region")
+      )
+      val after = reader.smallFileCounts(maxBytes = 10L * 1024 * 1024)
+      after.getOrElse(("tpch1", "region"), 0) shouldBe 1
+      after.getOrElse(("tpch1", "cold"), 0) shouldBe 5
+    }
+
+  // One file of 100 rows, 10 of them deleted: 10% of the file is deleted rows.
+  private val tenPercentDeleted =
+    "CREATE TABLE lake.tpch1.cold (i INTEGER);\n" +
+      "INSERT INTO lake.tpch1.cold SELECT range FROM range(100); " +
+      "CALL ducklake_flush_inlined_data('lake');\n" +
+      "DELETE FROM lake.tpch1.cold WHERE i < 10; CALL ducklake_flush_inlined_data('lake');"
+
+  /** The files the latest snapshot references, before and after `sql` runs. A rewrite replaces the
+    * data file and drops its delete file in a new snapshot; one that rewrites nothing leaves the
+    * latest snapshot's files as they were.
+    */
+  private def filesAroundStatement(reader: DuckLakeCatalogReader, sql: String) =
+    val before = reader.filesReferencedAt(reader.maxSnapshotId().get)
+    runSqlOnCatalog(sql)
+    (before, reader.filesReferencedAt(reader.maxSnapshotId().get))
+
+  "rewriteTable" should "rewrite a file whose deleted share passes the configured threshold" in
+    withCatalog("mreader", extraSql = tenPercentDeleted) { (reader, _) =>
+      val (before, after) = filesAroundStatement(
+        reader,
+        ai.starlake.quack.ondemand.maintenance.MaintenanceChainSql
+          .rewriteTable("lake", "tpch1", "cold", 0.05)
+      )
+      after should not be before
+      after.size should be < before.size
+    }
+
+  it should "leave a file whose deleted share is under the configured threshold" in
+    withCatalog("mreader", extraSql = tenPercentDeleted) { (reader, _) =>
+      val (before, after) = filesAroundStatement(
+        reader,
+        ai.starlake.quack.ondemand.maintenance.MaintenanceChainSql
+          .rewriteTable("lake", "tpch1", "cold", 0.5)
+      )
+      after shouldBe before
     }
 
   "totalDataFileBytes" should "shrink once the chain releases superseded files" in

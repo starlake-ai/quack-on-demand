@@ -323,7 +323,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
       refsConfigFor = _ =>
         beforePick(tracker)
-        ai.starlake.acl.model.Config.forDuckDB(None, None),
+        ai.starlake.acl.model.Config.forDuckDB(None, None)
+      ,
       // The nodes answer through the scripted transport, never the adapter's client, so the wake
       // hold's readiness probe would never see them answer: a respawned node is ready at once.
       nodeAnswers = Some(_ => IO.pure(true))
@@ -1472,8 +1473,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       true,
       ai.starlake.quack.edge.authz.NodePrincipal.System
     ).unsafeRunSync() match
-      case NodeOutcome.Transient(m, _) => m should include("is draining")
-      case other                       => fail(s"expected Transient, got $other")
+      case NodeOutcome.Transient(m, _, _) => m should include("is draining")
+      case other                          => fail(s"expected Transient, got $other")
     fx.transport.posted.size shouldBe before
     held(fx) shouldBe 0
 

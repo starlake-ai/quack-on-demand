@@ -202,3 +202,81 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
         Try(revokeConn.rollback())
         revokeConn.close()
     }
+
+  // The reported order: a child's mint is under way (it holds the user's PAT lock and is inserting
+  // under the parent) when the parent is revoked. A revoke that read the subtree at once would miss
+  // the uncommitted child and leave it live under a revoked parent; it must wait, then revoke it.
+  "revoke" should "revoke a child whose mint was still uncommitted when the revoke began" in
+    withFreshDb { (users, pats) =>
+      import scala.concurrent.{Await, Future}
+      import scala.concurrent.ExecutionContext.Implicits.global
+      import scala.concurrent.duration._
+
+      val uid         = seedUser(users)
+      val (parent, _) = pats.mint(uid, "parent", TokenRestriction.Unrestricted, None, 0)
+
+      // Connection A: a child mint, by hand so it can stay uncommitted: the user's PAT lock, the
+      // parent row locked as mint locks it, the child inserted.
+      val mintConn = DriverManager.getConnection(
+        TestPostgres.dbUrl(users.dbName),
+        TestPostgres.pgUser,
+        TestPostgres.pgPass
+      )
+      mintConn.setAutoCommit(false)
+      try
+        val lock = mintConn.prepareStatement(PatStore.UserLockSql)
+        lock.setInt(1, PatStore.LockClass)
+        lock.setString(2, uid)
+        lock.execute()
+        lock.close()
+        val rowLock = mintConn.prepareStatement(
+          "SELECT 1 FROM qodstate_pat WHERE id = ? AND revoked_at IS NULL FOR UPDATE"
+        )
+        rowLock.setString(1, parent.id)
+        rowLock.executeQuery().next() shouldBe true
+        rowLock.close()
+        val ins = mintConn.prepareStatement(
+          "INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, parent_id, depth) " +
+            "VALUES ('pat-child-race', ?, 'child', 'h-child-race', NOW(), ?, 1)"
+        )
+        ins.setString(1, uid)
+        ins.setString(2, parent.id)
+        ins.executeUpdate() shouldBe 1
+        ins.close()
+
+        val revoked: Future[List[String]] = Future(pats.revoke(uid, parent.id))
+        Thread.sleep(500)
+        revoked.isCompleted shouldBe false
+
+        mintConn.commit()
+
+        Await.result(revoked, 5.seconds).toSet shouldBe Set(parent.id, "pat-child-race")
+        countWhere(users.dbName, "id = 'pat-child-race' AND revoked_at IS NULL") shouldBe 0
+      finally
+        Try(mintConn.rollback())
+        mintConn.close()
+    }
+
+  it should "leave no live descendant under a revoked parent when mints race the revoke" in
+    withFreshDb { (users, pats) =>
+      import scala.concurrent.{Await, Future}
+      import scala.concurrent.ExecutionContext.Implicits.global
+      import scala.concurrent.duration._
+
+      val uid = seedUser(users)
+      for round <- 1 to 20 do
+        val (parent, _) = pats.mint(uid, s"p$round", TokenRestriction.Unrestricted, None, 0)
+        val mints       = (1 to 4).map { i =>
+          Future(
+            Try(pats.mint(uid, s"c$round-$i", TokenRestriction.Unrestricted, Some(parent.id), 1))
+          )
+        }
+        val revoke = Future(pats.revoke(uid, parent.id))
+        Await.result(Future.sequence(mints :+ revoke), 10.seconds)
+        withClue(s"round $round: ") {
+          countWhere(
+            users.dbName,
+            s"parent_id = '${parent.id}' AND revoked_at IS NULL"
+          ) shouldBe 0
+        }
+    }

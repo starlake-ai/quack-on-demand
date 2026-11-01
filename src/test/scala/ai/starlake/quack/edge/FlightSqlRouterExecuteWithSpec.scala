@@ -180,6 +180,90 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       case Left(RouterFailure.Unavailable(_)) => succeed
       case other                              => fail(s"expected Unavailable, got $other")
 
+  // A transport failure after the statement went out may come once it ran: a write (or a whole
+  // BEGIN ... COMMIT batch) that committed before its answer was lost must not run again on
+  // another node.
+  for sql <- List(
+      "INSERT INTO t VALUES (1)",
+      "BEGIN; INSERT INTO t VALUES (1); COMMIT",
+      "SELECT 1; INSERT INTO t VALUES (1)"
+    )
+  do
+    it should s"not retry a possibly-sent transient failure of a write: $sql" in:
+      val fx                                     = setup(nodeCount = 2)
+      var calls                                  = 0
+      val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
+        IO {
+          calls += 1
+          if calls == 1 then NodeOutcome.Transient("connection reset", 2L)
+          else NodeOutcome.Ok("second", 3L, () => ())
+        }
+      val out = fx.router
+        .executeWith(
+          "c-unk",
+          "alice",
+          poolKey,
+          sql,
+          None,
+          send,
+          purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+        )
+        .unsafeRunSync()
+      calls shouldBe 1
+      out match
+        case Left(RouterFailure.Internal(m)) =>
+          m should include("outcome is unknown")
+          m should include("connection reset")
+        case other => fail(s"expected Internal, got $other")
+
+  it should "retry a write on another node when the failure never sent it" in:
+    val fx                                     = setup(nodeCount = 2)
+    var calls                                  = List.empty[String]
+    val send: FlightSqlRouter.NodeSend[String] = (node, _, _, _, _) =>
+      IO {
+        calls = calls :+ node.nodeId
+        if calls.size == 1 then NodeOutcome.Transient("connection refused", 2L, notSent = true)
+        else NodeOutcome.Ok("second", 3L, () => ())
+      }
+    val out = fx.router
+      .executeWith(
+        "c-unsent",
+        "alice",
+        poolKey,
+        "INSERT INTO t VALUES (1)",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
+    out.map(_.value) shouldBe Right("second")
+    calls.distinct should have size 2
+
+  it should "answer the unknown outcome when a write's retry fails after it was sent" in:
+    val fx                                     = setup(nodeCount = 2)
+    var calls                                  = 0
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
+      IO {
+        calls += 1
+        if calls == 1 then NodeOutcome.Transient("connection refused", 2L, notSent = true)
+        else NodeOutcome.Transient("connection reset", 2L)
+      }
+    val out = fx.router
+      .executeWith(
+        "c-unsent-2",
+        "alice",
+        poolKey,
+        "INSERT INTO t VALUES (1)",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
+    calls shouldBe 2
+    out match
+      case Left(RouterFailure.Internal(m)) => m should include("outcome is unknown")
+      case other                           => fail(s"expected Internal, got $other")
+
   it should "classify a permanent node error without retrying" in:
     val fx                                     = setup(nodeCount = 2)
     var calls                                  = 0
