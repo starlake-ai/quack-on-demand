@@ -1002,12 +1002,69 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)
     try
+      val start          = System.nanoTime()
       val (status, head) = raw(
         h.baseUrl,
         "POST /api/tenant/list HTTP/1.1\r\nHost: l\r\nContent-Length: 268435456\r\n\r\n"
       )
       status should include("401")
       head should include("connection: close")
+      (System.nanoTime() - start) / 1000000000L should be < 4L
+    finally h.shutdown()
+  }
+
+  it should "leave unread a refused body whose length it cannot trust" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      List("Content-Length: 1\r\nContent-Length: 100", "Content-Length: +100").foreach { framing =>
+        val start          = System.nanoTime()
+        val (status, head) =
+          raw(h.baseUrl, s"POST /api/tenant/list HTTP/1.1\r\nHost: l\r\n$framing\r\n\r\n{")
+        withClue(framing) {
+          status should include("401")
+          head should include("connection: close")
+          // A drain would wait its 5 s for a body that never comes.
+          (System.nanoTime() - start) / 1000000000L should be < 4L
+        }
+      }
+    finally h.shutdown()
+  }
+
+  it should "wait at most 5 s for a refused body, whatever the body timeout" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   =
+      ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(bodyTimeoutSec = 30))
+    try
+      val start          = System.nanoTime()
+      val (status, head) = raw(
+        h.baseUrl,
+        "POST /api/tenant/list HTTP/1.1\r\nHost: l\r\nContent-Length: 100\r\n\r\n{"
+      )
+      status should include("401")
+      head should include("connection: close")
+      (System.nanoTime() - start) / 1000000000L should be < 10L
+    finally h.shutdown()
+  }
+
+  it should "hand an admitted caller's chunked body to its route" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val session = h.superuserSession()
+      val yaml    =
+        "apiVersion: quack-on-demand/v1\nkind: ConfigManifest\nexportedAt: '2026-06-10T00:00:00Z'\n" +
+          "exportedFrom: { managerVersion: test, hostname: localhost }\n"
+      val head = s"POST /api/manifest/import HTTP/1.1\r\nHost: l\r\nX-API-Key: $session\r\n" +
+        "Content-Type: application/yaml\r\nConnection: close\r\n"
+      val (plain, _)   = raw(h.baseUrl, head + s"Content-Length: ${yaml.length}\r\n\r\n$yaml")
+      val (chunked, _) = raw(
+        h.baseUrl,
+        head +
+          s"Transfer-Encoding: chunked\r\n\r\n${Integer.toHexString(yaml.length)}\r\n$yaml\r\n0\r\n\r\n"
+      )
+      plain should include("200")
+      chunked shouldBe plain
     finally h.shutdown()
   }
 

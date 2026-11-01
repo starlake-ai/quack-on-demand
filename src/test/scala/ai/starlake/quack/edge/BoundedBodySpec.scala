@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import fs2.{Chunk, Stream}
 import org.http4s.{Header, Method, Request, Uri}
+import org.http4s.ember.core.EmberException
 import org.http4s.headers.`Content-Length`
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -43,6 +44,10 @@ class BoundedBodySpec extends AnyFlatSpec with Matchers:
   it should "give up on a body that stops arriving" in:
     val stuck = bytes(1) ++ Stream.eval(IO.never[Byte])
     run(request(stuck), deadline = 100.millis) shouldBe BoundedBody.Outcome.TimedOut
+
+  it should "answer Ember's idle timeout on a stalled body as a timeout" in:
+    val idle = EmberException.ReadTimeout(60.seconds)
+    run(request(bytes(1) ++ Stream.raiseError[IO](idle))) shouldBe BoundedBody.Outcome.TimedOut
 
   it should "read an empty body at once" in:
     run(request(Stream.empty)) match

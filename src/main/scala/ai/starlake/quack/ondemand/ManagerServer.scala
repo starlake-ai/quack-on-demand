@@ -249,13 +249,18 @@ final class ManagerServer(
     * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
     * neither. The read gets [[refusalDrainDeadline]]: past it, or on a read failure, the answer
     * says `Connection: close` too.
+    *
+    * Only one `Content-Length` http4s can read counts as announced, as Ember frames a body by the
+    * last such header and by `toLong`: `Content-Length: 1` then a huge one would be drained past
+    * the limit, and `+100` would read as no body.
     */
   private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
     val chunked = BoundedBody.asksChunked(req)
+    val lengths = req.headers.get(CIString("Content-Length"))
     val drain   =
-      !chunked && req.contentLength
+      !chunked && lengths.exists(_.length == 1) && req.contentLength
         .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
-    val bodyless = req.contentLength.isEmpty && !chunked
+    val bodyless = !chunked && lengths.isEmpty
     val closing  = resp.putHeaders(org.http4s.headers.Connection.close)
     OptionT.liftF(
       if drain then

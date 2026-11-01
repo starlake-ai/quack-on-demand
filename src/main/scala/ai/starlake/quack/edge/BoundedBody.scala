@@ -3,6 +3,7 @@ package ai.starlake.quack.edge
 import cats.effect.IO
 import fs2.{Chunk, Stream}
 import org.http4s.Request
+import org.http4s.ember.core.EmberException
 import org.typelevel.ci.CIString
 
 import scala.concurrent.duration.FiniteDuration
@@ -28,17 +29,27 @@ object BoundedBody:
     * announced it: Ember and http4s' typed headers read `Content-Length: +32` or
     * `Transfer-Encoding: foo, chunked` differently, so nothing here may decide from the headers
     * that there is no body. A request with no body reads as empty at once.
+    *
+    * Each read is copied flat before it is kept: Ember cuts a chunked body's chunks as views of the
+    * socket read they came from, so a client padding small chunks with chunk extensions would
+    * otherwise pin a whole read for every few bytes the limit counts. Ember's own idle timeout on a
+    * stalled body is the deadline passing too, as in `QuackBodyRead`.
     */
   def read(req: Request[IO], maxBytes: Long, deadline: FiniteDuration): IO[Outcome] =
     if req.contentLength.exists(_ > maxBytes) then IO.pure(Outcome.TooLarge)
     else
       req.body
         .take(maxBytes + 1)
+        // A chunk of a chunked body is a view of the whole socket read it was cut from.
+        .chunks
+        .map(_.compact)
+        .unchunks
         .compile
         .to(Array)
         .map(bytes =>
           if bytes.length.toLong > maxBytes then Outcome.TooLarge else Outcome.Read(bytes)
         )
+        .recover { case _: EmberException.ReadTimeout => Outcome.TimedOut }
         .timeoutTo(deadline, IO.pure(Outcome.TimedOut))
 
   /** Whether the client asks for chunked framing, read from the raw header so that it covers every
