@@ -1391,5 +1391,39 @@ final case class QuackNativeConfig(
       description =
         "Largest request body accepted on /quack, in bytes (appends and streamed inserts)."
     )
-    maxBodyBytes: Long
-)
+    maxBodyBytes: Long,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_CONNECT_BODY_BYTES",
+      description =
+        "Largest CONNECTION_REQUEST accepted on /quack, in bytes: read before any credential is checked."
+    )
+    maxConnectBodyBytes: Long = 65536L,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC",
+      description =
+        "Seconds a /quack request has to send its message header and, for a CONNECTION_REQUEST, its body."
+    )
+    connectBodyTimeoutSec: Long = 30L,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_BODY_TIMEOUT_SEC",
+      description = "Seconds a live session's message has to arrive whole on /quack."
+    )
+    bodyTimeoutSec: Long = 300L,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_CONNECTIONS",
+      description = "Most connections the Quack front door keeps open at once."
+    )
+    maxConnections: Int = 1024
+):
+  require(
+    maxBodyBytes > 0 && maxConnectBodyBytes > 0 && connectBodyTimeoutSec > 0 &&
+      bodyTimeoutSec > 0 && maxConnections > 0,
+    "quack-native limits (QOD_QUACK_MAX_BODY_BYTES, QOD_QUACK_MAX_CONNECT_BODY_BYTES, " +
+      "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC, QOD_QUACK_BODY_TIMEOUT_SEC, QOD_QUACK_MAX_CONNECTIONS) " +
+      "must be positive"
+  )
+  // A body is held in one array, which stops short of 2 GiB.
+  require(
+    maxBodyBytes <= Int.MaxValue - 8L && maxConnectBodyBytes <= Int.MaxValue - 8L,
+    s"QOD_QUACK_MAX_BODY_BYTES and QOD_QUACK_MAX_CONNECT_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
+  )

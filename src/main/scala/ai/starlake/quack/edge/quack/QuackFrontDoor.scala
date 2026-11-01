@@ -92,6 +92,10 @@ final class QuackFrontDoor(
               s.renewLease(now)
               dispatch(s, f)
 
+  /** Whether `connectionId` names a session here: how much of a message's body the listener reads.
+    */
+  def isLive(connectionId: String): Boolean = sessions.get(connectionId).isDefined
+
   private def dispatch(s: QuackSession, f: Frame): IO[Array[Byte]] =
     f.header.msgType match
       case Type.PrepareRequest => s.mutex.lock.surround(prepare(s, f))
@@ -130,37 +134,40 @@ final class QuackFrontDoor(
         QuackCredentials.parse(hello.authString) match
           case Left(reason) => IO.pure(encodeError(s"Authentication failed: $reason"))
           case Right(c)     =>
-            handshake.authenticate(c.bearer, c.basic, c.pool, c.tenant, c.superuser) match
-              case Left(HandshakeFailure.Unauthenticated(m)) =>
-                // The auth chain's own messages already start with the marker.
-                val msg =
-                  if m.startsWith("Authentication failed") then m else s"Authentication failed: $m"
-                IO.pure(encodeError(msg))
-              case Left(HandshakeFailure.Unauthorized(m)) => IO.pure(encodeError(m))
-              case Left(HandshakeFailure.Unavailable(m))  => IO.pure(encodeError(m))
-              case Right(bound)                           =>
-                versionProbe(bound.poolKey, hello).flatMap {
-                  case Left(m)              => IO.pure(encodeError(m))
-                  case Right(serverVersion) =>
-                    sessions.bind(bound, hello).map { s =>
-                      events.emit(
-                        ManagerEvent.SessionOpened(bound.poolKey.tenant, bound.user, "quack")
-                      )
-                      logger.info(
-                        s"quack session ${s.connectionId.take(8)} bound: user=${bound.user} pool=${bound.poolKey} " +
-                          s"client=${hello.clientDuckdbVersion}/${hello.clientPlatform} v${hello.maxVersion}"
-                      )
-                      encodeConnectionResponse(
-                        s.connectionId,
-                        ConnectionResponse(
-                          serverVersion.getOrElse(s"quack-on-demand $version"),
-                          "quack-on-demand",
-                          QuackFrontDoor.ProtocolVersion,
-                          s.heartbeatSec
+            IO.blocking(handshake.authenticate(c.bearer, c.basic, c.pool, c.tenant, c.superuser))
+              .flatMap {
+                case Left(HandshakeFailure.Unauthenticated(m)) =>
+                  // The auth chain's own messages already start with the marker.
+                  val msg =
+                    if m.startsWith("Authentication failed") then m
+                    else s"Authentication failed: $m"
+                  IO.pure(encodeError(msg))
+                case Left(HandshakeFailure.Unauthorized(m)) => IO.pure(encodeError(m))
+                case Left(HandshakeFailure.Unavailable(m))  => IO.pure(encodeError(m))
+                case Right(bound)                           =>
+                  versionProbe(bound.poolKey, hello).flatMap {
+                    case Left(m)              => IO.pure(encodeError(m))
+                    case Right(serverVersion) =>
+                      sessions.bind(bound, hello).map { s =>
+                        events.emit(
+                          ManagerEvent.SessionOpened(bound.poolKey.tenant, bound.user, "quack")
                         )
-                      )
-                    }
-                }
+                        logger.info(
+                          s"quack session ${s.connectionId.take(8)} bound: user=${bound.user} pool=${bound.poolKey} " +
+                            s"client=${hello.clientDuckdbVersion}/${hello.clientPlatform} v${hello.maxVersion}"
+                        )
+                        encodeConnectionResponse(
+                          s.connectionId,
+                          ConnectionResponse(
+                            serverVersion.getOrElse(s"quack-on-demand $version"),
+                            "quack-on-demand",
+                            QuackFrontDoor.ProtocolVersion,
+                            s.heartbeatSec
+                          )
+                        )
+                      }
+                  }
+              }
 
   /** Best-effort handshake-time check that the pool's nodes speak the client's protocol generation:
     * one open/close against a routable node with the client's own hello. A version rejection is

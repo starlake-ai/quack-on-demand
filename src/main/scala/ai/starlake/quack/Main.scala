@@ -1582,6 +1582,7 @@ object Main extends IOApp with LazyLogging:
           new ai.starlake.quack.edge.quack.QuackFrontDoorServer(
             quackCfgResolved,
             door.handle,
+            door.isLive,
             door.sweep,
             door.closeAll()
           )

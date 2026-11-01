@@ -11,7 +11,7 @@ import fs2.io.net.tls.{TLSContext, TLSParameters}
 import org.http4s.{Header, HttpRoutes, MediaType, Response, Status}
 import org.http4s.dsl.io.*
 import org.http4s.ember.server.EmberServerBuilder
-import org.http4s.headers.`Content-Type`
+import org.http4s.headers.{`Content-Type`, Connection}
 import org.typelevel.ci.CIStringSyntax
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -26,7 +26,8 @@ import scala.concurrent.duration.*
 
 /** The HTTP shell of the native Quack front door: `POST /quack` carries protocol messages, `GET /`
   * and `OPTIONS /quack` answer what a node answers (the Wasm client needs the CORS preamble).
-  * Protocol outcomes are always HTTP 200; only an unreadable or oversized body is a 400.
+  * Protocol outcomes are always HTTP 200; only an unreadable or oversized body is a 400, and a body
+  * that misses its deadline is a 408.
   *
   * A dedicated Ember listener rather than a route on the REST port: the data plane keeps its own
   * port, TLS and lifecycle, as the Flight edge does.
@@ -34,6 +35,8 @@ import scala.concurrent.duration.*
 final class QuackFrontDoorServer(
     cfg: QuackNativeConfig,
     handle: Array[Byte] => IO[Array[Byte]],
+    // Whether a connection id names a live session: decides how much of a message's body is read.
+    isLive: String => Boolean,
     sweep: Instant => IO[Unit],
     closeAll: IO[Unit],
     sweepEvery: FiniteDuration = 30.seconds
@@ -46,15 +49,21 @@ final class QuackFrontDoorServer(
     "This is a DuckDB Quack RPC endpoint served by Quack on Demand. Use ATTACH 'quack:...' " +
       "(TYPE quack, TOKEN 'tenant=...&pool=...&user=...&password=...') to connect here.\n"
 
+  private def answer(body: Array[Byte]): IO[Response[IO]] =
+    handle(body).map { bytes =>
+      Response[IO](Status.Ok).withEntity(bytes).withContentType(wireType).putHeaders(cors)
+    }
+
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case req @ POST -> Root / "quack" =>
-      req.body.take(cfg.maxBodyBytes + 1).compile.to(Array).flatMap { body =>
-        if body.length > cfg.maxBodyBytes then
-          BadRequest(s"request body exceeds ${cfg.maxBodyBytes} bytes")
-        else
-          handle(body).map { bytes =>
-            Response[IO](Status.Ok).withEntity(bytes).withContentType(wireType).putHeaders(cors)
-          }
+      QuackBodyRead(req, cfg, isLive).flatMap {
+        case QuackBodyRead.Outcome.Admitted(body)      => answer(body)
+        case QuackBodyRead.Outcome.NotAdmitted(prefix) =>
+          answer(prefix).map(_.putHeaders(Connection.close))
+        case QuackBodyRead.Outcome.TooLarge(limit) =>
+          BadRequest(s"request body exceeds $limit bytes").map(_.putHeaders(Connection.close))
+        case QuackBodyRead.Outcome.TimedOut =>
+          IO.pure(Response[IO](Status.RequestTimeout).putHeaders(Connection.close))
       }
     case OPTIONS -> Root / "quack" =>
       IO.pure(
@@ -86,6 +95,7 @@ final class QuackFrontDoorServer(
         .withHost(Host.fromString(cfg.host).getOrElse(Host.fromString("0.0.0.0").get))
         .withPort(Port.fromInt(cfg.port).getOrElse(Port.fromInt(9494).get))
         .withHttpApp(routes.orNotFound)
+        .withMaxConnections(cfg.maxConnections)
         .withShutdownTimeout(1.second)
       built = tls.fold(base)(ctx => base.withTLS(ctx, TLSParameters.Default))
       server <- built.build
