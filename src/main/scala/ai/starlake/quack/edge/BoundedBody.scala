@@ -11,9 +11,9 @@ import scala.concurrent.duration.FiniteDuration
   * reads it whole anyway, and the refusals are then answered in one place, with no dependence on
   * how Tapir maps an exception raised while it decodes.
   *
-  * A refused body stays unread. Ember then closes the connection and does not read the rest
-  * (`Parser.Body`: its `drain` stays `None` until the body is consumed), so the caller's answer
-  * should say `Connection: close`.
+  * A refused body stays unread. When any of it has not arrived yet, Ember then closes the
+  * connection and does not read the rest (`Parser.Body`: its `drain` stays `None` until the body is
+  * consumed), and the caller's answer should say `Connection: close` either way.
   */
 object BoundedBody:
 
@@ -22,11 +22,11 @@ object BoundedBody:
     case TooLarge
     case TimedOut
 
-  /** Whether `req` announces a body. A request with neither a length nor chunking has none. */
-  def hasBody(req: Request[IO]): Boolean = req.contentLength.exists(_ > 0) || req.isChunked
-
   /** The body of `req`, at most `maxBytes`, within `deadline`. A declared length over the limit is
-    * refused before any read.
+    * refused before any read. The limit itself holds on the stream Ember frames, however the client
+    * announced it: Ember and http4s' typed headers read `Content-Length: +32` or
+    * `Transfer-Encoding: foo, chunked` differently, so nothing here may decide from the headers
+    * that there is no body. A request with no body reads as empty at once.
     */
   def read(req: Request[IO], maxBytes: Long, deadline: FiniteDuration): IO[Outcome] =
     if req.contentLength.exists(_ > maxBytes) then IO.pure(Outcome.TooLarge)

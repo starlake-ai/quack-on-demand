@@ -43,10 +43,10 @@ class BoundedBodySpec extends AnyFlatSpec with Matchers:
     val stuck = bytes(1) ++ Stream.eval(IO.never[Byte])
     run(request(stuck), deadline = 100.millis) shouldBe BoundedBody.Outcome.TimedOut
 
-  "hasBody" should "follow the declared length and chunking" in:
-    BoundedBody.hasBody(request(Stream.empty)) shouldBe false
-    BoundedBody.hasBody(request(Stream.empty, declared = Some(0L))) shouldBe false
-    BoundedBody.hasBody(request(bytes(1), declared = Some(1L))) shouldBe true
+  it should "read an empty body at once" in:
+    run(request(Stream.empty)) match
+      case BoundedBody.Outcome.Read(b) => b.length shouldBe 0
+      case other                       => fail(s"expected Read, got $other")
 
   "replay" should "give a route the bytes already read" in:
     val replayed = BoundedBody.replay(request(bytes(1)), Array[Byte](1, 2, 3))
