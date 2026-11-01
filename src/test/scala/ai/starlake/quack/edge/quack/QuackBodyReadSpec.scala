@@ -70,6 +70,11 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
       case QuackBodyRead.Outcome.Admitted(bytes) => bytes
       case other => fail(s"expected Admitted, got ${describe(other)}")
 
+  private def notAdmitted(outcome: QuackBodyRead.Outcome): Array[Byte] =
+    outcome match
+      case QuackBodyRead.Outcome.NotAdmitted(prefix) => prefix
+      case other => fail(s"expected NotAdmitted, got ${describe(other)}")
+
   /** Equal bytes, with a failure that names the first difference rather than printing the arrays.
     */
   private def shouldBeSame(actual: Array[Byte], expected: Array[Byte]): Unit =
@@ -112,6 +117,23 @@ class QuackBodyReadSpec extends AnyFlatSpec with Matchers:
     atLimit.length.toLong shouldBe limit
     shouldBeSame(admitted(read(atLimit, cfg(maxBody = limit))), atLimit)
     describe(read(over, cfg(maxBody = limit))) shouldBe s"TooLarge($limit)"
+
+  it should "stop at the peek limit on a header that never completes, keeping the bytes read" in:
+    // Field 2 (connection id) announcing 1 MiB, of which only a little over the limit ever comes.
+    val unfinished = Array[Byte](2, 0, 0x80.toByte, 0x80.toByte, 0x40) ++
+      Array.fill[Byte](QuackBodyRead.PeekMaxBytes + 1000)(97)
+    shouldBeSame(
+      notAdmitted(read(unfinished, cfg())),
+      unfinished.take(QuackBodyRead.PeekMaxBytes)
+    )
+
+  it should "answer a body that ends inside its header from the bytes sent" in:
+    val header = QuackWire.encodeDisconnect(LiveSession)
+    Seq(0, 1, 5).foreach { n =>
+      withClue(s"a body of the first $n bytes of a header: ") {
+        shouldBeSame(notAdmitted(read(header.take(n), cfg())), header.take(n))
+      }
+    }
 
   "QuackNativeConfig" should "refuse a body timeout below its connect timeout" in:
     val e = the[IllegalArgumentException] thrownBy cfg(connectTimeout = 10, bodyTimeout = 5)

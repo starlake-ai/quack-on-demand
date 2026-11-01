@@ -63,7 +63,9 @@ private[quack] object QuackBodyRead:
   )(state: State, chunk: Chunk[Byte]): State =
     state match
       case State.Peeking(seen) =>
-        val now = seen ++ chunk
+        // Flat, not a queue of reads: the header is parsed again on every read, before any
+        // credential.
+        val now = Chunk.array((seen ++ chunk).toArray)
         QuackWire.peekHeader(now.toArray) match
           case HeaderPeek.Complete(h) => admit(cfg, isLive, declared, h, now)
           case HeaderPeek.NeedMore if now.size < PeekMaxBytes => State.Peeking(now)
