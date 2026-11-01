@@ -3,10 +3,20 @@ package ai.starlake.quack.ondemand.branch
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.nio.file.Path
+
 /** Live spec (local Postgres + duckdb CLI): change-set classification over real metadata and the
   * fast-forward merge batch of design section 4.5, end to end.
   */
 class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixture:
+
+  /** Clones the open catalog into `branchDb` and answers the snapshot the branch forked at. */
+  private def forkAt(branchDb: String, branchDir: Path): Long =
+    BranchCloner(parentMeta)
+      .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
+      .toOption
+      .get
+      .forkSnapshot
 
   private val extra =
     """CREATE TABLE lake.tpch1.nation (n_nationkey INTEGER NOT NULL, n_name VARCHAR NOT NULL);
@@ -279,6 +289,112 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
           val cs = BranchChanges.compute(br, parent, fork)
           cs.conflicts.map(c => (c.table, c.reason)) shouldBe
             List(("nation", "dropped on main since the fork"))
+          cs.mergeable shouldBe false
+        finally br.close()
+      }
+    }
+
+  it should "report a conflict when main dropped a column and added it again under the same name" in
+    withCatalog("brcolid", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = forkAt(branchDb, branchDir)
+        duck(
+          "UPDATE qod_branch.tpch1.region SET r_name = 'ASIA-EDITED' WHERE r_regionkey = 2;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        duck(
+          """ALTER TABLE lake.tpch1.region DROP COLUMN r_comment;
+            |ALTER TABLE lake.tpch1.region ADD COLUMN r_comment VARCHAR;""".stripMargin
+        )
+        // Same name, type and nullability, yet every value of the column is gone on main.
+        duck("SELECT count(r_comment) FROM lake.tpch1.region;") shouldBe List("0")
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.conflicts.map(c => (c.table, c.reason)) shouldBe
+            List(("region", "schema changed on main since the fork"))
+          cs.mergeable shouldBe false
+        finally br.close()
+      }
+    }
+
+  it should "not take fields nested in a STRUCT for columns named rowid or snapshot_id" in
+    withCatalog(
+      "brnested",
+      """CREATE TABLE lake.tpch1.nested (id INTEGER, s STRUCT(rowid INTEGER, snapshot_id VARCHAR));
+        |INSERT INTO lake.tpch1.nested VALUES (1, {'rowid': 7, 'snapshot_id': 'x'});
+        |CALL ducklake_flush_inlined_data('lake');
+        |""".stripMargin
+    ) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = forkAt(branchDb, branchDir)
+        duck(
+          "UPDATE qod_branch.tpch1.nested SET s = {'rowid': 8, 'snapshot_id': 'y'} WHERE id = 1;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.tables.map(t => (t.table, t.kind, t.reservedColumn)) shouldBe
+            List(("nested", ChangeKind.Modified, None))
+          cs.mergeable shouldBe true
+        finally br.close()
+      }
+    }
+
+  it should "report a conflict when main dropped the schema a branch table was created in" in
+    withCatalog("brschema", extra + "CREATE SCHEMA lake.s2;\n") { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = forkAt(branchDb, branchDir)
+        duck("CREATE TABLE qod_branch.s2.t AS SELECT 1 AS x;", Some(branchDb), Some(branchDir))
+        duck("DROP SCHEMA lake.s2 CASCADE;")
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.tables.map(t => (t.schema, t.table, t.kind)) shouldBe
+            List(("s2", "t", ChangeKind.Created))
+          cs.conflicts.map(c => (c.schema, c.table, c.reason)) shouldBe
+            List(("s2", "t", "schema 's2' was dropped on main"))
+          cs.mergeable shouldBe false
+        finally br.close()
+      }
+    }
+
+  it should "count rows the branch wrote under a temporary name of the table" in
+    withCatalog("brtmpname", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = forkAt(branchDb, branchDir)
+        duck(
+          """ALTER TABLE qod_branch.tpch1.nation RENAME TO nation_tmp;
+            |INSERT INTO qod_branch.tpch1.nation_tmp VALUES (2, 'IT');
+            |ALTER TABLE qod_branch.tpch1.nation_tmp RENAME TO nation;""".stripMargin,
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.tables.map(t => (t.table, t.kind)) shouldBe List(("nation", ChangeKind.Modified))
+          cs.conflicts shouldBe Nil
+        finally br.close()
+      }
+    }
+
+  it should "mark a table renamed on the branch as altered, not as created" in
+    withCatalog("brrename", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = forkAt(branchDb, branchDir)
+        duck(
+          "ALTER TABLE qod_branch.tpch1.nation RENAME TO nation2;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs = BranchChanges.compute(br, parent, fork)
+          cs.tables.map(t => (t.table, t.kind)) shouldBe List(("nation2", ChangeKind.Altered))
           cs.mergeable shouldBe false
         finally br.close()
       }

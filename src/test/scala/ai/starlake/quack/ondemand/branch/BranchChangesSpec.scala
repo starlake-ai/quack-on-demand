@@ -8,23 +8,34 @@ import org.scalatest.matchers.should.Matchers
 /** Pure classification over hand-built metadata (no Postgres). */
 class BranchChangesSpec extends AnyFlatSpec with Matchers:
 
-  private def col(name: String, typ: String = "INTEGER", nullable: Boolean = true) =
-    CatalogColumnEntry(0, name, typ, nullable, isPrimaryKey = false)
+  private def col(
+      name: String,
+      typ: String = "INTEGER",
+      nullable: Boolean = true,
+      ordinal: Int = 0
+  ) = CatalogColumnEntry(ordinal, name, typ, nullable, isPrimaryKey = false)
 
   /** A fake catalog: `head` snapshot, table versions, changes after the fork, and per-(table,
-    * snapshot) column shapes (default: one column `x`, unchanged).
+    * snapshot) column shapes (default: one column `x`, unchanged). `columns` also lists fields
+    * nested in a STRUCT, LIST or MAP; `topLevel` is the table's own columns where they differ from
+    * it (default: the same list). `dropped` is the schemas dropped after the fork.
     */
   private final class Fake(
       head: Long,
       versions: List[TableVersion],
       changes: List[(Long, String)],
-      columns: Map[(Long, Long), List[CatalogColumnEntry]] = Map.empty
+      columns: Map[(Long, Long), List[CatalogColumnEntry]] = Map.empty,
+      topLevel: Map[(Long, Long), List[CatalogColumnEntry]] = Map.empty,
+      dropped: Set[String] = Set.empty
   ) extends ChangeSource:
     def maxSnapshotId(): Option[Long]                          = Some(head)
     def tableVersions(): List[TableVersion]                    = versions
     def snapshotChangesSince(fork: Long): List[(Long, String)] = changes.filter(_._1 > fork)
     def columnsOfTableAt(tableId: Long, n: Long): List[CatalogColumnEntry] =
       columns.getOrElse((tableId, n), List(col("x")))
+    def topLevelColumnsOfTableAt(tableId: Long, n: Long): List[CatalogColumnEntry] =
+      topLevel.getOrElse((tableId, n), columnsOfTableAt(tableId, n))
+    def droppedSchemasSince(fork: Long): Set[String] = dropped
 
   private val fork   = 10L
   private val region = TableVersion(2L, "tpch1", "region", 3L, None)
@@ -77,9 +88,10 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
       columns = Map((2L, 13L) -> List(col("x"), col("y")))
     )
     val (tables, _) = BranchChanges.classify(fake, fork, 13L)
-    tables.map(t => (t.table, t.kind)) shouldBe List(
-      ("nation", ChangeKind.Recreated),
-      ("region", ChangeKind.Altered)
+    // The merge fence is held to the table's id at the fork, so both carry it.
+    tables.map(t => (t.table, t.kind, t.tableId)) shouldBe List(
+      ("nation", ChangeKind.Recreated, Some(3L)),
+      ("region", ChangeKind.Altered, Some(2L))
     )
     tables.find(_.table == "region").get.mergeable shouldBe false
   }
@@ -141,9 +153,10 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
       changes = List(
         (11L, "inlined_insert:2"),                    // touches region: a row merge, no conflict
         (12L, "inline_flush:3,deleted_from_table:3"), // flush of nation: not a touch
-        (13L, """dropped_schema:"s2""""),
+        (13L, "dropped_schema:5"),                    // a schema id, as DuckDB commits it
         (14L, """created_schema:"s3"""")
-      )
+      ),
+      dropped = Set("s2")
     )
     BranchChanges
       .conflicts(branchTables, main, fork)
@@ -181,12 +194,19 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "flag a branch drop, recreate or schema change against rows main changed" in {
-    val main = new Fake(14L, List(region, nation), List((11L, "inlined_insert:2,inlined_insert:3")))
+    val ghost = TableVersion(4L, "tpch1", "ghost", 3L, None)
+    val main  = new Fake(
+      14L,
+      List(region, nation, ghost),
+      List((11L, "inlined_insert:2,inlined_insert:3,inlined_insert:4"))
+    )
     val branchTables = List(
+      TableChange("tpch1", "ghost", ChangeKind.Recreated),
       TableChange("tpch1", "nation", ChangeKind.Dropped),
       TableChange("tpch1", "region", ChangeKind.Altered)
     )
     BranchChanges.conflicts(branchTables, main, fork).map(c => (c.table, c.reason)) shouldBe List(
+      ("ghost", "changed on main since the fork"),
       ("nation", "changed on main since the fork"),
       ("region", "changed on main since the fork")
     )
@@ -210,7 +230,8 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
         TableVersion(2L, "tpch1", "region", 1L, Some(13L)),
         TableVersion(2L, "tpch1", "region2", 13L, None)
       ),
-      List((13L, "altered_table:2"))
+      // DuckDB commits a table rename as created_table under the new name.
+      List((13L, """created_table:"tpch1"."region2""""))
     )
     val cs = BranchChanges.compute(branch, main, fork)
     cs.conflicts.map(c => (c.table, c.reason)) shouldBe
@@ -238,6 +259,54 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
       .map(t => (t.table, t.tableId)) shouldBe List(("extra", None), ("nation", Some(3L)))
   }
 
+  it should "report a column main dropped and added again as a schema change" in {
+    val branch = new Fake(12L, List(region), List((11L, "inlined_insert:2")))
+    val main   = new Fake(
+      head = 15L,
+      versions = List(region),
+      changes = List((13L, "altered_table:2"), (14L, "altered_table:2")),
+      columns = Map(
+        (2L, fork) -> List(col("a", ordinal = 1), col("c", ordinal = 2)),
+        (2L, 15L)  -> List(col("a", ordinal = 1), col("c", ordinal = 3))
+      )
+    )
+    val cs = BranchChanges.compute(branch, main, fork)
+    cs.conflicts.map(c => (c.table, c.reason)) shouldBe
+      List(("region", "schema changed on main since the fork"))
+    cs.tables.map(_.threeWay) shouldBe List(false)
+    cs.mergeable shouldBe false
+  }
+
+  /** Table 2 is `r`, renamed to `r2` at snapshot 12 and back at 14, with its rows written at 13:
+    * DuckDB commits each rename as created_table under the new name, and the rows under the name
+    * the table has at that moment.
+    */
+  private val viaR2 = new Fake(
+    head = 14L,
+    versions = List(
+      TableVersion(2L, "tpch1", "r", 1L, Some(12L)),
+      TableVersion(2L, "tpch1", "r2", 12L, Some(14L)),
+      TableVersion(2L, "tpch1", "r", 14L, None)
+    ),
+    changes = List(
+      (12L, """created_table:"tpch1"."r2""""),
+      (13L, "inlined_insert:2"),
+      (14L, """created_table:"tpch1"."r"""")
+    )
+  )
+
+  it should "mark a table main wrote to under a temporary name as three-way" in {
+    val branch = new Fake(
+      12L,
+      List(TableVersion(2L, "tpch1", "r", 1L, None)),
+      List((11L, "inlined_insert:2"))
+    )
+    val cs = BranchChanges.compute(branch, viaR2, fork)
+    cs.conflicts shouldBe Nil
+    cs.tables.map(t => (t.table, t.kind, t.threeWay)) shouldBe
+      List(("r", ChangeKind.Modified, true))
+  }
+
   "classify" should "treat a rewrite as maintenance, never a touch" in {
     val fake = new Fake(11L, List(region), List((11L, "rewrite_delete:2")))
     BranchChanges.classify(fake, fork, 11L)._1 shouldBe Nil
@@ -257,6 +326,73 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
     only.reservedColumn shouldBe Some("snapshot_id")
     only.mergeable shouldBe false
     only.reason.get should include("column named snapshot_id")
+  }
+
+  it should "look for reserved column names among a table's own columns, not its nested fields" in {
+    // The full listing also holds the fields of a STRUCT column s: (rowid, snapshot_id).
+    val listing = List(col("id"), col("s"), col("rowid"), col("snapshot_id"))
+    val fake    = new Fake(
+      head = 11L,
+      versions = List(region),
+      changes = List((11L, "inlined_insert:2")),
+      columns = Map((2L, fork) -> listing, (2L, 11L) -> listing),
+      topLevel = Map((2L, 11L) -> List(col("id"), col("s")))
+    )
+    BranchChanges
+      .classify(fake, fork, 11L)
+      ._1
+      .map(t => (t.kind, t.reservedColumn, t.mergeable)) shouldBe
+      List((ChangeKind.Modified, None, true))
+  }
+
+  it should "mark a table whose column was dropped and added again as altered" in {
+    // Same name, type and nullability, but the new column takes the next order number.
+    val before = List(col("a", ordinal = 1), col("c", ordinal = 2))
+    val after  = List(col("a", ordinal = 1), col("c", ordinal = 3))
+    val fake   = new Fake(
+      head = 13L,
+      versions = List(region),
+      changes = List((11L, "inlined_insert:2"), (12L, "altered_table:2"), (13L, "altered_table:2")),
+      columns = Map((2L, fork) -> before, (2L, 13L) -> after)
+    )
+    BranchChanges.classify(fake, fork, 13L)._1.map(t => (t.table, t.kind, t.tableId)) shouldBe
+      List(("region", ChangeKind.Altered, Some(2L)))
+  }
+
+  it should "not take an altered table whose columns are as they were for a schema change" in {
+    // A comment or a partitioning commits altered_table and leaves the columns alone.
+    val rows =
+      new Fake(12L, List(region), List((11L, "altered_table:2"), (12L, "inlined_insert:2")))
+    BranchChanges.classify(rows, fork, 12L)._1.map(t => (t.table, t.kind)) shouldBe
+      List(("region", ChangeKind.Modified))
+    val bare = new Fake(11L, List(region), List((11L, "altered_table:2")))
+    BranchChanges.classify(bare, fork, 11L)._1 shouldBe Nil
+  }
+
+  it should "not take a dropped schema for a table touch or an unsupported change" in {
+    // dropped_schema carries a schema id, which names no table: unhandled, it would be unsupported.
+    val fake = new Fake(11L, List(region, nation), List((11L, "dropped_schema:5")))
+    BranchChanges.classify(fake, fork, 11L) shouldBe (Nil, Nil)
+  }
+
+  it should "count rows written under a temporary name of the table" in {
+    BranchChanges.classify(viaR2, fork, 14L)._1.map(t => (t.table, t.kind, t.tableId)) shouldBe
+      List(("r", ChangeKind.Modified, Some(2L)))
+  }
+
+  it should "mark a table renamed on the branch as altered, not as created" in {
+    // The rename is a created_table under the new name, for the same table id.
+    val fake = new Fake(
+      head = 11L,
+      versions = List(
+        TableVersion(2L, "tpch1", "region", 3L, Some(11L)),
+        TableVersion(2L, "tpch1", "region2", 11L, None)
+      ),
+      changes = List((11L, """created_table:"tpch1"."region2""""))
+    )
+    val renamed = BranchChanges.classify(fake, fork, 11L)._1
+    renamed.map(t => (t.table, t.kind, t.tableId, t.mergeable)) shouldBe
+      List(("region2", ChangeKind.Altered, Some(2L), false))
   }
 
   private def entries(changes: (Long, String)*) = BranchChanges.parseEntries(changes.toList)
@@ -305,6 +441,29 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
       11L
     ) shouldBe
       Right(List(SnapshotRange(11L, 11L)))
+  }
+
+  it should "refuse a snapshot holding a verb it does not know on the table" in {
+    BranchChanges.readRanges(entries((11L, "brand_new_verb:2")), 2L, 10L, 11L) shouldBe
+      Left(List(11L))
+    BranchChanges.readRanges(
+      entries((11L, "inserted_into_table:2"), (12L, "inlined_insert:2,brand_new_verb:2")),
+      2L,
+      10L,
+      12L
+    ) shouldBe Left(List(12L))
+    // On another table it does not matter.
+    BranchChanges.readRanges(entries((11L, "brand_new_verb:3")), 2L, 10L, 11L) shouldBe
+      Right(List(SnapshotRange(11L, 11L)))
+  }
+
+  it should "read through an altered table whose columns did not change" in {
+    BranchChanges.readRanges(
+      entries((11L, "altered_table:2"), (12L, "inserted_into_table:2")),
+      2L,
+      10L,
+      12L
+    ) shouldBe Right(List(SnapshotRange(11L, 12L)))
   }
 
   "historyGap" should "find the first missing snapshot since the fork" in {

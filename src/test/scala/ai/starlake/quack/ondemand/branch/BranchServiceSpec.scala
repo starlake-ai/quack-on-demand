@@ -50,6 +50,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       changes.filter(_._1 > fork)
     override def columnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
       List(CatalogColumnEntry(0, "x", "INTEGER", true, false))
+    override def topLevelColumnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
+      columnsOfTableAt(id, n)
+    override def droppedSchemasSince(fork: Long): Set[String]       = Set.empty
     override def snapshotByCommitMessage(msg: String): Option[Long] = committed.get(msg)
     override def close(): Unit                                      = ()
 

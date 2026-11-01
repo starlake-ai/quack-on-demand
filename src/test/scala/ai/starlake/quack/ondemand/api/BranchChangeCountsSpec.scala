@@ -65,7 +65,10 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       changes.filter(_._1 > fork)
     override def columnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
       List(CatalogColumnEntry(0, "x", "INTEGER", true, false))
-    override def close(): Unit = ()
+    override def topLevelColumnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
+      columnsOfTableAt(id, n)
+    override def droppedSchemasSince(fork: Long): Set[String] = Set.empty
+    override def close(): Unit                                = ()
 
   /** `(change_type, n)` rows, the shape the counter folds. */
   private def summary(inserted: Long): org.apache.arrow.vector.ipc.ArrowReader =

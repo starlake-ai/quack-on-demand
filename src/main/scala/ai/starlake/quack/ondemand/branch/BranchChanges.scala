@@ -80,6 +80,13 @@ trait ChangeSource:
   def snapshotChangesSince(fork: Long): List[(Long, String)]
   def columnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry]
 
+  /** The table's own columns: `columnsOfTableAt` also lists fields nested in a STRUCT, LIST or MAP.
+    */
+  def topLevelColumnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry]
+
+  /** Names of the schemas dropped after `fork`. */
+  def droppedSchemasSince(fork: Long): Set[String]
+
 /** Pure classification of `ducklake_snapshot_changes` verbs into table change sets (Epic 1).
   *
   * Verb vocabulary (DuckLake 1.0 metadata written by DuckDB 1.5.x; the pin-bump checklist spec
@@ -89,7 +96,8 @@ trait ChangeSource:
   *   - table DDL verbs: `created_table`, `dropped_table`, `altered_table`
   *   - maintenance verbs, never a touch: `inline_flush`, `merge_adjacent`, `compacted_table`,
   *     `rewrite_delete`
-  *   - schema-level: `created_schema` (harmless), `dropped_schema` (a main-side conflict)
+  *   - schema-level, never a table touch: `created_schema`, and `dropped_schema`, whose payload is
+  *     a schema id (the schemas main dropped come from `ChangeSource.droppedSchemasSince`)
   *   - anything else with a numeric payload: treated as a touch of that table (fail closed);
   *     anything else with a non-numeric payload: reported in `unsupported` (views, macros).
   *
@@ -104,8 +112,7 @@ object BranchChanges:
   val TableDdlVerbs: Set[String]    = Set("created_table", "dropped_table", "altered_table")
   val MaintenanceVerbs: Set[String] =
     Set("inline_flush", "merge_adjacent", "compacted_table", "rewrite_delete")
-  val IgnoredSchemaVerbs: Set[String] = Set("created_schema")
-  val DroppedSchemaVerb: String       = "dropped_schema"
+  val IgnoredSchemaVerbs: Set[String] = Set("created_schema", "dropped_schema")
 
   /** Column names the merge's reads use for their own purposes (compared case-insensitively). */
   val ReservedColumns: List[String] = List("rowid", "snapshot_id")
@@ -162,13 +169,11 @@ object BranchChanges:
     }
 
   /** Touched tables of one catalog since `fork`, keyed by name at the time of the touch, plus the
-    * unsupported (non-table) entries and the schemas dropped. `dataTouched` is the subset with a
-    * data verb.
+    * unsupported (non-table) entries. `dataTouched` is the subset with a data verb.
     */
   final case class Touches(
       tables: Set[Ref],
       dataTouched: Set[Ref],
-      droppedSchemas: Set[String],
       unsupported: List[String]
   )
 
@@ -176,7 +181,6 @@ object BranchChanges:
     val bySnapshot  = entries.groupBy(_.snapshotId)
     var tables      = Set.empty[Ref]
     var data        = Set.empty[Ref]
-    var schemas     = Set.empty[String]
     val unsupported = List.newBuilder[String]
 
     def resolve(e: Entry): Option[Ref] =
@@ -197,7 +201,6 @@ object BranchChanges:
         val flushArtifact = e.tableId.exists(flushedIds.contains)
         if MaintenanceVerbs.contains(e.verb) || flushArtifact then ()
         else if IgnoredSchemaVerbs.contains(e.verb) then ()
-        else if e.verb == DroppedSchemaVerb then schemas += e.schemaName.getOrElse(e.raw)
         else if DataVerbs.contains(e.verb) then
           resolve(e) match
             case Some(r) => tables += r; data += r
@@ -214,10 +217,16 @@ object BranchChanges:
         else unsupported += e.raw
       }
     }
-    Touches(tables, data, schemas, unsupported.result())
+    Touches(tables, data, unsupported.result())
 
+  /** Whether two column listings are the same columns. The order number is the column's identity: a
+    * column dropped and added again under the same name and type takes the next one, and has lost
+    * its values.
+    */
   private def sameShape(a: List[CatalogColumnEntry], b: List[CatalogColumnEntry]): Boolean =
-    a.map(c => (c.name, c.typeName, c.nullable)) == b.map(c => (c.name, c.typeName, c.nullable))
+    def shape(cs: List[CatalogColumnEntry]) =
+      cs.map(c => (c.ordinal, c.name, c.typeName, c.nullable))
+    shape(a) == shape(b)
 
   /** Classify the tables `source` touched since `fork`, against its own metadata. `only` narrows
     * which of them to look at, which saves their column reads.
@@ -235,27 +244,35 @@ object BranchChanges:
         versions
           .find(v => v.schema == ref.schema && v.name == ref.table && v.visibleAt(n))
           .map(_.tableId)
+      // A rename commits rows written meanwhile under the name the table has at that moment, so a
+      // data touch counts under any name the table's id has held.
+      def rowsTouched(id: Long): Boolean =
+        versions.exists(v => v.tableId == id && t.dataTouched.contains(Ref(v.schema, v.name)))
       val atFork = idAt(fork)
       val atHead = idAt(head)
       (atFork, atHead) match
-        case (None, Some(_)) => Some(TableChange(ref.schema, ref.table, ChangeKind.Created))
+        case (None, Some(h)) =>
+          // A table that existed at the fork under another name was renamed, not created.
+          if versions.exists(v => v.tableId == h && v.visibleAt(fork)) then
+            Some(TableChange(ref.schema, ref.table, ChangeKind.Altered, tableId = Some(h)))
+          else Some(TableChange(ref.schema, ref.table, ChangeKind.Created))
         case (Some(f), None) =>
           Some(TableChange(ref.schema, ref.table, ChangeKind.Dropped, tableId = Some(f)))
         case (Some(f), Some(h)) if f != h =>
           Some(TableChange(ref.schema, ref.table, ChangeKind.Recreated, tableId = Some(f)))
         case (Some(f), Some(_)) =>
-          val atHeadColumns = source.columnsOfTableAt(f, head)
-          val altered       = !sameShape(source.columnsOfTableAt(f, fork), atHeadColumns)
+          val altered =
+            !sameShape(source.columnsOfTableAt(f, fork), source.columnsOfTableAt(f, head))
           if altered then
             Some(TableChange(ref.schema, ref.table, ChangeKind.Altered, tableId = Some(f)))
-          else if t.dataTouched.contains(ref) then
+          else if rowsTouched(f) then
+            val own = source.topLevelColumnsOfTableAt(f, head)
             Some(
               TableChange(
                 ref.schema,
                 ref.table,
                 ChangeKind.Modified,
-                reservedColumn =
-                  ReservedColumns.find(r => atHeadColumns.exists(_.name.equalsIgnoreCase(r))),
+                reservedColumn = ReservedColumns.find(r => own.exists(_.name.equalsIgnoreCase(r))),
                 tableId = Some(f)
               )
             )
@@ -287,7 +304,7 @@ object BranchChanges:
       classify(main, fork, head, names.contains)._1
         .map(t => Ref(t.schema, t.table) -> t.kind)
         .toMap ++ renamed.map(_ -> ChangeKind.Altered),
-      touches(parseEntries(main.snapshotChangesSince(fork)), versions).droppedSchemas
+      main.droppedSchemasSince(fork)
     )
 
   /** Table conflicts: what no row merge can settle. Rows changed on both sides are not one. */
@@ -344,9 +361,10 @@ object BranchChanges:
 
   /** The snapshots to read one table's changes over: every one in `(fork, head]` except that
     * table's maintenance, which would report surviving rows as changes (a rewrite) or nothing (a
-    * flush). Left: snapshots mixing maintenance and data on the table, which cannot be read
-    * correctly. A flush's `deleted_from_table` on the flushed table is the known artifact, not a
-    * mix.
+    * flush). Left: snapshots that cannot be read correctly, those mixing maintenance and data on
+    * the table and those holding a verb on the table that this code does not know (it fails closed,
+    * as `touches` does). A flush's `deleted_from_table` on the flushed table is the known artifact,
+    * not a mix.
     */
   def readRanges(
       entries: List[Entry],
@@ -357,14 +375,16 @@ object BranchChanges:
     val ofTable = entries
       .filter(e => e.tableId.contains(tableId) && e.snapshotId > fork && e.snapshotId <= head)
       .groupBy(_.snapshotId)
+    val known                             = DataVerbs ++ MaintenanceVerbs ++ TableDdlVerbs
     def isMaintenance(verbs: Set[String]) = verbs.exists(MaintenanceVerbs.contains)
     def isMixed(verbs: Set[String])       =
       val data     = verbs -- MaintenanceVerbs
       val artifact = if verbs.contains("inline_flush") then Set("deleted_from_table") else Set.empty
       isMaintenance(verbs) && (data -- artifact).nonEmpty
-    val verbsBySnapshot = ofTable.view.mapValues(_.map(_.verb).toSet).toMap
-    val mixed           = verbsBySnapshot.collect { case (sid, vs) if isMixed(vs) => sid }.toList
-    if mixed.nonEmpty then Left(mixed.sorted)
+    def isUnreadable(verbs: Set[String]) = isMixed(verbs) || (verbs -- known).nonEmpty
+    val verbsBySnapshot                  = ofTable.view.mapValues(_.map(_.verb).toSet).toMap
+    val unreadable = verbsBySnapshot.collect { case (sid, vs) if isUnreadable(vs) => sid }.toList
+    if unreadable.nonEmpty then Left(unreadable.sorted)
     else
       val skipped = verbsBySnapshot.collect { case (sid, vs) if isMaintenance(vs) => sid }.toSet
       val ranges  =
