@@ -1427,3 +1427,8 @@ final case class QuackNativeConfig(
     maxBodyBytes <= Int.MaxValue - 8L && maxConnectBodyBytes <= Int.MaxValue - 8L,
     s"QOD_QUACK_MAX_BODY_BYTES and QOD_QUACK_MAX_CONNECT_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
   )
+  require(
+    connectBodyTimeoutSec <= bodyTimeoutSec && bodyTimeoutSec <= 86400L,
+    "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC must not exceed QOD_QUACK_BODY_TIMEOUT_SEC, which must be " +
+      "at most 86400"
+  )

@@ -26,9 +26,16 @@ private[quack] object QuackBodyRead:
     case TooLarge(limit: Long)
     case TimedOut
 
+  /** Reads shorter than this are merged into one array. A client sending one byte per packet would
+    * otherwise cost about 40 bytes of heap per byte, one chunk object per read, before any
+    * credential.
+    */
+  val SmallReadBytes: Int = 4096
+
   private enum State:
     case Peeking(seen: Chunk[Byte])
-    case Reading(seen: Chunk[Byte], limit: Long, sessionBound: Boolean)
+    // `seen` holds merged arrays, `small` the reads not merged yet.
+    case Reading(seen: Chunk[Byte], small: Chunk[Byte], limit: Long, sessionBound: Boolean)
     case Done(outcome: Outcome)
 
   private def admit(
@@ -47,7 +54,7 @@ private[quack] object QuackBodyRead:
       case None                      => State.Done(Outcome.NotAdmitted(seen.toArray))
       case Some((max, sessionBound)) =>
         if declared.exists(_ > max) || seen.size.toLong > max then State.Done(Outcome.TooLarge(max))
-        else State.Reading(seen, max, sessionBound)
+        else State.Reading(seen.compact, Chunk.empty, max, sessionBound)
 
   private def step(
       cfg: QuackNativeConfig,
@@ -61,10 +68,11 @@ private[quack] object QuackBodyRead:
           case HeaderPeek.Complete(h) => admit(cfg, isLive, declared, h, now)
           case HeaderPeek.NeedMore if now.size < PeekMaxBytes => State.Peeking(now)
           case _ => State.Done(Outcome.NotAdmitted(now.toArray))
-      case State.Reading(seen, limit, sessionBound) =>
-        val now = seen ++ chunk
-        if now.size.toLong > limit then State.Done(Outcome.TooLarge(limit))
-        else State.Reading(now, limit, sessionBound)
+      case State.Reading(seen, small, limit, sessionBound) =>
+        val merged = small ++ chunk
+        if seen.size.toLong + merged.size > limit then State.Done(Outcome.TooLarge(limit))
+        else if merged.size < SmallReadBytes then State.Reading(seen, merged, limit, sessionBound)
+        else State.Reading(seen ++ merged.compact, Chunk.empty, limit, sessionBound)
       case done => done
 
   /** The outcome of reading `req`'s body. The clock starts now: `connectBodyTimeoutSec` for the
@@ -76,8 +84,8 @@ private[quack] object QuackBodyRead:
         req.body.chunks
           .scan[State](State.Peeking(Chunk.empty))(step(cfg, isLive, req.contentLength))
           .evalTap {
-            case State.Reading(_, _, true) => sessionBound.set(true)
-            case _                         => IO.unit
+            case State.Reading(_, _, _, true) => sessionBound.set(true)
+            case _                            => IO.unit
           }
           .takeThrough {
             case State.Done(_) => false
@@ -86,16 +94,15 @@ private[quack] object QuackBodyRead:
           .compile
           .last
           .map {
-            case Some(State.Done(outcome))       => outcome
-            case Some(State.Reading(seen, _, _)) => Outcome.Admitted(seen.toArray)
+            case Some(State.Done(outcome))              => outcome
+            case Some(State.Reading(seen, small, _, _)) => Outcome.Admitted((seen ++ small).toArray)
             // The body ended before the header did: the dispatcher answers it as malformed.
             case Some(State.Peeking(seen)) => Outcome.NotAdmitted(seen.toArray)
             case None                      => Outcome.NotAdmitted(Array.emptyByteArray)
           }
       val deadline: IO[Unit] =
         IO.sleep(cfg.connectBodyTimeoutSec.seconds) *> sessionBound.get.flatMap { bound =>
-          if bound then
-            IO.sleep(math.max(0L, cfg.bodyTimeoutSec - cfg.connectBodyTimeoutSec).seconds)
+          if bound then IO.sleep((cfg.bodyTimeoutSec - cfg.connectBodyTimeoutSec).seconds)
           else IO.unit
         }
       IO.race(deadline, read).map(_.fold(_ => Outcome.TimedOut, identity))
