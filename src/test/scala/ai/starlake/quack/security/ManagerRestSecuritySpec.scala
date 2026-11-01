@@ -1,6 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/ManagerRestSecuritySpec.scala
 package ai.starlake.quack.security
 
+import ai.starlake.quack.RestLimitsConfig
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -23,6 +24,19 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     * answers its status; -1 when the server closed the connection first.
     */
   private def rawStatus(in: java.io.InputStream): Int = rawResponse(in)._1
+
+  /** Status line and lower-cased head a raw socket gets for `request`, the socket read to its end.
+    */
+  private def raw(baseUrl: String, request: String): (String, String) =
+    val uri  = java.net.URI.create(baseUrl)
+    val sock = new java.net.Socket(uri.getHost, uri.getPort)
+    try
+      sock.setSoTimeout(15000)
+      sock.getOutputStream.write(request.getBytes(UTF_8))
+      sock.getOutputStream.flush()
+      val text = new String(sock.getInputStream.readAllBytes(), UTF_8)
+      (text.takeWhile(_ != '\r'), text.takeWhile(_ != '{').toLowerCase)
+    finally sock.close()
 
   /** [[rawStatus]], with the response's headers (names lowercased). */
   private def rawResponse(in: java.io.InputStream): (Int, Map[String, String]) =
@@ -841,5 +855,190 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       withClue(s"GET /api/tenant/list body: ${resp.body()}") {
         resp.body() should not include SecurityFixtures.GlobexTenantName
       }
+    finally h.shutdown()
+  }
+
+  // ------------------------------------------------------------------
+  // Request body limits: in size and in time, per route
+  // ------------------------------------------------------------------
+
+  "The REST body limits" should "refuse a public body over its limit with 413" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   =
+      ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(maxPublicBodyBytes = 1024))
+    try
+      val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", "x" * 1025)
+      resp.statusCode() shouldBe 413
+      errorCode(resp.body()) should contain("payload_too_large")
+    finally h.shutdown()
+  }
+
+  it should "let an admitted caller send more than a public route takes, up to its own limit" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(
+      fix.store,
+      restLimits = RestLimitsConfig(maxBodyBytes = 4096, maxPublicBodyBytes = 1024)
+    )
+    try
+      val session = Some(h.superuserSession())
+      val within = post(h.httpClient, s"${h.baseUrl}/api/tenant/list", " " * 2048, apiKey = session)
+      within.statusCode() should not be 413
+      val over = post(h.httpClient, s"${h.baseUrl}/api/tenant/list", " " * 4097, apiKey = session)
+      over.statusCode() shouldBe 413
+      errorCode(over.body()) should contain("payload_too_large")
+    finally h.shutdown()
+  }
+
+  it should "give a module's public route the larger limit" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(
+      fix.store,
+      modulePublicPrefixes = Set("/api/hosted/signup"),
+      restLimits = RestLimitsConfig(maxBodyBytes = 4096, maxPublicBodyBytes = 1024)
+    )
+    try
+      post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * 2048)
+        .statusCode() should not be 413
+      post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * 4097).statusCode() shouldBe 413
+    finally h.shutdown()
+  }
+
+  it should "answer 408 when a public body stops arriving" in {
+    val fix = SecurityFixtures.freshStore()
+    val h = ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(bodyTimeoutSec = 1))
+    try
+      val (status, head) = raw(
+        h.baseUrl,
+        "POST /api/auth/login HTTP/1.1\r\nHost: l\r\nContent-Type: application/json\r\n" +
+          "Content-Length: 100\r\n\r\n{"
+      )
+      status should include("408")
+      head should include("connection: close")
+    finally h.shutdown()
+  }
+
+  it should "limit a body however the client frames it" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   =
+      ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(maxPublicBodyBytes = 16))
+    try
+      val body = "x" * 32
+      List(
+        s"Content-Length: 32\r\n\r\n$body",
+        s"Content-Length: +32\r\n\r\n$body",
+        s"Content-Length: 0\r\nContent-Length: 32\r\n\r\n$body"
+      ).foreach { framing =>
+        val (status, _) = raw(h.baseUrl, s"POST /api/auth/login HTTP/1.1\r\nHost: l\r\n$framing")
+        withClue(framing.takeWhile(_ != '\r'))(status should include("413"))
+      }
+      // Chunked framing costs CPU per read before a limit counts anything: refused unread.
+      val chunked = s"\r\n\r\n20\r\n$body\r\n0\r\n\r\n"
+      List("chunked", "foo, chunked", "xchunked").foreach { coding =>
+        val (status, head) =
+          raw(
+            h.baseUrl,
+            s"POST /api/auth/login HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: $coding$chunked"
+          )
+        withClue(coding) {
+          status should include("411")
+          head should include("connection: close")
+        }
+      }
+    finally h.shutdown()
+  }
+
+  it should "limit an admitted caller's chunked body too" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(maxBodyBytes = 16))
+    try
+      val body        = "x" * 32
+      val session     = h.superuserSession()
+      val (status, _) = raw(
+        h.baseUrl,
+        s"POST /api/tenant/list HTTP/1.1\r\nHost: l\r\nX-API-Key: $session\r\n" +
+          s"Transfer-Encoding: chunked\r\n\r\n20\r\n$body\r\n0\r\n\r\n"
+      )
+      status should include("413")
+    finally h.shutdown()
+  }
+
+  it should "answer 408 when a body the headers hide stops arriving" in {
+    val fix = SecurityFixtures.freshStore()
+    val h = ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(bodyTimeoutSec = 1))
+    try
+      val (status, _) = raw(
+        h.baseUrl,
+        "POST /api/auth/login HTTP/1.1\r\nHost: l\r\nContent-Length: +100\r\n\r\n{"
+      )
+      status should include("408")
+    finally h.shutdown()
+  }
+
+  it should "still serve a request with no body" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val session = Some(h.superuserSession())
+      get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = session).statusCode() shouldBe 200
+    finally h.shutdown()
+  }
+
+  it should "not wait long for the body of a refused request" in {
+    val fix = SecurityFixtures.freshStore()
+    val h = ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(bodyTimeoutSec = 1))
+    try
+      val start          = System.nanoTime()
+      val (status, head) = raw(
+        h.baseUrl,
+        "POST /api/tenant/list HTTP/1.1\r\nHost: l\r\nContent-Length: 100\r\n\r\n{"
+      )
+      status should include("401")
+      head should include("connection: close")
+      (System.nanoTime() - start) / 1000000000L should be < 5L
+    finally h.shutdown()
+  }
+
+  it should "refuse a huge body on a guarded path without reading it" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val (status, head) = raw(
+        h.baseUrl,
+        "POST /api/tenant/list HTTP/1.1\r\nHost: l\r\nContent-Length: 268435456\r\n\r\n"
+      )
+      status should include("401")
+      head should include("connection: close")
+    finally h.shutdown()
+  }
+
+  "The REST connection limit" should "hold a client until a connection leaves, then answer it" in {
+    val fix = SecurityFixtures.freshStore()
+    val h = ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(maxConnections = 1))
+    try
+      val uri     = java.net.URI.create(h.baseUrl)
+      val request = "GET /health HTTP/1.1\r\nHost: l\r\n\r\n"
+
+      def send(sock: java.net.Socket): Unit =
+        sock.getOutputStream.write(request.getBytes(UTF_8))
+        sock.getOutputStream.flush()
+
+      // One slot, held by a connection that is answered and then kept open.
+      val holder = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        holder.setSoTimeout(15000)
+        send(holder)
+        rawStatus(new java.io.BufferedInputStream(holder.getInputStream)) shouldBe 200
+        val client = new java.net.Socket(uri.getHost, uri.getPort)
+        try
+          send(client)
+          // The client connects and sends its request, and is not answered while the slot is taken.
+          client.setSoTimeout(1500)
+          a[java.net.SocketTimeoutException] should be thrownBy client.getInputStream.read()
+          // Once the holder leaves, the slot is free and the client is answered.
+          holder.close()
+          client.setSoTimeout(15000)
+          rawStatus(new java.io.BufferedInputStream(client.getInputStream)) shouldBe 200
+        finally client.close()
+      finally holder.close()
     finally h.shutdown()
   }

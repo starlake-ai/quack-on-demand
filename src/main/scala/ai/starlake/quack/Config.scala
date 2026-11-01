@@ -481,6 +481,45 @@ object TelemetryConfig:
         else Right(())
       case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
 
+/** The REST listener's request limits (`quack-on-demand.restLimits`). */
+final case class RestLimitsConfig(
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_BODY_BYTES",
+      description =
+        "Largest request body the REST port reads for an admitted caller or a module's public " +
+          "route, in bytes."
+    )
+    maxBodyBytes: Long = 16777216L,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_PUBLIC_BODY_BYTES",
+      description =
+        "Largest request body the REST port reads on a public route (login, password reset, SSO), " +
+          "in bytes: read before any credential is checked."
+    )
+    maxPublicBodyBytes: Long = 65536L,
+    @field @ConfigField(
+      envVar = "QOD_REST_BODY_TIMEOUT_SEC",
+      description = "Seconds a REST request has to send its whole body."
+    )
+    bodyTimeoutSec: Long = 30L,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_CONNECTIONS",
+      description = "Most connections the REST port keeps open at once."
+    )
+    maxConnections: Int = 1024
+):
+  require(
+    maxBodyBytes > 0 && maxPublicBodyBytes > 0 && bodyTimeoutSec > 0 && maxConnections > 0,
+    "restLimits (QOD_REST_MAX_BODY_BYTES, QOD_REST_MAX_PUBLIC_BODY_BYTES, " +
+      "QOD_REST_BODY_TIMEOUT_SEC, QOD_REST_MAX_CONNECTIONS) must be positive"
+  )
+  // A body is held in one array, which stops short of 2 GiB.
+  require(
+    maxBodyBytes <= Int.MaxValue - 8L && maxPublicBodyBytes <= Int.MaxValue - 8L,
+    s"QOD_REST_MAX_BODY_BYTES and QOD_REST_MAX_PUBLIC_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
+  )
+  require(bodyTimeoutSec <= 86400L, "QOD_REST_BODY_TIMEOUT_SEC must be at most 86400")
+
 final case class ManagerConfig(
     @field @ConfigField(
       envVar = "QOD_ON_DEMAND_HOST",
@@ -585,6 +624,7 @@ final case class ManagerConfig(
     pat: PatConfig = PatConfig(),
     tenantFiles: TenantFilesConfig = TenantFilesConfig(),
     userS3: UserS3Config = UserS3Config(),
+    restLimits: RestLimitsConfig = RestLimitsConfig(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
     nodeAuthzLimits: NodeAuthzLimitsConfig = NodeAuthzLimitsConfig(),

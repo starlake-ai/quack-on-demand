@@ -89,6 +89,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
+  given ProductHint[RestLimitsConfig]          = ProductHint[RestLimitsConfig](camelMapping)
   given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
   given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
   given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
@@ -127,6 +128,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagerAuthConfig]        = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
+  given ConfigReader[RestLimitsConfig]         = deriveReader[RestLimitsConfig]
   given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
   given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
   given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]

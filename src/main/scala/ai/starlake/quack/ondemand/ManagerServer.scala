@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
+import ai.starlake.quack.edge.BoundedBody
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.telemetry.{
   AuditActions,
@@ -19,6 +20,7 @@ import org.http4s.headers.Location
 import org.http4s.server.{staticcontent, Router}
 import org.http4s.server.staticcontent.FileService
 import org.typelevel.ci.CIString
+import scala.concurrent.duration.{FiniteDuration, SECONDS}
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
 import fs2.io.file.{Path => FsPath}
@@ -136,6 +138,12 @@ final class ManagerServer(
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
     catch case _: Exception => ""
 
+  /** A public path a module declared. It takes the larger body limit: a provider's webhook does not
+    * fit the core public routes' limit, and no core route lives there.
+    */
+  private def isModulePublic(path: String): Boolean =
+    modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
     path == "/api/auth/login" || path == "/api/auth/change-password" ||
@@ -154,7 +162,7 @@ final class ManagerServer(
       // Fleet heartbeat (qod fleet join): the handler validates X-Fleet-Token itself. Gated on the
       // runtime so the path stays 401 at the guard everywhere else.
       (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
-      modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+      isModulePublic(path)
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface only. Everything else on
     * `/api` answers `403 admin_required` for such sessions -- this predicate is the entire
@@ -187,6 +195,75 @@ final class ManagerServer(
       // ahead of the route ever being wired.
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
+  private val limits = cfg.restLimits
+
+  private val bodyDeadline = FiniteDuration(limits.bodyTimeoutSec, SECONDS)
+
+  /** How long a refusal waits for the small body it reads and discards. */
+  private val refusalDrainDeadline = FiniteDuration(math.min(limits.bodyTimeoutSec, 5L), SECONDS)
+
+  private def bodyRefusal(status: Status, code: String, message: String): Response[IO] =
+    Response[IO](status)
+      .withEntity(s"""{"error":"$code","message":"$message"}""")
+      .withContentType(org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json))
+      .putHeaders(org.http4s.headers.Connection.close)
+
+  /** `routes` on `req`, its body read first within `maxBytes` and the deadline. Past either the
+    * answer is 413 or 408 and the rest stays unread. Every request goes through the read, whatever
+    * its headers say: a request with no body reads as empty at once, and the headers must not
+    * decide (see [[BoundedBody.read]]).
+    */
+  private def withBoundedBody(req: Request[IO], maxBytes: Long)(
+      routes: HttpRoutes[IO]
+  ): OptionT[IO, Response[IO]] =
+    OptionT.liftF(BoundedBody.read(req, maxBytes, bodyDeadline)).flatMap {
+      case BoundedBody.Outcome.Read(bytes) => routes(BoundedBody.replay(req, bytes))
+      case BoundedBody.Outcome.TooLarge    =>
+        OptionT.pure[IO](
+          bodyRefusal(
+            Status.PayloadTooLarge,
+            "payload_too_large",
+            s"request body exceeds $maxBytes bytes"
+          )
+        )
+      case BoundedBody.Outcome.TimedOut =>
+        OptionT.pure[IO](
+          bodyRefusal(
+            Status.RequestTimeout,
+            "request_timeout",
+            "request body did not arrive in time"
+          )
+        )
+    }
+
+  /** The largest request body a refusal reads and discards before answering. */
+  private val RefusalDrainBytes: Long = 1L << 20
+
+  /** `resp`, after reading the rest of `req`'s body. Ember answers a request whose body the app
+    * left partly unread as keep-alive and then closes the connection, so a client that reuses it
+    * for its next request finds it closed (the JDK client does not retry a POST: "header parser
+    * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
+    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read. Any
+    * other body (chunked, longer, awaiting a go-ahead) is left unread, and the answer then says
+    * `Connection: close`, so a pooling client opens a new connection instead of reusing the one
+    * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
+    * neither. The read gets [[refusalDrainDeadline]]: past it, or on a read failure, the answer
+    * says `Connection: close` too.
+    */
+  private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
+    val chunked = BoundedBody.asksChunked(req)
+    val drain   =
+      !chunked && req.contentLength
+        .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
+    val bodyless = req.contentLength.isEmpty && !chunked
+    val closing  = resp.putHeaders(org.http4s.headers.Connection.close)
+    OptionT.liftF(
+      if drain then
+        req.body.compile.drain.as(resp).timeout(refusalDrainDeadline).handleError(_ => closing)
+      else if bodyless then IO.pure(resp)
+      else IO.pure(closing)
+    )
+
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token or a live personal access token, admitted with exactly its owner's scope (admin
     * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
@@ -202,31 +279,13 @@ final class ManagerServer(
     * credential, and a user blocked by must_change_password has no session to present),
     * `/api/config/client`, `/health`, `/ready`, and everything outside `/api/...` (incl.
     * `/ui/...`).
+    *
+    * Request bodies are read here, whole, before a route sees one ([[withBoundedBody]]), within
+    * `restLimits.bodyTimeoutSec`. A public route takes no chunked framing, as no credential has
+    * been checked: a core one reads at most `restLimits.maxPublicBodyBytes`, a module's and an
+    * admitted caller's at most `restLimits.maxBodyBytes`. No route outside `/api` reads a body
+    * except `/mcp`, which applies the limit itself, so nothing is read here for such a path.
     */
-  /** The largest request body a refusal reads and discards before answering. */
-  private val RefusalDrainBytes: Long = 1L << 20
-
-  /** `resp`, after reading the rest of `req`'s body. Ember answers a request whose body the app
-    * left partly unread as keep-alive and then closes the connection, so a client that reuses it
-    * for its next request finds it closed (the JDK client does not retry a POST: "header parser
-    * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
-    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read. Any
-    * other body (chunked, longer, awaiting a go-ahead) is left unread, and the answer then says
-    * `Connection: close`, so a pooling client opens a new connection instead of reusing the one
-    * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
-    * neither.
-    */
-  private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
-    val drain =
-      req.contentLength
-        .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
-    val bodyless = req.contentLength.isEmpty && !req.isChunked
-    OptionT.liftF(
-      if drain then req.body.compile.drain.attempt.void.as(resp)
-      else if bodyless then IO.pure(resp)
-      else IO.pure(resp.putHeaders(org.http4s.headers.Connection.close))
-    )
-
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     Kleisli { req =>
       // Router parity: tapir segments the path as
@@ -241,7 +300,20 @@ final class ManagerServer(
         if req.uri.path.endsWithSlash then raw + "/" else raw
       }
       if !path.startsWith("/api/") && path != "/api" then routes(req)
-      else if isPublicApi(path) then routes(req)
+      else if isPublicApi(path) then
+        // No credential has been checked: see BoundedBody.asksChunked.
+        if BoundedBody.asksChunked(req) then
+          OptionT.pure[IO](
+            bodyRefusal(
+              Status.LengthRequired,
+              "length_required",
+              "this route takes a Content-Length, not chunked framing"
+            )
+          )
+        else
+          val maxBytes =
+            if isModulePublic(path) then limits.maxBodyBytes else limits.maxPublicBodyBytes
+          withBoundedBody(req, maxBytes)(routes)
       else
         // Admit on X-API-Key header OR on the qod_session cookie. The cookie
         // is the browser path (HttpOnly so JS can't read it; SameSite=Lax so
@@ -347,7 +419,7 @@ final class ManagerServer(
                     org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
                   )
               )
-            case _ => routes(req)
+            case _ => withBoundedBody(req, limits.maxBodyBytes)(routes)
     }
 
   def serve: Resource[IO, org.http4s.server.Server] =
@@ -1201,6 +1273,7 @@ final class ManagerServer(
       .default[IO]
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
+      .withMaxConnections(limits.maxConnections)
       .withHttpApp(
         (internalRoutes.foldLeft(HttpRoutes.empty[IO])(_ <+> _) <+> apiKeyGuard(apiRoutes) <+>
           mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+> moduleStatic <+>
