@@ -168,7 +168,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
         )}
       </div>
       {diff?.nextCursor && !loading && (
-        <button type="button" style={{ marginTop: 12, alignSelf: 'flex-start' }} onClick={() => load({ cursor: diff.nextCursor! })}>
+        <button type="button" className="link-button" style={{ marginTop: 12, alignSelf: 'flex-start' }} onClick={() => load({ cursor: diff.nextCursor! })}>
           Load more
         </button>
       )}

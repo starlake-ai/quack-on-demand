@@ -195,7 +195,7 @@ export default function CatalogHistoryPanel({
       <div style={{ marginTop: 12 }}>
         {loading && <p className="subtle">Loading...</p>}
         {!loading && hasMore && (
-          <button type="button" onClick={() => load(false)}>Load more</button>
+          <button type="button" className="link-button" onClick={() => load(false)}>Load more</button>
         )}
       </div>
 

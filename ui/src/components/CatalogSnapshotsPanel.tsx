@@ -207,7 +207,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
             </table>
             {hasMore && (
               <div style={{ marginTop: 12, textAlign: 'center' }}>
-                <button onClick={loadMore} disabled={loadingMore}>
+                <button type="button" className="link-button" onClick={loadMore} disabled={loadingMore}>
                   {loadingMore ? 'Loading...' : 'Load older snapshots'}
                 </button>
               </div>

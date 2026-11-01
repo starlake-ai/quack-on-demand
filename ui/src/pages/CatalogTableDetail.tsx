@@ -721,6 +721,7 @@ export default function CatalogTableDetail() {
                             {dataDiff.nextCursor && !dataDiffLoading && (
                               <button
                                 type="button"
+                                className="link-button"
                                 style={{ marginTop: 12 }}
                                 onClick={() => loadDataDiff({ cursor: dataDiff.nextCursor! })}
                               >

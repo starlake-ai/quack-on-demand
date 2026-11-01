@@ -138,7 +138,7 @@ export default function Audit() {
         </tbody>
       </table>
       {nextBefore && (
-        <button type="button" className="copy-btn" style={{ marginTop: 8 }} onClick={() => load(true, nextBefore)}>
+        <button type="button" className="link-button" style={{ marginTop: 8 }} onClick={() => load(true, nextBefore)}>
           Load more
         </button>
       )}

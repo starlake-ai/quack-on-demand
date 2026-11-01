@@ -544,7 +544,7 @@ export default function History() {
         <div style={{ textAlign: 'center', marginBottom: 16 }}>
           <button
             type="button"
-            className="copy-btn"
+            className="link-button"
             disabled={stmtLoading}
             onClick={loadMore}
           >

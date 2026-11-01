@@ -453,7 +453,7 @@ export default function IcebergTableDetail() {
                     <div style={{ marginTop: 12 }}>
                       {historyLoading && <p className="subtle">Loading...</p>}
                       {!historyLoading && historyHasMore && (
-                        <button type="button" onClick={() => loadHistory(false)}>Load more</button>
+                        <button type="button" className="link-button" onClick={() => loadHistory(false)}>Load more</button>
                       )}
                     </div>
                   </div>

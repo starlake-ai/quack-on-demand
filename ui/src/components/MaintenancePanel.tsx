@@ -491,7 +491,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
               </table>
               {hasMore && (
                 <div style={{ marginTop: 12, textAlign: 'center' }}>
-                  <button onClick={loadMoreRuns} disabled={loadingMore}>
+                  <button type="button" className="link-button" onClick={loadMoreRuns} disabled={loadingMore}>
                     {loadingMore ? 'Loading...' : 'Load older runs'}
                   </button>
                 </div>
