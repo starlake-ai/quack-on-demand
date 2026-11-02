@@ -1,19 +1,26 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.{BranchingConfig, ManagedObjectStoreConfig}
-import ai.starlake.quack.edge.adapter.{QuackHttpAdapter, QuackResponse}
-import ai.starlake.quack.model.{Branch, NodeSpec}
+import ai.starlake.quack.edge.adapter.{QuackError, QuackHttpAdapter, QuackResponse}
+import ai.starlake.quack.model.{Branch, NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.api.{
   ArrowRowsDecoder,
   CatalogPreviewHandlers,
   DataDiffSql,
   ExecCaller
 }
-import ai.starlake.quack.ondemand.branch.{BranchService, ChangeCounter, MergeExecutor, TableChange}
+import ai.starlake.quack.ondemand.branch.{
+  BranchService,
+  ChangeCounter,
+  MergeExecutor,
+  MergeNode,
+  TableChange
+}
 import ai.starlake.quack.ondemand.runtime.{NodeReadiness, QuackBackend}
 import ai.starlake.quack.ondemand.storage.S3ManagedStoreClient
 import cats.effect.{FiberIO, IO}
 import com.typesafe.scalalogging.LazyLogging
+import io.circe.Json
 
 import java.nio.file.{Files, Path}
 import scala.concurrent.duration._
@@ -27,8 +34,11 @@ import scala.util.control.NonFatal
   */
 object BranchWiring extends LazyLogging:
 
-  /** Spawns `spec`, waits for it to accept connections, sends the batch, stops the node. The wait
-    * is bounded by `mergeTimeoutSec`; a timeout is reported as `Left("timeout ...")` and the caller
+  /** Merge node reads are one row of counts or up to 80 sample rowids. */
+  private val MergeNodeMaxRows = 1000
+
+  /** Spawns `spec`, waits for it to accept connections, runs the body, stops the node. Each send is
+    * bounded by `mergeTimeoutSec`; a timeout is reported as `Left("timeout ...")` and the caller
     * settles the outcome by locating the commit message on the parent.
     */
   def mergeExecutor(
@@ -36,11 +46,14 @@ object BranchWiring extends LazyLogging:
       backend: QuackBackend,
       adapter: QuackHttpAdapter
   ): MergeExecutor = new MergeExecutor:
-    def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]] =
+
+    def withNode[A](
+        spec: NodeSpec
+    )(body: MergeNode => IO[Either[String, A]]): IO[Either[String, A]] =
       backend.start(spec).attempt.flatMap {
         case Left(e)     => IO.pure(Left(s"merge node spawn failed: ${e.getMessage}"))
         case Right(node) =>
-          val body = NodeReadiness
+          NodeReadiness
             .awaitReachable(
               node.host,
               node.port,
@@ -48,35 +61,52 @@ object BranchWiring extends LazyLogging:
               isAlive = () => backend.isAlive(node.nodeId)
             )
             .flatMap { ready =>
-              if !ready then
+              if ready then body(on(node))
+              else
                 IO.pure(
                   Left(
                     s"merge node ${node.nodeId} did not accept connections within ${cfg.nodeReadyTimeoutSec}s"
                   )
                 )
-              else
-                adapter
-                  .send(
-                    node,
-                    batch,
-                    ai.starlake.quack.edge.authz.NodePrincipal.System,
-                    session = None,
-                    recordLoad = false
-                  )
-                  .map {
-                    case QuackResponse.Ok(_, _, close) =>
-                      close(); Right(())
-                    case QuackResponse.Failed(err, _) => Left(err.toString)
-                  }
-                  .timeoutTo(
-                    cfg.mergeTimeoutSec.seconds,
-                    IO.pure(
-                      Left(s"timeout: merge batch did not answer within ${cfg.mergeTimeoutSec}s")
-                    )
-                  )
             }
-          body.guarantee(backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit))
+            .guarantee(backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit))
       }
+
+    private def bounded[A](call: IO[Either[String, A]]): IO[Either[String, A]] =
+      call.timeoutTo(
+        cfg.mergeTimeoutSec.seconds,
+        IO.pure(Left(s"timeout: the merge node did not answer within ${cfg.mergeTimeoutSec}s"))
+      )
+
+    private def send(node: RunningNode, sql: String) =
+      adapter.send(
+        node,
+        sql,
+        ai.starlake.quack.edge.authz.NodePrincipal.System,
+        session = None,
+        recordLoad = false
+      )
+
+    private def on(node: RunningNode): MergeNode = new MergeNode:
+      def exec(batch: String): IO[Either[String, Unit]] =
+        bounded(send(node, batch).map {
+          case QuackResponse.Ok(_, _, close) => close(); Right(())
+          case QuackResponse.Failed(err, _)  => Left(textOf(err))
+        })
+
+      def rows(sql: String): IO[Either[String, List[List[Json]]]] =
+        bounded(send(node, sql).flatMap {
+          case QuackResponse.Failed(err, _)       => IO.pure(Left(textOf(err)))
+          case QuackResponse.Ok(reader, _, close) =>
+            IO.blocking(ArrowRowsDecoder.decode(reader, MergeNodeMaxRows)._2)
+              .guarantee(IO(close()))
+              .attempt
+              .map(_.left.map(e => s"reading the result: ${e.getMessage}"))
+        })
+
+    private def textOf(err: QuackError): String = err match
+      case QuackError.Transient(message, _) => message
+      case QuackError.Permanent(message)    => message
 
   /** Counts through the same executor the catalog data-diff uses, as the caller the service hands
     * it: the requester for counts asked over REST or MCP, the system caller only for propose's

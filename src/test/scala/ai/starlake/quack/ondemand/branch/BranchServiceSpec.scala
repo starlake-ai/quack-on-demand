@@ -115,21 +115,28 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         if cloneFails then Left("boom") else Right(CloneResult(10L, 30, 100L))
       ,
       mergeExecutor = new MergeExecutor:
-        def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]] =
-          mergeBatches += batch
-          beforeRun()
-          mergeFails match
-            case Some(err) => IO.pure(Left(err))
-            case None      =>
-              // The batch's message is the commit-message call's third literal; the fake parent
-              // reader answers the locate query for it.
-              val msg = batch.linesIterator
-                .find(_.startsWith("CALL ducklake_set_commit_message"))
-                .get
-                .split("'")(5)
-              mainReader.committed.put(msg, mainReader.head + 1)
-              mainReader.head += 1
-              IO.pure(Right(())),
+        def withNode[A](spec: NodeSpec)(
+            body: MergeNode => IO[Either[String, A]]
+        ): IO[Either[String, A]] =
+          body(new MergeNode:
+            def exec(batch: String): IO[Either[String, Unit]] =
+              mergeBatches += batch
+              beforeRun()
+              mergeFails match
+                case Some(err) => IO.pure(Left(err))
+                case None      =>
+                  // The batch's message is the commit-message call's third literal; the fake parent
+                  // reader answers the locate query for it.
+                  val msg = batch.linesIterator
+                    .find(_.startsWith("CALL ducklake_set_commit_message"))
+                    .get
+                    .split("'")(5)
+                  mainReader.committed.put(msg, mainReader.head + 1)
+                  mainReader.head += 1
+                  IO.pure(Right(()))
+            def rows(sql: String): IO[Either[String, List[List[io.circe.Json]]]] =
+              IO.pure(Right(Nil)))
+      ,
       mergeFence = new MergeFence:
         def arm(
             meta: Map[String, String],

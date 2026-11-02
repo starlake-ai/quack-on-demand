@@ -3,16 +3,10 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.{BranchingConfig, CatalogConfig}
 import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{Branch, NodeSpec, Tenant, TenantDbKind}
+import ai.starlake.quack.model.{Branch, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.branch.{
-  BranchService,
-  ChangeCounter,
-  MergeExecutor,
-  MergeFence,
-  TableChange
-}
+import ai.starlake.quack.ondemand.branch.{BranchService, ChangeCounter, MergeFence, TableChange}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore}
@@ -73,9 +67,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       store = store,
       resolveReader = (_, _) => new DuckLakeCatalogReader(null),
       cloneCatalog = (_, _, branchDb, _) => { cloneCalls += branchDb; Left("not in this spec") },
-      mergeExecutor = new MergeExecutor:
-        def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]] = IO.pure(Right(()))
-      ,
+      mergeExecutor = ai.starlake.quack.ondemand.branch.ZeroRowsMergeExecutor,
       mergeFence = new MergeFence:
         def arm(
             m: Map[String, String],

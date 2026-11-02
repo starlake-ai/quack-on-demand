@@ -53,12 +53,13 @@ object BranchFailure:
   /** A deciding authority (OPA) could not be reached: retryable, never a permission verdict. */
   def unavailable(code: String, msg: String) = BranchFailure(503, code, msg)
 
-/** Runs the merge batch on an ephemeral node built from `spec`. `Right(())` once the batch
-  * committed; `Left(reason)` otherwise (a reason containing "conflict" is the engine's optimistic
-  * concurrency loser; "timeout" is a bounded wait that expired without an answer).
+/** Runs work on an ephemeral merge node built from `spec`: spawns it, waits for it to accept
+  * connections, runs `body`, stops it whatever happens. `Left`: the node never came up, or what
+  * `body` answered. Each call on the node is bounded; a reason containing "timeout" is a bounded
+  * wait that expired without an answer, and the commit message on main then decides what happened.
   */
 trait MergeExecutor:
-  def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]]
+  def withNode[A](spec: NodeSpec)(body: MergeNode => IO[Either[String, A]]): IO[Either[String, A]]
 
 /** Change-feed counts of one modified table on the branch pool: `(inserted, deleted, updated)`.
   * `caller` is who the count statement runs as, required so no call site can leave it to a default:
@@ -856,7 +857,7 @@ final class BranchService(
           case Left(err) => refuse(BranchFailure.upstream("merge_failed", err))
           case Right(_)  =>
             mergeExecutor
-              .run(spec, batch)
+              .withNode(spec)(_.exec(batch))
               .guarantee(IO.blocking(mergeFence.disarm(parentMeta, message)))
               .flatMap(settle(tenant, parent, b, merge, cs, message, actor, apiKey, refuse))
         }
