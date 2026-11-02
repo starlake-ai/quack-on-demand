@@ -859,6 +859,12 @@ In-engine authorization, Phase D: the node decides every statement alone.
   a DoPut client that read -1 for these reads 0. Over JDBC these statements return no rows: an
   `executeQuery` of `CALL`, `EXPLAIN ANALYZE` or a batch answers `Statement did not return a result
   set`, after running once.
+- A FlightSQL write now answers only after its commit (#170). The edge sent the `Count` row first,
+  and the Arrow JDBC driver returns from `executeUpdate` once it holds that row. The next statement
+  could therefore run before the commit (`Table with name ... does not exist` right after the
+  `CREATE TABLE AS` that made it, which had looked like an effect of `setAutoCommit`), and a failed
+  commit reached nobody: a rolled-back write looked like a success. A JDBC client now gets the
+  failure as a `SQLException`.
 
 ## 0.10.1
 

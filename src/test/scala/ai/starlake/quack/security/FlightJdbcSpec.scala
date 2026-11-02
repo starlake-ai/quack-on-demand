@@ -3,12 +3,15 @@ package ai.starlake.quack.security
 import ai.starlake.quack.edge.adapter.{QuackResponse, TestArrow}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.ondemand.InProcessDuckDb
+import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.ipc.ArrowReader
 import org.duckdb.DuckDBConnection
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, SQLException, Statement}
 import java.util.Properties
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.jdk.CollectionConverters._
 
 /** Issue 170 through the real Arrow Flight SQL JDBC driver. The driver sends a statement advertised
@@ -27,7 +30,32 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
   /** What a real node streams: `Success` for these, `Count` for a plain write, else the rows. */
   private val SuccessVerbs = Set("USE", "SET", "RESET", "VACUUM", "ANALYZE", "DROP")
 
-  private final class Edge(val client: Connection, base: Connection, sent: java.util.Queue[String]):
+  /** Mirrors `adapter.StampedCommitArrowReader`: the COMMIT runs when the stream is exhausted, and
+    * a failure propagates to whoever is reading.
+    */
+  private final class CommitOnExhaustion(underlying: ArrowReader, commit: () => Unit)
+      extends ArrowReader(TestArrow.sharedAllocator):
+    private val attempted                 = new AtomicBoolean(false)
+    override def loadNextBatch(): Boolean =
+      val more = underlying.loadNextBatch()
+      if !more && attempted.compareAndSet(false, true) then commit()
+      more
+    override def getVectorSchemaRoot(): VectorSchemaRoot = underlying.getVectorSchemaRoot
+    override def getDictionaryVectors()                  = underlying.getDictionaryVectors
+    override def bytesRead(): Long                       = underlying.bytesRead()
+    override def close(closeReadSource: Boolean): Unit   = underlying.close(closeReadSource)
+    override protected def readSchema()                  = underlying.getVectorSchemaRoot.getSchema
+    override protected def closeReadSource(): Unit       = ()
+
+  private final class Edge(
+      val client: Connection,
+      base: Connection,
+      sent: java.util.Queue[String],
+      commitOfWrites: AtomicReference[() => Unit]
+  ):
+    /** What the COMMIT of each later plain write (`Count` answer) does. */
+    def onCommit(f: () => Unit): Unit = commitOfWrites.set(f)
+
     /** The statements the node received since the last call, then forgets them. */
     def drain(): List[String] =
       val all = sent.asScala.toList
@@ -44,6 +72,7 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
       .getConnection("jdbc:duckdb:", InProcessDuckDb.properties)
       .asInstanceOf[DuckDBConnection]
     val received = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val commit   = new AtomicReference[() => Unit](() => ())
     try
       base.createStatement().execute(OpaEdgeFixtures.OrdersSetup)
       val node: String => QuackResponse = sql =>
@@ -53,15 +82,23 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
           val stmt  = conn.createStatement()
           val parts = sql.split(";").map(_.trim).filter(_.nonEmpty).toList
           parts.init.foreach(stmt.execute)
-          val last = parts.last
-          val verb = last.takeWhile(!_.isWhitespace).toUpperCase(java.util.Locale.ROOT)
-          val rs   =
+          val last   = parts.last
+          val verb   = last.takeWhile(!_.isWhitespace).toUpperCase(java.util.Locale.ROOT)
+          val reader =
             if SuccessVerbs(verb) then
               stmt.execute(last)
-              stmt.executeQuery("SELECT true AS \"Success\"")
-            else if stmt.execute(last) then stmt.getResultSet
-            else stmt.executeQuery(s"SELECT CAST(${stmt.getUpdateCount} AS BIGINT) AS \"Count\"")
-          QuackResponse.Ok(TestArrow.fromResultSet(conn, rs), 1L, () => ())
+              TestArrow.fromResultSet(conn, stmt.executeQuery("SELECT true AS \"Success\""))
+            else if stmt.execute(last) then TestArrow.fromResultSet(conn, stmt.getResultSet)
+            else
+              val count = stmt.getUpdateCount
+              new CommitOnExhaustion(
+                TestArrow.fromResultSet(
+                  conn,
+                  stmt.executeQuery(s"SELECT CAST($count AS BIGINT) AS \"Count\"")
+                ),
+                commit.get()
+              )
+          QuackResponse.Ok(reader, 1L, () => ())
         catch
           case e: Throwable =>
             conn.close()
@@ -83,7 +120,7 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
         val url = s"jdbc:arrow-flight-sql://${h.host}:${h.port}/?useEncryption=false" +
           s"&tenant=${SecurityFixtures.TenantId}&pool=${SecurityFixtures.PoolName}"
         val client = DriverManager.getConnection(url, props)
-        try body(new Edge(client, base, received))
+        try body(new Edge(client, base, received, commit))
         finally client.close()
       finally h.shutdown()
     finally base.close()
@@ -171,6 +208,38 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
   "a prepared executeUpdate" should "survive a Success answer" in withEdge { edge =>
     statement(edge.client)(_.executeUpdate("CREATE TABLE gone(x INT)"))
     prepared(edge.client, "DROP TABLE gone")(_.executeUpdate()) shouldBe 0
+  }
+
+  // A write advertised as Count reaches JDBC through DoGet, and the driver returns from executeUpdate
+  // once it holds the first batch, without reading to the end. The edge sent that batch before the
+  // exhaustion that fires a stamped write's COMMIT, so the client's next statement could run before
+  // the commit (`Table with name ... does not exist` right after the CTAS that created it), and it
+  // never read a failed commit.
+  "a write's answer" should "reach the client only after its COMMIT" in withEdge { edge =>
+    val committed = new AtomicBoolean(false)
+    edge.onCommit { () =>
+      Thread.sleep(500)
+      committed.set(true)
+    }
+    statement(edge.client)(_.executeUpdate("INSERT INTO orders VALUES (20, 'd@x.io')"))
+    committed.get() shouldBe true
+    committed.set(false)
+    prepared(edge.client, "INSERT INTO orders VALUES (21, 'e@x.io')")(_.execute())
+    committed.get() shouldBe true
+  }
+
+  it should "be the failure when its COMMIT fails, and the write must not run again" in withEdge {
+    edge =>
+      edge.onCommit(() => throw new RuntimeException("Transaction conflict"))
+      edge.drain()
+      intercept[SQLException] {
+        statement(edge.client)(_.executeUpdate("INSERT INTO orders VALUES (22, 'f@x.io')"))
+      }
+      edge.drain().count(_.contains("VALUES (22,")) shouldBe 1
+      intercept[SQLException] {
+        prepared(edge.client, "INSERT INTO orders VALUES (23, 'g@x.io')")(_.execute())
+      }
+      edge.drain().count(_.contains("VALUES (23,")) shouldBe 1
   }
 
   "the paths that worked" should "keep working" in withEdge { edge =>

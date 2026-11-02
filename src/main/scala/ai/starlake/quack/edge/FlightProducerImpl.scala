@@ -9,7 +9,8 @@ import org.apache.arrow.flight.sql.NoOpFlightSqlProducer
 import org.apache.arrow.flight.sql.FlightSqlProducer.Schemas
 import org.apache.arrow.flight.sql.impl.FlightSql
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
-import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
+import org.apache.arrow.vector.{BigIntVector, VectorLoader, VectorSchemaRoot, VectorUnloader}
+import org.apache.arrow.vector.ipc.message.ArrowRecordBatch
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 
 import java.nio.charset.StandardCharsets
@@ -258,12 +259,11 @@ final class FlightProducerImpl(
       .toRuntimeException()
 
   /** #106 signature 1: a stamped write's COMMIT (see the `adapter.StampedCommitArrowReader` doc)
-    * fires from INSIDE `streamArrow`'s `loadNextBatch()` loop, after the statement's own result has
-    * already been streamed to the client, and from DoPut's drain before the update count is
-    * acknowledged ([[ackUpdateResult]]). When that COMMIT loses a genuine DuckLake
-    * optimistic-concurrency race, the exception used to fall into the generic [[internalError]]
-    * bucket: a scary opaque "internal error" for what is, underneath, an ordinary concurrent-write
-    * conflict.
+    * fires from INSIDE `streamArrow`'s `loadNextBatch()` loop, before a Count answer is streamed
+    * ([[streamAfterExhaustion]]), and from DoPut's drain before the update count is acknowledged
+    * ([[ackUpdateResult]]). When that COMMIT loses a genuine DuckLake optimistic-concurrency race,
+    * the exception used to fall into the generic [[internalError]] bucket: a scary opaque "internal
+    * error" for what is, underneath, an ordinary concurrent-write conflict.
     *
     * The matcher below recognizes ONLY DuckLake's known-transient
     * write-write/concurrent-modification signature -- reusing the exact heuristic already pinned
@@ -1532,45 +1532,18 @@ final class FlightProducerImpl(
     * legitimately abandon streams mid-flight, and pumping batches into a cancelled gRPC stream
     * wastes node reads and spams netty warnings.
     *
-    * `advertisedWasCount` is true when the caller advertised [[countSchema]] for this statement
-    * (see [[coerceSuccessToCount]]'s doc for why); when the node's first batch turns out to be the
-    * single-row `Success: BOOLEAN` shape instead, the coerced Count row is streamed in its place
-    * and any further node batches are drained unread (there should be none for a single-row
-    * result).
+    * `advertisedWasCount` is true when the caller advertised [[countSchema]] for this statement:
+    * see [[streamAfterExhaustion]].
     */
   private[edge] def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
       listener: FlightProducer.ServerStreamListener,
       advertisedWasCount: Boolean = false
   ): Unit =
-    val root: VectorSchemaRoot = reader.getVectorSchemaRoot
-    var hasMore                = reader.loadNextBatch()
-    // Schema is known independently of hasMore (a Success:BOOLEAN result can report zero
-    // materialized rows - see coerceSuccessToCount's doc), so the coercion check does not gate on
-    // hasMore; it only matters for the untouched pass-through branch below.
-    val toStream: VectorSchemaRoot =
-      if advertisedWasCount then coerceSuccessToCount(root) else root
-    if toStream ne root then
-      // Minor-risk audit trail (see coerceSuccessToCount's doc): this shape is assumed impossible
-      // for a genuine result carrying real rows, but if it ever isn't, warn instead of silently
-      // discarding data. firstBatchRows is read BEFORE the drain loop refills the same root.
-      val firstBatchRows = root.getRowCount
-      try
-        listener.start(toStream)
-        if !listener.isCancelled() then listener.putNext()
-        var laterBatchHadRows = false
-        while reader.loadNextBatch() && !listener.isCancelled() do
-          if root.getRowCount > 0 then laterBatchHadRows = true
-        if firstBatchRows > 1 || laterBatchHadRows then
-          logger.warn(
-            "coerceSuccessToCount discarded a Success:BOOLEAN result carrying real row data " +
-              s"(firstBatchRows=$firstBatchRows, laterBatchHadRows=$laterBatchHadRows) - a " +
-              "statement legitimately returning rows under this exact shape would silently lose " +
-              "them; see coerceSuccessToCount's doc"
-          )
-        listener.completed()
-      finally toStream.close()
+    if advertisedWasCount then streamAfterExhaustion(reader, listener)
     else
+      val root: VectorSchemaRoot = reader.getVectorSchemaRoot
+      var hasMore                = reader.loadNextBatch()
       listener.start(root)
       if !hasMore then
         // Empty result set: emit a zero-row batch so the client receives the
@@ -1581,3 +1554,55 @@ final class FlightProducerImpl(
         listener.putNext()
         hasMore = reader.loadNextBatch()
       listener.completed()
+
+  /** Answer a statement advertised as [[countSchema]] only once its stream is exhausted, which is
+    * what fires a stamped write's deferred COMMIT (`adapter.StampedCommitArrowReader`). The Arrow
+    * JDBC driver returns from `executeUpdate` as soon as it holds the first batch and never reads
+    * further, so with the Count row sent first its next statement could run before the COMMIT
+    * (`Table with name ... does not exist` right after the CTAS that created it), and a COMMIT that
+    * failed reached nobody: a rolled-back write looked like a success (issue 170). A failure here
+    * propagates to the caller before anything is sent.
+    *
+    * Holding the batches is cheap: such a statement answers one row. A node reply of the
+    * `Success: BOOLEAN` shape is coerced ([[coerceSuccessToCount]]) and its rows dropped, with a
+    * WARN if it carried real data.
+    */
+  private def streamAfterExhaustion(
+      reader: org.apache.arrow.vector.ipc.ArrowReader,
+      listener: FlightProducer.ServerStreamListener
+  ): Unit =
+    val root    = reader.getVectorSchemaRoot
+    val batches = scala.collection.mutable.ListBuffer.empty[ArrowRecordBatch]
+    try
+      while reader.loadNextBatch() do batches += new VectorUnloader(root).getRecordBatch
+      val coerced = coerceSuccessToCount(root)
+      if coerced ne root then
+        try
+          val rows = batches.iterator.map(_.getLength.toLong).sum
+          if rows > 1 then
+            logger.warn(
+              s"coerceSuccessToCount discarded a Success:BOOLEAN result carrying real row data " +
+                s"($rows rows) - a statement legitimately returning rows under this exact shape " +
+                "would silently lose them; see coerceSuccessToCount's doc"
+            )
+          listener.start(coerced)
+          if !listener.isCancelled() then listener.putNext()
+          listener.completed()
+        finally coerced.close()
+      else
+        // The held batches share the reader's buffers, which Arrow only lets vectors of an allocator
+        // with the same root take over.
+        val owner = root.getFieldVectors.asScala.headOption.fold(allocator)(_.getAllocator)
+        val out   = VectorSchemaRoot.create(root.getSchema, owner)
+        try
+          listener.start(out)
+          if batches.isEmpty then
+            out.setRowCount(0)
+            listener.putNext()
+          val loader = new VectorLoader(out)
+          for batch <- batches if !listener.isCancelled() do
+            loader.load(batch)
+            listener.putNext()
+          listener.completed()
+        finally out.close()
+    finally batches.foreach(_.close())
