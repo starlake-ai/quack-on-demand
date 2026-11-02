@@ -2101,8 +2101,7 @@ abstract class AuthzEndToEndCases(
       withClue(s"[$d] mona: an AT read under the old name -> ") {
         as(d, "mona", "lake", s"SELECT id FROM $lake.main.vault AT (VERSION => $old)") match
           case Left(err) =>
-            val guard = "under a column or row policy it cannot be read with time travel"
-            err should (include(guard) or
+            err should (include("under a column or row policy it cannot be read with time travel") or
               include("not available to principals with column or row policies"))
           case Right(rows) => fail(s"expected a refusal, got rows $rows")
       }

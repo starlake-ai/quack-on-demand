@@ -41,8 +41,8 @@ import scala.util.Using
   * (FlightSqlRouter: column and row policy rewriters, metadata filter, protected-write guard): a
   * router over a one-node pool of a chosen tenant-db kind, whose node call only captures the fully
   * rewritten, `USE`-prefixed SQL, plus an in-process DuckDB (core, no extensions) to execute that
-  * captured text against seeded tables. Table grants are not judged here: qod-node decides them, so
-  * a spec that needs a refusal answers it through `respond`, as the node would.
+  * captured text against seeded tables. Table grants are not judged here: qod-node decides them,
+  * so a spec that needs a refusal answers it through `respond`, as the node would.
   */
 object PolicyPipelineFixture:
 
@@ -104,7 +104,6 @@ object PolicyPipelineFixture:
       guarded: Boolean = false
   ): Harness =
     val backend = new QuackBackend:
-      def allowsLocalFiles   = true
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -130,7 +129,7 @@ object PolicyPipelineFixture:
       backend,
       tracker,
       store,
-      duckLakeInitializer = (_, _, _) => ()
+      duckLakeInitializer = (_, _) => ()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     val metastore = kc.kind match
@@ -148,7 +147,7 @@ object PolicyPipelineFixture:
       case TenantDbKind.InMemory => ""
       case _                     => s"/tmp/qod-policy-pipeline/${kc.catalog}"
     sup
-      .createTenantDb("acme", kc.suffix, kc.kind, metastore, dataPath, writerTrusted = true)
+      .createTenantDb("acme", kc.suffix, kc.kind, metastore, dataPath)
       .unsafeRunSync()
       .fold(e => throw new IllegalStateException(s"createTenantDb(${kc.kind}): $e"), identity)
     val key = PoolKey("acme", s"acme_${kc.suffix}", "sales")

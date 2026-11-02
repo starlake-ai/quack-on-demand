@@ -40,11 +40,19 @@ class ExecCallerSpec extends AnyFlatSpec with Matchers:
     c.preferredNode shouldBe None
   }
 
-  it should "carry no JWT roles, groups or claims and admit a superuser row by default" in {
+  it should "carry no JWT roles, groups or claims by default" in {
     // Only a caller holding a verified bearer JWT sets these; every other call site is unchanged.
-    val c = ExecCaller.unrestricted("conn-1", "alice")
+    val c = ExecCaller.unrestricted("conn-1", "alice", superuserAdmissible = false)
     (c.jwtRoles, c.jwtGroups, c.jwtClaims) shouldBe (Set.empty, Set.empty, Map.empty)
-    c.superuserAdmissible shouldBe true
+  }
+
+  it should "hand its JWT roles, groups and claims to the handshake request" in {
+    val c = ExecCaller
+      .unrestricted("conn-1", "alice", superuserAdmissible = false)
+      .copy(jwtRoles = Set("r"), jwtGroups = Set("g"), jwtClaims = Map("sub" -> "alice"))
+    val req = c.authzRequest(ai.starlake.quack.model.PoolKey("acme", "acme_db", "p"))
+    (req.jwtRoles, req.jwtGroups, req.jwtClaims) shouldBe (Set("r"), Set("g"), Map("sub" -> "alice"))
+    req.superuserAdmissible shouldBe false
   }
 
   "effectiveMaxRows" should "take the smallest of the server cap, the token cap and the request" in {
