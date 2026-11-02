@@ -866,6 +866,13 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `CREATE TABLE AS` that made it, which had looked like an effect of `setAutoCommit`), and a failed
   commit reached nobody: a rolled-back write looked like a success. A JDBC client now gets the
   failure as a `SQLException`.
+- Behaviour change over the Arrow JDBC driver: a plain write is now a real update (#170).
+  `Statement.executeUpdate` returns its row count instead of -1, and `Statement.execute` returns
+  `false` with the count in `getUpdateCount`, instead of a result set holding a `Count` row. So an
+  `executeQuery` of a write now answers `Statement did not return a result set`, after running
+  once: a client reading that `Count` row must use `executeUpdate`. `GetFlightInfo` and `GetSchema`
+  still advertise `Count`, so ADBC is unchanged; only the Prepare answer has zero fields. ODBC reads
+  the same two, but this was not tested against the ODBC driver or Power BI.
 
 ## 0.10.1
 

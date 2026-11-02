@@ -77,6 +77,8 @@ for every later statement there.
 The driver returns no rows for a statement QoD cannot describe without running
 it (`CALL`, `EXPLAIN ANALYZE`, a batch of statements). The statement still runs
 once, and `executeQuery` then answers `Statement did not return a result set`.
+The same goes for an `INSERT`, `UPDATE`, `DELETE` or DDL statement: run them with
+`executeUpdate`, which returns the row count.
 
 ## Configuration
 

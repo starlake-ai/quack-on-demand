@@ -60,11 +60,10 @@ class SchemaProbeAdbcSpec extends AnyFlatSpec with Matchers:
           val stmt  = conn.createStatement()
           val parts = sql.split(";").map(_.trim).filter(_.nonEmpty).toList
           parts.init.foreach(stmt.execute)
-          QuackResponse.Ok(
-            TestArrow.fromResultSet(conn, stmt.executeQuery(parts.last)),
-            1L,
-            () => ()
-          )
+          val rs =
+            if stmt.execute(parts.last) then stmt.getResultSet
+            else stmt.executeQuery(s"SELECT CAST(${stmt.getUpdateCount} AS BIGINT) AS \"Count\"")
+          QuackResponse.Ok(TestArrow.fromResultSet(conn, rs), 1L, () => ())
         catch
           case e: Throwable =>
             conn.close()
@@ -99,14 +98,19 @@ class SchemaProbeAdbcSpec extends AnyFlatSpec with Matchers:
              |print(cur.fetchall()[0][0])
              |cur.execute("SHOW TABLES")
              |print(sorted(r[0] for r in cur.fetchall()))
+             |cur.execute("INSERT INTO orders VALUES (4, 'd@x.io'), (5, 'e@x.io')")
+             |print(cur.description[0][0], cur.fetchall()[0][0])
+             |print(cur.adbc_statement.set_sql_query("INSERT INTO orders VALUES (6, 'f@x.io')"), cur.adbc_statement.execute_update())
              |conn.close()
              |""".stripMargin
         )
         withClue(err)(rc shouldBe 0)
-        out.split("\n").toList shouldBe List("3", "['orders']")
-        received.asScala.count(_.contains("INSERT INTO orders")) shouldBe 1
+        out.split("\n").toList shouldBe List("3", "['orders']", "Count 2", "None 1")
+        received.asScala.count(_.contains("VALUES (3, 'c@x.io')")) shouldBe 1
+        received.asScala.count(_.contains("(4, 'd@x.io')")) shouldBe 1
+        received.asScala.count(_.contains("(6, 'f@x.io')")) shouldBe 1
         val rs = base.createStatement().executeQuery("SELECT count(*) FROM orders")
         rs.next()
-        rs.getLong(1) shouldBe 3L
+        rs.getLong(1) shouldBe 6L
       finally h.shutdown()
     finally base.close()

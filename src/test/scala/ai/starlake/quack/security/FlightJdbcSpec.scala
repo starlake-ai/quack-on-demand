@@ -223,7 +223,28 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
     prepared(edge.client, "DELETE FROM orders WHERE id >= 40")(_.executeUpdate()) shouldBe 2
   }
 
-  it should "be 0 for a statement answering Success" in withEdge { edge =>
+  // A plain write was advertised as Count at Prepare, so the driver took it for a query: the count
+  // stayed in a result set that Statement.executeUpdate never reads, and it answered -1.
+  it should "reach Statement.executeUpdate for a plain write" in withEdge { edge =>
+    val insert = "INSERT INTO orders VALUES (50, 'm@x.io'), (51, 'n@x.io'), (52, 'o@x.io')"
+    statement(edge.client)(_.executeUpdate(insert)) shouldBe 3
+    val delete = "DELETE FROM orders WHERE id >= 50"
+    statement(edge.client)(s => (s.execute(delete), s.getUpdateCount)) shouldBe (false, 3)
+    statement(edge.client)(_.executeUpdate("CREATE TABLE made(x INT)")) should be >= 0
+    prepared(edge.client, "DROP TABLE made")(_.executeUpdate()) shouldBe 0
+  }
+
+  "a plain write through executeQuery" should "be refused plainly, after running once" in withEdge {
+    edge =>
+      edge.drain()
+      val e = intercept[SQLException] {
+        statement(edge.client)(_.executeQuery("INSERT INTO orders VALUES (60, 'p@x.io')"))
+      }
+      e.getMessage should include("did not return a result set")
+      edge.drain().count(_.contains("VALUES (60,")) shouldBe 1
+  }
+
+  "the update count of a Success answer" should "be 0" in withEdge { edge =>
     statement(edge.client)(_.executeUpdate("USE main")) shouldBe 0
     prepared(edge.client, "SET threads=2")(_.executeUpdate()) shouldBe 0
   }

@@ -424,7 +424,13 @@ final class FlightProducerImpl(
     liveSession(peer, noContext(peer)) match
       case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
         // Registers the handle and answers the Prepare with the advertised schema (None: absent).
-        def prepared(schema: Option[Schema], node: Option[String], durationMs: Option[Long]) =
+        // `answered` is what the Prepare result itself says, when it differs from `schema`.
+        def prepared(
+            schema: Option[Schema],
+            node: Option[String],
+            durationMs: Option[Long],
+            answered: Option[ByteString] = None
+        ) =
           val handle = java.util.UUID.randomUUID().toString
           preparedStatements.put(
             handle,
@@ -442,7 +448,9 @@ final class FlightProducerImpl(
           val resp = FlightSql.ActionCreatePreparedStatementResult
             .newBuilder()
             .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
-            .setDatasetSchema(schema.map(serializeSchema).getOrElse(ByteString.EMPTY))
+            .setDatasetSchema(
+              answered.getOrElse(schema.map(serializeSchema).getOrElse(ByteString.EMPTY))
+            )
             // The ODBC driver throws on an ABSENT parameter_schema, so advertise
             // zero parameters explicitly via the empty schema.
             .setParameterSchema(emptySchemaBytes)
@@ -474,10 +482,17 @@ final class FlightProducerImpl(
             // SQL admin mutation, which always delivers (status, detail) - advertise
             // adminStatusSchema instead (see its doc for the incident this fixes). Not executed
             // here either way - only the schema advertised at Prepare differs.
-            val skipSchema =
-              if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then adminStatusSchema
-              else countSchema
-            prepared(Some(skipSchema), None, None)
+            //
+            // A Count result answers Prepare itself with zero fields, while GetFlightInfo and
+            // GetSchema keep advertising Count. The Arrow JDBC driver decides from this answer
+            // alone: with Count it takes the write for a query, and Statement.executeUpdate
+            // returns -1 without reading the count from its result set. With zero fields it goes
+            // through DoPut and gets the count. The answer is present rather than absent as the
+            // ODBC driver refuses an absent parameter_schema; it reads the result schema from
+            // FlightInfo and GetSchema, like ADBC.
+            if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
+              prepared(Some(adminStatusSchema), None, None)
+            else prepared(Some(countSchema), None, None, answered = Some(emptySchemaBytes))
 
           case PrepareStrategy.Unprobed =>
             // No node call: running the text to read its schema would run its effects, and the
@@ -1019,7 +1034,7 @@ final class FlightProducerImpl(
     */
   private def drainUpdateCount(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
     var count = 0L
-    while reader.loadNextBatch() do count += updateCountOf(reader.getVectorSchemaRoot)
+    while reader.loadNextBatch() do count += updateCountOf(reader.getVectorSchemaRoot).max(0L)
     count
 
   /** What one batch adds to the count: DuckDB's `Count` cell, 0 for its `Success` answer ("ran,
