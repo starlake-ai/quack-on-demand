@@ -130,6 +130,7 @@ class MergeDecisionSpec extends AnyFlatSpec with Matchers:
     val Verdict.Refuse(f) = v: @unchecked
     f.code shouldBe "conflicts_changed"
     f.status shouldBe 409
+    f.message shouldBe "row conflicts the proposal did not show on: s.a; propose again"
     f.message should include("s.a")
     f.message should not include "s.b"
     f.message should not include "s.c"
@@ -159,6 +160,61 @@ class MergeDecisionSpec extends AnyFlatSpec with Matchers:
     decide(RowCounts("s", "a", toDelete = 1L)) shouldBe Verdict.Proceed
     decide(RowCounts("s", "a", toInsert = 1L)) shouldBe Verdict.Proceed
     decide(RowCounts("s", "a")) shouldBe Verdict.NothingToDo
+  }
+
+  it should "say there is nothing to do when a conflict within the proposal leaves nothing to write" in {
+    // Main wins an update/delete conflict: its row stays, and the branch's delete is not applied.
+    val c = RowCounts("s", "a", updateDeleteConflicts = 2L)
+    def decide(policy: Option[ConflictPolicy], proposed: List[RowCounts], others: Boolean) =
+      MergeDecision.decide(List(c), proposed, policy, others)
+    decide(Some(ConflictPolicy.Main), List(c), others = false) shouldBe Verdict.NothingToDo
+    decide(Some(ConflictPolicy.Main), List(c), others = true) shouldBe Verdict.Proceed
+    // Nothing to write is no reason to skip the conflicts: they are ruled on first.
+    code(decide(None, List(c), others = false)) shouldBe "merge_conflict"
+    code(decide(Some(ConflictPolicy.Main), Nil, others = false)) shouldBe "conflicts_changed"
+  }
+
+  it should "cap the main rows a key matches under branch, which a fall in toDelete can hide" in {
+    // The branch deletes 1000 fork rows and inserts one with the key, and main inserts one with it:
+    // keyMatches 1, one main row matched, toDelete 1001. Main then deletes the 1000 fork rows and
+    // inserts 1000 rows with the key: keyMatches and toDelete are as before, 1000 main rows match.
+    val shown =
+      RowCounts("s", "a", toUpdate = 1L, toDelete = 1001L, keyMatches = 1L, mainRowsByKey = 1L)
+    def decide(now: RowCounts, policy: ConflictPolicy) =
+      MergeDecision.decide(List(now), List(shown), Some(policy), otherTables = false)
+    val flood = shown.copy(mainRowsByKey = 1000L)
+    code(decide(flood, ConflictPolicy.Branch)) shouldBe "conflicts_changed"
+    decide(flood, ConflictPolicy.Main) shouldBe Verdict.Proceed
+    // As many main rows as were shown, or fewer: fine.
+    decide(shown, ConflictPolicy.Branch) shouldBe Verdict.Proceed
+    decide(shown.copy(mainRowsByKey = 0L), ConflictPolicy.Branch) shouldBe Verdict.Proceed
+  }
+
+  it should "compare the conflicts of each column, so one column cannot stand in for another" in {
+    def decide(now: RowCounts, shown: RowCounts, policy: ConflictPolicy) =
+      MergeDecision.decide(List(now), List(shown), Some(policy), otherTables = false)
+    // Two rows in conflict, both in column a.
+    val onA =
+      RowCounts("s", "t", toUpdate = 1L, cellConflicts = 2L, columnConflicts = Map("a" -> 2L))
+    // The same total, now in column b. And two rows in conflict on a, one of them also on b.
+    val onB   = onA.copy(columnConflicts = Map("b" -> 2L))
+    val shown = onA.copy(columnConflicts = Map("a" -> 1L, "b" -> 2L))
+    for policy <- ConflictPolicy.values do
+      withClue(s"$policy: ") {
+        code(decide(onB, onA, policy)) shouldBe "conflicts_changed"
+        code(decide(onA, onB, policy)) shouldBe "conflicts_changed"
+        // A column the proposal did list, with more conflicts and the same total.
+        code(decide(onA.copy(columnConflicts = Map("a" -> 2L, "b" -> 1L)), shown, policy)) shouldBe
+          "conflicts_changed"
+        // A proposal stored without the map: every column reads 0.
+        code(decide(onA, onA.copy(columnConflicts = Map.empty), policy)) shouldBe
+          "conflicts_changed"
+        // As many in each column, or fewer.
+        decide(onA, onA, policy) shouldBe Verdict.Proceed
+        decide(onA.copy(cellConflicts = 1L, columnConflicts = Map("a" -> 1L)), onA, policy) shouldBe
+          Verdict.Proceed
+        decide(shown, shown, policy) shouldBe Verdict.Proceed
+      }
   }
 
   "ConflictPolicy.fromWire" should "read main and branch only" in {
@@ -251,21 +307,28 @@ class MergeDecisionSpec extends AnyFlatSpec with Matchers:
       updateDeleteConflicts = 6L,
       deleteUpdateConflicts = 7L,
       keyMatches = 8L,
-      minUpdateRowid = 9L,
-      maxUpdateRowid = 10L,
-      columnConflicts = Map("a" -> 11L),
-      samples = Map("cell" -> List(12L, 13L))
+      mainRowsByKey = 9L,
+      minUpdateRowid = 10L,
+      maxUpdateRowid = 11L,
+      columnConflicts = Map("a" -> 12L),
+      samples = Map("cell" -> List(13L, 14L))
     )
     val stored =
       """[{
         |  "schema": "s", "table": "t",
         |  "toUpdate": 2, "toDelete": 3, "toInsert": 4,
         |  "cellConflicts": 5, "updateDeleteConflicts": 6, "deleteUpdateConflicts": 7,
-        |  "keyMatches": 8, "minUpdateRowid": 9, "maxUpdateRowid": 10,
-        |  "columnConflicts": {"a": 11}, "samples": {"cell": [12, 13]}
+        |  "keyMatches": 8, "mainRowsByKey": 9, "minUpdateRowid": 10, "maxUpdateRowid": 11,
+        |  "columnConflicts": {"a": 12}, "samples": {"cell": [13, 14]}
         |}]""".stripMargin
     RowCounts.listFromJson(stored) shouldBe Right(List(full))
     parse(RowCounts.listToJson(List(full))) shouldBe parse(stored)
+  }
+
+  it should "not count the main rows a key matches as a conflict" in {
+    val c = RowCounts("s", "t", toUpdate = 1L, mainRowsByKey = 5L)
+    c.conflicts shouldBe 0L
+    MergeDecision.decide(List(c), Nil, None, otherTables = false) shouldBe Verdict.Proceed
   }
 
   "the error helpers" should "recognize a moved main and an exhausted memory" in {
@@ -328,4 +391,53 @@ class MergeDecisionSpec extends AnyFlatSpec with Matchers:
   it should "say the merge node needs more memory with no colon when no text is left" in {
     MergeDecision.failureText("\"quoted from the start\" Out of Memory Error") shouldBe
       "the merge node needs more memory"
+  }
+
+  private val CommitWrapper =
+    "Invalid Input Error: Failed to commit: Failed to commit DuckLake transaction."
+
+  it should "keep the cause DuckLake puts on the line after its commit wrapper" in {
+    // The three texts of FlightProducerImplSuccessCoercionSpec, a full disk among them.
+    val causes = List(
+      "Transaction conflict: catalog was modified by a concurrent transaction",
+      "Failed to load DuckLake - table with id 76 references schema id 1 that does not exist",
+      "IO Error: No space left on device"
+    )
+    for cause <- causes do
+      MergeDecision.failureText(s"$CommitWrapper\n$cause") shouldBe s"$CommitWrapper $cause"
+    MergeDecision.failureText(s"$CommitWrapper\r\n${causes(2)}") shouldBe
+      s"$CommitWrapper ${causes(2)}"
+  }
+
+  it should "keep one more line only under that wrapper, cut at its first quote" in {
+    val disk = "IO Error: No space left on device"
+    // No third line: a detail line can hold a value with no quote around it.
+    MergeDecision.failureText(
+      s"$CommitWrapper\n$disk\nDETAIL: Key (day)=(SENTINEL) already exists."
+    ) shouldBe s"$CommitWrapper $disk"
+    // A quote on the second line ends the text there.
+    MergeDecision.failureText(
+      CommitWrapper + "\nFailed to execute query \"INSERT INTO i VALUES ('SENTINEL')\": ERROR: boom"
+    ) shouldBe s"$CommitWrapper Failed to execute query"
+    // A quote on the first line ends everything there, the wrapper's cause included.
+    MergeDecision.failureText(s"$CommitWrapper 'x'\n$disk") shouldBe CommitWrapper
+    // Another first line gets no second one, even when it holds the wrapper's words.
+    MergeDecision.failureText(
+      "Failed to commit DuckLake transaction. Retry\nDETAIL: Key (day)=(SENTINEL) already exists."
+    ) shouldBe "Failed to commit DuckLake transaction. Retry"
+    // The wrapper alone, or followed by a blank line, has no cause to add.
+    MergeDecision.failureText(CommitWrapper) shouldBe CommitWrapper
+    MergeDecision.failureText(s"$CommitWrapper\n\nPossible solutions:") shouldBe CommitWrapper
+    // The limit bounds the whole text.
+    MergeDecision.failureText(s"$CommitWrapper\n" + "x" * 1000).length shouldBe 300
+  }
+
+  it should "keep the sizes of an out-of-memory error under that wrapper" in {
+    val sizes =
+      "Out of Memory Error: failed to allocate data of size 1.0 GiB (15.9 GiB/16.0 GiB used)"
+    val hints =
+      "\n\nPossible solutions:\n* Reducing the number of threads (SET threads=X)\n" +
+        "* Increasing the memory limit (SET memory_limit='...GB')"
+    MergeDecision.failureText(s"$CommitWrapper\n$sizes$hints") shouldBe
+      s"the merge node needs more memory: $CommitWrapper $sizes"
   }

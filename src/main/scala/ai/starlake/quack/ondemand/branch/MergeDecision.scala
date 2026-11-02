@@ -16,7 +16,9 @@ object ConflictPolicy:
 /** One table's row merge as Decide saw it: how many rows each statement would write, the conflicts
   * and sample rowids. Numbers and rowids only: no cell value is ever kept (design section 8.2).
   * `updateDeleteConflicts`: main updated, the branch deleted. `deleteUpdateConflicts`: main
-  * deleted, the branch updated.
+  * deleted, the branch updated. `mainRowsByKey`: the rows of main the declared key matches, as
+  * distinct main rowids; `branch` deletes them all, while `keyMatches` counts the branch's rows
+  * only. It is not a conflict of its own, so it is not part of `conflicts`.
   */
 final case class RowCounts(
     schema: String,
@@ -28,6 +30,7 @@ final case class RowCounts(
     updateDeleteConflicts: Long = 0L,
     deleteUpdateConflicts: Long = 0L,
     keyMatches: Long = 0L,
+    mainRowsByKey: Long = 0L,
     minUpdateRowid: Long = 0L,
     maxUpdateRowid: Long = 0L,
     columnConflicts: Map[String, Long] = Map.empty,
@@ -106,21 +109,26 @@ object MergeDecision:
       .find(p => p.schema == c.schema && p.table == c.table)
       .getOrElse(RowCounts(c.schema, c.table))
 
-  /** Whether `c` is above what the proposal showed in any one kind of conflict. A total would let a
-    * shown cell conflict stand in for a delete the approver never saw.
+  /** Whether `c` is above what the proposal showed in any one kind of conflict, or in any one
+    * column (a column it did not list showed 0). A total would let a shown cell conflict stand in
+    * for a delete the approver never saw, or a conflict in column `b` for one in column `a`.
     *
-    * Under `branch` it is also above when it deletes more rows from main. `branch` deletes every
-    * main row whose key matches, however many now do, while `keyMatches` counts the branch's rows
-    * only: one branch row can come to delete a million that no conflict count showed. The branch is
-    * frozen, so only key matches can raise `toDelete`; main deleting rows the branch deleted only
-    * lowers it.
+    * Under `branch`, two counts of what it deletes from main are capped as well. `branch` deletes
+    * every main row whose key matches, however many now do, while `keyMatches` counts the branch's
+    * rows only: one branch row can come to delete a million main rows that no conflict count
+    * showed. `mainRowsByKey` counts those main rows. `toDelete` adds them to the branch's own
+    * deletes, and main deleting some of those lowers it, so a rise in the key matches could hide in
+    * that total. `toDelete` stays capped beside it, so that any growth of the delete set that the
+    * key count does not explain is refused too.
     */
   private def grew(c: RowCounts, shown: RowCounts, policy: Option[ConflictPolicy]): Boolean =
     c.cellConflicts > shown.cellConflicts ||
       c.updateDeleteConflicts > shown.updateDeleteConflicts ||
       c.deleteUpdateConflicts > shown.deleteUpdateConflicts ||
       c.keyMatches > shown.keyMatches ||
-      (policy.contains(ConflictPolicy.Branch) && c.toDelete > shown.toDelete)
+      c.columnConflicts.exists((column, n) => n > shown.columnConflicts.getOrElse(column, 0L)) ||
+      (policy.contains(ConflictPolicy.Branch) &&
+        (c.mainRowsByKey > shown.mainRowsByKey || c.toDelete > shown.toDelete))
 
   /** Whether an attempt goes on to Apply. `proposed`: the counts the approver saw. Messages name
     * tables, never numbers: the caller may hold no grant on them (design section 8.2).
@@ -145,7 +153,7 @@ object MergeDecision:
       Verdict.Refuse(
         BranchFailure.conflict(
           "conflicts_changed",
-          s"more row conflicts than the proposal showed on: ${names(grown)}; propose again"
+          s"row conflicts the proposal did not show on: ${names(grown)}; propose again"
         )
       )
     else if !otherTables && now.forall(_.writesNothing) then Verdict.NothingToDo
@@ -186,24 +194,43 @@ object MergeDecision:
 
   private val MaxFailureText = 300
 
-  /** What may be stored and returned of a node's error: its first line, up to the first quote.
+  /** DuckLake's wrapper of a failed commit. It ends the first line of the error, and the cause is
+    * on the second.
+    */
+  private val CommitWrapper = "Failed to commit DuckLake transaction."
+
+  private def beforeQuote(line: String): String =
+    line.takeWhile(c => c != '\'' && c != '"').trim
+
+  /** What may be stored and returned of a node's error: its first line, up to the first quote, and
+    * under DuckLake's commit wrapper the line after it, cut the same way; 300 characters at most.
     * DuckDB's errors quote values, and DuckLake's quote the whole failed metadata batch, inlined
-    * rows included, so no cell value is ever stored (design section 8.2). Only the first line,
-    * because the lines after it can hold a value with no quote around it (a detail line) and, in an
-    * out-of-memory error, tuning hints naming settings the caller cannot change; the sizes are on
-    * the first line.
+    * rows included, so no cell value is ever stored (design section 8.2). A quote on the first line
+    * ends everything there.
+    *
+    * No more lines than that, because later ones can hold a value with no quote around it (a detail
+    * line) and, in an out-of-memory error, tuning hints naming settings the caller cannot change.
+    * The wrapper is the first line and its cause the second (a full disk, a broken catalog, a lost
+    * race), and this text is the only record of the failure, so that line is kept. The sizes of an
+    * out-of-memory error are on the first line, or on the second under the wrapper.
     *
     * The cut does not catch a value DuckDB prints with no quote, as in "with value N can't be
     * cast". That error is not reachable: the merge's own SQL holds no cast, it copies and compares
     * columns of the same type. A statement added to it that casts must check this again.
     */
   def failureText(error: String): String =
-    val kept = error
-      .takeWhile(c => c != '\n' && c != '\r' && c != '\'' && c != '"')
-      .take(MaxFailureText)
-      .trim
+    val lines  = error.linesIterator
+    val first  = lines.nextOption().getOrElse("")
+    val head   = beforeQuote(first)
+    val quoted = first.exists(c => c == '\'' || c == '"')
+    val kept   =
+      if !quoted && head.endsWith(CommitWrapper) then
+        val cause = beforeQuote(lines.nextOption().getOrElse(""))
+        if cause.isEmpty then head else s"$head $cause"
+      else head
+    val text = kept.take(MaxFailureText).trim
     if outOfMemory(error) then
-      if kept.isEmpty then "the merge node needs more memory"
-      else s"the merge node needs more memory: $kept"
-    else if kept.isEmpty then "the merge failed on the node"
-    else kept
+      if text.isEmpty then "the merge node needs more memory"
+      else s"the merge node needs more memory: $text"
+    else if text.isEmpty then "the merge failed on the node"
+    else text
