@@ -368,7 +368,11 @@ object ManagerServerHarness:
       // the manager-wide password grant behind the database check, passes its own.
       authService: Option[AuthenticationService] = None,
       // Request limits of the REST listener. Specs that exercise them pass small ones.
-      restLimits: RestLimitsConfig = RestLimitsConfig()
+      restLimits: RestLimitsConfig = RestLimitsConfig(),
+      // GET /metrics. The default mounts nothing (no Prometheus child, as with the sink off); a spec
+      // that drives the route through the real server passes an endpoint over its own registry.
+      metricsEndpoint: MetricsEndpoint =
+        new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
   ): Harness =
     val mgrCfg  = minimalManagerConfig(port = 0).copy(restLimits = restLimits)
     val edgeCfg = minimalFlightConfig
@@ -612,8 +616,6 @@ object ManagerServerHarness:
       hostname = "localhost",
       requireEncryption = false
     )
-
-    val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
 
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
     // Main's wiring (total scopeOf; PAT resolution via patAuth).

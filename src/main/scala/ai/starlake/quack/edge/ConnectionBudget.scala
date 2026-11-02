@@ -47,7 +47,7 @@ object ConnectionBudget:
       heldBytes: Long,
       maxHeapBytes: Long
   ): String =
-    s"$listener takes $taken connections, not the $configured of $envVar: each can hold " +
+    s"$listener takes at most $taken of the $configured connections of $envVar: each can hold " +
       s"${heldBytes / 1024} KiB before any credential, against a fifth of this " +
       s"${maxHeapBytes / (1024 * 1024)} MiB heap. Raise the heap (-Xmx) or lower the limits to " +
       "take more"

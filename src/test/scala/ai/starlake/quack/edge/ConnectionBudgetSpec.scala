@@ -108,9 +108,9 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
       rest,
       oneGiB
     ) shouldBe
-      "The REST port takes 260 connections, not the 1024 of QOD_REST_MAX_CONNECTIONS: each can " +
-      "hold 806 KiB before any credential, against a fifth of this 1024 MiB heap. Raise the heap " +
-      "(-Xmx) or lower the limits to take more"
+      "The REST port takes at most 260 of the 1024 connections of QOD_REST_MAX_CONNECTIONS: each " +
+      "can hold 806 KiB before any credential, against a fifth of this 1024 MiB heap. Raise the " +
+      "heap (-Xmx) or lower the limits to take more"
 
   it should "stay true when not even one connection fits a fifth of the heap" in:
     // An operator's 2 GiB public body limit: one connection can hold twice the heap's fifth, and
@@ -128,7 +128,9 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
         huge,
         oneGiB
       )
-    line should include("takes 1 connections, not the 1024 of QOD_REST_MAX_CONNECTIONS")
+    line should include("takes at most 1 of the 1024 connections of QOD_REST_MAX_CONNECTIONS")
+    // Said of one connection as of many: "takes 1 connections" read badly.
+    line should not include "takes 1 connections"
     line should include(s"each can hold ${huge / 1024} KiB before any credential")
     line should include("against a fifth of this 1024 MiB heap")
     line should include("Raise the heap (-Xmx) or lower the limits to take more")

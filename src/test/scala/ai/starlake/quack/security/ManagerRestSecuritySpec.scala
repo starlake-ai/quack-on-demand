@@ -3,7 +3,9 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.RestLimitsConfig
 import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
+import ai.starlake.quack.observability.metrics.MetricsEndpoint
 import io.circe.parser._
+import io.micrometer.prometheusmetrics.{PrometheusConfig, PrometheusMeterRegistry}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -1138,6 +1140,64 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
           rawStatus(new java.io.BufferedInputStream(client.getInputStream)) shouldBe 200
         finally client.close()
       finally holders.foreach(_.close())
+    finally h.shutdown()
+  }
+
+  /** [[rawResponse]] with the body of a response framed by its Content-Length. */
+  private def rawResponseBody(in: java.io.InputStream): (Int, Map[String, String], Array[Byte]) =
+    def line(): String =
+      val sb = new StringBuilder
+      var c  = in.read()
+      while c != -1 && c != '\n' do
+        if c != '\r' then sb.append(c.toChar)
+        c = in.read()
+      sb.toString
+    val status  = line().split(' ')(1).toInt
+    val headers = Iterator
+      .continually(line())
+      .takeWhile(_.nonEmpty)
+      .map(h => h.take(h.indexOf(':')).trim.toLowerCase -> h.drop(h.indexOf(':') + 1).trim)
+      .toMap
+    (status, headers, in.readNBytes(headers("content-length").toInt))
+
+  // /metrics is public (a scraper holds no credential) and is mounted from the harness's own
+  // endpoint, so these cases pin the mount outside the guard, the interpreter's options, and the
+  // Accept answer through the real server: none of them is visible to a spec of the endpoint alone.
+  "The REST metrics route" should "answer a scraper that holds no credential with the whole scrape, its length and its media type" in {
+    val prom = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
+    prom.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok").increment()
+    val expected = prom.scrape().getBytes(UTF_8)
+    val scrapes  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val fix      = SecurityFixtures.freshStore()
+    val h        = ManagerServerHarness.boot(
+      fix.store,
+      metricsEndpoint = new MetricsEndpoint(Some(prom), () => scrapes.incrementAndGet())
+    )
+    try
+      val uri  = java.net.URI.create(h.baseUrl)
+      val sock = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        sock.setSoTimeout(15000)
+        val in = new java.io.BufferedInputStream(sock.getInputStream)
+        // Two scrapes on one connection, as Prometheus keeps one, with no credential and the
+        // Accept header of the scrapers that ask for plain text.
+        val answers = List.fill(2) {
+          sock.getOutputStream.write(
+            "GET /metrics HTTP/1.1\r\nHost: l\r\nAccept: text/plain\r\n\r\n".getBytes(UTF_8)
+          )
+          sock.getOutputStream.flush()
+          rawResponseBody(in)
+        }
+        answers.foreach { (status, headers, body) =>
+          status shouldBe 200
+          headers("content-type") shouldBe "text/plain; version=0.0.4; charset=utf-8"
+          headers("content-length") shouldBe expected.length.toString
+          headers.get("transfer-encoding") shouldBe None
+          body shouldBe expected
+        }
+        // The two scrapes shared one.
+        scrapes.get() shouldBe 1
+      finally sock.close()
     finally h.shutdown()
   }
 

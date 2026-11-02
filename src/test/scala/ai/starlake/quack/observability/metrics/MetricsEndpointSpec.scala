@@ -87,6 +87,55 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     resp.headers.get(org.typelevel.ci.CIString("Content-Type")).map(_.toList.map(_.value)) shouldBe
       Some(List(promTextV004))
 
+  // Tapir answers 406 before the route runs when no body the endpoint declares satisfies the
+  // request's Accept header, and it reads the media type the body is DECLARED with, not the
+  // Content-Type header. A body declared as a stream of bytes (application/octet-stream) turned
+  // `Accept: text/plain` into a 406 for the scrapers that send it.
+
+  /** What scrapers send, by name: each of these must be answered with the scrape. */
+  private val acceptedScrapers: List[(String, String)] = List(
+    "text/plain, Datadog's OpenMetrics check" -> "text/plain",
+    "a wildcard subtype"                      -> "text/*",
+    "the exposition format's own"             -> "text/plain;version=0.0.4",
+    "anything, as curl sends"                 -> "*/*",
+    "Prometheus 3"                            ->
+      ("application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.5," +
+        "application/openmetrics-text;version=0.0.1;q=0.4," +
+        "text/plain;version=1.0.0;escaping=allow-utf-8;q=0.3,text/plain;version=0.0.4;q=0.2," +
+        "*/*;q=0.1"),
+    "Telegraf's default" ->
+      ("application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;" +
+        "encoding=delimited;q=0.7,text/plain;version=0.0.4;q=0.3")
+  )
+
+  private def scrapeAccepting(accept: String): Request[IO] =
+    scrapeRequest.putHeaders(Header.Raw(org.typelevel.ci.CIString("Accept"), accept))
+
+  it should "answer each scraper's Accept header with the scrape and the exact media type" in:
+    val prom     = populated(2)
+    val expected = prom.scrape().getBytes(UTF_8)
+    val handler  = app(new MetricsEndpoint(Some(prom), () => ()))
+    // Every answer is collected before any is judged, so that a failure names each scraper it
+    // refuses and not only the first.
+    val answers = acceptedScrapers.map { (who, accept) =>
+      val resp = handler.run(scrapeAccepting(accept)).unsafeRunSync()
+      (
+        who,
+        resp.status.code,
+        resp.headers.get(org.typelevel.ci.CIString("Content-Type")).map(_.toList.map(_.value)),
+        resp.body.compile.to(Array).unsafeRunSync().toSeq
+      )
+    }
+    answers.map((who, status, _, _) => who -> status) shouldBe
+      acceptedScrapers.map((who, _) => who -> 200)
+    answers.map((_, _, contentType, _) => contentType).distinct shouldBe
+      List(Some(List(promTextV004)))
+    answers.map((_, _, _, body) => body).distinct shouldBe List(expected.toSeq)
+
+  it should "still refuse a client that accepts nothing it serves" in:
+    val handler = app(new MetricsEndpoint(Some(populated(1)), () => ()))
+    handler.run(scrapeAccepting("application/json")).unsafeRunSync().status.code shouldBe 406
+
   // The scrape is public, and a client that stops reading keeps its response in memory until the
   // idle timeout: a scrape of 1.36 MB held by each of 295 stalled requests filled 924 MiB of a
   // 1 GiB heap (reproduced). So one request must cost little whatever the registry holds.
@@ -122,11 +171,15 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
   it should "share a scrape that took longer than its ttl with the requests that waited for it" in:
     // A scrape is as old as the moment it ended: counted from the moment it began, a slow one
     // would be stale for every request queued behind it, and each of them would scrape again.
+    // The margins are wide on purpose. The requests that waited take the gate one after another
+    // and each compares its own clock with the moment the scrape ended, so a pause of the JVM
+    // between two of those hand-offs must not read as a stale scrape: with a ttl of 1 s it takes
+    // a pause of over a second, where a ttl of 100 ms needed a pause of tens of milliseconds.
     val refreshes              = new AtomicInteger(0)
     val slowScrape: () => Unit = () =>
       refreshes.incrementAndGet()
-      Thread.sleep(500)
-    val endpoint = new MetricsEndpoint(Some(populated(1)), slowScrape, ttl = 100.millis)
+      Thread.sleep(1500)
+    val endpoint = new MetricsEndpoint(Some(populated(1)), slowScrape, ttl = 1.second)
     val handler  = app(endpoint)
     (1 to 10).toList
       .parTraverse(_ => handler.run(scrapeRequest).flatMap(_.body.compile.drain))
@@ -186,6 +239,47 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     next.bodyText.compile.string.unsafeRunSync() should include("statement_duration_seconds")
     calls.get() shouldBe 2
 
+  it should "fail a request that waited past its bound for a wedged scrape, and be free again once the wedge ends" in:
+    // A scrape that never returns (a hung bean, a lock) keeps the gate. Each request after it
+    // would wait there holding a connection slot of the listener for as long as the wedge lasts: a
+    // Prometheus scraping every 15 s would fill 260 slots in about 65 minutes. So a request waits
+    // at most `scrapeWait`; only the one that holds the scrape stays until it returns.
+    val wedged             = new CountDownLatch(1)
+    val release            = new CountDownLatch(1)
+    val calls              = new AtomicInteger(0)
+    val scrape: () => Unit = () =>
+      if calls.incrementAndGet() == 1 then
+        wedged.countDown()
+        release.await(60, TimeUnit.SECONDS)
+    val endpoint = new MetricsEndpoint(Some(populated(1)), scrape, scrapeWait = 500.millis)
+    val handler  = quietApp(endpoint)
+    val holder   = handler.run(scrapeRequest).flatMap(_.body.compile.drain).unsafeToFuture()
+    try
+      wedged.await(10, TimeUnit.SECONDS) shouldBe true
+      // The outer timeout is only here so that a missing bound fails the case instead of hanging it.
+      val began    = System.nanoTime()
+      val waiter   = handler.run(scrapeRequest).timeout(5.seconds).unsafeRunSync()
+      val waitedMs = (System.nanoTime() - began) / 1000000L
+      waiter.status.code shouldBe 500
+      waitedMs should be >= 400L
+      waitedMs should be < 3000L
+      // Waiters that gave up leave nothing behind: another one gives up the same way.
+      handler.run(scrapeRequest).timeout(5.seconds).unsafeRunSync().status.code shouldBe 500
+    finally release.countDown()
+    // Once the wedge ends the request that held it ends too, and the gate is free for the next.
+    Await.ready(holder, 10.seconds)
+    val next = handler.run(scrapeRequest).timeout(5.seconds).unsafeRunSync()
+    next.status.code shouldBe 200
+    next.bodyText.compile.string.unsafeRunSync() should include("statement_duration_seconds")
+
+  it should "give a Prometheus scraping every 5 s a fresh scrape each time" in:
+    // observability/prometheus.yml, observability/prometheus-compose.yml and
+    // charts/quack-on-demand/local-stack-k8s/prometheus.yaml scrape every 5 s. A scrape is stamped
+    // when it ended, so the next scrape finds it (the interval minus the time the last one took)
+    // old: a ttl of 5 s repeated half the samples (measured: 4 of 7 were new), and a ttl of 4 s
+    // leaves a second for the scrape.
+    (5.seconds - MetricsEndpoint.Ttl) should be >= 1.second
+
   it should "fail a response read past its deadline, and never end it as if it were whole" in:
     val prom     = populated(60)
     val endpoint = new MetricsEndpoint(Some(prom), () => (), responseDeadline = 1.second)
@@ -202,6 +296,19 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     failure shouldBe an[IOException]
     failure.getMessage should include("deadline")
     received.get() should be < prom.scrape().length
+
+  it should "send the length of the scrape, which it knows" in:
+    // Chunk framing reaches an HTTP/1.0 client as body bytes, and a cut chunked response is only
+    // told by a missing terminator. With the length declared a client reads the whole body or sees
+    // it short.
+    val prom     = populated(2)
+    val expected = prom.scrape().getBytes(UTF_8)
+    val resp     = app(new MetricsEndpoint(Some(prom), () => ())).run(scrapeRequest).unsafeRunSync()
+    resp.headers
+      .get(org.typelevel.ci.CIString("Content-Length"))
+      .map(_.toList.map(_.value)) shouldBe
+      Some(List(expected.length.toString))
+    resp.headers.get(org.typelevel.ci.CIString("Transfer-Encoding")) shouldBe None
 
   // What a scraper sees, through the real server.
 
@@ -236,6 +343,9 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
       readLine(in)
       readChunks(in, data :: read)
 
+  /** A chunked body is read as such, so that a response framed any other way than by its length
+    * fails the assertions on its headers and chunks instead of hanging the read.
+    */
   private def readResponse(in: InputStream): Wire =
     val status  = readLine(in)
     val headers = Iterator
@@ -248,43 +358,62 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
       Wire(status, headers, Array.concat(chunks*), chunks.map(_.length))
     else Wire(status, headers, in.readNBytes(headers("content-length").toInt), Nil)
 
-  it should "serve a scraper over HTTP: chunked, the exact media type, the whole text, and the next request on the same connection" in:
-    val prom      = populated(60)
-    val refreshes = new AtomicInteger(0)
-    val endpoint  = new MetricsEndpoint(Some(prom), () => refreshes.incrementAndGet())
-    val expected  = prom.scrape().getBytes(UTF_8)
+  /** `f` given the port of `endpoint` served by Ember on a free one. */
+  private def onEmber[A](endpoint: MetricsEndpoint)(f: Int => A): A =
     EmberServerBuilder
       .default[IO]
       .withHost(Host.fromString("127.0.0.1").get)
       .withPort(Port.fromInt(0).get)
       .withHttpApp(app(endpoint))
       .build
-      .use(server =>
-        IO.blocking {
-          val port = server.addressIp4s.port.value
-          scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
-            socket.setSoTimeout(15000)
-            val in = new java.io.BufferedInputStream(socket.getInputStream)
-            // Two requests on one connection: the first response must end where it should for the
-            // second to be read.
-            val responses = (1 to 2).toList.map { _ =>
-              socket.getOutputStream.write(
-                "GET /metrics HTTP/1.1\r\nHost: l\r\n\r\n".getBytes(UTF_8)
-              )
-              socket.getOutputStream.flush()
-              readResponse(in)
-            }
-            responses.foreach { r =>
-              r.status shouldBe "HTTP/1.1 200 OK"
-              r.headers("content-type") shouldBe promTextV004
-              r.headers.get("transfer-encoding") shouldBe Some("chunked")
-              r.headers.get("content-length") shouldBe None
-              r.body shouldBe expected
-              r.chunkSizes.sum shouldBe expected.length
-              r.chunkSizes.max should be <= 8192
-            }
-            refreshes.get() shouldBe 1
-          }
-        }
-      )
+      .use(server => IO.blocking(f(server.addressIp4s.port.value)))
       .unsafeRunSync()
+
+  it should "serve a scraper over HTTP with its length: the exact media type, the whole text, and the next request on the same connection" in:
+    val prom      = populated(60)
+    val refreshes = new AtomicInteger(0)
+    val endpoint  = new MetricsEndpoint(Some(prom), () => refreshes.incrementAndGet())
+    val expected  = prom.scrape().getBytes(UTF_8)
+    onEmber(endpoint) { port =>
+      scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
+        socket.setSoTimeout(15000)
+        val in = new java.io.BufferedInputStream(socket.getInputStream)
+        // Two requests on one connection: the first response must end where its length says for
+        // the second to be read.
+        val responses = (1 to 2).toList.map { _ =>
+          socket.getOutputStream.write(
+            "GET /metrics HTTP/1.1\r\nHost: l\r\nAccept: text/plain\r\n\r\n".getBytes(UTF_8)
+          )
+          socket.getOutputStream.flush()
+          readResponse(in)
+        }
+        responses.foreach { r =>
+          r.status shouldBe "HTTP/1.1 200 OK"
+          r.headers("content-type") shouldBe promTextV004
+          r.headers.get("content-length") shouldBe Some(expected.length.toString)
+          r.headers.get("transfer-encoding") shouldBe None
+          r.chunkSizes shouldBe Nil
+          r.body shouldBe expected
+        }
+        refreshes.get() shouldBe 1
+      }
+    }
+
+  it should "frame the scrape by its length for a client that speaks HTTP/1.0" in:
+    // Such a client does not read chunk framing: it would take the chunk sizes for body bytes.
+    val prom     = populated(60)
+    val expected = prom.scrape().getBytes(UTF_8)
+    onEmber(new MetricsEndpoint(Some(prom), () => ())) { port =>
+      scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
+        socket.setSoTimeout(15000)
+        socket.getOutputStream.write("GET /metrics HTTP/1.0\r\n\r\n".getBytes(UTF_8))
+        socket.getOutputStream.flush()
+        // HTTP/1.0 ends at the close of the connection: the body is everything after the head.
+        val all  = socket.getInputStream.readAllBytes()
+        val text = new String(all, java.nio.charset.StandardCharsets.ISO_8859_1)
+        val head = text.substring(0, text.indexOf("\r\n\r\n")).toLowerCase
+        head should include(s"content-length: ${expected.length}")
+        head should not include "transfer-encoding"
+        all.drop(head.length + 4) shouldBe expected
+      }
+    }
