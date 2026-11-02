@@ -262,6 +262,7 @@ lazy val root = (project in file("."))
       Dependencies.caffeine,
       Dependencies.jakartaMail,
       Dependencies.scalaTest,
+      Dependencies.flightSqlJdbc,
       Dependencies.wireMock,
       Dependencies.http4sBlazeClient % Test
     ),

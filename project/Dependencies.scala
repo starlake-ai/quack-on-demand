@@ -78,6 +78,8 @@ object Dependencies {
   val liquibaseCore         = "org.liquibase" % "liquibase-core" % Versions.liquibase
 
   val scalaTest             = "org.scalatest" %% "scalatest" % Versions.scalaTest % Test
+  // The real client behind FlightJdbcSpec. Shaded, so it cannot clash with the server's Arrow.
+  val flightSqlJdbc         = "org.apache.arrow" % "flight-sql-jdbc-driver" % "19.0.0" % Test
   val wireMock              = "org.wiremock" % "wiremock" % Versions.wireMock % Test
 
   // fs2-blobstore (multi-cloud ACL storage)

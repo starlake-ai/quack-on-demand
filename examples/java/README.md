@@ -66,6 +66,16 @@ QOD_HOST=127.0.0.1 mvn -q compile exec:java \
 Set `QOD_TPCH_SCHEMA` to target a different schema. The queries live in
 [`TpchQueries.java`](src/main/java/ai/starlake/quack/example/TpchQueries.java).
 
+## Session state and statements without rows
+
+Every statement runs on a node connection of its own, in the pool's default
+schema. A lone `USE` or `SET` succeeds but does not carry over to the next
+statement, so qualify the names you read and write instead.
+
+The driver returns no rows for a statement QoD cannot describe without running
+it (`CALL`, `EXPLAIN ANALYZE`, a batch of statements). The statement still runs
+once, and `executeQuery` then answers `Statement did not return a result set`.
+
 ## Configuration
 
 Every setting has an environment-variable override:

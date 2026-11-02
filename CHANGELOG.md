@@ -849,6 +849,16 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Drain waits for in-flight statements before stopping a node, on FlightSQL and the native front
   door (#161, thanks `ItsM0rty`). The wait is bounded by the new `QOD_POOL_DRAIN_TIMEOUT_SEC`
   (default 20 s).
+- A lone `USE`, `SET`, `VACUUM`, `CALL` and other statements with no count work again over the
+  Arrow Flight SQL JDBC driver, and run once (#170). Since 0.10.0 the driver sent them through
+  DoPut, the edge acknowledged a count of -1, and the driver read that as "open a result set". On a
+  plain statement this failed, and the client saw `Failed to successfully execute query after 5
+  attempts` for a statement that had succeeded ten times, so `INSERT ... RETURNING <text>` on a
+  catalog that allows it wrote ten rows. A prepared statement hit a null `signature` instead,
+  `DROP TABLE` included. The edge now acknowledges 0 when the result has no numeric first cell, so
+  a DoPut client that read -1 for these reads 0. Over JDBC these statements return no rows: an
+  `executeQuery` of `CALL`, `EXPLAIN ANALYZE` or a batch answers `Statement did not return a result
+  set`, after running once.
 
 ## 0.10.1
 

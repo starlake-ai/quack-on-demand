@@ -532,8 +532,9 @@ final class FlightProducerImpl(
         // The ODBC driver reads the result schema from FlightInfo.schema (not the
         // GetSchema RPC): a null here breaks Power BI, and the cached Prepare-time
         // schema matches the DoGet stream so ADBC's mismatch guard stays happy. An unprobed
-        // statement has no schema to give: absent (null) lets ADBC and JDBC take the stream's,
-        // where a zero-field schema would fail ADBC's guard.
+        // statement has no schema to give: absent (null) lets ADBC take the stream's, where a
+        // zero-field schema would fail its guard. The Arrow JDBC driver never gets here for one:
+        // it reads the absent schema as an update and goes through DoPut, so it sees no rows.
         new FlightInfo(
           p.datasetSchema.orNull,
           descriptor,
@@ -1009,8 +1010,14 @@ final class FlightProducerImpl(
         ackStream.onError(internalError(label, t))
 
   /** Drain `reader` to exhaustion and return the affected-row count: DuckDB's single-row Count cell
-    * of the first batch, or -1 (accepted by FlightSQL clients as "unknown"). A failure to read the
-    * stream (the deferred COMMIT among them) propagates; only an unreadable count cell is -1.
+    * of the first batch, or 0 when the result has no numeric first cell (USE, SET, DROP, a write
+    * answering with text): "ran, produced no count", as in [[coerceSuccessToCount]]. A failure to
+    * read the stream (the deferred COMMIT among them) propagates.
+    *
+    * Never -1, though FlightSQL defines it as "unknown". The Arrow JDBC driver hands the value to
+    * Avatica, where -1 means "no count, open a result set". On a prepared statement that signature
+    * is null, so the client hits an NPE. On a plain statement the result set fails, Avatica retries
+    * the statement, and each of its 5 attempts runs it again through DoPut and DoGet (issue 170).
     */
   private def drainUpdateCount(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
     if reader.loadNextBatch() then
@@ -1020,12 +1027,12 @@ final class FlightProducerImpl(
           if root.getRowCount >= 1 && !root.getFieldVectors.isEmpty then
             root.getFieldVectors.get(0).getObject(0) match
               case n: java.lang.Number => n.longValue()
-              case _                   => -1L
-          else -1L
-        catch case _: Throwable => -1L
+              case _                   => 0L
+          else 0L
+        catch case _: Throwable => 0L
       while reader.loadNextBatch() do ()
       count
-    else -1L
+    else 0L
 
   /** Ack the update count; the buffer is released only after onNext + onCompleted have consumed it.
     */
