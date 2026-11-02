@@ -124,3 +124,51 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
     sql.indexOf("CREATE TABLE") should be < sql.indexOf("DELETE FROM")
     sql.indexOf("DELETE FROM") should be < sql.indexOf("UPDATE ")
   }
+
+  private def rowMerge(schema: String, table: String) =
+    RowMergeTable(0, schema, table, List("r"), Nil, Nil, Nil) ->
+      RowCounts(schema, table, toDelete = 1L)
+
+  private def modified(schema: String, table: String) =
+    TableChange(schema, table, ChangeKind.Modified)
+
+  private def applied(changes: List[TableChange], merges: List[(RowMergeTable, RowCounts)]) =
+    BranchMergeSql.applyBatch(
+      parentAlias = "p",
+      branchAlias = "b",
+      tableChanges = changes,
+      rowMerges = merges,
+      ranged = false,
+      updateChunkRows = 100L,
+      fork = 10L,
+      head = 15L,
+      author = "a",
+      message = "m"
+    )
+
+  it should "refuse a modified table with no row merge: it would be left out just before the commit" in {
+    val thrown = the[IllegalArgumentException] thrownBy
+      applied(List(modified("s", "a"), modified("s", "b")), List(rowMerge("s", "a")))
+    thrown.getMessage should include("s.b")
+    thrown.getMessage should not include "s.a"
+    an[IllegalArgumentException] should be thrownBy applied(List(modified("s", "a")), Nil)
+  }
+
+  it should "refuse a row merge of a table the change set does not hold as modified" in {
+    val thrown = the[IllegalArgumentException] thrownBy
+      applied(List(modified("s", "a")), List(rowMerge("s", "a"), rowMerge("s", "b")))
+    thrown.getMessage should include("s.b")
+    thrown.getMessage should not include "s.a"
+    an[IllegalArgumentException] should be thrownBy
+      applied(List(TableChange("s", "a", ChangeKind.Created)), List(rowMerge("s", "a")))
+    an[IllegalArgumentException] should be thrownBy
+      applied(List(modified("s1", "a")), List(rowMerge("s2", "a")))
+  }
+
+  it should "take the same tables in any order, and no row merge when no table is modified" in {
+    applied(
+      List(modified("s", "b"), modified("s", "a")),
+      List(rowMerge("s", "a"), rowMerge("s", "b"))
+    ) should include("""DELETE FROM "p"."s"."b"""")
+    applied(List(TableChange("s", "x", ChangeKind.Created)), Nil) should include("CREATE TABLE")
+  }

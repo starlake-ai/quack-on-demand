@@ -192,7 +192,7 @@ class ThreeWayMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMerge
       }
     }
 
-  it should "split a large update into ranges with the same result" in
+  it should "take the ranged form of an update, one range at this size, with the same result" in
     withCatalog("twranged", seed) { (_, _) =>
       scenario(cleanMain, cleanBranch, ranged = true) { (out, cs, branchDb, branchDir) =>
         out.isRight shouldBe true
@@ -704,6 +704,114 @@ class ThreeWayMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMerge
           val c = out.fold(e => fail(e), _.head)
           (c.keyMatches, c.mainRowsByKey) shouldBe (0L, 0L)
           (c.toDelete, c.toUpdate, c.toInsert) shouldBe (0L, 1L, 3L)
+      }
+    }
+
+  it should "read no key of main's when main has no commits since the fork" in
+    ConflictPolicy.values.foreach { policy =>
+      withCatalog(s"twkeyquiet${policy.wire}", keyedSeed) { (_, _) =>
+        scenario("", keyedBranch, Some(policy), keys = Map("tpch1.k" -> List("k"))) {
+          (out, cs, _, _) =>
+            cs.tables.map(_.threeWay) shouldBe List(false)
+            val c = out.fold(e => fail(e), _.head)
+            (c.keyMatches, c.mainRowsByKey, c.toDelete, c.toInsert) shouldBe (0L, 0L, 0L, 5L)
+            keysOf("").size shouldBe 5
+        }
+      }
+    }
+
+  private val pairKey = Map("tpch1.pairs" -> List("k", "k2"))
+
+  private val pairSeed =
+    """CREATE TABLE lake.tpch1.pairs (id BIGINT, k VARCHAR, k2 INTEGER, note VARCHAR);
+      |INSERT INTO lake.tpch1.pairs SELECT i, 'old' || i, 0, 'n' FROM range(1000) r(i);
+      |""".stripMargin
+
+  /** Main's rows in a file and inlined, some changed since, all flushed and rewritten. */
+  private val pairMain = List(
+    "INSERT INTO lake.tpch1.pairs SELECT i, 'f' || (i - 5000), 1, 'main' FROM range(5000, 5100) r(i);",
+    "INSERT INTO lake.tpch1.pairs VALUES (5100, 'inl', 1, 'main'), (5101, 'gone', 1, 'main'), (5102, 'was', 1, 'main'), (5103, NULL, 1, 'main'), (5104, 'c2', NULL, 'main'), (5105, 'c2', 2, 'main');",
+    "DELETE FROM lake.tpch1.pairs WHERE id = 5101;",
+    "UPDATE lake.tpch1.pairs SET k = 'now' WHERE id = 5102;",
+    "CALL ducklake_flush_inlined_data('lake');",
+    "DELETE FROM lake.tpch1.pairs WHERE id = 5050;",
+    "CALL ducklake_rewrite_data_files('lake', 'pairs', schema => 'tpch1', delete_threshold => 0.0);",
+    "UPDATE lake.tpch1.pairs SET note = 'main2' WHERE id = 5001;"
+  ).mkString("\n")
+
+  private val pairBranch = (_: Long) =>
+    List(
+      "INSERT INTO qod_branch.tpch1.pairs VALUES " +
+        "(6000, 'f1', 1, 'branch'), " +    // matches main's row in a file, updated since
+        "(6001, 'f50', 1, 'branch'), " +   // main deleted that key
+        "(6002, 'inl', 1, 'branch'), " +   // matches main's inlined row, flushed since
+        "(6003, 'gone', 1, 'branch'), " +  // main deleted that key
+        "(6004, 'was', 1, 'branch'), " +   // main moved off that key
+        "(6005, 'now', 1, 'branch'), " +   // main moved onto that key
+        "(6006, NULL, 1, 'branch'), " +    // a NULL in the first part
+        "(6007, 'c2', 2, 'branch'), " +    // both parts match
+        "(6008, 'c2', NULL, 'branch'), " + // a NULL in the second part, against one on main too
+        "(6009, 'c2', 3, 'branch'), " +    // the first part matches, not the second: moved below
+        "(6010, 'dropped', 1, 'branch');",
+      "UPDATE qod_branch.tpch1.pairs SET k = 'f2', k2 = 1 WHERE id = 6009;", // now on a key of main's
+      "DELETE FROM qod_branch.tpch1.pairs WHERE id = 6010;",
+      "UPDATE qod_branch.tpch1.pairs SET note = 'pre' WHERE id = 3;"
+    ).mkString("\n")
+
+  private def pairRows() =
+    duck(
+      "SELECT coalesce(k, 'NULL') || '/' || coalesce(k2::VARCHAR, 'NULL') || ':' || note " +
+        "FROM lake.tpch1.pairs WHERE id >= 5000 " +
+        "AND NOT (id BETWEEN 5003 AND 5099 AND id <> 5050) ORDER BY 1;" // 5050 stays deleted
+    )
+
+  it should "match every part of a composite key against main's latest values, under `main`" in
+    withCatalog("twpairm", pairSeed) { (_, _) =>
+      scenario(pairMain, pairBranch, Some(ConflictPolicy.Main), keys = pairKey) { (out, _, _, _) =>
+        val c = out.fold(e => fail(e), _.head)
+        // f1/1, inl/1, now/1, c2/2, and f2/1 by the row the branch moved onto it.
+        (c.keyMatches, c.mainRowsByKey) shouldBe (5L, 5L)
+        (c.toDelete, c.toUpdate, c.toInsert) shouldBe (0L, 1L, 5L)
+        pairRows() shouldBe List(
+          "NULL/1:branch",
+          "NULL/1:main",
+          "c2/2:main",
+          "c2/NULL:branch",
+          "c2/NULL:main",
+          "f0/1:main",
+          "f1/1:main2",
+          "f2/1:main",
+          "f50/1:branch",
+          "gone/1:branch",
+          "inl/1:main",
+          "now/1:main",
+          "was/1:branch"
+        )
+      }
+    }
+
+  it should "delete only main's rows that match every part of a composite key, under `branch`" in
+    withCatalog("twpairb", pairSeed) { (_, _) =>
+      scenario(pairMain, pairBranch, Some(ConflictPolicy.Branch), keys = pairKey) {
+        (out, _, _, _) =>
+          val c = out.fold(e => fail(e), _.head)
+          (c.keyMatches, c.mainRowsByKey) shouldBe (5L, 5L)
+          (c.toDelete, c.toUpdate, c.toInsert) shouldBe (5L, 1L, 10L)
+          pairRows() shouldBe List(
+            "NULL/1:branch",
+            "NULL/1:main",
+            "c2/2:branch",
+            "c2/NULL:branch",
+            "c2/NULL:main",
+            "f0/1:main",
+            "f1/1:branch",
+            "f2/1:branch",
+            "f50/1:branch",
+            "gone/1:branch",
+            "inl/1:branch",
+            "now/1:branch",
+            "was/1:branch"
+          )
       }
     }
 

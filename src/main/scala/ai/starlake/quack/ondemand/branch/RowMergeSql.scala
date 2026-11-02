@@ -45,6 +45,13 @@ object RowMergeTable:
             val id = t.tableId.getOrElse(
               throw new IllegalArgumentException(s"modified table ${t.schema}.${t.table} has no id")
             )
+            // Such a column hides the row identifier from the merge's writes but not from the feed
+            // it reads, so wrong rows would be written, silently. Callers refuse the table first.
+            t.reservedColumn.foreach(c =>
+              throw new IllegalArgumentException(
+                s"table ${t.schema}.${t.table} has a column named $c and is not mergeable"
+              )
+            )
             def ranges(es: List[BranchChanges.Entry], head: Long) =
               BranchChanges
                 .readRanges(es, id, fork, head)
@@ -86,7 +93,7 @@ object RowMergeSql:
   val MaxRangeWidth: Long      = 16000000L
   val TargetRowsPerRange: Long = 2000000L
 
-  private def q(ident: String): String = "\"" + ident.replace("\"", "\"\"") + "\""
+  private def q(ident: String): String = SqlLiterals.duckdbIdent(ident)
   private def lit(v: String): String   = SqlLiterals.duckdbLiteral(v)
 
   private def w(t: RowMergeTable, name: String): String =
@@ -315,7 +322,9 @@ object RowMergeSql:
     s"CREATE OR REPLACE TABLE ${w(t, "del")} AS " +
       s"SELECT rowid FROM ${w(t, "merged")} WHERE action IN ($actions)$keyed"
 
-  /** From `post_b`, never `merged`: on a `conflict_delete_update` row main's side is absent. */
+  /** From `post_b`, simply the branch's own rows. `merged` holds no row born after the fork, and on
+    * a `conflict_delete_update` row its first cell case gives the branch's value anyway.
+    */
   private def insertSet(t: RowMergeTable, policy: Option[ConflictPolicy]): String =
     val born =
       s"SELECT ${valueList(t, "b.")} FROM ${w(t, "post_b")} b " +
@@ -382,8 +391,10 @@ object RowMergeSql:
   ): Either[String, RowCounts] =
     val row            = countRows.headOption.getOrElse(Nil)
     def number(i: Int) = row.lift(i).flatMap(long)
-    // Positions 7 and 8 are the update's rowid bounds, NULL when it has no row.
-    val required = (0 to 6).toList ++ (9 +: t.columns.indices.map(_ + 10))
+    // Positions 7 and 8 are the update's rowid bounds, NULL only when it has no row: with rows and no
+    // bounds, its ranges would match nothing, and the commit would still succeed.
+    val bounds   = if number(0).exists(_ > 0L) then List(7, 8) else Nil
+    val required = (0 to 6).toList ++ bounds ++ (9 +: t.columns.indices.map(_ + 10))
     if required.exists(number(_).isEmpty) then
       Left(s"the merge node's counts for ${t.schema}.${t.table} cannot be read")
     else
@@ -418,7 +429,7 @@ object RowMergeSql:
     def ceilDiv(a: Long, b: Long) = (a + b - 1L) / b
     val span                      = maxRowid - minRowid + 1L
     val n     = List(1L, ceilDiv(span, MaxRangeWidth), ceilDiv(rows, TargetRowsPerRange)).max
-    val edges = (0L to n).toList.map(i => minRowid + span * i / n)
+    val edges = (0L to n).toList.map(i => minRowid + (BigInt(span) * i / n).toLong)
     edges.zip(edges.tail)
 
   /** DELETE, then UPDATE, then INSERT: an UPDATE costs the table its statistics for the rest of the

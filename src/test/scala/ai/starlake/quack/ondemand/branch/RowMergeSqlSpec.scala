@@ -133,7 +133,7 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
   it should "bring a row main deleted back from the branch's own row, when the branch wins" in {
     val ins =
       statementFor(RowMergeSql.values("lake", t, 10L, 5L, Some(ConflictPolicy.Branch)), "ins")
-    // From post_b: the cell rule would return NULL for every cell the branch did not change.
+    // From post_b, the branch's own row. merged's first cell case gives the same values there.
     ins should include("conflict_delete_update")
     ins should include("t0_post_b")
     val main =
@@ -224,6 +224,17 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
     RowMergeSql.updateRanges(0L, 999L, 10000000L).size shouldBe 5 // rows decide: 10M at 2M each
   }
 
+  it should "keep its edges right where span * n passes a Long" in {
+    val lo     = 30000000000000L
+    val span   = 20000000000000L
+    val ranges = RowMergeSql.updateRanges(lo, lo + span - 1L, 1L)
+    ranges.size shouldBe 1250000 // 2e13 rowids at 16M wide
+    ranges.head._1 shouldBe lo
+    ranges.last._2 shouldBe lo + span
+    ranges.zip(ranges.tail).forall((a, b) => a._2 == b._1) shouldBe true
+    ranges.forall((a, b) => b > a && b - a <= RowMergeSql.MaxRangeWidth) shouldBe true
+  }
+
   "parseSizes" should "read the two sizes, and refuse an answer it cannot read" in {
     RowMergeSql.parseSizes(List(List(Json.fromLong(3L), Json.fromLong(1L)))) shouldBe
       Right(RowMergeSql.OverlapSizes(3L, 1L))
@@ -258,6 +269,22 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
       Json.fromLong(0L)
     )
     RowMergeSql.parseCounts(t, List(row), Nil).map(_.minUpdateRowid) shouldBe Right(0L)
+  }
+
+  it should "refuse an update with rows whose bounds cannot be read: its ranges would match nothing" in {
+    def counted(toUpdate: Long, lo: Json, hi: Json) =
+      val rest = List.fill(3)(Json.fromLong(0L))
+      val row  = Json.fromLong(toUpdate) :: List.fill(6)(Json.fromLong(0L)) ++ List(lo, hi) ++ rest
+      RowMergeSql.parseCounts(t, List(row), Nil)
+    val five = Json.fromLong(5L)
+    counted(1L, Json.Null, Json.Null).isLeft shouldBe true
+    counted(1L, five, Json.Null).isLeft shouldBe true
+    counted(1L, Json.Null, five).isLeft shouldBe true
+    counted(1L, Json.fromString("x"), five).isLeft shouldBe true
+    counted(1L, five, five).map(c => (c.minUpdateRowid, c.maxUpdateRowid)) shouldBe Right((5L, 5L))
+    counted(0L, Json.Null, Json.Null).map(c => (c.toUpdate, c.minUpdateRowid)) shouldBe Right(
+      (0L, 0L)
+    )
   }
 
   it should "refuse counts it cannot read: zeros would hide main's changes" in {
@@ -359,4 +386,21 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
         new Fake(List((11L, ""), (12L, ""), (13L, ""))),
         Map.empty
       )
+  }
+
+  it should "fail loudly on a table with a reserved column, which its callers must refuse first" in {
+    // Such a column hides the row identifier from the UPDATE and the DELETE, not from the feed, so
+    // the merge would write other rows than the ones it read.
+    val cs = changeSet(
+      TableChange("s", "t", ChangeKind.Modified, tableId = Some(2L), reservedColumn = Some("rowid"))
+    )
+    val thrown = the[IllegalArgumentException] thrownBy
+      RowMergeTable.plan(
+        cs,
+        new Fake(Nil),
+        new Fake(List((11L, ""), (12L, ""), (13L, ""))),
+        Map.empty
+      )
+    thrown.getMessage should include("s.t")
+    thrown.getMessage should include("rowid")
   }

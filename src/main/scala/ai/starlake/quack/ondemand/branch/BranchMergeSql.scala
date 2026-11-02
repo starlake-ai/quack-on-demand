@@ -21,7 +21,8 @@ import ai.starlake.quack.model.SqlLiterals
   *
   * A table with a column of its own named `rowid` shadows DuckDB's row identifier, so the rowid
   * arithmetic would compare that column against the feed's identifiers; [[BranchChanges]] marks
-  * such a table not mergeable and this renderer refuses it.
+  * such a table not mergeable. [[tableStatements]] refuses it here, and [[RowMergeTable.plan]] on
+  * the row merge's path.
   */
 object BranchMergeSql:
 
@@ -122,6 +123,8 @@ object BranchMergeSql:
 
   /** The Apply stage: one transaction. Tables merged by rows come last, each with its statements in
     * the order [[RowMergeSql.applyStatements]] gives. Only safe under an armed [[MergeFence]].
+    * `rowMerges` must be exactly the `Modified` tables of `tableChanges`: this is the last check
+    * before a commit that would otherwise leave a table's changes out, silently.
     */
   def applyBatch(
       parentAlias: String,
@@ -135,6 +138,16 @@ object BranchMergeSql:
       author: String,
       message: String
   ): String =
+    def names(tables: Set[(String, String)]) =
+      tables.toList.sorted.map((schema, table) => s"$schema.$table").mkString(", ")
+    val modified =
+      tableChanges.filter(_.kind == ChangeKind.Modified).map(c => (c.schema, c.table)).toSet
+    val merged = rowMerges.map((t, _) => (t.schema, t.table)).toSet
+    require(
+      modified == merged,
+      s"modified tables with no row merge: ${names(modified -- merged)}; " +
+        s"row merges of no modified table: ${names(merged -- modified)}"
+    )
     val others = tableChanges
       .filter(_.kind != ChangeKind.Modified)
       .sortBy(c => (c.kind.ordinal, c.schema, c.table))
