@@ -372,7 +372,6 @@ object Main extends IOApp with LazyLogging:
     BootPreflight.checkInternalUrl(
       mgrCfg0.runtimeType,
       mgrCfg0.nodeAuthz,
-      mgrCfg0.host,
       mgrCfg0.port
     ) match
       case Left(msg)  => sys.error(msg)
@@ -550,7 +549,7 @@ object Main extends IOApp with LazyLogging:
         case Right(secret) =>
           new ai.starlake.quack.edge.authz.NodeKeys(
             secret,
-            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.host, mgrCfg.port),
+            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
             versions = policyVersions,
             creds = servedUserS3,
             issued = Some(issuedHandles),
@@ -2121,6 +2120,7 @@ object Main extends IOApp with LazyLogging:
       val nodeInternal = new ai.starlake.quack.edge.authz.NodeInternalServer(
         internalHost,
         internalPort,
+        mgrCfg.nodeAuthz.internalMaxConnections,
         List(credentialsRoute.routes, decideRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge

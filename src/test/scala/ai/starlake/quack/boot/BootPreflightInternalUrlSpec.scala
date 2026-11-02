@@ -9,16 +9,10 @@ import org.scalatest.matchers.should.Matchers
   */
 class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
 
-  private def check(
-      runtime: String,
-      internalUrl: String = "",
-      podIp: String = "",
-      bindHost: String = "0.0.0.0"
-  ) =
+  private def check(runtime: String, internalUrl: String = "", podIp: String = "") =
     BootPreflight.checkInternalUrl(
       runtime,
       NodeAuthzConfig(internalUrl = internalUrl, podIp = podIp),
-      bindHost,
       20900
     )
 
@@ -28,12 +22,6 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
     check("local", "http://manager.internal:20901/qod") shouldBe
       Right("http://manager.internal:20901/qod")
     check("local", "http://manager.internal") shouldBe Right("http://manager.internal")
-  }
-
-  it should "default to the bind address when the manager listens on one specific address" in {
-    check("local", bindHost = "192.168.1.5") shouldBe Right("http://192.168.1.5:20901")
-    check("local", bindHost = "fd00::5") shouldBe Right("http://[fd00::5]:20901")
-    check("local", bindHost = "localhost") shouldBe Right("http://127.0.0.1:20901")
   }
 
   "every runtime" should "accept what qod-node's URL parser accepts" in {
@@ -98,12 +86,9 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
     check("kubernetes", "http://m:1", podIp = "$(MY_POD_IP)") shouldBe Right("http://m:1")
   }
 
-  it should "name QOD_ON_DEMAND_HOST when the refused URL came from the bind address" in {
-    check("local", bindHost = "my host") shouldBe
-      Left(BootPreflight.InternalUrlBindHostFormatMessage)
-  }
-
   "the kubernetes runtime" should "refuse the loopback default and every loopback URL" in {
+    // The default does not follow the address REST binds: a manager listening on one specific
+    // address with no pod IP gets this refusal like any other.
     for runtime <- List("kubernetes", "KUBERNETES", "k8s", "K8S") do
       withClue(runtime)(
         check(runtime) shouldBe
@@ -164,7 +149,6 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
         check(runtime) shouldBe Left(BootPreflight.InternalUrlFleetMessage)
         check(runtime, podIp = "10.1.2.3") shouldBe Left(BootPreflight.InternalUrlFleetMessage)
         check(runtime, podIp = "$(MY_POD_IP)") shouldBe Left(BootPreflight.InternalUrlFleetMessage)
-        check(runtime, bindHost = "10.0.0.9") shouldBe Left(BootPreflight.InternalUrlFleetMessage)
         check(runtime, "   ") shouldBe Left(BootPreflight.InternalUrlFleetMessage)
         check(runtime, "http://manager.example:20901") shouldBe
           Right("http://manager.example:20901")
@@ -203,15 +187,54 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
     port(rest = 65535).left.toOption.get should include("QOD_INTERNAL_PORT")
   }
 
-  "the bind address" should "be loopback for a loopback URL, else the REST bind address" in {
-    def host(url: String = "", pod: String = "", bind: String = "0.0.0.0") =
-      BootPreflight.internalBindHost(NodeAuthzConfig(internalUrl = url, podIp = pod), bind, 20900)
+  it should "not say the operator set a port they never set" in {
+    val listener = "the node verdict listener's port"
+    val setting  =
+      "(QOD_INTERNAL_PORT, quack-on-demand.nodeAuthz.internalPort; by default the REST port + 1)"
+    // REST on 31337 leaves the FlightSQL port to the listener, and REST on 21899 a node port.
+    port(rest = 31337) shouldBe Left(s"$listener 31338 $setting is the FlightSQL port")
+    port(rest = 21899) shouldBe
+      Left(
+        s"$listener 21900 $setting is in the node port range 21900-22500 (QOD_MIN_PORT, QOD_MAX_PORT)"
+      )
+    port(internalPort = 9494) shouldBe Left(s"$listener 9494 $setting is the Quack port")
+  }
+
+  "the bind address" should "be loopback for a loopback URL, whatever REST binds" in {
+    def host(url: String = "", bind: String = "0.0.0.0") =
+      BootPreflight.internalBindHost(NodeAuthzConfig(internalUrl = url), bind, 20900)
     host() shouldBe "127.0.0.1"
+    host(bind = "192.168.1.5") shouldBe "127.0.0.1"
+    host(bind = "::1") shouldBe "127.0.0.1"
     host(url = "http://localhost:20901") shouldBe "127.0.0.1"
     host(url = "http://[::1]:20901") shouldBe "::1"
-    host(pod = "10.1.2.3") shouldBe "0.0.0.0"
-    host(url = "http://mgr.internal:20901") shouldBe "0.0.0.0"
-    host(bind = "192.168.1.5") shouldBe "192.168.1.5"
+    // The node connects to IPv4 loopback here, so ::1 would answer nobody.
+    host(url = "http://[::ffff:127.0.0.1]:20901") shouldBe "127.0.0.1"
+  }
+
+  it should "be the URL's address when that names this host, as a literal" in {
+    def host(url: String = "", pod: String = "", bind: String = "0.0.0.0")(local: String*) =
+      BootPreflight.internalBindHost(
+        NodeAuthzConfig(internalUrl = url, podIp = pod),
+        bind,
+        20900,
+        a => local.contains(a.getHostAddress)
+      )
+    host(url = "http://10.0.0.5:20901")("10.0.0.5") shouldBe "10.0.0.5"
+    host(pod = "10.1.2.3")("10.1.2.3") shouldBe "10.1.2.3"
+    host(url = "http://[fd00::7]:20901")("fd00:0:0:0:0:0:0:7") shouldBe "fd00:0:0:0:0:0:0:7"
+    // Not an address of this host: nodes reach it some other way (a port forward, NAT).
+    host(url = "http://10.0.0.5:20901", bind = "10.0.0.9")() shouldBe "10.0.0.9"
+    host(pod = "10.1.2.3")() shouldBe "0.0.0.0"
+  }
+
+  it should "never look a name up" in {
+    BootPreflight.internalBindHost(
+      NodeAuthzConfig(internalUrl = "http://mgr.internal:20901"),
+      "0.0.0.0",
+      20900,
+      a => fail(s"looked up $a")
+    ) shouldBe "0.0.0.0"
   }
 
   it should "read a loopback URL in the forms qod-node's resolver reads" in {
@@ -221,8 +244,6 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
     host(url = "http://qod.localhost:20901") shouldBe "127.0.0.1"
     host(url = "http://127.1:20901") shouldBe "127.0.0.1"
     host(url = "http://2130706433:20901") shouldBe "127.0.0.1"
-    // The default URL of a manager bound to ::1 is that address.
-    host(bind = "::1") shouldBe "::1"
     // An unusable URL is refused by checkInternalUrl; the bind address stays where REST binds.
     host(url = "not a url", bind = "10.0.0.9") shouldBe "10.0.0.9"
   }
@@ -259,10 +280,6 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
       "host: with QOD_INTERNAL_URL unset, nodes call this replica's decision endpoint on " +
       "http://<pod IP>:<internal port>. Set QOD_POD_IP to this pod's IP (the downward API's " +
       "status.podIP, as the Helm chart does), or set QOD_INTERNAL_URL"
-    BootPreflight.InternalUrlBindHostFormatMessage shouldBe
-      "QOD_ON_DEMAND_HOST (quack-on-demand.host) does not make a plain http:// URL with a host: " +
-      "with QOD_INTERNAL_URL and QOD_POD_IP unset, nodes call this replica's decision endpoint " +
-      "on http://<bind address>:<internal port>. Set QOD_INTERNAL_URL"
     BootPreflight.internalUrlKubernetesMessage("http://127.0.0.1:20901") shouldBe
       "the node decide URL is http://127.0.0.1:20901, a loopback address no node pod can reach " +
       "on the kubernetes runtime: leave QOD_INTERNAL_URL unset and set QOD_POD_IP from the " +

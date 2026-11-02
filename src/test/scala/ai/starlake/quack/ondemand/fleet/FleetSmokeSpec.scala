@@ -42,7 +42,9 @@ import scala.util.Try
   *   3. start the join process (server s1, node port 23100), joins pending approval (autoApprove is
   *      empty), is approved over REST,
   *   4. the pending slot fills: one node, served by s1, s1 reachable and running;
-  *   5. `SELECT 42` through the FlightSQL edge;
+  *   5. `SELECT 42` through the FlightSQL edge; 5b. the same as a tenant user (the superuser's
+  *      statement never makes the node ask the manager for a verdict, the user's does, over the
+  *      node verdict listener `nodeAuthz.internalUrl` names);
   *   6. drain s1: the slot goes pending, s1 keeps no assignment;
   *   7. undrain s1: the node comes back on s1;
   *   8. SIGKILL the join process (the node survives it), restart it: it reaps the orphan through
@@ -74,6 +76,10 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   private val TenantDb   = "acme_db"
   private val Pool       = "bi"
   private val Ceiling    = 60.seconds
+
+  // The tenant user of step 5b.
+  private val User         = "alice"
+  private val UserPassword = "Alice-pw-0123456789"
 
   private val DbPrefix = "qod_fleetsmoke"
   private val dbName   = s"${DbPrefix}_test_${System.nanoTime().toHexString}"
@@ -384,7 +390,15 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   // ---------------------------------------------------------------- FlightSQL
 
-  private def selectFortyTwo(): String =
+  /** `SELECT 42` through the edge as `user`: the seeded admin as a superuser by default. A
+    * superuser never makes the node ask the manager for a verdict; a tenant user does, on every
+    * plan.
+    */
+  private def selectFortyTwo(
+      user: String = "admin",
+      password: String = "admin",
+      superuser: Boolean = true
+  ): String =
     val allocator         = new RootAllocator()
     val raw: FlightClient =
       FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", FlightPort)).build()
@@ -392,10 +406,10 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       val hdrs = new FlightCallHeaders()
       hdrs.insert("tenant", Tenant)
       hdrs.insert("pool", Pool)
-      hdrs.insert("superuser", "true")
+      if superuser then hdrs.insert("superuser", "true")
       hdrs.insert(
         "authorization",
-        "Basic " + Base64.getEncoder.encodeToString("admin:admin".getBytes("UTF-8"))
+        "Basic " + Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))
       )
       val opt    = new HeaderCallOption(hdrs)
       val fsql   = new FlightSqlClient(raw)
@@ -494,6 +508,23 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     "5 FlightSQL SELECT 42"
   ) {
     await("SELECT 42 through the edge", 30.seconds)(Try(selectFortyTwo()).toOption) shouldBe "42"
+  }
+
+  "fleet smoke 5b" should "route a tenant user's SELECT 42, which needs a verdict from the manager" in step(
+    "5b tenant user SELECT 42"
+  ) {
+    // The statement above runs as a superuser, and qod-node never asks the manager about a
+    // superuser: it passes whatever the node decide URL names. A tenant user's plan is decided by
+    // the manager, over the node verdict listener the URL must name.
+    post(
+      "/api/user/create",
+      s"""{"tenant":"$Tenant","username":"$User","password":"$UserPassword","kind":"user",
+         |"roles":["qod_all_tables"],"groups":["qod_all_pools"]}""".stripMargin
+    )
+    // An exception retries, and the last one is named if the ceiling is reached.
+    await("a tenant user's SELECT 42 through the edge", 30.seconds)(
+      Some(selectFortyTwo(User, UserPassword, superuser = false))
+    ) shouldBe "42"
   }
 
   "fleet smoke 6" should "move the slot to pending when the server is drained" in step("6 drain") {

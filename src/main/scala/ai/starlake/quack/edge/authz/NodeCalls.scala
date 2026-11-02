@@ -42,8 +42,11 @@ object NodeCalls:
 
   val BodyTooDeep: String = "request body nested too deeply"
 
-  /** How long a node has to send a body it holds in full. */
-  val BodyDeadline: FiniteDuration = 30.seconds
+  /** How long a node has to send a body: qod-node holds a body in full and sends it at once. It is
+    * also how long a client with no key holds a connection slot of the listener with a stalled
+    * body.
+    */
+  val BodyDeadline: FiniteDuration = 5.seconds
 
   /** `req` answered by `answer(nodeId, signature, body)`, run blocking, once both headers are well
     * formed and the body is read within `maxBodyBytes`; else 401 ([[MissingHeaders]], through
@@ -72,7 +75,11 @@ object NodeCalls:
           case BoundedBody.Outcome.TimedOut   => closing((Status.RequestTimeout, BodyTooSlow))
         }
       case _ =>
-        IO(respond(refused(node.filter(NodeIdText.matches).getOrElse("unknown"), MissingHeaders)))
+        // The body stays unread, so the connection must not be kept: see BoundedBody.
+        IO(
+          respond(refused(node.filter(NodeIdText.matches).getOrElse("unknown"), MissingHeaders))
+            .putHeaders(org.http4s.headers.Connection.close)
+        )
 
   /** Which refusals a route logs at WARN: the first per node id (kept [[RefusalLog.RememberMs]]),
     * at most [[RefusalLog.MaxWarnsPerMinute]] a minute; every other one at DEBUG. Anyone who can

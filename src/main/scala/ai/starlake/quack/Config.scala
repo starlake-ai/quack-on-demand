@@ -739,14 +739,14 @@ final case class NodeAuthzConfig(
     keySecret: String = "",
     @field @ConfigField(
       envVar = "QOD_INTERNAL_URL",
-      description = "URL nodes reach this replica on, carried in every session handle: nodes call " +
-        "it for their statements' verdicts (plain http). Default " +
-        "`http://<QOD_POD_IP>:<internal port>` when the pod IP is set, else " +
-        "`http://<QOD_ON_DEMAND_HOST>:<internal port>` when the manager listens on one specific " +
-        "address, else `http://127.0.0.1:<internal port>`. " +
-        "Required in fleet mode (this replica's own address, one per replica, never a load " +
-        "balancer); never a loopback URL on Kubernetes. It must name the internal port, not " +
-        "the manager's REST port."
+      description =
+        "URL nodes reach this replica on, carried in every session handle: nodes call " +
+          "it for their statements' verdicts (plain http). Default " +
+          "`http://<QOD_POD_IP>:<internal port>` when the pod IP is set, else " +
+          "`http://127.0.0.1:<internal port>`. " +
+          "Required in fleet mode (this replica's own address, one per replica, never a load " +
+          "balancer); never a loopback URL on Kubernetes. It must name the internal port, not " +
+          "the manager's REST port."
     )
     internalUrl: String = "",
     @field @ConfigField(
@@ -756,6 +756,15 @@ final case class NodeAuthzConfig(
           "manager port + 1."
     )
     internalPort: Int = 0,
+    @field @ConfigField(
+      envVar = "QOD_INTERNAL_MAX_CONNECTIONS",
+      description =
+        "How many connections the node verdict listener serves at once. A node opens one per " +
+          "call. A call's body, up to 1 MiB, is read before its signature can be checked, so " +
+          "this bounds the heap a client reaching the port can hold, at about 1 MiB per " +
+          "connection: keep clients off the port."
+    )
+    internalMaxConnections: Int = 256,
     @field @ConfigField(
       envVar = "QOD_POD_IP",
       description = "This replica's pod IP; the Helm chart sets it from the downward API. With " +
@@ -785,33 +794,28 @@ final case class NodeAuthzConfig(
     internalPort >= 0 && internalPort <= 65535,
     s"nodeAuthz.internalPort (QOD_INTERNAL_PORT) must be 0 or a port, got $internalPort"
   )
+  require(
+    internalMaxConnections >= 1,
+    s"nodeAuthz.internalMaxConnections (QOD_INTERNAL_MAX_CONNECTIONS) must be at least 1, got " +
+      s"$internalMaxConnections"
+  )
 
   /** The port of the node verdict listener. */
   def listenerPort(restPort: Int): Int = if internalPort > 0 then internalPort else restPort + 1
 
-  /** [[internalUrl]]; else this pod's address on the listener's port; else, when the manager
-    * listens on one specific address (`bindHost`, QOD_ON_DEMAND_HOST, neither a wildcard nor
-    * `localhost` / `127.0.0.1`), that address; else this host's loopback URL. An IPv6 address goes
-    * in brackets.
+  /** [[internalUrl]]; else this pod's address on the listener's port; else this host's loopback
+    * URL: the local runtime's nodes share the manager's host, whatever address REST binds. An IPv6
+    * address goes in brackets.
     */
-  def replicaUrl(bindHost: String, restPort: Int): String =
+  def replicaUrl(restPort: Int): String =
     val pod  = podIp.trim
-    val bind = bindHost.trim
     val port = listenerPort(restPort)
     if internalUrl.trim.nonEmpty then internalUrl.trim
     else if pod.nonEmpty then s"http://${urlHost(pod)}:$port"
-    else if specificBindHost(bind) then s"http://${urlHost(bind)}:$port"
     else s"http://127.0.0.1:$port"
 
   private def urlHost(host: String): String =
     if host.contains(':') && !host.startsWith("[") then s"[$host]" else host
-
-  /** A bind address the loopback default does not reach: not blank, not a wildcard, not `localhost`
-    * or `127.0.0.1`.
-    */
-  private def specificBindHost(host: String): Boolean =
-    !Set("", "*", "0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0", "localhost", "127.0.0.1")
-      .contains(host.toLowerCase(java.util.Locale.ROOT))
 
 object NodeAuthzConfig:
 

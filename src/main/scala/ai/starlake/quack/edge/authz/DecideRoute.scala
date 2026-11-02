@@ -41,7 +41,7 @@ import scala.util.control.NonFatal
   *
   * Every decision (allow, refuse, unavailable) is counted in `qod_authz_decisions_total` and timed
   * in `qod_authz_decide_duration_ms` ([[AuthzInstruments]]); a call refused before a decision (401)
-  * or malformed (400, 413) is not a decision.
+  * or malformed (400, 408, 411, 413) is not a decision.
   */
 final class DecideRoute(
     keys: NodeKeys,

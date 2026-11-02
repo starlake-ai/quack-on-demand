@@ -63,19 +63,21 @@ class NodeCallsSpec extends AnyFlatSpec with Matchers:
   private def nested(levels: Int): Stream[IO, Byte] =
     Stream.emits(("[" * levels + "]" * levels).getBytes.toList)
 
-  "NodeCalls.serve" should "refuse a call missing a header without reading its body" in {
+  "NodeCalls.serve" should "refuse a call missing a header unread, closing the connection" in {
     val answered = new AtomicInteger()
-    serve(request(None, Some(Mac), Untouchable), answered) shouldBe
-      (Status.Unauthorized, NodeCalls.MissingHeaders)
-    serve(request(Some("quack-a-1"), None, Untouchable), answered) shouldBe
-      (Status.Unauthorized, NodeCalls.MissingHeaders)
-    serve(request(Some("bad node"), Some(Mac), Untouchable), answered)._1 shouldBe
-      Status.Unauthorized
-    serve(
-      request(Some("quack-a-1"), Some(Mac.toUpperCase + "x"), Untouchable),
-      answered
-    )._1 shouldBe
-      Status.Unauthorized
+    // The body stays unread, so the connection must not be kept: its unread bytes would be taken
+    // for the next request.
+    def refusal(req: Request[IO]): (Status, String, Boolean) =
+      val resp = response(req, answered)
+      (resp.status, resp.as[String].unsafeRunSync(), closesConnection(resp))
+    refusal(request(None, Some(Mac), Untouchable)) shouldBe
+      (Status.Unauthorized, NodeCalls.MissingHeaders, true)
+    refusal(request(Some("quack-a-1"), None, Untouchable)) shouldBe
+      (Status.Unauthorized, NodeCalls.MissingHeaders, true)
+    refusal(request(Some("bad node"), Some(Mac), Untouchable)) shouldBe
+      (Status.Unauthorized, NodeCalls.MissingHeaders, true)
+    refusal(request(Some("quack-a-1"), Some(Mac.toUpperCase + "x"), Untouchable)) shouldBe
+      (Status.Unauthorized, NodeCalls.MissingHeaders, true)
     answered.get() shouldBe 0
   }
 
