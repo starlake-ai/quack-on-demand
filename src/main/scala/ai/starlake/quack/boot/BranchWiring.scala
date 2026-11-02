@@ -23,6 +23,7 @@ import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 
 import java.nio.file.{Files, Path}
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
@@ -34,12 +35,16 @@ import scala.util.control.NonFatal
   */
 object BranchWiring extends LazyLogging:
 
-  /** Merge node reads are one row of counts or up to 80 sample rowids. */
+  /** Merge node reads are one row of counts or up to 80 sample rowids. A longer result is refused,
+    * never cut.
+    */
   private val MergeNodeMaxRows = 1000
 
   /** Spawns `spec`, waits for it to accept connections, runs the body, stops the node. Each send is
-    * bounded by `mergeTimeoutSec`; a timeout is reported as `Left("timeout ...")` and the caller
-    * settles the outcome by locating the commit message on the parent.
+    * bounded by `mergeTimeoutSec`: one that does not answer in time is abandoned (it ends when the
+    * node is stopped) and reported as a `Left` starting with [[MergeExecutor.TimedOut]], and the
+    * caller settles the outcome by locating the commit message on the parent. A node that cannot be
+    * stopped is logged at ERROR.
     */
   def mergeExecutor(
       cfg: BranchingConfig,
@@ -50,33 +55,62 @@ object BranchWiring extends LazyLogging:
     def withNode[A](
         spec: NodeSpec
     )(body: MergeNode => IO[Either[String, A]]): IO[Either[String, A]] =
-      backend.start(spec).attempt.flatMap {
-        case Left(e)     => IO.pure(Left(s"merge node spawn failed: ${e.getMessage}"))
-        case Right(node) =>
-          NodeReadiness
-            .awaitReachable(
-              node.host,
-              node.port,
-              timeout = cfg.nodeReadyTimeoutSec.seconds,
-              isAlive = () => backend.isAlive(node.nodeId)
-            )
-            .flatMap { ready =>
-              if ready then body(on(node))
-              else
-                IO.pure(
-                  Left(
-                    s"merge node ${node.nodeId} did not accept connections within ${cfg.nodeReadyTimeoutSec}s"
+      // A bracket: the spawn runs masked, so a cancel pending when it returns still stops the node.
+      backend
+        .start(spec)
+        .attempt
+        .bracket {
+          case Left(e)     => IO.pure(Left(s"merge node spawn failed: ${e.getMessage}"))
+          case Right(node) =>
+            NodeReadiness
+              .awaitReachable(
+                node.host,
+                node.port,
+                timeout = cfg.nodeReadyTimeoutSec.seconds,
+                isAlive = () => backend.isAlive(node.nodeId)
+              )
+              .flatMap { ready =>
+                if ready then body(on(node))
+                else
+                  IO.pure(
+                    Left(
+                      s"merge node ${node.nodeId} did not accept connections within ${cfg.nodeReadyTimeoutSec}s"
+                    )
                   )
-                )
-            }
-            .guarantee(backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit))
+              }
+        } {
+          case Left(_)     => IO.unit
+          case Right(node) => stopped(node)
+        }
+
+    /** Stops `node`. One that cannot be stopped is logged, not swallowed: it may still be running,
+      * and a caller that counts on the node being gone (the merge's last look at main) needs the
+      * trace.
+      */
+    private def stopped(node: RunningNode): IO[Unit] =
+      backend.stop(node.poolKey, node.nodeId).handleErrorWith { e =>
+        IO.delay(
+          logger.error(
+            s"merge node ${node.nodeId} could not be stopped and may still be running: " +
+              e.getMessage,
+            e
+          )
+        )
       }
 
+    /** `call` within `mergeTimeoutSec`. The bound holds even when the send is stuck: the production
+      * client's send is uncancelable (a blocking POST with no request timeout of its own), so
+      * waiting for it to end, as `timeoutTo` does, would hold the answer for as long as the node
+      * hangs. The send is abandoned instead, and ends when `backend.stop` kills the node.
+      */
     private def bounded[A](call: IO[Either[String, A]]): IO[Either[String, A]] =
-      call.timeoutTo(
-        cfg.mergeTimeoutSec.seconds,
-        IO.pure(Left(s"timeout: the merge node did not answer within ${cfg.mergeTimeoutSec}s"))
-      )
+      call
+        .timeoutAndForget(cfg.mergeTimeoutSec.seconds)
+        .recover { case _: TimeoutException =>
+          Left(
+            s"${MergeExecutor.TimedOut}the merge node did not answer within ${cfg.mergeTimeoutSec}s"
+          )
+        }
 
     private def send(node: RunningNode, sql: String) =
       adapter.send(
@@ -87,21 +121,27 @@ object BranchWiring extends LazyLogging:
         recordLoad = false
       )
 
+    // A close is a blocking POST (the DISCONNECT), so it runs on the blocking pool.
     private def on(node: RunningNode): MergeNode = new MergeNode:
       def exec(batch: String): IO[Either[String, Unit]] =
-        bounded(send(node, batch).map {
-          case QuackResponse.Ok(_, _, close) => close(); Right(())
-          case QuackResponse.Failed(err, _)  => Left(textOf(err))
+        bounded(send(node, batch).flatMap {
+          case QuackResponse.Ok(_, _, close) => IO.blocking(close()).as(Right(()))
+          case QuackResponse.Failed(err, _)  => IO.pure(Left(textOf(err)))
         })
 
       def rows(sql: String): IO[Either[String, List[List[Json]]]] =
         bounded(send(node, sql).flatMap {
           case QuackResponse.Failed(err, _)       => IO.pure(Left(textOf(err)))
           case QuackResponse.Ok(reader, _, close) =>
-            IO.blocking(ArrowRowsDecoder.decode(reader, MergeNodeMaxRows)._2)
-              .guarantee(IO(close()))
+            IO.blocking(ArrowRowsDecoder.decode(reader, MergeNodeMaxRows))
+              .guarantee(IO.blocking(close()))
               .attempt
-              .map(_.left.map(e => s"reading the result: ${e.getMessage}"))
+              .map {
+                case Left(e)             => Left(s"reading the result: ${e.getMessage}")
+                case Right((_, _, true)) =>
+                  Left(s"the result holds more than $MergeNodeMaxRows rows")
+                case Right((_, rows, false)) => Right(rows)
+              }
         })
 
     private def textOf(err: QuackError): String = err match

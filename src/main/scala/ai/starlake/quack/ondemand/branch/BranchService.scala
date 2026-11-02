@@ -55,11 +55,19 @@ object BranchFailure:
 
 /** Runs work on an ephemeral merge node built from `spec`: spawns it, waits for it to accept
   * connections, runs `body`, stops it whatever happens. `Left`: the node never came up, or what
-  * `body` answered. Each call on the node is bounded; a reason containing "timeout" is a bounded
-  * wait that expired without an answer, and the commit message on main then decides what happened.
+  * `body` answered. Each call on the node is bounded: one that does not answer in time is abandoned
+  * (the statement may still run until the node is stopped) and answers a `Left` that starts with
+  * [[MergeExecutor.TimedOut]], and the commit message on main then decides what happened. An engine
+  * error can hold the word "timeout" too (a lock timeout), so a consumer tests
+  * `startsWith(MergeExecutor.TimedOut)`, never `contains("timeout")`.
   */
 trait MergeExecutor:
   def withNode[A](spec: NodeSpec)(body: MergeNode => IO[Either[String, A]]): IO[Either[String, A]]
+
+object MergeExecutor:
+
+  /** How the reason of a node call that did not answer within its bound starts. */
+  val TimedOut = "timeout: "
 
 /** Change-feed counts of one modified table on the branch pool: `(inserted, deleted, updated)`.
   * `caller` is who the count statement runs as, required so no call site can leave it to a default:
