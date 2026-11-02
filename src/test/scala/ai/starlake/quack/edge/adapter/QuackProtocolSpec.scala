@@ -454,3 +454,15 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
         err.msg should include("no such function")
       finally allocator.close()
     }
+
+  describe("JdkHttpTransport"):
+    it("reports a refused connection as Transient: nothing reached the node, a retry is safe") {
+      val closed = { val s = new java.net.ServerSocket(0); val p = s.getLocalPort; s.close(); p }
+      val transport =
+        new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient())
+      val err = intercept[QuackWireError.Transient] {
+        transport.post(URI.create(s"http://127.0.0.1:$closed/quack"), Array.emptyByteArray)
+          .unsafeRunSync()
+      }
+      err.msg should include("cannot connect")
+    }
