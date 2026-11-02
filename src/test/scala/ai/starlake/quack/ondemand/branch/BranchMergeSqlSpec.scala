@@ -96,3 +96,31 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
     BranchMergeSql.findSnapshotSql("acme_tpch", "m [x]") shouldBe
       """SELECT max(snapshot_id) AS snapshot_id FROM "acme_tpch".snapshots() WHERE commit_message = 'm [x]'"""
   }
+
+  "BranchMergeSql.applyBatch" should "stamp first, guard the head, write other tables, then rows" in {
+    val region = RowMergeTable(0, "tpch1", "region", List("r"), Nil, Nil, Nil)
+    val sql    = BranchMergeSql.applyBatch(
+      parentAlias = "acme_tpch",
+      branchAlias = "qod_branch",
+      tableChanges = List(
+        TableChange("tpch1", "region", ChangeKind.Modified),
+        TableChange("tpch1", "extra", ChangeKind.Created)
+      ),
+      rowMerges = List(region -> RowCounts("tpch1", "region", toDelete = 1L, toUpdate = 1L)),
+      ranged = false,
+      updateChunkRows = 100L,
+      fork = 10L,
+      head = 15L,
+      author = "tenant:acme/user:bob",
+      message = "merge branch f [mg-1] proposed by alice"
+    )
+    val lines = sql.linesIterator.toList
+    lines.head shouldBe "BEGIN;"
+    lines(1) should startWith("CALL ducklake_set_commit_message('acme_tpch',")
+    lines(2) should include("branch moved past snapshot 15")
+    lines(3) shouldBe "SET dynamic_or_filter_threshold = 10000;"
+    lines.last shouldBe "COMMIT;"
+    sql should include("""CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT""")
+    sql.indexOf("CREATE TABLE") should be < sql.indexOf("DELETE FROM")
+    sql.indexOf("DELETE FROM") should be < sql.indexOf("UPDATE ")
+  }

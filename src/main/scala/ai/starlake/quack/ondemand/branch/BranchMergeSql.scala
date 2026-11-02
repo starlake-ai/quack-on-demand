@@ -120,6 +120,35 @@ object BranchMergeSql:
       headGuard(branchAlias, head)
     ) ++ body ++ List("COMMIT")).mkString("", ";\n", ";")
 
+  /** The Apply stage: one transaction. Tables merged by rows come last, each with its statements in
+    * the order [[RowMergeSql.applyStatements]] gives. Only safe under an armed [[MergeFence]].
+    */
+  def applyBatch(
+      parentAlias: String,
+      branchAlias: String,
+      tableChanges: List[TableChange],
+      rowMerges: List[(RowMergeTable, RowCounts)],
+      ranged: Boolean,
+      updateChunkRows: Long,
+      fork: Long,
+      head: Long,
+      author: String,
+      message: String
+  ): String =
+    val others = tableChanges
+      .filter(_.kind != ChangeKind.Modified)
+      .sortBy(c => (c.kind.ordinal, c.schema, c.table))
+      .flatMap(c => tableStatements(parentAlias, branchAlias, c, fork, head))
+    val rows = rowMerges.flatMap((t, c) =>
+      RowMergeSql.applyStatements(parentAlias, t, c, ranged, updateChunkRows)
+    )
+    (List(
+      "BEGIN",
+      s"CALL ducklake_set_commit_message(${lit(parentAlias)}, ${lit(author)}, ${lit(message)})",
+      headGuard(branchAlias, head),
+      RowMergeSql.Settings
+    ) ++ others ++ rows ++ List("COMMIT")).mkString("", ";\n", ";")
+
   /** Locates the merge snapshot on the parent by its unique commit message. */
   def findSnapshotSql(parentAlias: String, message: String): String =
     s"SELECT max(snapshot_id) AS snapshot_id FROM ${q(parentAlias)}.snapshots() " +
