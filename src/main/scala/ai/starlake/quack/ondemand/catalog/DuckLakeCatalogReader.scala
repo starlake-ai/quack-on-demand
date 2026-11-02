@@ -173,6 +173,21 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
           List(n, n)
         )
 
+  /** Whether `schema.name` names a view in any version of the catalog, live or dropped. The REST
+    * data edge refuses time travel on such a name: whether DuckLake honours `AT (VERSION => n)` on
+    * a view is not established, and a name that was a view at some snapshot could resolve to it.
+    */
+  def viewEverNamed(schema: String, name: String): Boolean =
+    query(
+      """SELECT 1
+        |  FROM ducklake_view v
+        |  JOIN ducklake_schema s ON s.schema_id = v.schema_id
+        | WHERE s.schema_name = ? AND v.view_name = ?
+        | LIMIT 1""".stripMargin,
+      schema,
+      name
+    )(_ => 1).nonEmpty
+
   def snapshotExists(id: Long): Boolean =
     query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
 
