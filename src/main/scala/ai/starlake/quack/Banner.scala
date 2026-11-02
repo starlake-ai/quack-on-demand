@@ -48,6 +48,15 @@ object Banner:
              |$Line""".stripMargin
         )
 
+  private def display(h: String) = if h == "0.0.0.0" || h == "::" then "localhost" else h
+
+  /** The REST data edge's banner line, without the banner's indent. Every statement it sends is
+    * judged by the node like any other door's, so the line only says how a client authenticates.
+    */
+  def restLine(host: String, port: Int, tls: Boolean): String =
+    val url = s"${if tls then "https" else "http"}://${display(host)}:$port/api/v1"
+    s"REST (data)   : $url  (PAT bearer, read-only)"
+
   /** The post-startup banner: printed once REST and FlightSQL are both listening. `restHost` /
     * `flightHost` of 0.0.0.0 render as localhost so the endpoints are copy-pasteable. Client
     * connection strings are not printed; the banner links to their documentation instead.
@@ -61,6 +70,8 @@ object Banner:
       tlsEnabled: Boolean,
       /** The native Quack front door `(host, port, tls)` when it is enabled. */
       quack: Option[(String, Int, Boolean)] = None,
+      /** The REST data edge `(host, port, tls)` when it is enabled. */
+      rest: Option[(String, Int, Boolean)] = None,
       /** Authorization engine of a tenant that sets none (`quack-flightsql.opa.defaultMode`, env
         * `QOD_ACL_MODE`): `qod` or `opa`.
         */
@@ -76,14 +87,16 @@ object Banner:
         */
       problems: List[ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem] = Nil
   ): String =
-    def display(h: String) = if h == "0.0.0.0" || h == "::" then "localhost" else h
     // Constant since Phase D: every node checks every statement, and nothing switches it off.
     val aclLine =
       "   SQL ACL       : ENFORCED on every node (QoD grants, or the tenant's OPA in opa mode)"
     val modeLine =
       s"   ACL MODE      : $aclMode (default for tenants that set none; $opaTenants tenant(s) in opa mode)"
-    val rh        = display(restHost)
-    val fh        = display(flightHost)
+    val rh             = display(restHost)
+    val fh             = display(flightHost)
+    val restBannerLine = rest.fold("") { case (h, p, tls) =>
+      s"\n   ${restLine(h, p, tls)}"
+    }
     val quackLine = quack.fold("") { case (h, p, tls) =>
       s"\n   Quack (DuckDB): quack:${display(h)}:$p  (${if tls then "TLS" else "plain HTTP"})"
     }
@@ -100,7 +113,7 @@ object Banner:
        | $upLine$configLine
        |   control plane : ${jdbcControlPlaneUrl(meta)}
        |   REST API + UI : http://$rh:$restPort  (UI: http://$rh:$restPort/ui)
-       |   FlightSQL     : $scheme://$fh:$flightPort$quackLine
+       |   FlightSQL     : $scheme://$fh:$flightPort$quackLine$restBannerLine
        |$aclLine
        |$modeLine
        |""".stripMargin + problemsSection(problems) +
