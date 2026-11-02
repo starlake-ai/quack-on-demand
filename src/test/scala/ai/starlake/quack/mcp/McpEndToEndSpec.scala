@@ -226,6 +226,14 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     resp.statusCode() shouldBe 404
   }
 
+  it should "let a pooling client go on after an unresolved PAT's unread body" in
+    withHarness() { h =>
+      // Ember closes a connection whose body stays unread, so the 401 must say so, or the client
+      // reuses it and fails: 1 call in 5 did, with a body this size.
+      val body = rpc("ping") + " " * 65536
+      (1 to 20).foreach(_ => postMcp(h, body, Some("qod_pat_unknown")).statusCode() shouldBe 401)
+    }
+
   "mcp admin surface" should "drive the full provisioning flow" in withHarness() { h =>
     val root = mintPat(None, SecurityFixtures.RootUsername)
 

@@ -96,7 +96,7 @@ class HealthHandlerSpec extends AnyFlatSpec with Matchers:
     answer = false
     val slow = new Thread(() => { h.healthy(); () })
     slow.start()
-    entered.await()
+    entered.await(10, TimeUnit.SECONDS) shouldBe true
     // The second ping is stalled: the others get the last answer without waiting for it.
     h.healthy() shouldBe true
     pings.get shouldBe 2
@@ -116,7 +116,7 @@ class HealthHandlerSpec extends AnyFlatSpec with Matchers:
     })
     val first = new Thread(() => { h.healthy(); () })
     first.start()
-    entered.await()
+    entered.await(10, TimeUnit.SECONDS) shouldBe true
     h.healthy() shouldBe false
     release.countDown()
     first.join()
@@ -130,5 +130,45 @@ class HealthHandlerSpec extends AnyFlatSpec with Matchers:
       true
     })
     an[IllegalStateException] should be thrownBy h.healthy()
+    h.healthy() shouldBe true
+  }
+
+  it should "stop serving a true answer once it is twice the interval old" in {
+    var now     = 0L
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val pings   = new AtomicInteger
+    val h       = new CachedDbHealth(
+      () => {
+        if pings.incrementAndGet() == 2 then
+          entered.countDown()
+          release.await(10, TimeUnit.SECONDS)
+        true
+      },
+      ttlNanos = 100L,
+      nanoTime = () => now
+    )
+    h.healthy() shouldBe true
+    now = 100L
+    val slow = new Thread(() => { h.healthy(); () })
+    slow.start()
+    entered.await(10, TimeUnit.SECONDS) shouldBe true
+    now = 199L
+    h.healthy() shouldBe true
+    now = 200L
+    h.healthy() shouldBe false
+    release.countDown()
+    slow.join()
+  }
+
+  it should "recover once a ping answers true again" in {
+    var now    = 0L
+    var answer = false
+    val h      = new CachedDbHealth(() => answer, ttlNanos = 100L, nanoTime = () => now)
+    h.healthy() shouldBe false
+    answer = true
+    now = 99L
+    h.healthy() shouldBe false
+    now = 100L
     h.healthy() shouldBe true
   }

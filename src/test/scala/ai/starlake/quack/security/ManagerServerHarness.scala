@@ -474,7 +474,7 @@ object ManagerServerHarness:
     )
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
-    val health = new HealthHandler(sup)
+    val health = new HealthHandler(sup, () => true)
 
     val tagHandlers = new TagHandlers(
       sup,

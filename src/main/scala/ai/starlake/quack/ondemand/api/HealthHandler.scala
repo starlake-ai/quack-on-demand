@@ -6,7 +6,7 @@ import sttp.model.StatusCode
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
-final class HealthHandler(sup: PoolSupervisor, dbHealthy: () => Boolean = () => true):
+final class HealthHandler(sup: PoolSupervisor, dbHealthy: () => Boolean):
 
   private def snapshot: HealthResponse =
     val pools = sup.list()
@@ -24,8 +24,10 @@ final class HealthHandler(sup: PoolSupervisor, dbHealthy: () => Boolean = () => 
   }
 
 /** Whether the database answered lately, for the readiness probe. Anyone can call that probe, and a
-  * stalled database makes a ping wait for seconds. So one ping runs at a time, at most once per
-  * `ttlNanos`, and every other caller gets the last answer at once (false until there is one).
+  * stalled database makes a ping wait for seconds. So one ping runs at a time, about once per
+  * `ttlNanos`, and every other caller gets the last answer at once: false until there is one, and
+  * false once a `true` is twice `ttlNanos` old, so that a slow ping cannot keep a dead database
+  * ready. `ping` must bound its own time: while it runs, no other ping starts.
   */
 final class CachedDbHealth(
     ping: () => Boolean,
@@ -39,7 +41,7 @@ final class CachedDbHealth(
     val known = last.get()
     val now   = nanoTime()
     if known.exists((at, _) => now - at < ttlNanos) || !pinging.compareAndSet(false, true) then
-      known.exists((_, answer) => answer)
+      known.exists((at, answer) => answer && now - at < 2 * ttlNanos)
     else
       try
         val answer = ping()
