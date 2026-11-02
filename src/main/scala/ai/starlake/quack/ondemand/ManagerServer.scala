@@ -1310,6 +1310,7 @@ final class ManagerServer(
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
       .withMaxConnections(limits.maxConnections)
+      .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
       .withHttpApp(
         (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+>
           moduleStatic <+> rootRedirect).orNotFound

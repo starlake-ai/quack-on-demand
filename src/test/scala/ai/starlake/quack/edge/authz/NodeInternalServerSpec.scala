@@ -13,6 +13,7 @@ import java.net.{InetAddress, ServerSocket, Socket, URI}
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets.{ISO_8859_1, UTF_8}
 import java.util.concurrent.atomic.AtomicInteger
+import scala.concurrent.duration.*
 
 class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
 
@@ -219,6 +220,40 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
             tookMs should be < 8000L
           }
           served.get() shouldBe 0
+        }
+      )
+      .unsafeRunSync()
+
+  it should "read a body no more than ReadBufferBytes at a time" in:
+    // Ember keeps a buffer of this size for every connection, whatever it sends, so it sets what a
+    // flood of connections holds (BoundedBody.ReadBufferBytes). The route lets the body pile up in
+    // the socket before it reads, so that a read has more than the buffer to take: with Ember's
+    // default 256 KiB, a read hands the route well over 32 KiB at once.
+    val port    = freePort()
+    val largest = new AtomicInteger(0)
+    val slow    = HttpRoutes.of[IO] {
+      case req @ POST -> Root / "api" / "internal" / "authz" / "decide" =>
+        IO.sleep(500.millis) *>
+          req.body.chunks
+            .evalMap(c => IO(largest.accumulateAndGet(c.size, (a, b) => math.max(a, b))))
+            .compile
+            .drain *> Ok("read")
+    }
+    val body = new Array[Byte](512 * 1024)
+    new NodeInternalServer("127.0.0.1", port, 256, List(slow)).resource
+      .use(_ =>
+        IO.blocking {
+          scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
+            socket.setSoTimeout(15000)
+            socket.getOutputStream.write(
+              decideCall(s"Content-Length: ${body.length}").getBytes(UTF_8)
+            )
+            socket.getOutputStream.write(body)
+            socket.getOutputStream.flush()
+            readResponse(reader(socket))._1 should startWith("HTTP/1.1 200")
+          }
+          largest.get should be > 0
+          largest.get should be <= BoundedBody.ReadBufferBytes
         }
       )
       .unsafeRunSync()

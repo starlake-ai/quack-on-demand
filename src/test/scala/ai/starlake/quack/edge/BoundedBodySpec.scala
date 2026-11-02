@@ -10,6 +10,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.typelevel.ci.CIString
 
+import java.lang.ref.WeakReference
 import java.nio.charset.{Charset, StandardCharsets}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
@@ -130,3 +131,97 @@ class BoundedBodySpec extends AnyFlatSpec with Matchers:
     // This one nests only for a route that reads UTF-8 whatever the header says.
     reading(past, declared) shouldBe BoundedBody.Outcome.TooDeep
     shouldBeRead(reading(nested(8), declared, ibm037))
+
+  private def pattern(n: Int): Array[Byte] = Array.tabulate[Byte](n)(i => (i * 7 + 1).toByte)
+
+  it should "hand back every byte of a body cut into reads of one byte, and refuse one more" in:
+    def trickled(n: Int): Stream[IO, Byte] =
+      Stream.emits(pattern(n).toList).covary[IO].chunkLimit(1).unchunks
+    run(request(trickled(16))) match
+      case BoundedBody.Outcome.Read(b) => b.toList shouldBe pattern(16).toList
+      case other                       => fail(s"expected Read, got $other")
+    run(request(trickled(17))) shouldBe BoundedBody.Outcome.TooLarge
+
+  it should "start from nothing each time the same read runs" in:
+    val read = BoundedBody.read(request(bytes(8)), 16, 5.seconds)
+    for _ <- 1 to 2 do
+      read.unsafeRunSync() match
+        case BoundedBody.Outcome.Read(b) => b.length shouldBe 8
+        case other                       => fail(s"expected Read, got $other")
+
+  it should "keep every byte, in order, across the arrays it holds a body in" in:
+    val s = BoundedBody.SegmentBytes
+    // Sizes on both sides of the points where one array fills and the next begins, read in one go
+    // and cut into reads that start and end inside the arrays.
+    val cases = for
+      size <- List(1, 511, 512, 513, 1024, 1025, 4096, s - 1, s, s + 1, 2 * s, 3 * s + 5)
+      cut  <- List(Int.MaxValue, 1000, 7)
+      if cut != 7 || size <= 4096
+    yield (size, cut)
+    cases.foreach { (size, cut) =>
+      withClue(s"a body of $size bytes in reads of at most $cut: ") {
+        val body = Stream.emits(pattern(size).toList).covary[IO].chunkLimit(cut).unchunks
+        run(request(body), max = 1L << 20) match
+          case BoundedBody.Outcome.Read(b) =>
+            b.length shouldBe size
+            java.util.Arrays.mismatch(b, pattern(size)) shouldBe -1
+          case other => fail(s"expected Read, got $other")
+      }
+    }
+
+  /** A body of `reads` reads, each a view of `viewSize` bytes of an array of 1 MiB of its own, as
+    * Ember cuts the chunks of a chunked body out of the socket read they came from. `arrays` holds
+    * a weak reference to each array. Before it hands over a read, and again before it ends, the
+    * body waits for the collector to clear the array of every read it handed over: a reader that
+    * kept a read leaves its array standing, and the body then fails the read, naming the read it
+    * waited for, once `patience` is up. So a reader that keeps its reads fails in `patience` rather
+    * than hanging, and holds at most two arrays.
+    */
+  private final class ViewedBody(reads: Int, viewSize: Int, patience: FiniteDuration):
+    private val Offset = 7
+    private val arrays = new Array[WeakReference[Array[Byte]]](reads)
+
+    private def clearedBefore(read: Int): Boolean = (0 until read).forall(arrays(_).get == null)
+
+    private def awaitCleared(read: Int): IO[Unit] =
+      IO.blocking {
+        val until = System.nanoTime() + patience.toNanos
+        while !clearedBefore(read) && System.nanoTime() < until do
+          System.gc()
+          Thread.sleep(20)
+        if !clearedBefore(read) then
+          throw new IllegalStateException(
+            s"read $read was due, but an array of the reads before it was still held after $patience"
+          )
+      }
+
+    val body: Stream[IO, Byte] =
+      Stream
+        .range(0, reads)
+        .evalMap { i =>
+          awaitCleared(i) *> IO {
+            val big = new Array[Byte](1 << 20)
+            java.util.Arrays.fill(big, Offset, Offset + viewSize, (i + 1).toByte)
+            arrays(i) = new WeakReference(big)
+            // Chunk.array would copy a short slice.
+            Chunk.ArraySlice(big, Offset, viewSize)
+          }
+        }
+        .flatMap(Stream.chunk) ++ Stream.exec(awaitCleared(reads))
+
+    /** What the reader must hand back: view `i` is `viewSize` bytes of `i + 1`. */
+    val expected: Array[Byte] = Array.tabulate(reads * viewSize)(k => (k / viewSize + 1).toByte)
+
+  it should "keep no read it was handed" in:
+    // A view of a large array stands for a chunk of a chunked body, cut from a whole socket read.
+    // The stream keeps its next read waiting until every earlier array was seen to be collected.
+    // A view shorter than 64 bytes is copied by fs2's collector anyway, so these are not shorter.
+    for viewSize <- List(64, 1000) do
+      withClue(s"views of $viewSize bytes: ") {
+        val viewed = new ViewedBody(reads = 12, viewSize, patience = 5.seconds)
+        run(request(viewed.body), max = 1L << 20, deadline = 2.minutes) match
+          case BoundedBody.Outcome.Read(b) =>
+            b.length shouldBe viewed.expected.length
+            java.util.Arrays.mismatch(b, viewed.expected) shouldBe -1
+          case other => fail(s"expected Read, got $other")
+      }

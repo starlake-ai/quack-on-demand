@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.quack.edge.BoundedBody
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.comcast.ip4s.{Host, Port}
@@ -40,6 +41,7 @@ final class NodeInternalServer(
       .withHost(bindHost)
       .withPort(bindPort)
       .withMaxConnections(maxConnections)
+      .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
       .withIdleTimeout(10.seconds)
       .withHttpApp(routes.foldLeft(HttpRoutes.empty[IO])(_ <+> _).orNotFound)
       .withShutdownTimeout(1.second)

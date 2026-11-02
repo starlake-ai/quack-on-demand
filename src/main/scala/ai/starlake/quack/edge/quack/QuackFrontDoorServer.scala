@@ -108,6 +108,7 @@ final class QuackFrontDoorServer(
         .withPort(Port.fromInt(cfg.port).getOrElse(Port.fromInt(9494).get))
         .withHttpApp(routes.orNotFound)
         .withMaxConnections(cfg.maxConnections)
+        .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
         .withShutdownTimeout(1.second)
       built = tls.fold(base)(ctx =>
         base

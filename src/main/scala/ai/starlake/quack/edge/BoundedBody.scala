@@ -8,6 +8,7 @@ import org.typelevel.ci.CIString
 
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.annotation.tailrec
+import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.FiniteDuration
 
 /** Reads a whole request body under a size and a time limit: what REST, MCP and the node routes do
@@ -37,16 +38,70 @@ object BoundedBody:
     */
   val MaxNesting: Int = 256
 
+  /** Bytes a listener reads from a socket at once. Ember allocates this per connection on the first
+    * read and keeps it, whatever the connection sends, and an out-of-memory error is fatal to the
+    * manager. So this sets what a flood of connections holds: at Ember's default of 256 KiB, 1024
+    * idle connections hold 262 MiB of heap. A large body only takes more reads.
+    */
+  val ReadBufferBytes: Int = 32 * 1024
+
+  /** The largest array a body is held in while it is read. G1 gives an array of half a region or
+    * more (512 KiB with the default heap of a 4 GiB host) whole regions to itself, so one array
+    * growing to hold a body of 1 MiB costs 2 MiB of heap while the client stalls (measured), and
+    * the node verdict listener takes such bodies from clients with no key. Arrays of this size cost
+    * what they hold.
+    */
+  private[edge] val SegmentBytes: Int = 64 * 1024
+
+  /** The bytes of a body so far. Each read is copied into arrays that start small and grow with the
+    * body up to [[SegmentBytes]], so a client sending small packets costs no wrapper per read and a
+    * short body costs no more than itself, and nothing of a read is kept: a chunk of a chunked body
+    * is a view pinning the whole socket read it was cut from. The one array a route gets is made by
+    * [[toByteArray]], once the body is complete.
+    */
+  private final class Kept:
+    private val full: ArrayBuffer[Array[Byte]] = ArrayBuffer.empty
+    private var current: Array[Byte]           = Array.emptyByteArray
+    private var filled: Int                    = 0
+    private var held: Long                     = 0L
+
+    def size: Long = held
+
+    def add(from: Array[Byte], offset: Int, length: Int): Unit =
+      @tailrec def go(offset: Int, length: Int): Unit =
+        if length > 0 then
+          if filled == current.length then
+            full += current
+            current = new Array[Byte](math.min(SegmentBytes.toLong, math.max(512L, held)).toInt)
+            filled = 0
+          val n = math.min(length, current.length - filled)
+          System.arraycopy(from, offset, current, filled, n)
+          filled += n
+          held += n
+          go(offset + n, length - n)
+      go(offset, length)
+
+    def toByteArray: Array[Byte] =
+      val out = new Array[Byte](held.toInt)
+      val at  = full.foldLeft(0) { (at, segment) =>
+        System.arraycopy(segment, 0, out, at, segment.length)
+        at + segment.length
+      }
+      System.arraycopy(current, 0, out, at, filled)
+      out
+
   /** The body of `req`, at most `maxBytes`, within `deadline`. A declared length over the limit is
     * refused before any read. The limit itself holds on the stream Ember frames, however the client
     * announced it: Ember and http4s' typed headers read `Content-Length: +32` or
     * `Transfer-Encoding: foo, chunked` differently, so nothing here may decide from the headers
     * that there is no body. A request with no body reads as empty at once.
     *
-    * Each read is copied flat before it is kept: Ember cuts a chunked body's chunks as views of the
-    * socket read they came from, so a client padding small chunks with chunk extensions would
-    * otherwise pin a whole read for every few bytes the limit counts. Ember's own idle timeout on a
-    * stalled body is the deadline passing too, as in `QuackBodyRead`.
+    * Each read goes into [[Kept]] as it arrives and nothing of it is kept. A chunk kept per read
+    * costs a wrapper per read, about 3 heap bytes per body byte for a client sending small packets,
+    * before any credential. And Ember cuts a chunked body's chunks as views of the socket read they
+    * came from, so a client padding small chunks with chunk extensions would otherwise pin a whole
+    * read for every few bytes the limit counts. Ember's own idle timeout on a stalled body is the
+    * deadline passing too, as in `QuackBodyRead`.
     *
     * A body that nests past [[MaxNesting]] is `TooDeep`, whether a route reads it as UTF-8 or
     * decodes it in the charset the request declares.
@@ -54,21 +109,26 @@ object BoundedBody:
   def read(req: Request[IO], maxBytes: Long, deadline: FiniteDuration): IO[Outcome] =
     if req.contentLength.exists(_ > maxBytes) then IO.pure(Outcome.TooLarge)
     else
-      req.body
-        .take(maxBytes + 1)
-        // A chunk of a chunked body is a view of the whole socket read it was cut from.
-        .chunks
-        .map(_.compact)
-        .unchunks
-        .compile
-        .to(Array)
-        .map(bytes =>
-          if bytes.length.toLong > maxBytes then Outcome.TooLarge
-          else if nestsTooDeep(req, bytes) then Outcome.TooDeep
-          else Outcome.Read(bytes)
-        )
-        .recover { case _: EmberException.ReadTimeout => Outcome.TimedOut }
-        .timeoutTo(deadline, IO.pure(Outcome.TimedOut))
+      // A Kept for each run: `fold` takes its starting value once.
+      IO.defer {
+        req.body
+          .take(maxBytes + 1)
+          .chunks
+          .compile
+          .fold(new Kept()) { (kept, read) =>
+            val flat = read.toArraySlice
+            kept.add(flat.values, flat.offset, flat.size)
+            kept
+          }
+          .map(kept =>
+            if kept.size > maxBytes then Outcome.TooLarge
+            else
+              val bytes = kept.toByteArray
+              if nestsTooDeep(req, bytes) then Outcome.TooDeep else Outcome.Read(bytes)
+          )
+          .recover { case _: EmberException.ReadTimeout => Outcome.TimedOut }
+          .timeoutTo(deadline, IO.pure(Outcome.TimedOut))
+      }
 
   /** Whether `bytes` nest past [[MaxNesting]] for any route: as UTF-8, which is what the routes
     * reading bytes see, and in the charset the request declares, which is what Tapir decodes with
