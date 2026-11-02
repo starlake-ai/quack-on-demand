@@ -629,6 +629,31 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
       ) shouldBe None
     }
 
+  "a fenced merge's open transaction" should "retry over another table's commit and land after it" in
+    withCatalog("fnretried", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, _, branchDb, branchDir) =>
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), None) shouldBe
+          Right(())
+        val br = branchReader(branchDb)
+        try
+          // At Apply's COMMIT its transaction has written, so it is pinned at main's head S and its
+          // first try needs S + 1. This commit takes that id, so landing at all takes a retry.
+          withNode(
+            branchDb,
+            branchDir,
+            beforeCommit = () => duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');"): Unit
+          )(node => runMerge(node, cs, br, parent, message)) shouldBe a[Right[?, ?]]
+        finally
+          PostgresMergeFence.disarm(parentMeta, message)
+          br.close()
+        val other = cs.mainSnapshot + 1
+        parent.snapshotByCommitMessage(message) shouldBe Some(other + 1)
+        parent.snapshotChangesSince(cs.mainSnapshot).map(_._1) shouldBe List(other, other + 1)
+        duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe List("BRANCH")
+        duck("SELECT n_name FROM lake.tpch1.nation ORDER BY 1;") shouldBe List("DE", "FR", "IT")
+      }
+    }
+
   "the merge fence" should "refuse a merged table that moved at once, and the next attempt merges" in
     withCatalog("fnfast", extra) { (parent, _) =>
       fencedRegionMerge(parent) { (cs, message, send, branchDb, branchDir) =>
@@ -760,18 +785,13 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
         None
       ) shouldBe Right(())
       def harmless(changes: String): Boolean =
-        val c = java.sql.DriverManager.getConnection(
-          ai.starlake.quack.ondemand.state.testkit.TestPostgres.dbUrl(parentMeta("dbName")),
-          ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgUser,
-          ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgPass
-        )
-        try
+        onCatalog { c =>
           val ps = c.prepareStatement("SELECT qod_merge_fence.harmless(?, ARRAY[2]::bigint[])")
           ps.setString(1, changes)
           val rs = ps.executeQuery()
           rs.next()
           rs.getBoolean(1)
-        finally c.close()
+        }
       harmless("inserted_into_table:3,rewrite_delete:3") shouldBe true
       harmless("inserted_into_table:2") shouldBe false
       harmless("merge_adjacent:2") shouldBe false
@@ -809,7 +829,9 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
             ).left.toOption.get
             info(s"DuckLake's own text quotes the inlined value: ${raw.contains(sentinel)}")
             MergeDecision.failureText(raw) should not include sentinel
-            // The cause follows DuckLake's wrapper: a pin bump that rewords it would lose the cause.
+            // The cut keeps the line after DuckLake's wrapper: a pin bump that rewords the wrapper
+            // would lose it. That line does not always hold the cause: a failure in the metadata
+            // batch, as here, ends at `Failed to execute query`, before the quoted SQL.
             MergeDecision.failureText(raw) should not endWith "transaction."
           finally PostgresMergeFence.disarm(parentMeta, message)
         finally br.close()
@@ -863,10 +885,8 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
           ids(cs),
           Some(120)
         ) shouldBe Right(())
-        try
-          val started = System.nanoTime()
-          duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');")
-          ((System.nanoTime() - started) / 1e9) should be < 5.0
+        // A held writer would run out of DuckLake's retries, and `duck` fails on its error.
+        try duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');")
         finally PostgresMergeFence.disarm(parentMeta, message)
       }
     }
@@ -915,11 +935,88 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
           Some(2)
         ) shouldBe Right(())
         Thread.sleep(2500)
-        val started = System.nanoTime()
+        // A held writer would run out of DuckLake's retries, and `duck` fails on its error.
         duck("INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');")
-        ((System.nanoTime() - started) / 1e9) should be < 5.0
       }
     }
+
+  // ---- arming takes no lock that stalls the catalog's commits -----------------------------------
+
+  /** `body` while an open transaction of another session holds what `lockSql` takes. */
+  private def whileLocked[A](lockSql: String)(body: => A): A =
+    onCatalog { holder =>
+      holder.setAutoCommit(false)
+      holder.createStatement().execute(lockSql)
+      try body
+      finally holder.rollback()
+    }
+
+  /** An arm on a thread of its own: one that waits on the lock fails the test here, and goes on
+    * once the lock's holder lets go.
+    */
+  private def armAside(message: String, base: Long): Either[String, Unit] =
+    given ExecutionContext = ExecutionContext.global
+    Await.result(
+      Future(PostgresMergeFence.arm(parentMeta, message, base, Set(2L), None)),
+      20.seconds
+    )
+
+  // What a commit's trigger holds on the fence table. An ALTER cannot run beside it.
+  private val FenceRead = "LOCK TABLE qod_merge_fence.fence IN ACCESS SHARE MODE"
+
+  "arming a catalog whose fence table is current" should "run no ALTER, so no reader holds it up" in
+    withCatalog("fnnoalter", extra) { (parent, _) =>
+      val head = parent.maxSnapshotId().get
+      PostgresMergeFence.arm(parentMeta, "first", head, Set(2L), None) shouldBe Right(())
+      whileLocked(FenceRead)(armAside("second", head) shouldBe Right(()))
+    }
+
+  "arming a catalog missing a fence column" should "answer Left when a lock holds up the ALTER" in
+    withCatalog("fnalter", extra) { (parent, _) =>
+      val head = parent.maxSnapshotId().get
+      PostgresMergeFence.arm(parentMeta, "first", head, Set(2L), None) shouldBe Right(())
+      // The fence table as an earlier build left it.
+      onCatalog(
+        _.createStatement().execute("ALTER TABLE qod_merge_fence.fence DROP COLUMN hold_until")
+      )
+      whileLocked(FenceRead)(
+        armAside("second", head).left.toOption.get should include("lock timeout")
+      )
+      // Once free, the next arm adds the column: it writes the hold there.
+      PostgresMergeFence.arm(parentMeta, "third", head, Set(2L), Some(60)) shouldBe Right(())
+    }
+
+  "arming a catalog with no trigger yet" should "answer Left when a commit holds up creating it" in
+    withCatalog("fntrigger", extra) { (parent, _) =>
+      val head = parent.maxSnapshotId().get
+      // What a commit holds on the table, until it ends. CREATE TRIGGER cannot run beside it.
+      whileLocked("LOCK TABLE ducklake_snapshot_changes IN ROW EXCLUSIVE MODE")(
+        armAside("first", head).left.toOption.get should include("lock timeout")
+      )
+      PostgresMergeFence.arm(parentMeta, "second", head, Set(2L), None) shouldBe Right(())
+    }
+
+  // ---- the catalog fixture --------------------------------------------------------------------
+
+  "the catalog fixture" should "drop its database even when a session stays open on it" in {
+    val pg              = ai.starlake.quack.ondemand.state.testkit.TestPostgres
+    val (name, session) = withCatalog("fxforce") { (_, _) =>
+      val db = currentDbName.get
+      (db, java.sql.DriverManager.getConnection(pg.dbUrl(db), pg.pgUser, pg.pgPass))
+    }
+    try
+      val admin = java.sql.DriverManager.getConnection(pg.adminUrl, pg.pgUser, pg.pgPass)
+      try
+        val ps = admin.prepareStatement("SELECT count(*) FROM pg_database WHERE datname = ?")
+        ps.setString(1, name)
+        val rs = ps.executeQuery()
+        rs.next()
+        rs.getInt(1) shouldBe 0
+      finally admin.close()
+    finally
+      session.close()
+      pg.dropDatabase(name)
+  }
 
   // ---- TableCommitFence: a restore's replace held to the table state it validated ----
 

@@ -16,17 +16,21 @@ import scala.util.control.NonFatal
   * transaction: a BEFORE INSERT trigger on `ducklake_snapshot_changes` refuses the row carrying the
   * merge's unique commit message unless every other snapshot after S is harmless: only row data or
   * maintenance on tables outside `tableIds`. Anything else (a schema change, an unknown verb)
-  * refuses. The refusal's text avoids the words DuckLake retries (`conflict`, `concurrent`,
-  * `unique`, `primary key`), so it fails at once. Commits on other tables force the merge to retry
-  * with the next snapshot id, so the Apply batch leaves retries on.
+  * refuses. Postgres serializes snapshot ids through the primary key, so the check and the commit
+  * are atomic: DuckLake's metadata transactions run REPEATABLE READ, but a commit the trigger's
+  * view cannot see holds the id this commit needs, so this try fails and the retry reads afresh.
+  * The refusal's text avoids the words DuckLake retries (`conflict`, `concurrent`, `unique`,
+  * `primary key`), so it fails at once. Commits on other tables force the merge to retry with the
+  * next snapshot id, so the Apply batch leaves retries on.
   *
   * With `holdSec`, until that many seconds from now (the database's clock), the same trigger
   * refuses every other commit naming a table in `tableIds`, in words DuckLake does retry, so a
-  * writer waits. The hold ends by itself: a dead manager cannot block writers for longer. Two kinds
-  * of commit get past it and land: one whose metadata transaction began before the arm (DuckLake's
-  * run REPEATABLE READ, so its first try never sees the row), and a rename, whose changes hold the
-  * new name and no id. The fence then refuses the merge: the hold saves attempts, and the fence
-  * alone keeps main's writes.
+  * writer waits. The hold ends by itself: a dead manager cannot block writers for longer. Three
+  * kinds of commit get past it and land: at most one whose metadata transaction began before the
+  * arm (its first try's view has no row, and once one lands the others lose its id and retry on a
+  * view that does); a rename, whose changes hold the new name and no id; and a commit with a fence
+  * row of its own, such as a restore, which returns before the hold is read. The fence then refuses
+  * the merge: the hold saves attempts, and the fence alone keeps main's writes.
   */
 trait MergeFence:
 
@@ -128,20 +132,51 @@ object PostgresMergeFence extends MergeFence with TableCommitFence with LazyLogg
     "inserted_into_table|deleted_from_table|inlined_insert|inlined_delete|" +
       "inline_flush|merge_adjacent|compacted_table|rewrite_delete"
 
+  /** Postgres `lock_timeout`, in ms, on an arm's own connection. Bounds how long an ALTER of the
+    * fence table or the CREATE TRIGGER waits behind a transaction that holds its table, and so how
+    * long every commit on the catalog queues behind the pending lock. Past it the arm answers
+    * `Left`.
+    */
+  private val ArmLockTimeoutMs = 5000
+
+  /** What a fence table an earlier build created may lack. table_id: one table the commit is held
+    * to (a restore). table_ids: a merge's tables.
+    */
+  private val AddedColumns =
+    List("table_id" -> "BIGINT", "table_ids" -> "BIGINT[]", "hold_until" -> "TIMESTAMPTZ")
+
+  private def fenceColumns(c: Connection): Set[String] =
+    val ps = c.prepareStatement(
+      "SELECT a.attname FROM pg_attribute a JOIN pg_class r ON r.oid = a.attrelid " +
+        "JOIN pg_namespace n ON n.oid = r.relnamespace " +
+        "WHERE n.nspname = ? AND r.relname = 'fence' AND a.attnum > 0 AND NOT a.attisdropped"
+    )
+    try
+      ps.setString(1, FenceSchema)
+      val rs = ps.executeQuery()
+      try Iterator.continually(rs).takeWhile(_.next()).map(_.getString(1)).toSet
+      finally rs.close()
+    finally ps.close()
+
   private def install(c: Connection, schema: String): Unit =
     val fs = q(FenceSchema)
     val ms = q(schema)
     val st = c.createStatement()
     try
+      st.execute(s"SET lock_timeout = $ArmLockTimeoutMs")
       st.execute(s"CREATE SCHEMA IF NOT EXISTS $fs")
       st.execute(
         s"CREATE TABLE IF NOT EXISTS $fs.fence " +
           "(commit_message TEXT PRIMARY KEY, base_snapshot BIGINT NOT NULL)"
       )
-      // table_id: one table the commit is held to (a restore). table_ids: a merge's tables.
-      st.execute(s"ALTER TABLE $fs.fence ADD COLUMN IF NOT EXISTS table_id BIGINT")
-      st.execute(s"ALTER TABLE $fs.fence ADD COLUMN IF NOT EXISTS table_ids BIGINT[]")
-      st.execute(s"ALTER TABLE $fs.fence ADD COLUMN IF NOT EXISTS hold_until TIMESTAMPTZ")
+      // ALTER takes ACCESS EXCLUSIVE even for a column that exists, and the trigger reads this table
+      // on every commit: asked on every arm, one stuck reader would queue them all behind it.
+      val present = fenceColumns(c)
+      AddedColumns
+        .filterNot((name, _) => present.contains(name))
+        .foreach((name, kind) =>
+          st.execute(s"ALTER TABLE $fs.fence ADD COLUMN IF NOT EXISTS $name $kind")
+        )
       // CASE, not AND: Postgres does not promise to test the pattern before the cast. Anything that
       // does not read as a known verb on a table id refuses, NULL ids included.
       st.execute(

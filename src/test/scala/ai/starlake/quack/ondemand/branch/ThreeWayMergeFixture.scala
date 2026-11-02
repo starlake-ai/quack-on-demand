@@ -16,9 +16,10 @@ import scala.collection.mutable.ListBuffer
 
 /** A merge node stand-in: one in-process DuckDB, a new connection per call, as the real node serves
   * each request. So working tables must survive between calls and session settings must not, which
-  * is what the real thing does.
+  * is what the real thing does. `beforeCommit` runs just before a batch's COMMIT, its transaction
+  * open: what another client does at that moment.
   */
-final class JdbcMergeNode(root: Connection) extends MergeNode:
+final class JdbcMergeNode(root: Connection, beforeCommit: () => Unit = () => ()) extends MergeNode:
 
   private def on[A](body: Connection => A): IO[Either[String, A]] = IO.blocking {
     val c = root.asInstanceOf[DuckDBConnection].duplicate()
@@ -30,7 +31,10 @@ final class JdbcMergeNode(root: Connection) extends MergeNode:
   def exec(batch: String): IO[Either[String, Unit]] = on { c =>
     val st = c.createStatement()
     try
-      batch.split(";\n").map(_.stripSuffix(";").trim).filter(_.nonEmpty).foreach(s => st.execute(s))
+      batch.split(";\n").map(_.stripSuffix(";").trim).filter(_.nonEmpty).foreach { s =>
+        if s == "COMMIT" then beforeCommit()
+        st.execute(s)
+      }
     finally st.close()
   }
 
@@ -126,7 +130,11 @@ trait ThreeWayMergeFixture extends BranchLiveFixture:
       .forkSnapshot
 
   /** A node with both catalogs attached the way `PoolSupervisor.mergeNodeSpec` attaches them. */
-  protected def withNode[A](branchDb: String, branchDir: Path)(body: MergeNode => A): A =
+  protected def withNode[A](
+      branchDb: String,
+      branchDir: Path,
+      beforeCommit: () => Unit = () => ()
+  )(body: MergeNode => A): A =
     Class.forName("org.duckdb.DuckDBDriver")
     val m                  = parentMeta
     val parentDir          = currentDataPath.getOrElse(Assertions.fail("outside withCatalog"))
@@ -147,7 +155,7 @@ trait ThreeWayMergeFixture extends BranchLiveFixture:
             s"(DATA_PATH '$branchDir/', READ_ONLY)"
         ).foreach(s => st.execute(s))
       finally st.close()
-      body(new JdbcMergeNode(root))
+      body(new JdbcMergeNode(root, beforeCommit))
     finally root.close()
 
   protected def planned(
