@@ -257,3 +257,111 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
         }
       )
       .unsafeRunSync()
+
+  // What bounds a request's line and headers (NodeInternalServer.MaxHeaderBytes): Ember parses both
+  // into objects before any route runs and holds them for the whole request, and a client needs no
+  // node key to send them.
+
+  /** What the listener sent back for a request, and whether it then closed the connection. */
+  private final case class Reply(text: String, closed: Boolean)
+
+  /** Everything the listener sends back for `request`, written whole to a raw socket and read to
+    * the end of the connection, or to a 10 s timeout (`closed` is then false). A close that reaches
+    * a client still writing can arrive as a reset: what came before it is kept. `halfClose` shuts
+    * the client's sending side after the request, as a client that hung up mid-request does, and
+    * leaves it able to read the answer.
+    */
+  private def exchange(port: Int, request: String, halfClose: Boolean = false): Reply =
+    scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
+      socket.setSoTimeout(10000)
+      socket.getOutputStream.write(request.getBytes(UTF_8))
+      socket.getOutputStream.flush()
+      if halfClose then socket.shutdownOutput()
+      val received = new java.io.ByteArrayOutputStream()
+      val buffer   = new Array[Byte](4096)
+      val in       = socket.getInputStream
+      val closed   =
+        try
+          Iterator
+            .continually(in.read(buffer))
+            .takeWhile(_ >= 0)
+            .foreach(received.write(buffer, 0, _))
+          true
+        catch
+          case _: java.net.SocketTimeoutException               => false
+          case _: java.net.SocketException if received.size > 0 => true
+      Reply(new String(received.toByteArray, ISO_8859_1), closed)
+    }
+
+  /** A well-formed call to the decide route with a request line naming `path` and `pad` bytes of
+    * one extra header (none for 0), a body of two bytes, asking for the connection to be closed
+    * after its answer.
+    */
+  private def paddedCall(path: String = "/api/internal/authz/decide", pad: Int = 0): String =
+    s"POST $path HTTP/1.1\r\nHost: l\r\nX-QoD-Node: quack-a-1\r\nX-QoD-Signature: ${"0" * 64}\r\n" +
+      (if pad > 0 then s"X-Pad: ${"a" * pad}\r\n" else "") +
+      "Connection: close\r\nContent-Length: 2\r\n\r\n{}"
+
+  it should "answer a header block over its limit 431 and close, and serve one just inside it" in:
+    val port  = freePort()
+    val limit = NodeInternalServer.MaxHeaderBytes
+    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
+      .use(_ =>
+        IO.blocking {
+          val over = exchange(port, paddedCall(pad = limit))
+          over.text should startWith("HTTP/1.1 431")
+          over.text.toLowerCase should include("connection: close")
+          over.text should not include "verdict"
+          over.closed shouldBe true
+          val inside = exchange(port, paddedCall(pad = limit - 512))
+          inside.text should startWith("HTTP/1.1 200")
+          inside.text should endWith("verdict")
+        }
+      )
+      .unsafeRunSync()
+
+  it should "answer a request line over its limit 431 and close, and serve one just inside it" in:
+    val port  = freePort()
+    val limit = NodeInternalServer.MaxHeaderBytes
+    val path  = "/api/internal/authz/decide?x="
+    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
+      .use(_ =>
+        IO.blocking {
+          val over = exchange(port, paddedCall(path = path + "a" * limit))
+          over.text should startWith("HTTP/1.1 431")
+          over.text.toLowerCase should include("connection: close")
+          over.text should not include "verdict"
+          over.closed shouldBe true
+          val inside = exchange(port, paddedCall(path = path + "a" * (limit - 512)))
+          inside.text should startWith("HTTP/1.1 200")
+          inside.text should endWith("verdict")
+        }
+      )
+      .unsafeRunSync()
+
+  it should "answer an error its header-limit handler does not match as Ember does, a bare 500" in:
+    // The request fails to parse with an error that is not the limit's: the client hangs up in
+    // the middle of its headers, or sends a Content-Length that is no number. Ember applies a
+    // partial error handler to it with no guard: one that matched only the limit would drop the
+    // connection with no answer, where Ember with no handler answers 500.
+    val port = freePort()
+    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
+      .use(_ =>
+        IO.blocking {
+          val hungUp = exchange(
+            port,
+            "POST /api/internal/authz/decide HTTP/1.1\r\nHost: l\r\nX-QoD-No",
+            halfClose = true
+          )
+          hungUp.text should startWith("HTTP/1.1 500")
+          hungUp.text.toLowerCase should include("content-length: 0")
+          hungUp.closed shouldBe true
+          val unreadable = exchange(
+            port,
+            "POST /api/internal/authz/decide HTTP/1.1\r\nHost: l\r\nContent-Length: abc\r\n\r\n"
+          )
+          unreadable.text should startWith("HTTP/1.1 500")
+          unreadable.closed shouldBe true
+        }
+      )
+      .unsafeRunSync()

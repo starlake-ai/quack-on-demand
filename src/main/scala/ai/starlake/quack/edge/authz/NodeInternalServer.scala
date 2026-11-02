@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.authz
 
-import ai.starlake.quack.edge.BoundedBody
+import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.comcast.ip4s.{Host, Port}
@@ -15,8 +15,10 @@ import scala.concurrent.duration.*
   * REST port so that clients filling that port's connection slots cannot stop authorization for
   * every tenant. Every route authenticates each call with the node's key, but only after reading
   * its body, which the signature covers, so a client that reaches this port can hold
-  * `maxConnections` slots and about 1 MiB of heap in each. A node opens one connection per call,
-  * sends its body at once and leaves, so the idle timeout is short.
+  * `maxConnections` slots and about 1.3 MiB of heap in each (the 1 MiB body, and the parsed header
+  * block, read buffer and state Ember holds for the request: `ConnectionBudget.heldBytes`), and the
+  * listener takes no more connections than a fifth of the heap holds. A node opens one connection
+  * per call, sends its body at once and leaves, so the idle timeout is short.
   */
 final class NodeInternalServer(
     host: String,
@@ -40,8 +42,21 @@ final class NodeInternalServer(
       .default[IO]
       .withHost(bindHost)
       .withPort(bindPort)
-      .withMaxConnections(maxConnections)
+      .withMaxConnections(
+        ConnectionBudget.slots(
+          "The node verdict listener",
+          "QOD_INTERNAL_MAX_CONNECTIONS",
+          maxConnections,
+          ConnectionBudget.heldBytes(
+            NodeInternalServer.MaxHeaderBytes,
+            DecideRoute.MaxBodyBytes,
+            tls = false
+          )
+        )
+      )
       .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
+      .withMaxHeaderSize(NodeInternalServer.MaxHeaderBytes)
+      .withErrorHandler(BoundedBody.headerLimitHandler(BoundedBody.headersTooLarge))
       .withIdleTimeout(10.seconds)
       .withHttpApp(routes.foldLeft(HttpRoutes.empty[IO])(_ <+> _).orNotFound)
       .withShutdownTimeout(1.second)
@@ -52,3 +67,11 @@ final class NodeInternalServer(
           t
         )
       }
+
+object NodeInternalServer:
+
+  /** The largest request line, and the largest header block, the listener reads, in bytes each. A
+    * node sends under 400, and Ember holds a parsed line and block for the whole request, about 40
+    * heap bytes per wire byte, before any key is checked.
+    */
+  val MaxHeaderBytes: Int = 4096

@@ -2,8 +2,9 @@ package ai.starlake.quack.edge
 
 import cats.effect.IO
 import fs2.{Chunk, Stream}
-import org.http4s.Request
+import org.http4s.{Request, Response, Status}
 import org.http4s.ember.core.EmberException
+import org.http4s.headers.{`Content-Length`, Connection}
 import org.typelevel.ci.CIString
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -160,10 +161,10 @@ object BoundedBody:
     scan(0, 0, false)
 
   /** Whether the client asks for chunked framing, read from the raw header so that it covers every
-    * spelling Ember decodes. Ember rescans a chunk-size line on every read, up to 40 KiB of it, and
-    * that line yields no data byte for a limit to count, so a client trickling one burns about a
-    * core per connection until the deadline. So what reads a body before any credential refuses
-    * such a request with 411, before pulling the body.
+    * spelling Ember decodes. Ember rescans a chunk-size line on every read, up to the listener's
+    * header limit of it, and that line yields no data byte for a limit to count, so a client
+    * trickling one burns about a core per connection until the deadline. So what reads a body
+    * before any credential refuses such a request with 411, before pulling the body.
     */
   def asksChunked(req: Request[IO]): Boolean =
     req.headers.get(CIString("Transfer-Encoding")).isDefined
@@ -171,3 +172,28 @@ object BoundedBody:
   /** `req` with `bytes` as its body: what a route reads once the listener read the original. */
   def replay(req: Request[IO], bytes: Array[Byte]): Request[IO] =
     req.withBodyStream(Stream.chunk(Chunk.array(bytes)))
+
+  /** The bare answer to a request line or header block over a listener's limit, for a listener with
+    * nothing of its own to say. Ember closes the connection after it.
+    */
+  def headersTooLarge: Response[IO] =
+    Response[IO](Status.RequestHeaderFieldsTooLarge).putHeaders(Connection.close)
+
+  /** What Ember answers an error that no handler matches: a bare 500. */
+  private val ServerFailure: Response[IO] =
+    Response[IO](Status.InternalServerError).putHeaders(`Content-Length`.zero)
+
+  /** The error handler (`withErrorHandler`) of a listener with a header limit
+    * (`withMaxHeaderSize`): a request line or header block over the limit is answered `tooLarge`,
+    * and every other error as Ember answers one when it has no handler, a bare 500. The second case
+    * is why this exists: Ember applies the handler to a request that fails to parse as a plain
+    * function, so a partial one that matched only the limit throws `MatchError` for a client that
+    * hangs up in the middle of its headers or sends a `Content-Length` that is no number, and the
+    * connection is dropped with no answer where Ember answers 500. Anyone can send either.
+    */
+  def headerLimitHandler(
+      tooLarge: => Response[IO]
+  ): PartialFunction[Throwable, IO[Response[IO]]] = {
+    case _: EmberException.MessageTooLong => IO.pure(tooLarge)
+    case _                                => IO.pure(ServerFailure)
+  }

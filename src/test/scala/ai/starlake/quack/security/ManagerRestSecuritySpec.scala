@@ -1103,6 +1103,108 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  /** What the server sent back for a request, and whether it then closed the connection. */
+  private final case class Reply(text: String, closed: Boolean)
+
+  /** Everything the server sends back for `request`, written whole to a raw socket and read to the
+    * end of the connection, or to a 15 s timeout (`closed` is then false). A close that reaches a
+    * client still writing can arrive as a reset: what came before it is kept. `halfClose` shuts the
+    * client's sending side after the request, as a client that hung up mid-request does, and leaves
+    * it able to read the answer.
+    */
+  private def rawAll(baseUrl: String, request: String, halfClose: Boolean = false): Reply =
+    val uri  = java.net.URI.create(baseUrl)
+    val sock = new java.net.Socket(uri.getHost, uri.getPort)
+    try
+      sock.setSoTimeout(15000)
+      sock.getOutputStream.write(request.getBytes(UTF_8))
+      sock.getOutputStream.flush()
+      if halfClose then sock.shutdownOutput()
+      val received = new java.io.ByteArrayOutputStream()
+      val buffer   = new Array[Byte](4096)
+      val in       = sock.getInputStream
+      val closed   =
+        try
+          Iterator
+            .continually(in.read(buffer))
+            .takeWhile(_ >= 0)
+            .foreach(received.write(buffer, 0, _))
+          true
+        catch
+          case _: java.net.SocketTimeoutException               => false
+          case _: java.net.SocketException if received.size > 0 => true
+      Reply(new String(received.toByteArray, UTF_8), closed)
+    finally sock.close()
+
+  /** `GET /health` with a request line and one extra header of `pad` bytes each, asking for the
+    * connection to be closed after the answer.
+    */
+  private def healthCall(path: String = "/health", pad: Int = 0): String =
+    s"GET $path HTTP/1.1\r\nHost: l\r\n" + (if pad > 0 then s"X-Pad: ${"a" * pad}\r\n" else "") +
+      "Connection: close\r\n\r\n"
+
+  // What bounds a request's line and headers (RestLimitsConfig.maxHeaderBytes): Ember parses both
+  // into objects before any route runs and holds them for the whole request, and a client needs no
+  // credential to send them.
+  "The REST header limit" should "answer a header block over it 431 and close, and serve one just inside" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val limit = RestLimitsConfig().maxHeaderBytes
+      val over  = rawAll(h.baseUrl, healthCall(pad = limit))
+      over.text should startWith("HTTP/1.1 431")
+      over.text.toLowerCase should include("connection: close")
+      over.text should include(""""error":"headers_too_large"""")
+      over.text should include(s"request line or headers exceed $limit bytes")
+      over.closed shouldBe true
+      rawAll(h.baseUrl, healthCall(pad = limit - 512)).text should startWith("HTTP/1.1 200")
+    finally h.shutdown()
+  }
+
+  it should "answer a request line over it 431 and close, and serve one just inside" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val limit = RestLimitsConfig().maxHeaderBytes
+      val over  = rawAll(h.baseUrl, healthCall(path = "/health?x=" + "a" * limit))
+      over.text should startWith("HTTP/1.1 431")
+      over.text.toLowerCase should include("connection: close")
+      over.text should include(""""error":"headers_too_large"""")
+      over.closed shouldBe true
+      val inside = rawAll(h.baseUrl, healthCall(path = "/health?x=" + "a" * (limit - 512)))
+      inside.text should startWith("HTTP/1.1 200")
+    finally h.shutdown()
+  }
+
+  it should "take the limit from its configuration" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   =
+      ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(maxHeaderBytes = 2048))
+    try
+      rawAll(h.baseUrl, healthCall(pad = 3000)).text should startWith("HTTP/1.1 431")
+      rawAll(h.baseUrl, healthCall(pad = 1000)).text should startWith("HTTP/1.1 200")
+    finally h.shutdown()
+  }
+
+  it should "answer an error it does not match as Ember does, a bare 500" in {
+    // The request fails to parse with an error that is not the limit's: the client hangs up in
+    // the middle of its headers, or sends a Content-Length that is no number. Ember applies a
+    // partial error handler to it with no guard: one that matched only the limit would drop the
+    // connection with no answer, where Ember with no handler answers 500.
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val hungUp = rawAll(h.baseUrl, "GET /health HTTP/1.1\r\nHost: l\r\nX-Pa", halfClose = true)
+      hungUp.text should startWith("HTTP/1.1 500")
+      hungUp.text.toLowerCase should include("content-length: 0")
+      hungUp.closed shouldBe true
+      val unreadable =
+        rawAll(h.baseUrl, "GET /health HTTP/1.1\r\nHost: l\r\nContent-Length: abc\r\n\r\n")
+      unreadable.text should startWith("HTTP/1.1 500")
+      unreadable.closed shouldBe true
+    finally h.shutdown()
+  }
+
   // A depth that overflows the stack must never go through this harness: a regression would then
   // shut down the test JVM's cats-effect runtime for every later spec. These cases use the depth of
   // the limit, so a regression fails them and halts nothing.

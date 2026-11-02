@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge.quack
 
 import ai.starlake.quack.QuackNativeConfig
-import ai.starlake.quack.edge.{BoundedBody, CertGen}
+import ai.starlake.quack.edge.{BoundedBody, CertGen, ConnectionBudget}
 import cats.effect.{IO, Resource}
 import cats.effect.unsafe.implicits.global
 import com.comcast.ip4s.{Host, Port, SocketAddress}
@@ -107,8 +107,17 @@ final class QuackFrontDoorServer(
         .withHost(Host.fromString(cfg.host).getOrElse(Host.fromString("0.0.0.0").get))
         .withPort(Port.fromInt(cfg.port).getOrElse(Port.fromInt(9494).get))
         .withHttpApp(routes.orNotFound)
-        .withMaxConnections(cfg.maxConnections)
+        .withMaxConnections(
+          ConnectionBudget.slots(
+            "The Quack front door",
+            "QOD_QUACK_MAX_CONNECTIONS",
+            cfg.maxConnections,
+            ConnectionBudget.heldBytes(cfg.maxHeaderBytes, cfg.maxConnectBodyBytes, cfg.tlsEnabled)
+          )
+        )
         .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
+        .withMaxHeaderSize(cfg.maxHeaderBytes)
+        .withErrorHandler(BoundedBody.headerLimitHandler(BoundedBody.headersTooLarge))
         .withShutdownTimeout(1.second)
       built = tls.fold(base)(ctx =>
         base

@@ -237,6 +237,22 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
     ) shouldBe "0.0.0.0"
   }
 
+  it should "be a loopback literal's own address: a node calls exactly that address" in {
+    // All of 127.0.0.0/8 is loopback on Linux, and a listener on 127.0.0.1 answers 127.0.0.2 nobody.
+    def host(url: String) =
+      BootPreflight.internalBindHost(NodeAuthzConfig(internalUrl = url), "0.0.0.0", 20900)
+    host("http://127.0.0.2:20901") shouldBe "127.0.0.2"
+    host("http://127.0.0.1:20901") shouldBe "127.0.0.1"
+    host("http://127.1:20901") shouldBe "127.0.0.1"
+    host("http://0x7f.0.0.3:20901") shouldBe "127.0.0.3"
+    host("http://2130706435:20901") shouldBe "127.0.0.3"
+    host("http://[::ffff:127.0.0.2]:20901") shouldBe "127.0.0.2"
+    host("http://[::1]:20901") shouldBe "::1"
+    // A name resolves, in qod-node's resolver, to the first loopback address.
+    host("http://localhost:20901") shouldBe "127.0.0.1"
+    host("http://qod.localhost:20901") shouldBe "127.0.0.1"
+  }
+
   it should "read a loopback URL in the forms qod-node's resolver reads" in {
     def host(url: String = "", bind: String = "0.0.0.0") =
       BootPreflight.internalBindHost(NodeAuthzConfig(internalUrl = url), bind, 20900)
@@ -298,4 +314,16 @@ class BootPreflightInternalUrlSpec extends AnyFlatSpec with Matchers:
       "20901 (QOD_INTERNAL_PORT). Name that port in the URL"
     BootPreflight.decideUrlLine("http://10.0.0.5:20901", "0.0.0.0", 20901) shouldBe
       "node decide URL: http://10.0.0.5:20901 (listening on 0.0.0.0:20901)"
+  }
+
+  "the boot line" should "bracket an IPv6 bind address, as a URL does" in {
+    BootPreflight.decideUrlLine("http://[fd00::7]:20901", "fd00:0:0:0:0:0:0:7", 20901) shouldBe
+      "node decide URL: http://[fd00::7]:20901 (listening on [fd00:0:0:0:0:0:0:7]:20901)"
+    BootPreflight.decideUrlLine("http://[::1]:20901", "::1", 20901) shouldBe
+      "node decide URL: http://[::1]:20901 (listening on [::1]:20901)"
+    // An address already in brackets is not bracketed twice, and an IPv4 one never is.
+    BootPreflight.decideUrlLine("http://[::1]:20901", "[::1]", 20901) shouldBe
+      "node decide URL: http://[::1]:20901 (listening on [::1]:20901)"
+    BootPreflight.decideUrlLine("http://127.0.0.2:20901", "127.0.0.2", 20901) shouldBe
+      "node decide URL: http://127.0.0.2:20901 (listening on 127.0.0.2:20901)"
   }

@@ -504,14 +504,28 @@ final case class RestLimitsConfig(
     bodyTimeoutSec: Long = 30L,
     @field @ConfigField(
       envVar = "QOD_REST_MAX_CONNECTIONS",
-      description = "Most connections the REST port keeps open at once."
+      description =
+        "Most connections the REST port keeps open at once. Fewer when a fifth of the heap " +
+          "cannot hold that many: boot says so."
     )
-    maxConnections: Int = 1024
+    maxConnections: Int = 1024,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_HEADER_BYTES",
+      description =
+        "Largest request line, and largest header block, the REST port reads, in bytes each. " +
+          "Raising it lowers how many connections fit the heap."
+    )
+    maxHeaderBytes: Int = 8192
 ):
   require(
     maxBodyBytes > 0 && maxPublicBodyBytes > 0 && bodyTimeoutSec > 0 && maxConnections > 0,
     "restLimits (QOD_REST_MAX_BODY_BYTES, QOD_REST_MAX_PUBLIC_BODY_BYTES, " +
       "QOD_REST_BODY_TIMEOUT_SEC, QOD_REST_MAX_CONNECTIONS) must be positive"
+  )
+  require(
+    maxHeaderBytes >= 1024 && maxHeaderBytes <= 1048576,
+    s"restLimits.maxHeaderBytes (QOD_REST_MAX_HEADER_BYTES) must be between 1024 and 1048576, " +
+      s"got $maxHeaderBytes"
   )
   // A body is held in one array, which stops short of 2 GiB.
   require(
@@ -761,8 +775,9 @@ final case class NodeAuthzConfig(
       description =
         "How many connections the node verdict listener serves at once. A node opens one per " +
           "call. A call's body, up to 1 MiB, is read before its signature can be checked, so " +
-          "this bounds the heap a client reaching the port can hold, at about 1 MiB per " +
-          "connection: keep clients off the port."
+          "this bounds the heap a client reaching the port can hold, at about 1.3 MiB per " +
+          "connection: keep clients off the port. Fewer when a fifth of the heap cannot hold " +
+          "that many: boot says so."
     )
     internalMaxConnections: Int = 256,
     @field @ConfigField(
@@ -1470,9 +1485,18 @@ final case class QuackNativeConfig(
     bodyTimeoutSec: Long = 300L,
     @field @ConfigField(
       envVar = "QOD_QUACK_MAX_CONNECTIONS",
-      description = "Most connections the Quack front door keeps open at once."
+      description =
+        "Most connections the Quack front door keeps open at once. Fewer when a fifth of the " +
+          "heap cannot hold that many: boot says so."
     )
-    maxConnections: Int = 1024
+    maxConnections: Int = 1024,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_HEADER_BYTES",
+      description =
+        "Largest request line, and largest header block, the Quack front door reads, in bytes " +
+          "each. Raising it lowers how many connections fit the heap."
+    )
+    maxHeaderBytes: Int = 4096
 ):
   require(
     maxBodyBytes > 0 && maxConnectBodyBytes > 0 && connectBodyTimeoutSec > 0 &&
@@ -1480,6 +1504,11 @@ final case class QuackNativeConfig(
     "quack-native limits (QOD_QUACK_MAX_BODY_BYTES, QOD_QUACK_MAX_CONNECT_BODY_BYTES, " +
       "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC, QOD_QUACK_BODY_TIMEOUT_SEC, QOD_QUACK_MAX_CONNECTIONS) " +
       "must be positive"
+  )
+  require(
+    maxHeaderBytes >= 1024 && maxHeaderBytes <= 1048576,
+    s"quack-native.maxHeaderBytes (QOD_QUACK_MAX_HEADER_BYTES) must be between 1024 and 1048576, " +
+      s"got $maxHeaderBytes"
   )
   // A body is held in one array, which stops short of 2 GiB.
   require(

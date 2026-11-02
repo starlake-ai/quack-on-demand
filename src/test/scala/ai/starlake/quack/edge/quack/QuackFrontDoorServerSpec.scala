@@ -374,6 +374,72 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       finally sock.close()
     }
 
+  /** `request`, written whole to a raw socket: the status line, the lower-cased head and the body
+    * bytes of what the server answers until it closes the connection. `halfClose` shuts the
+    * client's sending side after the request, as a client that hung up mid-request does.
+    */
+  private def rawText(
+      base: String,
+      request: String,
+      halfClose: Boolean = false
+  ): (String, String, Array[Byte]) =
+    val uri  = URI.create(base)
+    val sock = new java.net.Socket(uri.getHost, uri.getPort)
+    try
+      sock.setSoTimeout(15000)
+      sock.getOutputStream.write(request.getBytes("ISO-8859-1"))
+      sock.getOutputStream.flush()
+      if halfClose then sock.shutdownOutput()
+      readResponse(sock)
+    finally sock.close()
+
+  // What bounds a request's line and headers (QuackNativeConfig.maxHeaderBytes): Ember parses both
+  // into objects before any route runs and holds them for the whole request, and a client needs no
+  // credential to send them.
+
+  "The header limit" should "answer a header block over it 431 and close, and serve one just inside" in:
+    val c     = cfg(freePort())
+    val limit = c.maxHeaderBytes
+    withServer(c) { base =>
+      val (status, head, _) = rawHead(base, s"X-Pad: ${"a" * limit}")
+      status should include("431")
+      head should include("connection: close")
+      // A request inside the limit is served as usual.
+      rawHead(base, s"X-Pad: ${"a" * (limit - 512)}")._1 should include("200")
+    }
+
+  it should "answer a request line over it 431 and close, and serve one just inside" in:
+    val c     = cfg(freePort())
+    val limit = c.maxHeaderBytes
+    withServer(c) { base =>
+      def call(pad: Int) = rawText(base, s"POST /quack?x=${"a" * pad} HTTP/1.1\r\nHost: l\r\n\r\n")
+      val (status, head, _) = call(limit)
+      status should include("431")
+      head should include("connection: close")
+      call(limit - 512)._1 should include("200")
+    }
+
+  it should "take the limit from its configuration" in:
+    withServer(cfg(freePort()).copy(maxHeaderBytes = 2048)) { base =>
+      rawHead(base, s"X-Pad: ${"a" * 3000}")._1 should include("431")
+      rawHead(base, s"X-Pad: ${"a" * 1000}")._1 should include("200")
+    }
+
+  it should "answer an error it does not match as Ember does, a bare 500" in:
+    // The request fails to parse with an error that is not the limit's: the client hangs up in
+    // the middle of its headers, or sends a Content-Length that is no number. Ember applies a
+    // partial error handler to it with no guard: one that matched only the limit would drop the
+    // connection with no answer, where Ember with no handler answers 500.
+    withServer(cfg(freePort())) { base =>
+      val (hungUp, head, _) =
+        rawText(base, "POST /quack HTTP/1.1\r\nHost: l\r\nX-Pa", halfClose = true)
+      hungUp should include("500")
+      head should include("content-length: 0")
+      val (unreadable, _, _) =
+        rawText(base, "POST /quack HTTP/1.1\r\nHost: l\r\nContent-Length: abc\r\n\r\n")
+      unreadable should include("500")
+    }
+
   "The connection limit" should "hold a client until a connection leaves, then answer it" in:
     // One slot, held by a connection that is answered and then kept open.
     withServer(cfg(freePort(), maxConnections = 1)) { base =>

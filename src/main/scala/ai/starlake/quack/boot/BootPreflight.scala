@@ -407,7 +407,9 @@ object BootPreflight extends LazyLogging:
     * user info and queries are refused).
     */
   def decideUrlLine(url: String, host: String, port: Int): String =
-    s"node decide URL: $url (listening on $host:$port)"
+    // An IPv6 address goes in brackets, as in a URL: `[fd00:0:0:0:0:0:0:7]:20901`.
+    val shown = if host.contains(':') && !host.startsWith("[") then s"[$host]" else host
+    s"node decide URL: $url (listening on $shown:$port)"
 
   /** The port of the node verdict listener, clear of the manager's other listeners and of the ports
     * its nodes lease.
@@ -445,8 +447,9 @@ object BootPreflight extends LazyLogging:
       case None => Right(port)
 
   /** Where the node verdict listener binds, so that as little as possible reaches it: loopback for
-    * a loopback decide URL; the URL's address when that is a literal address of this host, since
-    * nodes call exactly that address (no name is ever looked up here); otherwise where REST binds.
+    * a loopback decide URL (a literal binds its own address, `127.0.0.2` included, and a name binds
+    * `127.0.0.1`); the URL's address when that is a literal address of this host, since nodes call
+    * exactly that address (no name is ever looked up here); otherwise where REST binds.
     */
   def internalBindHost(
       nodeAuthz: NodeAuthzConfig,
@@ -457,8 +460,13 @@ object BootPreflight extends LazyLogging:
   ): String =
     nodeUrlHost(nodeAuthz.replicaUrl(restPort)) match
       case Some(host) if loopbackHost(host) =>
-        if literalAddress(host).exists(_.isInstanceOf[java.net.Inet6Address]) then "::1"
-        else "127.0.0.1"
+        // A loopback literal binds its own address: all of 127.0.0.0/8 is loopback on Linux, and a
+        // listener on 127.0.0.1 answers a node that calls 127.0.0.2 nobody. A name is not a
+        // literal, and qod-node resolves it to the first loopback address.
+        literalAddress(host) match
+          case Some(_: java.net.Inet6Address) => "::1"
+          case Some(address)                  => address.getHostAddress
+          case None                           => "127.0.0.1"
       case Some(host) =>
         literalAddress(host).filter(isLocalAddress).map(_.getHostAddress).getOrElse(bindHost)
       case None => bindHost

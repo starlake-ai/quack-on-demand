@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
-import ai.starlake.quack.edge.BoundedBody
+import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.state.PatStore
 import ai.starlake.quack.ondemand.telemetry.{
@@ -1309,8 +1309,25 @@ final class ManagerServer(
       .default[IO]
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
-      .withMaxConnections(limits.maxConnections)
+      .withMaxConnections(
+        ConnectionBudget.slots(
+          "The REST port",
+          "QOD_REST_MAX_CONNECTIONS",
+          limits.maxConnections,
+          ConnectionBudget.heldBytes(limits.maxHeaderBytes, limits.maxPublicBodyBytes, tls = false)
+        )
+      )
       .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
+      .withMaxHeaderSize(limits.maxHeaderBytes)
+      .withErrorHandler(
+        BoundedBody.headerLimitHandler(
+          bodyRefusal(
+            Status.RequestHeaderFieldsTooLarge,
+            "headers_too_large",
+            s"request line or headers exceed ${limits.maxHeaderBytes} bytes"
+          )
+        )
+      )
       .withHttpApp(
         (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+>
           moduleStatic <+> rootRedirect).orNotFound

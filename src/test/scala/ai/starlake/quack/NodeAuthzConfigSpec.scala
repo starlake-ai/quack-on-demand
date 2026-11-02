@@ -144,6 +144,19 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
       .map(e => (e.envVar, e.sensitive)) shouldBe Some(("QOD_INTERNAL_MAX_CONNECTIONS", false))
   }
 
+  it should "tell an operator what a connection holds, and that a small heap takes fewer" in {
+    val description = ConfigRegistry
+      .collect(List("quack-on-demand" -> classOf[ManagerConfig]))
+      .find(_.path == "quack-on-demand.nodeAuthz.internalMaxConnections")
+      .map(_.description)
+      .get
+    // 4 KiB of headers and a 1 MiB body, before the signature is checked: 1316864 bytes.
+    description should include("about 1.3 MiB per connection")
+    description should include(
+      "Fewer when a fifth of the heap cannot hold that many: boot says so."
+    )
+  }
+
   // How many handle contexts (MintedHandles) and nonces (IssuedHandles) one replica keeps: each is
   // kept a handle's lifetime plus its grace (360 s) whatever the statement's duration, so the bound
   // caps a replica's sustained tenant statements at about capacity / 360 per second.
