@@ -37,7 +37,8 @@ final class NodeInternalServer(
       throw new IllegalArgumentException(s"the node verdict listener cannot bind port $port")
     )
 
-  val resource: Resource[IO, Server] =
+  /** The listener's server as configured and not yet started, so that its limits can be read. */
+  private[authz] val builder: EmberServerBuilder[IO] =
     EmberServerBuilder
       .default[IO]
       .withHost(bindHost)
@@ -60,7 +61,9 @@ final class NodeInternalServer(
       .withIdleTimeout(10.seconds)
       .withHttpApp(routes.foldLeft(HttpRoutes.empty[IO])(_ <+> _).orNotFound)
       .withShutdownTimeout(1.second)
-      .build
+
+  val resource: Resource[IO, Server] =
+    builder.build
       .adaptError { case t =>
         new RuntimeException(
           s"the node verdict listener could not bind $host:$port (QOD_INTERNAL_PORT): ${t.getMessage}",

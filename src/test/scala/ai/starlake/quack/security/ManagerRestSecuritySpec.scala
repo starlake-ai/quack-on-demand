@@ -2,7 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.RestLimitsConfig
-import ai.starlake.quack.edge.BoundedBody
+import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -1071,26 +1071,26 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  /** One `GET /health` on `sock`, left unanswered by this call. */
+  private def sendHealth(sock: java.net.Socket): Unit =
+    sock.getOutputStream.write("GET /health HTTP/1.1\r\nHost: l\r\n\r\n".getBytes(UTF_8))
+    sock.getOutputStream.flush()
+
   "The REST connection limit" should "hold a client until a connection leaves, then answer it" in {
     val fix = SecurityFixtures.freshStore()
     val h = ManagerServerHarness.boot(fix.store, restLimits = RestLimitsConfig(maxConnections = 1))
     try
-      val uri     = java.net.URI.create(h.baseUrl)
-      val request = "GET /health HTTP/1.1\r\nHost: l\r\n\r\n"
-
-      def send(sock: java.net.Socket): Unit =
-        sock.getOutputStream.write(request.getBytes(UTF_8))
-        sock.getOutputStream.flush()
+      val uri = java.net.URI.create(h.baseUrl)
 
       // One slot, held by a connection that is answered and then kept open.
       val holder = new java.net.Socket(uri.getHost, uri.getPort)
       try
         holder.setSoTimeout(15000)
-        send(holder)
+        sendHealth(holder)
         rawStatus(new java.io.BufferedInputStream(holder.getInputStream)) shouldBe 200
         val client = new java.net.Socket(uri.getHost, uri.getPort)
         try
-          send(client)
+          sendHealth(client)
           // The client connects and sends its request, and is not answered while the slot is taken.
           client.setSoTimeout(1500)
           a[java.net.SocketTimeoutException] should be thrownBy client.getInputStream.read()
@@ -1100,6 +1100,44 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
           rawStatus(new java.io.BufferedInputStream(client.getInputStream)) shouldBe 200
         finally client.close()
       finally holder.close()
+    finally h.shutdown()
+  }
+
+  it should "take no more connections than a fifth of the heap holds, however many it is set to" in {
+    // A public body limit of 2 GiB makes a connection able to hold more than a fifth of any test
+    // heap, so the listener takes the one connection `fit` leaves it of the 1024 it is set to.
+    // That is ConnectionBudget.slots at work: handed the 1024 itself, it would answer them all.
+    val limits = RestLimitsConfig(maxConnections = 1024, maxPublicBodyBytes = Int.MaxValue - 8L)
+    val slots  = ConnectionBudget.fit(
+      1024,
+      ConnectionBudget.heldBytes(limits.maxHeaderBytes, limits.maxPublicBodyBytes, tls = false),
+      Runtime.getRuntime.maxMemory
+    )
+    slots should be < 64
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, restLimits = limits)
+    try
+      val uri = java.net.URI.create(h.baseUrl)
+      // Every slot, taken by a connection that is answered and then kept open.
+      val holders = List.fill(slots) {
+        val holder = new java.net.Socket(uri.getHost, uri.getPort)
+        holder.setSoTimeout(15000)
+        sendHealth(holder)
+        rawStatus(new java.io.BufferedInputStream(holder.getInputStream)) shouldBe 200
+        holder
+      }
+      try
+        val client = new java.net.Socket(uri.getHost, uri.getPort)
+        try
+          sendHealth(client)
+          client.setSoTimeout(1500)
+          a[java.net.SocketTimeoutException] should be thrownBy client.getInputStream.read()
+          // Once a holder leaves, a slot is free and the client is answered.
+          holders.head.close()
+          client.setSoTimeout(15000)
+          rawStatus(new java.io.BufferedInputStream(client.getInputStream)) shouldBe 200
+        finally client.close()
+      finally holders.foreach(_.close())
     finally h.shutdown()
   }
 
@@ -1155,7 +1193,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       over.text should startWith("HTTP/1.1 431")
       over.text.toLowerCase should include("connection: close")
       over.text should include(""""error":"headers_too_large"""")
-      over.text should include(s"request line or headers exceed $limit bytes")
+      over.text should include(
+        s"request line or headers exceed $limit bytes (QOD_REST_MAX_HEADER_BYTES)"
+      )
       over.closed shouldBe true
       rawAll(h.baseUrl, healthCall(pad = limit - 512)).text should startWith("HTTP/1.1 200")
     finally h.shutdown()
@@ -1170,6 +1210,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       over.text should startWith("HTTP/1.1 431")
       over.text.toLowerCase should include("connection: close")
       over.text should include(""""error":"headers_too_large"""")
+      over.text should include("(QOD_REST_MAX_HEADER_BYTES)")
       over.closed shouldBe true
       val inside = rawAll(h.baseUrl, healthCall(path = "/health?x=" + "a" * (limit - 512)))
       inside.text should startWith("HTTP/1.1 200")

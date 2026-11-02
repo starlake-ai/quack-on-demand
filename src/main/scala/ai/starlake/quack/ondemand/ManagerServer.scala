@@ -1324,7 +1324,8 @@ final class ManagerServer(
           bodyRefusal(
             Status.RequestHeaderFieldsTooLarge,
             "headers_too_large",
-            s"request line or headers exceed ${limits.maxHeaderBytes} bytes"
+            s"request line or headers exceed ${limits.maxHeaderBytes} bytes " +
+              "(QOD_REST_MAX_HEADER_BYTES)"
           )
         )
       )

@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.authz
 
-import ai.starlake.quack.edge.BoundedBody
+import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.http4s.{HttpRoutes, Status}
@@ -21,26 +21,26 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
     case POST -> Root / "api" / "internal" / "authz" / "decide" => Ok("verdict")
   }
 
-  private def freePort(): Int =
-    val s = new ServerSocket(0)
-    try s.getLocalPort
-    finally s.close()
+  /** The port the listener bound. The listeners here bind port 0 and read the port back: a free
+    * port looked up first and bound after can be taken in between, on a busy machine.
+    */
+  private def portOf(server: org.http4s.server.Server): Int = server.addressIp4s.port.value
 
   "the node verdict listener" should "serve its routes and nothing else" in:
-    val port               = freePort()
-    val http               = HttpClient.newHttpClient()
-    def post(path: String) = http.send(
+    val http                          = HttpClient.newHttpClient()
+    def post(port: Int, path: String) = http.send(
       HttpRequest
         .newBuilder(URI.create(s"http://127.0.0.1:$port$path"))
         .POST(HttpRequest.BodyPublishers.ofString("{}"))
         .build(),
       HttpResponse.BodyHandlers.ofString()
     )
-    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(routes)).resource
+      .use(server =>
         IO.blocking {
-          post("/api/internal/authz/decide").body() shouldBe "verdict"
-          post("/api/auth/login").statusCode() shouldBe 404
+          val port = portOf(server)
+          post(port, "/api/internal/authz/decide").body() shouldBe "verdict"
+          post(port, "/api/auth/login").statusCode() shouldBe 404
         }
       )
       .unsafeRunSync()
@@ -57,7 +57,6 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
     finally taken.close()
 
   it should "refuse chunked framing and nested JSON on the wire, before a route runs" in:
-    val port       = freePort()
     val http       = HttpClient.newHttpClient()
     val served     = new AtomicInteger()
     val nodeRoutes = HttpRoutes.of[IO] {
@@ -67,7 +66,7 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
           (Status.Ok, "verdict")
         }
     }
-    def call(body: HttpRequest.BodyPublisher) = http.send(
+    def call(port: Int, body: HttpRequest.BodyPublisher) = http.send(
       HttpRequest
         .newBuilder(URI.create(s"http://127.0.0.1:$port/api/internal/authz/decide"))
         .header("X-QoD-Node", "quack-a-1")
@@ -78,28 +77,30 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
     )
     def json(levels: Int) = HttpRequest.BodyPublishers.ofString("[" * levels + "]" * levels)
     // The whole request goes out in one write, so the refusal of its framing meets no unread bytes.
-    def raw(request: String): String =
+    def raw(port: Int, request: String): String =
       scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
         socket.setSoTimeout(5000)
         socket.getOutputStream.write(request.getBytes(UTF_8))
         socket.getOutputStream.flush()
         new String(socket.getInputStream.readAllBytes(), UTF_8)
       }
-    new NodeInternalServer("127.0.0.1", port, 256, List(nodeRoutes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(nodeRoutes)).resource
+      .use(server =>
         IO.blocking {
+          val port  = portOf(server)
           val reply = raw(
+            port,
             "POST /api/internal/authz/decide HTTP/1.1\r\nHost: l\r\nX-QoD-Node: quack-a-1\r\n" +
               s"X-QoD-Signature: ${"0" * 64}\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n[]\r\n0\r\n\r\n"
           )
           reply should startWith("HTTP/1.1 411")
           reply should include(NodeCalls.ChunkedRefused)
           reply.toLowerCase should include("connection: close")
-          val deep = call(json(BoundedBody.MaxNesting + 1))
+          val deep = call(port, json(BoundedBody.MaxNesting + 1))
           (deep.statusCode(), deep.body()) shouldBe
             (Status.BadRequest.code, NodeCalls.BodyTooDeep)
           served.get() shouldBe 0
-          val ok = call(json(BoundedBody.MaxNesting))
+          val ok = call(port, json(BoundedBody.MaxNesting))
           (ok.statusCode(), ok.body()) shouldBe (Status.Ok.code, "verdict")
           served.get() shouldBe 1
         }
@@ -142,11 +143,26 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
     )
     badPort.getMessage should include("70000")
 
+  it should "take no more connections than a fifth of the heap holds, however many it is set to" in:
+    // The most that can be set. A connection can hold over a megabyte of heap before any node key
+    // is checked, so this is ConnectionBudget.slots at work: handed the number itself, the
+    // builder would hold it. (1024 would not tell them apart on a heap of 8 GiB or more.)
+    val configured = Int.MaxValue
+    val held       = ConnectionBudget.heldBytes(
+      NodeInternalServer.MaxHeaderBytes,
+      DecideRoute.MaxBodyBytes,
+      tls = false
+    )
+    val expected = ConnectionBudget.fit(configured, held, Runtime.getRuntime.maxMemory)
+    expected should be < configured
+    new NodeInternalServer("127.0.0.1", 0, configured, List(routes)).builder.maxConnections shouldBe
+      expected
+
   it should "hold a client while its connection slots are taken, and answer it once one frees" in:
-    val port = freePort()
-    new NodeInternalServer("127.0.0.1", port, 1, List(routes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 1, List(routes)).resource
+      .use(server =>
         IO.blocking {
+          val port                       = portOf(server)
           def send(socket: Socket): Unit =
             socket.getOutputStream.write((decideCall("Content-Length: 2") + "{}").getBytes(UTF_8))
             socket.getOutputStream.flush()
@@ -173,10 +189,10 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
 
   it should "close a connection that goes idle" in:
-    val port = freePort()
-    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(routes)).resource
+      .use(server =>
         IO.blocking {
+          val port = portOf(server)
           scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
             // A node opens a connection per call and leaves: one kept open and silent is closed
             // well before Ember's default minute.
@@ -192,7 +208,6 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
 
   it should "answer a body that stops arriving 408 at the body deadline, closing the connection" in:
-    val port       = freePort()
     val served     = new AtomicInteger()
     val nodeRoutes = HttpRoutes.of[IO] {
       case req @ POST -> Root / "api" / "internal" / "authz" / "decide" =>
@@ -201,9 +216,10 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
           (Status.Ok, "verdict")
         }
     }
-    new NodeInternalServer("127.0.0.1", port, 256, List(nodeRoutes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(nodeRoutes)).resource
+      .use(server =>
         IO.blocking {
+          val port = portOf(server)
           scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
             socket.setSoTimeout(8000)
             // Well-formed headers announcing 100 bytes, and one byte of them.
@@ -229,7 +245,6 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
     // flood of connections holds (BoundedBody.ReadBufferBytes). The route lets the body pile up in
     // the socket before it reads, so that a read has more than the buffer to take: with Ember's
     // default 256 KiB, a read hands the route well over 32 KiB at once.
-    val port    = freePort()
     val largest = new AtomicInteger(0)
     val slow    = HttpRoutes.of[IO] {
       case req @ POST -> Root / "api" / "internal" / "authz" / "decide" =>
@@ -240,9 +255,10 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
             .drain *> Ok("read")
     }
     val body = new Array[Byte](512 * 1024)
-    new NodeInternalServer("127.0.0.1", port, 256, List(slow)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(slow)).resource
+      .use(server =>
         IO.blocking {
+          val port = portOf(server)
           scala.util.Using.resource(new Socket("127.0.0.1", port)) { socket =>
             socket.setSoTimeout(15000)
             socket.getOutputStream.write(
@@ -303,11 +319,11 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
       "Connection: close\r\nContent-Length: 2\r\n\r\n{}"
 
   it should "answer a header block over its limit 431 and close, and serve one just inside it" in:
-    val port  = freePort()
     val limit = NodeInternalServer.MaxHeaderBytes
-    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(routes)).resource
+      .use(server =>
         IO.blocking {
+          val port = portOf(server)
           val over = exchange(port, paddedCall(pad = limit))
           over.text should startWith("HTTP/1.1 431")
           over.text.toLowerCase should include("connection: close")
@@ -321,12 +337,12 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
 
   it should "answer a request line over its limit 431 and close, and serve one just inside it" in:
-    val port  = freePort()
     val limit = NodeInternalServer.MaxHeaderBytes
     val path  = "/api/internal/authz/decide?x="
-    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(routes)).resource
+      .use(server =>
         IO.blocking {
+          val port = portOf(server)
           val over = exchange(port, paddedCall(path = path + "a" * limit))
           over.text should startWith("HTTP/1.1 431")
           over.text.toLowerCase should include("connection: close")
@@ -344,10 +360,10 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
     // the middle of its headers, or sends a Content-Length that is no number. Ember applies a
     // partial error handler to it with no guard: one that matched only the limit would drop the
     // connection with no answer, where Ember with no handler answers 500.
-    val port = freePort()
-    new NodeInternalServer("127.0.0.1", port, 256, List(routes)).resource
-      .use(_ =>
+    new NodeInternalServer("127.0.0.1", 0, 256, List(routes)).resource
+      .use(server =>
         IO.blocking {
+          val port   = portOf(server)
           val hungUp = exchange(
             port,
             "POST /api/internal/authz/decide HTTP/1.1\r\nHost: l\r\nX-QoD-No",

@@ -26,20 +26,31 @@ object ConnectionBudget:
     */
   val HeapPerParsedByte: Long = 40L
 
-  /** The most one connection can hold before any credential. Waiting for the end of its headers, a
-    * parsed request line and a parsed header block, each up to `maxHeaderBytes`: Ember applies the
-    * limit to each. Reading a body, the header block, the rest of its first read (Ember keeps it
-    * for the whole request) and the body: its request line is then the short path of a route that
-    * reads one.
+  /** The most one connection can hold before any credential: a parsed request line and a parsed
+    * header block, each up to `maxHeaderBytes` (Ember applies the limit to each), the rest of its
+    * first read (Ember keeps it for the whole request) and a body.
     */
   def heldBytes(maxHeaderBytes: Int, maxBodyBytes: Long, tls: Boolean): Long =
-    val parsing = 2L * maxHeaderBytes * HeapPerParsedByte
-    val reading = maxHeaderBytes * HeapPerParsedByte + BoundedBody.ReadBufferBytes + maxBodyBytes
-    ConnectionBytes + math.max(parsing, reading) + (if tls then TlsBytes else 0L)
+    ConnectionBytes + 2L * maxHeaderBytes * HeapPerParsedByte + BoundedBody.ReadBufferBytes +
+      maxBodyBytes + (if tls then TlsBytes else 0L)
 
   /** At most `configured`, and no more than fit a fifth of `maxHeapBytes` at `heldBytes` each. */
   def fit(configured: Int, heldBytes: Long, maxHeapBytes: Long): Int =
     math.max(1L, math.min(configured.toLong, maxHeapBytes / HeapParts / heldBytes)).toInt
+
+  /** What boot says when a listener takes fewer connections than it is configured to. */
+  private[edge] def notice(
+      listener: String,
+      envVar: String,
+      configured: Int,
+      taken: Int,
+      heldBytes: Long,
+      maxHeapBytes: Long
+  ): String =
+    s"$listener takes $taken connections, not the $configured of $envVar: each can hold " +
+      s"${heldBytes / 1024} KiB before any credential, against a fifth of this " +
+      s"${maxHeapBytes / (1024 * 1024)} MiB heap. Raise the heap (-Xmx) or lower the limits to " +
+      "take more"
 
   /** [[fit]] for this JVM's heap, saying so at boot when that is fewer than `configured` (println,
     * as the logger's default level would swallow it).
@@ -48,9 +59,5 @@ object ConnectionBudget:
     val maxHeap = Runtime.getRuntime.maxMemory
     val taken   = fit(configured, heldBytes, maxHeap)
     if taken < configured then
-      println(
-        s"$listener takes $taken connections, not the $configured of $envVar: each can hold " +
-          s"${heldBytes / 1024} KiB before any credential, and a fifth of this " +
-          s"${maxHeap / (1024 * 1024)} MiB heap holds no more. Raise the heap (-Xmx) to take more"
-      )
+      println(notice(listener, envVar, configured, taken, heldBytes, maxHeap))
     taken

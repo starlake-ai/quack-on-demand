@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge.quack
 
 import ai.starlake.quack.QuackNativeConfig
-import ai.starlake.quack.edge.CertGen
+import ai.starlake.quack.edge.{CertGen, ConnectionBudget}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -459,6 +459,36 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
           QuackWire.decodeErrorMessage(bytes) shouldBe Right(s"len=${message.length}")
         finally client.close()
       finally holder.close()
+    }
+
+  it should "take no more connections than a fifth of the heap holds, however many it is set to" in:
+    // A connect body limit of 2 GiB makes a connection able to hold more than a fifth of any test
+    // heap, so the door takes the one connection `fit` leaves it of the 1024 it is set to. That is
+    // ConnectionBudget.slots at work: handed the 1024 itself, it would answer them all.
+    val c     = cfg(freePort(), maxConnections = 1024, maxConnect = Int.MaxValue - 8L)
+    val slots = ConnectionBudget.fit(
+      1024,
+      ConnectionBudget.heldBytes(c.maxHeaderBytes, c.maxConnectBodyBytes, c.tlsEnabled),
+      Runtime.getRuntime.maxMemory
+    )
+    slots should be < 64
+    withServer(c) { base =>
+      // Every slot, taken by a connection that is answered and then kept open.
+      val holders = List.fill(slots)(answeredAndHeld(base))
+      val message = sessionMessage(LiveSession, 5)
+      try
+        val client = sendRequest(base, message)
+        try
+          client.setSoTimeout(1500)
+          a[java.net.SocketTimeoutException] should be thrownBy client.getInputStream.read()
+          // Once a holder leaves, a slot is free and the client is answered.
+          holders.head.close()
+          client.setSoTimeout(15000)
+          val (status, _, bytes) = readResponse(client)
+          status should include("200")
+          QuackWire.decodeErrorMessage(bytes) shouldBe Right(s"len=${message.length}")
+        finally client.close()
+      finally holders.foreach(_.close())
     }
 
   "GET /" should "identify the endpoint like a node does" in:
