@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.authz
 
-import io.circe.{Decoder, HCursor}
+import io.circe.{CursorOp, Decoder, HCursor}
 import io.circe.parser.parse
 
 import java.nio.charset.StandardCharsets
@@ -166,6 +166,7 @@ private object Versioned:
       case Right(json) =>
         val c: HCursor = json.hcursor
         c.get[Int]("v") match
-          case Right(1)     => json.as[A].left.map(f => f.getMessage)
+          case Right(1) =>
+            json.as[A].left.map(f => s"malformed at ${CursorOp.opsToPath(f.history)}")
           case Right(other) => Left(s"unsupported version $other")
           case Left(_)      => Left("no version")

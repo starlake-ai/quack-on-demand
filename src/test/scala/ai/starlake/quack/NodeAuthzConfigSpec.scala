@@ -60,10 +60,10 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
       "http://10.0.0.5:20900"
   }
 
-  it should "fall back to this host's loopback URL on the manager port when blank" in {
-    NodeAuthzConfig().replicaUrl("0.0.0.0", 20900) shouldBe "http://127.0.0.1:20900"
+  it should "fall back to this host's loopback URL on the internal port when blank" in {
+    NodeAuthzConfig().replicaUrl("0.0.0.0", 20900) shouldBe "http://127.0.0.1:20901"
     NodeAuthzConfig(internalUrl = "   ")
-      .replicaUrl("0.0.0.0", 20901) shouldBe "http://127.0.0.1:20901"
+      .replicaUrl("0.0.0.0", 20901) shouldBe "http://127.0.0.1:20902"
   }
 
   "NodeAuthzConfig" should "take QOD_POD_IP" in {
@@ -74,13 +74,13 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
       .map(e => (e.envVar, e.sensitive)) shouldBe Some(("QOD_POD_IP", false))
   }
 
-  "replicaUrl" should "be this pod's address on the manager port when only the pod IP is set" in {
+  "replicaUrl" should "be this pod's address on the internal port when only the pod IP is set" in {
     NodeAuthzConfig(podIp = "10.1.2.3")
-      .replicaUrl("0.0.0.0", 20900) shouldBe "http://10.1.2.3:20900"
+      .replicaUrl("0.0.0.0", 20900) shouldBe "http://10.1.2.3:20901"
     NodeAuthzConfig(podIp = " fd00::7 ")
-      .replicaUrl("0.0.0.0", 20900) shouldBe "http://[fd00::7]:20900"
+      .replicaUrl("0.0.0.0", 20900) shouldBe "http://[fd00::7]:20901"
     NodeAuthzConfig(podIp = "[fd00::7]")
-      .replicaUrl("0.0.0.0", 20900) shouldBe "http://[fd00::7]:20900"
+      .replicaUrl("0.0.0.0", 20900) shouldBe "http://[fd00::7]:20901"
   }
 
   it should "prefer the internal URL to the pod IP" in {
@@ -90,15 +90,15 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "be the bind address when the manager listens on one specific address" in {
-    NodeAuthzConfig().replicaUrl("192.168.1.5", 20900) shouldBe "http://192.168.1.5:20900"
-    NodeAuthzConfig().replicaUrl(" fd00::5 ", 20900) shouldBe "http://[fd00::5]:20900"
-    NodeAuthzConfig().replicaUrl("[fd00::5]", 20900) shouldBe "http://[fd00::5]:20900"
-    NodeAuthzConfig().replicaUrl("mgr.internal", 20900) shouldBe "http://mgr.internal:20900"
+    NodeAuthzConfig().replicaUrl("192.168.1.5", 20900) shouldBe "http://192.168.1.5:20901"
+    NodeAuthzConfig().replicaUrl(" fd00::5 ", 20900) shouldBe "http://[fd00::5]:20901"
+    NodeAuthzConfig().replicaUrl("[fd00::5]", 20900) shouldBe "http://[fd00::5]:20901"
+    NodeAuthzConfig().replicaUrl("mgr.internal", 20900) shouldBe "http://mgr.internal:20901"
     // A loopback address other than 127.0.0.1 is not reached by the loopback default either.
-    NodeAuthzConfig().replicaUrl("::1", 20900) shouldBe "http://[::1]:20900"
+    NodeAuthzConfig().replicaUrl("::1", 20900) shouldBe "http://[::1]:20901"
     // The pod IP and the internal URL still win.
     NodeAuthzConfig(podIp = "10.1.2.3").replicaUrl("192.168.1.5", 20900) shouldBe
-      "http://10.1.2.3:20900"
+      "http://10.1.2.3:20901"
     NodeAuthzConfig(internalUrl = "http://m:1").replicaUrl("192.168.1.5", 20900) shouldBe
       "http://m:1"
   }
@@ -118,8 +118,41 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
       )
     do
       withClue(s"'$bind'")(
-        NodeAuthzConfig().replicaUrl(bind, 20900) shouldBe "http://127.0.0.1:20900"
+        NodeAuthzConfig().replicaUrl(bind, 20900) shouldBe "http://127.0.0.1:20901"
       )
+  }
+
+  "listenerPort" should "be the REST port + 1 unless configured" in {
+    NodeAuthzConfig().listenerPort(20900) shouldBe 20901
+    NodeAuthzConfig(internalPort = 30000).listenerPort(20900) shouldBe 30000
+    NodeAuthzConfig(internalPort = 30000).replicaUrl("0.0.0.0", 20900) shouldBe
+      "http://127.0.0.1:30000"
+  }
+
+  "NodeAuthzConfig.internalPort" should "default to 0, the REST port + 1" in {
+    NodeAuthzConfig().internalPort shouldBe 0
+    load().nodeAuthz.internalPort shouldBe 0
+  }
+
+  it should "take QOD_INTERNAL_PORT" in {
+    load(Map("QOD_INTERNAL_PORT" -> "30000")).nodeAuthz.internalPort shouldBe 30000
+    load(Map("QOD_INTERNAL_PORT" -> "65535")).nodeAuthz.internalPort shouldBe 65535
+    load(Map("QOD_INTERNAL_PORT" -> "0")).nodeAuthz.internalPort shouldBe 0
+  }
+
+  it should "refuse a value that is not a port, naming the variable" in
+    List("65536", "-1").foreach { v =>
+      withClue(v) {
+        val e = intercept[Exception](load(Map("QOD_INTERNAL_PORT" -> v)))
+        e.getMessage should include("QOD_INTERNAL_PORT")
+      }
+    }
+
+  it should "register under its variable, not sensitive" in {
+    ConfigRegistry
+      .collect(List("quack-on-demand" -> classOf[ManagerConfig]))
+      .find(_.path == "quack-on-demand.nodeAuthz.internalPort")
+      .map(e => (e.envVar, e.sensitive)) shouldBe Some(("QOD_INTERNAL_PORT", false))
   }
 
   // How many handle contexts (MintedHandles) and nonces (IssuedHandles) one replica keeps: each is

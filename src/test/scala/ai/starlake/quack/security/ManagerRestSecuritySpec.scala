@@ -291,12 +291,14 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "refuse a call to /api/internal/ when no internal route is mounted" in {
+  it should "refuse a call to /api/internal/ on the REST port" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)
     try
-      // The harness mounts no internal route: the path falls through to the guard, which refuses.
+      // Nodes call these on the internal listener; here the guard refuses the path like any other.
       post(h.httpClient, s"${h.baseUrl}/api/internal/authz/credentials", """{"handle":"x"}""")
+        .statusCode() shouldBe 401
+      post(h.httpClient, s"${h.baseUrl}/api/internal/authz/decide", """{"handle":"x"}""")
         .statusCode() shouldBe 401
     finally h.shutdown()
   }

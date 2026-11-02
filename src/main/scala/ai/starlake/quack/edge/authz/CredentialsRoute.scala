@@ -14,8 +14,9 @@ import java.util.Base64
 
 /** `POST /api/internal/authz/credentials` (decision 23): a node fetches the S3 credentials of the
   * principal its connection's handle names, to install them as that connection's secrets
-  * `qod_uc_<id8>`. Mounted ahead of the manager's api-key guard (a node has no session); every call
-  * authenticates itself, in order, each failure answered before the next step reads anything:
+  * `qod_uc_<id8>`. Served by [[NodeInternalServer]], a listener apart from the manager's REST port
+  * (a node has no session); every call authenticates itself, in order, each failure answered before
+  * the next step reads anything:
   *
   *   1. `X-QoD-Node` names the node and `X-QoD-Signature` is the lowercase hex HMAC-SHA256 of the
   *      body bytes under that node's key: both headers are checked before the body is read, the MAC
@@ -32,9 +33,10 @@ import java.util.Base64
   * or the handle fails; 503 [[CredentialsRoute.ContextExpired]] for a handle this replica did not
   * mint or no longer remembers, and 503 [[CredentialsRoute.Unavailable]] while the principal's set
   * cannot be served ([[UserS3Credentials.current]]: a stale cache, an unreadable deny set), both
-  * retryable; 400 for a malformed request; 413 past [[CredentialsRoute.MaxBodyBytes]]. The system
-  * principal has no credential: an empty set. The log never holds the body, the handle, the
-  * signature, the answer or a key; a node's repeated refusals go to DEBUG
+  * retryable; 400 for a malformed request (JSON nested too deeply included); 408 for a body that
+  * does not arrive in time; 411 for chunked framing; 413 past [[CredentialsRoute.MaxBodyBytes]]
+  * ([[NodeCalls.serve]]). The system principal has no credential: an empty set. The log never holds
+  * the body, the handle, the signature, the answer or a key; a node's repeated refusals go to DEBUG
   * ([[NodeCalls.RefusalLog]]).
   */
 final class CredentialsRoute(

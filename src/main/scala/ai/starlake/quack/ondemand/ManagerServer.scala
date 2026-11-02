@@ -109,13 +109,7 @@ final class ManagerServer(
     tenantLocations: Option[TenantLocationHandlers] = None,
     // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
     // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
-    s3Credentials: Option[UserS3CredentialHandlers] = None,
-    // The node-to-manager calls (POST /api/internal/authz/*: CredentialsRoute here, Task 6's
-    // DecideRoute): mounted IN FRONT of apiKeyGuard, since a node has no session; each route
-    // authenticates every call itself (the node-key MAC of the body, then the handle). Empty (tests)
-    // leaves them unmounted, so a node's call is refused (fail closed). Never Tapir endpoints: they
-    // stay out of the OpenAPI contract, CLI parity and McpCoverageSpec.
-    internalRoutes: List[HttpRoutes[IO]] = Nil
+    s3Credentials: Option[UserS3CredentialHandlers] = None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -1317,8 +1311,7 @@ final class ManagerServer(
       .withPort(Port.fromInt(cfg.port).get)
       .withMaxConnections(limits.maxConnections)
       .withHttpApp(
-        (internalRoutes.foldLeft(HttpRoutes.empty[IO])(_ <+> _) <+> apiKeyGuard(apiRoutes) <+>
-          mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+> moduleStatic <+>
-          rootRedirect).orNotFound
+        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+>
+          moduleStatic <+> rootRedirect).orNotFound
       )
       .build

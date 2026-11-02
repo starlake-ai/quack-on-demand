@@ -14,8 +14,8 @@ import java.util.Base64
 import scala.util.control.NonFatal
 
 /** `POST /api/internal/authz/decide`: a node asks for the verdict of one statement (spec Section 5,
-  * decisions 14 and 22). Mounted in front of the manager's api-key guard (a node has no session);
-  * every call authenticates itself:
+  * decisions 14 and 22). Served by [[NodeInternalServer]], a listener apart from the manager's REST
+  * port (a node has no session); every call authenticates itself:
   *
   *   1. `X-QoD-Node` names the node and `X-QoD-Signature` is the lowercase hex HMAC-SHA256 of the
   *      body bytes under that node's key: both headers are checked before the body is read, the MAC
@@ -34,9 +34,10 @@ import scala.util.control.NonFatal
   *
   * Answers (all `text/plain; charset=UTF-8`): 200 with a signed [[Verdict]] (allow or refuse), 401
   * when the node or the handle fails, 503 when the decision is unavailable (an expired context
-  * included), 400 for a malformed request, 413 past [[DecideRoute.MaxBodyBytes]]. The log never
-  * holds the body, the handle, the signature, a verdict or a key; a node's repeated refusals go to
-  * DEBUG ([[NodeCalls.RefusalLog]]).
+  * included), 400 for a malformed request (JSON nested too deeply included), 408 for a body that
+  * does not arrive in time, 411 for chunked framing, 413 past [[DecideRoute.MaxBodyBytes]]
+  * ([[NodeCalls.serve]]). The log never holds the body, the handle, the signature, a verdict or a
+  * key; a node's repeated refusals go to DEBUG ([[NodeCalls.RefusalLog]]).
   *
   * Every decision (allow, refuse, unavailable) is counted in `qod_authz_decisions_total` and timed
   * in `qod_authz_decide_duration_ms` ([[AuthzInstruments]]); a call refused before a decision (401)

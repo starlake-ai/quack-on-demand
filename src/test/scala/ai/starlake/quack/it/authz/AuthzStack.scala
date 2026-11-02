@@ -40,8 +40,8 @@ import scala.util.Try
   * (plain gRPC), the native Quack front door, MCP, and a throwaway control-plane database. With
   * `relayed`, nodes call the decision endpoint through [[relay]] (the handles' replica URL), which
   * a spec stops to play a dead replica or reads to count decisions (the latency spec, Task 14);
-  * without it they call the REST port directly. REST calls ride a login session of the seeded admin
-  * (admin / admin).
+  * without it they call the internal listener directly. REST calls ride a login session of the
+  * seeded admin (admin / admin).
   */
 final class AuthzStack(
     name: String,
@@ -69,7 +69,7 @@ final class AuthzStack(
   /** DuckLake catalog databases the specs created on the test Postgres, dropped by [[stop]]. */
   val catalogDatabases: ListBuffer[String] = ListBuffer.empty
 
-  val relay = new TcpRelay(relayPort, restPort)
+  val relay = new TcpRelay(relayPort, restPort + 1)
 
   private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
 
@@ -81,7 +81,7 @@ final class AuthzStack(
     TestPostgres.dropStrayTestDatabases(s"qod_$name")
     dropStrayCatalogs()
     if relayed then relay.start()
-    val replicaPort = if relayed then relayPort else restPort
+    val replicaPort = if relayed then relayPort else restPort + 1
     val script      = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath
     val overlay     = ConfigSource.string(
       s"""

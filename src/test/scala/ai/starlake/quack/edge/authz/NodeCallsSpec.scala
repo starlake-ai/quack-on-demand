@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.quack.edge.BoundedBody
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
@@ -8,7 +9,8 @@ import cats.effect.unsafe.implicits.global
 import ch.qos.logback.classic.Level
 import com.typesafe.scalalogging.Logger
 import fs2.Stream
-import org.http4s.{Header, Method, Request, Status}
+import org.http4s.{Header, Method, Request, Response, Status}
+import org.http4s.ember.core.EmberException
 import org.http4s.headers.`Content-Length`
 import org.http4s.implicits.*
 import org.scalatest.flatspec.AnyFlatSpec
@@ -16,6 +18,7 @@ import org.scalatest.matchers.should.Matchers
 import org.typelevel.ci.CIString
 
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
+import scala.concurrent.duration.*
 
 class NodeCallsSpec extends AnyFlatSpec with Matchers:
 
@@ -36,14 +39,29 @@ class NodeCallsSpec extends AnyFlatSpec with Matchers:
       r.putHeaders(h)
     )
 
-  private def serve(req: Request[IO], answered: AtomicInteger = new AtomicInteger()) =
-    val resp = NodeCalls
-      .serve(req, 16)((_, why) => (Status.Unauthorized, why)) { (_, _, _) =>
+  private def response(
+      req: Request[IO],
+      answered: AtomicInteger = new AtomicInteger(),
+      bound: Int = 16
+  ): Response[IO] =
+    NodeCalls
+      .serve(req, bound)((_, why) => (Status.Unauthorized, why)) { (_, _, _) =>
         answered.incrementAndGet()
         (Status.Ok, "ok")
       }
       .unsafeRunSync()
+
+  private def serve(req: Request[IO], answered: AtomicInteger = new AtomicInteger()) =
+    val resp = response(req, answered)
     (resp.status, resp.as[String].unsafeRunSync())
+
+  private def closesConnection(resp: Response[IO]): Boolean =
+    resp.headers
+      .get(CIString("Connection"))
+      .exists(_.exists(_.value.equalsIgnoreCase("close")))
+
+  private def nested(levels: Int): Stream[IO, Byte] =
+    Stream.emits(("[" * levels + "]" * levels).getBytes.toList)
 
   "NodeCalls.serve" should "refuse a call missing a header without reading its body" in {
     val answered = new AtomicInteger()
@@ -72,6 +90,65 @@ class NodeCallsSpec extends AnyFlatSpec with Matchers:
     ) shouldBe
       (Status.PayloadTooLarge, NodeCalls.BodyTooLarge)
     serve(request(Some("quack-a-1"), Some(Mac))) shouldBe (Status.Ok, "ok")
+  }
+
+  it should "close the connection after refusing a body it left unread" in {
+    val declared =
+      request(Some("quack-a-1"), Some(Mac), Untouchable).putHeaders(`Content-Length`(17L))
+    val over =
+      request(Some("quack-a-1"), Some(Mac), Stream.emits(Array.fill(17)('x'.toByte).toList))
+    for req <- List(declared, over) do
+      val resp = response(req)
+      resp.status shouldBe Status.PayloadTooLarge
+      closesConnection(resp) shouldBe true
+    // An answer to a body read in full keeps the connection as it was.
+    closesConnection(response(request(Some("quack-a-1"), Some(Mac)))) shouldBe false
+  }
+
+  it should "refuse chunked framing before pulling the body" in {
+    val answered = new AtomicInteger()
+    val chunked  = request(Some("quack-a-1"), Some(Mac), Untouchable)
+      .putHeaders(Header.Raw(CIString("Transfer-Encoding"), "chunked"))
+    val resp = response(chunked, answered)
+    (resp.status, resp.as[String].unsafeRunSync()) shouldBe
+      (Status.LengthRequired, NodeCalls.ChunkedRefused)
+    closesConnection(resp) shouldBe true
+    // Without its headers a chunked call is refused as any other, unread.
+    val headerless = request(None, Some(Mac), Untouchable)
+      .putHeaders(Header.Raw(CIString("Transfer-Encoding"), "chunked"))
+    serve(headerless, answered) shouldBe (Status.Unauthorized, NodeCalls.MissingHeaders)
+    answered.get() shouldBe 0
+  }
+
+  it should "answer a body that stops arriving 408, closing the connection" in {
+    val answered = new AtomicInteger()
+    val stalled  = Stream.emits("{".getBytes.toList) ++
+      Stream.raiseError[IO](EmberException.ReadTimeout(60.seconds))
+    val resp = response(request(Some("quack-a-1"), Some(Mac), stalled), answered)
+    (resp.status, resp.as[String].unsafeRunSync()) shouldBe
+      (Status.RequestTimeout, NodeCalls.BodyTooSlow)
+    closesConnection(resp) shouldBe true
+    answered.get() shouldBe 0
+  }
+
+  it should "refuse JSON nested too deep without calling the route, and answer one at the limit" in {
+    val answered = new AtomicInteger()
+    val deep     = response(
+      request(Some("quack-a-1"), Some(Mac), nested(BoundedBody.MaxNesting + 1)),
+      answered,
+      bound = 4096
+    )
+    (deep.status, deep.as[String].unsafeRunSync()) shouldBe
+      (Status.BadRequest, NodeCalls.BodyTooDeep)
+    closesConnection(deep) shouldBe true
+    answered.get() shouldBe 0
+    val limit = response(
+      request(Some("quack-a-1"), Some(Mac), nested(BoundedBody.MaxNesting)),
+      answered,
+      bound = 4096
+    )
+    limit.status shouldBe Status.Ok
+    answered.get() shouldBe 1
   }
 
   "the node-id bound" should "admit the longest id PoolSupervisor composes" in {

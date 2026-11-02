@@ -350,11 +350,25 @@ object Main extends IOApp with LazyLogging:
       else "account lockout: disabled"
     )
 
-    // The URL nodes call back for verdicts must be reachable from the runtime's nodes: on
-    // Kubernetes this pod's address (the chart sets QOD_POD_IP), in fleet mode the address the
-    // servers heartbeat to. Configuration only, so it runs before the Postgres preflight. The line
-    // is printed, not logged, as the session secret's source is: the logger's default ERROR root
-    // level would swallow it, and operators need to see which URL their nodes call.
+    // The listener nodes call back for verdicts needs a port of its own, and the URL they call must
+    // be reachable from the runtime's nodes: on Kubernetes this pod's address (the chart sets
+    // QOD_POD_IP), in fleet mode the address the servers heartbeat to. Configuration only, so it
+    // runs before the Postgres preflight. The line is printed, not logged, as the session secret's
+    // source is: the logger's default ERROR root level would swallow it, and operators need to see
+    // which URL their nodes call.
+    val internalPort =
+      BootPreflight.checkInternalPort(
+        mgrCfg0.nodeAuthz,
+        mgrCfg0.port,
+        edgeCfg.port,
+        Option.when(quackCfgResolved.enabled)(quackCfgResolved.port),
+        mgrCfg0.minPort,
+        mgrCfg0.maxPort
+      ) match
+        case Left(msg)   => sys.error(msg)
+        case Right(port) => port
+    val internalHost =
+      BootPreflight.internalBindHost(mgrCfg0.nodeAuthz, mgrCfg0.host, mgrCfg0.port)
     BootPreflight.checkInternalUrl(
       mgrCfg0.runtimeType,
       mgrCfg0.nodeAuthz,
@@ -362,7 +376,7 @@ object Main extends IOApp with LazyLogging:
       mgrCfg0.port
     ) match
       case Left(msg)  => sys.error(msg)
-      case Right(url) => println(BootPreflight.decideUrlLine(url))
+      case Right(url) => println(BootPreflight.decideUrlLine(url, internalHost, internalPort))
 
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
@@ -397,11 +411,14 @@ object Main extends IOApp with LazyLogging:
       opaCfg,
       modules,
       quackCfgResolved,
-      qodNodeBin
+      qodNodeBin,
+      internalHost,
+      internalPort
     )
 
   /** The boot after the Liquibase apply and the session secret's resolution: `mgrCfg` carries the
-    * resolved secret, and the configuration as loaded is not in scope.
+    * resolved secret, and the configuration as loaded is not in scope. `internalHost` and
+    * `internalPort` are where the node verdict listener binds (checked at the top of the boot).
     */
   private def bootResolved(
       mgrCfg: ManagerConfig,
@@ -411,7 +428,9 @@ object Main extends IOApp with LazyLogging:
       opaCfg: OpaConfig,
       modules: List[ai.starlake.quack.spi.ManagerModule],
       quackCfgResolved: QuackNativeConfig,
-      qodNodeBin: Option[java.nio.file.Path]
+      qodNodeBin: Option[java.nio.file.Path],
+      internalHost: String,
+      internalPort: Int
   ): IO[ExitCode] =
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
@@ -1227,8 +1246,8 @@ object Main extends IOApp with LazyLogging:
         mgrCfg.tenantFiles.rootOpt,
         auditRecorder
       )
-      // The node decision pipeline and its endpoint (POST /api/internal/authz/decide), sharing
-      // the one OPA authorizer.
+      // The node decision pipeline and its endpoint (POST /api/internal/authz/decide, served by
+      // the node verdict listener), sharing the one OPA authorizer.
       val authzDecider =
         BootFactories.authzDecider(sup, opaCfg, opaAuthorizer, locationRules)
       val decideRoute =
@@ -1793,8 +1812,9 @@ object Main extends IOApp with LazyLogging:
         locationRules.dataFolderOverlap,
         auditRecorder
       )
-      // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), outside the
-      // api-key guard; it answers only handles this replica minted (issuedHandles).
+      // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), served by the
+      // node verdict listener, not the REST port; it answers only handles this replica minted
+      // (issuedHandles).
       val credentialsRoute =
         new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, servedUserS3)
 
@@ -2095,8 +2115,13 @@ object Main extends IOApp with LazyLogging:
         quackCfg = Some(quackCfgResolved),
         icebergCatalog = icebergCatalogHandlers,
         tenantLocations = Some(tenantLocationHandlers),
-        s3Credentials = Some(s3CredentialHandlers),
-        internalRoutes = List(credentialsRoute.routes, decideRoute.routes)
+        s3Credentials = Some(s3CredentialHandlers)
+      )
+      // Nodes' verdict and credential calls: a listener of their own, bound with REST.
+      val nodeInternal = new ai.starlake.quack.edge.authz.NodeInternalServer(
+        internalHost,
+        internalPort,
+        List(credentialsRoute.routes, decideRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
@@ -2206,7 +2231,8 @@ object Main extends IOApp with LazyLogging:
         // enforcement off while module suites (which wire gates directly) stay green.
         IO.defer(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
         IO.delay(buildManagerServer()).flatMap { mgr =>
-          mgr.serve.use { _ =>
+          // The node listener first, then REST, released in the reverse order: one `use`.
+          nodeInternal.resource.flatMap(_ => mgr.serve).use { _ =>
             logger.info(
               s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
                 s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"
