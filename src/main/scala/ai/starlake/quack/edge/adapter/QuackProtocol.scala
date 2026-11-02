@@ -179,7 +179,13 @@ object QuackProtocol:
         .header("Content-Type", "application/vnd.duckdb")
         .POST(HttpRequest.BodyPublishers.ofByteArray(body))
         .build()
-      val resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray())
+      // Refused or timed out while connecting: nothing reached the node, so the call is safe to
+      // retry, as the Transient contract above says (a node still starting, or one that died).
+      val resp =
+        try http.send(req, HttpResponse.BodyHandlers.ofByteArray())
+        catch
+          case e @ (_: java.net.ConnectException | _: java.net.http.HttpConnectTimeoutException) =>
+            throw QuackWireError.Transient(s"cannot connect to Quack node at $uri: $e")
       resp.statusCode() match
         case 200                         => resp.body()
         case sc if sc >= 500 && sc < 600 =>
