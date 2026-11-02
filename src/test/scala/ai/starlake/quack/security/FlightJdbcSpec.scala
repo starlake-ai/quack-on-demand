@@ -183,9 +183,9 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
   "a write answering with text" should "land exactly once" in withEdge { edge =>
     val before = edge.single("SELECT count(*) FROM orders")
     val sql    = "INSERT INTO orders VALUES (11, 'b@x.io') RETURNING email"
-    statement(edge.client)(_.executeUpdate(sql)) shouldBe 0
+    statement(edge.client)(_.executeUpdate(sql)) shouldBe 1
     edge.single("SELECT count(*) FROM orders") shouldBe before + 1
-    prepared(edge.client, sql)(_.executeUpdate()) shouldBe 0
+    prepared(edge.client, sql)(_.executeUpdate()) shouldBe 1
     edge.single("SELECT count(*) FROM orders") shouldBe before + 2
   }
 
@@ -198,9 +198,34 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
     do
       withClue(sql) {
         edge.drain()
-        statement(edge.client)(_.executeUpdate(sql)) shouldBe 0
+        statement(edge.client)(_.executeUpdate(sql)) shouldBe 1
         edge.drain().size shouldBe 1
       }
+  }
+
+  // The count came from the first cell of the result whatever that cell was, so a RETURNING reported
+  // the first id it returned, and a read its first number.
+  "the update count" should "be the rows of a result that is not DuckDB's Count" in withEdge {
+    edge =>
+      val insert =
+        "INSERT INTO orders VALUES (30, 'h@x.io'), (31, 'i@x.io'), (32, 'j@x.io') RETURNING id"
+      statement(edge.client)(_.executeUpdate(insert)) shouldBe 3
+      val delete = "DELETE FROM orders WHERE id >= 30 RETURNING id"
+      prepared(edge.client, delete)(_.executeUpdate()) shouldBe 3
+      prepared(edge.client, "SELECT 42 AS a")(_.executeUpdate()) shouldBe 1
+      prepared(edge.client, "SELECT count(*) AS n FROM range(5)")(_.executeUpdate()) shouldBe 1
+      prepared(edge.client, "SELECT 1 AS a FROM range(5)")(_.executeUpdate()) shouldBe 5
+  }
+
+  it should "be DuckDB's Count when the result is one" in withEdge { edge =>
+    val insert = "INSERT INTO orders VALUES (40, 'k@x.io'), (41, 'l@x.io')"
+    prepared(edge.client, insert)(_.executeUpdate()) shouldBe 2
+    prepared(edge.client, "DELETE FROM orders WHERE id >= 40")(_.executeUpdate()) shouldBe 2
+  }
+
+  it should "be 0 for a statement answering Success" in withEdge { edge =>
+    statement(edge.client)(_.executeUpdate("USE main")) shouldBe 0
+    prepared(edge.client, "SET threads=2")(_.executeUpdate()) shouldBe 0
   }
 
   // Not unprobed, and failing since before F17: a prepared executeUpdate always goes through DoPut,

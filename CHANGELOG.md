@@ -855,10 +855,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
   plain statement this failed, and the client saw `Failed to successfully execute query after 5
   attempts` for a statement that had succeeded ten times, so `INSERT ... RETURNING <text>` on a
   catalog that allows it wrote ten rows. A prepared statement hit a null `signature` instead,
-  `DROP TABLE` included. The edge now acknowledges 0 when the result has no numeric first cell, so
-  a DoPut client that read -1 for these reads 0. Over JDBC these statements return no rows: an
-  `executeQuery` of `CALL`, `EXPLAIN ANALYZE` or a batch answers `Statement did not return a result
-  set`, after running once.
+  `DROP TABLE` included. The edge no longer acknowledges -1: a DoPut client reads `Count` when the
+  result is DuckDB's `Count`, 0 for a `Success` answer, and otherwise the number of rows. So a
+  `RETURNING id` no longer reports its first id as the count, nor a read its first number. Over
+  JDBC these statements return no rows: an `executeQuery` of `CALL`, `EXPLAIN ANALYZE` or a batch
+  answers `Statement did not return a result set`, after running once.
 - A FlightSQL write now answers only after its commit (#170). The edge sent the `Count` row first,
   and the Arrow JDBC driver returns from `executeUpdate` once it holds that row. The next statement
   could therefore run before the commit (`Table with name ... does not exist` right after the

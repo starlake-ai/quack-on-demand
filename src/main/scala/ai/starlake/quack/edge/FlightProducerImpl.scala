@@ -318,10 +318,9 @@ final class FlightProducerImpl(
     * Of that second bucket, only BEGIN/COMMIT/ROLLBACK/DROP/ALTER (`StatementKind.SkipExecute`
     * territory -- see [[PrepareStrategy.choose]]) actually reach this coercion: the edge advertises
     * `countSchema` for those WITHOUT probing, so a real `Success: BOOLEAN` reply drifts from what
-    * was promised. VACUUM/ANALYZE/SET classify as `StatementKind.Other` -> `FullExecute`, meaning
-    * the edge probes and advertises their REAL schema up front, so advertised and actual always
-    * agree for them and coercion never triggers -- they are DuckDB facts, not statements this code
-    * path handles.
+    * was promised. VACUUM/ANALYZE/SET classify as `StatementKind.Other` -> `Unprobed`, meaning the
+    * edge advertises no schema for them, so nothing is promised and coercion never triggers -- they
+    * are DuckDB facts, not statements this code path handles.
     *
     * The split does not track the classifier's Read/Write/Ddl buckets (CREATE INDEX -> Count but
     * DROP INDEX -> Success), so predicting it per statement kind is a trap, not a fix -- this
@@ -342,12 +341,7 @@ final class FlightProducerImpl(
     * otherwise-silent data loss is at least auditable.
     */
   private[edge] def coerceSuccessToCount(root: VectorSchemaRoot): VectorSchemaRoot =
-    val fields         = root.getSchema.getFields
-    val isSuccessShape =
-      fields.size() == 1 &&
-        fields.get(0).getName == "Success" &&
-        fields.get(0).getType.isInstanceOf[ArrowType.Bool]
-    if !isSuccessShape then root
+    if !isSuccessShape(root) then root
     else
       val coerced = VectorSchemaRoot.create(countSchema, allocator)
       val vec     = coerced.getVector("Count").asInstanceOf[BigIntVector]
@@ -356,6 +350,12 @@ final class FlightProducerImpl(
       vec.setValueCount(1)
       coerced.setRowCount(1)
       coerced
+
+  private def isSuccessShape(root: VectorSchemaRoot): Boolean =
+    val fields = root.getSchema.getFields
+    fields.size() == 1 &&
+    fields.get(0).getName == "Success" &&
+    fields.get(0).getType.isInstanceOf[ArrowType.Bool]
 
   /** Resolve a prepared handle into an executable plan, enforcing two invariants: the calling peer
     * must be the handle's creator (a leaked handle cannot be replayed), and the [[EffectiveSet]] is
@@ -1009,10 +1009,8 @@ final class FlightProducerImpl(
       case scala.util.Failure(t) =>
         ackStream.onError(internalError(label, t))
 
-  /** Drain `reader` to exhaustion and return the affected-row count: DuckDB's single-row Count cell
-    * of the first batch, or 0 when the result has no numeric first cell (USE, SET, DROP, a write
-    * answering with text): "ran, produced no count", as in [[coerceSuccessToCount]]. A failure to
-    * read the stream (the deferred COMMIT among them) propagates.
+  /** Drain `reader` to exhaustion and return the affected-row count: see [[updateCountOf]]. A
+    * failure to read the stream (the deferred COMMIT among them) propagates.
     *
     * Never -1, though FlightSQL defines it as "unknown". The Arrow JDBC driver hands the value to
     * Avatica, where -1 means "no count, open a result set". On a prepared statement that signature
@@ -1020,19 +1018,22 @@ final class FlightProducerImpl(
     * the statement, and each of its 5 attempts runs it again through DoPut and DoGet (issue 170).
     */
   private def drainUpdateCount(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
-    if reader.loadNextBatch() then
-      val root  = reader.getVectorSchemaRoot
-      val count =
-        try
-          if root.getRowCount >= 1 && !root.getFieldVectors.isEmpty then
-            root.getFieldVectors.get(0).getObject(0) match
-              case n: java.lang.Number => n.longValue()
-              case _                   => 0L
-          else 0L
-        catch case _: Throwable => 0L
-      while reader.loadNextBatch() do ()
-      count
-    else 0L
+    var count = 0L
+    while reader.loadNextBatch() do count += updateCountOf(reader.getVectorSchemaRoot)
+    count
+
+  /** What one batch adds to the count: DuckDB's `Count` cell, 0 for its `Success` answer ("ran,
+    * produced no count", as in [[coerceSuccessToCount]]), and the rows of any other result. Only
+    * the `Count` column carries a count: the first cell of a `RETURNING id` is an id.
+    */
+  private def updateCountOf(root: VectorSchemaRoot): Long =
+    val fields = root.getSchema.getFields
+    if isSuccessShape(root) then 0L
+    else if fields.size() == 1 && fields.get(0).getName == "Count" && root.getRowCount >= 1 then
+      root.getVector(0).getObject(0) match
+        case n: java.lang.Number => n.longValue()
+        case _                   => root.getRowCount.toLong
+    else root.getRowCount.toLong
 
   /** Ack the update count; the buffer is released only after onNext + onCompleted have consumed it.
     */
