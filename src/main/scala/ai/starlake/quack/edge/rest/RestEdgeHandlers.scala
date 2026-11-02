@@ -143,7 +143,7 @@ object RestEdgeHandlers:
   * axis inside the executor, `branchOnly` and the token's timeout all run in the injected
   * `executor`, which is `Main.routedExecutor` in production and the seam a spec stubs. Every
   * statement is text from [[RestSql]] and goes through that executor exactly as MCP `run_sql` does,
-  * so the validator and the rewriters see an ordinary SELECT.
+  * so the rewriters and the node's decision see an ordinary SELECT.
   *
   * Two executors, both the routed executor: `executor` records its statements (history, metering,
   * audit) and runs every statement but one; `probeExecutor` does not record and runs only the
@@ -339,8 +339,8 @@ final class RestEdgeHandlers(
             _  <- refuseViewTimeTravel(view, q)
             rq <- lift(RestResolver.resolve(q, pr._1))
             // Same node as the probe: a soft pin, a vanished node falls back as usual.
-            pinned = t.copy(caller = t.caller.copy(preferredNode = Some(pr._2)))
-            sql    = RestSql.render(at, rq, limit)
+            pinned    = t.copy(caller = t.caller.copy(preferredNode = Some(pr._2)))
+            sql       = RestSql.render(at, rq, limit)
             onFailure = dataFailure(req.requestId, filtered = rq.filters.nonEmpty)
             // A Parquet body's slot is taken before the data statement: one over the cap costs
             // the node nothing.

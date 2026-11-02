@@ -52,11 +52,11 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * usual pick. All three default to what every call site had before they existed.
   *
   * `jwtRoles`, `jwtGroups` and `jwtClaims` are what a VERIFIED bearer JWT said about the caller,
-  * handed to the handshake ([[authzRequest]]) exactly as the FlightSQL edge hands its own: the roles
-  * and groups widen the user's EffectiveSet by name inside the user's tenant, and the claims ride on
-  * it to the OPA input. A credential validated by a tenant-scoped authority cannot speak for a
-  * tenant-less superuser row of the same name, so such a caller sets `superuserAdmissible = false`.
-  * Empty for every caller without a JWT.
+  * handed to the handshake ([[authzRequest]]) exactly as the FlightSQL edge hands its own: the
+  * roles and groups widen the user's EffectiveSet by name inside the user's tenant, and the claims
+  * ride on it to the OPA input. A credential validated by a tenant-scoped authority cannot speak
+  * for a tenant-less superuser row of the same name, so such a caller sets
+  * `superuserAdmissible = false`. Empty for every caller without a JWT.
   */
 final case class ExecCaller(
     connectionId: String,
