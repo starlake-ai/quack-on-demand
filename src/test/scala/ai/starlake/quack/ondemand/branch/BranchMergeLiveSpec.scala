@@ -582,6 +582,16 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
 
   private def ids(cs: BranchChangeSet) = cs.tables.flatMap(_.tableId).toSet
 
+  /** A plain connection to the open catalog's Postgres database. */
+  private def onCatalog[A](body: java.sql.Connection => A): A =
+    val c = java.sql.DriverManager.getConnection(
+      ai.starlake.quack.ondemand.state.testkit.TestPostgres.dbUrl(parentMeta("dbName")),
+      ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgUser,
+      ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgPass
+    )
+    try body(c)
+    finally c.close()
+
   "the merge fence" should "let a commit on another table through" in
     withCatalog("fnother", extra) { (parent, _) =>
       fencedRegionMerge(parent) { (cs, message, send, _, _) =>
@@ -670,6 +680,74 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
           send().left.toOption.get should include("qod merge fence:")
         finally PostgresMergeFence.disarm(parentMeta, message)
       }
+    }
+
+  it should "refuse a snapshot with no row of changes: nothing shows it harmless" in
+    withCatalog("fnnorow", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, send, _, _) =>
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), None) shouldBe
+          Right(())
+        try
+          duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');")
+          onCatalog(
+            _.createStatement().execute(
+              "DELETE FROM ducklake_snapshot_changes " +
+                s"WHERE snapshot_id = ${parent.maxSnapshotId().get}"
+            )
+          )
+          send().left.toOption.get should include("qod merge fence:")
+        finally PostgresMergeFence.disarm(parentMeta, message)
+      }
+    }
+
+  "arming the same message again" should "replace the row's tables and its hold" in
+    withCatalog("fnrearm", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, send, _, _) =>
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, Set(999L), Some(120)) shouldBe
+          Right(())
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), None) shouldBe
+          Right(())
+        try
+          // No hold left, or this writer would wait and fail. The merged tables are the new ones, or
+          // this commit would read as harmless and the merge would build on it.
+          duck("INSERT INTO lake.tpch1.region VALUES (7, 'MAIN', 'h');")
+          send().left.toOption.get should include("qod merge fence:")
+        finally PostgresMergeFence.disarm(parentMeta, message)
+      }
+    }
+
+  "the hold's rule" should "name whole table ids, in any entry of a commit" in
+    withCatalog("hdrule", extra) { (parent, _) =>
+      PostgresMergeFence.arm(
+        parentMeta,
+        "probe",
+        parent.maxSnapshotId().get,
+        Set(2L),
+        Some(120)
+      ) shouldBe
+        Right(())
+      // The trigger on its own: the row never lands.
+      def held(changes: String): Boolean =
+        onCatalog { c =>
+          c.setAutoCommit(false)
+          val ps = c.prepareStatement(
+            "INSERT INTO ducklake_snapshot_changes (snapshot_id, changes_made) VALUES (999999, ?)"
+          )
+          ps.setString(1, changes)
+          try
+            ps.executeUpdate()
+            false
+          catch case e: java.sql.SQLException if e.getMessage.contains("qod merge hold:") => true
+          finally c.rollback()
+        }
+      held("inlined_insert:2") shouldBe true
+      held("inlined_insert:5,inlined_delete:2") shouldBe true
+      held("dropped_table:2,created_table:\"s\".\"t\"") shouldBe true
+      held("inlined_insert:23") shouldBe false
+      held("inlined_insert:12") shouldBe false
+      held("inlined_insert:5") shouldBe false
+      PostgresMergeFence.disarm(parentMeta, "probe")
+      held("inlined_insert:2") shouldBe false
     }
 
   "the fence's rule" should "admit only row data or maintenance on other tables" in

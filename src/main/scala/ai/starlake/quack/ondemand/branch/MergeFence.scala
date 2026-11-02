@@ -22,7 +22,11 @@ import scala.util.control.NonFatal
   *
   * With `holdSec`, until that many seconds from now (the database's clock), the same trigger
   * refuses every other commit naming a table in `tableIds`, in words DuckLake does retry, so a
-  * writer waits. The hold ends by itself: a dead manager cannot block writers for longer.
+  * writer waits. The hold ends by itself: a dead manager cannot block writers for longer. Two kinds
+  * of commit get past it and land: one whose metadata transaction began before the arm (DuckLake's
+  * run REPEATABLE READ, so its first try never sees the row), and a rename, whose changes hold the
+  * new name and no id. The fence then refuses the merge: the hold saves attempts, and the fence
+  * alone keeps main's writes.
   */
 trait MergeFence:
 
@@ -76,9 +80,9 @@ object TableCommitFence:
   * / `pgPort` / `pgUser` / `pgPassword` / `dbName`, the credentials DuckLake created its tables
   * with, so they own `ducklake_snapshot_changes`). Objects live in their own schema,
   * [[FenceSchema]], so [[BranchCloner]] (which copies the metadata schema only) never carries them
-  * into a branch. The trigger is installed once per catalog and left in place: it is a no-op for
-  * every commit whose message has no fence row, and re-creating it on each merge would take a lock
-  * that stalls the tenant's commits.
+  * into a branch. The trigger is installed once per catalog and left in place: it lets through
+  * every commit whose message has no fence row, unless a live hold names its tables, and
+  * re-creating it on each merge would take a lock that stalls the tenant's commits.
   */
 object PostgresMergeFence extends MergeFence with TableCommitFence with LazyLogging:
 
