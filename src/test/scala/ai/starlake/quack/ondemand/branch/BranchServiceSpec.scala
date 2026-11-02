@@ -131,7 +131,13 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
               mainReader.head += 1
               IO.pure(Right(())),
       mergeFence = new MergeFence:
-        def arm(meta: Map[String, String], message: String, base: Long) =
+        def arm(
+            meta: Map[String, String],
+            message: String,
+            base: Long,
+            ids: Set[Long],
+            hold: Option[Int]
+        ) =
           fenceArms += ((meta("dbName"), message, base))
           fenceFails.toLeft(())
         def disarm(meta: Map[String, String], message: String) = fenceDisarms += message: Unit

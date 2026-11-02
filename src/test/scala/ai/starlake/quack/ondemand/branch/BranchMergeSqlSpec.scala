@@ -21,12 +21,11 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
       message = "merge branch f [mg-1] proposed by alice"
     )
     val lines = sql.linesIterator.toList
-    lines.head shouldBe "SET ducklake_max_retry_count = 0;"
-    lines(1) shouldBe "BEGIN;"
-    lines(2) shouldBe
+    lines.head shouldBe "BEGIN;"
+    lines(1) shouldBe
       "CALL ducklake_set_commit_message('acme_tpch', 'tenant:acme/user:bob', 'merge branch f [mg-1] proposed by alice');"
     // Inside the transaction and before any write: the branch must still be at the validated head.
-    lines(3) shouldBe
+    lines(2) shouldBe
       """SELECT CASE WHEN (SELECT max(snapshot_id) FROM "qod_branch".snapshots()) <> 15 THEN error('branch moved past snapshot 15 after validation; propose it again') END AS head_guard;"""
     lines.last shouldBe "COMMIT;"
     sql should include(

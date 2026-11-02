@@ -4,11 +4,13 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.nio.file.Path
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration.*
 
 /** Live spec (local Postgres + duckdb CLI): change-set classification over real metadata and the
   * fast-forward merge batch of design section 4.5, end to end.
   */
-class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixture:
+class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFixture:
 
   /** Clones the open catalog into `branchDb` and answers the snapshot the branch forked at. */
   private def forkAt(branchDb: String, branchDir: Path): Long =
@@ -462,7 +464,13 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
           author = BranchMergeSql.author("acme", "bob"),
           message = message
         )
-        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot) shouldBe Right(())
+        PostgresMergeFence.arm(
+          parentMeta,
+          message,
+          cs.mainSnapshot,
+          cs.tables.flatMap(_.tableId).toSet,
+          None
+        ) shouldBe Right(())
         val out =
           try duckAttempt(sql, Some(branchDb), Some(branchDir))
           finally PostgresMergeFence.disarm(parentMeta, message)
@@ -518,16 +526,320 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with BranchLiveFixtu
             BranchMergeSql.author("acme", "bob"),
             message
           )
-          PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot) shouldBe Right(())
+          PostgresMergeFence.arm(
+            parentMeta,
+            message,
+            cs.mainSnapshot,
+            cs.tables.flatMap(_.tableId).toSet,
+            None
+          ) shouldBe Right(())
           try duck(sql, Some(branchDb), Some(branchDir))
           finally PostgresMergeFence.disarm(parentMeta, message)
           parent.snapshotByCommitMessage(message) shouldBe Some(cs.mainSnapshot + 1)
           duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
             List("BRANCH")
           // A second arm on the same catalog reuses the installed trigger.
-          PostgresMergeFence.arm(parentMeta, "other", cs.mainSnapshot + 1) shouldBe Right(())
+          PostgresMergeFence.arm(
+            parentMeta,
+            "other",
+            cs.mainSnapshot + 1,
+            Set.empty,
+            None
+          ) shouldBe Right(())
           PostgresMergeFence.disarm(parentMeta, "other")
         finally br.close()
+      }
+    }
+
+  // ---- the fence is table-scoped, and the hold keeps writers out ------------------------------
+
+  /** A branch with one committed change on `region`, its change set, and the message to commit by.
+    * `body` gets the Apply batch ready to send.
+    */
+  private def fencedRegionMerge[A](
+      parent: ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+  )(
+      body: (BranchChangeSet, String, () => Either[String, Unit], String, java.nio.file.Path) => A
+  ): A =
+    withBranchDb { (branchDb, branchDir) =>
+      val fork = cloneBranch(branchDb, branchDir)
+      duck(
+        "UPDATE qod_branch.tpch1.region SET r_name = 'BRANCH' WHERE r_regionkey = 2;",
+        Some(branchDb),
+        Some(branchDir)
+      )
+      val br = branchReader(branchDb)
+      try
+        val cs      = BranchChanges.compute(br, parent, fork)
+        val message = BranchMergeSql.commitMessage("feature", "mg-fence", "alice")
+        val send    = () =>
+          withNode(branchDb, branchDir)(node =>
+            runMerge(node, cs, br, parent, message).map(_ => ())
+          )
+        body(cs, message, send, branchDb, branchDir)
+      finally br.close()
+    }
+
+  private def ids(cs: BranchChangeSet) = cs.tables.flatMap(_.tableId).toSet
+
+  "the merge fence" should "let a commit on another table through" in
+    withCatalog("fnother", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, send, _, _) =>
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), None) shouldBe Right(
+          ()
+        )
+        try
+          duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');")
+          send() shouldBe Right(())
+        finally PostgresMergeFence.disarm(parentMeta, message)
+        duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe List("BRANCH")
+        duck("SELECT n_name FROM lake.tpch1.nation ORDER BY 1;") shouldBe List("DE", "FR", "IT")
+      }
+    }
+
+  "a retried commit" should "leave no hole in the snapshot ids the history-gap check relies on" in
+    withCatalog("fnretry", extra) { (parent, _) =>
+      given ExecutionContext = ExecutionContext.global
+      val fork               = parent.maxSnapshotId().get
+      val slow               = Future(
+        duckAttempt(
+          """BEGIN;
+            |UPDATE lake.tpch1.region SET r_name = 'SLOW' WHERE r_regionkey = 2;
+            |SELECT sleep_ms(4000);
+            |COMMIT;""".stripMargin
+        )
+      )
+      Thread.sleep(1500)
+      duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');") // forces the slow commit to retry
+      Await.result(slow, 60.seconds).isRight shouldBe true
+      BranchChanges.historyGap(
+        parent.snapshotChangesSince(fork),
+        fork,
+        parent.maxSnapshotId().get
+      ) shouldBe None
+    }
+
+  "the merge fence" should "refuse a merged table that moved at once, and the next attempt merges" in
+    withCatalog("fnfast", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, send, branchDb, branchDir) =>
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), None) shouldBe Right(
+          ()
+        )
+        try
+          duck("INSERT INTO lake.tpch1.region VALUES (7, 'MAIN', 'h');")
+          val out = send()
+          out.left.toOption.get should include("qod merge fence:")
+          MergeDecision.mainMoved(out.left.toOption.get) shouldBe true
+          // DuckLake's retries take about 9 s and end with this text. If it shows, the failed query's
+          // text holds a retry word: lower ducklake_max_retry_count in the Apply batch.
+          out.left.toOption.get should not include "Exceeded the maximum retry count"
+        finally PostgresMergeFence.disarm(parentMeta, message)
+        parent.snapshotByCommitMessage(message) shouldBe None
+
+        // The next attempt reads main again and absorbs its commit: refused, never lost.
+        val br = branchReader(branchDb)
+        try
+          val next = BranchChanges.compute(br, parent, cs.forkSnapshot)
+          PostgresMergeFence.arm(
+            parentMeta,
+            message,
+            next.mainSnapshot,
+            ids(next),
+            None
+          ) shouldBe Right(())
+          try
+            withNode(branchDb, branchDir)(node =>
+              runMerge(node, next, br, parent, message)
+            ).isRight shouldBe true
+          finally PostgresMergeFence.disarm(parentMeta, message)
+        finally br.close()
+        duck(
+          "SELECT r_name FROM lake.tpch1.region WHERE r_regionkey IN (2, 7) ORDER BY r_regionkey;"
+        ) shouldBe List("BRANCH", "MAIN")
+      }
+    }
+
+  it should "refuse on a schema change anywhere" in
+    withCatalog("fnddl", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, send, _, _) =>
+        PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), None) shouldBe Right(
+          ()
+        )
+        try
+          duck("CREATE TABLE lake.tpch1.brandnew (x INTEGER);")
+          send().left.toOption.get should include("qod merge fence:")
+        finally PostgresMergeFence.disarm(parentMeta, message)
+      }
+    }
+
+  "the fence's rule" should "admit only row data or maintenance on other tables" in
+    withCatalog("fnrule", extra) { (parent, _) =>
+      PostgresMergeFence.arm(
+        parentMeta,
+        "probe",
+        parent.maxSnapshotId().get,
+        Set(2L),
+        None
+      ) shouldBe Right(())
+      def harmless(changes: String): Boolean =
+        val c = java.sql.DriverManager.getConnection(
+          ai.starlake.quack.ondemand.state.testkit.TestPostgres.dbUrl(parentMeta("dbName")),
+          ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgUser,
+          ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgPass
+        )
+        try
+          val ps = c.prepareStatement("SELECT qod_merge_fence.harmless(?, ARRAY[2]::bigint[])")
+          ps.setString(1, changes)
+          val rs = ps.executeQuery()
+          rs.next()
+          rs.getBoolean(1)
+        finally c.close()
+      harmless("inserted_into_table:3,rewrite_delete:3") shouldBe true
+      harmless("inserted_into_table:2") shouldBe false
+      harmless("merge_adjacent:2") shouldBe false
+      harmless("""created_table:"s"."t"""") shouldBe false
+      harmless("brand_new_verb:3") shouldBe false
+      harmless("") shouldBe false
+      harmless(null) shouldBe false
+    }
+
+  "a failed commit's text" should "hold no inlined value once it is cut for storing" in
+    withCatalog("fnvalue", extra) { (parent, _) =>
+      val sentinel = "SENTINEL-CELL-7731"
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = cloneBranch(branchDb, branchDir)
+        duck(
+          s"UPDATE qod_branch.tpch1.region SET r_name = '$sentinel' WHERE r_regionkey = 2;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs      = BranchChanges.compute(br, parent, fork)
+          val message = BranchMergeSql.commitMessage("feature", "mg-value", "alice")
+          PostgresMergeFence.arm(
+            parentMeta,
+            message,
+            cs.mainSnapshot,
+            ids(cs),
+            None
+          ) shouldBe Right(())
+          try
+            duck("INSERT INTO lake.tpch1.region VALUES (7, 'MAIN', 'h');")
+            val raw = withNode(branchDb, branchDir)(node =>
+              runMerge(node, cs, br, parent, message)
+            ).left.toOption.get
+            info(s"DuckLake's own text quotes the inlined value: ${raw.contains(sentinel)}")
+            MergeDecision.failureText(raw) should not include sentinel
+            // The cause follows DuckLake's wrapper: a pin bump that rewords it would lose the cause.
+            MergeDecision.failureText(raw) should not endWith "transaction."
+          finally PostgresMergeFence.disarm(parentMeta, message)
+        finally br.close()
+      }
+    }
+
+  "the hold" should "make a writer wait, then commit" in
+    withCatalog("hdwait", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, _, _, _) =>
+        // Expiry stands in for a release: both end the hold the same way for the writer.
+        PostgresMergeFence.arm(
+          parentMeta,
+          message,
+          cs.mainSnapshot,
+          ids(cs),
+          Some(3)
+        ) shouldBe Right(())
+        try
+          val started = System.nanoTime()
+          duck("INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');")
+          ((System.nanoTime() - started) / 1e9) should be > 2.0
+        finally PostgresMergeFence.disarm(parentMeta, message)
+        duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 7;") shouldBe List("WRITER")
+      }
+    }
+
+  it should "fail a writer past DuckLake's retries, saying the table is being merged" in
+    withCatalog("hdfail", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, _, _, _) =>
+        PostgresMergeFence.arm(
+          parentMeta,
+          message,
+          cs.mainSnapshot,
+          ids(cs),
+          Some(120)
+        ) shouldBe Right(())
+        try
+          val out = duckAttempt("INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');")
+          out.left.toOption.get should include("table is being merged")
+        finally PostgresMergeFence.disarm(parentMeta, message)
+      }
+    }
+
+  it should "leave other tables' writers alone" in
+    withCatalog("hdother", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, _, _, _) =>
+        PostgresMergeFence.arm(
+          parentMeta,
+          message,
+          cs.mainSnapshot,
+          ids(cs),
+          Some(120)
+        ) shouldBe Right(())
+        try
+          val started = System.nanoTime()
+          duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');")
+          ((System.nanoTime() - started) / 1e9) should be < 5.0
+        finally PostgresMergeFence.disarm(parentMeta, message)
+      }
+    }
+
+  it should "let the merge itself through, and fail a writer already in flight once" in
+    withCatalog("hdflight", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, send, _, _) =>
+        given ExecutionContext = ExecutionContext.global
+        PostgresMergeFence.arm(
+          parentMeta,
+          message,
+          cs.mainSnapshot,
+          ids(cs),
+          Some(120)
+        ) shouldBe Right(())
+        try
+          // The writer's transaction is open when the merge commits, and commits after it.
+          val writer = Future(
+            duckAttempt(
+              """BEGIN;
+                |INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');
+                |SELECT sleep_ms(15000);
+                |COMMIT;""".stripMargin
+            )
+          )
+          Thread.sleep(2000)
+          send() shouldBe Right(())
+          PostgresMergeFence.disarm(parentMeta, message)
+          Await.result(writer, 60.seconds).left.toOption.get should include("Transaction conflict")
+        finally PostgresMergeFence.disarm(parentMeta, message)
+        // One that starts after the merge is unaffected.
+        duck("INSERT INTO lake.tpch1.region VALUES (8, 'LATER', 'h');")
+        duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe List("BRANCH")
+        duck("SELECT count(*) FROM lake.tpch1.region WHERE r_regionkey = 7;") shouldBe List("0")
+      }
+    }
+
+  it should "end by itself after a crash, with nobody disarming it" in
+    withCatalog("hdcrash", extra) { (parent, _) =>
+      fencedRegionMerge(parent) { (cs, message, _, _, _) =>
+        PostgresMergeFence.arm(
+          parentMeta,
+          message,
+          cs.mainSnapshot,
+          ids(cs),
+          Some(2)
+        ) shouldBe Right(())
+        Thread.sleep(2500)
+        val started = System.nanoTime()
+        duck("INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');")
+        ((System.nanoTime() - started) / 1e9) should be < 5.0
       }
     }
 

@@ -840,10 +840,19 @@ final class BranchService(
       case Some(spec) =>
         // The change set was validated against main at cs.mainSnapshot; a main write that
         // commits between here and the batch's commit would otherwise be built upon or
-        // overwritten. The fence refuses the merge commit unless it lands directly on top.
+        // overwritten. The fence refuses the merge commit unless every snapshot since is row data
+        // or maintenance on other tables.
         val meta       = sup.effectiveMetastoreFor(tenant, parent.name)
         val parentMeta = meta.updated("dbName", meta.getOrElse("dbName", parent.name))
-        IO.blocking(mergeFence.arm(parentMeta, message, cs.mainSnapshot)).flatMap {
+        IO.blocking(
+          mergeFence.arm(
+            parentMeta,
+            message,
+            cs.mainSnapshot,
+            cs.tables.flatMap(_.tableId).toSet,
+            holdSec = None
+          )
+        ).flatMap {
           case Left(err) => refuse(BranchFailure.upstream("merge_failed", err))
           case Right(_)  =>
             mergeExecutor

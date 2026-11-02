@@ -162,8 +162,15 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
         def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]] = IO.pure(Right(()))
       ,
       mergeFence = new MergeFence:
-        def arm(meta: Map[String, String], message: String, base: Long) = Right(())
-        def disarm(meta: Map[String, String], message: String)          = ()
+        def arm(
+            m: Map[String, String],
+            msg: String,
+            base: Long,
+            ids: Set[Long],
+            hold: Option[Int]
+        ) =
+          Right(())
+        def disarm(meta: Map[String, String], message: String) = ()
       ,
       counter = BranchWiring.changeCounter(
         executor,
