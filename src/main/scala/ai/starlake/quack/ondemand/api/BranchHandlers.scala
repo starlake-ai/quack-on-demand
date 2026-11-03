@@ -293,7 +293,7 @@ final class BranchHandlers(
       IO.blocking(bounds(a.tid, a.db, branch)).flatMap {
         case Left(e)              => IO.pure(Left(e))
         case Right((b, from, to)) =>
-          preview.dataDiffHiding(
+          preview.dataDiff(
             a.tid,
             b.tenantDbName,
             schema,
@@ -321,7 +321,7 @@ final class BranchHandlers(
       IO.blocking(bounds(a.tid, a.db, branch)).flatMap {
         case Left(e)              => IO.pure(Left(e))
         case Right((b, from, to)) =>
-          preview.schemaDiffHiding(
+          preview.schemaDiff(
             a.tid,
             b.tenantDbName,
             schema,

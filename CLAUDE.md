@@ -657,8 +657,9 @@ covers it with any verb, the parent's catalog alias being the session catalog (`
 `changes`, a merge row's summary, conflicts and keys list what they see, with no raw `unsupported` verb;
 `BranchChangesResponse.otherTables` counts the rest; `mergeable` is the whole branch's. Tables they do not
 see are not counted as them. `diff` and `schema-diff` of such a table answer exactly as for no such table,
-at the point where that is decided (`CatalogPreviewHandlers.dataDiffHiding` / `schemaDiffHiding`), and a
-key on one as for a table not in the change set, so its columns cannot be probed. An OPA tenant's users see
+at the point where that is decided (the `hidden` argument of `CatalogPreviewHandlers.dataDiff` /
+`schemaDiff`, which has no default: the catalog's own endpoints pass `NoneHidden`), and a key on one as for
+a table not in the change set, so its columns cannot be probed. An OPA tenant's users see
 nothing listed, as with their `SHOW TABLES`. Residuals, not holes to report: refusal text and a merge row's
 `error` can name a table of the change set; `list` shows every branch's owner and name; and a proposer sees
 whether an admin's merge of their proposal was refused for row conflicts, one bit per merge an admin runs.

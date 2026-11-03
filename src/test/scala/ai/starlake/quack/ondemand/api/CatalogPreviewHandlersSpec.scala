@@ -240,7 +240,16 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         to: String = "42",
         apiKey: Option[String] = RootKey
     ) =
-      h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(SuperuserScope)
+      h.schemaDiff(
+        tenant,
+        tenantDb,
+        schema,
+        table,
+        from,
+        to,
+        apiKey,
+        CatalogPreviewHandlers.NoneHidden
+      )(SuperuserScope)
         .unsafeRunSync()
 
     def dataDiff(
@@ -256,9 +265,20 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         changeType: Option[String] = None,
         apiKey: Option[String] = RootKey
     ) =
-      h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, apiKey)(
-        SuperuserScope
-      ).unsafeRunSync()
+      h.dataDiff(
+        tenant,
+        tenantDb,
+        schema,
+        table,
+        from,
+        to,
+        limit,
+        cursor,
+        changeType,
+        apiKey,
+        CatalogPreviewHandlers.NoneHidden
+      )(SuperuserScope)
+        .unsafeRunSync()
 
     def queueDiffResults(
         summary: List[(String, Long)],
@@ -285,7 +305,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
   "a hidden table" should "answer a schema diff as a table that does not exist" in new Stubs:
     val h = handlers(readerOverride = onlyRegion)
     def diff(table: String, from: String = "12", to: String = "42") = h
-      .schemaDiffHiding("acme", "acme_tpch1", "tpch1", table, from, to, RootKey, hidesRegion)(
+      .schemaDiff("acme", "acme_tpch1", "tpch1", table, from, to, RootKey, hidesRegion)(
         SuperuserScope
       )
       .unsafeRunSync()
@@ -306,7 +326,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         cursor: Option[String] = None,
         changeType: Option[String] = None
     ) = h
-      .dataDiffHiding(
+      .dataDiff(
         "acme",
         "acme_tpch1",
         "tpch1",
@@ -340,21 +360,24 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     seenSqls shouldBe Nil
     seenSql shouldBe None
 
+  it should "be for every caller of a diff to say: forgetting it does not compile" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    assertCompiles(
+      """h.schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", RootKey, CatalogPreviewHandlers.NoneHidden)(SuperuserScope)"""
+    )
+    assertTypeError(
+      """h.schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", RootKey)(SuperuserScope)"""
+    )
+    assertCompiles(
+      """h.dataDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", None, None, None, RootKey, CatalogPreviewHandlers.NoneHidden)(SuperuserScope)"""
+    )
+    assertTypeError(
+      """h.dataDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", None, None, None, RootKey)(SuperuserScope)"""
+    )
+
   it should "still answer the plain diffs for a caller who hides nothing" in new Stubs:
     val h = handlers(readerOverride = onlyRegion)
     schemaDiff(h).isRight shouldBe true
-    h.schemaDiffHiding(
-      "acme",
-      "acme_tpch1",
-      "tpch1",
-      "region",
-      "12",
-      "42",
-      RootKey,
-      (_, _) => false
-    )(SuperuserScope)
-      .unsafeRunSync()
-      .isRight shouldBe true
 
   "preview" should "404 an unknown tenant" in new Stubs:
     val h   = handlers()
@@ -541,7 +564,16 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val foreignScope: SessionScope.Resolver =
       _ => SessionScope(superuser = false, manageableTenants = Set("other"))
     val out = h
-      .schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", Some("tok"))(foreignScope)
+      .schemaDiff(
+        "acme",
+        "acme_tpch1",
+        "tpch1",
+        "region",
+        "12",
+        "42",
+        Some("tok"),
+        CatalogPreviewHandlers.NoneHidden
+      )(foreignScope)
       .unsafeRunSync()
     out.left.toOption.get._1 shouldBe StatusCode.Forbidden
 

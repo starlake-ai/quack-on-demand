@@ -38,6 +38,12 @@ object CatalogPreviewHandlers:
     */
   val SuperuserIdentity = "superuser"
 
+  /** What a diff's caller says when it may see every table: the catalog's own endpoints, which are
+    * an admin's. The diffs take their `hidden` with no default, so that no caller can forget it and
+    * show a table.
+    */
+  val NoneHidden: (String, String) => Boolean = (_, _) => false
+
 /** Bounded, ACL-routed snapshot preview (Spec 00 time-travel viewer). `preview` runs the same
   * tenant-resolve -> [[TenantScopeCheck]] -> tenant-db-lookup gate as [[TagHandlers]] (kind-
   * tolerant: a `duckdb-file` / `memory` database previews its current state, its table qualified
@@ -184,23 +190,13 @@ final class CatalogPreviewHandlers(
     * resolved, every audit event (ok, and the unknown-table denial) carries the resolved snapshot
     * ids as `detail = {from, to}`; pre-resolution denials (gate rejection, selector error) have no
     * ids yet and stay detail-less.
+    *
+    * `hidden`: for a caller who may not see every table, a table it names answers exactly as one
+    * that does not exist, at the point where that one does, so that nothing else in the request
+    * tells them apart. No default: a caller who may see them all passes
+    * [[CatalogPreviewHandlers.NoneHidden]].
     */
   def schemaDiff(
-      tenant: String,
-      tenantDb: String,
-      schema: String,
-      table: String,
-      from: String,
-      to: String,
-      apiKey: Option[String]
-  )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
-    schemaDiffHiding(tenant, tenantDb, schema, table, from, to, apiKey, (_, _) => false)(scopeOf)
-
-  /** [[schemaDiff]] for a caller who may not see every table: a table `hidden` names answers
-    * exactly as one that does not exist, at the point where that one does, so that nothing else in
-    * the request tells them apart.
-    */
-  def schemaDiffHiding(
       tenant: String,
       tenantDb: String,
       schema: String,
@@ -468,38 +464,13 @@ final class CatalogPreviewHandlers(
     * pair; a genuinely orphaned half-row at end-of-data passes through with its raw change type.
     * Audited unconditionally like [[preview]]; detail carries from/to/rowsReturned, never row
     * contents.
+    *
+    * `hidden`: for a caller who may not see every table, a table it names answers exactly as one
+    * that does not exist, at the point where that one does, so that nothing else in the request (a
+    * bad filter or cursor) tells them apart. No default: a caller who may see them all passes
+    * [[CatalogPreviewHandlers.NoneHidden]].
     */
   def dataDiff(
-      tenant: String,
-      tenantDb: String,
-      schema: String,
-      table: String,
-      from: String,
-      to: String,
-      limit: Option[Int],
-      cursor: Option[String],
-      changeType: Option[String],
-      apiKey: Option[String]
-  )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
-    dataDiffHiding(
-      tenant,
-      tenantDb,
-      schema,
-      table,
-      from,
-      to,
-      limit,
-      cursor,
-      changeType,
-      apiKey,
-      (_, _) => false
-    )(scopeOf)
-
-  /** [[dataDiff]] for a caller who may not see every table: a table `hidden` names answers exactly
-    * as one that does not exist, at the point where that one does, so that nothing else in the
-    * request (a bad filter or cursor) tells them apart.
-    */
-  def dataDiffHiding(
       tenant: String,
       tenantDb: String,
       schema: String,
