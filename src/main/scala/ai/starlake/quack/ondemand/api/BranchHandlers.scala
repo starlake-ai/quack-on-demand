@@ -261,7 +261,15 @@ final class BranchHandlers(
       case Right((tid, db, actor, countsAs)) =>
         val systemCounts = scopeOf(apiKey).superuser
         service
-          .propose(tid, db, req.branch, actor, countsAs, apiKey)
+          .propose(
+            tid,
+            db,
+            req.branch,
+            ai.starlake.quack.ondemand.branch.ProposeOptions(),
+            actor,
+            countsAs,
+            apiKey
+          )
           .map(_.left.map(toErr).map { case (b, m, cs) =>
             BranchProposeResponse(entry(b), mergeEntry(m, systemCounts), changesResponse(b, cs))
           })

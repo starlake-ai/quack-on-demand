@@ -17,6 +17,7 @@ import ai.starlake.quack.model.{
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.CatalogColumnEntry
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, PinnedSetResolver, TableVersion}
+import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore, RbacUser}
 import cats.effect.IO
@@ -68,9 +69,15 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       def createDatabase(name: String): Either[String, Unit] = { created += name; Right(()) }
       def dropDatabase(name: String): Either[String, Unit]   = { dropped += name; Right(()) }
     val backend = new StubQuackBackend()
-    val sup     = new PoolSupervisor(backend, new NodeLoadTracker, store, dbAdmin = admin)
-    val tenant  = sup.createTenant(Tenant("acme", acl = tenantAcl)).unsafeRunSync().toOption.get
-    val parent  = sup
+    val sup     = new PoolSupervisor(
+      backend,
+      new NodeLoadTracker,
+      store,
+      dbAdmin = admin,
+      locks = PoolLocker.inProcess()
+    )
+    val tenant = sup.createTenant(Tenant("acme", acl = tenantAcl)).unsafeRunSync().toOption.get
+    val parent = sup
       .createTenantDb(
         "acme",
         "tpch",
@@ -102,6 +109,23 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     var mergeFails   = Option.empty[String]
     var beforeRun    = () => ()
     var fenceFails   = Option.empty[String]
+
+    /** The counts row Decide reads: to update, delete, insert, cell, update-delete, delete-update,
+      * key matches, min and max update rowid, main's rows the key matches, then conflicts per
+      * column.
+      */
+    var countsRow: List[Long] = List(1L, 0L, 0L, 0L, 0L, 0L, 0L, 1L, 1L, 0L, 0L)
+    val nodeBatches           = mutable.ListBuffer.empty[String]
+    var nodesStarted          = 0
+
+    /** Runs on every batch of Prepare or Decide. */
+    var duringAnalysis: () => Unit = () => ()
+
+    /** What every batch of Prepare or Decide answers. */
+    var stageFails = Option.empty[String]
+
+    /** Why the merge node does not come up. */
+    var nodeFails    = Option.empty[String]
     val fenceArms    = mutable.ListBuffer.empty[(String, String, Long)]
     val fenceDisarms = mutable.ListBuffer.empty[String]
     val purged       = mutable.ListBuffer.empty[String]
@@ -118,24 +142,40 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         def withNode[A](spec: NodeSpec)(
             body: MergeNode => IO[Either[String, A]]
         ): IO[Either[String, A]] =
-          body(new MergeNode:
-            def exec(batch: String): IO[Either[String, Unit]] =
-              mergeBatches += batch
-              beforeRun()
-              mergeFails match
-                case Some(err) => IO.pure(Left(err))
-                case None      =>
-                  // The batch's message is the commit-message call's third literal; the fake parent
-                  // reader answers the locate query for it.
-                  val msg = batch.linesIterator
-                    .find(_.startsWith("CALL ducklake_set_commit_message"))
-                    .get
-                    .split("'")(5)
-                  mainReader.committed.put(msg, mainReader.head + 1)
-                  mainReader.head += 1
-                  IO.pure(Right(()))
-            def rows(sql: String): IO[Either[String, List[List[io.circe.Json]]]] =
-              IO.pure(Right(Nil)))
+          nodesStarted += 1
+          nodeFails match
+            case Some(err) => IO.pure(Left(err))
+            case None      =>
+              body(new MergeNode:
+                def exec(batch: String): IO[Either[String, Unit]] =
+                  nodeBatches += batch
+                  if !batch.startsWith("BEGIN") then
+                    duringAnalysis()
+                    IO.pure(stageFails.toLeft(()))
+                  else
+                    mergeBatches += batch
+                    beforeRun()
+                    mergeFails match
+                      case Some(err) => IO.pure(Left(err))
+                      case None      =>
+                        // The batch's message is the commit-message call's third literal; the fake
+                        // parent reader answers the locate query for it.
+                        val msg = batch.linesIterator
+                          .find(_.startsWith("CALL ducklake_set_commit_message"))
+                          .get
+                          .split("'")(5)
+                        mainReader.committed.put(msg, mainReader.head + 1)
+                        mainReader.head += 1
+                        IO.pure(Right(()))
+                def rows(sql: String): IO[Either[String, List[List[io.circe.Json]]]] =
+                  IO.pure(
+                    Right(
+                      if sql.contains("_need") then
+                        List(List(io.circe.Json.fromLong(0L), io.circe.Json.fromLong(0L)))
+                      else if sql.contains("AS kind") then Nil
+                      else List(countsRow.map(io.circe.Json.fromLong))
+                    )
+                  ))
       ,
       mergeFence = new MergeFence:
         def arm(
@@ -275,7 +315,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.touchBranch()
     val (b, m, cs) =
       f.service
-        .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
+        .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
         .unsafeRunSync()
         .toOption
         .get
@@ -283,14 +323,323 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     m.status shouldBe BranchMergeStatus.Proposed
     m.proposer shouldBe "root"
     m.mainSnapshotAtPropose shouldBe 10L
+    m.headSnapshotAtPropose shouldBe Some(12L)
     cs.tables.map(t => (t.table, t.kind, t.inserted, t.deleted, t.updated)) shouldBe
       List(("region", ChangeKind.Modified, 3L, 1L, 2L))
+  }
+
+  it should "run the analysis on a node and store its counts, writing nothing to either catalog" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.countsRow = List(5L, 2L, 1L, 3L, 0L, 0L, 0L, 1L, 9L, 0L, 3L)
+    val (_, m, _) = f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+    f.nodesStarted shouldBe 1
+    f.nodeBatches.exists(_.startsWith("BEGIN")) shouldBe false
+    val stored = RowCounts.listFromJson(m.rowConflictsJson).toOption.get
+    stored.map(c => (c.table, c.toUpdate, c.toDelete, c.toInsert, c.cellConflicts)) shouldBe
+      List(("region", 5L, 2L, 1L, 3L))
+    stored.head.columnConflicts shouldBe Map("x" -> 3L)
+  }
+
+  it should "start no node when nothing merges by rows" in {
+    val f = new Fixture
+    f.create("x") // no branch work
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "record conflicts rather than refuse them" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.countsRow = List(0L, 0L, 0L, 3L, 0L, 0L, 0L, 0L, 0L, 0L, 3L)
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+  }
+
+  it should "store the policy and keys, and refuse a key the change set cannot use" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val refused = f.service
+      .propose(
+        "acme",
+        f.parent.name,
+        "x",
+        ProposeOptions(keys = Map("tpch1.region" -> List("nope"))),
+        f.admin1,
+        Proposer,
+        None
+      )
+      .unsafeRunSync()
+    refused.left.map(_.code) shouldBe Left("invalid_key")
+    f.service
+      .propose(
+        "acme",
+        f.parent.name,
+        "x",
+        ProposeOptions(keys = Map("tpch1.other" -> List("x"))),
+        f.admin1,
+        Proposer,
+        None
+      )
       .unsafeRunSync()
       .left
-      .map(_.code) shouldBe
-      Left("already_proposed")
+      .map(_.code) shouldBe Left("invalid_key")
+    val (_, m, _) = f.service
+      .propose(
+        "acme",
+        f.parent.name,
+        "x",
+        ProposeOptions(Some(ConflictPolicy.Branch), Map("tpch1.region" -> List("x"))),
+        f.admin1,
+        Proposer,
+        None
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+    m.onConflict shouldBe Some("branch")
+    m.mergeKeysJson shouldBe """{"tpch1.region":["x"]}"""
+  }
+
+  it should "replace an open proposal and abandon the old one" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val first = f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      ._2
+    val second = f.service
+      .propose(
+        "acme",
+        f.parent.name,
+        "x",
+        ProposeOptions(Some(ConflictPolicy.Main)),
+        f.admin2,
+        Proposer,
+        None
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+      ._2
+    val b = f.store.findBranch(f.parent.id, "x").get
+    b.status shouldBe BranchStatus.Proposed
+    val statuses = f.store.listBranchMerges(b.id).map(m => m.id -> m.status).toMap
+    statuses(first.id) shouldBe BranchMergeStatus.Abandoned
+    statuses(second.id) shouldBe BranchMergeStatus.Proposed
+    second.proposer shouldBe "boss"
+    f.store.getBranchMerge(first.id).flatMap(_.decidedAt) shouldBe
+      Some(Instant.parse("2026-09-20T12:00:00Z"))
+  }
+
+  it should "refuse a gap in main's history since the fork" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.mainReader.head = 13L
+    f.mainReader.changes = List((11L, ""), (13L, "inlined_insert:2"))
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(f => (f.status, f.code)) shouldBe Left((409, "history_gap"))
+  }
+
+  it should "refuse that gap whatever the branch changed, before any node" in {
+    val f = new Fixture
+    f.create("x") // no branch work: nothing merges by rows
+    f.mainReader.head = 13L
+    f.mainReader.changes = List((11L, ""), (13L, "inlined_insert:2"))
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(_.code) shouldBe Left("history_gap")
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "refuse when the branch ended during the analysis, recording nothing" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val b = f.store.findBranch(f.parent.id, "x").get
+    f.duringAnalysis = () => f.store.updateBranch(b.copy(status = BranchStatus.Discarded)): Unit
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(_.status) shouldBe Left(404)
+    f.store.listBranchMerges(b.id) shouldBe Nil
+  }
+
+  it should "keep a quoted value out of a failed analysis's message" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.stageFails =
+      Some("""Failed to execute query "INSERT INTO i VALUES ('SENTINEL')": ERROR: boom""")
+    val res = f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+    res.left.map(_.code) shouldBe Left("merge_failed")
+    res.left.toOption.get.message should not include "SENTINEL"
+  }
+
+  it should "report an analysis that failed, and record no proposal" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.nodeFails = Some("merge node spawn failed: no free port")
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(f => (f.status, f.code)) shouldBe Left((502, "merge_failed"))
+    val b = f.store.findBranch(f.parent.id, "x").get
+    b.status shouldBe BranchStatus.Open
+    f.store.listBranchMerges(b.id) shouldBe Nil
+  }
+
+  it should "read the branch's side first, then main's, with the proposal's policy and keys" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.mainReader.head = 11L
+    f.mainReader.changes = List((11L, "inlined_insert:2"))
+    f.service
+      .propose(
+        "acme",
+        f.parent.name,
+        "x",
+        ProposeOptions(Some(ConflictPolicy.Branch), Map("tpch1.region" -> List("x"))),
+        f.admin1,
+        Proposer,
+        None
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.nodesStarted shouldBe 1
+    val prepare = f.nodeBatches.head
+    prepare should include("ducklake_table_insertions('qod_branch', 'tpch1', 'region', 11, 12)")
+    prepare should include("\"acme_tpch\".\"tpch1\".\"region\" AT (VERSION => 10)")
+    val decide = f.nodeBatches.tail.mkString("\n")
+    decide should include("ducklake_table_insertions('acme_tpch', 'tpch1', 'region', 11, 11)")
+    decide should include("action IN ('apply_delete', 'conflict_update_delete')")
+    decide should include("t0_key_hits")
+  }
+
+  it should "send nothing after the first stage that fails" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.stageFails = Some("boom")
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(_.code) shouldBe Left("merge_failed")
+    f.nodeBatches.size shouldBe 1
+  }
+
+  it should "start no node when a table conflict rules the merge out, and record the conflict" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    // main dropped the table the branch changed: nothing a node could read there.
+    f.mainReader.head = 11L
+    f.mainReader.versions = List(TableVersion(2L, "tpch1", "region", 1L, Some(11L)))
+    f.mainReader.changes = List((11L, "dropped_table:2"))
+    val (_, m, _) = f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+    f.nodesStarted shouldBe 0
+    m.conflictsJson should include("dropped on main")
+    m.rowConflictsJson shouldBe "[]"
+  }
+
+  it should "start no node for a table with a reserved column, whose plan would throw" in {
+    val f = new Fixture
+    val b = f.create("x").toOption.get
+    f.readers.put(
+      b.tenantDbName,
+      new FakeReader(11L, f.branchReader.versions, List((11L, "inlined_insert:2"))):
+        override def columnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
+          List(CatalogColumnEntry(0, "rowid", "BIGINT", true, false))
+    )
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "refuse a snapshot mixing maintenance and data, before any node" in {
+    val f = new Fixture
+    f.create("x")
+    f.branchReader.head = 12L
+    f.branchReader.changes =
+      List((11L, "merge_adjacent:2,inlined_insert:2"), (12L, "inlined_insert:2"))
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(f => (f.status, f.code)) shouldBe Left((422, "merge_unsupported"))
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "hold the merge lock through the analysis, and release it" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val lock               = PoolKey("acme", f.parent.name, "__merge")
+    def free               = f.sup.poolLocks.tryWithLock(lock)(IO.unit).unsafeRunSync().isDefined
+    var freeDuringAnalysis = Option.empty[Boolean]
+    f.duringAnalysis = () => freeDuringAnalysis = Some(free)
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    freeDuringAnalysis shouldBe Some(false)
+    free shouldBe true
+  }
+
+  it should "keep the open proposal when the next one fails" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val first = f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      ._2
+    f.stageFails = Some("boom")
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin2, Proposer, None)
+      .unsafeRunSync()
+      .left
+      .map(_.code) shouldBe Left("merge_failed")
+    val b = f.store.findBranch(f.parent.id, "x").get
+    b.status shouldBe BranchStatus.Proposed
+    f.store.listBranchMerges(b.id).map(m => (m.id, m.status)) shouldBe
+      List((first.id, BranchMergeStatus.Proposed))
   }
 
   "merge" should "refuse the proposer, non-admins, unproposed branches and conflicts" in {
@@ -305,7 +654,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       .map(_.code) shouldBe
       Left("not_proposed")
     f.service
-      .propose("acme", f.parent.name, "x", f.alice, Proposer, None)
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.alice, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     f.service
@@ -339,7 +688,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.create("x")
     f.touchBranch()
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     val branchOnlyBoss = BranchActor("boss", isAdmin = true, branchOnly = true)
@@ -360,7 +709,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.create("x")
     f.touchBranch()
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     val (b, m, _) = f.service
@@ -402,7 +751,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     val b = f.create("x").toOption.get
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
     val key       = PoolKey("acme", b.tenantDbName, b.poolName)
     var duringRun = Option.empty[(Boolean, Boolean, Int)]
     f.beforeRun =
@@ -419,7 +770,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("x")
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
     // A branch write lands between the first validation and the freeze: the merged head is the
     // frozen one.
     var reads  = 0
@@ -441,7 +794,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     val b = f.create("x").toOption.get
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
     val key = PoolKey("acme", b.tenantDbName, b.poolName)
     f.mergeFails = Some("Binder Error: branch moved past snapshot 12 after validation")
     f.service
@@ -455,7 +810,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
   it should "leave the branch's pool untouched when the merge is refused before it runs" in {
     val f = new Fixture
     val b = f.create("x").toOption.get
-    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
     val key    = PoolKey("acme", b.tenantDbName, b.poolName)
     val before = f.sup.get(key).map(_.nodes.map(_.nodeId))
     // No branch work: nothing_to_merge, decided before any freeze.
@@ -472,7 +829,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("x")
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
     f.mergeFails = Some("TransactionContext Error: write-write conflict on table region")
     val res = f.service.merge("acme", f.parent.name, "x", None, f.admin2, None).unsafeRunSync()
     res.left.map(_.code) shouldBe Left("concurrent_write")
@@ -485,7 +844,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("x")
     f.touchBranch()
-    f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+    f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+      .unsafeRunSync()
     f.fenceFails = Some("cannot arm the merge fence: connection refused")
     val res = f.service.merge("acme", f.parent.name, "x", None, f.admin2, None).unsafeRunSync()
     res.left.map(_.code) shouldBe Left("merge_failed")
@@ -499,7 +860,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       val f = new Fixture
       f.create("x")
       f.touchBranch()
-      f.service.propose("acme", f.parent.name, "x", f.admin1, Proposer, None).unsafeRunSync()
+      f.service
+        .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
+        .unsafeRunSync()
       f.mergeFails = Some(refused)
       // main commits after validation, while the batch runs
       if mainMoves then f.beforeRun = () => f.mainReader.head += 1
@@ -524,7 +887,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val b = f.store.findBranch(f.parent.id, "x").get
     f.readers.put(b.tenantDbName, altered)
     f.service
-      .propose("acme", f.parent.name, "x", f.admin1, Proposer, None)
+      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
       .unsafeRunSync()
       .isRight shouldBe true
     f.service

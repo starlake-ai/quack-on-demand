@@ -539,82 +539,215 @@ final class BranchService(
 
   // ---------- propose ----------
 
-  /** Records a merge proposal. Its stored summary (`summaryJson`, the merge row) counts every
-    * modified table as the system caller: the lifecycle's own record, shown in full to superusers
-    * only (`BranchHandlers` strips its counts for anyone else). The change set returned to the
-    * proposer counts as `countsAs`, the requester, like [[changes]]: a table the node refuses them
-    * is flagged `countsUnavailable`, never filled from the system's counts.
+  /** Records a merge proposal: the change set, and what a merge would do to its rows now, read on a
+    * merge node without writing to either catalog (design section 5.1). Conflicts are recorded, not
+    * refused: merge decides. Proposing again replaces an open proposal. The stored summary
+    * (`summaryJson`) counts every modified table as the system caller: the lifecycle's own record,
+    * shown in full to superusers only (`BranchHandlers` strips its counts for anyone else). The
+    * change set returned to the proposer counts as `countsAs`, the requester, like [[changes]]: a
+    * table the node refuses them is flagged `countsUnavailable`, never filled from the system's
+    * counts.
     */
   def propose(
       tenant: String,
       parentDb: String,
       name: String,
+      options: ProposeOptions,
       actor: BranchActor,
       countsAs: ai.starlake.quack.ondemand.api.ExecCaller,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+    def denied(f: BranchFailure): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+      audit.rest(
+        apiKey,
+        "control-plane",
+        AuditActions.BranchPropose,
+        "denied",
+        tenant = Some(tenant),
+        detail = Map("error" -> f.code)
+      )
+      IO.pure(Left(f))
+    // The branch as it is now: a merge or a discard may have ended it since the last look.
+    def proposable(parent: TenantDb): Res[Branch] =
+      for
+        b <- liveBranch(parent, name)
+        _ <- b.status match
+          case BranchStatus.Open | BranchStatus.Proposed => Right(())
+          case other => Left(BranchFailure.conflict("not_open", s"branch '$name' is ${other.wire}"))
+      yield b
     val pre = for
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
       _      <- mayUse(tenant, parent, actor)
-      b      <- liveBranch(parent, name)
-      _      <- b.status match
-        case BranchStatus.Open     => Right(())
-        case BranchStatus.Proposed =>
-          Left(BranchFailure.conflict("already_proposed", s"branch '$name' is already proposed"))
-        case other => Left(BranchFailure.conflict("not_open", s"branch '$name' is ${other.wire}"))
-    yield (parent, b)
+      _      <- proposable(parent)
+    yield parent
     pre match
-      case Left(f) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.BranchPropose,
-          "denied",
-          tenant = Some(tenant)
-        )
-        IO.pure(Left(f))
-      case Right((parent, b)) =>
-        // The lifecycle's own summary (stored on the merge row): every modified table, counted
-        // as the system caller, whoever proposes. The proposer's reply counts as the proposer.
-        val system = ai.starlake.quack.ondemand.api.ExecCaller.system(s"branch-counts-$tenant")
-        (for
-          shape  <- computeChanges(tenant, parent, b, countsAs = None)
-          stored <- countAs(tenant, parent, b, shape, system)
-          reply  <-
-            if countsAs.system then IO.pure(stored) else countAs(tenant, parent, b, shape, countsAs)
-        yield (stored, reply)).flatMap { (cs, reply) =>
-          IO.blocking {
-            val merge = store.createBranchMerge(
-              BranchMerge(
-                id = Names.newSurrogateId("mg"),
-                branchId = b.id,
-                proposer = actor.identity,
-                approver = None,
-                status = BranchMergeStatus.Proposed,
-                summaryJson = BranchService.summaryJson(cs).noSpaces,
-                conflictsJson = BranchService.conflictsJson(cs).noSpaces,
-                mainSnapshotAtPropose = cs.mainSnapshot
-              )
-            )
-            val updated = store.updateBranch(b.copy(status = BranchStatus.Proposed)).getOrElse(b)
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.BranchPropose,
-              "ok",
-              tenant = Some(tenant),
-              target = Some(s"${parent.name}/$name"),
-              detail = Map(
-                "mergeId"   -> merge.id,
-                "tables"    -> cs.tables.size.toString,
-                "conflicts" -> cs.conflicts.size.toString,
-                "mergeable" -> cs.mergeable.toString
-              )
-            )
-            Right((updated, merge, reply))
+      case Left(f)       => denied(f)
+      case Right(parent) =>
+        // One merge node at a time per parent, as for a merge, and a proposal never overlaps one: a
+        // merge must not find its proposal replaced, nor a proposal revive what a merge ended.
+        sup.poolLocks.withLock(PoolKey(tenant, parent.name, "__merge"))(
+          IO.blocking(proposable(parent)).flatMap {
+            case Left(f)  => denied(f)
+            case Right(b) =>
+              // The lifecycle's own summary (stored on the merge row): every modified table, counted
+              // as the system caller, whoever proposes. The proposer's reply counts as the proposer.
+              val system =
+                ai.starlake.quack.ondemand.api.ExecCaller.system(s"branch-counts-$tenant")
+              computeChanges(tenant, parent, b, countsAs = None).flatMap { shape =>
+                analyze(tenant, parent, b, shape, options).flatMap {
+                  case Left(f)     => denied(f)
+                  case Right(rows) =>
+                    (for
+                      stored <- countAs(tenant, parent, b, shape, system)
+                      reply  <-
+                        if countsAs.system then IO.pure(stored)
+                        else countAs(tenant, parent, b, shape, countsAs)
+                    yield (stored, reply)).flatMap { (cs, reply) =>
+                      IO.blocking {
+                        // A discard or an expiry does not take the lock: the analysis may have
+                        // outlived the branch.
+                        proposable(parent).map { current =>
+                          store
+                            .listBranchMerges(current.id)
+                            .filter(_.status == BranchMergeStatus.Proposed)
+                            .foreach(m =>
+                              store.updateBranchMerge(
+                                m.copy(
+                                  status = BranchMergeStatus.Abandoned,
+                                  decidedAt = Some(now())
+                                )
+                              )
+                            )
+                          val merge = store.createBranchMerge(
+                            BranchMerge(
+                              id = Names.newSurrogateId("mg"),
+                              branchId = current.id,
+                              proposer = actor.identity,
+                              approver = None,
+                              status = BranchMergeStatus.Proposed,
+                              summaryJson = BranchService.summaryJson(cs).noSpaces,
+                              conflictsJson = BranchService.conflictsJson(cs).noSpaces,
+                              mainSnapshotAtPropose = cs.mainSnapshot,
+                              onConflict = options.onConflict.map(_.wire),
+                              mergeKeysJson = options.keys.asJson.noSpaces,
+                              headSnapshotAtPropose = Some(cs.headSnapshot),
+                              rowConflictsJson = RowCounts.listToJson(rows)
+                            )
+                          )
+                          val updated = store
+                            .updateBranch(current.copy(status = BranchStatus.Proposed))
+                            .getOrElse(current)
+                          audit.rest(
+                            apiKey,
+                            "control-plane",
+                            AuditActions.BranchPropose,
+                            "ok",
+                            tenant = Some(tenant),
+                            target = Some(s"${parent.name}/$name"),
+                            detail = Map(
+                              "mergeId"    -> merge.id,
+                              "tables"     -> cs.tables.size.toString,
+                              "conflicts"  -> cs.conflicts.size.toString,
+                              "mergeable"  -> cs.mergeable.toString,
+                              "onConflict" -> options.onConflict.fold("none")(_.wire)
+                            )
+                          )
+                          (updated, merge, reply)
+                        }
+                      }.flatMap {
+                        case Left(f)  => denied(f)
+                        case Right(r) => IO.pure(Right(r))
+                      }
+                    }
+                }
+              }
           }
-        }
+        )
+
+  /** The tables of `cs` that merge by rows, or why they cannot be read. */
+  private def rowTables(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch,
+      cs: BranchChangeSet,
+      keys: Map[String, List[String]]
+  ): Res[List[RowMergeTable]] =
+    RowMergeTable
+      .plan(
+        cs,
+        resolveReader(tenant, b.tenantDbName),
+        resolveReader(tenant, parent.name),
+        keys
+      )
+      .left
+      .map {
+        case RowMergeTable.Problem.HistoryGap(missing) =>
+          BranchFailure.conflict(
+            "history_gap",
+            s"main's snapshot $missing since the fork is gone, so its changes cannot be read; " +
+              "discard this branch and create it again"
+          )
+        case RowMergeTable.Problem.MixedSnapshots(schema, table, snapshots) =>
+          BranchFailure.unprocessable(
+            "merge_unsupported",
+            s"$schema.$table: snapshot(s) ${snapshots.mkString(", ")} cannot be read correctly: " +
+              "they mix maintenance and data, or hold a change this version does not know"
+          )
+      }
+
+  /** What a merge would do to the rows of `cs` now. Nothing to read when nothing merges by rows, or
+    * when a table conflict or an unsupported change already rules the merge out.
+    */
+  private def analyze(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch,
+      cs: BranchChangeSet,
+      options: ProposeOptions
+  ): IO[Res[List[RowCounts]]] =
+    IO.blocking {
+      val br = resolveReader(tenant, b.tenantDbName)
+      MergeDecision
+        .keyProblem(
+          options.keys,
+          cs.tables,
+          t => t.tableId.toList.flatMap(br.topLevelColumnsOfTableAt(_, cs.headSnapshot)).map(_.name)
+        )
+        .map(BranchFailure.badRequest("invalid_key", _))
+        .toLeft(())
+        .flatMap(_ =>
+          if !cs.mergeable then Right(Nil)
+          else rowTables(tenant, parent, b, cs, options.keys)
+        )
+    }.flatMap {
+      case Left(f)    => IO.pure(Left(f))
+      case Right(Nil) => IO.pure(Right(Nil))
+      case Right(ts)  =>
+        sup.mergeNodeSpec(tenant, parent.name, b.tenantDbName, b.dataPath) match
+          case None =>
+            IO.pure(
+              Left(BranchFailure.upstream("merge_failed", "cannot build the merge node spec"))
+            )
+          case Some(spec) =>
+            val runner = new RowMergeRunner(
+              parentAliasOf(tenant, parent),
+              BranchMergeSql.BranchAlias,
+              cs.forkSnapshot,
+              options.onConflict
+            )
+            mergeExecutor
+              .withNode(spec)(node =>
+                runner.prepare(node, ts).flatMap {
+                  case Left(err) => IO.pure(Left(err))
+                  case Right(_)  => runner.decide(node, ts)
+                }
+              )
+              .map(
+                _.left
+                  .map(e => BranchFailure.upstream("merge_failed", MergeDecision.failureText(e)))
+              )
+    }
 
   // ---------- merge ----------
 
