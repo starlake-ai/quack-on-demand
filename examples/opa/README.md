@@ -129,7 +129,9 @@ the `statement` rule with this input:
 - `accesses` are the objects of the bound plan, lowercase, sorted: tables and views read or written,
   and schemas, sequences, indexes, types created, dropped or altered. `kind` is `table`, `view`,
   `secure_view`, `schema`, `sequence`, `index`, `macro`, `type` or `trigger`; a schema-wide access
-  (`kind: schema`) has `table: "*"`. `columns` lists the columns read (empty for a write or DDL).
+  (`kind: schema`) has `table: "*"`. `columns` lists the columns read: empty for a write or DDL, and
+  for a read that names none, such as `SELECT count(*) FROM t` or the change counts of the data diff
+  and of a branch, so a policy keyed on a column admits those.
   `via` names the outermost secure view the access is read through (`catalog.schema.name`), `null`
   otherwise: a secure view runs with its creator's rights, so QoD covers such a read by a read grant
   on the view, and the starter policy does the same. The view itself is listed too (`kind:

@@ -282,7 +282,7 @@ final class CatalogRestoreHandlers(
         )
       )
     if toSnapshot >= currentSnapshot then
-      // Nothing to undo (also load-bearing: DataDiffSql.diffFn(to, current) would name snapshot
+      // Nothing to undo (also load-bearing: DataDiffSql.summarySql(to, current) would name snapshot
       // to + 1, an engine ERROR when it does not exist; same convention as dataDiff's from == to
       // short-circuit).
       IO.pure(ok(DataDiffSummary(0, 0, 0)))

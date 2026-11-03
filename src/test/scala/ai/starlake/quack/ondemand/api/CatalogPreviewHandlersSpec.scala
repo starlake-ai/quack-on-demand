@@ -600,6 +600,18 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     )
     seenSqls(1) should include("ORDER BY snapshot_id, rowid, change_type")
 
+  it should "render the summary statement that the node's own tests carry, text for text" in {
+    // The same text is in native/qod-node/tests/describer_extension_test.cpp and screen_rules_test.cpp,
+    // the only guard CI runs for the node's verdict on this statement: change them together.
+    DataDiffSql.summarySql("lake", "main", "t", 1, 3) shouldBe
+      "SELECT CASE WHEN d.rowid IS NULL THEN 'insert' WHEN i.rowid IS NULL THEN 'delete' " +
+      "ELSE 'update_postimage' END AS change_type, count(*) AS n " +
+      "FROM (SELECT snapshot_id, rowid FROM ducklake_table_deletions('lake', 'main', 't', 2, 3)) d " +
+      "FULL JOIN (SELECT snapshot_id, rowid " +
+      "FROM ducklake_table_insertions('lake', 'main', 't', 2, 3)) i " +
+      "ON d.snapshot_id = i.snapshot_id AND d.rowid = i.rowid GROUP BY change_type"
+  }
+
   it should "apply the changeType filter and cursor predicate in the page SQL" in new Stubs:
     queueDiffResults(summary = Nil, page = Nil)
     val h = handlers(executorOverride = queuedExecutor)

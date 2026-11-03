@@ -137,9 +137,11 @@ int main() {
 	expect("uma reads through the secure view after the prelude",
 	       Run(uma, "USE lake.main; SELECT count(*) FROM memory.main.sv"), "2");
 
-	// DuckLake's change feed with the table named by literals: decided as a read of that table (the data
-	// diff summary's shape), never of DuckLake's metadata. (The parse screen, which refuses a computed name,
-	// runs as quack's authorization callback, which this harness does not drive: screen_rules_test.)
+	// DuckLake's change feed with the table named by literals: decided as a read of that table, never of
+	// DuckLake's metadata. The count here runs over the whole feed (ducklake_table_changes); the data diff's
+	// own summary (DataDiffSql.summarySql) reads the two functions the feed joins, and describer_extension_test
+	// and screen_rules_test carry its statement. (The parse screen, which refuses a computed name, runs as
+	// quack's authorization callback, which this harness does not drive: screen_rules_test.)
 	expect("tina updates", as_tina("UPDATE t SET v = 'c' WHERE id = 2"), "1");
 	auto before = decided.size();
 	auto head = Run(internal, "SELECT max(snapshot_id) FROM ducklake_snapshots('lake')");
