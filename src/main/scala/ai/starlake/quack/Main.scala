@@ -1898,12 +1898,9 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
-      // Branches (Epic 1): the lifecycle service and its REST handlers. The actor resolver
-      // accepts a session JWT (UI / CLI login) or a PAT (the MCP data tools curry the bearer as
-      // apiKey); no credential, or any other token, is refused with 401 instead of becoming the
-      // superuser admin actor.
-      val branchActorOf =
-        ai.starlake.quack.ondemand.api.BranchHandlers.actorResolver(restCaller)
+      // Branches (Epic 1): the lifecycle service and its REST handlers. Their gate accepts a session
+      // JWT (UI / CLI login) or a PAT (the MCP data tools curry the bearer as apiKey); no credential,
+      // or any other token, is refused with 401.
       lazy val branchService: ai.starlake.quack.ondemand.branch.BranchService =
         new ai.starlake.quack.ondemand.branch.BranchService(
           cfg = mgrCfg.branching,
@@ -1936,7 +1933,6 @@ object Main extends IOApp with LazyLogging:
             sup,
             branchService,
             ph,
-            branchActorOf,
             callerOf = restCaller,
             audit = auditRecorder
           )

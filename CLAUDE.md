@@ -624,19 +624,44 @@ past 60 s, COMMIT included. A timed-out list sends nothing more and closes, roll
 manager's node runs the statement in flight and stops, so only a COMMIT already in flight can land, and
 its connection keeps its transaction open on the parent's catalog until the node goes. Known residual,
 not a hole to report: once a retry arms, a COMMIT still in flight is held to the retry's snapshot, so a
-main commit between the first run's snapshot and its first catalog read has no check. Every branch endpoint admits only admins
-(`TenantDbGate`, pinned by `BranchChangeCountsSpec`), whatever the MCP tools' `adminOnly = false` says,
-so an agent needs a tenant admin's token for the branch tools (`--branch-only` works; `--drop-admin` and
-a plain user's token get `403 tenant_forbidden`). A tenant admin can lift their own mask, so
-`hasConflicts` tells them nothing new. Before letting a plain user in, close this: with a write grant
-and a mask or a row policy, `hasConflicts` is an equality oracle on what main wrote since the fork,
-through a key or an UPDATE of a cell main also changed (the merge compares as the system principal).
-The commit is located by its unique message,
+main commit between the first run's snapshot and its first catalog read has no check. The commit is located by its unique message,
 tagged `merge-<branch>-<id8>`, then the branch is torn down; `MergeFence` holds that commit to the
 validated main snapshot through a trigger on `ducklake_snapshot_changes` in the parent catalog DB,
 schema `qod_merge_fence`, refusing unless every later snapshot is row data or maintenance on other
 tables, because DuckLake's own conflict check misses main writes that land before the merge's first read
 or into a table the merge drops.
+
+**Who may branch:** any principal who may connect to one of the parent's pools, over REST and MCP, in the
+tenant it belongs to (`BranchHandlers.gate`, the one gate of every endpoint; design 8.2). Own tenant only:
+`s.profile.tenant` for a session, `p.user.tenant` for a PAT, because the handshake resolves a user name
+per tenant; anything else is `403 tenant_forbidden`, a tenant that does not exist included. Then the
+routed executor's own decision (`caller.authzRequest`, on the pools the token's `databases` and `pools`
+axes allow): `403 no_pool_access` with no reason, also for a database that does not exist; `503
+authz_unavailable` when it cannot be decided. A superuser or an admin of THE TENANT IN HAND passes without
+a pool grant (`BranchHandlers.adminOf`); an admin of another tenant who is a plain member here is a plain
+member here. So a `--drop-admin` PAT reaches these endpoints as the plain user it is. Merge is admin only
+(`admin_required`), with no MCP tool. A non-admin proposes and discards only a branch they own (`403
+not_owner`) and asks for a TTL from 1 up to the server's default when it has one (`400 invalid_ttl`, naming
+it; absent takes the default even when that is no TTL, the operator's own choice): a branch with no TTL
+stops snapshot expiry above its fork for the whole database. The owner's rule on who gets in, the numbers
+and the names below go together: open one without the others and it leaks.
+
+**What a non-admin is shown.** Decide compares as the system principal, so with a write grant and a mask
+or a row policy, `hasConflicts` is an equality oracle on what main wrote since the fork, through a key or
+an UPDATE of a cell main also changed. So a non-admin who may not count a table gets no `rowConflicts` for
+it (`None`), never the flagged row an admin gets (an admin can lift their own mask), and a merge row shows
+a non-admin no row numbers at all. A non-admin who may count sees the numbers: a policy holder's count is
+refused on every table (`CatalogReachingCalls`), so such a viewer holds no policy. Names follow filtered
+metadata: `BranchActor.sees` covers a table when the handshake's effective set, narrowed by the token,
+covers it with any verb, the parent's catalog alias being the session catalog (`BranchHandlers.seenBy`).
+`changes`, a merge row's summary, conflicts and keys list what they see, with no raw `unsupported` verb;
+`BranchChangesResponse.otherTables` counts the rest; `mergeable` is the whole branch's. Tables they do not
+see are not counted as them. `diff` and `schema-diff` of such a table answer exactly as for no such table,
+at the point where that is decided (`CatalogPreviewHandlers.dataDiffHiding` / `schemaDiffHiding`), and a
+key on one as for a table not in the change set, so its columns cannot be probed. An OPA tenant's users see
+nothing listed, as with their `SHOW TABLES`. Residuals, not holes to report: refusal text and a merge row's
+`error` can name a table of the change set; `list` shows every branch's owner and name; and a proposer sees
+whether an admin's merge of their proposal was refused for row conflicts, one bit per merge an admin runs.
 
 ### Pool suspend/resume (scale-to-zero)
 
@@ -807,7 +832,10 @@ a non-admin's PATs) to a fixed allowlist (`isProfileApi`: `/api/auth/whoami`,
 `/api/auth/logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools`, the
 caller's own `/api/auth/pat/{create,list,revoke,delete}`, their own S3 credentials
 `/api/profile/s3/{list,add,remove}`, and `/api/auth/sso/ticket` when the
-Starlake integration is on) and answers `403 admin_required` on everything else; the UI mounts
+Starlake integration is on; `isBranchApi`: `POST /api/branch/{create,propose,discard}` and the `GET`s
+`/api/branch/tenant/<t>/database/<d>/branches[/<b>[/changes|/diff|/schema-diff]]`, matched on method and
+whole segments, never a prefix, which also skip the guard's URL-tenant check since `BranchHandlers.gate`
+decides) and answers `403 admin_required` on everything else; the UI mounts
 only the `/profile` route (own password change; own usage/statements; own S3 credentials) for them.
 `GET /api/profile/pools` (`qod profile pools`) answers
 `{"pools":[{"tenant":...,"tenantDb":...,"pool":...,"status":...}]}` (the field names and

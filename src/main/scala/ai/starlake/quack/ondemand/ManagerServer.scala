@@ -156,9 +156,9 @@ final class ManagerServer(
       (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
       modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
 
-  /** Paths a NON-ADMIN session may reach: the self-service profile surface only. Everything else on
-    * `/api` answers `403 admin_required` for such sessions -- this predicate is the entire
-    * authorization story for regular users, so no other handler needs to know they exist.
+  /** Paths a NON-ADMIN session may reach: the self-service profile surface. Everything else on
+    * `/api` but [[isBranchApi]] answers `403 admin_required` for such sessions, so that no other
+    * handler needs to know regular users exist.
     *
     * Exact equality, never a prefix test: SPI modules mount their own path prefixes under `/api`
     * (and core keeps adding siblings under `/api/auth`), and a prefix match would silently hand
@@ -187,6 +187,43 @@ final class ManagerServer(
       // ahead of the route ever being wired.
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
+  /** The branch routes a NON-ADMIN session may reach, and the only paths whose tenant the guard
+    * leaves to the handler: any principal who may connect may branch, in its own tenant, which
+    * `BranchHandlers`' one gate decides. Everything else about a branch stays admin-only, merge
+    * first of all.
+    *
+    * Method and whole segments, as the router reads them, an explicit list, never a prefix: a route
+    * added under `/api/branch/` later stays admin-only until someone decides otherwise.
+    */
+  private def isBranchApi(
+      method: Method,
+      segments: Vector[String],
+      endsWithSlash: Boolean
+  ): Boolean =
+    def named(parts: String*) = parts.forall(_.nonEmpty)
+    !endsWithSlash && ((method, segments) match
+      case (Method.POST, Vector("api", "branch", "create" | "propose" | "discard"))      => true
+      case (Method.GET, Vector("api", "branch", "tenant", t, "database", d, "branches")) =>
+        named(t, d)
+      case (Method.GET, Vector("api", "branch", "tenant", t, "database", d, "branches", b)) =>
+        named(t, d, b)
+      case (
+            Method.GET,
+            Vector(
+              "api",
+              "branch",
+              "tenant",
+              t,
+              "database",
+              d,
+              "branches",
+              b,
+              "changes" | "diff" | "schema-diff"
+            )
+          ) =>
+        named(t, d, b)
+      case _ => false)
+
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token or a live personal access token, admitted with exactly its owner's scope (admin
     * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
@@ -195,8 +232,9 @@ final class ManagerServer(
     * Sessions come in two flavors since the regular-user profile feature: admin sessions (JWT
     * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
     * tenant-scoped login for a `role=user` principal, which are demoted here to the
-    * [[isProfileApi]] allowlist and get `403 admin_required` everywhere else. The 403 (rather than
-    * the anonymous 401) is what tells a client its session is valid but under-privileged.
+    * [[isProfileApi]] and [[isBranchApi]] allowlists and get `403 admin_required` everywhere else.
+    * The 403 (rather than the anonymous 401) is what tells a client its session is valid but
+    * under-privileged.
     *
     * Always-open paths: `/api/auth/login`, `/api/auth/change-password` (the current password is the
     * credential, and a user blocked by must_change_password has no session to present),
@@ -235,11 +273,12 @@ final class ManagerServer(
       // MUST see the same shape or an encoded/slash-prefixed spelling of an
       // /api path routes while skipping the guard (proven: ////api/tenant/list
       // and /%61pi/tenant/list both bypassed earlier derivations).
-      val path = {
-        val segs = req.uri.path.segments.map(_.decoded()).dropWhile(_.isEmpty)
-        val raw  = segs.mkString("/", "/", "")
+      val segments = req.uri.path.segments.map(_.decoded()).dropWhile(_.isEmpty)
+      val path     = {
+        val raw = segments.mkString("/", "/", "")
         if req.uri.path.endsWithSlash then raw + "/" else raw
       }
+      val branchApi = isBranchApi(req.method, segments, req.uri.path.endsWithSlash)
       if !path.startsWith("/api/") && path != "/api" then routes(req)
       else if isPublicApi(path) then routes(req)
       else
@@ -272,7 +311,7 @@ final class ManagerServer(
         val tokenScope      = resolved.map(_.scope)
         val nonAdminSession = resolved.isDefined && !sessionAdmin
 
-        val admitted = sessionAdmin || (nonAdminSession && isProfileApi(path))
+        val admitted = sessionAdmin || (nonAdminSession && (isProfileApi(path) || branchApi))
         // Strip control characters -- jsonb rejects NUL (0x00); cap length so
         // detail stays bounded. An unsanitized `%00` in the path would make
         // the insert throw and the attacker would erase their own trail.
@@ -329,11 +368,16 @@ final class ManagerServer(
             refuse(req, Response[IO](Status.Unauthorized))
         else
           // Per-request tenant scope check on the admitted credential's scope.
-          // Body-tenant endpoints do their own check via TenantScopeCheck.reject.
+          // Body-tenant endpoints do their own check via TenantScopeCheck.reject, and the branch
+          // routes through their one gate: a plain member reaches their own tenant there, which
+          // holds no admin grant for this check to find.
           val queryTenant = req.uri.query.params.get("tenant")
-          val pathTenant  = TenantScopeGuard
-            .extractTenant(path, queryTenant)
-            .map(t => canonicalTenantIdOf(t).getOrElse(t))
+          val pathTenant  =
+            if branchApi then None
+            else
+              TenantScopeGuard
+                .extractTenant(path, queryTenant)
+                .map(t => canonicalTenantIdOf(t).getOrElse(t))
           (tokenScope, pathTenant) match
             case (Some(scope), Some(t))
                 if !scope.superuser && !scope.manageableTenants.contains(t) =>

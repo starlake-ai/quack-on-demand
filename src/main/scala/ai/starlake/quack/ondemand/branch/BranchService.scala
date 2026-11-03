@@ -16,7 +16,6 @@ import ai.starlake.quack.model.{
 }
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
-import ai.starlake.quack.ondemand.rbac.{AuthzRequest, HandshakeDenial}
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
@@ -30,13 +29,14 @@ import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
-/** Who is asking, on the tenant in hand. `isAdmin` = tenant admin of that tenant, or superuser;
-  * every other principal is a plain data-plane user and must be able to connect to the parent. No
-  * handler reaches the non-admin case today: `TenantDbGate` admits only admins. `sees`: whether a
-  * reply may name a table (schema, table): an admin sees them all, anyone else the tables they hold
-  * a grant on, as filtered metadata does. `branchOnly` = the credential is a PAT restricted to
-  * branch writes: it may create and write branches, but a merge writes main, so merge refuses it
-  * (`branch_only_token`).
+/** Who is asking, on the tenant in hand, once the handlers' one gate has let them by: it decides
+  * who may connect, and this service trusts its actor (`BranchHandlers.gate`). `isAdmin` = an admin
+  * of THIS tenant, or a superuser; every other principal is a plain data-plane user, who proposes
+  * and discards only their own branches, asks for no branch with no TTL, and never merges. `sees`:
+  * whether a reply may name a table (schema, table): an admin sees them all, anyone else the tables
+  * they hold a grant on, as filtered metadata does. `branchOnly` = the credential is a PAT
+  * restricted to branch writes: it may create and write branches, but a merge writes main, so merge
+  * refuses it (`branch_only_token`).
   */
 final case class BranchActor private (
     identity: String,
@@ -70,9 +70,6 @@ object BranchFailure:
   def conflict(code: String, msg: String)      = BranchFailure(409, code, msg)
   def unprocessable(code: String, msg: String) = BranchFailure(422, code, msg)
   def upstream(code: String, msg: String)      = BranchFailure(502, code, msg)
-
-  /** A deciding authority (OPA) could not be reached: retryable, never a permission verdict. */
-  def unavailable(code: String, msg: String) = BranchFailure(503, code, msg)
 
 /** Runs work on an ephemeral merge node built from `spec`: spawns it, waits for it to accept
   * connections, runs `body`, stops it whatever happens. `Left`: the node never came up, or what
@@ -114,7 +111,7 @@ trait ChangeCounter:
   * in-memory store with a stub backend.
   *
   * Tenant coordinates are the tenant id (== lowercased name) and the PARENT tenant-db name; callers
-  * resolve them through `TenantDbGate` first.
+  * resolve them through `BranchHandlers.gate` first, which also decides who may connect.
   */
 final class BranchService(
     cfg: BranchingConfig,
@@ -195,45 +192,6 @@ final class BranchService(
   def proposalOf(b: Branch): Option[BranchMerge] =
     store.listBranchMerges(b.id).find(_.status == BranchMergeStatus.Proposed)
 
-  /** A non-admin may act on a parent iff it can connect to at least one of its pools: exactly the
-    * FlightSQL handshake gate, so "may query" and "may branch" are the same permission. Admins
-    * (tenant admins and superusers) never reach the gate, so it runs with
-    * `superuserAdmissible = false`: the actor binds a row of the parent's tenant, never a superuser
-    * row. Uses `authorizeHandshakeDetailed` (not the legacy string-left delegate) so an OPA outage
-    * on an opa-mode parent is distinguishable from an ordinary grant refusal: `Res` has its own
-    * error channel (`BranchFailure`), so `Unavailable` is surfaced as a retryable 503 rather than
-    * collapsed into the same "acl_denied" a real policy Deny gets. No handler reaches this arm
-    * today: `TenantDbGate` admits only admins.
-    */
-  private def mayUse(tenant: String, parent: TenantDb, actor: BranchActor): Res[Unit] =
-    if actor.isAdmin then Right(())
-    else
-      val pools = sup.list().map(_.key).filter(k => k.tenant == tenant && k.tenantDb == parent.name)
-      val outcomes = pools.map { k =>
-        sup.authorizeHandshakeDetailed(
-          AuthzRequest(tenant, k.pool, actor.identity, superuserAdmissible = false, edge = "rest")
-        )
-      }
-      if outcomes.exists(_.isRight) then Right(())
-      else if outcomes.exists {
-          case Left(_: HandshakeDenial.Unavailable) => true
-          case _                                    => false
-        }
-      then
-        Left(
-          BranchFailure.unavailable(
-            "authz_unavailable",
-            s"authorization service unavailable for '${actor.identity}' on '${parent.name}'"
-          )
-        )
-      else
-        Left(
-          BranchFailure.forbidden(
-            "acl_denied",
-            s"user '${actor.identity}' cannot connect to any pool of '${parent.name}'"
-          )
-        )
-
   private def enabled: Res[Unit] =
     if cfg.enabled then Right(())
     else
@@ -303,7 +261,6 @@ final class BranchService(
       for
         _      <- enabled
         parent <- parentOf(tenant, parentDb)
-        _      <- mayUse(tenant, parent, actor)
         name   <- BranchNames
           .validateName(rawName)
           .left
@@ -535,7 +492,6 @@ final class BranchService(
     val pre = for
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
-      _      <- mayUse(tenant, parent, actor)
       b      <- liveBranch(parent, name)
     yield (parent, b)
     pre match
@@ -641,7 +597,6 @@ final class BranchService(
     val pre = for
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
-      _      <- mayUse(tenant, parent, actor)
       // Before anything else: a proposal starts a node and replaces the open one.
       b <- liveBranch(parent, name)
       _ <- ownerOrAdmin(b, actor, "propose")

@@ -1,6 +1,8 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{Branch, BranchMerge}
+import ai.starlake.acl.parser.Verb
+import ai.starlake.quack.edge.sql.GrantMatch
+import ai.starlake.quack.model.{Branch, BranchMerge, TenantDb}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.branch.{
@@ -12,60 +14,180 @@ import ai.starlake.quack.ondemand.branch.{
   RowCounts,
   TableChange
 }
+import ai.starlake.quack.ondemand.rbac.{EffectiveSet, HandshakeDenial}
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import io.circe.Json
 import sttp.model.StatusCode
 
-/** REST handlers for branches (Epic 1). Gate = [[TenantDbGate]] on the PARENT tenant-db (tenant
-  * resolve, [[TenantScopeCheck]], DuckLake kind), then everything else is the service's business
-  * rules. The gate admits only a superuser or an admin of the tenant, so `BranchService.mayUse`'s
-  * non-admin arm is not reached from here. The actor is what `actorOf` resolves: the session's
-  * username (tenant admin or superuser) or a PAT's owner (an MCP PAT curries its bearer as
-  * `apiKey`); no credential, or any other token, is a 401 before the service is reached (see
-  * [[BranchHandlers.actorResolver]]). The data diff delegates to [[CatalogPreviewHandlers]], whose
+/** REST handlers for branches (Epic 1). Any principal who may connect to one of the parent's pools
+  * may branch it, in its own tenant; every endpoint passes [[gate]], the one place that says so,
+  * and everything after it is the service's business rules. Who gets in:
+  *
+  *   - A superuser, or an admin of the tenant in hand, as for every tenant-db surface
+  *     ([[TenantDbGate]]). An admin of another tenant who is a plain member here is a plain member
+  *     here: [[BranchActor.isAdmin]] is decided for this tenant, and only here.
+  *   - Anyone else, on the tenant they belong to only: the handshake resolves a user NAME per
+  *     tenant, and in another tenant the same name can be another user. Then the handshake's own
+  *     decision, the one the routed executor asks for this caller ([[ExecCaller.authzRequest]]), on
+  *     the pools the token's `databases` and `pools` axes allow, as `ProfileHandlers.pools` does.
+  *     An unavailable decision (the tenant's OPA down) is a 503, never a refusal.
+  *
+  * A non-admin's replies then name only the tables they hold a grant on ([[BranchActor.sees]]), and
+  * carry no row numbers of a table they may not count (`BranchHandlers.changesResponse`). Merge is
+  * the service's to refuse them: `admin_required`. No credential, or any other token, is a 401
+  * before anything else. The data diffs delegate to [[CatalogPreviewHandlers]], whose
   * [[RestCaller]] resolves the executor identity.
   */
 final class BranchHandlers(
     sup: PoolSupervisor,
     service: BranchService,
     preview: CatalogPreviewHandlers,
-    actorOf: Option[String] => Either[(StatusCode, ErrorResponse), BranchActor],
-    /** Who the change counts run as: the requester, resolved like every other data endpoint. */
+    /** The one credential resolution, and who the change counts run as: the requester. */
     callerOf: RestCaller,
     audit: AuditRecorder = AuditRecorder.noop
 ):
 
-  private type Out[T] = IO[Either[(StatusCode, ErrorResponse), T]]
+  private type Err    = (StatusCode, ErrorResponse)
+  private type Out[T] = IO[Either[Err, T]]
 
-  private def toErr(f: BranchFailure): (StatusCode, ErrorResponse) =
+  /** What [[gate]] decided: the tenant and parent database by their ids, who is asking, and as whom
+    * their statements run.
+    */
+  private final case class Admitted(
+      tid: String,
+      db: String,
+      actor: BranchActor,
+      superuser: Boolean,
+      principal: RestCaller.Principal
+  ):
+    def caller(connectionId: String): ExecCaller = RestCaller.callerOf(connectionId, principal)
+
+  private def toErr(f: BranchFailure): Err =
     (StatusCode(f.status), ErrorResponse(f.code, f.message))
 
+  private val DuckLakeOnly = Some("branching requires a ducklake tenant-db")
+
+  /** The one gate of every branch endpoint, REST and MCP: see the class comment. */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
-  ): Either[(StatusCode, ErrorResponse), (String, String)] =
-    TenantDbGate(
-      sup,
-      rawTenant,
-      tenantDb,
-      apiKey,
-      requireDuckLake = Some("branching requires a ducklake tenant-db")
-    )(scopeOf).flatMap { (tid, db) =>
-      // A token's databases axis on the PARENT (review 5 R2): every branch endpoint, REST and MCP.
-      callerOf.resolve(apiKey).toOption.map(RestCaller.callerOf("branch-scope", _)) match
-        case Some(caller) =>
-          TokenScope.databaseRefusal(sup, tid, caller.restriction, db).toLeft((tid, db))
-        case None => Right((tid, db))
+  ): Either[Err, Admitted] =
+    callerOf.resolve(apiKey).flatMap { principal =>
+      val scope = scopeOf(apiKey)
+      TenantDbGate.resolveTenantId(sup, rawTenant) match
+        case Some(tid) if BranchHandlers.adminOf(scope, tid) =>
+          admittedAsAdmin(tid, tenantDb, apiKey, scope, principal)(scopeOf)
+        case Some(tid) if ownTenant(principal).contains(tid) =>
+          admittedAsMember(tid, tenantDb, apiKey, principal)
+        // An unknown tenant, to someone who manages one: as on every other tenant-db surface.
+        case None if scope.superuser || scope.manageableTenants.nonEmpty =>
+          Left(
+            (
+              StatusCode.NotFound,
+              ErrorResponse("not_found", s"tenant '$rawTenant' is not registered")
+            )
+          )
+        // Anyone else gets one answer for a tenant that exists and for one that does not.
+        case _ => Left(TenantScopeCheck.forbidden(rawTenant))
     }
 
-  /** [[gate]], then the actor: an unresolvable token is a 401 and never reaches the service. */
-  private def gatedActor(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: SessionScope.Resolver
-  ): Either[(StatusCode, ErrorResponse), (String, String, BranchActor)] =
+  /** The tenant a credential belongs to, the one a plain member may branch in. */
+  private def ownTenant(principal: RestCaller.Principal): Option[String] =
+    (principal match
+      case RestCaller.Principal.Session(s) => s.profile.tenant
+      case RestCaller.Principal.Pat(p)     => p.user.tenant
+    ).flatMap(TenantDbGate.resolveTenantId(sup, _))
+
+  private def admittedAsAdmin(
+      tid: String,
+      tenantDb: String,
+      apiKey: Option[String],
+      scope: SessionScope,
+      principal: RestCaller.Principal
+  )(scopeOf: SessionScope.Resolver): Either[Err, Admitted] =
+    val caller = RestCaller.callerOf("branch-scope", principal)
     for
-      (tid, db) <- gate(rawTenant, tenantDb, apiKey)(scopeOf)
-      actor     <- actorOf(apiKey)
-    yield (tid, db, actor)
+      (_, db) <- TenantDbGate(sup, tid, tenantDb, apiKey, DuckLakeOnly)(scopeOf)
+      // A token's databases axis on the PARENT (review 5 R2): every branch endpoint, REST and MCP.
+      _ <- TokenScope.databaseRefusal(sup, tid, caller.restriction, db).toLeft(())
+    yield Admitted(
+      tid,
+      db,
+      BranchActor.admin(caller.identity, caller.restriction.branchOnly),
+      scope.superuser,
+      principal
+    )
+
+  private def admittedAsMember(
+      tid: String,
+      tenantDb: String,
+      apiKey: Option[String],
+      principal: RestCaller.Principal
+  ): Either[Err, Admitted] =
+    val caller = RestCaller.callerOf("branch-gate", principal)
+    for
+      _   <- TokenScope.databaseRefusal(sup, tid, caller.restriction, tenantDb).toLeft(())
+      eff <- mayConnect(caller, tid, tenantDb)
+      // The member may reach this database, so its kind is theirs to read.
+      (_, db) <- TenantDbGate(sup, tid, tenantDb, apiKey, DuckLakeOnly)(BranchHandlers.decided(tid))
+    yield
+      val alias = TenantDb.catalogAlias(sup.effectiveMetastoreFor(tid, db), db)
+      Admitted(
+        tid,
+        db,
+        BranchActor.plain(
+          caller.identity,
+          BranchHandlers.seenBy(eff, alias),
+          caller.restriction.branchOnly
+        ),
+        superuser = false,
+        principal
+      )
+
+  /** Whether `caller` may connect to a pool of `db`, on the handshake's own decision: the effective
+    * set it decides with, narrowed by a token's restriction. Decided lazily and in order, so the
+    * first pool that admits them or cannot answer ends it (each OPA-mode decision is a round trip).
+    * A database with no such pool, or none at all, reads the same, and says nothing of why.
+    */
+  private def mayConnect(caller: ExecCaller, tid: String, db: String): Either[Err, EffectiveSet] =
+    sup
+      .list()
+      .map(_.key)
+      .filter(k => k.tenant == tid && k.tenantDb == db)
+      .filter(k => caller.restriction.allowsDatabase(k.tenantDb))
+      .filter(k => caller.restriction.allowsPool(k.pool))
+      .sortBy(_.pool)
+      .to(LazyList)
+      .map(k => sup.authorizeHandshakeDetailed(caller.authzRequest(k)))
+      .collectFirst {
+        case Right(authorized)                      => Right(authorized.effectiveSet)
+        case Left(HandshakeDenial.Unavailable(msg)) =>
+          Left(
+            (
+              StatusCode.ServiceUnavailable,
+              ErrorResponse("authz_unavailable", s"authorization service unavailable: $msg")
+            )
+          )
+      }
+      .getOrElse(
+        Left(
+          (
+            StatusCode.Forbidden,
+            ErrorResponse("no_pool_access", s"you may connect to no pool of database '$db'")
+          )
+        )
+      )
+
+  /** [[gate]], off the compute pool (a decision can be a round trip to the tenant's OPA), then
+    * `run`.
+    */
+  private def admitted[T](rawTenant: String, tenantDb: String, apiKey: Option[String])(
+      scopeOf: SessionScope.Resolver
+  )(run: Admitted => Out[T]): Out[T] =
+    IO.blocking(gate(rawTenant, tenantDb, apiKey)(scopeOf)).flatMap {
+      case Left(e)  => IO.pure(Left(e))
+      case Right(a) => run(a)
+    }
 
   private def entry(b: Branch): BranchEntry =
     BranchEntry(
@@ -86,12 +208,11 @@ final class BranchHandlers(
   def create(req: BranchCreateRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchEntry] =
-    gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
-        service
-          .create(tid, db, req.name, req.ttlHours, req.fromSnapshot, actor, apiKey)
-          .map(_.left.map(toErr).map(entry))
+    admitted(req.tenant, req.tenantDb, apiKey)(scopeOf) { a =>
+      service
+        .create(a.tid, a.db, req.name, req.ttlHours, req.fromSnapshot, a.actor, apiKey)
+        .map(_.left.map(toErr).map(entry))
+    }
 
   def list(
       tenant: String,
@@ -100,29 +221,30 @@ final class BranchHandlers(
       apiKey: Option[String]
   )(
       scopeOf: SessionScope.Resolver
-  ): Out[BranchListResponse] = IO.blocking {
-    gate(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db) =>
-      service
-        .list(tid, db, includeTerminal.getOrElse(false))
-        .left
-        .map(toErr)
-        .map(bs => BranchListResponse(bs.map(entry)))
+  ): Out[BranchListResponse] =
+    admitted(tenant, tenantDb, apiKey)(scopeOf) { a =>
+      IO.blocking(
+        service
+          .list(a.tid, a.db, includeTerminal.getOrElse(false))
+          .left
+          .map(toErr)
+          .map(bs => BranchListResponse(bs.map(entry)))
+      )
     }
-  }
 
   def get(tenant: String, tenantDb: String, branch: String, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
-  ): Out[BranchDetailResponse] = IO.blocking {
-    gatedActor(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db, actor) =>
-      service.get(tid, db, branch).left.map(toErr).map { case (b, merges) =>
-        val systemCounts = scopeOf(apiKey).superuser
-        BranchDetailResponse(
-          entry(b),
-          merges.map(BranchHandlers.mergeEntry(_, systemCounts, actor))
-        )
-      }
+  ): Out[BranchDetailResponse] =
+    admitted(tenant, tenantDb, apiKey)(scopeOf) { a =>
+      IO.blocking(
+        service.get(a.tid, a.db, branch).left.map(toErr).map { case (b, merges) =>
+          BranchDetailResponse(
+            entry(b),
+            merges.map(BranchHandlers.mergeEntry(_, a.superuser, a.actor))
+          )
+        }
+      )
     }
-  }
 
   def changes(
       tenant: String,
@@ -131,35 +253,29 @@ final class BranchHandlers(
       counts: Option[Boolean],
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[BranchChangesResponse] =
-    // Counts run as the requester (a session or, over MCP, the PAT curried as apiKey), resolved
-    // like the data diff's: the node decides which tables they may count, never the system caller.
-    (for
-      (tid, db, actor) <- gatedActor(tenant, tenantDb, apiKey)(scopeOf)
-      countsAs         <-
-        if counts.getOrElse(true) then callerOf(s"branch-changes-$tid-$db", apiKey).map(Some(_))
-        else Right(None)
-    yield (tid, db, actor, countsAs)) match
-      case Left(e)                           => IO.pure(Left(e))
-      case Right((tid, db, actor, countsAs)) =>
-        val countsAsked = countsAs.nonEmpty
-        val superuser   = scopeOf(apiKey).superuser
-        service
-          .changes(tid, db, branch, countsAs, actor, apiKey)
-          .flatMap {
-            case Left(f)        => IO.pure(Left(toErr(f)))
-            case Right((b, cs)) =>
-              IO.blocking(service.proposalOf(b)).map { proposal =>
-                Right(
-                  BranchHandlers.changesResponse(
-                    b,
-                    cs,
-                    proposal,
-                    actor,
-                    t => superuser || (countsAsked && t.counted)
-                  )
+    admitted(tenant, tenantDb, apiKey)(scopeOf) { a =>
+      // Counts run as the requester (a session or, over MCP, the PAT curried as apiKey): the node
+      // decides which tables they may count, never the system caller.
+      val countsAs =
+        Option.when(counts.getOrElse(true))(a.caller(s"branch-changes-${a.tid}-${a.db}"))
+      service
+        .changes(a.tid, a.db, branch, countsAs, a.actor, apiKey)
+        .flatMap {
+          case Left(f)        => IO.pure(Left(toErr(f)))
+          case Right((b, cs)) =>
+            IO.blocking(service.proposalOf(b)).map { proposal =>
+              Right(
+                BranchHandlers.changesResponse(
+                  b,
+                  cs,
+                  proposal,
+                  a.actor,
+                  t => a.superuser || (countsAs.nonEmpty && t.counted)
                 )
-              }
-          }
+              )
+            }
+        }
+    }
 
   /** Delegates to the catalog data-diff on the BRANCH tenant-db over `(fork, head]`. */
   def diff(
@@ -173,27 +289,25 @@ final class BranchHandlers(
       changeType: Option[String],
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
-    gatedActor(tenant, tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
-        bounds(tid, db, branch) match
-          case Left(e)              => IO.pure(Left(e))
-          case Right((b, from, to)) =>
-            preview.dataDiffHiding(
-              tid,
-              b.tenantDbName,
-              schema,
-              table,
-              from,
-              to,
-              limit,
-              cursor,
-              changeType,
-              apiKey,
-              (s, t) => !actor.sees(s, t)
-            )(
-              scopeOf
-            )
+    admitted(tenant, tenantDb, apiKey)(scopeOf) { a =>
+      IO.blocking(bounds(a.tid, a.db, branch)).flatMap {
+        case Left(e)              => IO.pure(Left(e))
+        case Right((b, from, to)) =>
+          preview.dataDiffHiding(
+            a.tid,
+            b.tenantDbName,
+            schema,
+            table,
+            from,
+            to,
+            limit,
+            cursor,
+            changeType,
+            apiKey,
+            (s, t) => !a.actor.sees(s, t)
+          )(BranchHandlers.decided(a.tid))
+      }
+    }
 
   def schemaDiff(
       tenant: String,
@@ -203,29 +317,29 @@ final class BranchHandlers(
       table: String,
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
-    gatedActor(tenant, tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
-        bounds(tid, db, branch) match
-          case Left(e)              => IO.pure(Left(e))
-          case Right((b, from, to)) =>
-            preview.schemaDiffHiding(
-              tid,
-              b.tenantDbName,
-              schema,
-              table,
-              from,
-              to,
-              apiKey,
-              (s, t) => !actor.sees(s, t)
-            )(scopeOf)
+    admitted(tenant, tenantDb, apiKey)(scopeOf) { a =>
+      IO.blocking(bounds(a.tid, a.db, branch)).flatMap {
+        case Left(e)              => IO.pure(Left(e))
+        case Right((b, from, to)) =>
+          preview.schemaDiffHiding(
+            a.tid,
+            b.tenantDbName,
+            schema,
+            table,
+            from,
+            to,
+            apiKey,
+            (s, t) => !a.actor.sees(s, t)
+          )(BranchHandlers.decided(a.tid))
+      }
+    }
 
   /** `(branch, fork, head)` as the numeric bound strings the catalog diff handlers parse. */
   private def bounds(
       tid: String,
       db: String,
       branch: String
-  ): Either[(StatusCode, ErrorResponse), (Branch, String, String)] =
+  ): Either[Err, (Branch, String, String)] =
     service.resolveTarget(tid, db, branch).left.map(toErr).flatMap { case (b, _) =>
       service.headSnapshot(tid, b) match
         case Some(head) => Right((b, b.forkSnapshot.toString, head.toString))
@@ -238,61 +352,69 @@ final class BranchHandlers(
   def propose(req: BranchProposeRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchProposeResponse] =
-    // The reply's change set counts as the proposer (resolved like `changes`); the stored summary
-    // keeps the system's counts, shown to superusers only (mergeEntry).
-    (for
-      (tid, db, actor) <- gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf)
-      countsAs         <- callerOf(s"branch-propose-$tid-$db", apiKey)
-      options          <- ProposeOptions.parse(req.onConflict, req.keys).left.map(toErr)
-    yield (tid, db, actor, countsAs, options)) match
-      case Left(e)                                    => IO.pure(Left(e))
-      case Right((tid, db, actor, countsAs, options)) =>
-        val systemCounts = scopeOf(apiKey).superuser
-        service
-          .propose(tid, db, req.branch, options, actor, countsAs, apiKey)
-          .map(_.left.map(toErr).map { case (b, m, cs) =>
-            BranchProposeResponse(
-              entry(b),
-              BranchHandlers.mergeEntry(m, systemCounts, actor),
-              BranchHandlers.changesResponse(b, cs, Some(m), actor, t => systemCounts || t.counted)
+    admitted(req.tenant, req.tenantDb, apiKey)(scopeOf) { a =>
+      ProposeOptions.parse(req.onConflict, req.keys) match
+        case Left(f)        => IO.pure(Left(toErr(f)))
+        case Right(options) =>
+          // The reply's change set counts as the proposer, like `changes`; the stored summary keeps
+          // the system's counts, shown to superusers only (mergeEntry).
+          service
+            .propose(
+              a.tid,
+              a.db,
+              req.branch,
+              options,
+              a.actor,
+              a.caller(s"branch-propose-${a.tid}-${a.db}"),
+              apiKey
             )
-          })
+            .map(_.left.map(toErr).map { case (b, m, cs) =>
+              BranchProposeResponse(
+                entry(b),
+                BranchHandlers.mergeEntry(m, a.superuser, a.actor),
+                BranchHandlers.changesResponse(
+                  b,
+                  cs,
+                  Some(m),
+                  a.actor,
+                  t => a.superuser || t.counted
+                )
+              )
+            })
+    }
 
   def merge(req: BranchMergeRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchMergeResponse] =
-    gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
-        val superuser = scopeOf(apiKey).superuser
-        service
-          .merge(
-            tid,
-            db,
-            req.branch,
-            req.proposalId,
-            req.expectedMainSnapshot,
-            req.holdWriters,
-            actor,
-            apiKey
+    admitted(req.tenant, req.tenantDb, apiKey)(scopeOf) { a =>
+      service
+        .merge(
+          a.tid,
+          a.db,
+          req.branch,
+          req.proposalId,
+          req.expectedMainSnapshot,
+          req.holdWriters,
+          a.actor,
+          apiKey
+        )
+        .map(_.left.map(toErr).map { case (b, m, cs) =>
+          BranchMergeResponse(
+            entry(b),
+            BranchHandlers.mergeEntry(m, a.superuser, a.actor),
+            BranchHandlers.changesResponse(b, cs, Some(m), a.actor, _ => a.superuser)
           )
-          .map(_.left.map(toErr).map { case (b, m, cs) =>
-            BranchMergeResponse(
-              entry(b),
-              BranchHandlers.mergeEntry(m, superuser, actor),
-              BranchHandlers.changesResponse(b, cs, Some(m), actor, _ => superuser)
-            )
-          })
+        })
+    }
 
   def discard(req: BranchOpRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchEntry] =
-    gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
-      case Left(e)                 => IO.pure(Left(e))
-      case Right((tid, db, actor)) =>
-        service
-          .discard(tid, db, req.branch, actor, apiKey)
-          .map(_.left.map(toErr).map(entry))
+    admitted(req.tenant, req.tenantDb, apiKey)(scopeOf) { a =>
+      service
+        .discard(a.tid, a.db, req.branch, a.actor, apiKey)
+        .map(_.left.map(toErr).map(entry))
+    }
 
 object BranchHandlers:
 
@@ -484,23 +606,28 @@ object BranchHandlers:
       .top
       .getOrElse(summary)
 
-  /** The branch actor a bearer resolves to, through [[RestCaller.resolve]] (the one resolution): a
-    * session -> its user, admin when it manages a tenant; a PAT -> its owner, admin per the PAT,
-    * carrying its `branchOnly` restriction (merge refuses it). No credential, or any other token
-    * (unknown, expired, revoked, a session that died between the guard and the handler), is refused
-    * with 401 `unauthorized`: never a superuser admin actor able to approve a merge.
+  /** Whether `scope` is an admin of tenant `tid`: a superuser, or an admin of that very tenant.
+    * Never of any other: an admin elsewhere who is a plain member here is a plain member here,
+    * whose replies are narrowed and who may not merge.
     */
-  def actorResolver(
-      callers: RestCaller
-  ): Option[String] => Either[(StatusCode, ErrorResponse), BranchActor] =
-    apiKey =>
-      callers.resolve(apiKey).map {
-        case RestCaller.Principal.Session(s) =>
-          if s.scope.superuser || s.scope.manageableTenants.nonEmpty then
-            BranchActor.admin(s.profile.username)
-          else BranchActor.plain(s.profile.username, sees = (_, _) => false)
-        case RestCaller.Principal.Pat(p) =>
-          val branchOnly = p.restriction.branchOnly
-          if p.isAdmin then BranchActor.admin(p.user.username, branchOnly)
-          else BranchActor.plain(p.user.username, sees = (_, _) => false, branchOnly)
-      }
+  def adminOf(scope: SessionScope, tid: String): Boolean =
+    scope.superuser || scope.manageableTenants.contains(tid)
+
+  /** What a non-admin's replies may name: a table `eff` covers with any verb, as filtered metadata
+    * narrows their listings. `alias`, the parent's catalog, is the only session catalog, so a
+    * wildcard catalog covers it and nothing else. An empty set (nothing could be resolved) shows
+    * nothing. An OPA tenant's users hold no QoD grants to go by, so they see nothing listed, as
+    * with their `SHOW TABLES`.
+    */
+  def seenBy(eff: EffectiveSet, alias: String): (String, String) => Boolean =
+    (schema, table) =>
+      List(Verb.Read, Verb.Write, Verb.Ddl).exists(
+        GrantMatch.covers(eff.permissions, Set(alias), alias, schema, table, _)
+      )
+
+  /** What [[gate]] hands [[CatalogPreviewHandlers]] for its own gate, and its own for the kind
+    * check: this tenant, admitted. The branch gate has decided who may come this far, and the
+    * statements still run as the caller, under the node's verdict.
+    */
+  private def decided(tid: String): SessionScope.Resolver =
+    _ => SessionScope(superuser = false, manageableTenants = Set(tid))

@@ -280,7 +280,7 @@ There is no static API key and no open mode: every non-public `/api/...` call ne
 
 ### Regular-user login (profile only)
 
-The admin UI isn't admin-exclusive: a tenant-scoped `kind=user` principal can log in too, with the same `/api/auth/login` call plus a `tenant` (the blank/system login and OIDC SSO still require an admin grant). The resulting session is demoted to a fixed allowlist - `whoami`, `logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools` and its own PATs - and gets `403 admin_required` on everything else; the UI lands such a session straight on `/profile` (change own password; view own usage + recent statements).
+The admin UI isn't admin-exclusive: a tenant-scoped `kind=user` principal can log in too, with the same `/api/auth/login` call plus a `tenant` (the blank/system login and OIDC SSO still require an admin grant). The resulting session is demoted to a fixed allowlist - `whoami`, `logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools`, its own PATs and the branch routes (see "Branches") - and gets `403 admin_required` on everything else; the UI lands such a session straight on `/profile` (change own password; view own usage + recent statements).
 
 ```bash
 # Log in as a regular tenant user (demo credentials from the bootstrap manifest)
@@ -2045,8 +2045,9 @@ Branch names: lowercase letter first, then letters, digits, `_` or `-`, at most
 48 characters. Only DuckLake databases can be branched, and never a branch.
 
 ```bash
-# 1. Create a branch of acme's tpch1 database (expires after 24h; omit for the server default,
-#    0 = never). A tenant admin or a superuser may branch a database.
+# 1. Create a branch of acme's tpch1 database (expires after 24h; omit for the server default).
+#    Anyone who may connect to one of the database's pools may branch it, in their own tenant. An
+#    admin may ask for --ttl-hours 0 (never); anyone else asks for 1 up to the server's default.
 qod branch create --tenant acme --db acme_tpch1 --name feature-x --ttl-hours 24
 
 # 2. Work on the branch. The FlightSQL `branch` connection header (or `qod sql --branch`)
@@ -2060,7 +2061,8 @@ qod sql --tenant acme --pool bi --branch feature-x \
 qod branch changes --tenant acme --db acme_tpch1 --branch feature-x
 qod branch diff --tenant acme --db acme_tpch1 --branch feature-x --schema tpch1 --table nation
 
-# 4. Propose. Records the change set and what a merge would do to its rows now: rows to update,
+# 4. Propose: the branch's owner, or an admin (403 not_owner otherwise). Records the change set and
+#    what a merge would do to its rows now: rows to update,
 #    delete and insert, conflicts per column, sample rowids. Never a cell value: query the branch and
 #    main by rowid to see them. Proposing again replaces an open proposal. `merge.id` in the reply is
 #    the proposal's id; in `qod branch show` it is the `id` of the entry with status `proposed` under
@@ -2071,7 +2073,8 @@ qod branch diff --tenant acme --db acme_tpch1 --branch feature-x --schema tpch1 
 #    --key schema.table=col[,col...]: rows both sides inserted with this key become conflicts.
 qod branch propose --tenant acme --db acme_tpch1 --branch feature-x
 
-# 5. Merge, as a DIFFERENT principal than the proposer (403 self_merge_forbidden otherwise).
+# 5. Merge: an admin only (403 admin_required), and a DIFFERENT principal than the proposer
+#    (403 self_merge_forbidden otherwise).
 #    Every table the branch modified merges cell by cell, with main's side empty when only the branch
 #    changed it. On success main gains ONE snapshot stamped with proposer and approver, a tag
 #    `merge-<branch>-<id8>`, and the branch is torn down.
@@ -2085,16 +2088,29 @@ qod branch list --tenant acme --db acme_tpch1 --all
 
 The admin console has the same lifecycle on the tenant page, "Branches" tab:
 create, list (live or all), expand a branch for its change set, per-table row
-diffs and merge history, then propose, merge or discard.
+diffs and merge history, then propose, merge or discard. Plain users work from
+the CLI and MCP.
 
-Agents over MCP get the same lifecycle with a tenant admin's token (a plain user's token, or one minted with `--drop-admin`, gets 403 `tenant_forbidden`): `create_branch`,
+What a plain user reads follows their grants. `branch changes`, `branch show`
+and a proposal's reply name only the tables they hold a grant on, and
+`otherTables` counts the rest; a diff of any other table answers as for no such
+table, and a key on one as for a table not in the change set. They see a table's
+row numbers only when their own count of it succeeds, and the count of a user
+holding a column or row policy never does: such a user gets no `rowConflicts` at
+all. An OPA tenant's users see nothing listed, as with their `SHOW TABLES`.
+`mergeable` is always the whole branch's, and a refusal's text can still name
+another table of it. An admin sees every table.
+
+Agents over MCP get the same lifecycle, with a plain user's token as with an admin's (a token minted with `--drop-admin` acts as the plain user it is): `create_branch`,
 `list_branches`, `branch_changes`, `diff`, `propose_merge`, `discard`, and a
-`branch` argument on `run_sql`, `list_tables` and `describe_table`. There is
-deliberately no merge tool. To make "agents never write main" a hard rule,
-mint the agent's token with `qod auth pat create --name agent --branch-only`:
-INSERT / UPDATE / DELETE / DDL on the live database are then refused with
-`write_requires_branch`, reads are unchanged, and every child token inherits
-the flag.
+`branch` argument on `run_sql`, `list_tables` and `describe_table` (the last
+two read the catalog, which takes an admin; a plain user's token reads it with
+`run_sql`). There is deliberately no merge tool: a merge needs an admin, over
+REST or the CLI. To make "agents never write main" a hard rule, mint the agent's
+token with
+`qod auth pat create --name agent --branch-only`: INSERT / UPDATE / DELETE / DDL
+on the live database are then refused with `write_requires_branch`, reads are
+unchanged, and every child token inherits the flag.
 
 An open proposal's `error` starting `timeout:` means a merge is running or may have landed. Merging again settles it; if it landed on a branch that has moved since, that removes what was written on the branch since.
 

@@ -26,7 +26,7 @@ final class RestCaller(
 ):
 
   /** The ONE credential resolution (session, then PAT, else 401) shared by the executor caller
-    * below, the branch actor ([[BranchHandlers.actorResolver]]) and the profile pool listing.
+    * below, the branch handlers' gate and the profile pool listing.
     */
   def resolve(apiKey: Option[String]): Either[(StatusCode, ErrorResponse), RestCaller.Principal] =
     apiKey

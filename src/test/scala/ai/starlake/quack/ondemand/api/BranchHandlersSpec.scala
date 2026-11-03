@@ -25,8 +25,14 @@ import ai.starlake.quack.ondemand.branch.{
   TableChange
 }
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
-import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore}
+import ai.starlake.quack.ondemand.state.{
+  DbAdmin,
+  InMemoryControlPlaneStore,
+  RbacUser,
+  RolePermission
+}
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.IO
@@ -121,13 +127,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       (_, _) => new DuckLakeCatalogReader(null),
       CatalogConfig()
     )
-    val handlers = new BranchHandlers(
-      sup,
-      service,
-      preview,
-      BranchHandlers.actorResolver(callers),
-      callers
-    )
+    val handlers = new BranchHandlers(sup, service, preview, callers)
 
     def merge(key: Option[String]) =
       handlers
@@ -180,29 +180,30 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  "BranchHandlers.actorResolver" should "map each credential to its actor, and refuse the rest" in {
-    val resolve = BranchHandlers.actorResolver(restCaller(sessionOf, patOf))
-    resolve(Some(RootSessionTok)).map(a => (a.identity, a.isAdmin)) shouldBe
-      Right((RootUsername, true))
-    resolve(Some(SessionTok)).map(a => (a.identity, a.isAdmin)) shouldBe Right(("alice", true))
-    resolve(Some(PatTok)).map(a => (a.identity, a.isAdmin)) shouldBe Right(("alice", true))
-    resolve(None).left.toOption.map(_._1) shouldBe Some(StatusCode.Unauthorized)
-    resolve(Some("qod_pat_unknown")).left.toOption.map(_._1) shouldBe
-      Some(StatusCode.Unauthorized)
-    resolve(Some("static-key-1")).left.toOption.map(_._1) shouldBe Some(StatusCode.Unauthorized)
+  "BranchHandlers.adminOf" should "be decided for the tenant in hand, and no other" in {
+    BranchHandlers.adminOf(SessionScope.Superuser, "acme") shouldBe true
+    BranchHandlers.adminOf(SessionScope(false, Set("acme")), "acme") shouldBe true
+    BranchHandlers.adminOf(SessionScope(false, Set("globex")), "acme") shouldBe false
+    BranchHandlers.adminOf(SessionScope.NoAccess, "acme") shouldBe false
   }
 
-  it should "carry a PAT's branchOnly restriction into the actor" in {
-    val branchOnlyPat = "qod_pat_branch_only"
-    val patOf2: String => Option[ai.starlake.quack.ondemand.auth.PatPrincipal] = t =>
-      if t == branchOnlyPat then
-        patOf(PatTok).map(p => p.copy(restriction = p.restriction.copy(branchOnly = true)))
-      else patOf(t)
-    val resolve = BranchHandlers.actorResolver(restCaller(sessionOf, patOf2))
-    resolve(Some(branchOnlyPat)).map(_.branchOnly) shouldBe Right(true)
-    resolve(Some(PatTok)).map(_.branchOnly) shouldBe Right(false)
-    resolve(Some(SessionTok)).map(_.branchOnly) shouldBe Right(false)
-    resolve(Some(RootSessionTok)).map(_.branchOnly) shouldBe Right(false)
+  "BranchHandlers.seenBy" should "see a table any verb of a grant covers, and nothing without one" in {
+    def set(grants: RolePermission*) =
+      EffectiveSet(RbacUser("u", Some("acme"), "bob", "user"), Nil, Nil, grants.toList, Nil)
+    def perm(catalog: String, schema: String, table: String, verb: String) =
+      RolePermission("p", "r", catalog, schema, table, verb)
+    def sees(grants: RolePermission*) = BranchHandlers.seenBy(set(grants*), "cat")("main", "fact")
+    List("RO", "RW", "DDL", "ALL").foreach(v =>
+      withClue(v)(sees(perm("cat", "main", "fact", v)) shouldBe true)
+    )
+    sees(perm("*", "*", "*", "RO")) shouldBe true
+    sees(perm("CAT", "MAIN", "FACT", "RO")) shouldBe true
+    sees(perm("cat", "main", "*", "RO")) shouldBe true
+    sees(perm("cat", "main", "other", "ALL")) shouldBe false
+    sees(perm("cat", "other", "fact", "ALL")) shouldBe false
+    sees(perm("other", "main", "fact", "ALL")) shouldBe false
+    // An effective set with nothing resolved shows nothing: fail closed.
+    sees() shouldBe false
   }
 
   // ---------- what a reply shows, by viewer ----------

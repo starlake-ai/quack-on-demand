@@ -1,6 +1,16 @@
 // src/test/scala/ai/starlake/quack/security/ManagerRestSecuritySpec.scala
 package ai.starlake.quack.security
 
+import ai.starlake.quack.ondemand.api.{BranchHandlers, ExecCaller}
+import ai.starlake.quack.ondemand.branch.{
+  BranchService,
+  ChangeCounter,
+  MergeFence,
+  TableChange,
+  ZeroRowsMergeExecutor
+}
+import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import cats.effect.IO
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -422,6 +432,263 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       }
     finally h.shutdown()
   }
+
+  // ---- the branch routes: any principal who may connect may branch, the handlers' gate decides ----
+
+  /** The harness with the branch routes mounted: a branch service that never gets past its gates,
+    * since no fixture database is a DuckLake one and no fixture user but alice holds a pool grant.
+    */
+  private def withBranchRoutes(body: ManagerServerHarness.Harness => Unit): Unit =
+    val fix = SecurityFixtures.freshStore()
+    SecurityFixtures.addTenantB(fix)
+    val h = ManagerServerHarness.boot(
+      fix.store,
+      branchesOf = Some((sup, preview, callers) =>
+        new BranchHandlers(
+          sup,
+          new BranchService(
+            cfg = ai.starlake.quack.BranchingConfig(),
+            sup = sup,
+            store = fix.store,
+            resolveReader = (_, _) => new DuckLakeCatalogReader(null),
+            cloneCatalog = (_, _, _, _) => Left("not in this spec"),
+            mergeExecutor = ZeroRowsMergeExecutor,
+            mergeFence = new MergeFence:
+              def arm(
+                  m: Map[String, String],
+                  msg: String,
+                  base: Long,
+                  ids: Set[Long],
+                  hold: Option[Int]
+              ) =
+                Right(())
+              def disarm(meta: Map[String, String], message: String) = ()
+            ,
+            counter = new ChangeCounter:
+              def count(
+                  caller: ExecCaller,
+                  t: String,
+                  b: ai.starlake.quack.model.Branch,
+                  a: String,
+                  c: TableChange,
+                  f: Long,
+                  h: Long
+              ) = IO.pure(Right((0L, 0L, 0L)))
+            ,
+            purgeFiles = (_, _) => Right(())
+          ),
+          preview,
+          callers
+        )
+      )
+    )
+    try body(h)
+    finally h.shutdown()
+
+  private def bobOf(h: ManagerServerHarness.Harness): String =
+    h.mintToken(
+      SecurityFixtures.BobUsername,
+      SecurityFixtures.BobPassword,
+      tenant = Some(SecurityFixtures.TenantId)
+    )
+
+  /** A request of any method, with an empty JSON body when it takes one. */
+  private def send(
+      h: ManagerServerHarness.Harness,
+      method: String,
+      path: String,
+      token: Option[String]
+  ): java.net.http.HttpResponse[String] =
+    val hasBody = method != "GET" && method != "DELETE"
+    val request = java.net.http.HttpRequest
+      .newBuilder(java.net.URI.create(s"${h.baseUrl}$path"))
+      .timeout(RequestTimeout)
+      .method(
+        method,
+        if hasBody then java.net.http.HttpRequest.BodyPublishers.ofString("{}")
+        else java.net.http.HttpRequest.BodyPublishers.noBody()
+      )
+    if hasBody then request.header("Content-Type", "application/json")
+    token.foreach(t => request.header("X-API-Key", t))
+    h.httpClient.send(request.build(), java.net.http.HttpResponse.BodyHandlers.ofString())
+
+  private val BranchBase = s"/api/branch/tenant/${SecurityFixtures.TenantId}/database/" +
+    s"${SecurityFixtures.TenantDbName}/branches"
+
+  it should "let a plain session reach exactly the branch routes, whose gate then answers it" in
+    withBranchRoutes { h =>
+      val bob = bobOf(h)
+      // bob holds no pool grant, so the answer is the handlers' gate's: past the guard, and refused
+      // by the rule meant for him.
+      val body =
+        s"""{"tenant":"${SecurityFixtures.TenantId}","tenantDb":"${SecurityFixtures.TenantDbName}","""
+      List(
+        ("POST", "/api/branch/create", body + """"name":"x"}"""),
+        ("POST", "/api/branch/propose", body + """"branch":"x"}"""),
+        ("POST", "/api/branch/discard", body + """"branch":"x"}""")
+      ).foreach { (_, path, json) =>
+        val resp = post(h.httpClient, s"${h.baseUrl}$path", json, apiKey = Some(bob))
+        withClue(s"POST $path body: ${resp.body()}") {
+          resp.statusCode() shouldBe 403
+          errorCode(resp.body()) should contain("no_pool_access")
+        }
+      }
+      List(
+        BranchBase,
+        s"$BranchBase/b",
+        s"$BranchBase/b/changes",
+        s"$BranchBase/b/diff?schema=main&table=t",
+        s"$BranchBase/b/schema-diff?schema=main&table=t"
+      ).foreach { path =>
+        val resp = get(h.httpClient, s"${h.baseUrl}$path", apiKey = Some(bob))
+        withClue(s"GET $path body: ${resp.body()}") {
+          resp.statusCode() shouldBe 403
+          errorCode(resp.body()) should contain("no_pool_access")
+        }
+      }
+    }
+
+  it should "keep merge and everything else about a branch to admins, on whole segments" in
+    withBranchRoutes { h =>
+      val bob = bobOf(h)
+      List(
+        // The one route a plain user must never reach, in the spellings the guard has met before.
+        "POST" -> "/api/branch/merge",
+        "POST" -> "/%61pi/branch/merge",
+        "POST" -> "////api/branch/merge",
+        "POST" -> "/api/branch/%6Derge",
+        // What only looks like a listed route.
+        "POST" -> "/api/branch/create/extra",
+        "POST" -> "/api/branch/create/",
+        "POST" -> "/api/branch/create%2Fextra",
+        "POST" -> "/api/branch/merge%2F..%2Fcreate",
+        "POST" -> "/api/branch//create",
+        "POST" -> "/api/branchx/create",
+        "POST" -> "/api/branch/created",
+        "POST" -> "/api/branch/later-route",
+        "GET"  -> "/api/branch/later-route",
+        "GET"  -> "/api/branch",
+        "GET"  -> "/api/branch/",
+        "GET"  -> s"/api/branch/tenant/${SecurityFixtures.TenantId}",
+        "GET"  -> s"/api/branch/tenant/${SecurityFixtures.TenantId}/database/d",
+        "GET"  -> "/api/branch/tenant//database/d/branches",
+        "GET"  -> s"/api/branch/tenant/${SecurityFixtures.TenantId}/database//branches",
+        "GET"  -> s"$BranchBase/",
+        "GET"  -> s"$BranchBase//changes",
+        "GET"  -> s"$BranchBase/b/merge",
+        "GET"  -> s"$BranchBase/b/other",
+        "GET"  -> s"$BranchBase/b/changes/",
+        "GET"  -> s"$BranchBase/b/changes/extra",
+        "GET"  -> s"$BranchBase/b/diff/extra",
+        "GET"  -> s"$BranchBase/b/schema-diff/extra",
+        // A listed path under the wrong method.
+        "GET"    -> "/api/branch/create",
+        "GET"    -> "/api/branch/propose",
+        "GET"    -> "/api/branch/discard",
+        "DELETE" -> "/api/branch/discard",
+        "PUT"    -> "/api/branch/create",
+        "POST"   -> BranchBase,
+        "POST"   -> s"$BranchBase/b",
+        "DELETE" -> s"$BranchBase/b",
+        "POST"   -> s"$BranchBase/b/changes",
+        "PUT"    -> s"$BranchBase/b/diff",
+        "POST"   -> s"$BranchBase/b/schema-diff"
+      ).foreach { (method, path) =>
+        val resp = send(h, method, path, Some(bob))
+        withClue(s"$method $path body: ${resp.body()}") {
+          resp.statusCode() shouldBe 403
+          errorCode(resp.body()) should contain("admin_required")
+        }
+      }
+    }
+
+  it should "refuse no credential on the branch routes, in every spelling" in
+    withBranchRoutes { h =>
+      List(
+        "POST" -> "/api/branch/create",
+        "POST" -> "/api/branch/merge",
+        "GET"  -> BranchBase,
+        "POST" -> "/%61pi/branch/create",
+        "POST" -> "////api/branch/create",
+        "GET"  -> s"/%61pi${BranchBase.stripPrefix("/api")}",
+        "GET"  -> s"////$BranchBase"
+      ).foreach { (method, path) =>
+        val resp = send(h, method, path, None)
+        withClue(s"$method $path body: ${resp.body()}") {
+          resp.statusCode() shouldBe 401
+        }
+      }
+    }
+
+  it should "leave another tenant's branch path to the handlers' gate, which refuses it" in
+    withBranchRoutes { h =>
+      val bob   = bobOf(h)
+      val alice = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      val globex = s"/api/branch/tenant/${SecurityFixtures.GlobexTenantId}/database/" +
+        s"${SecurityFixtures.GlobexTenantDbName}/branches"
+      val body = s"""{"tenant":"${SecurityFixtures.GlobexTenantId}",""" +
+        s""""tenantDb":"${SecurityFixtures.GlobexTenantDbName}","""
+      // A plain member of acme, and an admin of acme: neither has anything to do with globex.
+      List(bob, alice).foreach { token =>
+        List(globex, s"$globex/b", s"$globex/b/changes").foreach { path =>
+          val resp = get(h.httpClient, s"${h.baseUrl}$path", apiKey = Some(token))
+          withClue(s"GET $path body: ${resp.body()}") {
+            resp.statusCode() shouldBe 403
+            errorCode(resp.body()) should contain("tenant_forbidden")
+          }
+        }
+        val resp = post(
+          h.httpClient,
+          s"${h.baseUrl}/api/branch/create",
+          body + """"name":"x"}""",
+          apiKey = Some(token)
+        )
+        withClue(s"POST create body: ${resp.body()}") {
+          resp.statusCode() shouldBe 403
+          errorCode(resp.body()) should contain("tenant_forbidden")
+        }
+      }
+      // A tenant that does not exist reads the same to a plain member.
+      val ghost = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/branch/tenant/ghost/database/d/branches",
+        apiKey = Some(bob)
+      )
+      withClue(s"ghost body: ${ghost.body()}") {
+        ghost.statusCode() shouldBe 403
+        errorCode(ghost.body()) should contain("tenant_forbidden")
+      }
+    }
+
+  it should "still answer an admin of the tenant through the same gate, and a merge" in
+    withBranchRoutes { h =>
+      val alice = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      // The fixture database is no DuckLake one: past the guard, past the tenant, to the kind.
+      val listed = get(h.httpClient, s"${h.baseUrl}$BranchBase", apiKey = Some(alice))
+      withClue(s"list body: ${listed.body()}") {
+        listed.statusCode() shouldBe 400
+        errorCode(listed.body()) should contain("invalid_kind")
+      }
+      val merged = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/branch/merge",
+        s"""{"tenant":"${SecurityFixtures.TenantId}","tenantDb":"${SecurityFixtures.TenantDbName}",""" +
+          """"branch":"x","proposalId":"mg"}""",
+        apiKey = Some(alice)
+      )
+      withClue(s"merge body: ${merged.body()}") {
+        merged.statusCode() shouldBe 400
+        errorCode(merged.body()) should contain("invalid_kind")
+      }
+    }
 
   it should "keep admin sessions unrestricted" in {
     val fix = SecurityFixtures.freshStore()

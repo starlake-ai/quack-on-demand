@@ -9,7 +9,8 @@ from ._run import call
 app = typer.Typer(
     help=(
         "Writable branches of a DuckLake database: agents write on a branch, a human reviews "
-        "the change set and merges."
+        "the change set and merges. Anyone who may connect to one of the database's pools may "
+        "branch it, in their own tenant; merge needs an admin."
     )
 )
 
@@ -40,7 +41,12 @@ def create(
     db: str = DB,
     name: str = typer.Option(..., "--name", help="Branch name (lowercase, letters/digits/_/-)."),
     ttl_hours: int = typer.Option(
-        None, "--ttl-hours", help="Hours until the branch expires; 0 = never; default = server."
+        None,
+        "--ttl-hours",
+        help=(
+            "Hours until the branch expires; default = server. An admin may pass 0 = never; anyone "
+            "else asks for 1 up to the server's default."
+        ),
     ),
     from_snapshot: int = typer.Option(
         None,

@@ -8,12 +8,12 @@ import io.circe.syntax._
 import Dtos.given
 
 /** The agent-facing branch tools (Epic 1): `create_branch`, `list_branches`, `branch_changes`,
-  * `diff`, `propose_merge`, `discard`. Listed for every PAT (`adminOnly = false`), but the
-  * handlers' gate (`TenantDbGate`) admits only a superuser or an admin of the tenant: a plain
-  * user's token, or a `--drop-admin` one, gets `tenant_forbidden`. `merge` is deliberately absent:
-  * a human (a different principal than the proposer) approves through REST or the CLI. Each tool
-  * curries `principal.rawToken` into the REST handler's `apiKey` seam, so the handler resolves the
-  * same PAT principal this route did.
+  * `diff`, `propose_merge`, `discard`. Listed for every PAT (`adminOnly = false`): the handlers'
+  * one gate admits any principal who may connect to one of the parent's pools, in its own tenant, a
+  * plain user's token and a `--drop-admin` one included, which then read as the plain users they
+  * are. `merge` is deliberately absent: a human (a different principal than the proposer) approves
+  * through REST or the CLI, and only an admin. Each tool curries `principal.rawToken` into the REST
+  * handler's `apiKey` seam, so the handler resolves the same PAT principal this route did.
   */
 final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resolver):
 
@@ -49,7 +49,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
         "Branch name: lowercase letter first, then letters, digits, '_' or '-', at most 48 chars."
       ),
       "ttl_hours" -> intProp(
-        "Hours until the branch expires and is discarded; 0 = never; default = server setting."
+        "Hours until the branch expires and is discarded; default = server setting. An admin may " +
+          "pass 0 = never; anyone else asks for 1 up to the server's default."
       ),
       tenantProp
     ),
@@ -96,7 +97,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
         "modified with insert/delete/update counts, or altered), conflicts against the live " +
         "database, and anything v1 cannot merge. `mergeable` means no table conflict and " +
         "nothing unsupported: row conflicts are the merge's to decide, and the proposal shows " +
-        "them.",
+        "them. Unless you are an admin, only the tables you hold a grant on are named, and " +
+        "`otherTables` counts the rest.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -162,8 +164,9 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
   private val proposeMergeTool = McpToolDef(
     name = "propose_merge",
     description =
-      "Propose the branch for merge: records a merge request carrying the change set and what a " +
-        "merge would do to its rows now. A human with a different identity reviews and merges " +
+      "Propose a branch you own (or any branch, as an admin) for merge: records a merge request " +
+        "carrying the change set and what a merge would do to its rows now. A human with a " +
+        "different identity, and an admin, reviews and merges " +
         "(there is no merge tool). Proposing again replaces an open proposal, unless its last " +
         "merge may have landed: that refuses with proposal_unsettled, and the human merges it " +
         "again or discards the branch, as the refusal says.",

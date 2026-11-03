@@ -1671,7 +1671,8 @@ final case class SchemaDiffResponse(
 // ---------- Branches (Epic 1) ----------
 
 /** `fromSnapshot` is reserved: v1 forks at the parent head and refuses any other value with 409
-  * `fork_snapshot_unsupported`. `ttlHours` 0 = never expires; absent = the manager default.
+  * `fork_snapshot_unsupported`. `ttlHours`: absent = the manager default; 0 = never expires, an
+  * admin's only; anyone else asks for 1 up to that default, when it has one.
   */
 final case class BranchCreateRequest(
     tenant: String,

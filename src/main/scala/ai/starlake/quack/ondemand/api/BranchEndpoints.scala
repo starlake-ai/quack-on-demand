@@ -7,8 +7,8 @@ import sttp.tapir.json.circe._
 
 /** Branch REST surface (Epic 1), its own object for the `<clinit>` 64KB reason shared by every
   * endpoint module. POSTs carry tenant in the body like [[RestoreEndpoints]]; GETs carry it in the
-  * path. Every endpoint takes the session input; the handlers enforce [[TenantScopeCheck]] per
-  * request.
+  * path. Every endpoint takes the session input; the handlers' one gate decides per request, and
+  * `ManagerServer.isBranchApi` lists the routes a non-admin may reach.
   */
 object BranchEndpoints:
 
@@ -34,10 +34,14 @@ object BranchEndpoints:
       .description(
         "Create a writable branch of a DuckLake tenant-db: a zero-copy clone of the catalog at " +
           "the current head, served by its own pool. Target it with the FlightSQL `branch` " +
-          "connection header or the MCP `branch` argument. 409 duplicate / branch_limit / " +
+          "connection header or the MCP `branch` argument. Any principal who may connect to one " +
+          "of the parent's pools may branch it, in its own tenant. 409 duplicate / branch_limit / " +
           "fork_snapshot_unsupported (v1 forks at head only); 400 invalid_name / " +
-          "branch_of_branch_unsupported; 403 acl_denied when the caller cannot connect to the " +
-          "parent."
+          "branch_of_branch_unsupported; 400 invalid_ttl: an admin may ask for ttlHours 0 (no " +
+          "TTL), anyone else from 1 up to the server's default; absent ttlHours takes the default " +
+          "for everyone; 403 no_pool_access when the caller cannot connect to the parent, " +
+          "tenant_forbidden on a tenant that is not theirs; 503 authz_unavailable when that " +
+          "cannot be decided."
       )
 
   val listEndpoint: PublicEndpoint[
@@ -53,7 +57,8 @@ object BranchEndpoints:
       .out(jsonBody[BranchListResponse])
       .description(
         "List the live branches of a tenant-db (open or proposed); includeTerminal=true also " +
-          "returns merged, discarded and expired history rows."
+          "returns merged, discarded and expired history rows. Open to any principal who may " +
+          "connect to one of its pools, in its own tenant."
       )
 
   val getEndpoint: PublicEndpoint[
@@ -66,7 +71,10 @@ object BranchEndpoints:
       .in(branchPath / path[String]("branch"))
       .in(Endpoints.authToken)
       .out(jsonBody[BranchDetailResponse])
-      .description("One branch (live or terminal) with its merge history.")
+      .description(
+        "One branch (live or terminal) with its merge history. Unless the caller is an admin, a " +
+          "merge row names only the tables they hold a grant on, and carries no rowConflicts."
+      )
 
   val changesEndpoint: PublicEndpoint[
     (String, String, String, Option[Boolean], Option[String]),
@@ -84,7 +92,10 @@ object BranchEndpoints:
           "recreated, modified or altered (with insert/delete/update counts unless counts=false), " +
           "the conflicts against main, and the changes v1 cannot merge. `mergeable` means no " +
           "table conflict and nothing unsupported: row conflicts are the merge's to decide, and " +
-          "the proposal shows them."
+          "the proposal shows them. Unless the caller is an admin, tables and conflicts name only " +
+          "the tables they hold a grant on, unsupported is empty, otherTables counts the rest, " +
+          "and a table they may not count has no rowConflicts; `mergeable` stays the whole " +
+          "branch's."
       )
 
   val diffEndpoint: PublicEndpoint[
@@ -114,7 +125,9 @@ object BranchEndpoints:
       .out(jsonBody[DataDiffResponse])
       .description(
         "Row-level diff of one table between the branch's fork snapshot and its head: the same " +
-          "paginated change feed as the catalog data-diff (keyset cursor, changeType filter)."
+          "paginated change feed as the catalog data-diff (keyset cursor, changeType filter). A " +
+          "table the caller holds no grant on answers as one that does not exist, unless they " +
+          "are an admin."
       )
 
   val schemaDiffEndpoint: PublicEndpoint[
@@ -130,7 +143,9 @@ object BranchEndpoints:
       .in(Endpoints.authToken)
       .out(jsonBody[SchemaDiffResponse])
       .description(
-        "Column-level diff of one table between the branch's fork snapshot and its head."
+        "Column-level diff of one table between the branch's fork snapshot and its head. A table " +
+          "the caller holds no grant on answers as one that does not exist, unless they are an " +
+          "admin."
       )
 
   val proposeEndpoint: PublicEndpoint[
@@ -145,15 +160,17 @@ object BranchEndpoints:
       .in(Endpoints.authToken)
       .out(jsonBody[BranchProposeResponse])
       .description(
-        "Propose the branch for merge: records a merge request with the change set and what a " +
-          "merge would do to its rows now, read on a merge node. A branch with conflicts can be " +
+        "Propose the branch for merge (its owner or an admin: 403 not_owner): records a merge " +
+          "request with the change set and what a merge would do to its rows now, read on a " +
+          "merge node. A branch with conflicts can be " +
           "proposed; merge refuses it. onConflict (main or branch) names the side that wins every " +
           "row conflict: a cell, a row one side deleted and the other updated, rows matching a " +
           "key; keys names the columns that catch rows both sides inserted. Proposing " +
           "again replaces an open proposal, unless its last merge may have landed (409 " +
           "proposal_unsettled: merge again, or discard; only a discard when another proposal's " +
-          "commit is on main). 400 invalid_on_conflict, invalid_key; " +
-          "409 history_gap."
+          "commit is on main). 400 invalid_on_conflict, invalid_key (a key on a table the " +
+          "caller holds no grant on, unless they are an admin, reads as one not in the change " +
+          "set); 409 history_gap."
       )
 
   val mergeEndpoint: PublicEndpoint[
@@ -169,7 +186,8 @@ object BranchEndpoints:
       .out(jsonBody[BranchMergeResponse])
       .description(
         "Merge a proposed branch onto main in one stamped snapshot, tag it, and tear the branch " +
-          "down. Tables both sides changed merge cell by cell. Human-gated: the approver must " +
+          "down. Tables both sides changed merge cell by cell. Admins only (403 admin_required). " +
+          "Human-gated: the approver must " +
           "differ from the proposer (403 self_merge_forbidden) and no MCP tool exposes it. " +
           "proposalId names the open proposal the approver read: another one in its place is 409 " +
           "proposal_replaced, and nothing changes. 409 proposal_unsettled: another proposal of this " +
@@ -183,7 +201,8 @@ object BranchEndpoints:
           "merge_failed closes it when the node failed, and keeps it open after a timeout or when " +
           "the fence could not be armed: merge again. The reply's changes carries no row counts " +
           "(inserted, deleted and updated read 0) and, when a merge settled, reads main after the " +
-          "landing; merge.summary and merge.rowConflicts hold the numbers, for a superuser."
+          "landing; merge.summary and merge.rowConflicts hold the numbers, for a superuser. " +
+          "A tenant admin gets those flagged countsUnavailable."
       )
 
   val discardEndpoint: PublicEndpoint[

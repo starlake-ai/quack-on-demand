@@ -366,7 +366,12 @@ object ManagerServerHarness:
       // The authentication service behind POST /api/auth/login. None keeps the in-memory one (the
       // database authenticator's stand-in over `store`); a spec that drives a real chain, such as
       // the manager-wide password grant behind the database check, passes its own.
-      authService: Option[AuthenticationService] = None
+      authService: Option[AuthenticationService] = None,
+      // Builds the branch handlers from this harness's own supervisor, preview handlers and
+      // executor-identity resolver, the way Main does. None leaves the branch routes unmounted.
+      branchesOf: Option[
+        (PoolSupervisor, CatalogPreviewHandlers, RestCaller) => BranchHandlers
+      ] = None
   ): Harness =
     val mgrCfg  = minimalManagerConfig(port = 0)
     val edgeCfg = minimalFlightConfig
@@ -737,6 +742,7 @@ object ManagerServerHarness:
       moduleStaticMounts = moduleStaticMounts,
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
+      branches = branchesOf.map(build => build(sup, previewHandlers, restCaller)),
       patAuth = patAuth,
       scim = Some(new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, audit)),
       // Mirrors Main: the fleet routes are always mounted; outside fleet mode the handler has no

@@ -53,6 +53,14 @@ class BranchThreeWayE2ESpec
   private var stack: AuthzStack = null
   private var tessToken: String = ""
 
+  private val Other   = s"other_br3_$run"
+  private val BobPw   = "Bob-Pw-3391"
+  private val CarolPw = "Carol-Pw-3391"
+  private val DavePw  = "Dave-Pw-3391"
+
+  /** bob's and carol's role ids. */
+  private val roleIds = scala.collection.mutable.Map.empty[String, String]
+
   /** The current case's databases and pools. */
   private val opened = ListBuffer.empty[(String, String)]
 
@@ -90,6 +98,52 @@ class BranchThreeWayE2ESpec
         )
       )
       tessToken = stack.login(Some(Acme), "tess", "Tess-Pw-3391")
+      // Plain members, each with a role of their own: what it grants is each case's own.
+      List("bob" -> BobPw, "carol" -> CarolPw).foreach { (user, password) =>
+        val role = s"${user}_role"
+        roleIds(user) = stack
+          .post("/api/role/create", obj("tenant" -> s(Acme), "name" -> s(role)))
+          .hcursor
+          .get[String]("id")
+          .fold(e => throw e, identity)
+        stack.post(
+          "/api/user/create",
+          obj(
+            "tenant"   -> s(Acme),
+            "username" -> s(user),
+            "password" -> s(password),
+            "kind"     -> s("user"),
+            "roles"    -> Json.arr(s(role)),
+            "groups"   -> Json.arr(s("qod_all_pools"))
+          )
+        )
+      }
+      // Every table, and no pool: only the pool grant is missing.
+      stack.post(
+        "/api/user/create",
+        obj(
+          "tenant"   -> s(Acme),
+          "username" -> s("dave"),
+          "password" -> s(DavePw),
+          "kind"     -> s("user"),
+          "roles"    -> Json.arr(s("qod_all_tables")),
+          "groups"   -> Json.arr(s("qod_no_pools"))
+        )
+      )
+      // Another tenant, whose bob is another user, with every grant there is, there.
+      stack.post(
+        "/api/tenant/create",
+        obj("id" -> s(Other), "displayName" -> s(Other), "metastore" -> Json.obj())
+      )
+      stack.post(
+        "/api/user/create",
+        obj(
+          "tenant"   -> s(Other),
+          "username" -> s("bob"),
+          "password" -> s(BobPw),
+          "kind"     -> s("user")
+        )
+      )
 
   override def afterAll(): Unit =
     try if stack != null then stack.stop()
@@ -106,8 +160,13 @@ class BranchThreeWayE2ESpec
   override def afterEach(): Unit =
     try
       opened.foreach { (td, pool) =>
-        // A merged or never-made branch is gone already: 404.
-        cleanUp(td, "/api/branch/discard", proposeBody(td, "feature"), Set(200, 404))
+        // A merged branch is gone already: only the live ones are listed.
+        Try(stack.get(branchesOf(td))).toOption
+          .flatMap(_.hcursor.downField("branches").values)
+          .toList
+          .flatten
+          .flatMap(_.hcursor.get[String]("name").toOption)
+          .foreach(b => cleanUp(td, "/api/branch/discard", proposeBody(td, b), Set(200, 404)))
         cleanUp(
           td,
           "/api/pool/delete",
@@ -181,6 +240,8 @@ class BranchThreeWayE2ESpec
         .flight("SELECT 1", "admin", "admin", Acme, pool, superuser = true, branch = Some(branch))
         .toOption
     }
+
+  private def branchesOf(td: String): String = s"/api/branch/tenant/$Acme/database/$td/branches"
 
   private def proposeBody(td: String, branch: String, extra: (String, Json)*): String =
     obj((Seq("tenant" -> s(Acme), "tenantDb" -> s(td), "branch" -> s(branch)) ++ extra)*)
@@ -643,6 +704,511 @@ class BranchThreeWayE2ESpec
     branchCode shouldBe 409
     branchBody should include("history_gap")
     branchBody should include("the branch's snapshot")
+  }
+
+  // ---------- any principal who may connect may branch ----------
+
+  private def parsed(body: String): Json =
+    io.circe.parser.parse(body).fold(e => fail(s"not JSON: $body: $e"), identity)
+
+  /** A GET that must succeed, as `token`. */
+  private def read(path: String, token: String): Json =
+    val (code, body) = stack.getStatus(path, token)
+    withClue(s"GET $path answered $body: ")(code shouldBe 200)
+    parsed(body)
+
+  /** The answer must be this refusal. */
+  private def refused(code: Int, error: String)(answer: (Int, String)): Unit =
+    withClue(s"answered ${answer._2}: ") {
+      answer._1 shouldBe code
+      parsed(answer._2).hcursor.get[String]("error") shouldBe Right(error)
+    }
+
+  private def tableNames(changes: Json): List[String] =
+    changes.hcursor
+      .downField("tables")
+      .values
+      .toList
+      .flatten
+      .flatMap(_.hcursor.get[String]("table").toOption)
+
+  private def grant(user: String, td: String, table: String, verb: String): Unit =
+    stack.post(
+      "/api/role/permission/grant",
+      obj(
+        "roleId"  -> s(roleIds(user)),
+        "catalog" -> s(td),
+        "schema"  -> s("main"),
+        "table"   -> s(table),
+        "verb"    -> s(verb)
+      )
+    )
+
+  /** A plain user's statement on `pool`, or on their branch: every row, or a failure of the case.
+    */
+  private def as(user: String, password: String, pool: String, branch: Option[String])(
+      statement: String
+  ): List[String] =
+    stack
+      .flight(statement, user, password, Acme, pool, branch = branch)
+      .fold(err => fail(s"$user: $statement -> $err"), identity)
+
+  /** `user` creates a branch and waits for it to serve them. */
+  private def branchAs(
+      user: String,
+      password: String,
+      token: String,
+      td: String,
+      pool: String,
+      branch: String
+  ): Unit =
+    stack.post(
+      "/api/branch/create",
+      obj(
+        "tenant"   -> s(Acme),
+        "tenantDb" -> s(td),
+        "name"     -> s(branch),
+        "ttlHours" -> Json.fromInt(24)
+      ),
+      token
+    )
+    stack.await(s"branch $branch of $pool serving $user", 120.seconds) {
+      stack.flight("SELECT 1", user, password, Acme, pool, branch = Some(branch)).toOption
+    }
+
+  private def plainTable(td: String, pool: String, table: String = "fact"): Unit =
+    sql(pool, s"CREATE TABLE $td.main.$table (id BIGINT, note VARCHAR, qty INTEGER)")
+    sql(pool, s"INSERT INTO $td.main.$table SELECT i, 'n', 0 FROM range(10000) r(i)")
+
+  "a plain user" should "branch, write, read their numbers and propose; a tenant admin merges it" in {
+    ready()
+    val td = database("bobs")
+    plainTable(td, "bobs")
+    sql("bobs", s"CREATE TABLE $td.main.secret (id BIGINT, code VARCHAR)")
+    sql("bobs", s"INSERT INTO $td.main.secret VALUES (1, 'x'), (2, 'y')")
+    grant("bob", td, "fact", "RW")
+    val bob = stack.login(Some(Acme), "bob", BobPw)
+    branchAs("bob", BobPw, bob, td, "bobs", "feature")
+    val onBranch = Some("feature")
+    val asBob    = as("bob", BobPw, "bobs", onBranch)
+    asBob(s"UPDATE $td.main.fact SET note = 'b' WHERE id < 100")
+    asBob(s"INSERT INTO $td.main.fact VALUES (20000, 'bi', 1)")
+    // Written by the superuser, on bob's branch: he holds no grant on it, and it merges with it.
+    sql("bobs", s"UPDATE $td.main.secret SET code = 'z' WHERE id = 1", onBranch)
+    // Main moves too: rows of both sides, in other columns.
+    sql("bobs", s"UPDATE $td.main.fact SET qty = 9 WHERE id BETWEEN 50 AND 149")
+    val base = branchesOf(td)
+
+    // The list and the branch itself read to him, owner included.
+    read(base, bob).hcursor.downField("branches").downN(0).get[String]("owner") shouldBe Right(
+      "bob"
+    )
+    val (detailCode, detailBody) = stack.getStatus(s"$base/feature", bob)
+    detailCode shouldBe 200
+    detailBody should not include "secret"
+
+    // His numbers, by the node's own verdict on him; secret is not named, only counted.
+    val (changesCode, changesBody) = stack.getStatus(s"$base/feature/changes", bob)
+    withClue(changesBody)(changesCode shouldBe 200)
+    changesBody should not include "secret"
+    val changes = parsed(changesBody)
+    tableNames(changes) shouldBe List("fact")
+    val fact = changes.hcursor.downField("tables").downN(0)
+    (fact.get[Long]("updated"), fact.get[Long]("inserted")) shouldBe (Right(100L), Right(1L))
+    fact.get[Boolean]("countsUnavailable") shouldBe Right(false)
+    fact.get[Boolean]("threeWay") shouldBe Right(true)
+    changes.hcursor.get[Int]("otherTables") shouldBe Right(1)
+    changes.hcursor.get[List[String]]("unsupported") shouldBe Right(Nil)
+
+    // The diffs of a table he may read, and of one he may not, which reads as no such table.
+    read(s"$base/feature/schema-diff?schema=main&table=fact", bob)
+    read(s"$base/feature/diff?schema=main&table=fact&limit=5", bob).hcursor
+      .downField("summary")
+      .get[Long]("updated") shouldBe Right(100L)
+    List("schema-diff", "diff").foreach { diff =>
+      val (hiddenCode, hidden) =
+        stack.getStatus(s"$base/feature/$diff?schema=main&table=secret", bob)
+      val (absentCode, absent) =
+        stack.getStatus(s"$base/feature/$diff?schema=main&table=ghost", bob)
+      withClue(s"$diff: $hidden: ") {
+        hiddenCode shouldBe 404
+        (hiddenCode, hidden.replace("secret", "<t>")) shouldBe
+          (absentCode, absent.replace("ghost", "<t>"))
+      }
+    }
+    // A bad filter is refused first, for both.
+    val (badCode, bad) =
+      stack.getStatus(s"$base/feature/diff?schema=main&table=secret&changeType=nope", bob)
+    val (ghostCode, ghost) =
+      stack.getStatus(s"$base/feature/diff?schema=main&table=ghost&changeType=nope", bob)
+    (badCode, bad) shouldBe (ghostCode, ghost)
+
+    // A key on a table he does not see reads as one not in the change set, whatever its columns.
+    def keyedOn(table: String, column: String) = stack.postStatus(
+      "/api/branch/propose",
+      proposeBody(td, "feature", "keys" -> Json.obj(s"main.$table" -> Json.arr(s(column)))),
+      bob
+    )
+    val noSuchTable = keyedOn("ghost", "id")
+    refused(400, "invalid_key")(noSuchTable)
+    List(keyedOn("secret", "id"), keyedOn("secret", "no_such_column")).foreach { (code, body) =>
+      (code, body.replace("secret", "ghost")) shouldBe noSuchTable
+    }
+
+    // His proposal: the numbers of the table he may count, none on the merge row.
+    val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), bob)
+    proposed.noSpaces should not include "secret"
+    val shown = proposed.hcursor.downField("changes").downField("tables").downN(0)
+    shown.get[String]("table") shouldBe Right("fact")
+    val rows = shown.downField("rowConflicts")
+    (rows.get[Long]("toUpdate"), rows.get[Long]("toInsert")) shouldBe (Right(100L), Right(1L))
+    rows.get[Boolean]("hasConflicts") shouldBe Right(false)
+    val merge = proposed.hcursor.downField("merge")
+    merge.get[String]("proposer") shouldBe Right("bob")
+    merge.get[List[Json]]("rowConflicts") shouldBe Right(Nil)
+    tableNames(merge.downField("summary").focus.get) shouldBe List("fact")
+
+    // He may not merge it: the guard says so, on a session that may do all of the above.
+    refused(403, "admin_required")(
+      stack.postStatus("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)), bob)
+    )
+
+    // The tenant admin sees it all, secret included, and merges bob's proposal.
+    val asTess = read(s"$base/feature/changes", tessToken)
+    tableNames(asTess).toSet shouldBe Set("fact", "secret")
+    asTess.hcursor.get[Int]("otherTables") shouldBe Right(0)
+    val done =
+      stack.post("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)), tessToken)
+    done.hcursor.downField("merge").get[String]("status") shouldBe Right("merged")
+    done.hcursor.downField("merge").get[String]("approver") shouldBe Right("tess")
+    sql("bobs", s"SELECT note, qty FROM $td.main.fact WHERE id = 60") shouldBe List("b,9")
+    sql("bobs", s"SELECT note FROM $td.main.fact WHERE id = 20000") shouldBe List("bi")
+    sql("bobs", s"SELECT code FROM $td.main.secret WHERE id = 1") shouldBe List("z")
+  }
+
+  it should "learn nothing of a masked cell from a proposal, right guess or wrong" in {
+    ready()
+    val td = database("masked")
+    plainTable(td, "masked")
+    // A table with no policy on it: a policy holder's counts are refused there too.
+    plainTable(td, "masked", "beside")
+    grant("carol", td, "fact", "RW")
+    grant("carol", td, "beside", "RW")
+    stack.post(
+      "/api/role/column-policy/create",
+      obj(
+        "roleId"       -> s(roleIds("carol")),
+        "catalogName"  -> s(td),
+        "schemaName"   -> s("main"),
+        "tableName"    -> s("fact"),
+        "columnName"   -> s("note"),
+        "action"       -> s("mask"),
+        "transformSql" -> s("'***'")
+      )
+    )
+    val carol = stack.login(Some(Acme), "carol", CarolPw)
+    val base  = branchesOf(td)
+    val root  = stack.login(None, "admin", "admin")
+    List("cell-right", "cell-wrong", "key-right", "key-wrong").foreach(
+      branchAs("carol", CarolPw, carol, td, "masked", _)
+    )
+    // What main wrote since the fork, and she must not learn: the mask holds on a plain read.
+    sql("masked", s"UPDATE $td.main.fact SET note = 'top-secret' WHERE id = 5")
+    sql("masked", s"INSERT INTO $td.main.fact VALUES (50000, 'also-secret', 1)")
+    as("carol", CarolPw, "masked", None)(s"SELECT note FROM $td.main.fact WHERE id = 5") shouldBe
+      List("***")
+    def on(branch: String) = as("carol", CarolPw, "masked", Some(branch))
+    // On her own branches: an UPDATE of the masked cell, and a row keyed on the masked column.
+    List("cell-right" -> "top-secret", "cell-wrong" -> "not-it").foreach { (branch, guess) =>
+      on(branch)(s"UPDATE $td.main.fact SET note = '$guess' WHERE id = 5")
+      on(branch)(s"UPDATE $td.main.beside SET qty = 1 WHERE id = 5")
+    }
+    List("key-right" -> "also-secret", "key-wrong" -> "not-it").foreach { (branch, guess) =>
+      on(branch)(s"INSERT INTO $td.main.fact VALUES (60000, '$guess', 1)")
+      on(branch)(s"UPDATE $td.main.beside SET qty = 1 WHERE id = 5")
+    }
+
+    /** What cannot be the same twice: the ids, the clock, and the branch's own names. */
+    def bare(j: Json): Json =
+      j.mapObject(
+        _.remove("id")
+          .remove("branch")
+          .remove("name")
+          .remove("pool")
+          .remove("catalogDb")
+          .remove("createdAt")
+          .remove("updatedAt")
+          .remove("decidedAt")
+          .remove("expiresAt")
+          .mapValues(bare)
+      ).mapArray(_.map(bare))
+
+    /** Her propose reply, then her read of the branch, then its row in the history, as she sees
+      * them.
+      */
+    def replies(branch: String, keys: Map[String, List[String]]): List[Json] =
+      val body = proposeBody(
+        td,
+        branch,
+        "keys" -> Json.fromFields(
+          keys.map((t, cols) => t -> Json.arr(cols.map(s)*))
+        )
+      )
+      val proposed = stack.post("/api/branch/propose", body, carol)
+      val changes  = read(s"$base/$branch/changes", carol)
+      val detail   = read(s"$base/$branch", carol)
+      List(proposed, changes, detail)
+
+    /** What the system's Decide found, as a superuser reads it. */
+    def found(branch: String): (Boolean, Long, Long) =
+      val row = read(s"$base/$branch", root).hcursor
+        .downField("merges")
+        .downN(0)
+        .downField("rowConflicts")
+        .values
+        .toList
+        .flatten
+        .find(_.hcursor.get[String]("table").contains("fact"))
+        .getOrElse(fail(s"no row numbers of fact on $branch"))
+        .hcursor
+      (
+        row.get[Boolean]("hasConflicts").toOption.get,
+        row.get[Long]("cellConflicts").toOption.get,
+        row.get[Long]("keyMatches").toOption.get
+      )
+
+    List(
+      ("cell", Map.empty[String, List[String]], (false, 0L, 0L), (true, 1L, 0L)),
+      ("key", Map("main.fact" -> List("note")), (true, 0L, 1L), (false, 0L, 0L))
+    ).foreach { (kind, keys, onRight, onWrong) =>
+      withClue(s"through a $kind: ") {
+        val right = replies(s"$kind-right", keys)
+        val wrong = replies(s"$kind-wrong", keys)
+        // The oracle's bit is there to read: the two proposals differ, to a superuser.
+        found(s"$kind-right") shouldBe onRight
+        found(s"$kind-wrong") shouldBe onWrong
+        // And not to her: the same replies, whichever she guessed.
+        right.map(bare) shouldBe wrong.map(bare)
+        right.foreach(_.noSpaces should not include "secret")
+        // A table she can see, with no entry, and no number; beside, under no policy, the same.
+        val (reply, changes) = (right.head.hcursor.downField("changes").focus.get, right(1))
+        List(reply, changes).foreach { c =>
+          tableNames(c).toSet shouldBe Set("fact", "beside")
+          c.hcursor.get[Int]("otherTables") shouldBe Right(0)
+          c.hcursor.downField("tables").values.toList.flatten.foreach { t =>
+            t.hcursor.downField("rowConflicts").focus.forall(_.isNull) shouldBe true
+            t.hcursor.get[Boolean]("countsUnavailable") shouldBe Right(true)
+            List("inserted", "deleted", "updated")
+              .foreach(n => t.hcursor.get[Long](n) shouldBe Right(0L))
+          }
+        }
+        right.head.hcursor.downField("merge").get[List[Json]]("rowConflicts") shouldBe Right(Nil)
+        right(2).hcursor.downField("merges").downN(0).get[List[Json]]("rowConflicts") shouldBe
+          Right(Nil)
+      }
+    }
+  }
+
+  it should "propose only what they own, and ask for no forever" in {
+    ready()
+    val td = database("owned")
+    plainTable(td, "owned")
+    grant("bob", td, "fact", "RW")
+    grant("carol", td, "fact", "RW")
+    val carol = stack.login(Some(Acme), "carol", CarolPw)
+    val bob   = stack.login(Some(Acme), "bob", BobPw)
+    branchAs("carol", CarolPw, carol, td, "owned", "carols")
+    refused(403, "not_owner")(
+      stack.postStatus("/api/branch/propose", proposeBody(td, "carols"), bob)
+    )
+    refused(403, "not_owner")(
+      stack.postStatus("/api/branch/discard", proposeBody(td, "carols"), bob)
+    )
+    val asked = (ttl: Int) =>
+      stack.postStatus(
+        "/api/branch/create",
+        obj(
+          "tenant"   -> s(Acme),
+          "tenantDb" -> s(td),
+          "name"     -> s("forever"),
+          "ttlHours" -> Json.fromInt(ttl)
+        ),
+        bob
+      )
+    refused(400, "invalid_ttl")(asked(0))
+    refused(400, "invalid_ttl")(asked(100000))
+    asked(0)._2 should include("168")
+    read(branchesOf(td), bob).hcursor.downField("branches").values.toList.flatten.size shouldBe 1
+    // The owner discards her own.
+    stack.post("/api/branch/discard", proposeBody(td, "carols"), carol)
+    read(branchesOf(td), bob).hcursor.downField("branches").values.toList.flatten shouldBe Nil
+  }
+
+  it should "be refused every endpoint with no pool of the database, and every tenant but their own" in {
+    ready()
+    val td = database("sealed")
+    plainTable(td, "sealed")
+    stack.post(
+      "/api/branch/create",
+      obj("tenant" -> s(Acme), "tenantDb" -> s(td), "name" -> s("feature"))
+    )
+    val base = branchesOf(td)
+    val body = proposeBody(td, "feature")
+
+    /** Every branch route, as `token`, on tenant `tenant`'s path or body. */
+    def everyRoute(token: String, tenant: String): List[(Int, String)] =
+      val path = s"/api/branch/tenant/$tenant/database/$td/branches"
+      val op   = obj("tenant" -> s(tenant), "tenantDb" -> s(td), "branch" -> s("feature"))
+      List(
+        stack.getStatus(path, token),
+        stack.getStatus(s"$path/feature", token),
+        stack.getStatus(s"$path/feature/changes", token),
+        stack.getStatus(s"$path/feature/diff?schema=main&table=fact", token),
+        stack.getStatus(s"$path/feature/schema-diff?schema=main&table=fact", token),
+        stack.postStatus(
+          "/api/branch/create",
+          obj(
+            "tenant"   -> s(tenant),
+            "tenantDb" -> s(td),
+            "name"     -> s("nope"),
+            "ttlHours" -> Json.fromInt(24)
+          ),
+          token
+        ),
+        stack.postStatus("/api/branch/propose", op, token),
+        stack.postStatus("/api/branch/discard", op, token)
+      )
+
+    // dave holds every table and no pool: 403 on every endpoint, whichever credential.
+    val dave    = stack.login(Some(Acme), "dave", DavePw)
+    val davePat = stack
+      .post(
+        "/api/auth/pat/create",
+        obj("name" -> s(s"dave-$run"), "dropAdmin" -> Json.False),
+        token = dave
+      )
+      .hcursor
+      .get[String]("token")
+      .fold(e => throw e, identity)
+    List(dave, davePat).foreach { token =>
+      everyRoute(token, Acme).foreach(refused(403, "no_pool_access"))
+      refused(403, "admin_required")(
+        stack.postStatus(
+          "/api/branch/merge",
+          proposeBody(td, "feature", "proposalId" -> s("m")),
+          token
+        )
+      )
+    }
+
+    // Another tenant's bob, by name a member here, and with every grant over there.
+    val stranger = stack.login(Some(Other), "bob", BobPw)
+    everyRoute(stranger, Acme).foreach(refused(403, "tenant_forbidden"))
+    // Our bob, who may connect here, on the other tenant's path and on one that does not exist.
+    grant("bob", td, "fact", "RW")
+    val bob = stack.login(Some(Acme), "bob", BobPw)
+    read(base, bob)
+    everyRoute(bob, Other).foreach(refused(403, "tenant_forbidden"))
+    everyRoute(bob, "no_such_tenant").foreach(refused(403, "tenant_forbidden"))
+    // Nothing got through: the branch is as it was, and nothing else was made.
+    read(base, tessToken).hcursor.downField("branches").values.toList.flatten.size shouldBe 1
+    read(s"$base/feature", tessToken).hcursor.get[List[Json]]("merges") shouldBe Right(Nil)
+  }
+
+  it should "work over MCP with their own token, within its axes" in {
+    ready()
+    val td = database("agent")
+    plainTable(td, "agent")
+    sql("agent", s"CREATE TABLE $td.main.secret (id BIGINT, code VARCHAR)")
+    grant("bob", td, "fact", "RW")
+    val bob                                        = stack.login(Some(Acme), "bob", BobPw)
+    def pat(name: String, fields: (String, Json)*) = stack
+      .post(
+        "/api/auth/pat/create",
+        obj((List("name" -> s(s"$name-$run"), "dropAdmin" -> Json.False) ++ fields)*),
+        token = bob
+      )
+      .hcursor
+      .get[String]("token")
+      .fold(e => throw e, identity)
+    // A token that writes only on a branch: agents never write main, as a hard rule.
+    val agent                                     = pat("agent", "branchOnly" -> Json.True)
+    def tool(name: String, args: (String, Json)*) =
+      stack.mcpTool(agent, name, Json.obj((("database" -> s(td)) +: args)*))
+    def ok(answer: Either[String, String]): Json =
+      answer.fold(err => fail(s"the tool refused: $err"), parsed)
+    val created = ok(
+      tool("create_branch", "name" -> s("feature"), "ttl_hours" -> Json.fromInt(24))
+    )
+    created.hcursor.get[String]("owner") shouldBe Right("bob")
+    stack.await("the branch serving over MCP", 120.seconds) {
+      tool("run_sql", "sql" -> s("SELECT 1"), "branch" -> s("feature")).toOption
+    }
+    // Its write on the branch lands, and main refuses it.
+    ok(
+      tool(
+        "run_sql",
+        "sql"    -> s(s"UPDATE $td.main.fact SET note = 'agent' WHERE id < 10"),
+        "branch" -> s("feature")
+      )
+    )
+    tool("run_sql", "sql" -> s(s"UPDATE $td.main.fact SET note = 'agent' WHERE id < 10")) match
+      case Left(err) => err should include("write_requires_branch")
+      case Right(t)  => fail(s"the branch-only token wrote on main: $t")
+    sql("agent", s"SELECT count(*) FROM $td.main.fact WHERE note = 'agent'") shouldBe List("0")
+    sql("agent", s"INSERT INTO $td.main.secret VALUES (1, 'x')", Some("feature"))
+
+    val changes = ok(tool("branch_changes", "branch" -> s("feature")))
+    tableNames(changes) shouldBe List("fact")
+    changes.hcursor.get[Int]("otherTables") shouldBe Right(1)
+    changes.noSpaces should not include "secret"
+    changes.hcursor.downField("tables").downN(0).get[Long]("updated") shouldBe Right(10L)
+    val proposed = ok(tool("propose_merge", "branch" -> s("feature")))
+    proposed.hcursor.downField("merge").get[String]("proposer") shouldBe Right("bob")
+    proposed.hcursor.downField("merge").get[List[Json]]("rowConflicts") shouldBe Right(Nil)
+    proposed.noSpaces should not include "secret"
+    // No merge tool, and no forever.
+    tool("merge", "branch" -> s("feature")).isLeft shouldBe true
+    tool("create_branch", "name" -> s("forever"), "ttl_hours" -> Json.fromInt(0)) match
+      case Left(err) => err should include("invalid_ttl")
+      case Right(t)  => fail(s"a plain token asked for no TTL: $t")
+
+    // A token scoped to another database sees nothing here.
+    val elsewhere = pat("elsewhere", "databases" -> Json.arr(s("no_such_db")))
+    stack.mcpTool(elsewhere, "list_branches", Json.obj("database" -> s(td))) match
+      case Left(err) => err should include("token_scope")
+      case Right(t)  => fail(s"a token scoped elsewhere listed: $t")
+
+    // A tenant admin's --drop-admin token reaches these endpoints as the plain user it is: tess is
+    // an admin, whose token may not merge, nor ask for no TTL, nor read her numbers as an admin's.
+    val dropped = stack
+      .post(
+        "/api/auth/pat/create",
+        obj("name" -> s(s"tess-$run"), "dropAdmin" -> Json.True),
+        token = tessToken
+      )
+      .hcursor
+      .get[String]("token")
+      .fold(e => throw e, identity)
+    stack.mcpTool(
+      dropped,
+      "create_branch",
+      Json.obj("database" -> s(td), "name" -> s("forever"), "ttl_hours" -> Json.fromInt(0))
+    ) match
+      case Left(err) => err should include("invalid_ttl")
+      case Right(t)  => fail(s"a --drop-admin token asked for no TTL: $t")
+    refused(403, "admin_required")(
+      stack.postStatus(
+        "/api/branch/merge",
+        proposeBody(td, "feature", idOf(proposed)),
+        dropped
+      )
+    )
+    // tess herself merges what the agent proposed.
+    val done =
+      stack.post("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)), tessToken)
+    done.hcursor.downField("merge").get[String]("status") shouldBe Right("merged")
+    sql("agent", s"SELECT count(*) FROM $td.main.fact WHERE note = 'agent'") shouldBe List("10")
   }
 
   /** What `rowConflicts` said, without the sampled rowids. */
