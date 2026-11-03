@@ -19,8 +19,10 @@ import scala.util.Try
   * They run as a tenant admin, so the node judges the stamp's own `CALL` for that principal too.
   * The fence itself is exercised on the real catalog: a write landing in the restored table while
   * the replace runs still refuses the restore, atomically with its COMMIT, which now goes out as a
-  * statement of its own. Manager on 20977 (REST) / 31377 (FlightSQL) / 29513 (front door), relay
-  * 20987, nodes 23310-23314.
+  * statement of its own. In an OPA tenant the stamp's prelude is a plan with nothing for OPA to
+  * judge: the decider passes it unasked (`FakeOpa.refuseUntabled` turns a call about it into a
+  * refusal, and the strict stamp then takes the write down with it). Manager on 20977 (REST) /
+  * 31377 (FlightSQL) / 29513 (front door), relay 20987, nodes 23310-23314.
   */
 class CatalogStampedE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
@@ -174,6 +176,75 @@ class CatalogStampedE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
     sql(s"SELECT id FROM $td.main.vt_back") shouldBe List("9")
     authorsOf("undrop main.vt as main.vt_back from snapshot %") shouldBe
       List(s"tenant:$Acme/user:tess")
+  }
+
+  /** What a statement input put to OPA: its class and each `table:verb` it names. */
+  private def asked(body: String): (String, List[String]) =
+    val input = io.circe.parser.parse(body).fold(e => throw e, identity).hcursor.downField("input")
+    val named = input.downField("accesses").as[List[Json]].getOrElse(Nil).map { a =>
+      s"${a.hcursor.get[String]("table").getOrElse("?")}:${a.hcursor.get[String]("verb").getOrElse("?")}"
+    }
+    (input.downField("statement").get[String]("class").getOrElse("?"), named)
+
+  "a restore and an undrop in an OPA tenant" should "pass the strict stamp without OPA being asked about its prelude" in {
+    ready()
+    val opa = new FakeOpa(denyTable = "secret")
+    opa.start()
+    def setAcl(fields: (String, Json)*): Unit =
+      stack.post("/api/tenant/setAcl", obj((("name" -> s(Acme)) +: fields)*))
+    def asTess(path: String, table: String, more: (String, Json)*): (Int, String) =
+      val own = List("tenant" -> s(Acme), "tenantDb" -> s(td), "schema" -> s("main"))
+      stack.postStatus(path, obj((own ++ List("table" -> s(table)) ++ more)*), tessToken)
+    try
+      sql(s"CREATE TABLE $td.main.ot (id BIGINT, note VARCHAR)")
+      sql(s"INSERT INTO $td.main.ot VALUES (1, 'one')")
+      val to = sql(s"SELECT max(snapshot_id) FROM $td.snapshots()").head.toLong
+      sql(s"INSERT INTO $td.main.ot VALUES (2, 'two')")
+      sql(s"CREATE TABLE $td.main.od (id BIGINT)")
+      sql(s"INSERT INTO $td.main.od VALUES (5)")
+      sql(s"DROP TABLE $td.main.od")
+      setAcl("mode" -> s("opa"), "opaUrl" -> s(opa.url))
+      // An input naming no table is refused: were the prelude's plan put to OPA, the stamp would
+      // fail, and the statement, which never runs without it, with it.
+      opa.refuseUntabled.set(true)
+      val (rc, rb) = asTess("/api/catalog/restore", "ot", "to" -> s(to.toString))
+      withClue(rb)(rc shouldBe 200)
+      val (uc, ub) = asTess("/api/catalog/undrop", "od")
+      withClue(ub)(uc shouldBe 200)
+      sql(s"SELECT note FROM $td.main.ot ORDER BY id") shouldBe List("one")
+      sql(s"SELECT id FROM $td.main.od") shouldBe List("5")
+      authorsOf(s"restore main.ot to snapshot $to [%") shouldBe List(s"tenant:$Acme/user:tess")
+      authorsOf("undrop main.od as main.od from snapshot %") shouldBe List(
+        s"tenant:$Acme/user:tess"
+      )
+      // OPA judged the writes (the case is not vacuous), and only what they name: the stamp's own
+      // plan was not among its inputs.
+      val inputs = opa.statementBodies.map(asked)
+      info(s"OPA was asked ${inputs.size} plans: ${inputs.mkString("; ")}")
+      inputs should not be empty
+      inputs.foreach((_, tables) =>
+        tables.foreach(t => t should (startWith("ot:") or startWith("od:")))
+      )
+      // What that plan is to OPA: nothing to judge. The decider passes a plan with no object and no
+      // location without asking, so a dry run of the stamp's CALL finds nothing to put to OPA.
+      val before      = opa.statementCalls
+      val (dc, dbody) = stack.postStatus(
+        "/api/tenant/opaTest",
+        obj(
+          "tenant" -> s(Acme),
+          "pool"   -> s(Pool),
+          "user"   -> s("tess"),
+          "sql"    -> s(s"CALL ducklake_set_commit_message('$td', 'tenant:$Acme/user:tess', 'e2e')")
+        )
+      )
+      withClue(dbody) {
+        dc shouldBe 400
+        dbody should include("nothing_to_authorize")
+      }
+      opa.statementCalls shouldBe before
+    finally
+      try setAcl("mode" -> s("qod"))
+      finally opa.stop()
   }
 
   "a table restore beside writers" should "be refused, with no write lost, when one lands in its table first" in {

@@ -37,6 +37,7 @@ object RestoreEndpoints:
           "502 restore_outcome_unknown when it cannot be told whether the replace committed (its " +
           "COMMIT's answer was lost, or it answered and no commit of this restore is in the " +
           "catalog yet, or the catalog could not be read to settle it): the replace may still " +
-          "land, so check the table before retrying. A refusal by the node's own answer is " +
-          "restore_failed or concurrent_write, and nothing landed."
+          "land, so check the table before retrying. restore_failed or concurrent_write means " +
+          "nothing landed: the statement failed before its COMMIT, or the node itself refused " +
+          "the COMMIT (or the call timed out) and the catalog holds no commit of this restore."
       )

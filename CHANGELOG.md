@@ -835,9 +835,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
   broken connection, a 5xx), or it answered and no commit of the restore is in the catalog yet (a kill
   leaves a COMMIT in flight), or the catalog cannot be read to settle it. Check the table before
   retrying: the replace may still land, and the fence keeps it from erasing a write committed
-  meanwhile. Only the node's own refusal of the COMMIT is `restore_failed` or `409 concurrent_write`
-  (and takes the fence off). Every clean answer is confirmed by the restore's own commit, whose
-  snapshot is `newSnapshot`. A restore that outlives `restoreTimeoutSec` rolls back when its
+  meanwhile. A node's own error on the COMMIT asks the catalog first too, since a connection to the
+  catalog lost during the metadata COMMIT can leave that commit durable: the commit found is success,
+  and only a catalog showing no commit of the restore makes the node's refusal `restore_failed` or
+  `409 concurrent_write` (which takes the fence off). Every clean answer is confirmed by the
+  restore's own commit, whose snapshot is `newSnapshot`. A restore that outlives `restoreTimeoutSec` rolls back when its
   statement answers. An undrop whose stamp failed answers `undrop_failed` with `retryable: true`, its
   cause and "nothing was committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no
   other node says what failed first. `qod catalog restore`, `qod catalog undrop` and `qod profile

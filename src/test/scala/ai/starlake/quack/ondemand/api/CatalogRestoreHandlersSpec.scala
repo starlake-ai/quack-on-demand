@@ -454,6 +454,19 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.error shouldBe "restore_failed"
     fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
 
+  it should "settle a COMMIT the node answered with an error from the catalog too: that commit can be durable" in new Stubs:
+    // Every statement error is an ERROR_RESPONSE, a connection to the catalog lost during the
+    // metadata COMMIT included, and that commit can be durable. The node's error says what the node
+    // saw, not what the catalog's Postgres did: it is success when the catalog holds this restore's
+    // commit, and the fence comes off.
+    writeResult = IO.pure(
+      Right(QueryResult(refusedReader("catalog connection lost"), () => (), "node-1", 1L))
+    )
+    val out = restore(handlers(), to = "39")
+    out.toOption.get.newSnapshot shouldBe Some(43L)
+    telemetryStore.events.last.outcome shouldBe "ok"
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+
   it should "say its outcome is unknown, and keep the fence, when a COMMIT's answer is lost and no commit is visible" in new Stubs:
     // A broken connection, a 5xx: the COMMIT may still be in DuckLake's retries, and a read that
     // beats it finds nothing. restore_failed here would have a client retry a restore that lands.
@@ -491,22 +504,32 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "say its outcome is unknown, audited, when a COMMIT fails and the catalog cannot be read" in new Stubs:
     // The catalog's Postgres being down is what makes a COMMIT fail, and what makes the read that
-    // settles it fail too: neither success nor a plain failure, and never a bare 500.
+    // settles it fail too: neither success nor a plain failure, and never a bare 500. The node
+    // reports that outage as an error of its own (an ERROR_RESPONSE, the shape a real outage takes)
+    // or its answer is lost on the way back: both are unknown, and neither is a refusal.
     commitLands = false
-    writeResult = IO.pure(
-      Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
-    )
-    val out             = restore(handlers(readerOverride = unreadableCatalog()), to = "39")
-    val (status, error) = out.left.toOption.get
-    status shouldBe StatusCode.BadGateway
-    error.error shouldBe "restore_outcome_unknown"
-    error.message should include("connection reset")
-    error.message should include("catalog down")
-    error.message should include("check tpch1.orders before retrying")
-    telemetryStore.events.last.outcome shouldBe "denied"
-    // The audit trail names the code: it is not a refusal.
-    telemetryStore.events.last.detail.get("code") shouldBe Some("restore_outcome_unknown")
+    List(
+      "an error of the node's own" -> refusedReader("connection reset"),
+      "a lost answer"              -> failingReader("connection reset")
+    ).foreach { (shape, reader) =>
+      writeResult = IO.pure(Right(QueryResult(reader, () => (), "node-1", 1L)))
+      val out             = restore(handlers(readerOverride = unreadableCatalog()), to = "39")
+      val (status, error) = out.left.toOption.get
+      withClue(s"$shape: ") {
+        status shouldBe StatusCode.BadGateway
+        error.error shouldBe "restore_outcome_unknown"
+        error.message should include("connection reset")
+        error.message should include("catalog down")
+        error.message should include("check tpch1.orders before retrying")
+        telemetryStore.events.last.outcome shouldBe "denied"
+        // The audit trail names the code: it is not a refusal.
+        telemetryStore.events.last.detail.get("code") shouldBe Some("restore_outcome_unknown")
+      }
+    }
+    // The row stays armed in both: the commit may be durable, and a leftover matches only this
+    // restore's own message.
     fenceDisarms shouldBe empty
+    fenceArms.size shouldBe 2
 
   it should "say the same when a timeout leaves it to a catalog that cannot be read" in new Stubs:
     writeResult = IO.never

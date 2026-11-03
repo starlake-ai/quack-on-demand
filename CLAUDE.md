@@ -164,16 +164,21 @@ it. `QuackHttpClient.queryStampedRequired` sends nothing when the stamp fails (a
 refuses a named write no stamp applies to (`QuackHttpAdapter.NoStamp`). A client write's stamp stays
 best-effort (`queryStamped`). A replace that outlives the bound is cancelled and rolls back when its
 statement answers, so no COMMIT can land after a timeout. A restore's COMMIT fires when its result is
-read (`WriteResults.drain`, whose failure says by its type whether the node answered): the node's own
-error on the COMMIT, or a statement that failed before it, is a refusal (409 `concurrent_write` or 502
-`restore_failed`) and the fence row comes off. A clean answer or a lost one (a broken connection, a 5xx)
-is settled by the catalog, by the restore's own commit message, which also names `newSnapshot`: found is
-landed; absent, or a catalog that cannot be read, is `restore_outcome_unknown` (check the table before
-retrying), never a refusal, since a COMMIT may be in flight (a kill leaves one on another thread) or in
-DuckLake's retries and a read can beat it. The fence row stays armed on every unknown outcome: a late
-COMMIT is still held to the table state the restore validated and cannot erase a write committed
-meanwhile, and a leftover row matches only that restore's own message. An undrop's
-`undrop_outcome_unknown` is the same idea without a fence.
+read (`WriteResults.drain`, whose failure says by its type whether the node itself refused,
+`nodeRefused`). A statement that failed before the COMMIT is a refusal (409 `concurrent_write` or 502
+`restore_failed`) and the fence row comes off. Every end of the COMMIT (a clean answer, a lost one (a
+broken connection, a 5xx), the node's own error, a timeout) is settled by the catalog first, by the
+restore's own commit message, which also names `newSnapshot`: a node's error says what the node saw, not
+what the catalog's Postgres did, and a connection to the catalog lost during the metadata COMMIT can
+leave that commit durable. Found is landed; a catalog that cannot be read is `restore_outcome_unknown`
+(check the table before retrying); absent is a refusal only when nothing can land (the node itself
+refused the COMMIT, or a timeout cancelled the call before any COMMIT went out) and
+`restore_outcome_unknown` otherwise, never a refusal, since a COMMIT may be in flight (a kill leaves one
+on another thread) or in DuckLake's retries and a read can beat it. The fence row stays armed on every
+unknown outcome: a late COMMIT is still held to the table state the restore validated and cannot erase a
+write committed meanwhile, and a leftover row matches only that restore's own message. An undrop's
+`undrop_outcome_unknown` is the same idea without a fence: a failure reading its result's end is settled
+from the catalog too, and an absent commit there is unknown, never a refusal.
 
 **Node-side authorization (node protocol 6).** A non-superuser statement is decided on what
 DuckDB resolved for it, on the node, before it runs, and nowhere else. The parse screen re-parses every PREPARE with
