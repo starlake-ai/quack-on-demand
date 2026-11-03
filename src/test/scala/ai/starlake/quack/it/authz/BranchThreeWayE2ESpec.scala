@@ -3,11 +3,11 @@ package ai.starlake.quack.it.authz
 import ai.starlake.quack.edge.adapter.{NodeLoadTracker, QuackHttpAdapter, QuackHttpClient}
 import ai.starlake.quack.edge.authz.{NodeKeys, NodePrincipal, PolicyVersions, ReadOnlyCatalogs}
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
-import ai.starlake.quack.ondemand.branch.BranchMergeSql
+import ai.starlake.quack.ondemand.branch.{BranchMergeSql, ThreeWayMergeScaleBench}
 import ai.starlake.quack.ondemand.runtime.QodNodeTestBinary
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import cats.effect.unsafe.implicits.global
-import io.circe.Json
+import io.circe.{ACursor, Json}
 import org.apache.arrow.memory.RootAllocator
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.flatspec.AnyFlatSpec
@@ -643,4 +643,175 @@ class BranchThreeWayE2ESpec
     branchCode shouldBe 409
     branchBody should include("history_gap")
     branchBody should include("the branch's snapshot")
+  }
+
+  /** What `rowConflicts` said, without the sampled rowids. */
+  private def rowCounts(conflicts: ACursor): String =
+    def bare(j: Json) = j.mapObject(_.remove("samples")).noSpaces
+    conflicts.focus.fold("none")(j => j.asArray.fold(bare(j))(_.map(bare).mkString(" ")))
+
+  /** `ThreeWayMergeScaleBench`'s table and writes on the real stack, for what its embedded engine
+    * never meets: session handles, a node's screens and settings, the production client. Not part
+    * of `sbt test`: it runs only at a size the environment names. Prints what each step took.
+    */
+  it should "merge the benchmark's change set through a real node, at the size it is given" in {
+    def size(name: String) = sys.env.get(name).map(_.trim).filter(_.nonEmpty).map(_.toLong)
+    val (rows, changed)    = (size("QOD_BENCH_NODE_ROWS"), size("QOD_BENCH_NODE_CHANGES"))
+    assume(
+      rows.nonEmpty && changed.nonEmpty,
+      "QOD_BENCH_NODE_ROWS and QOD_BENCH_NODE_CHANGES are not set"
+    )
+    ready()
+    val (n, k) = (rows.get, changed.get)
+    val m      = n / k
+    // The writes' predicates are residues 0 to 6 of m: only past 6 do they name separate rows, and
+    // the numbers below count on that.
+    require(m > 6, "QOD_BENCH_NODE_CHANGES must be at most a seventh of QOD_BENCH_NODE_ROWS")
+
+    def timed[A](what: String)(body: => A): A =
+      val began = System.nanoTime()
+      val out   = body
+      println(f"node bench: $what: ${(System.nanoTime() - began) / 1e9}%.1f s")
+      out
+
+    val td = database("large")
+    // The merge node starts from the same script and this pool's init SQL, so it runs with these.
+    println(
+      "node bench: memory_limit, threads, temp_directory: " + sql(
+        "large",
+        "SELECT current_setting('memory_limit'), current_setting('threads'), " +
+          "current_setting('temp_directory')"
+      )
+    )
+    timed("the table") {
+      sql("large", s"CREATE SCHEMA $td.s")
+      sql("large", ThreeWayMergeScaleBench.createTable(td, n))
+    }
+    timed("the branch") {
+      stack.post(
+        "/api/branch/create",
+        obj("tenant" -> s(Acme), "tenantDb" -> s(td), "name" -> s("feature")),
+        timeoutSec = 3600
+      )
+      branchServing("large", "feature")
+    }
+    timed("main's writes") {
+      ThreeWayMergeScaleBench.changes(td, "main", n, k).foreach(sql("large", _))
+    }
+    timed("the branch's writes") {
+      ThreeWayMergeScaleBench.changes(td, "branch", n, k).foreach(sql("large", _, Some("feature")))
+    }
+
+    // The writes make conflicts on purpose, so the proposal names a winner.
+    val proposed = timed("propose") {
+      stack.post(
+        "/api/branch/propose",
+        proposeBody(td, "feature", "onConflict" -> s("main")),
+        tessToken,
+        timeoutSec = 3600
+      )
+    }
+    println(
+      s"node bench: propose: attempts ${proposed.hcursor.downField("merge").get[Int]("attempts")}, " +
+        "the counts tess sees: " +
+        rowCounts(
+          proposed.hcursor
+            .downField("changes")
+            .downField("tables")
+            .downArray
+            .downField("rowConflicts")
+        )
+    )
+
+    // The proposal's row is marked just before an Apply goes out: Apply's time runs from there.
+    val proposalId = proposed.hcursor.downField("merge").get[String]("id").toOption.get
+    val applySent  = new AtomicLong(0L)
+    val watching   = new AtomicBoolean(true)
+    val watcher    = new Thread(() =>
+      Using.resource(
+        DriverManager.getConnection(
+          TestPostgres.dbUrl(stack.dbName),
+          TestPostgres.pgUser,
+          TestPostgres.pgPass
+        )
+      ) { c =>
+        val st = c.prepareStatement("SELECT error FROM qodstate_branch_merge WHERE id = ?")
+        st.setString(1, proposalId)
+        while watching.get() && applySent.get() == 0L do
+          val rs = st.executeQuery()
+          if rs.next() && rs.getString(1) != null then applySent.set(System.nanoTime())
+          else Thread.sleep(200)
+      }
+    )
+    watcher.start()
+    val reply =
+      try
+        timed("merge") {
+          stack.post(
+            "/api/branch/merge",
+            proposeBody(td, "feature", idOf(proposed)),
+            timeoutSec = 3600
+          )
+        }
+      finally watching.set(false)
+    val ended = System.nanoTime()
+    watcher.join(10000)
+    val merge = reply.hcursor.downField("merge")
+    println(
+      "node bench: Apply: " +
+        Option(applySent.get())
+          .filter(_ > 0L)
+          .fold("not seen")(at => f"${(ended - at) / 1e9}%.1f s")
+    )
+    println(
+      s"node bench: merge: attempts ${merge.get[Int]("attempts")}, " +
+        s"the counts the superuser sees: ${rowCounts(merge.downField("rowConflicts"))}"
+    )
+    merge.get[String]("status") shouldBe Right("merged")
+    merge.get[Int]("attempts") shouldBe Right(1)
+
+    // What the writes must have left, from their predicates alone. Main wins the conflicts on amount
+    // (residue 2 of 20m), and its update of a row keeps the row from the branch's delete (residue 6
+    // of 100m). Each list is, in order: the rows, those carrying main's amount, the branch's status
+    // and the branch's qty, main's and the branch's inserts, those carrying the branch's amount, and
+    // the rows that should be gone or hold any other cell than these predicates say.
+    val amountByMain   = s"h % $m = 0 OR h % ${m * 20} IN (2, 3) OR h % ${m * 100} = 6"
+    val statusByBranch = s"h % $m = 1 OR h % ${m * 20} = 3"
+    val qtyByBranch    = s"h % $m = 1"
+    val deleted        = s"h % ${m * 10} IN (4, 5)"
+    val inserted       = k / 10
+    val expected       = sql(
+      "large",
+      s"SELECT $n - count(*) FILTER ($deleted) + ${2 * inserted}, " +
+        s"count(*) FILTER ($amountByMain), count(*) FILTER ($statusByBranch), " +
+        s"count(*) FILTER ($qtyByBranch), $inserted, $inserted, 0, 0 " +
+        s"FROM (SELECT hash(i) AS h FROM range($n) r(i))"
+    )
+    val made      = ThreeWayMergeScaleBench.created("id").toMap
+    val wrongCell = ThreeWayMergeScaleBench
+      .created("id")
+      .map { (column, value) =>
+        val should = column match
+          case "amount" => s"$value + CASE WHEN $amountByMain THEN 1 ELSE 0 END"
+          case "status" => s"CASE WHEN $statusByBranch THEN 'EDITED' ELSE $value END"
+          case "qty"    => s"$value + CASE WHEN $qtyByBranch THEN 1 ELSE 0 END"
+          case _        => value
+        s"$column IS DISTINCT FROM ($should)"
+      }
+      .mkString(" OR ")
+    val found = timed("the read-back") {
+      sql(
+        "large",
+        "SELECT count(*), " +
+          s"count(*) FILTER (id < $n AND amount = ${made("amount")} + 1), " +
+          s"count(*) FILTER (id < $n AND status = 'EDITED'), " +
+          s"count(*) FILTER (id < $n AND qty = ${made("qty")} + 1), " +
+          "count(*) FILTER (note = 'main-ins'), count(*) FILTER (note = 'br-ins'), " +
+          s"count(*) FILTER (id < $n AND amount = ${made("amount")} + 2), " +
+          s"count(*) FILTER (id < $n AND ($deleted OR $wrongCell)) " +
+          s"FROM (SELECT *, hash(id) AS h FROM $td.s.fact)"
+      )
+    }
+    println(s"node bench: read back $found, expected $expected")
+    found shouldBe expected
   }

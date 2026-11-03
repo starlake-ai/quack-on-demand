@@ -214,11 +214,16 @@ final class AuthzStack(
     last.getOrElse(throw new IllegalStateException(s"timed out waiting for $what$lastErr"))
 
   /** A REST call as the seeded admin (or the session `token`): (status, body). */
-  def postStatus(path: String, json: String, token: String = session): (Int, String) =
+  def postStatus(
+      path: String,
+      json: String,
+      token: String = session,
+      timeoutSec: Int = 30
+  ): (Int, String) =
     val r = http.send(
       HttpRequest
         .newBuilder(URI.create(s"http://127.0.0.1:$restPort$path"))
-        .timeout(Duration.ofSeconds(30))
+        .timeout(Duration.ofSeconds(timeoutSec.toLong))
         .header("X-API-Key", token)
         .header("Content-Type", "application/json")
         .POST(HttpRequest.BodyPublishers.ofString(json))
@@ -227,8 +232,8 @@ final class AuthzStack(
     )
     (r.statusCode(), r.body())
 
-  def post(path: String, json: String, token: String = session): Json =
-    val (code, body) = postStatus(path, json, token)
+  def post(path: String, json: String, token: String = session, timeoutSec: Int = 30): Json =
+    val (code, body) = postStatus(path, json, token, timeoutSec)
     if code < 200 || code >= 300 then throw new IllegalStateException(s"POST $path -> $code $body")
     if body.isBlank then Json.Null else parse(body).fold(e => throw e, identity)
 
