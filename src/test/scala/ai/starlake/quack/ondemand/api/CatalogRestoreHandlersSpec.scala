@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
-import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.adapter.{NodeLoadTracker, QuackHttpClient, QuackWireError}
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -31,15 +31,26 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
   private val RootKey: Option[String]               = Some(IdentityFixtures.RootSessionTok)
   private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
-  /** A write's result whose stream fails when read to its end: a stamped COMMIT refused there. */
-  private def failingReader(message: String): org.apache.arrow.vector.ipc.ArrowReader =
+  /** A write's result whose stream fails with `error` when read to its end: a stamped COMMIT
+    * failing there.
+    */
+  private def failingReaderWith(error: Throwable): org.apache.arrow.vector.ipc.ArrowReader =
     val under = emptyReader()
     new org.apache.arrow.vector.ipc.ArrowReader(new RootAllocator()):
-      override def loadNextBatch(): Boolean          = throw new java.io.IOException(message)
+      override def loadNextBatch(): Boolean          = throw error
       override def getVectorSchemaRoot               = under.getVectorSchemaRoot
       override def bytesRead(): Long                 = 0L
       override protected def readSchema(): Schema    = under.getVectorSchemaRoot.getSchema
       override protected def closeReadSource(): Unit = under.close()
+
+  /** The COMMIT's answer is lost: a broken connection says nothing of whether it landed. */
+  private def failingReader(message: String): org.apache.arrow.vector.ipc.ArrowReader =
+    failingReaderWith(new java.io.IOException(message))
+
+  /** The node answers the COMMIT with an error of its own (an ERROR_RESPONSE): refused, not landed.
+    */
+  private def refusedReader(message: String): org.apache.arrow.vector.ipc.ArrowReader =
+    failingReaderWith(QuackWireError.Permanent(message))
 
   private def emptyReader(): org.apache.arrow.vector.ipc.ArrowReader =
     val allocator = new RootAllocator()
@@ -214,14 +225,15 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         readerOverride: DuckLakeCatalogReader = committedReader,
         cfgOverride: CatalogConfig = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30),
         sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None,
-        patsOverride: String => Option[PatPrincipal] = _ => None
+        patsOverride: String => Option[PatPrincipal] = _ => None,
+        resolveOverride: Option[(String, String) => DuckLakeCatalogReader] = None
     ): CatalogRestoreHandlers =
       new CatalogRestoreHandlers(
         sup,
         store,
         readExecutor,
         writeExecutor,
-        (_, _) => readerOverride,
+        resolveOverride.getOrElse((_, _) => readerOverride),
         cfgOverride,
         IdentityFixtures.restCaller(sessionsOverride, patsOverride),
         fence,
@@ -401,11 +413,11 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.error shouldBe "concurrent_write"
     telemetryStore.events.last.outcome should not be "ok"
 
-  it should "not report success when the commit fails while the result is read" in new Stubs:
+  it should "not report success when the node refuses the COMMIT read at the end of the result" in new Stubs:
     var shut = false
     commitLands = false
     writeResult = IO.pure(
-      Right(QueryResult(failingReader("COMMIT failed: boom"), () => shut = true, "node-1", 1L))
+      Right(QueryResult(refusedReader("COMMIT failed: boom"), () => shut = true, "node-1", 1L))
     )
     val out = restore(handlers(), to = "39")
     out.left.toOption.get._1 shouldBe StatusCode.BadGateway
@@ -413,13 +425,58 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.message should include("COMMIT failed: boom")
     telemetryStore.events.last.outcome should not be "ok"
     shut shouldBe true
+    // The node's own answer is final: nothing can land, so the fence comes off.
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
 
-  it should "409 when the commit read at the end of the result reports a conflict" in new Stubs:
+  it should "409 when the node refuses the COMMIT with a conflict, and take the fence off" in new Stubs:
     commitLands = false
     writeResult = IO.pure(
-      Right(QueryResult(failingReader("write-write conflict"), () => (), "node-1", 1L))
+      Right(QueryResult(refusedReader("write-write conflict"), () => (), "node-1", 1L))
     )
-    restore(handlers(), to = "39").left.toOption.get._2.error shouldBe "concurrent_write"
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._1 shouldBe StatusCode.Conflict
+    out.left.toOption.get._2.error shouldBe "concurrent_write"
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+
+  it should "answer a COMMIT whose session handle the node refused as a refusal: it never went out" in new Stubs:
+    commitLands = false
+    writeResult = IO.pure(
+      Right(
+        QueryResult(
+          failingReaderWith(QuackHttpClient.HandleRefused("session handle refused: expired")),
+          () => (),
+          "node-1",
+          1L
+        )
+      )
+    )
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._2.error shouldBe "restore_failed"
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+
+  it should "say its outcome is unknown, and keep the fence, when a COMMIT's answer is lost and no commit is visible" in new Stubs:
+    // A broken connection, a 5xx: the COMMIT may still be in DuckLake's retries, and a read that
+    // beats it finds nothing. restore_failed here would have a client retry a restore that lands.
+    commitLands = false
+    List[Throwable](
+      new java.io.IOException("connection reset"),
+      QuackWireError.Transient("HTTP 503 from Quack node")
+    ).foreach { lost =>
+      writeResult = IO.pure(Right(QueryResult(failingReaderWith(lost), () => (), "node-1", 1L)))
+      val out             = restore(handlers(), to = "39")
+      val (status, error) = out.left.toOption.get
+      withClue(s"$lost: ") {
+        status shouldBe StatusCode.BadGateway
+        error.error shouldBe "restore_outcome_unknown"
+        error.message should include(lost.getMessage)
+        error.message should include("check tpch1.orders before retrying")
+        telemetryStore.events.last.outcome shouldBe "denied"
+      }
+    }
+    // The row stays armed: a late COMMIT is still held to the state it was validated against, and a
+    // leftover matches only this restore's own message.
+    fenceDisarms shouldBe empty
+    fenceArms.size shouldBe 2
 
   it should "settle a COMMIT whose answer was lost from the catalog, by this restore's own commit" in new Stubs:
     // The COMMIT is sent when the result is read, after the replace: the stream breaking there says
@@ -427,14 +484,10 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     writeResult = IO.pure(
       Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
     )
-    // It landed.
+    // It landed: success, and the fence comes off.
     restore(handlers(), to = "39").toOption.get.newSnapshot shouldBe Some(43L)
     telemetryStore.events.last.outcome shouldBe "ok"
-    // It did not: it is the failure it reads as.
-    commitLands = false
-    val lost = restore(handlers(), to = "39")
-    lost.left.toOption.get._1 shouldBe StatusCode.BadGateway
-    lost.left.toOption.get._2.error shouldBe "restore_failed"
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
 
   it should "say its outcome is unknown, audited, when a COMMIT fails and the catalog cannot be read" in new Stubs:
     // The catalog's Postgres being down is what makes a COMMIT fail, and what makes the read that
@@ -451,6 +504,9 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     error.message should include("catalog down")
     error.message should include("check tpch1.orders before retrying")
     telemetryStore.events.last.outcome shouldBe "denied"
+    // The audit trail names the code: it is not a refusal.
+    telemetryStore.events.last.detail.get("code") shouldBe Some("restore_outcome_unknown")
+    fenceDisarms shouldBe empty
 
   it should "say the same when a timeout leaves it to a catalog that cannot be read" in new Stubs:
     writeResult = IO.never
@@ -466,6 +522,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     error.message should include("timed out")
     error.message should include("check tpch1.orders before retrying")
     telemetryStore.events.last.outcome shouldBe "denied"
+    fenceDisarms shouldBe empty
 
   it should "confirm a clean answer by its own commit, and report that commit's snapshot" in new Stubs:
     // The table's own record says 40; the commit this restore made is snapshot 43.
@@ -473,21 +530,49 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     out.toOption.get.newSnapshot shouldBe Some(43L)
     telemetryStore.events.last.detail.get("newSnapshot") shouldBe Some("43")
 
-  it should "refuse, not report success, when its COMMIT answered and no commit carries its message" in new Stubs:
-    // The result read clean to its end, yet the catalog holds no commit of this restore: a fence
-    // refusal nobody saw (a kill between the answer and the read), so the table is unchanged.
+  it should "say its outcome is unknown, and keep the fence, when its COMMIT answered and no commit is visible" in new Stubs:
+    // The result read clean to its end, yet the catalog shows no commit of this restore: a kill can
+    // leave its COMMIT in flight on another thread, so the table may still be replaced. Never
+    // "unchanged", and the fence stays on for the COMMIT that may yet land.
     commitLands = false
     val out = restore(handlers(), to = "39")
     out.left.toOption.get._1 shouldBe StatusCode.BadGateway
-    out.left.toOption.get._2.error shouldBe "restore_failed"
+    out.left.toOption.get._2.error shouldBe "restore_outcome_unknown"
     out.left.toOption.get._2.message should include("no commit")
+    out.left.toOption.get._2.message should include("may still land")
+    out.left.toOption.get._2.message should include("check tpch1.orders before retrying")
+    out.left.toOption.get._2.message should not include "unchanged"
     telemetryStore.events.last.outcome shouldBe "denied"
     closed shouldBe true
+    fenceDisarms shouldBe empty
 
   it should "say its outcome is unknown when a clean answer cannot be confirmed" in new Stubs:
     val out = restore(handlers(readerOverride = unreadableCatalog()), to = "39")
     out.left.toOption.get._2.error shouldBe "restore_outcome_unknown"
     telemetryStore.events.last.outcome shouldBe "denied"
+    fenceDisarms shouldBe empty
+
+  it should "settle through a reader it resolves again, not the one it validated with" in new Stubs:
+    // The reader the restore began with can be closed by the idle sweep or evicted meanwhile.
+    val resolved = new java.util.concurrent.atomic.AtomicInteger(0)
+    val stale    = stubReader(ownCommit = _ => throw new java.sql.SQLException("pool closed"))
+    writeResult = IO.pure(
+      Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
+    )
+    val h = handlers(resolveOverride =
+      Some((_, _) => if resolved.getAndIncrement() == 0 then stale else committedReader)
+    )
+    restore(h, to = "39").toOption.get.newSnapshot shouldBe Some(43L)
+
+  it should "read the catalog a second time when the first read fails" in new Stubs:
+    val reads = new java.util.concurrent.atomic.AtomicInteger(0)
+    val flaky = stubReader(ownCommit =
+      m =>
+        if reads.getAndIncrement() == 0 then throw new java.sql.SQLException("blip")
+        else commits.get(m)
+    )
+    restore(handlers(readerOverride = flaky), to = "39").toOption.get.newSnapshot shouldBe Some(43L)
+    reads.get() shouldBe 2
 
   it should "read and close a result that arrives as the timeout fires, and settle it from the catalog" in new Stubs:
     // The executor goes on to its answer past the bound: that result must still be read to its end
@@ -544,6 +629,8 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._1 shouldBe StatusCode.BadGateway
     out.left.toOption.get._2.error shouldBe "restore_failed"
     out.left.toOption.get._2.message should include("timed out")
+    // Cancelled before its COMMIT could go out: nothing can land, the fence comes off.
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
 
   it should "report success when the CTAS commits despite the timeout (post-timeout probe)" in new Stubs:
     writeResult = IO.never

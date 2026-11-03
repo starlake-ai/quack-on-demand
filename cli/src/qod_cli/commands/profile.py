@@ -71,7 +71,8 @@ def undrop(
         body["asName"] = as_name
     if table_id is not None:
         body["tableId"] = table_id
-    # The server bounds the recovery's CTAS (undropTimeoutSec) and goes on past a client that gave up.
+    # The server decides the recovery at its bound (undropTimeoutSec), when the CTAS answers, and goes on
+    # past a client that gave up.
     call(ctx, "POST", "/api/profile/undrop", body=body, timeout=UNTIL_ANSWERED)
 
 

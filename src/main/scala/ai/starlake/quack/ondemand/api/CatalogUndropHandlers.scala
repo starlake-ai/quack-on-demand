@@ -641,7 +641,11 @@ final class CatalogUndropHandlers(
                           WriteResults.drain(result) match
                             case Right(_)  => committed
                             case Left(why) =>
-                              settled(s"undrop failed: $why", lost = true, retryable = false)
+                              settled(
+                                s"undrop failed: ${why.message}",
+                                lost = true,
+                                retryable = false
+                              )
                       }
 
 object CatalogUndropHandlers:

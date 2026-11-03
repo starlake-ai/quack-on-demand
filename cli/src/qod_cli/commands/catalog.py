@@ -417,7 +417,8 @@ def undrop(
         body["fromSnapshot"] = from_snapshot
     if table_id is not None:
         body["tableId"] = table_id
-    # The server bounds the recovery's CTAS (undropTimeoutSec) and goes on past a client that gave up.
+    # The server decides the recovery at its bound (undropTimeoutSec), when the CTAS answers, and goes on
+    # past a client that gave up.
     call(ctx, "POST", "/api/catalog/undrop", body=body, timeout=UNTIL_ANSWERED)
 
 
@@ -469,8 +470,9 @@ def restore(
         f" (current {preview['currentSnapshot']})?"
     ):
         raise typer.Exit(1)
-    # The replace is bounded by the server (restoreTimeoutSec), which goes on past a client that gave
-    # up: a retry then meets concurrent_write, or restores twice. The dry run above is a bounded read.
+    # The server decides the replace at its bound (restoreTimeoutSec), when the statement answers, and
+    # goes on past a client that gave up: a retry then meets concurrent_write, or restores twice. The
+    # dry run above is a bounded read.
     call(
         ctx,
         "POST",

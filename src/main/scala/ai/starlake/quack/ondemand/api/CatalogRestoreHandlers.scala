@@ -16,20 +16,36 @@ import scala.concurrent.duration.DurationInt
 
 /** Restore (Spec 04): roll a live table back to a prior snapshot as a NEW forward snapshot.
   *
-  * Execution is a single `CREATE OR REPLACE TABLE s.t AS SELECT * FROM s.t AT (VERSION => n)`
-  * routed through the write executor (`recordExecution = true` in Main, so the replace snapshot
-  * carries the principal's author stamp and the statement is ACL-checked per table: the CTAS emits
-  * Ddl + Read on the table, so the caller needs ALL, or DDL plus RO/RW). The dry run is the Spec 02
-  * aggregate over `(toSnapshot, currentSnapshot]`, run on the read executor as the caller too: the
-  * node admits DuckLake's change feed on a table the caller may read and refuses it otherwise (403
-  * `acl_denied`), so the counts never come from the system caller. Verified-live engine facts (Spec
-  * 04 Task 1): the replace assigns a new table_id whose begin_snapshot is the replace snapshot (the
-  * basis of both the `newSnapshot` in the response and the committed-despite-timeout probe), and a
-  * failed replace leaves the current state intact.
+  * Execution is one `CREATE OR REPLACE TABLE s.t AS SELECT * FROM s.t AT (VERSION => n)` routed
+  * through the write executor as the caller (`recordExecution = true` in Main). The router stamps
+  * it: the caller's author, and this restore's own unique commit message, which the commit fence
+  * and the settling of an answer that cannot tell both go by. The statement is ACL-checked per
+  * table: the CTAS emits Ddl + Read on the table, so the caller needs ALL, or DDL plus RO/RW. The
+  * dry run is the Spec 02 aggregate over `(toSnapshot, currentSnapshot]`, run on the read executor
+  * as the caller too: the node admits DuckLake's change feed on a table the caller may read and
+  * refuses it otherwise (403 `acl_denied`), so the counts never come from the system caller.
+  * Verified-live engine fact (Spec 04 Task 1): a failed replace leaves the current state intact.
+  * `newSnapshot` is the snapshot of this restore's own commit, as the catalog names it by its
+  * message, never a guess from the table's record.
   *
-  * Restore is a mutation: audited unconditionally, dry-runs included (detail carries dryRun). Known
-  * race, by design (no auto-pin): a maintenance expiry between the probes and the CTAS fails the
-  * statement transactionally; the caller retries into a clean 410.
+  * What the write's end means (its COMMIT fires when the result is read to its end):
+  *   - The node answered the COMMIT with an error of its own, or a statement failed before any
+  *     COMMIT, or the call was cancelled before one could go out (a timeout): refused, 409
+  *     `concurrent_write` or 502 `restore_failed`, and nothing can land.
+  *   - A clean answer, or one that was lost (a broken connection, a 5xx): the catalog decides, by
+  *     the restore's own commit. Found: landed. Absent, or the catalog unreadable: UNKNOWN, 502
+  *     `restore_outcome_unknown`, never a refusal: the COMMIT may be in flight (a kill leaves one
+  *     on another thread) or in DuckLake's retries, and a read can beat it.
+  *
+  * The commit fence row comes off with every answer that settles the restore (landed, refused) and
+  * STAYS ARMED on every unknown one, and on a call that ends abnormally: the COMMIT that may yet
+  * land is then still held to the table state this restore validated, so it cannot erase a write
+  * committed meanwhile, and a leftover row matches only this restore's own unique message.
+  *
+  * Restore is a mutation: audited unconditionally, dry-runs included (detail carries dryRun, and
+  * the code of a refusal or an unknown outcome). Known race, by design (no auto-pin): a maintenance
+  * expiry between the probes and the CTAS fails the statement transactionally; the caller retries
+  * into a clean 410.
   */
 final class CatalogRestoreHandlers(
     sup: PoolSupervisor,
@@ -134,7 +150,8 @@ final class CatalogRestoreHandlers(
             AuditActions.CatalogRestore,
             "denied",
             tenant = Some(tid),
-            target = target
+            target = target,
+            detail = Map("code" -> code)
           )
           err(sc, code, msg)
         def okAudit(detail: Map[String, String]): Unit =
@@ -244,11 +261,16 @@ final class CatalogRestoreHandlers(
                               toSnapshot,
                               currentSnapshot,
                               preTableId,
-                              reader,
                               caller,
                               denied,
                               okAudit
                             )
+
+  /** An answer, and whether it leaves the commit fence row armed ([[runExecute]]). */
+  private final case class Answered(
+      result: Either[(StatusCode, ErrorResponse), RestoreResponse],
+      keepFence: Boolean
+  )
 
   private def runDryRun(
       tid: String,
@@ -331,7 +353,6 @@ final class CatalogRestoreHandlers(
       toSnapshot: Long,
       currentSnapshot: Long,
       preTableId: Long,
-      reader: DuckLakeCatalogReader,
       caller: ExecCaller,
       denied: (StatusCode, String, String) => Either[(StatusCode, ErrorResponse), RestoreResponse],
       okAudit: Map[String, String] => Unit
@@ -391,30 +412,53 @@ final class CatalogRestoreHandlers(
         // the same); a false positive requires "conflict" in an unrelated engine error.
         def isConflict(reason: String): Boolean =
           reason.toLowerCase(Locale.ROOT).contains("conflict")
-        // A write whose outcome the answer cannot tell (a timeout, a broken stream), and every
-        // clean answer too: the catalog decides, by this restore's own commit, the snapshot its
-        // unique message names. A changed table id proves nothing: another writer's replace
-        // changes it too. `notThere` is the refusal when no commit of this restore is in the
-        // catalog (`reason`, the failure's own words, by default). A catalog that cannot be read
-        // leaves the outcome unknown, answered as such and audited, never a bare 500: the table
-        // is to be checked before a retry, as the undrop says.
-        def settledByCatalog(
-            reason: String,
-            notThere: Option[String] = None
-        ): Either[(StatusCode, ErrorResponse), RestoreResponse] =
-          scala.util.Try(reader.snapshotByCommitMessage(message)) match
-            case scala.util.Success(Some(ours)) => committedResponse(ours)
-            case scala.util.Success(None)       =>
-              val refusal = notThere.getOrElse(reason)
-              if isConflict(refusal) then denied(StatusCode.Conflict, "concurrent_write", refusal)
-              else denied(StatusCode.BadGateway, "restore_failed", refusal)
-            case scala.util.Failure(t) =>
-              denied(
-                StatusCode.BadGateway,
-                "restore_outcome_unknown",
+        def landed(newSnapshot: Long): Answered =
+          Answered(committedResponse(newSnapshot), keepFence = false)
+        // Nothing can land: the node answered the COMMIT with an error of its own, a statement
+        // failed before any COMMIT, or the call was cancelled before one could go out. The fence
+        // comes off.
+        def refused(sc: StatusCode, code: String, reason: String): Answered =
+          Answered(denied(sc, code, reason), keepFence = false)
+        def failed(reason: String): Answered =
+          if isConflict(reason) then refused(StatusCode.Conflict, "concurrent_write", reason)
+          else refused(StatusCode.BadGateway, "restore_failed", reason)
+        // Nobody knows whether the replace landed or still will. The fence row STAYS ARMED: the
+        // COMMIT may be in flight (a kill leaves one on another thread) or in DuckLake's retries,
+        // and if it lands after a writer committed to the table it is still refused atomically,
+        // where a disarmed row would let it through to erase that write. A leftover row matches
+        // only this restore's own unique message, so it holds nothing else.
+        def unknown(why: String): Answered =
+          Answered(
+            denied(StatusCode.BadGateway, "restore_outcome_unknown", why),
+            keepFence = true
+          )
+        def check: String = s"check ${req.schema}.${req.table} before retrying"
+        // This restore's commit, by its message, as the catalog tells it. Through a reader
+        // resolved again (the one the restore began with can be closed by the idle sweep or
+        // evicted since), and once more when a read fails: failing twice is an unreadable catalog.
+        def lookup(): scala.util.Try[Option[Long]] =
+          def once() = scala.util.Try(resolveReader(tid, db).snapshotByCommitMessage(message))
+          once().orElse(once())
+        // What an answer cannot tell (a timeout, a lost COMMIT answer) and every clean answer too:
+        // the catalog decides, by this restore's own commit. A changed table id proves nothing:
+        // another writer's replace changes it too. Found: landed. Absent: `reason` stands as a
+        // refusal when `canStillLand` is false (the call was cancelled before any COMMIT could go
+        // out); otherwise it proves nothing, since a COMMIT may be in flight and a read can beat
+        // it: unknown. A catalog that cannot be read is unknown too, answered as such and audited,
+        // never a bare 500.
+        def settle(reason: String, canStillLand: Boolean): Answered =
+          lookup() match
+            case scala.util.Success(Some(ours))           => landed(ours)
+            case scala.util.Success(None) if canStillLand =>
+              unknown(
+                s"$reason; no commit of this restore is in the catalog yet, and its COMMIT may " +
+                  s"still land: $check"
+              )
+            case scala.util.Success(None) => failed(reason)
+            case scala.util.Failure(t)    =>
+              unknown(
                 s"$reason; the catalog could not be read to settle it " +
-                  s"(${Option(t.getMessage).getOrElse(t.getClass.getSimpleName)}): check " +
-                  s"${req.schema}.${req.table} before retrying"
+                  s"(${Option(t.getMessage).getOrElse(t.getClass.getSimpleName)}): $check"
               )
         // The table as validated: `currentSnapshot` (the expectedCurrentSnapshot when the caller
         // sent one) is the newest snapshot that touched it, and `preTableId` its id. Any other
@@ -440,33 +484,38 @@ final class CatalogRestoreHandlers(
                 case Left(e) =>
                   // A replace that outlives the bound is cancelled, which its statement sees when
                   // it answers: the connection closes without the COMMIT and the transaction rolls
-                  // back. Only a COMMIT already in flight can still land, and the catalog says
-                  // whether it did.
+                  // back, so no COMMIT can land. The catalog is still asked, the call having been
+                  // cancelled at no precise moment.
                   val msg = e match
                     case _: java.util.concurrent.TimeoutException =>
                       s"restore timed out after ${cfg.restoreTimeoutSec}s"
                     case other => s"restore failed: ${other.getMessage}"
-                  settledByCatalog(msg)
+                  settle(msg, canStillLand = false)
                 case Right(Left(RouterFailure.AccessDenied(reason))) =>
-                  denied(StatusCode.Forbidden, "acl_denied", reason)
-                case Right(Left(failure)) if isConflict(failure.reason) =>
-                  denied(StatusCode.Conflict, "concurrent_write", failure.reason)
-                case Right(Left(failure)) =>
-                  denied(StatusCode.BadGateway, "restore_failed", failure.reason)
+                  refused(StatusCode.Forbidden, "acl_denied", reason)
+                // A statement that failed before any COMMIT: the COMMIT only fires when a result
+                // is read, so none is in flight.
+                case Right(Left(failure)) => failed(failure.reason)
                 // The COMMIT answered: confirmed by this restore's own commit, which also gives
                 // `newSnapshot` exactly. A kill landing between the statement's answer and the
-                // read can close the result, and with it swallow a refusal of the COMMIT, so a
-                // clean answer alone does not say the replace landed.
+                // read closes the result from another thread, which fires a COMMIT of its own that
+                // `drain` does not wait for: a clean answer alone says neither that the replace
+                // landed nor that it did not.
                 case Right(Right(Right(_))) =>
-                  settledByCatalog(
-                    "the restore's COMMIT answered",
-                    notThere = Some(
-                      "the restore's COMMIT answered, but no commit of the catalog carries its " +
-                        "message: the replace did not land (a write reached the table meanwhile, " +
-                        "or the statement was stopped), and the table is unchanged"
-                    )
-                  )
-                case Right(Right(Left(why))) => settledByCatalog(s"restore failed: $why")
+                  settle("the restore's COMMIT answered", canStillLand = true)
+                // The node answered the COMMIT with an error of its own: final, never unknown.
+                case Right(Right(Left(failure))) if failure.answered =>
+                  failed(s"restore failed: ${failure.message}")
+                // The COMMIT's answer was lost (a broken connection, a 5xx): it may have landed,
+                // may be in DuckLake's retries, and a read that beats it finds nothing.
+                case Right(Right(Left(failure))) =>
+                  settle(s"restore failed: ${failure.message}", canStillLand = true)
               }
-              .guarantee(IO.blocking(fence.disarm(catalogMeta, message)))
+              // Not a `guarantee`: only an answer that settles the restore takes the fence off. A
+              // call that ends abnormally (an error, a cancel) leaves it, as an unknown one does.
+              .flatTap(answered =>
+                if answered.keepFence then IO.unit
+                else IO.blocking(fence.disarm(catalogMeta, message))
+              )
+              .map(_.result)
         }

@@ -830,15 +830,18 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
   that failed, it used to land with no message, and an answer lost afterwards could not be settled
   from the catalog. A table restore, whose commit fence matches its message, does the same.
-- A table restore whose outcome only the catalog can tell (its COMMIT failed, or a timeout) answers
-  `502 restore_outcome_unknown`, audited, when the catalog cannot be read, instead of a bare 500: check
-  the table before retrying. Every clean answer is confirmed by the restore's own commit: its snapshot
-  is `newSnapshot`, and none in the catalog is a refusal (`restore_failed`, the table unchanged). A
-  restore that outlives `restoreTimeoutSec` rolls back when its statement answers. An undrop whose
-  stamp failed answers `undrop_failed` with `retryable: true`, its cause and "nothing was
-  committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no other node says what failed
-  first. `qod catalog restore`, `qod catalog undrop` and `qod profile undrop` wait for the server's
-  answer instead of giving up at 30 s.
+- A table restore that cannot tell whether its replace committed answers `502
+  restore_outcome_unknown`, audited, and its commit fence stays armed: its COMMIT's answer was lost (a
+  broken connection, a 5xx), or it answered and no commit of the restore is in the catalog yet (a kill
+  leaves a COMMIT in flight), or the catalog cannot be read to settle it. Check the table before
+  retrying: the replace may still land, and the fence keeps it from erasing a write committed
+  meanwhile. Only the node's own refusal of the COMMIT is `restore_failed` or `409 concurrent_write`
+  (and takes the fence off). Every clean answer is confirmed by the restore's own commit, whose
+  snapshot is `newSnapshot`. A restore that outlives `restoreTimeoutSec` rolls back when its
+  statement answers. An undrop whose stamp failed answers `undrop_failed` with `retryable: true`, its
+  cause and "nothing was committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no
+  other node says what failed first. `qod catalog restore`, `qod catalog undrop` and `qod profile
+  undrop` wait for the server's answer instead of giving up at 30 s.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

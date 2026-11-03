@@ -35,6 +35,8 @@ object RestoreEndpoints:
           "expectedCurrentSnapshot no longer matches the table's latest snapshot; 410 " +
           "snapshot_expired; 422 invalid_snapshot when the table does not resolve at the target; " +
           "502 restore_outcome_unknown when it cannot be told whether the replace committed (its " +
-          "COMMIT failed or the call timed out, and the catalog could not be read to settle it): " +
-          "the table may or may not have been replaced, so check it before retrying."
+          "COMMIT's answer was lost, or it answered and no commit of this restore is in the " +
+          "catalog yet, or the catalog could not be read to settle it): the replace may still " +
+          "land, so check the table before retrying. A refusal by the node's own answer is " +
+          "restore_failed or concurrent_write, and nothing landed."
       )
