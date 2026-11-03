@@ -299,8 +299,12 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     sup.createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
-    sup.createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
-    sup.createPool(PoolKey("acme", "acme_mem1", "mem_bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0))
+      .unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_mem1", "mem_bi"), RoleDistribution(1, 0, 0))
+      .unsafeRunSync()
 
   it should "preview a duckdb-file table qualified with the node's catalog alias" in new Stubs:
     addNodeHeldDbs(sup)
@@ -584,8 +588,13 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val h = handlers(executorOverride = queuedExecutor)
     dataDiff(h)
     seenSqls should have size 2
-    seenSqls.head shouldBe
-      "SELECT change_type, count(*) AS n FROM ducklake_table_changes('acme_tpch1', 'tpch1', 'region', 13, 42) GROUP BY change_type"
+    seenSqls.head should include(
+      "SELECT snapshot_id, rowid FROM ducklake_table_deletions('acme_tpch1', 'tpch1', 'region', 13, 42)"
+    )
+    seenSqls.head should include(
+      "SELECT snapshot_id, rowid FROM ducklake_table_insertions('acme_tpch1', 'tpch1', 'region', 13, 42)"
+    )
+    seenSqls.head should include("GROUP BY change_type")
     seenSqls(1) should include(
       "FROM ducklake_table_changes('acme_tpch1', 'tpch1', 'region', 13, 42)"
     )

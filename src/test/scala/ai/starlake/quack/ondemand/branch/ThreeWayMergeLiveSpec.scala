@@ -931,3 +931,19 @@ class ThreeWayMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMerge
         }
       }
     }
+
+  "the change counts" should "match the full change feed, on a mixed history" in
+    withCatalog("twcounts", seed) { (parent, _) =>
+      val fork = parent.maxSnapshotId().get
+      duck(cleanMain)
+      val head  = parent.maxSnapshotId().get
+      val cheap = duck(
+        ai.starlake.quack.ondemand.api.DataDiffSql
+          .summarySql("lake", "tpch1", "fact", fork, head) + ";"
+      )
+      val feed = duck(
+        s"SELECT change_type, count(*) FROM ducklake_table_changes('lake', 'tpch1', 'fact', ${fork + 1}, $head) " +
+          "WHERE change_type <> 'update_preimage' GROUP BY change_type;"
+      )
+      cheap.sorted shouldBe feed.sorted
+    }

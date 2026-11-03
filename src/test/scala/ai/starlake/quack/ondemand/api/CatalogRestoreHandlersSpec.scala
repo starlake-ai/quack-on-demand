@@ -295,7 +295,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     val h   = handlers()
     val out = restore(h, to = "39", dryRun = Some(true))
     readSql.get should include(
-      "ducklake_table_changes('acme_tpch1', 'tpch1', 'orders', 40, 40)"
+      "ducklake_table_deletions('acme_tpch1', 'tpch1', 'orders', 40, 40)"
     )
     val r = out.toOption.get
     r.summary shouldBe Some(DataDiffSummary(3, 1, 2))

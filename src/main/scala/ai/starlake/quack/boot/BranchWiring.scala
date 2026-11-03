@@ -29,10 +29,9 @@ import scala.util.control.NonFatal
 
 /** The world-touching collaborators of the branch service (Epic 1), extracted from Main like the
   * maintenance wiring: the ephemeral merge node runner (spawn, await-ready, run a body that may
-  * send several stages, stop), the change-feed counter (one `ducklake_table_changes` aggregate per
-  * modified table on the branch pool through the routed executor), the branch-prefix purge (local
-  * filesystem or S3-compatible store with the tenant-db's own credentials), and the leader-gated
-  * TTL sweep.
+  * send several stages, stop), the change-feed counter (one rowid-only count per modified table on
+  * the branch pool through the routed executor), the branch-prefix purge (local filesystem or
+  * S3-compatible store with the tenant-db's own credentials), and the leader-gated TTL sweep.
   */
 object BranchWiring extends LazyLogging:
 
