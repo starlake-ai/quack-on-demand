@@ -17,6 +17,7 @@ import java.util.concurrent.{
   ExecutorService,
   Executors,
   Flow,
+  Semaphore,
   TimeUnit,
   TimeoutException
 }
@@ -48,6 +49,18 @@ import scala.util.control.NonFatal
   * selector thread with it. Measured: on Temurin 17.0.20 (Linux) the connection of a refused answer
   * goes then too, but on Zulu 17.0.4.1 (macOS) nothing ever closes it, and its descriptor leaks as
   * it did before this change.
+  *
+  * A selector thread beside the blocking thread of the caller is the price of that, so the number
+  * of exchanges in flight is bounded: `send` takes the `Semaphore` its caller names,
+  * [[idpExchanges]] for the identity providers (a tenant admin picks the issuer, and anyone can
+  * make the manager ask it) and OpaClient's own for OPA, so that a flood of one cannot refuse the
+  * other. Measured: 1000 simultaneous starts against an issuer that never answers took the manager
+  * to 2132 threads with no bound, against 1142 with a client for the life of the process, and only
+  * the REST connection budget of 1024 stopped them there. A failed thread start is an
+  * `OutOfMemoryError`, which is fatal, and some Kubernetes clusters set `pids.max` to 1024 or 4096.
+  * A permit is taken with `tryAcquire` and given back when the exchange ends, however it ended;
+  * with none free `send` answers [[Busy]] at once and starts nothing. It never waits: a queue would
+  * hold the very blocking threads the bound is meant to save.
   */
 object BoundedHttp extends LazyLogging:
 
@@ -73,6 +86,21 @@ object BoundedHttp extends LazyLogging:
     */
   val MaxFailureChars: Int = 200
 
+  /** What [[send]] answers when it started nothing for lack of a permit. It says nothing of the
+    * server, so, unlike the text of a failure, a caller that remembers failures must not remember
+    * it (OidcDiscovery does not): it is the caller's own load, not the issuer's state.
+    */
+  val Busy: String = "too many exchanges in flight"
+
+  /** The exchanges with identity providers that may run at once, all issuers together. One lasts
+    * about the latency of a login at its provider, so 128 is hundreds of logins a second, and a
+    * flood against one issuer that never answers holds them for [[IdpTimeoutMs]] at most.
+    */
+  val IdpExchangeLimit: Int = 128
+
+  /** The permits of the exchanges with identity providers: discovery, token exchange, key sets. */
+  val idpExchanges: Semaphore = new Semaphore(IdpExchangeLimit)
+
   /** `request` sent and its answer read under `capBytes` and `timeoutMs` over the whole exchange:
     * `HttpRequest.timeout` alone bounds only the headers. The body is read by a subscriber that
     * never holds more than `capBytes`, and a read that passes either limit is cancelled, which
@@ -90,6 +118,10 @@ object BoundedHttp extends LazyLogging:
     * the readers of a key set and of a discovery document, which answer one fixed text and log this
     * one). `what` names the exchange in this object's own texts ("OPA", "discovery").
     *
+    * `permits` bounds the exchanges in flight, all callers that pass it together: see the object.
+    * With none free the answer is `Left(Busy)`, at once, with no client built and no thread
+    * started; the permit is back when this returns, however the exchange ended.
+    *
     * `secret` is a credential the request carries in a header (a bearer token): the JDK's text can
     * hold it (a server may echo it into a status line, and the JDK quotes the line), so it is
     * masked in that text BEFORE the text is cut, since a cut through the middle of a long secret
@@ -102,13 +134,15 @@ object BoundedHttp extends LazyLogging:
       capBytes: Int,
       timeoutMs: Long,
       what: String,
+      permits: Semaphore,
       redirects: HttpClient.Redirect = HttpClient.Redirect.NEVER,
       secret: Option[String] = None
   ): Either[String, (Int, String)] =
-    exchange(request, capBytes, timeoutMs, what, redirects) match
+    exchange(request, capBytes, timeoutMs, what, permits, redirects) match
       case Ended.Answered(status, body) => Right((status, body))
       case Ended.Limited(text)          => Left(text)
       case Ended.Raised(error)          => Left(describe(error, secret))
+      case Ended.Refused                => Left(Busy)
 
   /** A code-to-token exchange: `form` POSTed to the token endpoint `url`, and the body of its
     * answer when the status is 200, else why not. It is read like any identity provider's answer,
@@ -122,7 +156,12 @@ object BoundedHttp extends LazyLogging:
     * log gets the same: the class of what the JDK raised and nothing of its message, or this
     * object's own text when a limit of its was passed.
     */
-  def tokenExchange(url: String, form: String, refused: Int => String): Either[String, String] =
+  def tokenExchange(
+      url: String,
+      form: String,
+      refused: Int => String,
+      permits: Semaphore = idpExchanges
+  ): Either[String, String] =
     val ended =
       try
         val request = HttpRequest
@@ -137,6 +176,7 @@ object BoundedHttp extends LazyLogging:
           MaxIdpAnswerBytes,
           IdpTimeoutMs,
           "token endpoint",
+          permits,
           HttpClient.Redirect.NEVER
         )
       catch case NonFatal(e) => Ended.Raised(e)
@@ -148,6 +188,11 @@ object BoundedHttp extends LazyLogging:
         Left(TokenEndpointFailed)
       case Ended.Raised(error) =>
         logger.warn(s"token exchange failed: ${error.getClass.getSimpleName}")
+        Left(TokenEndpointFailed)
+      case Ended.Refused =>
+        // Below WARN: a refusal is the cheapest thing an anonymous caller can ask for, so a WARN
+        // for each would be a log flood.
+        logger.debug(s"token exchange refused: $Busy")
         Left(TokenEndpointFailed)
 
   /** `error` as a failure text: its class and message, with `secret` masked, then cut (see
@@ -177,7 +222,27 @@ object BoundedHttp extends LazyLogging:
     /** The JDK raised this. Its message can quote what the server sent. */
     case Raised(error: Throwable)
 
+    /** No permit was free: nothing was started. */
+    case Refused
+
+  /** The exchange itself, once a permit is taken. `tryAcquire`, never `acquire`: a caller that
+    * waited would hold its blocking thread, which is what the bound is meant to save. The permit
+    * goes back when the exchange ended however it ended, the client shut down first.
+    */
   private def exchange(
+      request: HttpRequest,
+      capBytes: Int,
+      timeoutMs: Long,
+      what: String,
+      permits: Semaphore,
+      redirects: HttpClient.Redirect
+  ): Ended =
+    if !permits.tryAcquire() then Ended.Refused
+    else
+      try inOwnClient(request, capBytes, timeoutMs, what, redirects)
+      finally permits.release()
+
+  private def inOwnClient(
       request: HttpRequest,
       capBytes: Int,
       timeoutMs: Long,

@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -105,6 +106,23 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     first.left.toOption.map(_.length).exists(_ <= 200) shouldBe true
     discovery.resolve(IssuerA) shouldBe first
     gets.asked.get shouldBe 1
+  }
+
+  // A refusal for lack of a permit says nothing of the issuer: remembered for 10 s it would turn
+  // one tenant's flood into 10 s of failed discovery for another tenant's healthy issuer. A real
+  // failure is remembered, as the first case above shows.
+  it should "not remember that the exchanges were busy: the next call asks again" in {
+    var busy      = true
+    val gets      = new Gets(_ => if busy then Left(BoundedHttp.Busy) else Right(docOf(IssuerA)))
+    val discovery = new OidcDiscovery(gets)
+
+    discovery.resolve(IssuerA) shouldBe Left(BoundedHttp.Busy)
+    discovery.resolve(IssuerA) shouldBe Left(BoundedHttp.Busy)
+    gets.asked.get shouldBe 2 // asked both times, within the 10 s a failure would be kept
+
+    busy = false
+    discovery.resolve(IssuerA).map(_.issuer) shouldBe Right(IssuerA)
+    gets.asked.get shouldBe 3
   }
 
   it should "answer a short failure as it was" in {

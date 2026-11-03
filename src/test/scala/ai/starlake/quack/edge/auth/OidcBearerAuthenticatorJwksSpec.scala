@@ -15,7 +15,7 @@ import java.net.http.HttpClient
 import java.net.{InetAddress, InetSocketAddress, ServerSocket}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CountDownLatch, Executors, Semaphore, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
 /** How [[OidcBearerAuthenticator]] reads the key set it verifies tokens against. The URL can come
@@ -289,11 +289,11 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
   // the retriever can be given.
   it should "ask for a key set under 50 KiB and 5 s, following redirects as NORMAL does" in {
     val seen = new java.util.concurrent.ConcurrentLinkedQueue[
-      (String, Int, Long, String, HttpClient.Redirect)
+      (String, Int, Long, String, Semaphore, HttpClient.Redirect)
     ]
     val retriever = OidcBearerAuthenticator.retrieverOver {
-      (request, cap, timeoutMs, what, redirects) =>
-        seen.add((request.uri.toString, cap, timeoutMs, what, redirects))
+      (request, cap, timeoutMs, what, permits, redirects) =>
+        seen.add((request.uri.toString, cap, timeoutMs, what, permits, redirects))
         Right((200, keySet.noSpaces))
     }
 
@@ -301,7 +301,39 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
 
     resource.getContent shouldBe keySet.noSpaces
     seen.asScala.toList shouldBe
-      List(("https://idp.example/jwks", 50 * 1024, 5000L, "JWKS", HttpClient.Redirect.NORMAL))
+      List(
+        (
+          "https://idp.example/jwks",
+          50 * 1024,
+          5000L,
+          "JWKS",
+          BoundedHttp.idpExchanges,
+          HttpClient.Redirect.NORMAL
+        )
+      )
+  }
+
+  // The read of a key set is one of the exchanges with identity providers that run at most 128 at
+  // once. With none free it answers the same fixed text as for any other failure, and asks nobody.
+  it should "answer the fixed text, asking nobody, while every identity provider exchange is taken" in {
+    val before = jwksGets
+    val held   = BoundedHttp.idpExchanges.drainPermits()
+    val events =
+      try
+        // AtOnce: a read that waited for a permit would park here for good, and hold every permit.
+        val (answer, logged) = LogCapture.logged(RetrieverLogger)(
+          AtOnce(authenticatorFor(s"${idp.base}/jwks").authenticate(token))
+        )
+        answer match
+          case Left(why) => why should include("JWKS unavailable")
+          case Right(p)  => fail(s"a token was accepted as '${p.username}' with no exchange free")
+        logged
+      finally BoundedHttp.idpExchanges.release(held)
+
+    (jwksGets - before) shouldBe 0
+    // Below WARN: a refusal is the cheapest thing an anonymous caller can ask for, so a WARN for
+    // each would be a log flood.
+    events.filter(_.getLevel.isGreaterOrEqual(Level.WARN)) shouldBe empty
   }
 
   it should "log the status a key set answered, and answer with the fixed text alone" in {

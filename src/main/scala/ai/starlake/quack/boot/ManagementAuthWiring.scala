@@ -3,6 +3,7 @@ package ai.starlake.quack.boot
 import java.net.URI
 import java.net.http.HttpRequest
 import java.time.Duration
+import java.util.concurrent.Semaphore
 import java.util.Locale
 import ai.starlake.quack.{ManagementOidcConfig, ManagerConfig}
 import ai.starlake.quack.edge.BoundedHttp
@@ -52,8 +53,15 @@ object ManagementAuthWiring extends LazyLogging:
     * the whole exchange (`HttpRequest.timeout` alone bounds only the headers): one anonymous `GET
     * /api/auth/oidc/start` makes this call, and a large or trickled answer, read whole, halted the
     * manager or held a blocking thread for as long as the issuer liked.
+    *
+    * It is one of the [[BoundedHttp.idpExchanges]]: with none free the answer is
+    * [[BoundedHttp.Busy]], passed on as it is, since OidcDiscovery behind it must tell a refusal
+    * for lack of a permit from a failure of the issuer (it remembers a failure for 10 s).
     */
-  private[boot] def discoveryGet(url: String): Either[String, String] =
+  private[boot] def discoveryGet(
+      url: String,
+      permits: Semaphore = BoundedHttp.idpExchanges
+  ): Either[String, String] =
     val answer =
       try
         val req = HttpRequest
@@ -62,13 +70,25 @@ object ManagementAuthWiring extends LazyLogging:
           .GET()
           .timeout(Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
           .build()
-        BoundedHttp.send(req, BoundedHttp.MaxIdpAnswerBytes, BoundedHttp.IdpTimeoutMs, "discovery")
+        BoundedHttp.send(
+          req,
+          BoundedHttp.MaxIdpAnswerBytes,
+          BoundedHttp.IdpTimeoutMs,
+          "discovery",
+          permits
+        )
       catch case e: Exception => Left(BoundedHttp.describe(e))
     answer match
       case Right((200, body)) => Right(body)
       case Right((code, _))   =>
         logger.warn(s"discovery read failed: HTTP $code")
         Left(DiscoveryUnavailable)
+      case Left(BoundedHttp.Busy) =>
+        // The one refusal that is not a failure of the issuer: it passes on as it is, for
+        // OidcDiscovery to tell it from a failure it remembers. Below WARN, as the cheapest thing
+        // an anonymous caller can ask for.
+        logger.debug(s"discovery read refused: ${BoundedHttp.Busy}")
+        Left(BoundedHttp.Busy)
       case Left(why) =>
         logger.warn(s"discovery read failed: $why")
         Left(DiscoveryUnavailable)
@@ -140,7 +160,7 @@ object ManagementAuthWiring extends LazyLogging:
       identitySource: ManagementIdentitySource,
       loadTenant: String => Option[Tenant]
   ): OidcSsoService =
-    val discovery = new OidcDiscovery(httpGet = discoveryGet)
+    val discovery = new OidcDiscovery(httpGet = url => discoveryGet(url))
     val resolver  = new OidcEndpointResolver(
       loadTenant = loadTenant,
       secrets = SecretRefResolver.default,
@@ -196,7 +216,7 @@ object ManagementAuthWiring extends LazyLogging:
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
     if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
-      val sqlTokenDiscovery = new OidcDiscovery(httpGet = discoveryGet)
+      val sqlTokenDiscovery = new OidcDiscovery(httpGet = url => discoveryGet(url))
       Some(
         new SqlTokenOidcService(
           authCfg,

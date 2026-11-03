@@ -3,10 +3,12 @@ package ai.starlake.quack.boot
 import ai.starlake.quack.{Main, ManagerConfig}
 import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.auth.{
+  AtOnce,
   EchoingServer,
   LocalIdp,
   MalformedServer,
   NestedClaims,
+  OidcDiscovery,
   OidcScope,
   OidcSsoError,
   PlainThread
@@ -32,6 +34,7 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import pureconfig.ConfigSource
 
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.Semaphore
 import scala.jdk.CollectionConverters.*
 
 /** Pins what [[ManagementAuthWiring.build]] wires per `identitySource`. The source governs only the
@@ -271,6 +274,47 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
           warned.foreach(_.length should be < 300)
         }
       finally server.close()
+    }
+
+  // The read of a discovery document is one of the exchanges with identity providers that run at
+  // most 128 at once. With none free it asks nobody and answers Busy, which OidcDiscovery tells
+  // from a failure of the issuer: a failure is remembered for 10 s, and a busy refusal says
+  // nothing of the issuer, so remembered it would turn one tenant's flood into 10 s of failed
+  // discovery for another tenant's healthy issuer.
+  it should "answer Busy, asking nobody, when no identity provider exchange is free" in
+    withIdp { idp =>
+      idp.serve("/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(idp.base))
+
+      // AtOnce: a read that waited for a permit would park here for good, with nobody to give one.
+      val (answer, events) = LogCapture.logged(WiringLogger)(
+        AtOnce(
+          ManagementAuthWiring.discoveryGet(
+            s"${idp.base}/.well-known/openid-configuration",
+            new Semaphore(0)
+          )
+        )
+      )
+
+      answer shouldBe Left(BoundedHttp.Busy)
+      idp.requests.size shouldBe 0
+      // Below WARN: a refusal is the cheapest thing an anonymous caller can ask for, so a WARN for
+      // each would be a log flood.
+      events.filter(_.getLevel.isGreaterOrEqual(Level.WARN)) shouldBe empty
+    }
+
+  it should "leave a busy discovery unremembered, so that the next call asks the issuer" in
+    withIdp { idp =>
+      val issuer = s"${idp.base}/healthy"
+      idp.serve("/healthy/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))
+      val permits   = new Semaphore(0)
+      val discovery = new OidcDiscovery(url => ManagementAuthWiring.discoveryGet(url, permits))
+
+      AtOnce(discovery.resolve(issuer)) shouldBe Left(BoundedHttp.Busy)
+      idp.requests.size shouldBe 0
+
+      permits.release()
+      discovery.resolve(issuer).map(_.issuer) shouldBe Right(issuer)
+      idp.requests.size shouldBe 1
     }
 
   it should "quote no server in the SQL-token flow's answer when the issuer answers a status line the JDK refuses" in {

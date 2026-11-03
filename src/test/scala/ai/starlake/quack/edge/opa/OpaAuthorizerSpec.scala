@@ -2,7 +2,8 @@ package ai.starlake.quack.edge.opa
 
 import ai.starlake.acl.model.TableRef
 import ai.starlake.acl.parser.{TableAccess, Verb}
-import ai.starlake.quack.edge.auth.EchoingServer
+import ai.starlake.quack.edge.BoundedHttp
+import ai.starlake.quack.edge.auth.{AtOnce, EchoingServer}
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
@@ -15,6 +16,8 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import java.util.concurrent.Semaphore
 
 class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
@@ -342,6 +345,32 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       result.left.toOption.exists(_.contains("<redacted>")) shouldBe true
       result.left.toOption.exists(_.contains("Zq9Zq9")) shouldBe false
     finally server.close()
+
+  // At most 256 OPA exchanges run at once, a selector thread each. With none free a decision is
+  // an error at once (fail closed, and an error is never cached), and nobody is asked.
+  it should "answer Busy and ask nobody when no OPA exchange is free" in:
+    wm.resetAll()
+    // AtOnce: a call that waited for a permit would park here for good, with nobody to give one.
+    AtOnce(
+      OpaClient.jdkPost(500, new Semaphore(0))(s"$base/v1/data/qod/authz/connect", "{}", None)
+    ) shouldBe Left(BoundedHttp.Busy)
+    wm.verify(0, postRequestedFor(anyUrl()))
+
+  // The permits of OPA are its own: a flood of exchanges with identity providers (an issuer is a
+  // tenant admin's choice) must not refuse the decisions of every tenant.
+  it should "have permits of its own, which a flood of identity provider exchanges does not take" in:
+    OpaClient.ExchangeLimit shouldBe 256
+    OpaClient.exchanges should not be theSameInstanceAs(BoundedHttp.idpExchanges)
+    OpaClient.exchanges.availablePermits shouldBe 256
+    wm.resetAll()
+    wm.stubFor(post(anyUrl()).willReturn(okJson("""{"result":{"allow":true}}""")))
+    val held = BoundedHttp.idpExchanges.drainPermits()
+    try
+      AtOnce(OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", None)) match
+        case Right((200, _)) => succeed
+        case other           =>
+          fail(s"an OPA decision was refused while identity providers were busy: $other")
+    finally BoundedHttp.idpExchanges.release(held)
 
   "decide" should "key the decision cache on kinds, columns, via and locations" in:
     var calls = 0

@@ -44,6 +44,11 @@ final case class OidcDiscoveryDoc(
   * for as long as the GET takes (up to 15 s). The time runs from the failed attempt, and a refused
   * call does not extend it. A success clears the failure. `nanoTime` is injectable for tests.
   *
+  * A refusal of the GET for lack of a permit ([[BoundedHttp.Busy]]: too many exchanges with
+  * identity providers in flight) is not a failure of the issuer and is not remembered, neither as a
+  * failure nor otherwise: remembered for 10 s it would turn one tenant's flood against its own
+  * issuer into 10 s of failed discovery for another tenant's healthy one. The next call asks.
+  *
   * A failure is remembered once its GET has returned, not before: calls that arrive while a GET is
   * still waiting on an issuer that never answers each make their own (the REST connection budget
   * bounds how many), so the memo ends the traffic to an issuer that fails, and only shortens it for
@@ -96,6 +101,9 @@ class OidcDiscovery(
         documents.put(issuerUrl, doc)
         failures.invalidate(issuerUrl)
         Right(doc)
+      case Left(BoundedHttp.Busy) =>
+        // A refusal for lack of a permit says nothing of the issuer: not remembered.
+        Left(BoundedHttp.Busy)
       case Left(why) =>
         val kept = BoundedHttp.cut(why)
         failures.put(issuerUrl, kept)

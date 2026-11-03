@@ -14,6 +14,7 @@ import java.io.IOException
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest}
 import java.util.Date
+import java.util.concurrent.Semaphore
 
 /** Validates Bearer tokens from OIDC providers (Keycloak, Google, Azure AD, AWS Cognito) by
   * verifying signatures against the provider's JWKS endpoint.
@@ -170,7 +171,10 @@ object OidcBearerAuthenticator extends LazyLogging:
 
   /** The shape of [[BoundedHttp.send]], so that a spec can see what the retriever asks of it. */
   private[auth] type Send =
-    (HttpRequest, Int, Long, String, HttpClient.Redirect) => Either[String, (Int, String)]
+    (HttpRequest, Int, Long, String, Semaphore, HttpClient.Redirect) => Either[
+      String,
+      (Int, String)
+    ]
 
   /** Reads a JWKS through `send`, under a size limit and a deadline over the whole read, redirects
     * included. The URL can come from a discovery document, which a tenant admin picks, and anyone
@@ -192,6 +196,7 @@ object OidcBearerAuthenticator extends LazyLogging:
           BoundedHttp.MaxJwksBytes,
           BoundedHttp.JwksTimeoutMs,
           "JWKS",
+          BoundedHttp.idpExchanges,
           HttpClient.Redirect.NORMAL
         )
       catch case e: Exception => Left(BoundedHttp.describe(e))
@@ -200,11 +205,15 @@ object OidcBearerAuthenticator extends LazyLogging:
       case Right((code, _))   =>
         logger.warn(s"JWKS read failed: HTTP $code")
         throw new IOException(JwksUnavailable)
+      case Left(BoundedHttp.Busy) =>
+        // Below WARN: a refusal is the cheapest thing an anonymous caller can ask for.
+        logger.debug(s"JWKS read refused: ${BoundedHttp.Busy}")
+        throw new IOException(JwksUnavailable)
       case Left(why) =>
         logger.warn(s"JWKS read failed: $why")
         throw new IOException(JwksUnavailable)
 
   private[auth] val jwksRetriever: ResourceRetriever =
-    retrieverOver((request, cap, timeoutMs, what, redirects) =>
-      BoundedHttp.send(request, cap, timeoutMs, what, redirects)
+    retrieverOver((request, cap, timeoutMs, what, permits, redirects) =>
+      BoundedHttp.send(request, cap, timeoutMs, what, permits, redirects)
     )
