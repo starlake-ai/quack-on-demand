@@ -562,15 +562,15 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                     <td>{live ? (b.expiresAt ? fmtTs(b.expiresAt) : 'never') : '-'}</td>
                     <td style={{ display: 'flex', gap: 10 }}>
                       {(b.status === 'open' || b.status === 'proposed') && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => openPropose(b)}>
+                        <button type="button" style={chipBtn} disabled={busy !== null} onClick={() => openPropose(b)}>
                           {b.status === 'open' ? 'propose' : 'propose again'}
                         </button>
                       )}
                       {b.status === 'proposed' && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => openMerge(b)}>merge</button>
+                        <button type="button" style={chipBtn} disabled={busy !== null} onClick={() => openMerge(b)}>merge</button>
                       )}
                       {live && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => discard(b)}>discard</button>
+                        <button type="button" style={chipBtn} disabled={busy !== null} onClick={() => discard(b)}>discard</button>
                       )}
                     </td>
                   </tr>
@@ -635,8 +635,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           </div>
           {pError && <div className="login-err" style={{ marginTop: '.75rem' }}>{pError}</div>}
           <div className="cred-form-actions">
-            <button type="submit" disabled={busy === proposeFor.name}>Propose</button>
-            <button type="button" className="secondary" onClick={() => setProposeFor(null)}>Cancel</button>
+            <button type="submit" disabled={busy !== null}>Propose</button>
+            <button type="button" className="secondary" onClick={() => setProposeFor(null)}
+              disabled={busy === proposeFor.name}>Cancel</button>
           </div>
         </form>
       )}
@@ -659,7 +660,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
             seconds, then fail. Use it when these tables commit too often for a quiet moment.
           </label>
           <div className="cred-form-actions">
-            <button type="submit">Merge</button>
+            <button type="submit" disabled={busy !== null}>Merge</button>
             <button type="button" className="secondary" onClick={() => setMergeFor(null)}>Cancel</button>
           </div>
         </form>

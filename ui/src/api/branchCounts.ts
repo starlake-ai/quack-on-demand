@@ -62,7 +62,8 @@ export function rowConflictsHint(
 }
 
 /** What a proposal's policy does to every kind of conflict. An approver with no grant on a table sees
-  * no numbers, so this can be all they read. */
+  * no numbers, so this can be all they read. Only no policy at all reads as a refusal: a name this
+  * console does not know (a policy the server gained later) is named, never read as one. */
 export function conflictPolicyText(onConflict?: string | null): string {
   if (onConflict === 'main') {
     return 'Main wins every conflict: a conflicting cell keeps its value, a row it deleted stays ' +
@@ -74,7 +75,8 @@ export function conflictPolicyText(onConflict?: string | null): string {
       'deleted from main even if main updated it, a row it updated returns even if main deleted ' +
       "it, and main's rows matching a key are deleted.";
   }
-  return 'Any conflict refuses the merge.';
+  if (!onConflict) return 'Any conflict refuses the merge.';
+  return `Conflicts follow the policy '${onConflict}'.`;
 }
 
 /** The note after a merge request's status chip, for a request that carries an error. On an open

@@ -113,6 +113,10 @@ describe('rowConflictsHint', () => {
   it('names whichever side the proposal chose', () => {
     expect(rowConflictsHint([conflicted], 'main')).toBe(conflictPolicyText('main'));
   });
+
+  it('names a policy it does not know instead of reading it as a refusal', () => {
+    expect(rowConflictsHint([conflicted], 'newest')).toBe("Conflicts follow the policy 'newest'.");
+  });
 });
 
 // An approver with no grant on a table sees no numbers (design 8.2), so these sentences can be all
@@ -138,6 +142,13 @@ describe('conflictPolicyText', () => {
   it('says that any conflict refuses the merge when the proposal names no policy', () => {
     expect(conflictPolicyText(null)).toBe('Any conflict refuses the merge.');
     expect(conflictPolicyText(undefined)).toBe('Any conflict refuses the merge.');
+    expect(conflictPolicyText('')).toBe('Any conflict refuses the merge.');
+  });
+
+  it('names a policy it does not know, and never reads it as a refusal', () => {
+    // The server takes main and branch today. A policy it gains later, shown by a console that
+    // predates it, must not read as "refuses": that would be false, and the safe-sounding way.
+    expect(conflictPolicyText('newest')).toBe("Conflicts follow the policy 'newest'.");
   });
 });
 
