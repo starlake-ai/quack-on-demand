@@ -66,3 +66,43 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
     val s                         = svc((_, _) => Left("HTTP 401"))
     val Right((_, state: String)) = s.startUrl(): @unchecked
     s.completeAuth("code", state, state) shouldBe Left("HTTP 401")
+
+  // The default code-to-token exchange reads the provider's answer under the same size limit as
+  // discovery, and a transport failure is a Left like any other (it used to be an exception that
+  // no caller caught).
+  private def withIdp[A](f: LocalIdp => A): A =
+    val idp = new LocalIdp
+    try f(idp)
+    finally idp.close()
+
+  "defaultExchange" should "return the body of a 200 token answer" in:
+    withIdp { idp =>
+      idp.serve("/token", 200, """{"id_token":"the-jwt"}""")
+      SqlTokenOidcService.defaultExchange(s"${idp.base}/token", "grant_type=x") shouldBe
+        Right("""{"id_token":"the-jwt"}""")
+    }
+
+  it should "refuse a token answer over 256 KiB with a Left" in:
+    withIdp { idp =>
+      idp.serve("/token", 200, s"""{"id_token":"the-jwt","pad":"${"x" * (300 * 1024)}"}""")
+      SqlTokenOidcService.defaultExchange(s"${idp.base}/token", "grant_type=x") match
+        case Left(why) => why should include("response exceeds 256 KiB")
+        case Right(_)  => fail("expected a Left for an answer over the cap")
+    }
+
+  it should "answer a non-200 with its status alone, never the answer or the form" in:
+    withIdp { idp =>
+      val form = "grant_type=authorization_code&client_secret=hunter2-secret"
+      idp.serveWith("/token")(received => (500, s"""{"error":"boom","echo":"$received"}"""))
+      SqlTokenOidcService.defaultExchange(s"${idp.base}/token", form) shouldBe
+        Left("Token exchange failed (HTTP 500)")
+      idp.requests.peek() shouldBe (("/token", form))
+    }
+
+  it should "answer a refused connection with a Left, not an exception" in:
+    val closed = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress)
+    val port   = closed.getLocalPort
+    closed.close()
+    val out = SqlTokenOidcService.defaultExchange(s"http://127.0.0.1:$port/token", "grant_type=x")
+    out.isLeft shouldBe true
+    out.left.toOption.exists(_.contains("grant_type")) shouldBe false

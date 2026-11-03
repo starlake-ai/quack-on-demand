@@ -26,7 +26,7 @@ import ai.starlake.quack.ondemand.auth.{
 }
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.state.UserGrant
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder}
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.unsafe.implicits.global
@@ -108,7 +108,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       // unless a test supplies a directory: a database-authenticator profile never reads it.
       grantsForIdentity: GrantsLookup = (_, _, _) => Nil,
       events: ManagerEventSink = ManagerEventSink.noop,
-      patSessionOf: String => Option[SessionTokenStore.Session] = _ => None
+      patSessionOf: String => Option[SessionTokenStore.Session] = _ => None,
+      publicDenialAudit: AuditRateLimiter = new AuditRateLimiter()
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -130,7 +131,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       resolveTenant = resolveTenant,
       audit = audit,
       events = events,
-      patSessionOf = patSessionOf
+      patSessionOf = patSessionOf,
+      publicDenialAudit = publicDenialAudit
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -529,6 +531,48 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     e.actor shouldBe "alice"
     e.tenant shouldBe Some("acme")
     e.detail shouldBe Map("username" -> "alice", "reason" -> "sso_required")
+  }
+
+  // The refusal is answered before any password check, so no password gate bounds it, and it needs
+  // no credential: measured before, 5000 requests wrote 5000 rows. The key is the tenant id the
+  // login resolved, which the manager knows, never text the sender chooses (the user name, the
+  // spelling of the tenant).
+  it should "write at most one sso_required row a minute per tenant, whatever user names and spellings are typed, and still answer every refusal" in {
+    var now       = 1_000_000L
+    val limiter   = new AuditRateLimiter(intervalMillis = 60000, clock = () => now)
+    val telemetry = new RecordingTelemetryStore
+    val calls     = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h         = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      resolveTenant = { case "ACME" => Some("acme"); case _ => None },
+      loadTenant = Map(acmeSso.id -> acmeSso, ssoTenant.id -> ssoTenant).get,
+      audit = new AuditRecorder(telemetry, _ => None),
+      publicDenialAudit = limiter
+    )
+    def refuse(user: String, tenant: String): Unit =
+      h.login(LoginRequest(user, "pw", tenant = Some(tenant))).unsafeRunSync() match
+        case Left((status, err)) =>
+          status shouldBe StatusCode.BadRequest
+          err.error shouldBe "sso_required"
+        case Right(_) => fail("expected 400 sso_required, got a session")
+    def rows = telemetry.events.map(e => (e.actor, e.tenant)).toList
+
+    // Two refused logins in one minute, other user name and other spelling of the tenant: both
+    // answer 400, one row.
+    refuse("alice", "acme")
+    refuse("bob", "  ACME ")
+    rows shouldBe List(("alice", Some("acme")))
+
+    // Another tenant has a key of its own.
+    refuse("alice", "t-sso")
+    rows shouldBe List(("alice", Some("acme")), ("alice", Some("t-sso")))
+
+    // A minute later the tenant writes again.
+    now += 60000
+    refuse("carol", "acme")
+    rows shouldBe List(("alice", Some("acme")), ("alice", Some("t-sso")), ("carol", Some("acme")))
+    calls shouldBe empty
   }
 
   it should "keep authenticating an unknown tenant first (401 invalid_credentials)" in {

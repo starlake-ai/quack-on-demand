@@ -1,7 +1,11 @@
 package ai.starlake.quack.boot
 
+import java.net.URI
+import java.net.http.{HttpClient, HttpRequest}
+import java.time.Duration
 import java.util.Locale
 import ai.starlake.quack.{ManagementOidcConfig, ManagerConfig}
+import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.auth.{
   OidcBearerAuthenticator,
   OidcDiscovery,
@@ -34,6 +38,57 @@ final case class ManagementAuthComponents(
 )
 
 object ManagementAuthWiring extends LazyLogging:
+
+  /** `GET url`, the way the manager reads an identity provider's discovery document: its body when
+    * the answer is 200, else why not. A tenant admin picks the issuer, so the answer is read under
+    * [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over the whole exchange
+    * (`HttpRequest.timeout` alone bounds only the headers): one anonymous `GET
+    * /api/auth/oidc/start` makes this call, and a large or trickled answer, read whole, halted the
+    * manager or held a blocking thread for as long as the issuer liked.
+    */
+  private[boot] def discoveryGet(client: HttpClient): String => Either[String, String] =
+    url =>
+      try
+        val req = HttpRequest
+          .newBuilder()
+          .uri(URI.create(url))
+          .GET()
+          .timeout(Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
+          .build()
+        BoundedHttp
+          .send(client, req, BoundedHttp.MaxIdpAnswerBytes, BoundedHttp.IdpTimeoutMs, "discovery")
+          .flatMap((code, body) =>
+            if code == 200 then Right(body) else Left(s"discovery HTTP $code")
+          )
+      catch case e: Exception => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
+
+  /** The code-to-token exchange: `form` POSTed to the token endpoint, its body when the answer is
+    * 200, else why not, under the same limits as [[discoveryGet]]. The form holds the client
+    * secret, so no failure text carries it: a refused status is named by its code alone, never by
+    * the provider's answer, which may echo what it was sent.
+    */
+  private[boot] def tokenExchange(client: HttpClient): (String, String) => Either[String, String] =
+    (url, form) =>
+      try
+        val req = HttpRequest
+          .newBuilder()
+          .uri(URI.create(url))
+          .header("Content-Type", "application/x-www-form-urlencoded")
+          .POST(HttpRequest.BodyPublishers.ofString(form))
+          .timeout(Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
+          .build()
+        BoundedHttp
+          .send(
+            client,
+            req,
+            BoundedHttp.MaxIdpAnswerBytes,
+            BoundedHttp.IdpTimeoutMs,
+            "token endpoint"
+          )
+          .flatMap((code, body) =>
+            if code == 200 then Right(body) else Left(s"token endpoint HTTP $code")
+          )
+      catch case e: Exception => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
 
   def build(
       mgrCfg: ManagerConfig,
@@ -92,25 +147,12 @@ object ManagementAuthWiring extends LazyLogging:
       identitySource: ManagementIdentitySource,
       loadTenant: String => Option[Tenant]
   ): OidcSsoService =
-    val httpClient = java.net.http.HttpClient
+    val httpClient = HttpClient
       .newBuilder()
-      .connectTimeout(java.time.Duration.ofSeconds(10))
+      .connectTimeout(Duration.ofSeconds(10))
       .build()
-    val discovery = new OidcDiscovery(httpGet =
-      url =>
-        try
-          val req = java.net.http.HttpRequest
-            .newBuilder()
-            .uri(java.net.URI.create(url))
-            .GET()
-            .timeout(java.time.Duration.ofSeconds(15))
-            .build()
-          val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-          if resp.statusCode() == 200 then Right(resp.body())
-          else Left(s"discovery HTTP ${resp.statusCode()}")
-        catch case e: Exception => Left(e.getMessage)
-    )
-    val resolver = new OidcEndpointResolver(
+    val discovery = new OidcDiscovery(httpGet = discoveryGet(httpClient))
+    val resolver  = new OidcEndpointResolver(
       loadTenant = loadTenant,
       secrets = SecretRefResolver.default,
       discovery = discovery
@@ -127,19 +169,7 @@ object ManagementAuthWiring extends LazyLogging:
     val publicBaseUrlOf = () =>
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
-    val httpExchange = (url: String, form: String) =>
-      try
-        val req = java.net.http.HttpRequest
-          .newBuilder()
-          .uri(java.net.URI.create(url))
-          .header("Content-Type", "application/x-www-form-urlencoded")
-          .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
-          .timeout(java.time.Duration.ofSeconds(15))
-          .build()
-        val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-        if resp.statusCode() == 200 then Right(resp.body())
-        else Left(s"token endpoint HTTP ${resp.statusCode()}")
-      catch case e: Exception => Left(e.getMessage)
+    val httpExchange   = tokenExchange(httpClient)
     val buildValidator = (ep: OidcEndpoints) =>
       new OidcBearerAuthenticator(
         ep.provider,
@@ -178,24 +208,11 @@ object ManagementAuthWiring extends LazyLogging:
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
     if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
-      val sqlTokenHttp = java.net.http.HttpClient
+      val sqlTokenHttp = HttpClient
         .newBuilder()
-        .connectTimeout(java.time.Duration.ofSeconds(10))
+        .connectTimeout(Duration.ofSeconds(10))
         .build()
-      val sqlTokenDiscovery = new OidcDiscovery(httpGet =
-        url =>
-          try
-            val req = java.net.http.HttpRequest
-              .newBuilder()
-              .uri(java.net.URI.create(url))
-              .GET()
-              .timeout(java.time.Duration.ofSeconds(15))
-              .build()
-            val resp = sqlTokenHttp.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-            if resp.statusCode() == 200 then Right(resp.body())
-            else Left(s"discovery HTTP ${resp.statusCode()}")
-          catch case e: Exception => Left(e.getMessage)
-      )
+      val sqlTokenDiscovery = new OidcDiscovery(httpGet = discoveryGet(sqlTokenHttp))
       Some(
         new SqlTokenOidcService(
           authCfg,

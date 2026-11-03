@@ -1,9 +1,10 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import com.typesafe.scalalogging.LazyLogging
 import java.net.{URI, URLEncoder}
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import java.net.http.{HttpClient, HttpRequest}
 import java.nio.charset.StandardCharsets
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -12,19 +13,32 @@ object SqlTokenOidcService extends LazyLogging:
   private val sharedClient = HttpClient.newHttpClient()
 
   /** Default code->token exchange: POST grant_type=authorization_code to the token endpoint and
-    * return the raw JSON body, or Left(reason).
+    * return the raw JSON body, or Left(reason). The answer is read under
+    * [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over the whole exchange,
+    * and no failure text carries the form (it holds the client secret): a refused status is named
+    * by its code alone.
     */
   def defaultExchange(tokenEndpoint: String, form: String): Either[String, String] =
-    val req = HttpRequest
-      .newBuilder()
-      .uri(URI.create(tokenEndpoint))
-      .header("Content-Type", "application/x-www-form-urlencoded")
-      .POST(HttpRequest.BodyPublishers.ofString(form))
-      .timeout(java.time.Duration.ofSeconds(15))
-      .build()
-    val resp = sharedClient.send(req, HttpResponse.BodyHandlers.ofString())
-    if resp.statusCode() != 200 then Left(s"Token exchange failed (HTTP ${resp.statusCode()})")
-    else Right(resp.body())
+    try
+      val req = HttpRequest
+        .newBuilder()
+        .uri(URI.create(tokenEndpoint))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .POST(HttpRequest.BodyPublishers.ofString(form))
+        .timeout(java.time.Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
+        .build()
+      BoundedHttp
+        .send(
+          sharedClient,
+          req,
+          BoundedHttp.MaxIdpAnswerBytes,
+          BoundedHttp.IdpTimeoutMs,
+          "token endpoint"
+        )
+        .flatMap((code, body) =>
+          if code != 200 then Left(s"Token exchange failed (HTTP $code)") else Right(body)
+        )
+    catch case e: Exception => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
 
 class SqlTokenOidcService(
     config: AuthenticationConfig,
