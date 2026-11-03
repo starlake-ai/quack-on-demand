@@ -23,8 +23,9 @@ import scala.util.{Failure, Success, Try, Using}
 
 /** The three-way merge on a real manager and real qod-node processes: proposal, conflicts, policy,
   * hold, encryption, a stage past one session handle's life, and no cell value left behind in the
-  * control plane. Manager on 20975 (REST) / 31375 (FlightSQL) / 29511 (front door), relay 20985,
-  * nodes 23280-23289.
+  * control plane; then what a plain user may do and read of a branch, by session and by token, and
+  * that a mask holds through a proposal. Manager on 20975 (REST) / 31375 (FlightSQL) / 29511 (front
+  * door), relay 20985, nodes 23280-23289.
   */
 class BranchThreeWayE2ESpec
     extends AnyFlatSpec
@@ -706,6 +707,245 @@ class BranchThreeWayE2ESpec
     branchBody should include("the branch's snapshot")
   }
 
+  /** What `rowConflicts` said, without the sampled rowids. */
+  private def rowCounts(conflicts: ACursor): String =
+    def bare(j: Json) = j.mapObject(_.remove("samples")).noSpaces
+    conflicts.focus.fold("none")(j => j.asArray.fold(bare(j))(_.map(bare).mkString(" ")))
+
+  /** `ThreeWayMergeScaleBench`'s table and writes on the real stack, for what its embedded engine
+    * never meets: session handles, a node's screens and settings, the production client. Not part
+    * of `sbt test`: it runs only at a size the environment names. Prints what each step took.
+    */
+  it should "merge the benchmark's change set through a real node, at the size it is given" in {
+    def setting(name: String) = sys.env.get(name).map(_.trim).filter(_.nonEmpty)
+    val rows                  = setting("QOD_BENCH_NODE_ROWS").map(_.toLong)
+    val changed               = setting("QOD_BENCH_NODE_CHANGES").map(_.toLong)
+    val memory                = setting("QOD_BENCH_NODE_MEMORY")
+    assume(
+      rows.nonEmpty && changed.nonEmpty,
+      "QOD_BENCH_NODE_ROWS and QOD_BENCH_NODE_CHANGES are not set"
+    )
+    ready()
+    val (n, k) = (rows.get, changed.get)
+    val m      = n / k
+    // The writes' predicates are residues 0 to 6 of m: only past 6 do they name separate rows, and
+    // the numbers below count on that.
+    require(m > 6, "QOD_BENCH_NODE_CHANGES must be at most a seventh of QOD_BENCH_NODE_ROWS")
+
+    def timed[A](what: String)(body: => A): A =
+      val began = System.nanoTime()
+      val out   = body
+      println(f"node bench: $what: ${(System.nanoTime() - began) / 1e9}%.1f s")
+      out
+
+    val td = database("large")
+    // The merge node starts from the same script and this pool's init SQL, so it runs with these,
+    // unless the size comes with a limit of its own (below).
+    val settings = "current_setting('memory_limit'), current_setting('threads'), " +
+      "current_setting('temp_directory')"
+    val poolNode = sql("large", s"SELECT $settings")
+    println(s"node bench: memory_limit, threads, temp_directory: $poolNode")
+    timed("the table") {
+      sql("large", s"CREATE SCHEMA $td.s")
+      sql("large", ThreeWayMergeScaleBench.createTable(td, n))
+    }
+    timed("the branch") {
+      stack.post(
+        "/api/branch/create",
+        obj("tenant" -> s(Acme), "tenantDb" -> s(td), "name" -> s("feature")),
+        timeoutSec = 3600
+      )
+      branchServing("large", "feature")
+    }
+    timed("main's writes") {
+      ThreeWayMergeScaleBench.changes(td, "main", n, k).foreach(sql("large", _))
+    }
+    timed("the branch's writes") {
+      ThreeWayMergeScaleBench.changes(td, "branch", n, k).foreach(sql("large", _, Some("feature")))
+    }
+
+    // A limit for the nodes that start from here on: a running node keeps its setup, and the writes
+    // above can need more (a single UPDATE of 105M rows fails at 16GB). Each of those nodes writes
+    // down what it runs with, in its own init statements, so that the merge node itself is read,
+    // and not what its spec should have copied from a serving pool.
+    val nodeSaw = root.resolve("large-node-settings.csv")
+    memory.foreach { limit =>
+      stack.post(
+        "/api/pool/setInitSql",
+        obj(
+          "tenant"   -> s(Acme),
+          "tenantDb" -> s(td),
+          "pool"     -> s("large"),
+          "initSql"  -> s(
+            s"SET memory_limit = '$limit';\n" +
+              s"COPY (SELECT $settings) TO '$nodeSaw' (FORMAT csv, HEADER false);"
+          )
+        )
+      )
+    }
+
+    // The writes make conflicts on purpose, so the proposal names a winner.
+    val proposed = timed("propose") {
+      stack.post(
+        "/api/branch/propose",
+        proposeBody(td, "feature", "onConflict" -> s("main")),
+        tessToken,
+        timeoutSec = 3600
+      )
+    }
+    println(
+      s"node bench: propose: attempts ${proposed.hcursor.downField("merge").get[Int]("attempts")}, " +
+        "the counts tess sees: " +
+        rowCounts(
+          proposed.hcursor
+            .downField("changes")
+            .downField("tables")
+            .downArray
+            .downField("rowConflicts")
+        )
+    )
+
+    // The proposal's analysis node wrote this file too: from here on only the merge node can.
+    Files.deleteIfExists(nodeSaw)
+
+    // The proposal's row is marked just before an Apply goes out. So this clock runs from there to
+    // the reply: Apply, the look for its commit, the merge node's stop, the branch's teardown.
+    val proposalId = proposed.hcursor.downField("merge").get[String]("id").toOption.get
+    val applySent  = new AtomicLong(0L)
+    val watching   = new AtomicBoolean(true)
+    val watcher    = new Thread(() =>
+      Using.resource(
+        DriverManager.getConnection(
+          TestPostgres.dbUrl(stack.dbName),
+          TestPostgres.pgUser,
+          TestPostgres.pgPass
+        )
+      ) { c =>
+        val st = c.prepareStatement("SELECT error FROM qodstate_branch_merge WHERE id = ?")
+        st.setString(1, proposalId)
+        while watching.get() && applySent.get() == 0L do
+          val rs = st.executeQuery()
+          if rs.next() && rs.getString(1) != null then applySent.set(System.nanoTime())
+          else Thread.sleep(200)
+      }
+    )
+    watcher.start()
+    val reply =
+      try
+        timed("merge") {
+          stack.post(
+            "/api/branch/merge",
+            proposeBody(td, "feature", idOf(proposed)),
+            timeoutSec = 3600
+          )
+        }
+      finally watching.set(false)
+    val ended = System.nanoTime()
+    watcher.join(10000)
+    val merge = reply.hcursor.downField("merge")
+    println(
+      "node bench: Apply and settle: " +
+        Option(applySent.get())
+          .filter(_ > 0L)
+          .fold("not seen")(at => f"${(ended - at) / 1e9}%.1f s")
+    )
+    println(
+      s"node bench: merge: attempts ${merge.get[Int]("attempts")}, " +
+        s"the counts the superuser sees: ${rowCounts(merge.downField("rowConflicts"))}"
+    )
+    merge.get[String]("status") shouldBe Right("merged")
+    // Under a limit of its own, a merge may run out of memory once and retry, as the design says.
+    if memory.isEmpty then merge.get[Int]("attempts") shouldBe Right(1)
+    memory.foreach { _ =>
+      val saw = Files.readString(nodeSaw).trim
+      println(s"node bench: memory_limit, threads, temp_directory on the merge node: $saw")
+      saw.split(",").headOption should not be poolNode.head.split(",").headOption
+    }
+
+    // What the writes must have left, from their predicates alone. Main wins the conflicts on amount
+    // (residue 2 of 20m), and its update of a row keeps the row from the branch's delete (residue 6
+    // of 100m). Each list is, in order: the rows, the sum of their ids (a row lost and another of its
+    // class doubled agree on everything else), those carrying main's amount, the branch's status and
+    // the branch's qty, main's and the branch's inserts, those carrying the branch's amount, and the
+    // rows that should be gone or hold any other cell than these predicates and the inserts say.
+    val amountByMain         = s"h % $m = 0 OR h % ${m * 20} IN (2, 3) OR h % ${m * 100} = 6"
+    val statusByBranch       = s"h % $m = 1 OR h % ${m * 20} = 3"
+    val qtyByBranch          = s"h % $m = 1"
+    val deleted              = s"h % ${m * 10} IN (4, 5)"
+    val inserted             = k / 10
+    val mainFirst            = n + 1000000000L
+    val branchFirst          = n + 2000000000L
+    def idsFrom(first: Long) = BigInt(inserted) * first + BigInt(inserted) * (inserted - 1) / 2
+    val expected             = sql(
+      "large",
+      s"SELECT $n - count(*) FILTER ($deleted) + ${2 * inserted}, " +
+        s"(sum(i::HUGEINT) FILTER (NOT ($deleted)) + ${idsFrom(mainFirst) + idsFrom(branchFirst)})" +
+        "::VARCHAR, " +
+        s"count(*) FILTER ($amountByMain), count(*) FILTER ($statusByBranch), " +
+        s"count(*) FILTER ($qtyByBranch), $inserted, $inserted, 0, 0 " +
+        s"FROM (SELECT i, hash(i) AS h FROM range($n) r(i))"
+    )
+    // One side's inserted rows, each cell as its INSERT wrote it.
+    def insertedFrom(first: Long, cells: String*) =
+      val same = ThreeWayMergeScaleBench.Columns.tail
+        .zip(cells)
+        .map((column, value) => s"$column IS NOT DISTINCT FROM $value")
+        .mkString(" AND ")
+      s"(id >= $first AND id < ${first + inserted} AND $same)"
+    val fromMain = insertedFrom(
+      mainFirst,
+      "1",
+      "1",
+      "'NEW'",
+      "1.00",
+      "1",
+      "TIMESTAMP '2030-01-01'",
+      "'main-ins'",
+      "0.5",
+      "true"
+    )
+    val fromBranch = insertedFrom(
+      branchFirst,
+      "2",
+      "2",
+      "'NEW'",
+      "2.00",
+      "2",
+      "TIMESTAMP '2031-01-01'",
+      "'br-ins'",
+      "0.5",
+      "false"
+    )
+    val made      = ThreeWayMergeScaleBench.created("id").toMap
+    val wrongCell = ThreeWayMergeScaleBench
+      .created("id")
+      .map { (column, value) =>
+        val should = column match
+          case "amount" => s"$value + CASE WHEN $amountByMain THEN 1 ELSE 0 END"
+          case "status" => s"CASE WHEN $statusByBranch THEN 'EDITED' ELSE $value END"
+          case "qty"    => s"$value + CASE WHEN $qtyByBranch THEN 1 ELSE 0 END"
+          case _        => value
+        s"$column IS DISTINCT FROM ($should)"
+      }
+      .mkString(" OR ")
+    val found = timed("the read-back") {
+      sql(
+        "large",
+        "SELECT count(*), sum(id::HUGEINT)::VARCHAR, " +
+          s"count(*) FILTER (id < $n AND amount = ${made("amount")} + 1), " +
+          s"count(*) FILTER (id < $n AND status = 'EDITED'), " +
+          s"count(*) FILTER (id < $n AND qty = ${made("qty")} + 1), " +
+          "count(*) FILTER (note = 'main-ins'), count(*) FILTER (note = 'br-ins'), " +
+          s"count(*) FILTER (id < $n AND amount = ${made("amount")} + 2), " +
+          s"count(*) FILTER (id IS NULL OR (id < $n AND ($deleted OR $wrongCell)) " +
+          s"OR (id >= $n AND NOT ($fromMain OR $fromBranch))) " +
+          s"FROM (SELECT *, hash(id) AS h FROM $td.s.fact)"
+      )
+    }
+    println(s"node bench: read back $found, expected $expected")
+    found shouldBe expected
+  }
+
   // ---------- any principal who may connect may branch ----------
 
   private def parsed(body: String): Json =
@@ -922,6 +1162,15 @@ class BranchThreeWayE2ESpec
     List("cell-right" -> "top-secret", "cell-wrong" -> "not-it").foreach { (branch, guess) =>
       on(branch)(s"UPDATE $td.main.fact SET note = '$guess' WHERE id = 5")
       on(branch)(s"UPDATE $td.main.beside SET qty = 1 WHERE id = 5")
+    }
+    // The change feed is no relation a mask applies to: no diff for her, no value by that way.
+    List("fact", "beside").foreach { table =>
+      val (code, body) =
+        stack.getStatus(s"$base/cell-right/diff?schema=main&table=$table", carol)
+      withClue(s"her diff of $table answered $body: ") {
+        code shouldBe 403
+        body should not include "not-it"
+      }
     }
     List("key-right" -> "also-secret", "key-wrong" -> "not-it").foreach { (branch, guess) =>
       on(branch)(s"INSERT INTO $td.main.fact VALUES (60000, '$guess', 1)")
@@ -1167,6 +1416,17 @@ class BranchThreeWayE2ESpec
     proposed.hcursor.downField("merge").get[String]("proposer") shouldBe Right("bob")
     proposed.hcursor.downField("merge").get[List[Json]]("rowConflicts") shouldBe Right(Nil)
     proposed.noSpaces should not include "secret"
+    // The same token on the REST routes, through the guard: as the same plain user.
+    read(branchesOf(td), agent).hcursor.downField("branches").downN(0).get[String]("owner") shouldBe
+      Right("bob")
+    tableNames(read(s"${branchesOf(td)}/feature/changes", agent)) shouldBe List("fact")
+    // The catalog tools are an admin's, branch or no branch; run_sql reads what the token may.
+    tool("list_tables", "branch" -> s("feature")) match
+      case Left(err) => err should include("tenant_forbidden")
+      case Right(t)  => fail(s"a plain token read the catalog: $t")
+    val shown = ok(tool("run_sql", "sql" -> s("SHOW TABLES"), "branch" -> s("feature"))).noSpaces
+    shown should include("fact")
+    shown should not include "secret"
     // No merge tool, and no forever.
     tool("merge", "branch" -> s("feature")).isLeft shouldBe true
     tool("create_branch", "name" -> s("forever"), "ttl_hours" -> Json.fromInt(0)) match
@@ -1209,243 +1469,4 @@ class BranchThreeWayE2ESpec
       stack.post("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)), tessToken)
     done.hcursor.downField("merge").get[String]("status") shouldBe Right("merged")
     sql("agent", s"SELECT count(*) FROM $td.main.fact WHERE note = 'agent'") shouldBe List("10")
-  }
-
-  /** What `rowConflicts` said, without the sampled rowids. */
-  private def rowCounts(conflicts: ACursor): String =
-    def bare(j: Json) = j.mapObject(_.remove("samples")).noSpaces
-    conflicts.focus.fold("none")(j => j.asArray.fold(bare(j))(_.map(bare).mkString(" ")))
-
-  /** `ThreeWayMergeScaleBench`'s table and writes on the real stack, for what its embedded engine
-    * never meets: session handles, a node's screens and settings, the production client. Not part
-    * of `sbt test`: it runs only at a size the environment names. Prints what each step took.
-    */
-  it should "merge the benchmark's change set through a real node, at the size it is given" in {
-    def setting(name: String) = sys.env.get(name).map(_.trim).filter(_.nonEmpty)
-    val rows                  = setting("QOD_BENCH_NODE_ROWS").map(_.toLong)
-    val changed               = setting("QOD_BENCH_NODE_CHANGES").map(_.toLong)
-    val memory                = setting("QOD_BENCH_NODE_MEMORY")
-    assume(
-      rows.nonEmpty && changed.nonEmpty,
-      "QOD_BENCH_NODE_ROWS and QOD_BENCH_NODE_CHANGES are not set"
-    )
-    ready()
-    val (n, k) = (rows.get, changed.get)
-    val m      = n / k
-    // The writes' predicates are residues 0 to 6 of m: only past 6 do they name separate rows, and
-    // the numbers below count on that.
-    require(m > 6, "QOD_BENCH_NODE_CHANGES must be at most a seventh of QOD_BENCH_NODE_ROWS")
-
-    def timed[A](what: String)(body: => A): A =
-      val began = System.nanoTime()
-      val out   = body
-      println(f"node bench: $what: ${(System.nanoTime() - began) / 1e9}%.1f s")
-      out
-
-    val td = database("large")
-    // The merge node starts from the same script and this pool's init SQL, so it runs with these,
-    // unless the size comes with a limit of its own (below).
-    val settings = "current_setting('memory_limit'), current_setting('threads'), " +
-      "current_setting('temp_directory')"
-    val poolNode = sql("large", s"SELECT $settings")
-    println(s"node bench: memory_limit, threads, temp_directory: $poolNode")
-    timed("the table") {
-      sql("large", s"CREATE SCHEMA $td.s")
-      sql("large", ThreeWayMergeScaleBench.createTable(td, n))
-    }
-    timed("the branch") {
-      stack.post(
-        "/api/branch/create",
-        obj("tenant" -> s(Acme), "tenantDb" -> s(td), "name" -> s("feature")),
-        timeoutSec = 3600
-      )
-      branchServing("large", "feature")
-    }
-    timed("main's writes") {
-      ThreeWayMergeScaleBench.changes(td, "main", n, k).foreach(sql("large", _))
-    }
-    timed("the branch's writes") {
-      ThreeWayMergeScaleBench.changes(td, "branch", n, k).foreach(sql("large", _, Some("feature")))
-    }
-
-    // A limit for the nodes that start from here on: a running node keeps its setup, and the writes
-    // above can need more (a single UPDATE of 105M rows fails at 16GB). Each of those nodes writes
-    // down what it runs with, in its own init statements, so that the merge node itself is read,
-    // and not what its spec should have copied from a serving pool.
-    val nodeSaw = root.resolve("large-node-settings.csv")
-    memory.foreach { limit =>
-      stack.post(
-        "/api/pool/setInitSql",
-        obj(
-          "tenant"   -> s(Acme),
-          "tenantDb" -> s(td),
-          "pool"     -> s("large"),
-          "initSql"  -> s(
-            s"SET memory_limit = '$limit';\n" +
-              s"COPY (SELECT $settings) TO '$nodeSaw' (FORMAT csv, HEADER false);"
-          )
-        )
-      )
-    }
-
-    // The writes make conflicts on purpose, so the proposal names a winner.
-    val proposed = timed("propose") {
-      stack.post(
-        "/api/branch/propose",
-        proposeBody(td, "feature", "onConflict" -> s("main")),
-        tessToken,
-        timeoutSec = 3600
-      )
-    }
-    println(
-      s"node bench: propose: attempts ${proposed.hcursor.downField("merge").get[Int]("attempts")}, " +
-        "the counts tess sees: " +
-        rowCounts(
-          proposed.hcursor
-            .downField("changes")
-            .downField("tables")
-            .downArray
-            .downField("rowConflicts")
-        )
-    )
-
-    // The proposal's analysis node wrote this file too: from here on only the merge node can.
-    Files.deleteIfExists(nodeSaw)
-
-    // The proposal's row is marked just before an Apply goes out. So this clock runs from there to
-    // the reply: Apply, the look for its commit, the merge node's stop, the branch's teardown.
-    val proposalId = proposed.hcursor.downField("merge").get[String]("id").toOption.get
-    val applySent  = new AtomicLong(0L)
-    val watching   = new AtomicBoolean(true)
-    val watcher    = new Thread(() =>
-      Using.resource(
-        DriverManager.getConnection(
-          TestPostgres.dbUrl(stack.dbName),
-          TestPostgres.pgUser,
-          TestPostgres.pgPass
-        )
-      ) { c =>
-        val st = c.prepareStatement("SELECT error FROM qodstate_branch_merge WHERE id = ?")
-        st.setString(1, proposalId)
-        while watching.get() && applySent.get() == 0L do
-          val rs = st.executeQuery()
-          if rs.next() && rs.getString(1) != null then applySent.set(System.nanoTime())
-          else Thread.sleep(200)
-      }
-    )
-    watcher.start()
-    val reply =
-      try
-        timed("merge") {
-          stack.post(
-            "/api/branch/merge",
-            proposeBody(td, "feature", idOf(proposed)),
-            timeoutSec = 3600
-          )
-        }
-      finally watching.set(false)
-    val ended = System.nanoTime()
-    watcher.join(10000)
-    val merge = reply.hcursor.downField("merge")
-    println(
-      "node bench: Apply and settle: " +
-        Option(applySent.get())
-          .filter(_ > 0L)
-          .fold("not seen")(at => f"${(ended - at) / 1e9}%.1f s")
-    )
-    println(
-      s"node bench: merge: attempts ${merge.get[Int]("attempts")}, " +
-        s"the counts the superuser sees: ${rowCounts(merge.downField("rowConflicts"))}"
-    )
-    merge.get[String]("status") shouldBe Right("merged")
-    // Under a limit of its own, a merge may run out of memory once and retry, as the design says.
-    if memory.isEmpty then merge.get[Int]("attempts") shouldBe Right(1)
-    memory.foreach { _ =>
-      val saw = Files.readString(nodeSaw).trim
-      println(s"node bench: memory_limit, threads, temp_directory on the merge node: $saw")
-      saw.split(",").headOption should not be poolNode.head.split(",").headOption
-    }
-
-    // What the writes must have left, from their predicates alone. Main wins the conflicts on amount
-    // (residue 2 of 20m), and its update of a row keeps the row from the branch's delete (residue 6
-    // of 100m). Each list is, in order: the rows, the sum of their ids (a row lost and another of its
-    // class doubled agree on everything else), those carrying main's amount, the branch's status and
-    // the branch's qty, main's and the branch's inserts, those carrying the branch's amount, and the
-    // rows that should be gone or hold any other cell than these predicates and the inserts say.
-    val amountByMain         = s"h % $m = 0 OR h % ${m * 20} IN (2, 3) OR h % ${m * 100} = 6"
-    val statusByBranch       = s"h % $m = 1 OR h % ${m * 20} = 3"
-    val qtyByBranch          = s"h % $m = 1"
-    val deleted              = s"h % ${m * 10} IN (4, 5)"
-    val inserted             = k / 10
-    val mainFirst            = n + 1000000000L
-    val branchFirst          = n + 2000000000L
-    def idsFrom(first: Long) = BigInt(inserted) * first + BigInt(inserted) * (inserted - 1) / 2
-    val expected             = sql(
-      "large",
-      s"SELECT $n - count(*) FILTER ($deleted) + ${2 * inserted}, " +
-        s"(sum(i::HUGEINT) FILTER (NOT ($deleted)) + ${idsFrom(mainFirst) + idsFrom(branchFirst)})" +
-        "::VARCHAR, " +
-        s"count(*) FILTER ($amountByMain), count(*) FILTER ($statusByBranch), " +
-        s"count(*) FILTER ($qtyByBranch), $inserted, $inserted, 0, 0 " +
-        s"FROM (SELECT i, hash(i) AS h FROM range($n) r(i))"
-    )
-    // One side's inserted rows, each cell as its INSERT wrote it.
-    def insertedFrom(first: Long, cells: String*) =
-      val same = ThreeWayMergeScaleBench.Columns.tail
-        .zip(cells)
-        .map((column, value) => s"$column IS NOT DISTINCT FROM $value")
-        .mkString(" AND ")
-      s"(id >= $first AND id < ${first + inserted} AND $same)"
-    val fromMain = insertedFrom(
-      mainFirst,
-      "1",
-      "1",
-      "'NEW'",
-      "1.00",
-      "1",
-      "TIMESTAMP '2030-01-01'",
-      "'main-ins'",
-      "0.5",
-      "true"
-    )
-    val fromBranch = insertedFrom(
-      branchFirst,
-      "2",
-      "2",
-      "'NEW'",
-      "2.00",
-      "2",
-      "TIMESTAMP '2031-01-01'",
-      "'br-ins'",
-      "0.5",
-      "false"
-    )
-    val made      = ThreeWayMergeScaleBench.created("id").toMap
-    val wrongCell = ThreeWayMergeScaleBench
-      .created("id")
-      .map { (column, value) =>
-        val should = column match
-          case "amount" => s"$value + CASE WHEN $amountByMain THEN 1 ELSE 0 END"
-          case "status" => s"CASE WHEN $statusByBranch THEN 'EDITED' ELSE $value END"
-          case "qty"    => s"$value + CASE WHEN $qtyByBranch THEN 1 ELSE 0 END"
-          case _        => value
-        s"$column IS DISTINCT FROM ($should)"
-      }
-      .mkString(" OR ")
-    val found = timed("the read-back") {
-      sql(
-        "large",
-        "SELECT count(*), sum(id::HUGEINT)::VARCHAR, " +
-          s"count(*) FILTER (id < $n AND amount = ${made("amount")} + 1), " +
-          s"count(*) FILTER (id < $n AND status = 'EDITED'), " +
-          s"count(*) FILTER (id < $n AND qty = ${made("qty")} + 1), " +
-          "count(*) FILTER (note = 'main-ins'), count(*) FILTER (note = 'br-ins'), " +
-          s"count(*) FILTER (id < $n AND amount = ${made("amount")} + 2), " +
-          s"count(*) FILTER (id IS NULL OR (id < $n AND ($deleted OR $wrongCell)) " +
-          s"OR (id >= $n AND NOT ($fromMain OR $fromBranch))) " +
-          s"FROM (SELECT *, hash(id) AS h FROM $td.s.fact)"
-      )
-    }
-    println(s"node bench: read back $found, expected $expected")
-    found shouldBe expected
   }
