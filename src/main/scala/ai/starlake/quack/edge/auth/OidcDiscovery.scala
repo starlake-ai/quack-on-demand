@@ -20,9 +20,19 @@ final case class OidcDiscoveryDoc(
   * A document is cached for a day ([[OidcDiscovery.DocumentTtlNanos]]) and a failure for
   * `failureTtlNanos`, each per issuer and each in a table of at most [[OidcDiscovery.MaxIssuers]]:
   * the issuer is a tenant admin's choice, and every setting of a new one would otherwise leave an
-  * entry for the life of the process (a document can hold up to the 256 KiB that `BoundedHttp` lets
-  * through). An entry lost to the bound or to the day costs one more GET, never a wrong answer, and
-  * a day ends a document that an issuer has since changed.
+  * entry for the life of the process. An entry lost to the bound or to the day costs one more GET,
+  * never a wrong answer, and a day ends a document that an issuer has since changed.
+  *
+  * What an entry costs is bounded too. A table keeps the five parsed fields of a document, not the
+  * document, and the issuer URL it is keyed by. A document with a field over
+  * [[OidcDiscovery.MaxFieldChars]] characters is refused (a `Left` naming the field, never its
+  * value, remembered like any failure), and so is an issuer URL over
+  * [[OidcDiscovery.MaxIssuerUrlChars]], before it is asked or kept: a tenant admin picks it, and
+  * nothing but the size of a REST body would bound it. Without that, one field of a document of the
+  * 256 KiB that `BoundedHttp` lets through could fill an entry, and 1024 of them would pin about
+  * 256 MiB for a day. With it the document table holds about 12 MiB at most (5 fields and a key of
+  * 2048 characters in 1024 entries; twice that if every character were outside Latin-1). A real
+  * endpoint URL is far shorter.
   *
   * Every call that finds a failure answers the same `Left` without asking the issuer: a tenant
   * admin picks the issuer, and an anonymous `GET /api/auth/oidc/start` resolves it, so with the
@@ -58,12 +68,17 @@ class OidcDiscovery(
     .build[String, String]()
 
   def resolve(issuerUrl: String): Either[String, OidcDiscoveryDoc] =
-    Option(documents.getIfPresent(issuerUrl)) match
-      case Some(doc) => Right(doc)
-      case None      =>
-        Option(failures.getIfPresent(issuerUrl)) match
-          case Some(why) => Left(why)
-          case None      => fetch(issuerUrl)
+    // The URL is the key of both tables, and a tenant admin picks it: refused before it is asked or
+    // kept, with a text that does not quote it.
+    if issuerUrl.length > OidcDiscovery.MaxIssuerUrlChars then
+      Left(s"issuer URL is longer than ${OidcDiscovery.MaxIssuerUrlChars} characters")
+    else
+      Option(documents.getIfPresent(issuerUrl)) match
+        case Some(doc) => Right(doc)
+        case None      =>
+          Option(failures.getIfPresent(issuerUrl)) match
+            case Some(why) => Left(why)
+            case None      => fetch(issuerUrl)
 
   /** Visible for tests: the documents still held, once the bound has been applied. */
   private[auth] def cachedDocuments: Long =
@@ -83,21 +98,35 @@ class OidcDiscovery(
 
   private def parseDoc(body: String): Either[String, OidcDiscoveryDoc] =
     parse(body).left.map(_.getMessage).flatMap { json =>
-      val c                                          = json.hcursor
+      val c = json.hcursor
+      // The Left names the field, never its value: it is remembered and shown.
+      def bounded(field: String, value: String): Either[String, String] =
+        if value.length > OidcDiscovery.MaxFieldChars then
+          Left(
+            s"field '$field' in discovery document is longer than " +
+              s"${OidcDiscovery.MaxFieldChars} characters"
+          )
+        else Right(value)
       def str(field: String): Either[String, String] =
-        c.get[String](field).left.map(_ => s"missing field '$field' in discovery document")
+        c.get[String](field)
+          .left
+          .map(_ => s"missing field '$field' in discovery document")
+          .flatMap(bounded(field, _))
       for
         issuer    <- str("issuer")
         authorize <- str("authorization_endpoint")
         token     <- str("token_endpoint")
         jwks      <- str("jwks_uri")
+        // end_session_endpoint is OPTIONAL in the OIDC spec; default to empty when absent.
+        endSession <- c
+          .get[String]("end_session_endpoint")
+          .fold(_ => Right(""), bounded("end_session_endpoint", _))
       yield OidcDiscoveryDoc(
         issuer = issuer,
         authorizationEndpoint = authorize,
         tokenEndpoint = token,
         jwksUri = jwks,
-        // end_session_endpoint is OPTIONAL in the OIDC spec; default to empty when absent.
-        endSessionEndpoint = c.get[String]("end_session_endpoint").getOrElse("")
+        endSessionEndpoint = endSession
       )
     }
 
@@ -108,3 +137,9 @@ object OidcDiscovery:
 
   /** How long a document is kept: a day. */
   val DocumentTtlNanos: Long = TimeUnit.DAYS.toNanos(1)
+
+  /** The most characters a field of a document may hold: a longer one refuses the document. */
+  val MaxFieldChars: Int = 2048
+
+  /** The most characters of an issuer URL, the key of both tables: a longer one is refused. */
+  val MaxIssuerUrlChars: Int = 2048

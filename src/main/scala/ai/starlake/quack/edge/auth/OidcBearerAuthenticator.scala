@@ -158,13 +158,22 @@ class OidcBearerAuthenticator(
 
 object OidcBearerAuthenticator:
 
+  // NORMAL, as the retriever it replaces followed redirects: a Keycloak base URL on http behind a
+  // proxy that redirects to https keeps working. It follows a redirect to the same scheme or to
+  // https, never from https to http and never to another scheme (a Location of file: is not
+  // followed), at most 5 times (jdk.httpclient.redirects.retrylimit), and the deadline of
+  // BoundedHttp.send covers every hop.
   private val jwksClient: HttpClient =
-    HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build()
+    HttpClient
+      .newBuilder()
+      .connectTimeout(java.time.Duration.ofSeconds(5))
+      .followRedirects(HttpClient.Redirect.NORMAL)
+      .build()
 
-  /** Reads a JWKS under a size limit and a deadline over the whole read. The URL can come from a
-    * discovery document, which a tenant admin picks, and anyone can then make the manager fetch it:
-    * Nimbus' default retriever has no deadline over a slow body, and it reads `file:` URLs. The JDK
-    * client refuses every scheme but http(s) and follows no redirect.
+  /** Reads a JWKS under a size limit and a deadline over the whole read, redirects included. The
+    * URL can come from a discovery document, which a tenant admin picks, and anyone can then make
+    * the manager fetch it: Nimbus' default retriever has no deadline over a slow body, and it reads
+    * `file:` URLs. The JDK client refuses every scheme but http(s).
     */
   private[auth] val jwksRetriever: ResourceRetriever = url =>
     val answer =

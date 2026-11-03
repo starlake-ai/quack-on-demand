@@ -150,7 +150,7 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
   }
 
   // The issuer is a tenant admin's choice, and every setting of a new one would leave an entry for
-  // the life of the process: a document can hold up to the 256 KiB that BoundedHttp lets through.
+  // the life of the process.
   it should "hold at most 1024 documents, however many issuers are asked, and answer every one" in {
     val gets = new Gets(url => Right(docOf(url.stripSuffix("/.well-known/openid-configuration"))))
     val discovery = new OidcDiscovery(gets)
@@ -161,4 +161,81 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     discovery.cachedDocuments should be <= 1024L
     // One that was let go costs one more GET, never a wrong answer.
     issuers.foreach(i => discovery.resolve(i).map(_.issuer) shouldBe Right(i))
+  }
+
+  // The cache keeps the five parsed fields of a document, not the document, so the length of a
+  // field is what an entry costs: 5 fields of 2048 characters in 1024 entries is about 10 MiB, where
+  // one field of a document of the 256 KiB that BoundedHttp lets through could hold all of it
+  // (1024 entries of 256 KiB, about 256 MiB). A real endpoint URL is far shorter than 2048.
+  private val FieldNames = List(
+    "issuer",
+    "authorization_endpoint",
+    "token_endpoint",
+    "jwks_uri",
+    "end_session_endpoint"
+  )
+
+  /** A document holding all five fields, `overrides` replacing some of their values. */
+  private def docWith(overrides: Map[String, String]): String =
+    val fields = Map(
+      "issuer"                 -> IssuerA,
+      "authorization_endpoint" -> s"$IssuerA/auth",
+      "token_endpoint"         -> s"$IssuerA/token",
+      "jwks_uri"               -> s"$IssuerA/jwks",
+      "end_session_endpoint"   -> s"$IssuerA/logout"
+    ) ++ overrides
+    fields.map((name, value) => s"\"$name\":\"$value\"").mkString("{", ",", "}")
+
+  it should "refuse a document with a field over 2048 characters, naming the field and never its value" in
+    FieldNames.foreach { field =>
+      withClue(s"[$field] ") {
+        val gets      = new Gets(_ => Right(docWith(Map(field -> ("z" * 2049)))))
+        val discovery = new OidcDiscovery(gets)
+        val refused   = discovery.resolve(IssuerA)
+
+        refused shouldBe Left(
+          s"field '$field' in discovery document is longer than 2048 characters"
+        )
+        // Remembered like any other failure: no second GET.
+        discovery.resolve(IssuerA) shouldBe refused
+        gets.asked.get shouldBe 1
+      }
+    }
+
+  it should "accept a document whose fields are exactly 2048 characters" in
+    FieldNames.foreach { field =>
+      withClue(s"[$field] ") {
+        val value     = "https://idp.example/" + ("z" * (2048 - 20))
+        val gets      = new Gets(_ => Right(docWith(Map(field -> value))))
+        val discovery = new OidcDiscovery(gets)
+
+        value.length shouldBe 2048
+        discovery.resolve(IssuerA).map(_.productIterator.toList.contains(value)) shouldBe
+          Right(true)
+      }
+    }
+
+  // The issuer URL is the key of both tables, and a tenant admin picks it: nothing but the size of a
+  // REST body bounds it, so without a limit 1024 keys could pin far more than the fields do. A real
+  // issuer URL is far shorter than 2048 characters.
+  it should "refuse an issuer URL over 2048 characters without asking it or keeping it" in {
+    val gets      = new Gets(_ => Right(docOf(IssuerA)))
+    val discovery = new OidcDiscovery(gets)
+    val long      = "https://idp.example/" + ("z" * 2029)
+
+    long.length shouldBe 2049
+    discovery.resolve(long) shouldBe Left("issuer URL is longer than 2048 characters")
+    discovery.resolve(long) shouldBe Left("issuer URL is longer than 2048 characters")
+    gets.asked.get shouldBe 0
+    discovery.cachedDocuments shouldBe 0
+  }
+
+  it should "ask an issuer URL of exactly 2048 characters" in {
+    val gets      = new Gets(_ => Right(docOf(IssuerA)))
+    val discovery = new OidcDiscovery(gets)
+    val exact     = "https://idp.example/" + ("z" * 2028)
+
+    exact.length shouldBe 2048
+    discovery.resolve(exact).map(_.issuer) shouldBe Right(IssuerA)
+    gets.asked.get shouldBe 1
   }
