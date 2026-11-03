@@ -72,7 +72,12 @@ final class FlightEdgeServer(
   private var sweeper: ScheduledExecutorService = null.asInstanceOf[ScheduledExecutorService]
 
   def start(): Unit =
-    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = cfg.sessionTtlSec)
+    val producer = new FlightProducerImpl(
+      router,
+      preparedIdleTtlSec = cfg.sessionTtlSec,
+      maxPutDrains = cfg.flightThreads / 4,
+      putDrainTimeoutMs = cfg.putDrainTimeoutMs
+    )
     ConnectionContext.onEvict(FlightEdgeServer.sessionEvicted(router, producer))
     sweeper = Executors.newSingleThreadScheduledExecutor { r =>
       val t = new Thread(r, "flight-session-sweeper"); t.setDaemon(true); t

@@ -33,7 +33,12 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     * onto the router and binds the peer's session to a superuser `EffectiveSet`, so a claimed SQL
     * admin statement (e.g. `CREATE ROLE`) is actually dispatched and mutates `sup` rather than
     * being routed toward a node. */
-  private def setupProducer(wireAdmin: Boolean = false) =
+  private def setupProducer(
+      wireAdmin: Boolean = false,
+      maxPutDrains: Int = 128,
+      maxPutDrainBytes: Long = 16777216L,
+      putDrainTimeoutMs: Long = 30000L
+  ) =
     val backend = new QuackBackend:
       private val n = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
@@ -87,7 +92,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
           metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
           protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
         )
-    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
+    val producer = new FlightProducerImpl(
+      router,
+      preparedIdleTtlSec = 3600L,
+      maxPutDrains = maxPutDrains,
+      maxPutDrainBytes = maxPutDrainBytes,
+      putDrainTimeoutMs = putDrainTimeoutMs
+    )
 
     val peer          = s"peer-${java.util.UUID.randomUUID()}"
     val superuserEff =
@@ -497,6 +508,135 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
         metadata.set(bytes)
     def onError(t: Throwable): Unit = onErrorRef.set(t)
     def onCompleted(): Unit         = completed = true
+
+  private val emptyRoot = org.apache.arrow.vector.VectorSchemaRoot.create(
+    new org.apache.arrow.vector.types.pojo.Schema(java.util.List.of()),
+    TestArrow.sharedAllocator
+  )
+
+  private val updateDescriptor = FlightDescriptor.command(
+    com.google.protobuf.Any
+      .pack(FlightSql.CommandStatementUpdate.newBuilder().setQuery("INSERT INTO t VALUES (1)").build())
+      .toByteArray
+  )
+
+  /** A DoPut stream the test scripts: `batches` batches. `holdFirst` holds the wait for the first
+    * message and `holdNext` the first read, as a silent client does.
+    */
+  private final class ScriptedPutStream(
+      batches: Int,
+      holdFirst: Option[java.util.concurrent.CountDownLatch] = None,
+      holdNext: Option[java.util.concurrent.CountDownLatch] = None
+  ) extends org.apache.arrow.flight.FlightStream(
+        TestArrow.sharedAllocator,
+        1,
+        null,
+        (_: Int) => ()
+      ):
+    val entered    = new java.util.concurrent.CountDownLatch(1)
+    val firstWaits = new java.util.concurrent.atomic.AtomicInteger(0)
+    val reads      = new java.util.concurrent.atomic.AtomicInteger(0)
+    override def getDescriptor(): FlightDescriptor =
+      firstWaits.incrementAndGet()
+      entered.countDown()
+      holdFirst.foreach(interruptibly)
+      updateDescriptor
+    override def next(): Boolean =
+      entered.countDown()
+      holdNext.foreach(interruptibly)
+      reads.incrementAndGet() <= batches
+    override def hasRoot(): Boolean                                  = true
+    override def getRoot(): org.apache.arrow.vector.VectorSchemaRoot = emptyRoot
+
+  // What FlightStream does on an interrupt: a runtime failure.
+  private def interruptibly(latch: java.util.concurrent.CountDownLatch): Unit =
+    try latch.await()
+    catch case e: InterruptedException => throw new RuntimeException(e)
+
+  private def put(
+      producer: FlightProducerImpl,
+      peer: String,
+      stream: org.apache.arrow.flight.FlightStream,
+      ack: RecordingPutListener
+  ): Unit = producer.acceptPut(fakeCallContext(peer), stream, ack).run()
+
+  private def statusOf(ack: RecordingPutListener) =
+    ack.onErrorRef.get().asInstanceOf[org.apache.arrow.flight.FlightRuntimeException].status().code()
+
+  "A DoPut" should "answer a missing session without waiting for the stream" in:
+    val (producer, _, _, _) = setupProducer()
+    val stream              = new ScriptedPutStream(batches = 1)
+    val ack                 = new RecordingPutListener
+    put(producer, "anonymous-x", stream, ack)
+    stream.firstWaits.get shouldBe 0
+    stream.reads.get shouldBe 0
+    statusOf(ack) shouldBe org.apache.arrow.flight.FlightStatusCode.UNAUTHENTICATED
+
+  it should "drain what the client sends, then run the statement" in:
+    val (producer, sent, _, peer) = setupProducer()
+    val stream                    = new ScriptedPutStream(batches = 2)
+    val ack                       = new RecordingPutListener
+    put(producer, peer, stream, ack)
+    stream.reads.get shouldBe 3
+    ack.onErrorRef.get() shouldBe null
+    sent.map(_._2).exists(_.contains("INSERT INTO t")) shouldBe true
+
+  it should "stop draining past the limit, empty batches counted" in:
+    val (producer, sent, _, peer) = setupProducer(maxPutDrainBytes = 4096L)
+    val stream                    = new ScriptedPutStream(batches = 100)
+    val ack                       = new RecordingPutListener
+    put(producer, peer, stream, ack)
+    stream.reads.get should be <= 6
+    statusOf(ack) shouldBe org.apache.arrow.flight.FlightStatusCode.INVALID_ARGUMENT
+    sent.map(_._2).exists(_.contains("INSERT INTO t")) shouldBe false
+
+  it should "count a DoPut waiting for its first message against the slots, and free the slot" in:
+    val (producer, _, _, peer) = setupProducer(maxPutDrains = 1)
+    val hold                   = new java.util.concurrent.CountDownLatch(1)
+    val held                   = new ScriptedPutStream(batches = 0, holdFirst = Some(hold))
+    val firstAck               = new RecordingPutListener
+    val first                  = new Thread(() => put(producer, peer, held, firstAck))
+    first.start()
+    held.entered.await()
+    val secondAck = new RecordingPutListener
+    put(producer, peer, new ScriptedPutStream(batches = 0), secondAck)
+    statusOf(secondAck) shouldBe org.apache.arrow.flight.FlightStatusCode.UNAVAILABLE
+    hold.countDown()
+    first.join(10000)
+    val thirdAck = new RecordingPutListener
+    put(producer, peer, new ScriptedPutStream(batches = 0), thirdAck)
+    thirdAck.onErrorRef.get() shouldBe null
+
+  it should "give up on a first message that never comes, and free the slot" in:
+    val (producer, sent, _, peer) = setupProducer(maxPutDrains = 1, putDrainTimeoutMs = 200L)
+    val never                     = new java.util.concurrent.CountDownLatch(1)
+    val ack                       = new RecordingPutListener
+    put(producer, peer, new ScriptedPutStream(batches = 0, holdFirst = Some(never)), ack)
+    statusOf(ack) shouldBe org.apache.arrow.flight.FlightStatusCode.TIMED_OUT
+    sent.map(_._2).exists(_.contains("INSERT INTO t")) shouldBe false
+    val next = new RecordingPutListener
+    put(producer, peer, new ScriptedPutStream(batches = 0), next)
+    next.onErrorRef.get() shouldBe null
+
+  it should "give up on a client that goes silent after its first message" in:
+    val (producer, _, _, peer) = setupProducer(putDrainTimeoutMs = 200L)
+    val never                  = new java.util.concurrent.CountDownLatch(1)
+    val ack                    = new RecordingPutListener
+    put(producer, peer, new ScriptedPutStream(batches = 0, holdNext = Some(never)), ack)
+    statusOf(ack) shouldBe org.apache.arrow.flight.FlightStatusCode.TIMED_OUT
+
+  it should "leave no interrupt behind, whether or not the deadline fired" in:
+    val (producer, _, _, peer) = setupProducer(putDrainTimeoutMs = 200L)
+    put(producer, peer, new ScriptedPutStream(batches = 0), new RecordingPutListener)
+    Thread.currentThread().isInterrupted shouldBe false
+    val never = new java.util.concurrent.CountDownLatch(1)
+    put(
+      producer,
+      peer,
+      new ScriptedPutStream(batches = 0, holdFirst = Some(never)),
+      new RecordingPutListener
+    )
+    Thread.currentThread().isInterrupted shouldBe false
 
   private def runUpdate(producer: FlightProducerImpl, peer: String, sql: String): RecordingPutListener =
     val cmd = FlightSql.CommandStatementUpdate.newBuilder().setQuery(sql).build()

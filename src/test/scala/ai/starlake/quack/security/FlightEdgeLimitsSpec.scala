@@ -305,6 +305,71 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       h.shutdown()
   }
 
+  // ---- DoPut ---------------------------------------------------------------------------------
+
+  private def updateDescriptor: FlightDescriptor =
+    val update = FlightSql.CommandStatementUpdate.newBuilder().setQuery("SELECT 1").build()
+    FlightDescriptor.command(ProtoAny.pack(update).toByteArray)
+
+  "DoPuts that send nothing" should "leave the edge serving, and give their slots back" in {
+    // 16 threads make 4 slots. Without them, 16 such calls would hold every thread for good.
+    val h      = boot(_.copy(flightThreads = 16, putDrainTimeoutMs = 1000L))
+    val client = h.newClient()
+    val socket = silentCalls(h.port, "DoPut", 32, credentials = true)
+    try
+      client.getInfo(sqlInfo, basic, timed) should not be null
+      socket.close()
+      val root = VectorSchemaRoot.create(new Schema(java.util.List.of()), h.allocator)
+      try
+        // A slot comes back by the deadline: whatever the statement then answers, it is not "too
+        // many concurrent updates". A refused stream may also fail to complete, which proves nothing.
+        soon {
+          val put =
+            client.startPut(updateDescriptor, root, new AsyncPutListener(), basic, timed)
+          put.completed()
+          val outcome = scala.util.Try(put.getResult())
+          outcome.failed.toOption.map(_.getMessage).getOrElse("") should not include
+            "too many concurrent"
+        }
+      finally root.close()
+    finally
+      socket.close()
+      client.close()
+      h.shutdown()
+  }
+
+  "DoPuts waiting for their data" should "leave the edge serving" in {
+    val h      = boot(_.copy(flightThreads = 16))
+    val client = h.newClient()
+    val root   = VectorSchemaRoot.create(new Schema(java.util.List.of()), h.allocator)
+    try
+      val waiting =
+        (1 to 32).map(_ => client.startPut(updateDescriptor, root, new AsyncPutListener(), basic))
+      // 16 threads make 4 drain slots: the other 28 are refused, and every thread stays usable.
+      // Without the slots, 16 of them would wait on every thread for data no thread could deliver.
+      client.getInfo(sqlInfo, basic, timed) should not be null
+      // A refused stream is already closed: completing it may throw, and that proves nothing here.
+      waiting.foreach(stream => scala.util.Try(stream.completed()))
+    finally
+      root.close()
+      client.close()
+      h.shutdown()
+  }
+
+  "A DoPut whose client stops sending" should "be answered TIMED_OUT at the deadline" in {
+    val h      = boot(_.copy(putDrainTimeoutMs = 500L))
+    val client = h.newClient()
+    val root   = VectorSchemaRoot.create(new Schema(java.util.List.of()), h.allocator)
+    try
+      val put = client.startPut(updateDescriptor, root, new AsyncPutListener(), basic, timed)
+      val ex  = intercept[FlightRuntimeException](put.getResult())
+      ex.status().code() shouldBe FlightStatusCode.TIMED_OUT
+    finally
+      root.close()
+      client.close()
+      h.shutdown()
+  }
+
   // ---- configuration -------------------------------------------------------------------------
 
   /** The bundled application.conf, the real environment left out and `env` standing in for it. */
