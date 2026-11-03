@@ -31,9 +31,10 @@ import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 /** Who is asking. `isAdmin` = tenant admin on the tenant, or superuser; every other principal is a
-  * plain data-plane user and must be able to connect to the parent. `branchOnly` = the credential
-  * is a PAT restricted to branch writes: it may create and write branches, but a merge writes main,
-  * so merge refuses it (`branch_only_token`).
+  * plain data-plane user and must be able to connect to the parent. No handler reaches the
+  * non-admin case today: `TenantDbGate` admits only admins. `branchOnly` = the credential is a PAT
+  * restricted to branch writes: it may create and write branches, but a merge writes main, so merge
+  * refuses it (`branch_only_token`).
   */
 final case class BranchActor(identity: String, isAdmin: Boolean, branchOnly: Boolean = false)
 
@@ -179,7 +180,8 @@ final class BranchService(
     * row. Uses `authorizeHandshakeDetailed` (not the legacy string-left delegate) so an OPA outage
     * on an opa-mode parent is distinguishable from an ordinary grant refusal: `Res` has its own
     * error channel (`BranchFailure`), so `Unavailable` is surfaced as a retryable 503 rather than
-    * collapsed into the same "acl_denied" a real policy Deny gets.
+    * collapsed into the same "acl_denied" a real policy Deny gets. No handler reaches this arm
+    * today: `TenantDbGate` admits only admins.
     */
   private def mayUse(tenant: String, parent: TenantDb, actor: BranchActor): Res[Unit] =
     if actor.isAdmin then Right(())

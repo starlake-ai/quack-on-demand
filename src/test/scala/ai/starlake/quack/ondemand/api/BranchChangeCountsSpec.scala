@@ -864,13 +864,13 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     // equality oracle on that column (design 8.2). If this ever changes, close that first.
     val plain: SessionScope.Resolver =
       _ => SessionScope(superuser = false, manageableTenants = Set.empty)
-    val f = new Fixture(ConflictingNode)
-    f.handlers
+    val f        = new Fixture(ConflictingNode)
+    val proposed = f.handlers
       .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
         RootScope
       )
       .unsafeRunSync()
-      .isRight shouldBe true
+      .fold(e => fail(s"propose: $e"), identity)
     val countedBefore = f.counted.size
     val tok           = Some(SessionTok)
     def verdict[A](
@@ -900,8 +900,15 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
           f.handlers
             .create(BranchCreateRequest("acme", f.parent.name, "other"), tok)(plain)
             .unsafeRunSync()
+        ),
+        "merge" -> verdict(
+          f.handlers
+            .merge(BranchMergeRequest("acme", f.parent.name, "feature", proposed.merge.id), tok)(
+              plain
+            )
+            .unsafeRunSync()
         )
-      ) shouldBe List("propose", "changes", "get", "create").map(_ -> refused)
+      ) shouldBe List("propose", "changes", "get", "create", "merge").map(_ -> refused)
     }
     f.counted.size shouldBe countedBefore
     f.store.listBranches(f.parent.id, Set.empty).map(_.name) shouldBe List("feature")

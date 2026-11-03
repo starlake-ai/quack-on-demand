@@ -8,11 +8,12 @@ import io.circe.syntax._
 import Dtos.given
 
 /** The agent-facing branch tools (Epic 1): `create_branch`, `list_branches`, `branch_changes`,
-  * `diff`, `propose_merge`, `discard`. All data tier (`adminOnly = false`): any principal that may
-  * connect to the parent database may branch it, exactly the FlightSQL handshake gate. `merge` is
-  * deliberately absent: a human (a different principal than the proposer) approves through REST or
-  * the CLI. Each tool curries `principal.rawToken` into the REST handler's `apiKey` seam, so the
-  * handler resolves the same PAT principal this route did.
+  * `diff`, `propose_merge`, `discard`. Listed for every PAT (`adminOnly = false`), but the
+  * handlers' gate (`TenantDbGate`) admits only a superuser or an admin of the tenant: a plain
+  * user's token, or a `--drop-admin` one, gets `tenant_forbidden`. `merge` is deliberately absent:
+  * a human (a different principal than the proposer) approves through REST or the CLI. Each tool
+  * curries `principal.rawToken` into the REST handler's `apiKey` seam, so the handler resolves the
+  * same PAT principal this route did.
   */
 final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resolver):
 

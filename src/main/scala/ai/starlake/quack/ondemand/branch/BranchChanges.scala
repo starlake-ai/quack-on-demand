@@ -46,7 +46,9 @@ final case class TableChange(
 ):
   def mergeable: Boolean = kind != ChangeKind.Altered && reservedColumn.isEmpty
 
-  /** Only modified tables are counted: a count of this table ran, and did not fail. */
+  /** True unless this table's count failed or was never due: only modified tables are counted. With
+    * no counts asked for it is still true, so a caller must know that too.
+    */
   def counted: Boolean = kind == ChangeKind.Modified && !countsUnavailable
 
   def reason: Option[String] =

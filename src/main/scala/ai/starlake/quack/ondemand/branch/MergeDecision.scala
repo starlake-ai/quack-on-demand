@@ -76,7 +76,7 @@ object ProposeOptions:
           .toRight(
             BranchFailure.badRequest(
               "invalid_on_conflict",
-              s"onConflict must be 'main' or 'branch', not '$w'"
+              s"the conflict policy must be 'main' or 'branch', not '$w'"
             )
           )
     policy.flatMap { p =>

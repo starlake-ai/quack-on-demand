@@ -101,7 +101,7 @@ def changes(
     branch: str = BRANCH,
     no_counts: bool = typer.Option(False, "--no-counts", help="Skip per-table row counts."),
 ):
-    """The branch's change set since its fork, its conflicts against main, and the merge verdict."""
+    """The branch's change set since its fork and its table conflicts against main."""
     call(
         ctx,
         "GET",

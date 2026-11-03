@@ -182,7 +182,7 @@ object BranchEndpoints:
           "merge_failed closes it when the node failed, and keeps it open after a timeout or when " +
           "the fence could not be armed: merge again. The reply's changes carries no row counts " +
           "(inserted, deleted and updated read 0) and, when a merge settled, reads main after the " +
-          "landing; merge.summary and merge.rowConflicts hold the numbers."
+          "landing; merge.summary and merge.rowConflicts hold the numbers, for a superuser."
       )
 
   val discardEndpoint: PublicEndpoint[

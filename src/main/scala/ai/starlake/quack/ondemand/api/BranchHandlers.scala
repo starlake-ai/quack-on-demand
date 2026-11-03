@@ -18,11 +18,12 @@ import sttp.model.StatusCode
 
 /** REST handlers for branches (Epic 1). Gate = [[TenantDbGate]] on the PARENT tenant-db (tenant
   * resolve, [[TenantScopeCheck]], DuckLake kind), then everything else is the service's business
-  * rules. The actor is what `actorOf` resolves: the session's username (tenant admin or superuser)
-  * or a PAT's owner (an MCP data-tier PAT curries its bearer as `apiKey` and arrives here as a
-  * non-admin actor whose `mayUse` gate is the handshake); no credential, or any other token, is a
-  * 401 before the service is reached (see [[BranchHandlers.actorResolver]]). The data diff
-  * delegates to [[CatalogPreviewHandlers]], whose [[RestCaller]] resolves the executor identity.
+  * rules. The gate admits only a superuser or an admin of the tenant, so `BranchService.mayUse`'s
+  * non-admin arm is not reached from here. The actor is what `actorOf` resolves: the session's
+  * username (tenant admin or superuser) or a PAT's owner (an MCP PAT curries its bearer as
+  * `apiKey`); no credential, or any other token, is a 401 before the service is reached (see
+  * [[BranchHandlers.actorResolver]]). The data diff delegates to [[CatalogPreviewHandlers]], whose
+  * [[RestCaller]] resolves the executor identity.
   */
 final class BranchHandlers(
     sup: PoolSupervisor,
