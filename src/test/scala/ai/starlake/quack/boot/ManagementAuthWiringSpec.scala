@@ -339,9 +339,9 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
     finally server.close()
   }
 
-  // ----- the flows still work on real answers, over the client each origin keeps -----
+  // ----- the flows still work on real answers, each exchange in a client of its own -----
 
-  "ManagementAuthWiring SSO" should "still sign a user in on real answers, through the clients its issuer's origin keeps" in
+  "ManagementAuthWiring SSO" should "still sign a user in on real answers, each exchange in a client of its own" in
     withIdp { idp =>
       val issuer = s"${idp.base}/sys"
       idp.serve("/sys/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))

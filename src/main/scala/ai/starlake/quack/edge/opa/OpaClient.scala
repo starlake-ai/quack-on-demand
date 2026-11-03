@@ -12,11 +12,11 @@ import java.time.Duration
   * JDK `HttpClient` call whose WHOLE exchange (connect, response headers AND response body) is
   * bounded by `timeoutMs` and whose body never buffers past the 1 MiB cap: both limits are
   * [[BoundedHttp.send]]'s. A tenant admin picks the OPA URL, so the calls go through
-  * [[OpaClient.exchanges]]: one client for each OPA server, kept while its exchanges end in a clean
-  * answer (a client for each call left a TIME_WAIT for each, and OPA failed closed past about 470
-  * uncached decisions a second) and shut down after any other ending, and at most
-  * [[OpaClient.ExchangeLimit]] calls in flight, half of them for any one server. A call past that
-  * is an error at once (fail closed, and an error is never cached) and asks nobody.
+  * [[OpaClient.exchanges]]: each in a client of its own, shut down when the call ends (the price is
+  * a TIME_WAIT for each call on Linux, so OPA fails closed past about 470 uncached decisions a
+  * second to one server unless `net.ipv4.tcp_tw_reuse=1`), and at most [[OpaClient.ExchangeLimit]]
+  * calls in flight, half of them for any one server. A call past that is an error at once (fail
+  * closed, and an error is never cached) and asks nobody.
   */
 final class OpaClient(timeoutMs: Int, post: OpaClient.Post):
 
@@ -37,9 +37,9 @@ object OpaClient:
   /** The OPA exchanges that may run at once. */
   val ExchangeLimit: Int = 256
 
-  /** The clients and permits of the OPA exchanges: its own, so that a flood of exchanges with
-    * identity providers cannot refuse OPA decisions, and a hanging OPA server of one tenant cannot
-    * refuse the decisions of another's (half of the limit for any one server).
+  /** The permits of the OPA exchanges: its own, so that a flood of exchanges with identity
+    * providers cannot refuse OPA decisions, and a hanging OPA server of one tenant cannot refuse
+    * the decisions of another's (half of the limit for any one server).
     */
   val exchanges: BoundedHttp.Exchanges = new BoundedHttp.Exchanges(ExchangeLimit)
 

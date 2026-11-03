@@ -112,9 +112,12 @@ authorization.
   fields, or the issuer URL, is over 2048 characters. A failed discovery is remembered for 10 s and a
   good one for a day. At most 128 such exchanges run at once, half of them to any one origin; OPA has
   its own 256, split the same way, and a decision past that answers a retryable `UNAVAILABLE`. These
-  clients speak HTTP/1.1 only, as the JDK's HTTP/2 reader queues frames with no bound. A JWKS URL may
-  now redirect from http to https. Errors no longer quote what a server answered. Run on JDK 21 or
-  later: boot prints a warning on an older one, where the connection of a refused answer stays open.
+  clients speak HTTP/1.1 only, as the JDK's HTTP/2 reader queues frames with no bound. Each exchange
+  uses a client and a connection of its own, closed when it ends, so on Linux sustained exchanges to
+  one identity provider or OPA instance above about 470 a second run out of local ports unless
+  `net.ipv4.tcp_tw_reuse=1`. A JWKS URL may now redirect from http to https. Errors no longer quote
+  what a server answered. Run on JDK 21 or later: boot prints a warning on an older one, where the
+  connection of a refused answer stays open.
 - **Chunked framing is refused before a credential:** `411` (`length_required` on REST) on public REST
   routes, the front door and the node routes. A client sending a body with a `Content-Length` is
   unaffected, and an admitted REST or MCP caller may still send chunked.

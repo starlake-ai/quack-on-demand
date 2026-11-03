@@ -171,10 +171,11 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
         awaitGate()
         ex.close()
     )
+    // The request read, the connection closed with no answer.
+    server.createContext("/drop", ex => ex.close())
     server.start()
 
   override def afterAll(): Unit =
-    shared.close()
     server.stop(0)
     executor.shutdownNow()
     ()
@@ -397,20 +398,18 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
   // handle on it to close. Anyone can make the manager read the answer of an issuer a tenant admin
   // picked, so each such answer was a descriptor and its buffers for good (a 380 KB status line
   // halted the manager at -Xmx256m after 151 callbacks, a 40 character one stops it at the file
-  // limit). A client is reused while its exchanges end in a clean answer, and shut down at once
-  // after any other ending, which closes everything it holds.
+  // limit). Every exchange has a client of its own, shut down when it ends, which closes everything
+  // it holds, whatever the answer was.
 
   private def bytes(text: String): Array[Byte] = text.getBytes(StandardCharsets.ISO_8859_1)
 
-  /** One answer a server can give, and how the client is meant to leave its connection: `clean` is
-    * a good answer, whose connection is kept for the next exchange; every other shape is refused,
-    * and its connection is closed at once.
+  /** One answer a server can give, and the redirect policy of the exchange that reads it. Whatever
+    * the answer, the connection is closed when `send` returns, a good one's included.
     */
   private final case class Shape(
       name: String,
       answer: Array[Byte],
-      redirects: HttpClient.Redirect = HttpClient.Redirect.NEVER,
-      clean: Boolean = false
+      redirects: HttpClient.Redirect = HttpClient.Redirect.NEVER
   )
 
   private val Following = HttpClient.Redirect.NORMAL
@@ -418,8 +417,7 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
   private val Shapes = List(
     Shape(
       "a good answer the client could keep alive",
-      bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"),
-      clean = true
+      bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
     ),
     Shape("an invalid status line", bytes("NOT-HTTP " + ("x" * 40) + "\r\n\r\n")),
     Shape(
@@ -477,38 +475,18 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
     send(getFrom(server.base + "/x"), 256 * 1024, 5000L, "probe", exchanges, shape.redirects)
 
   Shapes.foreach { shape =>
-    if shape.clean then
-      "BoundedHttp.send" should s"keep the connection of ${shape.name} for the next exchange, and let it go with its client" in {
-        assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
-        val exchanges = new BoundedHttp.Exchanges(8)
-        val server    = new MalformedServer(shape.answer)
-        try
-          sendToShape(shape, server, exchanges) shouldBe Right((200, "{}"))
-          // Not closed: the client is kept for the next exchange to the same origin.
-          server.awaitClosed(300L) shouldBe false
-          exchanges.close()
+    "BoundedHttp.send" should s"leave no connection open after ${shape.name}" in {
+      assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
+      val exchanges = new BoundedHttp.Exchanges(8)
+      val server    = new MalformedServer(shape.answer)
+      try
+        val out = sendToShape(shape, server, exchanges)
+        // The server holds the connection until the client hangs up: it must within about 2 s.
+        withClue(s"[${out.left.map(_.take(100))}] the client kept the connection open: ") {
           server.awaitClosed(2000L) shouldBe true
-        finally
-          exchanges.close()
-          server.close()
-      }
-    else
-      "BoundedHttp.send" should s"leave no connection open after ${shape.name}" in {
-        assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
-        val exchanges = new BoundedHttp.Exchanges(8)
-        val server    = new MalformedServer(shape.answer)
-        try
-          val out = sendToShape(shape, server, exchanges)
-          // The server holds the connection until the client hangs up: it must within about 2 s.
-          withClue(s"[${out.left.map(_.take(100))}] the client kept the connection open: ") {
-            server.awaitClosed(2000L) shouldBe true
-          }
-          // And the client that held it is gone: nothing is kept for the next exchange.
-          exchanges.clients shouldBe 0L
-        finally
-          exchanges.close()
-          server.close()
-      }
+        }
+      finally server.close()
+    }
 
     it should s"answer a short text, with no control character in it, after ${shape.name}" in {
       val exchanges = new BoundedHttp.Exchanges(8)
@@ -521,9 +499,7 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
             text.exists(Character.isISOControl(_)) shouldBe false
           }
         }
-      finally
-        exchanges.close()
-        server.close()
+      finally server.close()
     }
   }
 
@@ -611,28 +587,24 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       ending: => Unit
   ): Either[String, (Int, String)] =
     val exchanges = new BoundedHttp.Exchanges(2)
-    val origin    = BoundedHttp.Origin.of(get(path).uri, HttpClient.Redirect.NEVER)
+    val origin    = BoundedHttp.Origin.of(get(path).uri)
     gate = new CountDownLatch(1)
     val answer = new AtomicReference[Either[String, (Int, String)]]()
     val sender = new Thread(() => answer.set(send(get(path), 1000, timeoutMs, "probe", exchanges)))
     sender.setDaemon(true)
     sender.start()
-    // The origin's permit is the client's, and an exchange that ends badly takes its client out of
-    // the cache, so the case holds the client itself to see its permit come back.
-    val client = withClue("the permits are taken while the exchange is in flight: ") {
+    withClue("the permits are taken while the exchange is in flight: ") {
       eventually {
         exchanges.available shouldBe 1
         exchanges.originFree(origin) shouldBe Some(0)
       }
-      exchanges.clientOf(origin).getOrElse(fail("the exchange has no client"))
     }
     ending
     sender.join(15000L)
     withClue("both permits are back once send returned: ") {
       exchanges.available shouldBe 2
-      client.permits.availablePermits shouldBe 1
+      exchanges.originFree(origin) shouldBe Some(1)
     }
-    exchanges.close()
     answer.get
 
   "BoundedHttp.send, with a bound on the exchanges" should "hold a permit of the whole and of the origin for the whole exchange and give them back after an answer" in {
@@ -660,17 +632,15 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
     val exchanges = new BoundedHttp.Exchanges(2)
     gate = new CountDownLatch(1)
     gate.countDown()
-    try
-      List("/gate-ok", "/gate-big", "/gate-drop", "/small", "/gate-ok").foreach { path =>
-        val out = send(get(path), 1000, 5000L, "probe", exchanges)
-        withClue(s"[$path] ")(out should not be Left(BoundedHttp.Busy))
-      }
-      // One more, past an exchange that timed out.
-      send(get("/slow-start"), 1000, 300L, "probe", exchanges) shouldBe
-        Left("probe request timed out after 300 ms")
-      send(get("/small"), 1000, 5000L, "probe", exchanges).map(_._1) shouldBe Right(200)
-      exchanges.available shouldBe 2
-    finally exchanges.close()
+    List("/gate-ok", "/gate-big", "/gate-drop", "/small", "/gate-ok").foreach { path =>
+      val out = send(get(path), 1000, 5000L, "probe", exchanges)
+      withClue(s"[$path] ")(out should not be Left(BoundedHttp.Busy))
+    }
+    // One more, past an exchange that timed out.
+    send(get("/slow-start"), 1000, 300L, "probe", exchanges) shouldBe
+      Left("probe request timed out after 300 ms")
+    send(get("/small"), 1000, 5000L, "probe", exchanges).map(_._1) shouldBe Right(200)
+    exchanges.available shouldBe 2
   }
 
   it should "answer Busy at once, starting no thread and asking nobody, while every permit is taken" in {
@@ -704,9 +674,7 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       holder.join(10000L)
       first.get shouldBe Left("probe request timed out after 2000 ms")
       exchanges.available shouldBe 1
-    finally
-      exchanges.close()
-      hanging.close()
+    finally hanging.close()
   }
 
   "BoundedHttp.tokenExchange, with no permit free" should "answer the fixed text and send nothing" in {
@@ -725,20 +693,16 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
     finally server.close()
   }
 
-  // ----- one client per origin, and half of the limit for any one origin -----
+  // ----- half of the limit for any one origin -----
   //
-  // A client for each exchange left a TIME_WAIT for each on this host (about 470 a second per
-  // destination on Linux, then "Cannot assign requested address" for up to 60 s), which anyone
-  // could reach with callbacks against a shared identity provider. So a client is kept for its
-  // origin and reused while its exchanges end in a clean answer, and a hanging origin takes at
-  // most half of the limit, so that it cannot refuse every other one.
+  // What the exchanges share is their permits: one limit for all and half of it for any one origin,
+  // so that a hanging origin cannot refuse every other one. Each exchange has a client of its own.
 
   private val Ok200 = bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
 
   private def keepAliveServer = new MalformedServer(_ => Ok200, repeat = true)
 
-  private def originOf(url: String, redirects: HttpClient.Redirect = HttpClient.Redirect.NEVER) =
-    BoundedHttp.Origin.of(URI.create(url), redirects)
+  private def originOf(url: String) = BoundedHttp.Origin.of(URI.create(url))
 
   /** Starts `n` exchanges to `url` on threads of their own (they end by `deadlineMs` at the latest,
     * or when the server goes) and answers the threads.
@@ -758,170 +722,16 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       thread
     }
 
-  "BoundedHttp.send, over one origin" should "reuse the client and its connection while exchanges end in a clean answer" in {
-    val exchanges = new BoundedHttp.Exchanges(8)
-    val server    = keepAliveServer
-    try
-      (1 to 5).foreach { i =>
-        send(getFrom(server.base + s"/i$i"), 1024, 5000L, "probe", exchanges) shouldBe
-          Right((200, "{}"))
-        // The JDK puts a connection back in its pool a moment after the answer is complete.
-        Thread.sleep(20)
-      }
-      server.connections shouldBe 1
-      exchanges.clients shouldBe 1L
-    finally
-      exchanges.close()
-      server.close()
-  }
-
-  it should "reuse the client for an answer with any status, since a complete answer is a clean one" in {
-    val exchanges = new BoundedHttp.Exchanges(8)
-    val server    = new MalformedServer(
-      _ => bytes("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\n\r\nbusy"),
-      repeat = true
-    )
-    try
-      (1 to 3).foreach { i =>
-        send(getFrom(server.base + s"/i$i"), 1024, 5000L, "probe", exchanges) shouldBe
-          Right((503, "busy"))
-        Thread.sleep(20)
-      }
-      server.connections shouldBe 1
-    finally
-      exchanges.close()
-      server.close()
-  }
-
-  it should "take one server spelled two ways for one origin, and two ports, schemes or policies for two" in {
-    val never               = HttpClient.Redirect.NEVER
-    def origin(url: String) = BoundedHttp.Origin.of(URI.create(url), never)
-
+  "BoundedHttp.send, over one origin" should "take one server spelled two ways for one origin, and two ports or schemes for two" in {
     // The path, the query, the user info (the JDK never sends it) and the case of the scheme and
     // the host do not make another origin, and a missing port is the scheme's own.
-    origin("http://idp.example/a") shouldBe origin("HTTP://IDP.Example:80/b?c=d")
-    origin("https://idp.example/a") shouldBe origin("https://user:pw@idp.example:443/")
-    origin("http://[::1]:8080/a") shouldBe origin("http://[::1]:8080/b")
+    originOf("http://idp.example/a") shouldBe originOf("HTTP://IDP.Example:80/b?c=d")
+    originOf("https://idp.example/a") shouldBe originOf("https://user:pw@idp.example:443/")
+    originOf("http://[::1]:8080/a") shouldBe originOf("http://[::1]:8080/b")
 
-    origin("http://idp.example/") should not be origin("http://idp.example:8080/")
-    origin("http://idp.example/") should not be origin("https://idp.example/")
-    origin("http://idp.example/") should not be origin("http://idp2.example/")
-    origin("http://idp.example/") should not be
-      BoundedHttp.Origin.of(URI.create("http://idp.example/"), HttpClient.Redirect.NORMAL)
-  }
-
-  it should "give a different redirect policy its own client, since the policy is part of the origin" in {
-    val exchanges = new BoundedHttp.Exchanges(8)
-    val server    = keepAliveServer
-    try
-      send(getFrom(server.base + "/a"), 1024, 5000L, "probe", exchanges) shouldBe Right((200, "{}"))
-      send(
-        getFrom(server.base + "/b"),
-        1024,
-        5000L,
-        "probe",
-        exchanges,
-        HttpClient.Redirect.NORMAL
-      ) shouldBe Right((200, "{}"))
-      exchanges.clients shouldBe 2L
-    finally
-      exchanges.close()
-      server.close()
-  }
-
-  it should "shut a client down at once after a malformed answer, and give the next exchange a new one" in {
-    assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
-    val exchanges = new BoundedHttp.Exchanges(8)
-    val server    = new MalformedServer(
-      i => if i == 0 then bytes("NOT-HTTP " + ("x" * 40) + "\r\n\r\n") else Ok200,
-      repeat = true
-    )
-    try
-      send(getFrom(server.base + "/a"), 1024, 5000L, "probe", exchanges).isLeft shouldBe true
-      // The connection of the refused answer is closed within about 2 s of send returning, and the
-      // client that held it is gone.
-      server.awaitClosed(2000L) shouldBe true
-      exchanges.clients shouldBe 0L
-
-      send(getFrom(server.base + "/b"), 1024, 5000L, "probe", exchanges) shouldBe
-        Right((200, "{}"))
-      server.connections shouldBe 2
-      exchanges.clients shouldBe 1L
-    finally
-      exchanges.close()
-      server.close()
-  }
-
-  it should "answer a Left at once, and throw nothing, to an exchange whose client another exchange of the origin shut down" in {
-    assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
-    val exchanges = new BoundedHttp.Exchanges(8)
-    // The first connection is held with no answer, the second is answered with garbage, the rest
-    // are good.
-    val server = new MalformedServer(
-      i =>
-        if i == 0 then Array.emptyByteArray
-        else if i == 1 then bytes("NOT-HTTP " + ("x" * 40) + "\r\n\r\n")
-        else Ok200,
-      repeat = true
-    )
-    try
-      val held   = new AtomicReference[Either[String, (Int, String)]]()
-      val holder = new Thread(() =>
-        held.set(send(getFrom(server.base + "/held"), 1000, 10000L, "probe", exchanges))
-      )
-      holder.setDaemon(true)
-      holder.start()
-      eventually(server.connections shouldBe 1)
-
-      // Another exchange of the origin ends badly, which shuts the client down under the first.
-      send(getFrom(server.base + "/bad"), 1000, 5000L, "probe", exchanges).isLeft shouldBe true
-
-      val (_, ms) = timed(holder.join(5000L))
-      holder.isAlive shouldBe false
-      withClue(s"[${held.get}] ") {
-        held.get.isLeft shouldBe true
-        held.get should not be Left(BoundedHttp.Busy)
-      }
-      // At once: not the 10 s of its deadline.
-      ms should be < 5000L
-      // And the origin is asked again with a client of its own, as if nothing had happened.
-      send(getFrom(server.base + "/again"), 1000, 5000L, "probe", exchanges) shouldBe
-        Right((200, "{}"))
-      exchanges.available shouldBe 8
-    finally
-      exchanges.close()
-      server.close()
-  }
-
-  it should "not shut down a client that replaced the one a late failure belongs to" in {
-    val exchanges = new BoundedHttp.Exchanges(8)
-    val server    = keepAliveServer
-    try
-      val origin = originOf(server.base)
-      send(getFrom(server.base + "/1"), 1024, 5000L, "probe", exchanges) shouldBe
-        Right((200, "{}"))
-      val first = exchanges.clientOf(origin).getOrElse(fail("the exchange left no client"))
-
-      // An exchange that ended badly drops the first client...
-      exchanges.discard(origin, first)
-      exchanges.clientOf(origin) shouldBe None
-      // ...and a later exchange builds another.
-      send(getFrom(server.base + "/2"), 1024, 5000L, "probe", exchanges) shouldBe
-        Right((200, "{}"))
-      val second = exchanges.clientOf(origin).getOrElse(fail("the exchange left no client"))
-      (second eq first) shouldBe false
-
-      // The failure of an older exchange of the first client arrives late: the second stays, and is
-      // not shut down (its connection still serves the next exchange).
-      exchanges.discard(origin, first)
-      exchanges.clientOf(origin).exists(_ eq second) shouldBe true
-      Thread.sleep(20)
-      send(getFrom(server.base + "/3"), 1024, 5000L, "probe", exchanges) shouldBe
-        Right((200, "{}"))
-      server.connections shouldBe 2 // one for each client, and the second one's was reused
-    finally
-      exchanges.close()
-      server.close()
+    originOf("http://idp.example/") should not be originOf("http://idp.example:8080/")
+    originOf("http://idp.example/") should not be originOf("https://idp.example/")
+    originOf("http://idp.example/") should not be originOf("http://idp2.example/")
   }
 
   it should "give an origin half of the limit, and still serve another origin" in {
@@ -950,7 +760,6 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       holders.foreach(_.join(10000L))
       eventually(exchanges.available shouldBe 4)
     finally
-      exchanges.close()
       hanging.close()
       other.close()
   }
@@ -977,7 +786,6 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       eventually(exchanges.available shouldBe 2)
       send(getFrom(c.base + "/x"), 1024, 5000L, "probe", exchanges) shouldBe Right((200, "{}"))
     finally
-      exchanges.close()
       a.close()
       b.close()
       c.close()
@@ -1016,37 +824,117 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       answers.distinct shouldBe List(Right((200, "{}")))
     finally
       stop.set(true)
-      exchanges.close()
       hanging.close()
       other.close()
   }
 
-  it should "hold at most 128 clients however many origins are asked" in {
+  it should "hold at most 128 shares however many origins are asked" in {
     val exchanges = new BoundedHttp.Exchanges(8)
-    try
-      (1 to 300).foreach { i =>
-        exchanges.clientFor(
-          BoundedHttp.Origin("http", s"host$i.example", 80, HttpClient.Redirect.NEVER)
-        )
-      }
-      exchanges.clients should (be > 100L and be <= 128L)
-    finally exchanges.close()
+    (1 to 300).foreach { i =>
+      exchanges.shareOf(BoundedHttp.Origin("http", s"host$i.example", 80))
+    }
+    exchanges.shares should (be > 100L and be <= 128L)
   }
 
-  it should "shut an idle client down by itself, its connection with it, with no traffic to prompt it" in {
+  // ----- a client for each exchange leaves nothing behind -----
+  //
+  // A client kept for its origin was shut down when one exchange of it failed, and the JDK leaves
+  // open the channel of an exchange that is just starting on the client meanwhile: 5196 sockets left
+  // after 1.86 million exchanges to a closed port, surviving every GC. A redirect chain left a
+  // connection in the kept client for each hop (5395 callbacks, 38390 descriptors, the JVM dead).
+
+  /** `hops` servers that redirect, each to the next, then one that answers: a chain of origins as
+    * the redirects of a key set's URL can make. The first of the list is where a request goes in.
+    */
+  private def redirectChain(hops: Int): List[MalformedServer] =
+    (1 to hops).foldLeft(List(keepAliveServer)) { (chain, _) =>
+      val next = chain.head.base + "/x"
+      new MalformedServer(
+        _ => bytes(s"HTTP/1.1 302 Found\r\nLocation: $next\r\nContent-Length: 0\r\n\r\n"),
+        repeat = true
+      ) :: chain
+    }
+
+  "BoundedHttp.send, with a client for each exchange" should "open a connection for each exchange to one origin, and close each when send returns" in {
     assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
-    val exchanges = new BoundedHttp.Exchanges(4, idleTtl = Duration.ofMillis(400))
+    val exchanges = new BoundedHttp.Exchanges(8)
     val server    = keepAliveServer
     try
-      send(getFrom(server.base + "/x"), 1024, 5000L, "probe", exchanges) shouldBe Right((200, "{}"))
-      // Kept for the next exchange...
-      server.awaitClosed(100L) shouldBe false
-      // ...and gone once it has been idle for its time, though nothing else touches the cache.
-      eventually(server.awaitClosed(100L) shouldBe true)
-      exchanges.clients shouldBe 0L
-    finally
-      exchanges.close()
-      server.close()
+      (1 to 2).foreach { i =>
+        send(getFrom(server.base + s"/i$i"), 1024, 5000L, "probe", exchanges) shouldBe
+          Right((200, "{}"))
+        // The server keeps a connection for the next request and sees it end only when the client
+        // hangs up: the client that served the exchange is gone, and its connection with it.
+        withClue(s"[exchange $i] ")(server.awaitClosed(2000L) shouldBe true)
+      }
+      server.connections shouldBe 2
+    finally server.close()
+  }
+
+  it should "leave no connection open after a redirect chain that ends in a 200" in {
+    assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
+    val exchanges = new BoundedHttp.Exchanges(8)
+    val chain     = redirectChain(4)
+    try
+      send(getFrom(chain.head.base + "/x"), 1024, 5000L, "probe", exchanges, Following) shouldBe
+        Right((200, "{}"))
+      chain.zipWithIndex.foreach { (server, i) =>
+        withClue(s"[server ${i + 1} of ${chain.size}, ${server.connections} connection(s)] ") {
+          server.connections shouldBe 1
+          server.awaitClosed(2000L) shouldBe true
+        }
+      }
+    finally chain.foreach(_.close())
+  }
+
+  private def closedPortUrl: String =
+    val port = new ServerSocket(0, 1, InetAddress.getLoopbackAddress)
+    val free = port.getLocalPort
+    port.close()
+    s"http://127.0.0.1:$free/x"
+
+  // 64 threads send 38400 exchanges between them. Against a client kept for its origin that left
+  // 68 to 100 sockets (measured on the code that kept it, for each of the two floods below); a
+  // client for each exchange leaves none, so the margin of 16 is wide on both sides.
+  private val FloodThreads = 64
+  private val FloodEach    = 600
+
+  /** `threads` threads, each sending `each` exchanges to `url` one after the other: a flood that
+    * ends by its count, however the exchanges end, and a case fails if it has not ended in a
+    * minute.
+    */
+  private def flood(url: String, threads: Int, each: Int): Unit =
+    val exchanges = new BoundedHttp.Exchanges(4 * threads)
+    val workers   = (1 to threads).toList.map { _ =>
+      val worker = new Thread(() =>
+        (1 to each).foreach(_ => send(getFrom(url), 1024, 5000L, "probe", exchanges))
+      )
+      worker.setDaemon(true)
+      worker.start()
+      worker
+    }
+    workers.foreach(_.join(60000L))
+    workers.count(_.isAlive) shouldBe 0
+
+  /** Floods `url` and expects the descriptors to be back where they were once the clients, which
+    * end a moment after their exchange, have gone.
+    */
+  private def expectNoSocketLeftBy(url: String): Unit =
+    flood(url, 4, 3) // class loading, the default SSL context
+    val before = openDescriptors.get
+    flood(url, FloodThreads, FloodEach)
+    eventually((openDescriptors.get - before) should be <= 16L)
+
+  "BoundedHttp.send, from 64 threads at once" should "leave no socket after exchanges to a closed port" in {
+    assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
+    assume(openDescriptors.isDefined, "this JVM does not count its open file descriptors")
+    expectNoSocketLeftBy(closedPortUrl)
+  }
+
+  it should "leave no socket after exchanges to a server that closes with no answer" in {
+    assume(HasShutdownNow, "HttpClient.shutdownNow exists from JDK 21")
+    assume(openDescriptors.isDefined, "this JVM does not count its open file descriptors")
+    expectNoSocketLeftBy(base + "/drop")
   }
 
   // ----- the JDK's HTTP/2 reader queues inbound frames with no bound -----
@@ -1077,9 +965,7 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       head should startWith("get /x http/1.1")
       head should not include "upgrade"
       head should not include "http2-settings"
-    finally
-      exchanges.close()
-      server.close()
+    finally server.close()
   }
 
   it should "answer a 101 it never asked for, with a flood of frames after it, at once and not as a success" in {
@@ -1104,15 +990,13 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
           case other           => fail(s"a 101 became $other")
         ms should be < 2000L
       }
-    finally
-      exchanges.close()
-      server.close()
+    finally server.close()
   }
 
   // ----- TLS: how every identity provider and most OPA servers are reached -----
   //
   // No other case performs a TLS exchange. The JVM's default context is replaced meanwhile (a client
-  // takes the default when it is built, and the origins here are new), and put back after.
+  // takes the default when it is built, and every exchange builds its own), and put back after.
 
   private def withTls[A](body: TlsFixture => A): A =
     val tls      = new TlsFixture
@@ -1217,9 +1101,7 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
           out.map(_._1) shouldBe Right(200)
           out.map(_._2) should not be Right("h2")
         }
-      finally
-        exchanges.close()
-        server.close()
+      finally server.close()
     }
 
   it should "refuse a server whose certificate names another host, sending it nothing" in
@@ -1234,9 +1116,7 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
           out.left.toOption.exists(_.contains("SSLHandshakeException")) shouldBe true
         }
         server.requests.get shouldBe 0
-      finally
-        exchanges.close()
-        server.close()
+      finally server.close()
     }
 
   it should "follow a redirect from https to https and not one from https to http" in
@@ -1271,7 +1151,6 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
         ) shouldBe Right((302, ""))
         plain.connections shouldBe 0
       finally
-        exchanges.close()
         plain.close()
         server.close()
     }

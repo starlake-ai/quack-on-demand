@@ -149,8 +149,8 @@ object ManagementAuthWiring extends LazyLogging:
     * `QOD_MGMT_OIDC_CLIENT_ID` are set. Nothing is fetched here: discovery runs on the first login
     * of each issuer.
     *
-    * Discovery and the token exchange go through [[BoundedHttp]] (HTTP/1.1, one client for each
-    * origin, a bound on the exchanges in flight); id_token validation reuses
+    * Discovery and the token exchange go through [[BoundedHttp]] (HTTP/1.1, a client for each
+    * exchange, a bound on the exchanges in flight); id_token validation reuses
     * OidcBearerAuthenticator against the discovered jwks_uri. redirect_uri is built from the public
     * base URL (must match the IdP client's registered redirect URI).
     */
