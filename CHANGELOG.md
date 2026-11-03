@@ -5,7 +5,7 @@
 ### Upgrading from 0.10.x (read first)
 
 0.11.0 moves every authorization decision into the node. It is not a drop-in upgrade: a manager
-still carrying a removed setting refuses to boot, every node must restart, and tenant users lose
+still carrying some removed settings refuses to boot, every node must restart, and tenant users lose
 access the old switches used to grant. Work through these steps in order; the sections below give
 the details.
 

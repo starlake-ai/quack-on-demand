@@ -30,4 +30,7 @@
        the benign stream-cancel race (client RST_STREAM while DATA frames sit queued),
        e.g. DBeaver abandoning a Flight result stream after its first fetch page. -->
   <logger name="io.grpc.netty.NettyServerHandler" level="ERROR" />
+  <!-- A refused oversize FlightSQL message logs a WARN with its stack here, and a client with no
+       credentials can send them as fast as it likes: 8 MB of log in 30 s (measured). -->
+  <logger name="io.grpc.netty.NettyServerStream" level="ERROR" />
 </configuration>
