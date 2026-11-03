@@ -1500,7 +1500,10 @@ final class BranchService(
             ended match
               case Left(reason)                                   => unlessLanded(reason, 0)
               case Right((AttemptEnd.Committed(snapshot, cs), n)) =>
-                // The guarantee above has dealt with the fence.
+                // With an earlier send behind it, this is a settle like the others, whichever send
+                // landed: the hold goes, whichever run armed it, and the fence stays below this
+                // commit, which a held retry's arms need not be. With none, nothing else can land,
+                // and the guarantee above has dealt with the fence.
                 finishMerge(
                   tenant,
                   parent,
@@ -1512,7 +1515,10 @@ final class BranchService(
                   n,
                   actor,
                   apiKey,
-                  afterRecord = IO.unit
+                  afterRecord =
+                    if earlierTimeout then
+                      letGo(tenant, parent, b, merge, cs, snapshot, holdWriters)
+                    else IO.unit
                 )
               case Right((AttemptEnd.Refused(f, closes), n)) => refuse(f, closes, n)
               case Right((AttemptEnd.Failed(reason), n))     => unlessLanded(reason, n)

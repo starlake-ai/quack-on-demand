@@ -2250,6 +2250,21 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     g.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
     g.fenceArms.map(a => (a._3, a._5)).toList shouldBe List((10L, None))
     g.fenceDisarms shouldBe empty
+
+    // The look inside an attempt.
+    val h = new Fixture
+    h.create("x")
+    h.touchBranch()
+    h.propose().isRight shouldBe true
+    val inside = h.openProposal()
+    h.mergeFails = Some(TimedOutSend)
+    h.merge().left.map(_.code) shouldBe Left("merge_failed")
+    h.mergeFails = None
+    val armedInside = h.fenceArms.size
+    h.duringAnalysis = () => if h.mainReader.committed.isEmpty then h.land(inside)
+    h.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    h.fenceArms.size shouldBe armedInside
+    h.fenceDisarms shouldBe empty
   }
 
   it should "record the hold before the send, so the merge after a dead manager ends it" in {
@@ -2270,6 +2285,80 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
     f.fenceArms.last._3 shouldBe 12L
     f.fenceArms.last._5 shouldBe None
+  }
+
+  it should "end an earlier run's hold when a no-hold retry finds its commit inside an attempt" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(LostAnswer)
+    f.merge(hold = true).left.map(_.code) shouldBe Left("merge_failed")
+    f.mergeFails = None
+    f.fenceArms.last._5 shouldBe Some(600)
+    val armed = f.fenceArms.size
+    f.mergeBatches.clear()
+    // Past the next merge's first look, and before its attempt's.
+    f.duringAnalysis = () => if f.mainReader.committed.isEmpty then f.land(id, 13L)
+    val (message, atClear) = watchingArms(f, id)
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+    f.mergeBatches shouldBe empty
+    f.fenceArms.drop(armed).map(a => (a._2, a._3, a._4, a._5)).toList shouldBe
+      List((message, 12L, Set(2L), None))
+    f.fenceDisarms shouldBe empty
+    atClear() shouldBe Some((BranchMergeStatus.Merged, false))
+  }
+
+  it should "keep the fence below a commit a held retry finds at or below its head" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(TimedOutSend)
+    f.merge().left.map(_.code) shouldBe Left("merge_failed")
+    f.mergeFails = None
+    val armed = f.fenceArms.size
+    f.mergeBatches.clear()
+    // It lands before the retry reads main's head on the frozen branch: that head holds the commit,
+    // so the retry's own arms start at it, and it refuses no other send.
+    f.onHeadRead(2)(() => f.land(id))
+    val (message, atClear) = watchingArms(f, id)
+    f.merge(hold = true).map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    f.mergeBatches shouldBe empty
+    f.fenceArms.drop(armed).map(a => (a._3, a._5)).toList shouldBe
+      List((11L, Some(600)), (11L, None), (10L, None))
+    f.fenceArms.last._2 shouldBe message
+    f.fenceArms.last._4 shouldBe Set(2L)
+    f.fenceDisarms shouldBe empty
+    atClear() shouldBe Some((BranchMergeStatus.Merged, false))
+  }
+
+  it should "answer a settle inside an attempt whatever the clear does, and log a clear that failed" in {
+    for fails <- List[Fixture => Unit](
+        _.fenceFails = Some("cannot reach the catalog"),
+        _.onArm = () => throw new IllegalStateException("cannot reach the catalog")
+      )
+    do
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.propose().isRight shouldBe true
+      val id = f.openProposal()
+      f.mergeFails = Some(LostAnswer)
+      f.merge(hold = true).left.map(_.code) shouldBe Left("merge_failed")
+      f.mergeFails = None
+      // A retry with no hold arms nothing before this settle.
+      f.duringAnalysis = () => if f.mainReader.committed.isEmpty then f.land(id)
+      fails(f)
+      val (res, logs) = LogCapture.logged(ServiceLog)(f.merge())
+      res.map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+      f.row(id).status shouldBe BranchMergeStatus.Merged
+      f.store.findBranch(f.parent.id, "x") shouldBe None
+      logs.count(e =>
+        e.getLevel == Level.ERROR && e.getFormattedMessage.contains("cannot reach the catalog")
+      ) shouldBe 1
   }
 
   it should "leave another proposal's fence row alone: its commit on main is a refusal, not a settle" in {
