@@ -79,6 +79,7 @@ OCI publication to a public registry is a planned follow-up.
 |---|---|
 | `Deployment` | The manager pod. Default `replicas: 1` (see the Resilience guide at https://starlake-ai.github.io/quack-on-demand/operating/resilience and #11). |
 | `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`. |
+| Container port `internal` | `:20901`, no Service: node pods call the manager pod directly for verdicts. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
@@ -223,7 +224,8 @@ When you need the wire encrypted (compliance such as SOC2 / HIPAA / PCI), run a 
 
 ## Operational notes
 
-- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Replicas share the session secret stored in the control-plane database; `sessionJwtSecret` or `existingSessionJwtSecret` pins one instead (a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). Each replica passes its pod IP (`QOD_POD_IP`, downward API) so its nodes call that replica back for verdicts; leave `env.QOD_INTERNAL_URL` unset (the chart refuses it with `replicaCount > 1`).
+- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Replicas share the session secret stored in the control-plane database; `sessionJwtSecret` or `existingSessionJwtSecret` pins one instead (a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). Each replica passes its pod IP (`QOD_POD_IP`, downward API) so its nodes call that replica back for verdicts, on port 20901; leave `env.QOD_INTERNAL_URL` unset (the chart refuses it at any replica count, and `env.QOD_INTERNAL_PORT` too, since its NetworkPolicies and container port are fixed).
+- **JVM** - `javaOpts` (default `-XX:MaxRAMPercentage=50 -XX:MaxDirectMemorySize=512m`) is passed as `JAVA_OPTS`; `env.JAVA_OPTS` replaces it. Below a memory limit of 3Gi, set your own: heap, direct memory, metaspace, thread stacks and native libraries must all fit the limit, or the kernel kills the pod.
 - **K8s API scope** - manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
 - **TLS** - leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
 - **Probes** - liveness targets `/health` (always 200 while the JVM is alive); readiness targets `/ready` (503 until Postgres is reachable). Readiness gates traffic until Postgres connectivity is confirmed, so a rolling restart doesn't briefly serve requests against an unavailable control plane.

@@ -27,9 +27,14 @@ Before upgrading:
 5. On OPA tenants, update the policies for the node's input (`columns`, `via`, `locations`).
 6. If users load files, set `QOD_TENANT_FILES_ROOT`, and list in `QOD_USER_S3_ALLOWED_ENDPOINTS`
    any endpoint other than AWS that users' own S3 keys target.
-7. In fleet mode set `QOD_INTERNAL_URL` on every manager; on Kubernetes without the chart set
-   `QOD_POD_IP`. Under HA, set `QOD_NODE_KEY_SECRET` to the same value on every replica, or leave
-   it unset on all.
+7. In fleet mode set `QOD_INTERNAL_URL` on every manager, on the node verdict listener's port (the
+   REST port + 1 by default, `QOD_INTERNAL_PORT`), and let the servers reach that port, and only
+   them: a client that reaches it can hold its connection slots, which stops authorization (see
+   "Limits on unauthenticated work"). Name this host's own address in the URL, as a literal, and the
+   listener binds only that address; with another host name it binds where REST binds. Boot refuses
+   a URL naming the REST port. On Kubernetes without the chart set `QOD_POD_IP`, and open that port
+   to your node pods alone in any NetworkPolicy of your own. Under HA, set `QOD_NODE_KEY_SECRET` to
+   the same value on every replica, or leave it unset on all.
 
 During the upgrade:
 
@@ -50,6 +55,78 @@ After upgrading:
 13. Tell tenant users that DuckDB's built-in listing views are now refused to them
     (`pg_catalog.*`, `sqlite_master`, bare `SHOW` / `DESCRIBE`, `system.information_schema.*`).
     They keep `information_schema.*`, `SHOW TABLES` and `duckdb_*()`, filtered to their grants.
+
+### Limits on unauthenticated work
+
+A client with no credentials can no longer halt the manager through the REST port, the Quack front
+door or the node verdict listener, and one that reaches only the REST port can no longer stop
+authorization.
+
+- **Node verdicts have their own listener**, on the REST port + 1 (`QOD_INTERNAL_PORT`, the chart's
+  20901): slow clients on the REST port can no longer stop authorization. `POST
+  /api/internal/authz/*` left the REST port. With `QOD_INTERNAL_URL` unset the decide URL names the
+  pod IP, else loopback, and no longer a specific `QOD_ON_DEMAND_HOST`. The listener binds loopback
+  for a loopback URL, the URL's own address when that is a literal address of this host, else the
+  REST bind address. It serves at most 256 connections at once (`QOD_INTERNAL_MAX_CONNECTIONS`), and
+  reads a call's body, up to 1 MiB within 5 s, before it can check the call's signature, so a client
+  that reaches it can hold a slot and about 1.4 MiB of heap in each. Keep clients off this port: one
+  that reaches it can fill those slots, which stops authorization. The chart refuses
+  `env.QOD_INTERNAL_URL` at any replica count: its Service has no verdict port.
+- **Request bodies are limited** on the REST port and the Quack front door. REST: 64 KiB on public
+  routes (`QOD_REST_MAX_PUBLIC_BODY_BYTES`), 16 MiB elsewhere (`QOD_REST_MAX_BODY_BYTES`), 30 s to
+  arrive (`QOD_REST_BODY_TIMEOUT_SEC`), answered `413 payload_too_large` and `408 request_timeout`.
+  Quack front door: 64 KiB for a CONNECTION_REQUEST (`QOD_QUACK_MAX_CONNECT_BODY_BYTES`) within 30 s
+  (`QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC`), a live session's message within 300 s
+  (`QOD_QUACK_BODY_TIMEOUT_SEC`; boot refuses a connect timeout above it, or either above 86400), and
+  nothing read for a message that names no live session; a body that misses its deadline is answered
+  `408`. With TLS on, its reads have a 60 s deadline. It also refuses a token of more than 32
+  `key=value` pairs. `QOD_REST_MAX_CONNECTIONS` and `QOD_QUACK_MAX_CONNECTIONS` set the connection
+  limits.
+- **Request lines and headers are limited, and each of these listeners takes no more connections than
+  fit its share of the heap.** REST: 8 KiB each (`QOD_REST_MAX_HEADER_BYTES`), the front door 4 KiB
+  (`QOD_QUACK_MAX_HEADER_BYTES`), the verdict listener 4 KiB, answered `431`. The HTTP server's own
+  limit is 40 KiB each, which let one client with no credentials halt the manager. A browser with many
+  cookies on the manager's host or parent domain can reach 8 KiB and then sees `headers_too_large`:
+  raise the variable, and fewer connections fit. `QOD_REST_MAX_CONNECTIONS`,
+  `QOD_QUACK_MAX_CONNECTIONS` and `QOD_INTERNAL_MAX_CONNECTIONS` are ceilings (1024 by default for
+  REST and the front door): a listener takes fewer when a fifth of the heap cannot hold them (at a
+  1 GiB heap 260, 431 and 145), and boot prints a line saying so. Raise the heap (for example
+  `JAVA_OPTS=-Xmx2g`) to take more.
+- **`GET /metrics` shares one scrape for 4 s**, writes it in chunks of at most 8 KiB, and gives a
+  response 30 s to finish. It used to build a copy of the scrape for every request and hold it until
+  the client read it, at the cost of a refresh and a serialization each. A request that waits 10 s for
+  a scrape in progress answers `503`, and a scraper that polls more often than every 4 s sees repeated
+  samples.
+- **Anonymous auth routes write and call less.** `GET /api/auth/oidc/logout` writes an audit row and
+  calls Starlake only for a live session: it wrote a row and started a detached call for any cookie,
+  whatever it held. A login refused with `sso_required` (per tenant) and a denied `POST
+  /api/auth/sso/redeem` write at most one audit row a minute each, where each wrote one per request,
+  kept for the audit retention. Audit rows written for REST calls drop control characters (a tab or a
+  line break reads as a space) and cap a name at 256 characters and a detail value at 1024.
+- **Exchanges with identity providers and OPA are bounded.** A tenant admin picks the issuer, and
+  anyone can make the manager call it, so an issuer a tenant admin set could halt the manager for
+  every tenant. A discovery document or token answer is read under 256 KiB and 15 s over the whole exchange,
+  a JWKS under 50 KiB and 5 s and never from `file:`, and a token nested too deeply is refused. A
+  discovery document is refused (the sign-in then fails with `discovery_failed`) when its `jwks_uri`,
+  `token_endpoint` or `authorization_endpoint` is not an absolute http(s) URL, or when one of its
+  fields, or the issuer URL, is over 2048 characters. A failed discovery is remembered for 10 s and a
+  good one for a day. At most 128 such exchanges run at once, half of them to any one origin; OPA has
+  its own 256, split the same way, and a decision past that answers a retryable `UNAVAILABLE`. These
+  clients speak HTTP/1.1 only, as the JDK's HTTP/2 reader queues frames with no bound. A JWKS URL may
+  now redirect from http to https. Errors no longer quote what a server answered. Run on JDK 21 or
+  later: boot prints a warning on an older one, where the connection of a refused answer stays open.
+- **Chunked framing is refused before a credential:** `411` (`length_required` on REST) on public REST
+  routes, the front door and the node routes. A client sending a body with a `Content-Length` is
+  unaffected, and an admitted REST or MCP caller may still send chunked.
+- **A nested JSON body no longer halts the manager.** One anonymous POST of 8 KB holding `[[[...]]]`
+  ended the JVM. REST, MCP and the node routes refuse JSON nested past 256 levels (REST:
+  `400 json_too_deep`).
+- **`GET /ready` and `POST /api/auth/sso/redeem` no longer block a compute thread.** `/ready` runs one
+  database ping at a time, and other callers get the last answer.
+- **Image and chart:** the image's ENTRYPOINT expands `JAVA_OPTS`, and the image exposes 20901. The
+  chart passes `javaOpts`, default `-XX:MaxRAMPercentage=50 -XX:MaxDirectMemorySize=512m`, so its heap
+  goes from 1 GiB to 2 GiB under its default 4 GiB limit. Below a limit of 3Gi set your own. A stale
+  `env.JAVA_OPTS`, ignored before, now takes effect and replaces `javaOpts`.
 
 ### Phases A-C
 
@@ -594,22 +671,26 @@ After upgrading:
 
 - **BREAKING for fleet mode and hand-written Kubernetes manifests: nodes call the manager back.**
   Every handle carries the URL of the replica that minted it (`QOD_INTERNAL_URL`,
-  `quack-on-demand.nodeAuthz.internalUrl`), which nodes call for their verdicts. Its default is
-  `http://<QOD_POD_IP>:<port>` when the pod IP is set, else `http://<QOD_ON_DEMAND_HOST>:<port>` when
-  the manager binds one specific address, else `http://127.0.0.1:<port>`. The manager now refuses to
-  boot:
+  `quack-on-demand.nodeAuthz.internalUrl`), which nodes call for their verdicts, on the node verdict
+  listener's port (see "Limits on unauthenticated work" above). Its default is
+  `http://<QOD_POD_IP>:<internal port>` when the pod IP is set, else
+  `http://127.0.0.1:<internal port>`. The manager now refuses to boot:
   - in fleet mode without `QOD_INTERNAL_URL`: set it next to `QOD_RUNTIME_TYPE=fleet` and
     `QOD_FLEET_JOIN_TOKEN`, to this replica's own plain `http://` address on the servers' private
-    network (under HA one per replica, never a load balancer); `docker-compose.fleet.yml` sets
-    `http://host.docker.internal:20900`;
+    network and the verdict listener's port (under HA one per replica, never a load balancer);
+    `docker-compose.fleet.yml` sets `http://host.docker.internal:20901` (`MANAGER_INTERNAL_PORT`) and
+    publishes that port on every host interface, like the ports beside it, so keep it off any network
+    clients are on;
   - on Kubernetes with a loopback decide URL: the Helm chart sets `QOD_POD_IP` from the downward API
-    (and fails on `env.QOD_POD_IP`, or on `env.QOD_INTERNAL_URL` with more than one replica); a
-    hand-written manifest must set `QOD_POD_IP` from `status.podIP`, or `QOD_INTERNAL_URL`;
+    (and fails on `env.QOD_POD_IP`, on `env.QOD_INTERNAL_PORT`, or on `env.QOD_INTERNAL_URL` at any
+    replica count); a hand-written manifest must set `QOD_POD_IP` from `status.podIP`, or
+    `QOD_INTERNAL_URL`;
   - on any runtime with a URL qod-node cannot call (not lowercase `http://`, user info, a query,
-    a bad port).
-  Boot prints `node decide URL: <url>`. With `networkPolicy.enabled`, the chart's policies now let
-  node pods reach the manager pods on TCP 20900 whatever `networkPolicy.ingressFrom` says (the whole
-  REST port: a network policy cannot filter by path), in the release namespace only. A node host
+    a bad port), or an explicit one naming the REST port.
+  Boot prints `node decide URL: <url> (listening on <host>:<port>)`. With `networkPolicy.enabled`, the
+  chart's policies now let node pods reach the manager pods on TCP 20901 whatever
+  `networkPolicy.ingressFrom` says (the verdict listener, where every call authenticates with the
+  node's key), in the release namespace only. A node host
   name in `QOD_INTERNAL_URL` is resolved once per 30 s by each node. Fleet servers must run this
   release's `qod fleet join`: the assignment's `dbInitSql` is gone (the manager's resource SETs are
   `resourceSql`, the tenant's initSql rides its own secret files with its trust), and an older join
