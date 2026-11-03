@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.branch
 
+import ai.starlake.quack.BranchingConfig
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -63,8 +64,10 @@ object ThreeWayMergeScaleBench:
   * (8), `QOD_BENCH_MEMORY` (16GB), `QOD_BENCH_ROWS_PER_FILE` (a badly maintained table, optional),
   * `QOD_BENCH_DATA_ROOT` (a local temp directory by default, or `s3://bucket/prefix`),
   * `QOD_BENCH_SETUP_SQL` (statements run first, such as a secret; never printed),
-  * `QOD_BENCH_VERIFY` (`1`: check the result against a full three-way scan, which spills about
-  * 300GB at 1B rows).
+  * `QOD_BENCH_VERIFY` (`1`: check the result against a full three-way scan, at
+  * `QOD_BENCH_VERIFY_MEMORY`, 48GB by default). What that scan spills, measured under a limit
+  * scaled from 48GB at 1B rows: 72 GiB at 200M, 140 GiB at 400M, so about 360 GiB at 1B. Under one
+  * scaled from 80GB, 59 GiB at 200M.
   */
 class ThreeWayMergeScaleBench extends AnyFlatSpec with Matchers:
   import ThreeWayMergeScaleBench.{changes, createTable, Columns}
@@ -211,8 +214,9 @@ class ThreeWayMergeScaleBench extends AnyFlatSpec with Matchers:
                 tableChanges = cs.tables,
                 rowMerges = tables.zip(counts),
                 ranged = false,
-                updateChunkRows =
-                  env("QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS").map(_.toLong).getOrElse(20000000L),
+                updateChunkRows = env("QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS")
+                  .map(_.toLong)
+                  .getOrElse(BranchingConfig().mergeUpdateChunkRows),
                 fork = fork,
                 head = cs.headSnapshot,
                 author = "bench",
@@ -262,7 +266,7 @@ class ThreeWayMergeScaleBench extends AnyFlatSpec with Matchers:
             statements(
               conn,
               "SET GLOBAL threads = " + Runtime.getRuntime.availableProcessors(),
-              "SET GLOBAL memory_limit = '48GB'"
+              s"SET GLOBAL memory_limit = '${env("QOD_BENCH_VERIFY_MEMORY").getOrElse("48GB")}'"
             )
             val verdict = ScanOracle
               .statements("s", "fact", Columns, fork, cs.mainSnapshot, cs.headSnapshot, policy)

@@ -74,7 +74,8 @@ object JdbcMergeNode:
 
 /** The oracle: what main must hold after a merge, computed by an independent full three-way scan of
   * base, main and branch, the slow way the merge exists to avoid. Each statement is plain SQL over
-  * the attached `lake` and `qod_branch`. The last two answer `(check, wrong rows)`.
+  * the attached `lake` and `qod_branch`. The last two answer `(check, wrong rows)`. The four scans
+  * are views, read while the merge's result stands: a copy of each cost twice the disk at scale.
   */
 object ScanOracle:
   private def q(i: String) = "\"" + i.replace("\"", "\"\"") + "\""
@@ -117,10 +118,10 @@ object ScanOracle:
     val actualPost = s"(SELECT $list FROM scan_after WHERE r >= getvariable('n'))"
     List(
       s"SET VARIABLE n = (SELECT coalesce(max(rowid), -1) + 1 FROM lake.$t AT (VERSION => $fork))",
-      s"CREATE OR REPLACE TEMP TABLE scan_base AS SELECT rowid AS r, $list FROM lake.$t AT (VERSION => $fork)",
-      s"CREATE OR REPLACE TEMP TABLE scan_ours AS SELECT rowid AS r, $list FROM lake.$t AT (VERSION => $ours)",
-      s"CREATE OR REPLACE TEMP TABLE scan_theirs AS SELECT rowid AS r, $list FROM qod_branch.$t AT (VERSION => $theirs)",
-      s"CREATE OR REPLACE TEMP TABLE scan_after AS SELECT rowid AS r, $list FROM lake.$t",
+      s"CREATE OR REPLACE TEMP VIEW scan_base AS SELECT rowid AS r, $list FROM lake.$t AT (VERSION => $fork)",
+      s"CREATE OR REPLACE TEMP VIEW scan_ours AS SELECT rowid AS r, $list FROM lake.$t AT (VERSION => $ours)",
+      s"CREATE OR REPLACE TEMP VIEW scan_theirs AS SELECT rowid AS r, $list FROM qod_branch.$t AT (VERSION => $theirs)",
+      s"CREATE OR REPLACE TEMP VIEW scan_after AS SELECT rowid AS r, $list FROM lake.$t",
       "CREATE OR REPLACE TEMP TABLE scan_expected AS " +
         s"SELECT ba.r, $fate, $picks FROM scan_base ba " +
         "LEFT JOIN scan_ours ou ON ba.r = ou.r LEFT JOIN scan_theirs th ON ba.r = th.r",
