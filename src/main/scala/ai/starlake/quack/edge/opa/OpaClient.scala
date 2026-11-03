@@ -5,13 +5,16 @@ import ai.starlake.quack.edge.BoundedHttp
 import io.circe.Json
 
 import java.net.URI
-import java.net.http.{HttpClient, HttpRequest}
+import java.net.http.HttpRequest
 import java.time.Duration
 
 /** HTTP transport to an OPA server. `post` is injectable for tests; the default (`jdkPost`) is a
   * JDK `HttpClient` call whose WHOLE exchange (connect, response headers AND response body) is
   * bounded by `timeoutMs` and whose body never buffers past the 1 MiB cap: both limits are
-  * [[BoundedHttp.send]]'s.
+  * [[BoundedHttp.send]]'s. Each call has a client of its own, which [[BoundedHttp.send]] shuts down
+  * (the JDK keeps a connection whose answer it refuses): no connection is reused, which the
+  * decisions of a tenant's OPA can bear, since a decision is cached for `QOD_OPA_CACHE_TTL_SEC`
+  * seconds.
   */
 final class OpaClient(timeoutMs: Int, post: OpaClient.Post):
 
@@ -32,20 +35,16 @@ object OpaClient:
   def endpoint(base: String, policyPath: String, rule: String): String =
     s"${base.stripSuffix("/")}/v1/data/$policyPath/$rule"
 
-  /** `message` with every occurrence of the bearer token masked. The JDK echoes an invalid header
-    * value in its IllegalArgumentException, so a token carrying a control character would otherwise
-    * reach the manager log and a superuser's dry-run answer.
+  /** The default transport. A failure's text never carries the bearer token: the JDK echoes an
+    * invalid header value in its IllegalArgumentException, so a token holding a control character
+    * would otherwise reach the manager log and a superuser's dry-run answer, and a server can echo
+    * the token into a malformed status line, which the JDK quotes. [[BoundedHttp]] masks it in the
+    * text before it cuts the text.
     */
-  private def redactToken(message: String, token: Option[String]): String =
-    token.filter(_.nonEmpty).fold(message)(t => message.replace(t, "<redacted>"))
-
   def jdkPost(timeoutMs: Int): Post =
-    val client =
-      HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs.toLong)).build()
-    (url, body, token) => send(client, timeoutMs, url, body, token).left.map(redactToken(_, token))
+    (url, body, token) => send(timeoutMs, url, body, token)
 
   private def send(
-      client: HttpClient,
       timeoutMs: Int,
       url: String,
       body: String,
@@ -58,8 +57,7 @@ object OpaClient:
         .header("Content-Type", "application/json")
         .POST(HttpRequest.BodyPublishers.ofString(body))
       token.foreach(t => b.header("Authorization", s"Bearer $t"))
-      BoundedHttp.send(client, b.build(), MaxResponseBytes, timeoutMs.toLong, "OPA")
+      BoundedHttp.send(b.build(), MaxResponseBytes, timeoutMs.toLong, "OPA", secret = token)
     catch
       // The request cannot be built: a bad URL, or a header value the JDK refuses (and echoes).
-      case e: Exception =>
-        Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
+      case e: Exception => Left(BoundedHttp.describe(e, token))

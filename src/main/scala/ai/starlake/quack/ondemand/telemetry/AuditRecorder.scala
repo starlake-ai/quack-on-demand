@@ -71,13 +71,13 @@ final class AuditRecorder(
     * failed login records the typed user name twice and the typed tenant once, and the route needs
     * no credential. A row is kept for the audit retention, and a NUL in any text makes the insert
     * fail, which erases the row of whoever sent one. So, once and for every caller, `actor`,
-    * `tenant`, `target` and each `detail` value lose their control characters and are cut to
-    * [[AuditRecorder.MaxNameChars]] (the first three) and [[AuditRecorder.MaxDetailChars]] (the
-    * values): the same rule `ManagerServer`'s guard applies to the path it records. No caller needs
-    * a longer value whole. The longest legitimate values are a module's recorded SQL, which its own
-    * caller cuts to 500 characters, and the joined role and group lists of a created user
-    * (`UserHandlers`), which pass 1024 characters only for some 50 roles and are stored as
-    * memberships anyway.
+    * `tenant`, `target` and each `detail` value lose their control characters (a tab, a newline and
+    * a carriage return read as a space) and are cut to [[AuditRecorder.MaxNameChars]] (the first
+    * three) and [[AuditRecorder.MaxDetailChars]] (the values), as `ManagerServer`'s guard does for
+    * the path it records. No caller needs a longer value whole. The longest legitimate values are a
+    * module's recorded SQL, which its own caller cuts to 500 characters, and the joined role and
+    * group lists of a created user (`UserHandlers`), which pass 1024 characters only for some 50
+    * roles and are stored as memberships anyway.
     */
   def restAs(
       actor: String,
@@ -129,15 +129,19 @@ object AuditRecorder:
   /** The most characters of a `detail` value that a REST row keeps. */
   val MaxDetailChars: Int = 1024
 
-  /** `text` without its control characters (the C0 ones, DEL and the C1 ones, a tab and a newline
-    * among them), cut to `max` characters. The control characters go first, so they use none of the
-    * budget, and a cut never leaves half of a surrogate pair at the end.
+  /** `text` without its control characters (the C0 ones, DEL and the C1 ones), cut to `max`
+    * characters. A tab, a newline and a carriage return read as a space instead of vanishing, so
+    * that a module's recorded `SELECT *\nFROM t` does not read `SELECT *FROM t`. The control
+    * characters go first, so they use none of the budget (a space does), and a cut never leaves
+    * half of a surrogate pair at the end.
     */
   private[telemetry] def clean(text: String, max: Int): String =
-    val stripped = text.filter(c => !Character.isISOControl(c))
-    if stripped.length <= max then stripped
-    else if Character.isHighSurrogate(stripped.charAt(max - 1)) then stripped.substring(0, max - 1)
-    else stripped.substring(0, max)
+    val readable = text
+      .map(c => if c == '\t' || c == '\n' || c == '\r' then ' ' else c)
+      .filter(c => !Character.isISOControl(c))
+    if readable.length <= max then readable
+    else if Character.isHighSurrogate(readable.charAt(max - 1)) then readable.substring(0, max - 1)
+    else readable.substring(0, max)
 
 /** One event per key per interval; used to keep anonymous /api 401 bursts (port scans) from
   * flooding the audit table.

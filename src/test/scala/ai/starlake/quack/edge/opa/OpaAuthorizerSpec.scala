@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.opa
 
 import ai.starlake.acl.model.TableRef
 import ai.starlake.acl.parser.{TableAccess, Verb}
+import ai.starlake.quack.edge.auth.EchoingServer
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
@@ -318,6 +319,29 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     result.isLeft shouldBe true
     val leaked = result.left.toOption.exists(_.contains("s3cr3t-opa-token"))
     leaked shouldBe false
+
+  // A token is often a JWT of several hundred characters, and the Left of a transport error is cut:
+  // the token must be masked before the cut, or the cut leaves the beginning of it.
+  it should "never carry any part of a long bearer token in a transport error" in:
+    val token  = ("Zq9" * 200) + "\ninjected"
+    val result = OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", Some(token))
+    result.isLeft shouldBe true
+    result.left.toOption.exists(_.contains("Zq9Zq9")) shouldBe false
+
+  // A server can echo the credential it was sent into a malformed status line, which the JDK quotes
+  // in its exception: the same rule, on the path that reaches a server.
+  it should "never carry any part of a bearer token that a server echoes into its answer" in:
+    val token  = "Zq9" * 100
+    val server = new EchoingServer(EchoingServer.Shape.AuthorizationHeader)
+    try
+      val result =
+        OpaClient.jdkPost(2000)(s"${server.base}/v1/data/qod/authz/connect", "{}", Some(token))
+      // It reached the server, and the JDK quoted the line it got back.
+      server.requests shouldBe 1
+      result.left.toOption.exists(_.contains("Invalid status line")) shouldBe true
+      result.left.toOption.exists(_.contains("<redacted>")) shouldBe true
+      result.left.toOption.exists(_.contains("Zq9Zq9")) shouldBe false
+    finally server.close()
 
   "decide" should "key the decision cache on kinds, columns, via and locations" in:
     var calls = 0

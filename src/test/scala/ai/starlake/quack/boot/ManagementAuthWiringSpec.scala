@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.auth.{
   EchoingServer,
   LocalIdp,
+  MalformedServer,
   NestedClaims,
   OidcScope,
   OidcSsoError,
@@ -21,13 +22,16 @@ import ai.starlake.quack.edge.config.{
 }
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.auth.ManagementAuthMode
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.security.JwtTestSigner
+import ch.qos.logback.classic.Level
 import org.scalatest.concurrent.Eventually
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.time.{Millis, Seconds, Span}
 import pureconfig.ConfigSource
 
+import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters.*
 
 /** Pins what [[ManagementAuthWiring.build]] wires per `identitySource`. The source governs only the
@@ -39,6 +43,12 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
 
   override implicit val patienceConfig: PatienceConfig =
     PatienceConfig(timeout = Span(10, Seconds), interval = Span(50, Millis))
+
+  // The wiring is an object, whose logger is named after the object's class.
+  private val WiringLogger = ManagementAuthWiring.getClass.getName
+
+  // What a server said: it must be in no answer, and in the log only cut.
+  private val Marker = "marker-status-line-7f3a"
 
   // The overlay pins every field the assertions read, whatever QOD_* the invoking shell exports.
   // `issuerUrl` / `clientId` are the manager-wide client (QOD_MGMT_OIDC_ISSUER_URL / _CLIENT_ID).
@@ -213,9 +223,10 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
           .map(_.startUrl())
 
       startUrl("small").map(_.isRight) shouldBe Some(true)
-      startUrl("big") match
-        case Some(Left(why)) => why should include("response exceeds 256 KiB")
-        case other           => fail(s"expected a failed discovery, got $other")
+      // The page of the SQL-token flow shows this text, so it says nothing of what the issuer
+      // answered, the size limit included.
+      startUrl("big") shouldBe
+        Some(Left(s"OIDC discovery failed for ${idp.base}/realms/big: discovery unavailable"))
     }
 
   it should "answer an issuer nobody listens on with a Left that has a text" in {
@@ -224,12 +235,127 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
     val closed = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress)
     val port   = closed.getLocalPort
     closed.close()
-    val get = ManagementAuthWiring.discoveryGet(java.net.http.HttpClient.newHttpClient())
 
-    get(s"http://127.0.0.1:$port/.well-known/openid-configuration") match
-      case Left(why) => Option(why).exists(_.nonEmpty) shouldBe true
-      case Right(_)  => fail("nothing listens there")
+    ManagementAuthWiring.discoveryGet(
+      s"http://127.0.0.1:$port/.well-known/openid-configuration"
+    ) shouldBe
+      Left("discovery unavailable")
   }
+
+  // The key set and the token endpoint of an issuer, and its discovery document, are answers of a
+  // server the manager does not control. The text of a failure reaches the SQL-token page and any
+  // bearer client, so it quotes no server: one fixed text, status codes included, and the log
+  // gets the cause, cut.
+  it should "answer every failure with one fixed text, and log the cause cut" in
+    withIdp { idp =>
+      idp.serve("/status/503/.well-known/openid-configuration", 503, "busy")
+      val (statusAnswer, statusLog) = LogCapture.logged(WiringLogger)(
+        ManagementAuthWiring.discoveryGet(
+          s"${idp.base}/status/503/.well-known/openid-configuration"
+        )
+      )
+      statusAnswer shouldBe Left("discovery unavailable")
+      statusLog.map(_.getFormattedMessage).exists(_.contains("503")) shouldBe true
+
+      val line   = s"NOT-HTTP $Marker ${"z" * 400}"
+      val server =
+        new MalformedServer(line.concat("\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1))
+      try
+        val (quoteAnswer, quoteLog) = LogCapture.logged(WiringLogger)(
+          ManagementAuthWiring.discoveryGet(s"${server.base}/.well-known/openid-configuration")
+        )
+        quoteAnswer shouldBe Left("discovery unavailable")
+        val warned = quoteLog.filter(_.getLevel == Level.WARN).map(_.getFormattedMessage)
+        withClue(s"logged $warned: ") {
+          warned.exists(_.contains(s"NOT-HTTP $Marker")) shouldBe true
+          warned.foreach(_.length should be < 300)
+        }
+      finally server.close()
+    }
+
+  it should "quote no server in the SQL-token flow's answer when the issuer answers a status line the JDK refuses" in {
+    val line   = s"NOT-HTTP $Marker ${"z" * 400}"
+    val server = new MalformedServer(line.concat("\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1))
+    try
+      val keycloak = KeycloakAuthConfig(
+        enabled = true,
+        baseUrl = server.base,
+        realm = "r",
+        clientId = "qod-flightsql",
+        clientSecret = "s3cret"
+      )
+      val out = ManagementAuthWiring
+        .build(load("db"), noProviders.copy(keycloak = keycloak), noTenants)
+        .sqlToken
+        .map(_.startUrl())
+
+      out shouldBe Some(
+        Left(s"OIDC discovery failed for ${server.base}/realms/r: discovery unavailable")
+      )
+    finally server.close()
+  }
+
+  // ----- the flows still work on real answers, with no connection kept for the next exchange -----
+
+  "ManagementAuthWiring SSO" should "still sign a user in on real answers, each exchange on a client of its own" in
+    withIdp { idp =>
+      val issuer = s"${idp.base}/sys"
+      idp.serve("/sys/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))
+      idp.serve("/sys/jwks", 200, JwtTestSigner.jwksJson().noSpaces)
+      val sso = ManagementAuthWiring
+        .build(load("oidc", issuerUrl = issuer, clientId = "sys-app"), noProviders, noTenants)
+        .oidcSso
+        .getOrElse(fail("no SSO service"))
+      val started = sso
+        .startAuth(OidcScope.System, "/ui/", "wiring-spec")
+        .getOrElse(fail("the start failed"))
+      // The token answer carries the nonce the start put in the authorization URL.
+      val nonce = java.net.URLDecoder.decode(
+        """[?&]nonce=([^&]+)""".r
+          .findFirstMatchIn(started.redirectLocation)
+          .map(_.group(1))
+          .getOrElse(fail("no nonce in the authorization URL")),
+        StandardCharsets.UTF_8
+      )
+      val idToken = JwtTestSigner.mint(
+        Map("sub" -> "alice", "nonce" -> nonce),
+        issuer = issuer,
+        audience = Some("sys-app")
+      )
+      idp.serve("/sys/token", 200, s"""{"id_token":"$idToken"}""")
+
+      val result = sso.completeAuth(
+        "code",
+        started.stateParam,
+        started.stateCookieValue,
+        System.currentTimeMillis()
+      )
+
+      result.map(_.profile.username) shouldBe Right("alice")
+      idp.requests.asScala.map(_._1).toList.sorted shouldBe
+        List("/sys/.well-known/openid-configuration", "/sys/jwks", "/sys/token")
+    }
+
+  "ManagementAuthWiring SQL-token flow" should "still hand a client the token, on real discovery and token answers" in
+    withIdp { idp =>
+      val issuer = s"${idp.base}/realms/real"
+      idp.serve("/realms/real/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))
+      idp.serve("/realms/real/token", 200, """{"id_token":"the-jwt"}""")
+      val keycloak = KeycloakAuthConfig(
+        enabled = true,
+        baseUrl = idp.base,
+        realm = "real",
+        clientId = "qod-flightsql",
+        clientSecret = "s3cret"
+      )
+      val sqlToken = ManagementAuthWiring
+        .build(load("db"), noProviders.copy(keycloak = keycloak), noTenants)
+        .sqlToken
+        .getOrElse(fail("no SQL-token service"))
+      val (_, state) = sqlToken.startUrl().getOrElse(fail("the start failed"))
+
+      sqlToken.completeAuth("code", state, state) shouldBe Right("the-jwt")
+    }
 
   // The management SSO's code-to-token exchange. The form holds the client secret.
   private val clientSecretForm =
@@ -238,10 +364,8 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
   "ManagementAuthWiring token exchange" should "return the body of a 200 answer" in
     withIdp { idp =>
       idp.serve("/token", 200, """{"id_token":"the-jwt"}""")
-      ManagementAuthWiring.tokenExchange(java.net.http.HttpClient.newHttpClient())(
-        s"${idp.base}/token",
-        clientSecretForm
-      ) shouldBe Right("""{"id_token":"the-jwt"}""")
+      ManagementAuthWiring.tokenExchange(s"${idp.base}/token", clientSecretForm) shouldBe
+        Right("""{"id_token":"the-jwt"}""")
       idp.requests.peek() shouldBe (("/token", clientSecretForm))
     }
 
@@ -249,10 +373,8 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
     withIdp { idp =>
       idp.serve("/token", 200, s"""{"id_token":"the-jwt","pad":"${"x" * OverCap}"}""")
       // A healthy 200 answer is refused only by the cap, and the Left says nothing of why.
-      ManagementAuthWiring.tokenExchange(java.net.http.HttpClient.newHttpClient())(
-        s"${idp.base}/token",
-        clientSecretForm
-      ) shouldBe Left(BoundedHttp.TokenEndpointFailed)
+      ManagementAuthWiring.tokenExchange(s"${idp.base}/token", clientSecretForm) shouldBe
+        Left(BoundedHttp.TokenEndpointFailed)
     }
 
   it should "name a refused status by its code alone, never the answer or the form" in
@@ -260,10 +382,8 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
       idp.serveWith("/token")(received =>
         (400, s"""{"error":"invalid_client","echo":"$received"}""")
       )
-      ManagementAuthWiring.tokenExchange(java.net.http.HttpClient.newHttpClient())(
-        s"${idp.base}/token",
-        clientSecretForm
-      ) shouldBe Left("token endpoint HTTP 400")
+      ManagementAuthWiring.tokenExchange(s"${idp.base}/token", clientSecretForm) shouldBe
+        Left("token endpoint HTTP 400")
     }
 
   it should "be what the wired SSO service reads the manager-wide token endpoint with" in
@@ -299,10 +419,7 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
     List(EchoingServer.Shape.StatusLine, EchoingServer.Shape.ContentLength).foreach { shape =>
       val server = new EchoingServer(shape)
       try
-        val out = ManagementAuthWiring.tokenExchange(java.net.http.HttpClient.newHttpClient())(
-          s"${server.base}/token",
-          clientSecretForm
-        )
+        val out = ManagementAuthWiring.tokenExchange(s"${server.base}/token", clientSecretForm)
         withClue(s"[$shape] $out ") {
           out shouldBe Left(BoundedHttp.TokenEndpointFailed)
           server.requests shouldBe 1

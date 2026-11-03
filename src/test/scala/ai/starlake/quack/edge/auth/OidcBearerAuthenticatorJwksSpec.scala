@@ -1,7 +1,9 @@
 package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.edge.BoundedHttp
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.security.JwtTestSigner
+import ch.qos.logback.classic.Level
 import com.sun.net.httpserver.HttpServer
 import io.circe.Json
 import org.scalatest.BeforeAndAfterAll
@@ -9,6 +11,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.io.IOException
+import java.net.http.HttpClient
 import java.net.{InetAddress, InetSocketAddress, ServerSocket}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -28,6 +31,9 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
   private val Issuer   = "https://issuer.example"
   private val Audience = "qod-console"
   private val KiB      = 1024
+
+  // The retriever lives in the companion object, whose logger is named after the object's class.
+  private val RetrieverLogger = OidcBearerAuthenticator.getClass.getName
 
   private val idp = new LocalIdp
 
@@ -95,11 +101,11 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
         ex.sendResponseHeaders(302, -1L)
         ex.close()
     )
-    // A 302 to itself, after 1.5 s a hop: the five redirects the JDK follows would take 7.5 s.
+    // A 302 to itself, after 3 s a hop: the five redirects the JDK follows would take 15 s.
     oddServer.createContext(
       "/slow-loop",
       ex =>
-        Thread.sleep(1500)
+        Thread.sleep(3000)
         ex.getResponseHeaders.add("Location", "/slow-loop")
         try ex.sendResponseHeaders(302, -1L)
         catch case _: IOException => () // the client went away
@@ -141,10 +147,13 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
     refused.left.toOption.exists(_.contains("token validation failed")) shouldBe true
   }
 
-  it should "refuse a token when the key set answers a status other than 200" in {
+  it should "refuse a token when the key set answers a status other than 200, naming no status" in {
+    // What the server said, its status included, is the server's: the answer is the one fixed text.
     authenticatorFor(s"${idp.base}/jwks-500").authenticate(token) match
-      case Left(why) => why should include("JWKS HTTP 500")
-      case Right(p)  => fail(s"a token was accepted as '${p.username}' on a failed key set")
+      case Left(why) =>
+        why should include("JWKS unavailable")
+        why should not include "500"
+      case Right(p) => fail(s"a token was accepted as '${p.username}' on a failed key set")
   }
 
   // Nimbus' retriever followed a redirect, so a Keycloak base URL on http behind a proxy that
@@ -175,7 +184,7 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
     val ms      = (System.nanoTime() - t0) / 1000000L
 
     refused match
-      case Left(why) => why should include("JWKS HTTP 302")
+      case Left(why) => why should include("JWKS unavailable")
       case Right(p)  => fail(s"a token was accepted as '${p.username}' through a loop")
     ms should be < BoundedHttp.JwksTimeoutMs
   }
@@ -183,14 +192,19 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
   it should "end a slow redirect loop at the deadline, not after the sum of its hops" in {
     val authenticator = authenticatorFor(s"$oddBase/slow-loop")
     val t0            = System.nanoTime()
-    val out = PlainThread.run(stackKiB = 1024, waitSec = 25)(authenticator.authenticate(token))
-    val ms  = (System.nanoTime() - t0) / 1000000L
+    val (out, events) = LogCapture.logged(RetrieverLogger)(
+      PlainThread.run(stackKiB = 1024, waitSec = 25)(authenticator.authenticate(token))
+    )
+    val ms = (System.nanoTime() - t0) / 1000000L
 
     out match
-      case Right(Left(why)) => why should include("JWKS request timed out after 5000 ms")
+      case Right(Left(why)) => why should include("JWKS unavailable")
       case other            => fail(s"expected the deadline to end it, got $other")
-    // Five hops of 1.5 s would take 7.5 s; the deadline runs over the whole exchange.
-    ms should (be >= 4000L and be < 6500L)
+    // The answer says nothing of why; the log does.
+    events.map(_.getFormattedMessage).exists(_.contains("timed out after 5000 ms")) shouldBe true
+    // Six requests of 3 s each (the first and five redirects) would take 18 s; the deadline runs
+    // over the whole exchange, and the margin on its 5 s is wide for a suite under load.
+    ms should (be >= 4000L and be < 10000L)
   }
 
   it should "give up on a key set that trickles, within about the 5 s the read is allowed" in {
@@ -228,4 +242,80 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
 
     refused.isLeft shouldBe true
     ms should be < 5000L
+  }
+
+  // ----- what a server said is quoted nowhere -----
+  //
+  // The key set URL can name anything the manager can reach, and its status line used to travel in
+  // the JDK's exception to every bearer client (ProtocolException: Invalid status line:
+  // "SSH-2.0-OpenSSH_9.6 internal-bastion-3"): a probe of the network behind the manager, the
+  // reason OpaAuthorizer keeps this class of text in the log. The retriever throws one fixed text,
+  // whatever the cause, status codes included, and logs the cause cut.
+
+  private val Marker = "marker-status-line-7f3a"
+
+  it should "quote no server: a status line is in neither the exception nor the answer, and the log shows it cut" in {
+    val line   = s"NOT-HTTP $Marker ${"z" * 400}"
+    val server = new MalformedServer(line.concat("\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1))
+    try
+      val url                                   = new java.net.URL(server.base + "/jwks")
+      val (thrown: Option[IOException], events) = LogCapture.logged(RetrieverLogger) {
+        try
+          OidcBearerAuthenticator.jwksRetriever.retrieveResource(url)
+          None
+        catch case e: IOException => Some(e)
+      }
+
+      thrown.map(_.getMessage) shouldBe Some("JWKS unavailable")
+      thrown.flatMap(e => Option(e.getCause)) shouldBe None
+      val warned = events.filter(_.getLevel == Level.WARN).map(_.getFormattedMessage)
+      withClue(s"logged $warned: ") {
+        warned.exists(_.contains(s"NOT-HTTP $Marker")) shouldBe true
+        warned.foreach(_.length should be < 300)
+        warned.foreach(_ should not include ("z" * 300))
+      }
+
+      authenticatorFor(server.base + "/jwks").authenticate(token) match
+        case Left(why) =>
+          why should (not include Marker and not include "NOT-HTTP" and
+            not include "Invalid status line" and not include "ProtocolException")
+        case Right(p) => fail(s"a token was accepted as '${p.username}' on a refused key set")
+    finally server.close()
+  }
+
+  // What the retriever asks of BoundedHttp.send, seen without a server. The redirect policy is the
+  // one choice no real exchange on loopback can tell apart: ALWAYS differs from NORMAL only for a
+  // redirect from https to http, and a client that trusts a certificate of the spec's is not one
+  // the retriever can be given.
+  it should "ask for a key set under 50 KiB and 5 s, following redirects as NORMAL does" in {
+    val seen = new java.util.concurrent.ConcurrentLinkedQueue[
+      (String, Int, Long, String, HttpClient.Redirect)
+    ]
+    val retriever = OidcBearerAuthenticator.retrieverOver {
+      (request, cap, timeoutMs, what, redirects) =>
+        seen.add((request.uri.toString, cap, timeoutMs, what, redirects))
+        Right((200, keySet.noSpaces))
+    }
+
+    val resource = retriever.retrieveResource(new java.net.URL("https://idp.example/jwks"))
+
+    resource.getContent shouldBe keySet.noSpaces
+    seen.asScala.toList shouldBe
+      List(("https://idp.example/jwks", 50 * 1024, 5000L, "JWKS", HttpClient.Redirect.NORMAL))
+  }
+
+  it should "log the status a key set answered, and answer with the fixed text alone" in {
+    val url                                   = new java.net.URL(s"${idp.base}/jwks-500")
+    val (thrown: Option[IOException], events) = LogCapture.logged(RetrieverLogger) {
+      try
+        OidcBearerAuthenticator.jwksRetriever.retrieveResource(url)
+        None
+      catch case e: IOException => Some(e)
+    }
+
+    thrown.map(_.getMessage) shouldBe Some("JWKS unavailable")
+    events
+      .filter(_.getLevel == Level.WARN)
+      .map(_.getFormattedMessage)
+      .exists(_.contains("500")) shouldBe true
   }

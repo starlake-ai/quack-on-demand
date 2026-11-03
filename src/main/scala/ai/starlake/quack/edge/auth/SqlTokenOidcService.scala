@@ -4,13 +4,11 @@ import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import com.typesafe.scalalogging.LazyLogging
 import java.net.URLEncoder
-import java.net.http.HttpClient
 import java.nio.charset.StandardCharsets
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 object SqlTokenOidcService extends LazyLogging:
-  private val sharedClient = HttpClient.newHttpClient()
 
   /** Default code->token exchange: POST grant_type=authorization_code to the token endpoint and
     * return the raw JSON body, or Left(reason). The answer is read under
@@ -22,7 +20,6 @@ object SqlTokenOidcService extends LazyLogging:
     */
   def defaultExchange(tokenEndpoint: String, form: String): Either[String, String] =
     BoundedHttp.tokenExchange(
-      sharedClient,
       tokenEndpoint,
       form,
       code => s"Token exchange failed (HTTP $code)"

@@ -156,37 +156,55 @@ class OidcBearerAuthenticator(
       case (k, v) if v != null => k -> v.toString
     }.toMap
 
-object OidcBearerAuthenticator:
+object OidcBearerAuthenticator extends LazyLogging:
 
-  // NORMAL, as the retriever it replaces followed redirects: a Keycloak base URL on http behind a
-  // proxy that redirects to https keeps working. It follows a redirect to the same scheme or to
-  // https, never from https to http and never to another scheme (a Location of file: is not
-  // followed), at most 5 times (jdk.httpclient.redirects.retrylimit), and the deadline of
-  // BoundedHttp.send covers every hop.
-  private val jwksClient: HttpClient =
-    HttpClient
-      .newBuilder()
-      .connectTimeout(java.time.Duration.ofSeconds(5))
-      .followRedirects(HttpClient.Redirect.NORMAL)
-      .build()
-
-  /** Reads a JWKS under a size limit and a deadline over the whole read, redirects included. The
-    * URL can come from a discovery document, which a tenant admin picks, and anyone can then make
-    * the manager fetch it: Nimbus' default retriever has no deadline over a slow body, and it reads
-    * `file:` URLs. The JDK client refuses every scheme but http(s).
+  /** What the retriever throws, whatever went wrong. The URL of a key set can name anything the
+    * manager can reach (a tenant admin picks it), and the JDK quotes what a server sent when it
+    * refuses a malformed answer: `ProtocolException: Invalid status line: "SSH-2.0-OpenSSH_9.6
+    * internal-bastion-3"`. That text, or a status code, would reach any bearer client in the answer
+    * of [[OidcBearerAuthenticator.authenticate]] (the data plane's handshake, the front door),
+    * which is a probe of the network behind the manager. So the answer says one thing, and the log
+    * gets the cause, cut.
     */
-  private[auth] val jwksRetriever: ResourceRetriever = url =>
+  private[auth] val JwksUnavailable = "JWKS unavailable"
+
+  /** The shape of [[BoundedHttp.send]], so that a spec can see what the retriever asks of it. */
+  private[auth] type Send =
+    (HttpRequest, Int, Long, String, HttpClient.Redirect) => Either[String, (Int, String)]
+
+  /** Reads a JWKS through `send`, under a size limit and a deadline over the whole read, redirects
+    * included. The URL can come from a discovery document, which a tenant admin picks, and anyone
+    * can then make the manager fetch it: Nimbus' default retriever has no deadline over a slow
+    * body, and it reads `file:` URLs. The JDK client refuses every scheme but http(s).
+    *
+    * Redirects are followed (`NORMAL`): to the same scheme or to https, never from https to http
+    * and never to another scheme (a Location of file: is not followed), at most 5 times
+    * (jdk.httpclient.redirects.retrylimit), and the deadline covers every hop. The retriever this
+    * replaced (Nimbus', over `HttpURLConnection`) followed a redirect to the same protocol only, so
+    * a hop from http to https is new here: a Keycloak URL on http behind a proxy that redirects to
+    * https now works, and it did not before.
+    */
+  private[auth] def retrieverOver(send: Send): ResourceRetriever = url =>
     val answer =
       try
-        BoundedHttp.send(
-          jwksClient,
+        send(
           HttpRequest.newBuilder(url.toURI).GET().build(),
           BoundedHttp.MaxJwksBytes,
           BoundedHttp.JwksTimeoutMs,
-          "JWKS"
+          "JWKS",
+          HttpClient.Redirect.NORMAL
         )
-      catch case e: IllegalArgumentException => Left(e.getMessage)
+      catch case e: Exception => Left(BoundedHttp.describe(e))
     answer match
       case Right((200, body)) => new Resource(body, "application/json")
-      case Right((code, _))   => throw new IOException(s"JWKS HTTP $code")
-      case Left(why)          => throw new IOException(why)
+      case Right((code, _))   =>
+        logger.warn(s"JWKS read failed: HTTP $code")
+        throw new IOException(JwksUnavailable)
+      case Left(why) =>
+        logger.warn(s"JWKS read failed: $why")
+        throw new IOException(JwksUnavailable)
+
+  private[auth] val jwksRetriever: ResourceRetriever =
+    retrieverOver((request, cap, timeoutMs, what, redirects) =>
+      BoundedHttp.send(request, cap, timeoutMs, what, redirects)
+    )

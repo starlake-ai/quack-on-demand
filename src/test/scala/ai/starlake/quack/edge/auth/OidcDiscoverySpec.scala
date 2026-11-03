@@ -5,7 +5,7 @@ import org.scalatest.matchers.should.Matchers
 
 import java.util.concurrent.atomic.AtomicInteger
 
-/** [[OidcDiscovery]] caches an issuer's document for good and remembers a failed discovery for a
+/** [[OidcDiscovery]] caches an issuer's document for a day and remembers a failed discovery for a
   * short while: with an issuer down, each anonymous `GET /api/auth/oidc/start` would otherwise make
   * its own outbound GET and hold a blocking thread for up to 15 s (measured: 200 requests, 200
   * GETs).
@@ -87,10 +87,29 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     resolved.map(_.issuer) shouldBe Right(IssuerA)
     gets.asked.get shouldBe 2
 
-    // The document is cached for good: no further GET, however long after.
+    // The document is cached: no further GET, however often it is asked for within the day.
     clock.nanos = 1000 * Second
     discovery.resolve(IssuerA) shouldBe resolved
     gets.asked.get shouldBe 2
+  }
+
+  // A failure is held in a table of 1024 issuers for 10 s. The text of one is whatever the GET
+  // answers, and OidcDiscovery keeps what it is given, so it cuts what it keeps: the table of 1024
+  // held about 390 MiB of 380 KB status lines the JDK quoted, and ran a 256 MiB heap out after 474
+  // issuers.
+  it should "keep and answer at most 200 characters of a failure, whatever the GET said" in {
+    val gets      = new Gets(_ => Left("x" * (1024 * 1024)))
+    val discovery = new OidcDiscovery(gets)
+
+    val first = discovery.resolve(IssuerA)
+    first.left.toOption.map(_.length).exists(_ <= 200) shouldBe true
+    discovery.resolve(IssuerA) shouldBe first
+    gets.asked.get shouldBe 1
+  }
+
+  it should "answer a short failure as it was" in {
+    new OidcDiscovery(new Gets(_ => Left("connection refused"))).resolve(IssuerA) shouldBe
+      Left("connection refused")
   }
 
   private val Day = 24L * 3600 * Second

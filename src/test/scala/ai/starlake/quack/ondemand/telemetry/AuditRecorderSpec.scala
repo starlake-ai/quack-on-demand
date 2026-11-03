@@ -168,7 +168,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
       List(("alice", Some("tx"), Some("tg"), Map("username" -> "ab")))
   }
 
-  it should "drop every control character: the C0 ones, DEL and the C1 ones, a tab and a newline among them" in {
+  it should "drop every control character, the C0 ones, DEL and the C1 ones, but read a tab, a newline or a carriage return as a space" in {
     val store = new RecordingStore
     val r     = new AuditRecorder(store, _ => None)
 
@@ -184,10 +184,28 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     )
 
     val e = store.events.head
-    e.actor shouldBe "abcdefgh"
+    e.actor shouldBe "ab c d efgh"
     e.tenant shouldBe Some("t")
-    e.target shouldBe Some("xy")
-    e.detail shouldBe Map("username" -> "uvwz")
+    e.target shouldBe Some("x y")
+    e.detail shouldBe Map("username" -> "u v wz")
+  }
+
+  // A module's recorded SQL has line breaks, and `SELECT *\nFROM t` used to read `SELECT *FROM t`.
+  it should "keep a statement's words apart where it broke its lines" in {
+    val store = new RecordingStore
+    val r     = new AuditRecorder(store, _ => None)
+
+    r.restAs(
+      "module",
+      "system",
+      "control-plane",
+      "module.sql",
+      "ok",
+      detail = Map("sql" -> "SELECT *\nFROM t\r\nWHERE\tx = 1")
+    )
+
+    // Each of the three kinds of line break and the tab is one space; nothing is collapsed.
+    store.events.head.detail shouldBe Map("sql" -> "SELECT * FROM t  WHERE x = 1")
   }
 
   it should "cap actor, tenant and target at 256 characters and each detail value at 1024" in {
@@ -227,7 +245,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
       "auth",
       "auth.login.failure",
       "denied",
-      detail = Map("username" -> (("\n" * 2000) + ("b" * 1500)))
+      detail = Map("username" -> (("\u0002" * 2000) + ("b" * 1500)))
     )
 
     val e = store.events.head

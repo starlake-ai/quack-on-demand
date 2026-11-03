@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
 import io.circe.parser.parse
 
@@ -24,7 +25,10 @@ final case class OidcDiscoveryDoc(
   * never a wrong answer, and a day ends a document that an issuer has since changed.
   *
   * What an entry costs is bounded too. A table keeps the five parsed fields of a document, not the
-  * document, and the issuer URL it is keyed by. A document with a field over
+  * document, and the issuer URL it is keyed by; a failure it keeps is cut to
+  * [[BoundedHttp.MaxFailureChars]] characters, whatever `httpGet` answered (the production one
+  * answers a short text of its own, but this class keeps what it is given, and a failure quoted
+  * from a server once ran a 256 MiB heap out after 474 issuers). A document with a field over
   * [[OidcDiscovery.MaxFieldChars]] characters is refused (a `Left` naming the field, never its
   * value, remembered like any failure), and so is an issuer URL over
   * [[OidcDiscovery.MaxIssuerUrlChars]], before it is asked or kept: a tenant admin picks it, and
@@ -92,9 +96,10 @@ class OidcDiscovery(
         documents.put(issuerUrl, doc)
         failures.invalidate(issuerUrl)
         Right(doc)
-      case left @ Left(why) =>
-        failures.put(issuerUrl, why)
-        left
+      case Left(why) =>
+        val kept = BoundedHttp.cut(why)
+        failures.put(issuerUrl, kept)
+        Left(kept)
 
   private def parseDoc(body: String): Either[String, OidcDiscoveryDoc] =
     parse(body).left.map(_.getMessage).flatMap { json =>

@@ -5,11 +5,12 @@ import java.net.{InetAddress, ServerSocket, Socket}
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicInteger
 
-/** A server for the token-exchange cases that is not quite HTTP: it reads a request in full, then
-  * answers with a malformed status line (or a malformed `Content-Length`) that quotes the request's
-  * body. The JDK client refuses such an answer with an exception whose message quotes the line, so
-  * a client that puts the text of a failure in its error would carry its own request into it, and a
-  * token request's body holds the client secret. Close it when the case is done.
+/** A server for the cases that are not quite HTTP: it reads a request in full, then answers with a
+  * malformed status line (or a malformed `Content-Length`) that quotes the request's body, or the
+  * value of its `Authorization` header. The JDK client refuses such an answer with an exception
+  * whose message quotes the line, so a client that puts the text of a failure in its error would
+  * carry its own request into it: a token request's body holds the client secret, and an OPA
+  * request's header holds a bearer token. Close it when the case is done.
   */
 final class EchoingServer(shape: EchoingServer.Shape) extends AutoCloseable:
   private val socket   = new ServerSocket(0, 16, InetAddress.getLoopbackAddress)
@@ -43,11 +44,18 @@ final class EchoingServer(shape: EchoingServer.Shape) extends AutoCloseable:
             line.substring("content-length:".length).trim.toInt
         }
         .getOrElse(0)
-      val body   = new String(in.readNBytes(length), StandardCharsets.ISO_8859_1)
+      val body          = new String(in.readNBytes(length), StandardCharsets.ISO_8859_1)
+      val authorization = headers.linesIterator
+        .collectFirst {
+          case line if line.toLowerCase(java.util.Locale.ROOT).startsWith("authorization:") =>
+            line.substring("authorization:".length).trim
+        }
+        .getOrElse("")
       val answer = shape match
         case EchoingServer.Shape.StatusLine    => s"NOT-HTTP $body\r\n\r\n"
         case EchoingServer.Shape.ContentLength =>
           s"HTTP/1.1 200 OK\r\nContent-Length: $body\r\n\r\n"
+        case EchoingServer.Shape.AuthorizationHeader => s"NOT-HTTP $authorization\r\n\r\n"
       // Counted before the answer goes out, so that a client that has seen the answer finds it.
       answered.incrementAndGet()
       val out = connection.getOutputStream
@@ -91,3 +99,8 @@ object EchoingServer:
       * quoting the value.
       */
     case ContentLength
+
+    /** `NOT-HTTP <the Authorization header>`: refused as an invalid status line, quoting the
+      * credential the request carried.
+      */
+    case AuthorizationHeader

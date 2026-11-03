@@ -1217,8 +1217,9 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
       val classifier = EdgeRewriters.statementClassifier()
-      // ONE OPA authorizer per manager (one HttpClient, one decision cache), shared by the
-      // decision pipeline below, the handshake and the admin dry-run.
+      // ONE OPA authorizer per manager (one decision cache; each call to OPA has a client of its
+      // own, see BoundedHttp), shared by the decision pipeline below, the handshake and the admin
+      // dry-run.
       val opaDecisions = new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec)
       // Every bounded authorization cache reports its size, hits, misses, evictions and capacity
       // (cache_*{cache=...}, qod_cache_capacity{cache=...}), on every replica: each is this

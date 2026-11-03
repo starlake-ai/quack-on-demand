@@ -1,7 +1,7 @@
 package ai.starlake.quack.boot
 
 import java.net.URI
-import java.net.http.{HttpClient, HttpRequest}
+import java.net.http.HttpRequest
 import java.time.Duration
 import java.util.Locale
 import ai.starlake.quack.{ManagementOidcConfig, ManagerConfig}
@@ -39,15 +39,22 @@ final case class ManagementAuthComponents(
 
 object ManagementAuthWiring extends LazyLogging:
 
+  /** What a failed read of a discovery document says, whatever went wrong. Its `Left` reaches the
+    * page of the SQL-token flow, and the issuer is a URL the manager reads for anyone who asks, so
+    * the answer quotes no server: not the JDK's message (which quotes a malformed status line, or a
+    * `Location`), not a status code. The log gets the cause, cut.
+    */
+  private[boot] val DiscoveryUnavailable = "discovery unavailable"
+
   /** `GET url`, the way the manager reads an identity provider's discovery document: its body when
-    * the answer is 200, else why not. A tenant admin picks the issuer, so the answer is read under
-    * [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over the whole exchange
-    * (`HttpRequest.timeout` alone bounds only the headers): one anonymous `GET
+    * the answer is 200, else [[DiscoveryUnavailable]]. A tenant admin picks the issuer, so the
+    * answer is read under [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over
+    * the whole exchange (`HttpRequest.timeout` alone bounds only the headers): one anonymous `GET
     * /api/auth/oidc/start` makes this call, and a large or trickled answer, read whole, halted the
     * manager or held a blocking thread for as long as the issuer liked.
     */
-  private[boot] def discoveryGet(client: HttpClient): String => Either[String, String] =
-    url =>
+  private[boot] def discoveryGet(url: String): Either[String, String] =
+    val answer =
       try
         val req = HttpRequest
           .newBuilder()
@@ -55,12 +62,16 @@ object ManagementAuthWiring extends LazyLogging:
           .GET()
           .timeout(Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
           .build()
-        BoundedHttp
-          .send(client, req, BoundedHttp.MaxIdpAnswerBytes, BoundedHttp.IdpTimeoutMs, "discovery")
-          .flatMap((code, body) =>
-            if code == 200 then Right(body) else Left(s"discovery HTTP $code")
-          )
-      catch case e: Exception => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
+        BoundedHttp.send(req, BoundedHttp.MaxIdpAnswerBytes, BoundedHttp.IdpTimeoutMs, "discovery")
+      catch case e: Exception => Left(BoundedHttp.describe(e))
+    answer match
+      case Right((200, body)) => Right(body)
+      case Right((code, _))   =>
+        logger.warn(s"discovery read failed: HTTP $code")
+        Left(DiscoveryUnavailable)
+      case Left(why) =>
+        logger.warn(s"discovery read failed: $why")
+        Left(DiscoveryUnavailable)
 
   /** The code-to-token exchange: `form` POSTed to the token endpoint, its body when the answer is
     * 200, else why not, under the same limits as [[discoveryGet]]. The form holds the client
@@ -68,9 +79,8 @@ object ManagementAuthWiring extends LazyLogging:
     * alone, and any other failure by one fixed text ([[BoundedHttp.tokenExchange]]), never by the
     * provider's answer or the JDK's exception, which may quote what the provider was sent.
     */
-  private[boot] def tokenExchange(client: HttpClient): (String, String) => Either[String, String] =
-    (url, form) =>
-      BoundedHttp.tokenExchange(client, url, form, code => s"token endpoint HTTP $code")
+  private[boot] def tokenExchange(url: String, form: String): Either[String, String] =
+    BoundedHttp.tokenExchange(url, form, code => s"token endpoint HTTP $code")
 
   def build(
       mgrCfg: ManagerConfig,
@@ -119,9 +129,10 @@ object ManagementAuthWiring extends LazyLogging:
     * `QOD_MGMT_OIDC_CLIENT_ID` are set. Nothing is fetched here: discovery runs on the first login
     * of each issuer.
     *
-    * Discovery + token exchange use a shared java.net.http client; id_token validation reuses
-    * OidcBearerAuthenticator against the discovered jwks_uri. redirect_uri is built from the public
-    * base URL (must match the IdP client's registered redirect URI).
+    * Discovery and the token exchange go through [[BoundedHttp]], each exchange on a client of its
+    * own; id_token validation reuses OidcBearerAuthenticator against the discovered jwks_uri.
+    * redirect_uri is built from the public base URL (must match the IdP client's registered
+    * redirect URI).
     */
   private def buildOidcSso(
       mgrCfg: ManagerConfig,
@@ -129,11 +140,7 @@ object ManagementAuthWiring extends LazyLogging:
       identitySource: ManagementIdentitySource,
       loadTenant: String => Option[Tenant]
   ): OidcSsoService =
-    val httpClient = HttpClient
-      .newBuilder()
-      .connectTimeout(Duration.ofSeconds(10))
-      .build()
-    val discovery = new OidcDiscovery(httpGet = discoveryGet(httpClient))
+    val discovery = new OidcDiscovery(httpGet = discoveryGet)
     val resolver  = new OidcEndpointResolver(
       loadTenant = loadTenant,
       secrets = SecretRefResolver.default,
@@ -151,7 +158,6 @@ object ManagementAuthWiring extends LazyLogging:
     val publicBaseUrlOf = () =>
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
-    val httpExchange   = tokenExchange(httpClient)
     val buildValidator = (ep: OidcEndpoints) =>
       new OidcBearerAuthenticator(
         ep.provider,
@@ -171,7 +177,7 @@ object ManagementAuthWiring extends LazyLogging:
       codec = codec,
       roleClaim = authCfg.roleClaim,
       publicBaseUrlOf = publicBaseUrlOf,
-      httpExchange = httpExchange,
+      httpExchange = tokenExchange,
       buildValidator = buildValidator
     )
 
@@ -190,11 +196,7 @@ object ManagementAuthWiring extends LazyLogging:
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
     if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
-      val sqlTokenHttp = HttpClient
-        .newBuilder()
-        .connectTimeout(Duration.ofSeconds(10))
-        .build()
-      val sqlTokenDiscovery = new OidcDiscovery(httpGet = discoveryGet(sqlTokenHttp))
+      val sqlTokenDiscovery = new OidcDiscovery(httpGet = discoveryGet)
       Some(
         new SqlTokenOidcService(
           authCfg,
