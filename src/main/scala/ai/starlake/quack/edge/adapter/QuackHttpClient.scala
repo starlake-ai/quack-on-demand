@@ -158,28 +158,67 @@ open class QuackHttpClient(
   ): IO[QuackResponse] =
     poll(IO.pure[QuackResponse](ok)).onCancel(release)
 
-  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. `sent`: the
-    * statement went out before `t` (required: a default would either repeat a write that may have
-    * run or never retry one that never left), so a Transient is `notSent` only when it is false.
-    */
+  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. */
   private def mapNativeFailure(
       t: Throwable,
       startNanos: FiniteDuration,
       sent: Boolean
   ): IO[QuackResponse] =
     IO.monotonic.map { endNanos =>
-      val err = t match
-        case e: QuackWireError.Transient      => QuackError.Transient(e.msg, notSent = !sent)
-        case e: QuackWireError.Permanent      => QuackError.Permanent(e.msg)
-        case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage, notSent = true)
-        case other                            =>
-          QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
-      // Without DuckDB's statement excerpt: a failed statement can carry credentials (a node's
-      // own CREATE SECRET), and the excerpt would put them in the log.
-      logger.debug(
-        s"native query failed: ${ai.starlake.quack.edge.authz.NodeHandles.refusalText(String.valueOf(t.getMessage))}"
-      )
-      QuackResponse.Failed(err, (endNanos - startNanos).toMillis)
+      QuackResponse.Failed(errorOf(t, sent), (endNanos - startNanos).toMillis)
+    }
+
+  /** A native-path failure as a [[QuackError]]. `sent`: a statement went out before `t` (required:
+    * a default would either repeat a write that may have run or never retry one that never left),
+    * so a Transient is `notSent` only when it is false.
+    */
+  private def errorOf(t: Throwable, sent: Boolean): QuackError =
+    // Without DuckDB's statement excerpt: a failed statement can carry credentials (a node's
+    // own CREATE SECRET), and the excerpt would put them in the log.
+    logger.debug(
+      s"native query failed: ${ai.starlake.quack.edge.authz.NodeHandles.refusalText(String.valueOf(t.getMessage))}"
+    )
+    t match
+      case e: QuackWireError.Transient      => QuackError.Transient(e.msg, notSent = !sent)
+      case e: QuackWireError.Permanent      => QuackError.Permanent(e.msg)
+      case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage, notSent = !sent)
+      case other                            =>
+        QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
+
+  /** `statements` in order as separate PREPAREs on ONE wire connection (= one server-side DuckDB
+    * session), each after a fresh session handle from `authorize`, each result read and dropped. A
+    * node refuses a statement that binds once its connection's handle has expired, so one PREPARE
+    * holding several statements gets one handle's life for all of them; here each binds right after
+    * its own. A transaction can span the list: an entry may be `BEGIN`.
+    *
+    * The first failure ends the list, a refused handle included. A cancel does too, seen once the
+    * statement in flight has answered, since the JDK send is uninterruptible: the next statement is
+    * never sent, so no COMMIT can follow a caller's timeout. Whatever ends the list closes the
+    * connection, and DISCONNECT rolls back a transaction still open. A client that dies mid-list
+    * sends no DISCONNECT: the statement in flight runs to its end, nothing follows it, and its
+    * transaction stays open on the node, uncommitted, until the node goes.
+    */
+  def queryAll(
+      endpoint: String,
+      token: String,
+      authorize: () => String,
+      statements: List[String]
+  ): IO[Either[QuackError, Unit]] =
+    IO.uncancelable { poll =>
+      given IORuntime = IORuntime.global
+      // Set right before the first statement goes out, as in queryNative.
+      val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
+      nativeProtocol
+        .open(endpoint, token)
+        .flatMap { conn =>
+          val all = statements.foldLeft(checkpoint(poll, conn.close())) { (done, sql) =>
+            done *> install(poll, conn, Some(authorize)) *> IO(sent.set(true)) *>
+              conn.executeDiscard(sql) *> checkpoint(poll, conn.close())
+          }
+          all.handleErrorWith(t => conn.close() *> IO.raiseError(t)) *> conn.close()
+        }
+        .attempt
+        .map(_.left.map(errorOf(_, sent.get())))
     }
 
   /** Stamped-write bracket (EPIC P1). Runs `prelude` (BEGIN + ducklake_set_commit_message), then

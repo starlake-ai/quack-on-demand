@@ -777,6 +777,138 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       finally allocator.close()
     }
 
+  describe("queryAll (a list of statements on one connection)"):
+    /** `statements` through `transport`, their handles minted `h1`, `h2`, ... in order. */
+    def all(
+        transport: QuackTransport,
+        allocator: RootAllocator,
+        statements: List[String] = List("BEGIN", "UPDATE t SET i = 1", "COMMIT")
+    ): IO[Either[QuackError, Unit]] =
+      clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        .queryAll(endpoint, token, minting(), statements)
+
+    val empty = QuackTestFixtures.serializeSamplePrepareResponse(BigInt(1).bigInteger, false, false)
+
+    it("runs each statement after a fresh handle of its own, then disconnects") {
+      val transport = ScriptedTransport(_ => IO(empty))
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe Right(())
+        transport.steps shouldBe List(
+          "connect",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "disconnect"
+        )
+        transport.handles shouldBe List("h1", "h2", "h3")
+      finally allocator.close()
+    }
+
+    it("reads and drops a statement's rows, leaving nothing allocated") {
+      val transport = ScriptedTransport(_ => IO(prepareOk))
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe Right(())
+        allocator.getAllocatedMemory shouldBe 0L
+      finally allocator.close()
+    }
+
+    it("stops at the first failure, with its text, and closes the connection") {
+      val transport = ScriptedTransport {
+        case 2 => IO(QuackTestFixtures.serializeSampleErrorResponse("Transaction conflict: no"))
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() match
+          case Left(QuackError.Permanent(msg)) => msg should include("Transaction conflict: no")
+          case other                           => fail(s"expected Permanent, got $other")
+        transport.steps shouldBe
+          List("connect", "handle", "prepare", "handle", "prepare", "disconnect")
+      finally allocator.close()
+    }
+
+    it("stops at a refused handle: Transient, and notSent only before any statement went out") {
+      val refused =
+        QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")
+      val first = ScriptedTransport(_ => IO(empty), onPrelude = _ => IO(refused))
+      val later = ScriptedTransport(
+        _ => IO(empty),
+        onPrelude = {
+          case 2 => IO(refused)
+          case _ => IO(preludeOk)
+        }
+      )
+      val allocator = new RootAllocator()
+      try
+        all(first, allocator).unsafeRunSync() match
+          case Left(QuackError.Transient(msg, notSent)) =>
+            msg should include("refused the statement's session handle")
+            notSent shouldBe true
+          case other => fail(s"expected Transient, got $other")
+        first.steps shouldBe List("connect", "handle", "disconnect")
+        all(later, allocator).unsafeRunSync() match
+          case Left(QuackError.Transient(_, notSent)) => notSent shouldBe false
+          case other                                  => fail(s"expected Transient, got $other")
+        later.steps shouldBe List("connect", "handle", "prepare", "handle", "disconnect")
+      finally allocator.close()
+    }
+
+    it("answers a transport failure as sent once a statement went out, and closes") {
+      val transport = ScriptedTransport {
+        case 2 => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(QuackError.Transient("HTTP 503 from Quack node", notSent = false))
+        transport.steps.last shouldBe "disconnect"
+      finally allocator.close()
+    }
+
+    it(
+      "sends nothing after a cancel: the statement in flight ends the list, and DISCONNECT rolls back"
+    ) {
+      val transport = ScriptedTransport {
+        case 2 => IO.blocking { Thread.sleep(800); empty }
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        val got = all(transport, allocator).timeoutAndForget(200.millis).attempt.unsafeRunSync()
+        got.left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+        eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        Thread.sleep(200)
+        transport.steps shouldBe
+          List("connect", "handle", "prepare", "handle", "prepare", "disconnect")
+      finally allocator.close()
+    }
+
+    it("closes the connection when cancelled before the first statement") {
+      val gate      = new java.util.concurrent.CountDownLatch(1)
+      val transport = ScriptedTransport(
+        _ => IO(empty),
+        onPrelude = _ =>
+          IO.blocking {
+            gate.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            preludeOk
+          }
+      )
+      val allocator = new RootAllocator()
+      try
+        val got = all(transport, allocator).timeoutAndForget(100.millis).attempt.unsafeRunSync()
+        got.left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+        gate.countDown()
+        eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        transport.steps shouldBe List("connect", "handle", "disconnect")
+      finally allocator.close()
+    }
+
   describe("session handles of a stamped write"):
     val refusal =
       QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")

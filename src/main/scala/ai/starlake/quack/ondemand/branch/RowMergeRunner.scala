@@ -6,11 +6,18 @@ import cats.syntax.all.*
 import io.circe.Json
 
 /** The merge node, up for one analysis or merge. Each call is a new connection: session settings do
-  * not carry over, tables in its in-memory database do. Neither call raises: a failure is a value,
-  * with the engine's text.
+  * not carry over from one call to the next, tables in its in-memory database do. Neither call
+  * raises: a failure is a value, with the engine's text.
   */
 trait MergeNode:
-  def exec(batch: String): IO[Either[String, Unit]]
+
+  /** `statements` in order on the call's one connection, so a transaction and session settings span
+    * them. Every entry is exactly one statement: the node binds each under a session handle of its
+    * own, and a statement sharing an entry with another could bind after that handle has expired.
+    * The first failure ends the call and its connection, which rolls an open transaction back.
+    */
+  def exec(statements: List[String]): IO[Either[String, Unit]]
+
   def rows(sql: String): IO[Either[String, List[List[Json]]]]
 
 /** Runs the row merge's stages on a node (design section 5). Knows nothing of fences or proposals.
@@ -23,11 +30,8 @@ final class RowMergeRunner(
 ):
   private type Step[A] = EitherT[IO, String, A]
 
-  private def batch(statements: List[String]): String =
-    (RowMergeSql.Settings :: statements).mkString("", ";\n", ";")
-
   private def exec(node: MergeNode, statements: List[String]): Step[Unit] =
-    EitherT(node.exec(batch(statements)))
+    EitherT(node.exec(RowMergeSql.Settings :: statements))
 
   private def rows(node: MergeNode, sql: String): Step[List[List[Json]]] =
     EitherT(node.rows(sql))

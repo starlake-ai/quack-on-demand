@@ -118,6 +118,22 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
         authorize: () => String
     ): IO[QuackResponse] =
       IO { sent.synchronized(sent += sql); authorize() } *> answer(sql)
+    override def queryAll(
+        endpoint: String,
+        token: String,
+        authorize: () => String,
+        statements: List[String]
+    ): IO[Either[QuackError, Unit]] =
+      statements.foldLeft(IO.pure[Either[QuackError, Unit]](Right(()))) { (done, sql) =>
+        done.flatMap {
+          case Left(err) => IO.pure(Left(err))
+          case Right(_)  =>
+            IO { sent.synchronized(sent += sql); authorize() } *> answer(sql).flatMap {
+              case QuackResponse.Ok(_, _, close) => IO(close()).as(Right(()))
+              case QuackResponse.Failed(err, _)  => IO.pure(Left(err))
+            }
+        }
+      }
 
   /** A node's side of the wire as the real protocol sees it: every message is answered at once
     * except the statement's PREPARE, which is `statement` (a session handle's PREPARE and the
@@ -133,6 +149,32 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
         if isHandle(body) then IO(preludeOk)
         else statement.flatTap(_ => IO(statementReturned.set(true)))
       else IO(QuackTestFixtures.serializeSampleConnectionResponse("conn-merge-spec"))
+    }
+    def count(m: MessageType): Int = seen.asScala.count(_ == m.wireOrdinal)
+
+  /** A wire whose answer to a statement's PREPARE depends on the statement: the node's side of a
+    * list. Keeps every statement that arrived and counts what else did, in order.
+    */
+  private final class ListWire(answer: String => IO[Array[Byte]]) extends QuackTransport:
+    private val seen                                       = new ConcurrentLinkedQueue[Int]()
+    val statements                                         = new ConcurrentLinkedQueue[String]()
+    val steps                                              = new ConcurrentLinkedQueue[String]()
+    def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO.defer {
+      val t = QuackNativeBridge.parseMessageType(body)
+      seen.add(t)
+      if t == MessageType.PrepareRequest.wireOrdinal then
+        if isHandle(body) then
+          steps.add("handle")
+          IO(preludeOk)
+        else
+          val text = new String(body, StandardCharsets.ISO_8859_1)
+          statements.add(text)
+          steps.add("statement")
+          answer(text)
+      else
+        if t == MessageType.ConnectionRequest.wireOrdinal then steps.add("connect")
+        if t == MessageType.DisconnectMessage.wireOrdinal then steps.add("disconnect")
+        IO(QuackTestFixtures.serializeSampleConnectionResponse("conn-merge-spec"))
     }
     def count(m: MessageType): Int = seen.asScala.count(_ == m.wireOrdinal)
 
@@ -244,9 +286,9 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       val out = executorOver(backend, client)
         .withNode(spec) { node =>
           (for
-            _    <- EitherT(node.exec("CREATE TABLE x (i INT)"))
+            _    <- EitherT(node.exec(List("CREATE TABLE x (i INT)")))
             rows <- EitherT(node.rows("SELECT 7, 9"))
-            _    <- EitherT(node.exec("DROP TABLE x"))
+            _    <- EitherT(node.exec(List("DROP TABLE x")))
           yield rows).value
         }
         .unsafeRunSync()
@@ -361,7 +403,7 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
         executorOver(backend, new FakeClient(_ => IO.pure(QuackResponse.Failed(err, 1L))))
           .withNode(spec) { node =>
             for
-              e <- node.exec("S")
+              e <- node.exec(List("S"))
               r <- node.rows("S")
             yield Right((e, r))
           }
@@ -422,7 +464,7 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       cut.left.toOption.get should include(s"more than $RowCap rows")
     }
 
-  it should "close a response off the compute threads, for exec and for rows" in {
+  it should "close a result off the compute threads" in {
     val closedOn = new ConcurrentLinkedQueue[String]()
     val client   = new FakeClient(_ =>
       IO {
@@ -439,19 +481,14 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
     withNamedRuntime { runtime =>
       listening { port =>
         val out = executorOver(new FakeBackend(port), client)
-          .withNode(spec) { node =>
-            (for
-              _    <- EitherT(node.exec("S"))
-              rows <- EitherT(node.rows("S"))
-            yield rows).value
-          }
+          .withNode(spec)(_.rows("S"))
           .unsafeRunSync()(using runtime)
         out.isRight shouldBe true
       }
     }
     // A close is a blocking POST (the DISCONNECT): it must not pin a compute thread.
     closedOn.asScala.toList.map(_.split("-").take(2).mkString("-")) shouldBe
-      List("probe-blocking", "probe-blocking")
+      List("probe-blocking")
   }
 
   "a node that hangs" should "be answered with Left at the bound, with its send still running" in
@@ -459,7 +496,7 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       listening { port =>
         val backend = new FakeBackend(port)
         val began   = System.nanoTime()
-        val out     = executorOver(backend, client).withNode(spec)(_.exec("S")).unsafeRunSync()
+        val out = executorOver(backend, client).withNode(spec)(_.exec(List("S"))).unsafeRunSync()
         val elapsed = (System.nanoTime() - began).nanos.toMillis
         val reason  = out.left.toOption.getOrElse(fail(s"expected a Left, got $out"))
         reason should startWith(MergeExecutor.TimedOut)
@@ -493,6 +530,107 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       }
     }
 
+  "a list of statements" should "go on one connection, each after a handle of its own, and close it" in {
+    val allocator = new RootAllocator()
+    try
+      val wire = new ListWire(_ => IO(preludeOk))
+      listening { port =>
+        val out = executorOver(new FakeBackend(port), realClient(allocator, wire))
+          .withNode(spec)(_.exec(List("BEGIN", "UPDATE x SET i = 1", "COMMIT")))
+          .unsafeRunSync()
+        out shouldBe Right(())
+        wire.steps.asScala.toList shouldBe
+          List(
+            "connect",
+            "handle",
+            "statement",
+            "handle",
+            "statement",
+            "handle",
+            "statement",
+            "disconnect"
+          )
+        allocator.getAllocatedMemory shouldBe 0L
+      }
+    finally allocator.close()
+  }
+
+  it should "stop at the first failure, with the engine's text, and close the connection" in {
+    val allocator = new RootAllocator()
+    try
+      val wire = new ListWire(text =>
+        IO(
+          if text.contains("UPDATE") then
+            QuackTestFixtures.serializeSampleErrorResponse("Transaction conflict: no")
+          else preludeOk
+        )
+      )
+      listening { port =>
+        val out = executorOver(new FakeBackend(port), realClient(allocator, wire))
+          .withNode(spec)(_.exec(List("BEGIN", "UPDATE x SET i = 1", "COMMIT")))
+          .unsafeRunSync()
+        out.left.toOption.get should include("Transaction conflict: no")
+        wire.steps.asScala.toList shouldBe
+          List("connect", "handle", "statement", "handle", "statement", "disconnect")
+        wire.statements.asScala.exists(_.contains("COMMIT")) shouldBe false
+        allocator.getAllocatedMemory shouldBe 0L
+      }
+    finally allocator.close()
+  }
+
+  it should "send no COMMIT after a timeout, and roll back: the bound stops the list" in {
+    val allocator = new RootAllocator()
+    val gate      = new CountDownLatch(1)
+    try
+      val wire = new ListWire(text =>
+        if text.contains("UPDATE") then
+          IO.blocking {
+            gate.await(GateSafetyNet.toSeconds, TimeUnit.SECONDS)
+            preludeOk
+          }
+        else IO(preludeOk)
+      )
+      listening { port =>
+        val backend = new FakeBackend(port)
+        val out     = executorOver(backend, realClient(allocator, wire))
+          .withNode(spec)(_.exec(List("BEGIN", "UPDATE x SET i = 1", "COMMIT")))
+          .unsafeRunSync()
+        out.left.toOption.exists(_.startsWith(MergeExecutor.TimedOut)) shouldBe true
+        backend.stops.get shouldBe 1
+        // The statement in flight answers long after the timeout was reported: nothing follows it
+        // but the DISCONNECT, which rolls its transaction back.
+        gate.countDown()
+        eventually(10.seconds)(wire.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        Thread.sleep(300)
+        wire.statements.asScala.exists(_.contains("COMMIT")) shouldBe false
+        wire.steps.asScala.toList shouldBe
+          List("connect", "handle", "statement", "handle", "statement", "disconnect")
+        eventually(5.seconds)(allocator.getAllocatedMemory == 0L) shouldBe true
+      }
+    finally
+      gate.countDown()
+      eventually(10.seconds)(allocator.getAllocatedMemory == 0L)
+      allocator.close()
+  }
+
+  it should "hold the whole list to the bound, not each statement" in {
+    val allocator = new RootAllocator()
+    try
+      // Each statement answers well within the bound of 1 s, and the list does not.
+      val wire = new ListWire(_ => IO.sleep(600.millis).as(preludeOk))
+      listening { port =>
+        val out = executorOver(new FakeBackend(port), realClient(allocator, wire))
+          .withNode(spec)(_.exec(List("BEGIN", "UPDATE x SET i = 1", "COMMIT")))
+          .unsafeRunSync()
+        out.left.toOption.exists(_.startsWith(MergeExecutor.TimedOut)) shouldBe true
+        eventually(10.seconds)(wire.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        Thread.sleep(300)
+        wire.statements.asScala.exists(_.contains("COMMIT")) shouldBe false
+        eventually(5.seconds)(allocator.getAllocatedMemory == 0L) shouldBe true
+      }
+    finally allocator.close()
+  }
+
   "over the real client" should "close the connection after exec, and read rows off the wire" in {
     val allocator = new RootAllocator()
     try
@@ -501,7 +639,7 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
         val out = executorOver(new FakeBackend(port), realClient(allocator, wire))
           .withNode(spec) { node =>
             (for
-              _    <- EitherT(node.exec("CREATE TABLE x (i INT)"))
+              _    <- EitherT(node.exec(List("CREATE TABLE x (i INT)")))
               rows <- EitherT(node.rows("SELECT 42"))
             yield rows).value
           }

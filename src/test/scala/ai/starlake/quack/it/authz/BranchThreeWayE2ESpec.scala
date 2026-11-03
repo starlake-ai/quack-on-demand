@@ -1,22 +1,30 @@
 package ai.starlake.quack.it.authz
 
+import ai.starlake.quack.edge.adapter.{NodeLoadTracker, QuackHttpAdapter, QuackHttpClient}
+import ai.starlake.quack.edge.authz.{NodeKeys, NodePrincipal, PolicyVersions, ReadOnlyCatalogs}
+import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
 import ai.starlake.quack.ondemand.branch.BranchMergeSql
 import ai.starlake.quack.ondemand.runtime.QodNodeTestBinary
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import cats.effect.unsafe.implicits.global
 import io.circe.Json
+import org.apache.arrow.memory.RootAllocator
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.nio.file.{Files, Path}
 import java.sql.DriverManager
+import java.time.Instant
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration.*
 import scala.util.{Try, Using}
 
 /** The three-way merge on a real manager and real qod-node processes: proposal, conflicts, policy,
-  * hold, encryption, and no cell value left behind in the control plane. Manager on 20975 (REST) /
-  * 31375 (FlightSQL) / 29511 (front door), relay 20985, nodes 23280-23289.
+  * hold, encryption, a stage past one session handle's life, and no cell value left behind in the
+  * control plane. Manager on 20975 (REST) / 31375 (FlightSQL) / 29511 (front door), relay 20985,
+  * nodes 23280-23289.
   */
 class BranchThreeWayE2ESpec
     extends AnyFlatSpec
@@ -146,10 +154,10 @@ class BranchThreeWayE2ESpec
       .flight(statement, "admin", "admin", Acme, pool, superuser = true, branch = branch)
       .fold(err => throw new IllegalStateException(s"$statement -> $err"), identity)
 
-  /** A table of 10,000 rows, then a branch of it. */
-  private def tableAndBranch(td: String, pool: String, branch: String): Unit =
+  /** A table of `rows` rows, then a branch of it. */
+  private def tableAndBranch(td: String, pool: String, branch: String, rows: Long = 10000L): Unit =
     sql(pool, s"CREATE TABLE $td.main.fact (id BIGINT, note VARCHAR, qty INTEGER)")
-    sql(pool, s"INSERT INTO $td.main.fact SELECT i, 'n', 0 FROM range(10000) r(i)")
+    sql(pool, s"INSERT INTO $td.main.fact SELECT i, 'n', 0 FROM range($rows) r(i)")
     stack.post(
       "/api/branch/create",
       obj("tenant" -> s(Acme), "tenantDb" -> s(td), "name" -> s(branch))
@@ -219,6 +227,132 @@ class BranchThreeWayE2ESpec
     left shouldBe 0L
     // A writer commits at once afterwards.
     sql("held", s"INSERT INTO $td.main.fact VALUES (40000, 'after', 1)")
+  }
+
+  it should "land at once beside writers when it holds them, and lose no write" in {
+    ready()
+    val td = database("beside")
+    // Enough rows for the hold to outlast several of the writers' commits.
+    tableAndBranch(td, "beside", "feature", rows = 16000000L)
+    sql("beside", s"UPDATE $td.main.fact SET note = 'b' WHERE id < 4000000", Some("feature"))
+    val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), tessToken)
+    // On rows the branch changed too, in a column it did not.
+    val stop    = new AtomicBoolean(false)
+    val written = new AtomicLong(0L)
+    val refused = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+    val writers = (0 until 3).map { w =>
+      new Thread(() =>
+        var i = 0L
+        while !stop.get() do
+          stack.flight(
+            s"UPDATE $td.main.fact SET qty = qty + 1 WHERE id = ${i % 20}",
+            "admin",
+            "admin",
+            Acme,
+            "beside",
+            superuser = true
+          ) match
+            case Right(_) => written.incrementAndGet()
+            case Left(e)  => refused.add(e)
+          i += 1
+      )
+    }
+    writers.foreach(_.start())
+    val reply =
+      try
+        // Writers at full speed before the merge starts: this is what a merge has to get past.
+        stack.await("a writer's first commit", 30.seconds)(Option.when(written.get() > 0)(()))
+        stack.post(
+          "/api/branch/merge",
+          proposeBody(td, "feature", idOf(proposed), "holdWriters" -> Json.True)
+        )
+      finally
+        stop.set(true)
+        writers.foreach(_.join(30000))
+    val merge = reply.hcursor.downField("merge")
+    merge.get[String]("status") shouldBe Right("merged")
+    merge.get[Int]("attempts") shouldBe Right(1)
+    merge.get[Boolean]("holdWriters") shouldBe Right(true)
+    withClue(s"${written.get()} written; refused: $refused ") {
+      refused.isEmpty shouldBe false
+      refused.forEach(_ should include("concurrent write conflict"))
+      // Every write that was told it landed is there, beside the branch's cells.
+      sql("beside", s"SELECT sum(qty) FROM $td.main.fact WHERE id < 20") shouldBe
+        List(written.get().toString)
+    }
+    sql("beside", s"SELECT count(*) FROM $td.main.fact WHERE note = 'b'") shouldBe List("4000000")
+    sql("beside", s"SELECT count(*) FROM $td.main.fact WHERE id < 20 AND note = 'b'") shouldBe
+      List("20")
+  }
+
+  it should "commit a list past what one session handle lives, through the production client" in {
+    ready()
+    val td = database("longlist")
+    sql("longlist", s"CREATE TABLE $td.main.fact (id BIGINT, note VARCHAR, qty INTEGER)")
+    val (node, secret) = Using.resource(
+      DriverManager.getConnection(
+        TestPostgres.dbUrl(stack.dbName),
+        TestPostgres.pgUser,
+        TestPostgres.pgPass
+      )
+    ) { c =>
+      val st = c.prepareStatement(
+        "SELECT n.node_id, n.host, n.port, n.token FROM qodstate_node n " +
+          "JOIN qodstate_pool p ON p.id = n.pool_id WHERE p.name = 'longlist'"
+      )
+      val rs = st.executeQuery()
+      rs.next() shouldBe true
+      val running = RunningNode(
+        rs.getString(1),
+        PoolKey(Acme, td, "longlist"),
+        Role.Dual,
+        rs.getString(2),
+        rs.getInt(3),
+        rs.getString(4),
+        None,
+        None,
+        Instant.now()
+      )
+      val key = c.createStatement().executeQuery("SELECT key_secret FROM qodstate_node_authz")
+      key.next() shouldBe true
+      (running, key.getString(1))
+    }
+    val message   = "a list past one handle"
+    val allocator = new RootAllocator()
+    try
+      val adapter = new QuackHttpAdapter(
+        new QuackHttpClient(allocator),
+        new NodeLoadTracker,
+        new NodeKeys(
+          secret,
+          "http://127.0.0.1:1",
+          versions = PolicyVersions.zero,
+          readOnlyCatalogs = ReadOnlyCatalogs.none
+        )
+      )
+      val began  = System.nanoTime()
+      val answer = adapter
+        .sendAll(
+          node,
+          List(
+            "BEGIN",
+            s"CALL ducklake_set_commit_message('$td', 'system', '$message')",
+            s"INSERT INTO $td.main.fact VALUES (1, 'late', 1)",
+            "SELECT sleep_ms(61000)",
+            "COMMIT"
+          ),
+          NodePrincipal.System
+        )
+        .unsafeRunSync()
+      answer shouldBe Right(())
+      // COMMIT binds after the first handle of this list has expired.
+      ((System.nanoTime() - began) / 1000000000L) should be >= 61L
+    finally allocator.close()
+    sql(
+      "longlist",
+      s"SELECT count(*) FROM $td.snapshots() WHERE commit_message = '$message'"
+    ) shouldBe List("1")
+    sql("longlist", s"SELECT count(*) FROM $td.main.fact WHERE note = 'late'") shouldBe List("1")
   }
 
   it should "refuse a conflict, then merge it under a policy, keeping no cell value anywhere" in {
@@ -371,6 +505,7 @@ class BranchThreeWayE2ESpec
       stack.postStatus("/api/branch/merge", proposeBody(td, "feature", idOf(underMain)))
     emptyCode shouldBe 422
     emptyBody should include("nothing_to_merge")
+    emptyBody should include("loses to main under the proposal's policy")
     // A row the key does not match merges, and the one it matches stays main's. The refusal thawed
     // the branch, whose node is back once it answers.
     branchServing("keyed", "feature")

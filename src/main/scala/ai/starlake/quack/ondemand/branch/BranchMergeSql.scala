@@ -2,11 +2,11 @@ package ai.starlake.quack.ondemand.branch
 
 import ai.starlake.quack.model.SqlLiterals
 
-/** Renders a merge's table statements and its Apply batch: pure string building; identifiers are
-  * double-quoted, literals escaped. Tables whose rows merge go through [[RowMergeSql]]. Every read
-  * of the branch is pinned to `head`, the snapshot the change set was validated at. The batch also
-  * refuses to commit when the branch moved past `head` ([[headGuard]]); the caller freezes the
-  * branch's writes for the whole merge.
+/** Renders a merge's table statements and the statements of its Apply stage: pure string building;
+  * identifiers are double-quoted, literals escaped. Tables whose rows merge go through
+  * [[RowMergeSql]]. Every read of the branch is pinned to `head`, the snapshot the change set was
+  * validated at. The stage also refuses to commit when the branch moved past `head`
+  * ([[headGuard]]); the caller freezes the branch's writes for the whole merge.
   */
 object BranchMergeSql:
 
@@ -21,7 +21,7 @@ object BranchMergeSql:
   def commitMessage(branchName: String, mergeId: String, proposer: String): String =
     s"merge branch $branchName [$mergeId] proposed by $proposer"
 
-  /** Fails the batch (inside its transaction, before any write) unless the branch's latest snapshot
+  /** Fails the stage (inside its transaction, before any write) unless the branch's latest snapshot
     * is still `head`: a branch write that landed after validation would otherwise be dropped by the
     * teardown that follows a merge without ever reaching main.
     */
@@ -63,10 +63,11 @@ object BranchMergeSql:
           s"altered table ${change.schema}.${change.table} is not mergeable"
         )
 
-  /** The Apply stage: one transaction. Tables merged by rows come last, each with its statements in
-    * the order [[RowMergeSql.applyStatements]] gives. Only safe under an armed [[MergeFence]].
-    * `rowMerges` must be exactly the `Modified` tables of `tableChanges`: this is the last check
-    * before a commit that would otherwise leave a table's changes out, silently.
+  /** The Apply stage: one transaction, one entry per statement ([[MergeNode.exec]]). Tables merged
+    * by rows come last, each with its statements in the order [[RowMergeSql.applyStatements]]
+    * gives. Only safe under an armed [[MergeFence]]. `rowMerges` must be exactly the `Modified`
+    * tables of `tableChanges`: this is the last check before a commit that would otherwise leave a
+    * table's changes out, silently.
     */
   def applyBatch(
       parentAlias: String,
@@ -79,7 +80,7 @@ object BranchMergeSql:
       head: Long,
       author: String,
       message: String
-  ): String =
+  ): List[String] =
     def names(tables: Set[(String, String)]) =
       tables.toList.sorted.map((schema, table) => s"$schema.$table").mkString(", ")
     val modified =
@@ -97,7 +98,7 @@ object BranchMergeSql:
     val rows = rowMerges.flatMap((t, c) =>
       RowMergeSql.applyStatements(parentAlias, t, c, ranged, updateChunkRows)
     )
-    (List(
+    List(
       "BEGIN",
       s"CALL ducklake_set_commit_message(${lit(parentAlias)}, ${lit(author)}, ${lit(message)})",
       headGuard(branchAlias, head),
@@ -107,7 +108,7 @@ object BranchMergeSql:
       "SET ducklake_max_retry_count = 200",
       "SET ducklake_retry_wait_ms = 10",
       "SET ducklake_retry_backoff = 1"
-    ) ++ others ++ rows ++ List("COMMIT")).mkString("", ";\n", ";")
+    ) ++ others ++ rows ++ List("COMMIT")
 
   /** Locates the merge snapshot on the parent by its unique commit message. */
   def findSnapshotSql(parentAlias: String, message: String): String =

@@ -40,9 +40,10 @@ object BranchWiring extends LazyLogging:
     */
   private val MergeNodeMaxRows = 1000
 
-  /** Spawns `spec`, waits for it to accept connections, runs the body, stops the node. Each send is
-    * bounded by `mergeTimeoutSec`: one that does not answer in time is abandoned (it ends when the
-    * node is stopped) and reported as a `Left` starting with [[MergeExecutor.TimedOut]], and the
+  /** Spawns `spec`, waits for it to accept connections, runs the body, stops the node. Each call on
+    * the node is bounded by `mergeTimeoutSec`, a list of statements as a whole: one that does not
+    * answer in time is abandoned (the statement in flight ends when the node is stopped, and a list
+    * sends no other) and reported as a `Left` starting with [[MergeExecutor.TimedOut]], and the
     * caller settles the outcome by locating the commit message on the parent. A stop that raises is
     * logged at ERROR; Kubernetes' timeout and fleet's deadline return normally (each logs a WARN of
     * its own), so a node can outlive its stop.
@@ -102,7 +103,9 @@ object BranchWiring extends LazyLogging:
     /** `call` within `mergeTimeoutSec`. The bound holds even when the send is stuck: the production
       * client's send is uncancelable (a blocking POST with no request timeout of its own), so
       * waiting for it to end, as `timeoutTo` does, would hold the answer for as long as the node
-      * hangs. The send is abandoned instead, and ends when `backend.stop` kills the node.
+      * hangs. The send is abandoned instead, and ends when `backend.stop` kills the node. The
+      * cancel still reaches it: once the statement in flight answers, a list closes its connection
+      * and sends no other, so only a COMMIT already in flight can land after a timeout.
       */
     private def bounded[A](call: IO[Either[String, A]]): IO[Either[String, A]] =
       call
@@ -126,11 +129,12 @@ object BranchWiring extends LazyLogging:
 
     // A close is a blocking POST (the DISCONNECT), so it runs on the blocking pool.
     private def on(node: RunningNode): MergeNode = new MergeNode:
-      def exec(batch: String): IO[Either[String, Unit]] =
-        bounded(send(node, batch).flatMap {
-          case QuackResponse.Ok(_, _, close) => IO.blocking(close()).as(Right(()))
-          case QuackResponse.Failed(err, _)  => IO.pure(Left(textOf(err)))
-        })
+      def exec(statements: List[String]): IO[Either[String, Unit]] =
+        bounded(
+          adapter
+            .sendAll(node, statements, ai.starlake.quack.edge.authz.NodePrincipal.System)
+            .map(_.left.map(textOf))
+        )
 
       def rows(sql: String): IO[Either[String, List[List[Json]]]] =
         bounded(send(node, sql).flatMap {

@@ -57,10 +57,10 @@ object BranchFailure:
 /** Runs work on an ephemeral merge node built from `spec`: spawns it, waits for it to accept
   * connections, runs `body`, stops it whatever happens. `Left`: the node never came up, or what
   * `body` answered. Each call on the node is bounded: one that does not answer in time is abandoned
-  * (the statement may still run until the node is stopped) and answers a `Left` that starts with
-  * [[MergeExecutor.TimedOut]], and the commit message on main then decides what happened. An engine
-  * error can hold the word "timeout" too (a lock timeout), so a consumer tests
-  * `startsWith(MergeExecutor.TimedOut)`, never `contains("timeout")`.
+  * (the statement in flight may still run until the node is stopped, and nothing follows it) and
+  * answers a `Left` that starts with [[MergeExecutor.TimedOut]], and the commit message on main
+  * then decides what happened. An engine error can hold the word "timeout" too (a lock timeout), so
+  * a consumer tests `startsWith(MergeExecutor.TimedOut)`, never `contains("timeout")`.
   */
 trait MergeExecutor:
   def withNode[A](spec: NodeSpec)(body: MergeNode => IO[Either[String, A]]): IO[Either[String, A]]
@@ -700,11 +700,11 @@ final class BranchService(
         case (m, snapshot)                                    => landedElsewhere(m, snapshot)
       }
 
-  /** A branch's commit lands once. A batch can land long after its merge stopped waiting, on a node
-    * that outlived its stop or a dead manager, and its proposal may have closed or been replaced by
-    * then. So every look reads the message of every proposal of the branch, whatever its status,
-    * the open one first: its commit settles whatever else is on main. One catalog read per
-    * proposal. Blocks.
+  /** A branch's commit lands once. A COMMIT already sent can land after its merge stopped waiting,
+    * on a node that outlived its stop or a dead manager, and its proposal may have closed or been
+    * replaced by then. So every look reads the message of every proposal of the branch, whatever
+    * its status, the open one first: its commit settles whatever else is on main. One catalog read
+    * per proposal. Blocks.
     */
   private def landedCommit(
       tenant: String,
@@ -935,8 +935,8 @@ final class BranchService(
 
     // What a refusal does to the proposal (design section 8.4): one that no longer reflects reality
     // closes, and the branch reopens for a new one; otherwise it stays open for a retry. A proposal
-    // closes only after a look. A late batch can land at any point of a run, and its own commit can
-    // be what fails the check, on a table it created ("also created on main"): that merge landed,
+    // closes only after a look. A late commit can land at any point of a run, and can itself be what
+    // fails the check, on a table it created ("also created on main"): that merge landed,
     // so it settles, with its tag and its event. A failed look raises, which leaves the row open.
     def refuse(
         f: BranchFailure,
@@ -1186,17 +1186,17 @@ final class BranchService(
     val runner     =
       new RowMergeRunner(alias, BranchMergeSql.BranchAlias, first.forkSnapshot, policy)
 
-    // A batch that timed out may still be running, where a stop returned with the node alive, and a
-    // commit with no fence row passes the trigger. So the row stays after a timed-out run and after
-    // a retry of one: it matches only its own message, which both batches share. Until a retry
-    // arms, it holds the late batch to the S of the batch's own run. From the retry's arm on, it
-    // holds that batch to the retry's S: the batch is refused once a merged table moved after that
-    // S, the retry's own commit included, and passes the fence if nothing committed since. Main's
-    // commits from before that S are then left to DuckLake's own check, which starts at the batch's
-    // first catalog read: a commit between the batch's S and that read has no check at all, and the
-    // batch's stale UPDATE can overwrite it. A known residual, in the design. A retry's hold still
-    // ends with the merge: arming with no hold clears it and keeps the fence. A timed-out run's own
-    // hold has expired by then.
+    // A send that timed out stops at the statement in flight. When that is its COMMIT, the commit can
+    // still land, where a stop returned with the node alive, and a commit with no fence row passes
+    // the trigger. So the row stays after a timed-out run and after a retry of one: it matches only
+    // its own message, which both runs share. Until a retry arms, it holds the late commit to the S
+    // of its own run. From the retry's arm on, it holds that commit to the retry's S: the commit is
+    // refused once a merged table moved after that S, the retry's own commit included, and passes
+    // the fence if nothing committed since. Main's commits from before that S are then left to
+    // DuckLake's own check, which starts at the run's first catalog read: a commit between the run's
+    // S and that read has no check at all, and its stale UPDATE can overwrite it. A known residual,
+    // in the design. A retry's hold still ends with the merge: arming with no hold clears it and
+    // keeps the fence. A timed-out run's own hold has expired by then.
     val earlierTimeout    = merge.error.exists(_.startsWith(MergeExecutor.TimedOut))
     def release: IO[Unit] =
       if !earlierTimeout then IO.blocking(mergeFence.disarm(parentMeta, message))
@@ -1221,7 +1221,7 @@ final class BranchService(
     /** The look after `reason`, what a stage or a send answered. A send that timed out can still
       * land, and a stalled catalog is a likely cause of both, so after one a look that fails reads
       * as not found: `Failed` then keeps the fence row and `failed` stores the prefix, the only
-      * record that a batch can still land. After any other answer a failed look raises.
+      * record that a commit can still land. After any other answer a failed look raises.
       */
     def lookAfter(reason: Option[String]): IO[Option[(BranchMerge, Long)]] =
       IO.blocking(landedCommit(tenant, parent, b)).handleErrorWith {
@@ -1253,13 +1253,14 @@ final class BranchService(
                 AttemptEnd.Refused(
                   BranchFailure.unprocessable(
                     "nothing_to_merge",
-                    s"every change on branch '${b.name}' is already on main; discard it"
+                    "nothing to write: every change on the branch is already on main, or loses to " +
+                      "main under the proposal's policy; discard it"
                   ),
                   closes = false
                 )
               )
             case MergeDecision.Verdict.Proceed =>
-              val batch = BranchMergeSql.applyBatch(
+              val statements = BranchMergeSql.applyBatch(
                 parentAlias = alias,
                 branchAlias = BranchMergeSql.BranchAlias,
                 tableChanges = cs.tables,
@@ -1271,17 +1272,18 @@ final class BranchService(
                 author = author,
                 message = message
               )
-              // A manager that dies in this send leaves what a send that timed out leaves: its
-              // batch can still land. Whatever the send answers replaces this mark, since `refuse`
-              // and `finishMerge` copy from the row read at the start of the run.
+              // A manager that dies in this send leaves what a send that timed out leaves: a
+              // COMMIT in flight can still land, and nothing comes after the statement in flight.
+              // Whatever the send answers replaces this mark, since `refuse` and `finishMerge` copy
+              // from the row read at the start of the run.
               IO.blocking(
                 store.updateBranchMerge(merge.copy(error = Some(BranchService.ApplySent)))
               ) >>
-                node.exec(batch).flatMap { sent =>
+                node.exec(statements).flatMap { sent =>
                   lookAfter(sent.left.toOption).map {
                     case Some((landed, snapshot)) if landed.id == merge.id =>
                       AttemptEnd.Committed(snapshot, cs)
-                    // This send's own batch can still land when it timed out: `Failed` keeps its
+                    // This send's own commit can still land when it timed out: `Failed` keeps its
                     // fence row and its prefix, and the next look refuses.
                     case Some((landed, snapshot))
                         if !sent.left.exists(_.startsWith(MergeExecutor.TimedOut)) =>
@@ -1300,7 +1302,7 @@ final class BranchService(
 
     def attempt(node: MergeNode, n: Int, ranged: Boolean): IO[(AttemptEnd, Int)] =
       computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
-        // Past the first look, node start and Prepare are a long window for a late batch to land
+        // Past the first look, node start and Prepare are a long window for a late commit to land
         // in, below the S this attempt's fence starts at, where neither the fence nor DuckLake's
         // own check sees it. Reading S first makes this look complete: a landing it misses is above
         // S, so the fence refuses the send and the look after the send finds it.
@@ -1471,7 +1473,7 @@ final class BranchService(
                     actor,
                     apiKey
                   )
-                // This send's own batch can still land when it timed out: `failed` keeps its
+                // This send's own commit can still land when it timed out: `failed` keeps its
                 // prefix, and the next look refuses.
                 case Some((landed, snapshot)) if !reason.startsWith(MergeExecutor.TimedOut) =>
                   refuse(landedElsewhere(landed, snapshot), false, attempts)

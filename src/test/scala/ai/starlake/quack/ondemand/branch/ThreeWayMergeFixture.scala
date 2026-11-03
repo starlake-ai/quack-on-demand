@@ -14,9 +14,21 @@ import java.nio.file.Path
 import java.sql.{Connection, DriverManager, ResultSet}
 import scala.collection.mutable.ListBuffer
 
+/** Whether `sql` holds no second statement: no semicolon outside its literals and quoted
+  * identifiers, at its end included. What a merge node's `exec` asks of every entry.
+  */
+object OneStatement:
+  def holds(sql: String): Boolean =
+    val (_, semicolon) = sql.foldLeft((Option.empty[Char], false)) {
+      case ((Some(quote), found), c)                   => (Option.when(c != quote)(quote), found)
+      case ((None, found), c) if c == '\'' || c == '"' => (Some(c), found)
+      case ((None, found), c)                          => (None, found || c == ';')
+    }
+    !semicolon
+
 /** A merge node stand-in: one in-process DuckDB, a new connection per call, as the real node serves
   * each request. So working tables must survive between calls and session settings must not, which
-  * is what the real thing does. `beforeCommit` runs just before a batch's COMMIT, its transaction
+  * is what the real thing does. `beforeCommit` runs just before a list's COMMIT, its transaction
   * open: what another client does at that moment.
   */
 final class JdbcMergeNode(root: Connection, beforeCommit: () => Unit = () => ()) extends MergeNode:
@@ -28,10 +40,11 @@ final class JdbcMergeNode(root: Connection, beforeCommit: () => Unit = () => ())
     finally c.close()
   }
 
-  def exec(batch: String): IO[Either[String, Unit]] = on { c =>
+  def exec(statements: List[String]): IO[Either[String, Unit]] = on { c =>
     val st = c.createStatement()
     try
-      batch.split(";\n").map(_.stripSuffix(";").trim).filter(_.nonEmpty).foreach { s =>
+      statements.foreach { s =>
+        require(OneStatement.holds(s), s"an entry holds a second statement: $s")
         if s == "COMMIT" then beforeCommit()
         st.execute(s)
       }

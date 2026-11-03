@@ -164,8 +164,7 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
             val body   = tables
               .zip(counts)
               .flatMap((t, c) => RowMergeSql.applyStatements("lake", t, c, false, 1000000L))
-            node.exec(body.mkString("BEGIN;\n", ";\n", ";\nCOMMIT;")).unsafeRunSync() shouldBe
-              Right(())
+            node.exec(("BEGIN" :: body) :+ "COMMIT").unsafeRunSync() shouldBe Right(())
           }
           duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
             List("VALIDATED")

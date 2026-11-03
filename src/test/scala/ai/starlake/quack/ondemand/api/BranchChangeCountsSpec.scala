@@ -523,8 +523,8 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
 
   /** A node whose Decide finds 2 conflicting cells in column `x`, on every table. */
   private object ConflictingNode extends ai.starlake.quack.ondemand.branch.MergeNode:
-    def exec(batch: String) = IO.pure(Right(()))
-    def rows(sql: String)   = IO.pure(
+    def exec(statements: List[String]) = IO.pure(Right(()))
+    def rows(sql: String)              = IO.pure(
       Right(
         if sql.contains("_need") then List(List(Json.fromLong(0L), Json.fromLong(0L)))
         else if sql.contains("AS kind") then List(List(Json.fromString("cell"), Json.fromLong(70L)))
@@ -662,8 +662,8 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     * that a field filled from the wrong count, or left out, shows.
     */
   private object DistinctNode extends ai.starlake.quack.ondemand.branch.MergeNode:
-    def exec(batch: String) = IO.pure(Right(()))
-    def rows(sql: String)   = IO.pure(
+    def exec(statements: List[String]) = IO.pure(Right(()))
+    def rows(sql: String)              = IO.pure(
       Right(
         if sql.contains("_need") then List(List(Json.fromLong(0L), Json.fromLong(0L)))
         else if sql.contains("AS kind") then

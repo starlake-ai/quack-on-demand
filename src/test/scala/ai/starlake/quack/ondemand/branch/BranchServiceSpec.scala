@@ -182,7 +182,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
             case Some(err) => IO.pure(Left(err))
             case None      =>
               body(new MergeNode:
-                def exec(batch: String): IO[Either[String, Unit]] =
+                def exec(statements: List[String]): IO[Either[String, Unit]] =
+                  // One string per call: what these cases read is the list, whole and in order.
+                  val batch = statements.mkString("", ";\n", ";")
                   nodeBatches += batch
                   if !batch.startsWith("BEGIN") then
                     duringAnalysis()
@@ -1288,7 +1290,11 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.countsRow = List.fill(11)(0L)
     f.propose().isRight shouldBe true
     f.mergeBatches.clear()
-    f.merge().left.map(_.code) shouldBe Left("nothing_to_merge")
+    val refused = f.merge().left.toOption.get
+    refused.code shouldBe "nothing_to_merge"
+    // True under `main` too, where what is not written lost to main rather than being there already.
+    refused.message shouldBe "nothing to write: every change on the branch is already on main, " +
+      "or loses to main under the proposal's policy; discard it"
     f.mergeBatches shouldBe empty
     f.store.findBranch(f.parent.id, "x").get.status shouldBe BranchStatus.Proposed
   }

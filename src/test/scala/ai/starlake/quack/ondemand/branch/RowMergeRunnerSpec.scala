@@ -25,14 +25,15 @@ class RowMergeRunnerSpec extends AnyFlatSpec with Matchers:
 
   private final class FakeNode(overlap: Long, need: Long, failOn: Option[String] = None)
       extends MergeNode:
-    val batches                                       = mutable.ListBuffer.empty[String]
-    def exec(batch: String): IO[Either[String, Unit]] = IO {
-      batches += batch
-      if failOn.exists(batch.contains) then Left("boom") else Right(())
+    val lists                 = mutable.ListBuffer.empty[List[String]]
+    def batches: List[String] = lists.toList.map(_.mkString("\n"))
+    def exec(statements: List[String]): IO[Either[String, Unit]] = IO {
+      lists += statements
+      if failOn.exists(f => statements.exists(_.contains(f))) then Left("boom") else Right(())
     }
     def rows(sql: String): IO[Either[String, List[List[Json]]]] = IO {
       Right(
-        if sql.contains("t0_need") then List(List(Json.fromLong(overlap), Json.fromLong(need)))
+        if sql.contains("_need") then List(List(Json.fromLong(overlap), Json.fromLong(need)))
         else if sql.contains("AS kind") then Nil
         else List(List.fill(12)(Json.fromLong(0L)))
       )
@@ -43,9 +44,9 @@ class RowMergeRunnerSpec extends AnyFlatSpec with Matchers:
   "prepare" should "create the working schema and read the branch, with settings first" in {
     val node = new FakeNode(0L, 0L)
     runner.prepare(node, List(t)).unsafeRunSync() shouldBe Right(())
-    node.batches.size shouldBe 1
-    node.batches.head should startWith("SET dynamic_or_filter_threshold = 10000;\n")
-    node.batches.head should include("""CREATE SCHEMA IF NOT EXISTS "memory"."qod_merge"""")
+    node.lists.size shouldBe 1
+    node.lists.head.head shouldBe "SET dynamic_or_filter_threshold = 10000"
+    node.lists.head(1) shouldBe """CREATE SCHEMA IF NOT EXISTS "memory"."qod_merge""""
     node.batches.head should include("t0_post_b")
   }
 
@@ -74,11 +75,37 @@ class RowMergeRunnerSpec extends AnyFlatSpec with Matchers:
     node.batches.mkString("\n") should include("AT (VERSION => 10) WHERE rowid IN")
   }
 
-  it should "repeat the settings in every batch: each send is a new connection" in {
+  it should "repeat the setting in every list: each call is a new connection" in {
     val node = new FakeNode(overlap = 4L, need = 2L)
     runner.decide(node, List(t)).unsafeRunSync()
-    node.batches.foreach(_ should startWith("SET dynamic_or_filter_threshold = 10000;\n"))
-    node.batches.foreach(_ should endWith(";"))
+    node.lists should not be empty
+    node.lists.foreach(_.head shouldBe "SET dynamic_or_filter_threshold = 10000")
+  }
+
+  "every list" should "hold one statement per entry, whatever a table's names and shape render" in {
+    val tables = List(
+      t,
+      t.copy(index = 1, table = "o;r", columns = List("a;b", "c'd"), keyColumns = List("a;b")),
+      t.copy(index = 2, branchRanges = Nil),
+      t.copy(index = 3, mainRanges = Nil, keyColumns = List("id"))
+    )
+    (None :: ConflictPolicy.values.toList.map(Some(_))).foreach { policy =>
+      val node   = new FakeNode(overlap = 4L, need = 2L)
+      val runner = new RowMergeRunner("la;ke", "qod_branch", 10L, policy)
+      runner.prepare(node, tables).unsafeRunSync() shouldBe Right(())
+      runner.warmUp(node, tables).unsafeRunSync() shouldBe Right(())
+      runner.decide(node, tables).unsafeRunSync().isRight shouldBe true
+      node.lists should not be empty
+      node.lists.flatten.foreach(s => withClue(s)(OneStatement.holds(s) shouldBe true))
+    }
+  }
+
+  "the check of an entry" should "tell a second statement from a semicolon inside a name or literal" in {
+    OneStatement.holds("SELECT 1") shouldBe true
+    OneStatement.holds("SELECT 'a;b', 'it''s;', \"c;d\"") shouldBe true
+    OneStatement.holds("SELECT 1; SELECT 2") shouldBe false
+    OneStatement.holds("SELECT 1;") shouldBe false
+    OneStatement.holds("SELECT 'a;'; SELECT 2") shouldBe false
   }
 
   it should "stop at the first failure and report it" in {

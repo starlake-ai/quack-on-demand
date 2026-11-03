@@ -54,6 +54,24 @@ final class QuackHttpAdapter(
       )
     )(NodeOutcome.fromQuackResponse)
 
+  /** `statements` in order on one connection of `node`, for `principal`, each PREPARE after a fresh
+    * session handle, and nothing more once one fails or the caller cancels
+    * ([[QuackHttpClient.queryAll]]). For the manager's own work on a node of its own, whose
+    * statements can run past what one handle lives: it skips all the tracker's bookkeeping, as
+    * `send(recordLoad = false)` does.
+    */
+  def sendAll(
+      node: RunningNode,
+      statements: List[String],
+      principal: NodePrincipal
+  ): IO[Either[QuackError, Unit]] =
+    client.queryAll(
+      s"quack:${node.host}:${node.port}",
+      node.token,
+      authorizer(node, principal),
+      statements
+    )
+
   /** The prelude producer for statements of `principal` on `node`: a fresh session handle each
     * call, so a PREPARE sent long after another (a COMMIT) still carries a valid one. `onMint` is
     * told each handle minted.

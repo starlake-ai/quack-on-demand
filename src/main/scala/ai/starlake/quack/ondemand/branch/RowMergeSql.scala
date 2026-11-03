@@ -111,14 +111,15 @@ object RowMergeTable:
 
 /** Renders the row merge's stages (design section 6): pure strings. Working tables live in the
   * merge node's in-memory database, which survives between requests and dies with the node. Each
-  * statement is returned on its own; [[RowMergeRunner]] joins them into batches.
+  * statement is returned on its own, and [[RowMergeRunner]] sends them as lists: no string here may
+  * hold a second statement ([[MergeNode.exec]]).
   */
 object RowMergeSql:
 
   final case class OverlapSizes(overlap: Long, need: Long)
 
-  /** Session settings: repeat them in every batch, each send is a new connection. Lets a semi-join
-    * on rowids prune row groups (design finding 5).
+  /** A session setting: repeat it in every list, each call is a new connection. Lets a semi-join on
+    * rowids prune row groups (design finding 5).
     */
   val Settings: String = "SET dynamic_or_filter_threshold = 10000"
 

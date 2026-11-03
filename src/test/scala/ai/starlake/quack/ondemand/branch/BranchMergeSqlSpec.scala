@@ -40,8 +40,8 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
   }
 
   "BranchMergeSql.applyBatch" should "stamp first, guard the head, write other tables, then rows" in {
-    val region = RowMergeTable(0, "tpch1", "region", List("r"), Nil, Nil, Nil)
-    val sql    = BranchMergeSql.applyBatch(
+    val region     = RowMergeTable(0, "tpch1", "region", List("r"), Nil, Nil, Nil)
+    val statements = BranchMergeSql.applyBatch(
       parentAlias = "acme_tpch",
       branchAlias = "qod_branch",
       tableChanges = List(
@@ -56,19 +56,63 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
       author = "tenant:acme/user:bob",
       message = "it's [mg-1]"
     )
-    val lines = sql.linesIterator.toList
-    lines.head shouldBe "BEGIN;"
-    lines(1) shouldBe
-      "CALL ducklake_set_commit_message('acme_tpch', 'tenant:acme/user:bob', 'it''s [mg-1]');"
-    lines(2) should include("branch moved past snapshot 15")
-    lines(3) shouldBe "SET dynamic_or_filter_threshold = 10000;"
-    lines.last shouldBe "COMMIT;"
-    sql should include("""CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT""")
-    sql.indexOf("CREATE TABLE") should be < sql.indexOf("DELETE FROM")
-    sql.indexOf("DELETE FROM") should be < sql.indexOf("UPDATE ")
-    sql should include("SET ducklake_max_retry_count = 200;")
-    sql should include("SET ducklake_retry_wait_ms = 10;")
-    sql should include("SET ducklake_retry_backoff = 1;")
+    statements.head shouldBe "BEGIN"
+    statements(1) shouldBe
+      "CALL ducklake_set_commit_message('acme_tpch', 'tenant:acme/user:bob', 'it''s [mg-1]')"
+    statements(2) should include("branch moved past snapshot 15")
+    statements(3) shouldBe "SET dynamic_or_filter_threshold = 10000"
+    statements.slice(4, 7) shouldBe List(
+      "SET ducklake_max_retry_count = 200",
+      "SET ducklake_retry_wait_ms = 10",
+      "SET ducklake_retry_backoff = 1"
+    )
+    statements.last shouldBe "COMMIT"
+    def at(start: String) = statements.indexWhere(_.startsWith(start))
+    statements(at("CREATE TABLE")) should startWith(
+      """CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT"""
+    )
+    at("SET ducklake_retry_backoff") should be < at("CREATE TABLE")
+    at("CREATE TABLE") should be < at("DELETE FROM")
+    at("DELETE FROM") should be < at("UPDATE ")
+    at("UPDATE ") should be < statements.size - 1
+  }
+
+  it should "keep DELETE, UPDATE, INSERT per table, the head guard first, and one statement per entry" in {
+    def table(i: Int, name: String) =
+      RowMergeTable(i, "s;t", name, List("a;b", "c'd"), Nil, Nil, Nil) ->
+        RowCounts("s;t", name, toDelete = 1L, toUpdate = 5L, toInsert = 1L, maxUpdateRowid = 40L)
+    val merges     = List(table(0, "o;r"), table(1, "plain"))
+    val statements = BranchMergeSql.applyBatch(
+      parentAlias = "la;ke",
+      branchAlias = "b;r",
+      tableChanges = List(
+        TableChange("s;t", "o;r", ChangeKind.Modified),
+        TableChange("s;t", "plain", ChangeKind.Modified),
+        TableChange("s;t", "new;1", ChangeKind.Created),
+        TableChange("s;t", "again;2", ChangeKind.Recreated),
+        TableChange("s;t", "gone;3", ChangeKind.Dropped)
+      ),
+      rowMerges = merges,
+      // Ranges: a large update's several statements in one transaction.
+      ranged = true,
+      updateChunkRows = 100L,
+      fork = 10L,
+      head = 15L,
+      author = "it's; me",
+      message = "merge; [mg-1]"
+    )
+    statements.foreach(s => withClue(s)(OneStatement.holds(s) shouldBe true))
+    statements.indexWhere(_.contains("branch moved past snapshot")) shouldBe 2
+    def kinds(name: String) =
+      statements
+        .filter(_.contains(s""""s;t"."$name""""))
+        .map(_.takeWhile(_ != ' '))
+        .filter(k => Set("DELETE", "UPDATE", "INSERT")(k))
+        .distinct
+    kinds("o;r") shouldBe List("DELETE", "UPDATE", "INSERT")
+    kinds("plain") shouldBe List("DELETE", "UPDATE", "INSERT")
+    statements.count(_ == "COMMIT") shouldBe 1
+    statements.last shouldBe "COMMIT"
   }
 
   private def rowMerge(schema: String, table: String) =
@@ -115,8 +159,9 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
     applied(
       List(modified("s", "b"), modified("s", "a")),
       List(rowMerge("s", "a"), rowMerge("s", "b"))
-    ) should include("""DELETE FROM "p"."s"."b"""")
-    applied(List(TableChange("s", "x", ChangeKind.Created)), Nil) should include("CREATE TABLE")
+    ).mkString("\n") should include("""DELETE FROM "p"."s"."b"""")
+    applied(List(TableChange("s", "x", ChangeKind.Created)), Nil).mkString("\n") should
+      include("CREATE TABLE")
   }
 
   "findSnapshotSql" should "look the merge snapshot up by its message" in {

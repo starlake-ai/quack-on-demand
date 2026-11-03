@@ -100,6 +100,33 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     tracker.snapshot("n1").inFlight shouldBe 0
     tracker.snapshot("n1").ewmaMs should be > 0.0
 
+  it should "send a list for the principal, a fresh handle per statement, with no bookkeeping" in:
+    var seen: Option[(String, String, List[String])] = None
+    val handles    = scala.collection.mutable.ListBuffer.empty[String]
+    val statements = List("BEGIN", "SELECT 1", "COMMIT")
+    val client     = new QuackHttpClient(TestArrow.sharedAllocator):
+      override def queryAll(
+          endpoint: String,
+          token: String,
+          authorize: () => String,
+          statements: List[String]
+      ): IO[Either[QuackError, Unit]] = IO {
+        seen = Some((endpoint, token, statements))
+        statements.foreach(_ => handles += authorize())
+        Right(())
+      }
+    val tracker = new NodeLoadTracker
+    val before  = tracker.snapshot("n1")
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+
+    adapter.sendAll(node("n1"), statements, NodePrincipal.System).unsafeRunSync() shouldBe Right(())
+    seen shouldBe Some(("quack:127.0.0.1:0", "tok-n1", statements))
+    handles.size shouldBe 3
+    handles.foreach(_ should startWith("CALL system.main.qod_session("))
+    handles.toSet.size shouldBe 3
+    tracker.snapshot("n1") shouldBe before
+
   it should "mark node unhealthy on transient failure" in:
     val client = new FakeClient(
       Map(
