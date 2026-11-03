@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.edge.config.JwtAuthConfig
+import ai.starlake.sql.TooDeep
 import com.nimbusds.jose.crypto.{MACVerifier, RSASSAVerifier}
 import com.nimbusds.jose.jwk.RSAKey
 import com.nimbusds.jose.{JWSAlgorithm, JWSVerifier}
@@ -33,56 +34,75 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     else None
 
   override def authenticate(token: String): Either[String, AuthenticatedProfile] =
+    // Whoever holds the signing key builds the token, and a claim nested thousands of levels deep
+    // overflows the stack of the code that prints it (flattenClaims prints each claim with
+    // toString, a few frames a level). A StackOverflowError is fatal to cats-effect, so one
+    // escaping here halted the whole manager under IOApp. TooDeep.orElse catches it on the thread
+    // that overflowed, and the token is refused (see OidcBearerAuthenticator.authenticate).
+    TooDeep.orElse[Either[String, AuthenticatedProfile]](
+      Left("JWT token is nested too deeply")
+    )(validated(token))
+
+  private def validated(token: String): Either[String, AuthenticatedProfile] =
     try
       val signedJWT = SignedJWT.parse(token)
-      val verified  = verifySignature(signedJWT)
-      if !verified then return Left("JWT signature verification failed")
-
-      val claims = signedJWT.getJWTClaimsSet
-
-      // Validate issuer if configured
-      if config.issuer.nonEmpty then
-        val iss = Option(claims.getIssuer).getOrElse("")
-        if iss != config.issuer then
-          return Left(s"Unexpected JWT issuer: $iss (expected: ${config.issuer})")
-
-      // Validate audience if configured
-      if config.audience.nonEmpty then
-        val audiences = Option(claims.getAudience).map(_.toArray.toList).getOrElse(Nil)
-        if !audiences.contains(config.audience) then
-          return Left(s"JWT audience mismatch: $audiences (expected: ${config.audience})")
-
-      // Check expiry
-      val now = new Date()
-      val exp = Option(claims.getExpirationTime)
-      if exp.exists(_.before(now)) then return Left("JWT token has expired")
-
-      // Not before (RFC 7519 4.1.5), with the clock skew the OIDC path's nimbus processor allows,
-      // so an issuer whose clock runs a little ahead still signs usable tokens.
-      val nbf = Option(claims.getNotBeforeTime)
-      if nbf.exists(_.getTime > now.getTime + JwtBearerAuthenticator.NotBeforeSkewMs) then
-        return Left("JWT token is not valid yet (nbf is in the future)")
-
-      // A token naming no one is refused rather than named "unknown", which a row could hold.
-      extractUsername(claims) match
-        case None =>
-          Left("JWT: the token names no user (no preferred_username, email or sub)")
-        case Some(username) =>
-          val role   = RoleExtractor.extract(claims, roleClaim)
-          val groups = RoleExtractor.extractGroups(claims, "groups")
-
-          Right(
-            AuthenticatedProfile(
-              username = username,
-              role = role,
-              groups = groups + role,
-              claims = flattenClaims(claims),
-              authMethod = "jwt"
-            )
+      if !verifySignature(signedJWT) then Left("JWT signature verification failed")
+      else
+        val claims = signedJWT.getJWTClaimsSet
+        val now    = new Date()
+        for
+          _ <- checkIssuer(claims)
+          _ <- checkAudience(claims)
+          _ <- checkExpiry(claims, now)
+          _ <- checkNotBefore(claims, now)
+          // A token naming no one is refused rather than named "unknown", which a row could hold.
+          username <- extractUsername(claims).toRight(
+            "JWT: the token names no user (no preferred_username, email or sub)"
           )
+        yield profileOf(claims, username)
     catch
       case e: Exception =>
         Left(s"JWT validation failed: ${e.getMessage}")
+
+  // Validate issuer if configured
+  private def checkIssuer(claims: JWTClaimsSet): Either[String, Unit] =
+    if config.issuer.nonEmpty then
+      val iss = Option(claims.getIssuer).getOrElse("")
+      if iss != config.issuer then Left(s"Unexpected JWT issuer: $iss (expected: ${config.issuer})")
+      else Right(())
+    else Right(())
+
+  // Validate audience if configured
+  private def checkAudience(claims: JWTClaimsSet): Either[String, Unit] =
+    if config.audience.nonEmpty then
+      val audiences = Option(claims.getAudience).map(_.toArray.toList).getOrElse(Nil)
+      if !audiences.contains(config.audience) then
+        Left(s"JWT audience mismatch: $audiences (expected: ${config.audience})")
+      else Right(())
+    else Right(())
+
+  private def checkExpiry(claims: JWTClaimsSet, now: Date): Either[String, Unit] =
+    val exp = Option(claims.getExpirationTime)
+    if exp.exists(_.before(now)) then Left("JWT token has expired") else Right(())
+
+  // Not before (RFC 7519 4.1.5), with the clock skew the OIDC path's nimbus processor allows,
+  // so an issuer whose clock runs a little ahead still signs usable tokens.
+  private def checkNotBefore(claims: JWTClaimsSet, now: Date): Either[String, Unit] =
+    val nbf = Option(claims.getNotBeforeTime)
+    if nbf.exists(_.getTime > now.getTime + JwtBearerAuthenticator.NotBeforeSkewMs) then
+      Left("JWT token is not valid yet (nbf is in the future)")
+    else Right(())
+
+  private def profileOf(claims: JWTClaimsSet, username: String): AuthenticatedProfile =
+    val role   = RoleExtractor.extract(claims, roleClaim)
+    val groups = RoleExtractor.extractGroups(claims, "groups")
+    AuthenticatedProfile(
+      username = username,
+      role = role,
+      groups = groups + role,
+      claims = flattenClaims(claims),
+      authMethod = "jwt"
+    )
 
   private def verifySignature(jwt: SignedJWT): Boolean =
     hmacVerifier.exists(jwt.verify) || rsaVerifier.exists(jwt.verify)

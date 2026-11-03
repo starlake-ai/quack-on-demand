@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.config.{AuthenticationConfig, KeycloakAuthConfig}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -85,9 +86,10 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
   it should "refuse a token answer over 256 KiB with a Left" in:
     withIdp { idp =>
       idp.serve("/token", 200, s"""{"id_token":"the-jwt","pad":"${"x" * (300 * 1024)}"}""")
-      SqlTokenOidcService.defaultExchange(s"${idp.base}/token", "grant_type=x") match
-        case Left(why) => why should include("response exceeds 256 KiB")
-        case Right(_)  => fail("expected a Left for an answer over the cap")
+      // A healthy 200 answer is refused only by the cap, and the Left says nothing of why: the
+      // callback page shows it.
+      SqlTokenOidcService.defaultExchange(s"${idp.base}/token", "grant_type=x") shouldBe
+        Left(BoundedHttp.TokenEndpointFailed)
     }
 
   it should "answer a non-200 with its status alone, never the answer or the form" in:
@@ -103,6 +105,20 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
     val closed = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress)
     val port   = closed.getLocalPort
     closed.close()
-    val out = SqlTokenOidcService.defaultExchange(s"http://127.0.0.1:$port/token", "grant_type=x")
-    out.isLeft shouldBe true
-    out.left.toOption.exists(_.contains("grant_type")) shouldBe false
+    SqlTokenOidcService.defaultExchange(s"http://127.0.0.1:$port/token", "grant_type=x") shouldBe
+      Left(BoundedHttp.TokenEndpointFailed)
+
+  it should "answer a form that the server quotes back in a malformed answer with a fixed text, none of it in the Left" in:
+    // The JDK's exception for a malformed answer quotes the line, the page shows the Left, and the
+    // form holds the client secret.
+    val form = "grant_type=authorization_code&client_secret=hunter2-secret"
+    List(EchoingServer.Shape.StatusLine, EchoingServer.Shape.ContentLength).foreach { shape =>
+      val server = new EchoingServer(shape)
+      try
+        val out = SqlTokenOidcService.defaultExchange(s"${server.base}/token", form)
+        withClue(s"[$shape] $out ") {
+          out shouldBe Left(BoundedHttp.TokenEndpointFailed)
+          server.requests shouldBe 1
+        }
+      finally server.close()
+    }

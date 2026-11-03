@@ -575,6 +575,36 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     calls shouldBe empty
   }
 
+  // A failed login writes the typed user name twice (the actor and the detail) and the typed tenant
+  // once, and the route needs no credential: at 64 KiB each a flood at the password gate's rate
+  // bought megabytes a second of rows kept for the audit retention. AuditRecorder.restAs caps them.
+  it should "write one bounded row for a failed login whose user name and tenant are 60 KiB" in {
+    val telemetry = new RecordingTelemetryStore
+    val calls     = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h         = makeHandlers(
+      Left(AuthFailure.InvalidCredentials("invalid credentials")),
+      calls,
+      audit = new AuditRecorder(telemetry, _ => None)
+    )
+    val name   = "u" * (60 * 1024)
+    val tenant = "t" * (60 * 1024)
+
+    h.login(LoginRequest(name, "pw", tenant = Some(tenant))).unsafeRunSync() match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.Unauthorized
+        err.error shouldBe "invalid_credentials"
+      case Right(_) => fail("expected 401 invalid_credentials")
+
+    telemetry.events should have size 1
+    val e = telemetry.events.head
+    e.action shouldBe "auth.login.failure"
+    e.actor.length should be <= 256
+    e.tenant.map(_.length).getOrElse(0) should be <= 256
+    e.detail("username").length should be <= 1024
+    e.actor should startWith("uuuu")
+    e.tenant.exists(_.startsWith("tttt")) shouldBe true
+  }
+
   it should "keep authenticating an unknown tenant first (401 invalid_credentials)" in {
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h     = makeHandlers(

@@ -1,10 +1,12 @@
 package ai.starlake.quack.edge
 
 import java.io.ByteArrayOutputStream
+import java.net.URI
 import java.net.http.HttpResponse.{BodyHandler, BodySubscriber, ResponseInfo}
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 import java.util.concurrent.{
   CompletableFuture,
   CompletionStage,
@@ -20,6 +22,9 @@ import java.util.concurrent.{
   * `BodyHandlers.ofString` buffers whatever arrives, and `HttpRequest.timeout` bounds only the wait
   * for the headers. So a request goes through [[send]], which bounds the size of the answer and the
   * time of the WHOLE exchange (connect, headers and body).
+  *
+  * The cap covers the body. The response headers are bounded by the JDK's `jdk.http.maxHeaderSize`
+  * (384 kB on 21.0.11, measured); on 17.0.4.1 endless headers ran the heap out.
   */
 object BoundedHttp:
 
@@ -29,6 +34,15 @@ object BoundedHttp:
   /** The time an exchange with an identity provider may take, whole. */
   val IdpTimeoutMs: Long = 15000L
 
+  /** The most a JWKS (an identity provider's signing keys) may hold: Nimbus' own limit, kept. */
+  val MaxJwksBytes: Int = 50 * 1024
+
+  /** The time the read of a JWKS may take, whole. */
+  val JwksTimeoutMs: Long = 5000L
+
+  /** What every failed token exchange says, whatever went wrong: see [[tokenExchange]]. */
+  val TokenEndpointFailed: String = "token endpoint request failed"
+
   /** `request` sent and its answer read under `capBytes` and `timeoutMs` over the whole exchange:
     * `HttpRequest.timeout` alone bounds only the headers. The body is read by a subscriber that
     * never holds more than `capBytes`, and a read that passes either limit is cancelled, which
@@ -36,9 +50,12 @@ object BoundedHttp:
     *
     * A non-200 status is not a failure here: it comes back as `Right((status, body))`, for the
     * caller to judge. A `Left` says why the exchange gave nothing: an answer over the cap, a
-    * deadline passed, or the exception's class and message. It names no header and no body of the
-    * request, so a caller may put its text in an error. `what` names the exchange in the text
-    * ("OPA", "discovery").
+    * deadline passed, or the exception's class and message. The message is the JDK's, and the JDK
+    * quotes what the server sent when it refuses a malformed answer (an invalid status line, a
+    * `Content-Length` it cannot read), so a server that echoes the request puts the request in the
+    * text. The text carries nothing of the request on its own, but it cannot promise what a server
+    * echoes: a caller whose request holds a secret must not pass it on (see [[tokenExchange]]).
+    * `what` names the exchange in the text ("OPA", "discovery").
     */
   def send(
       client: HttpClient,
@@ -55,6 +72,37 @@ object BoundedHttp:
         )
       awaited(future, timeoutMs, what)
     catch case e: Exception => Left(describe(e))
+
+  /** A code-to-token exchange: `form` POSTed to the token endpoint `url`, and the body of its
+    * answer when the status is 200, else why not. It is read like any identity provider's answer,
+    * under [[MaxIdpAnswerBytes]] and [[IdpTimeoutMs]] over the whole exchange.
+    *
+    * The form holds the client secret, and the server is the identity provider's own. One that
+    * echoes the form into a malformed status line reaches the text of [[send]]'s `Left` (the JDK
+    * quotes the line), and a caller that shows or logs that text shows the secret. So nothing of
+    * the exchange is passed on: any `Left` of [[send]], and any failure to build the request, comes
+    * back as [[TokenEndpointFailed]], and a status other than 200 as `refused(status)`, a text the
+    * caller makes from the code alone, never from the answer.
+    */
+  def tokenExchange(
+      client: HttpClient,
+      url: String,
+      form: String,
+      refused: Int => String
+  ): Either[String, String] =
+    try
+      val request = HttpRequest
+        .newBuilder()
+        .uri(URI.create(url))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .POST(HttpRequest.BodyPublishers.ofString(form))
+        .timeout(Duration.ofMillis(IdpTimeoutMs))
+        .build()
+      send(client, request, MaxIdpAnswerBytes, IdpTimeoutMs, "token endpoint") match
+        case Left(_)            => Left(TokenEndpointFailed)
+        case Right((200, body)) => Right(body)
+        case Right((code, _))   => Left(refused(code))
+    catch case _: Exception => Left(TokenEndpointFailed)
 
   private def awaited(
       future: CompletableFuture[HttpResponse[Either[String, String]]],

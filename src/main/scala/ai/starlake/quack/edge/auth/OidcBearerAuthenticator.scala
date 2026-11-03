@@ -1,20 +1,26 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
+import ai.starlake.sql.TooDeep
 import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.jwk.source.{JWKSource, JWKSourceBuilder}
 import com.nimbusds.jose.proc.{JWSVerificationKeySelector, SecurityContext}
+import com.nimbusds.jose.util.{Resource, ResourceRetriever}
 import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.proc.DefaultJWTProcessor
 import com.typesafe.scalalogging.LazyLogging
 
+import java.io.IOException
 import java.net.URI
+import java.net.http.{HttpClient, HttpRequest}
 import java.util.Date
 
 /** Validates Bearer tokens from OIDC providers (Keycloak, Google, Azure AD, AWS Cognito) by
   * verifying signatures against the provider's JWKS endpoint.
   *
-  * Uses Nimbus JOSE+JWT's DefaultJWTProcessor with RemoteJWKSet which automatically caches and
-  * refreshes JWK sets for key rotation support.
+  * Uses Nimbus JOSE+JWT's DefaultJWTProcessor with a caching, rate-limited JWK source, which
+  * refreshes the JWK set for key rotation support. The set is read by
+  * [[OidcBearerAuthenticator.jwksRetriever]], under a size limit and a deadline.
   */
 class OidcBearerAuthenticator(
     val providerName: String,
@@ -29,7 +35,9 @@ class OidcBearerAuthenticator(
   val name: String = providerName
 
   private val jwkSource: JWKSource[SecurityContext] =
-    JWKSourceBuilder.create[SecurityContext](URI.create(jwksUrl).toURL()).build()
+    JWKSourceBuilder
+      .create[SecurityContext](URI.create(jwksUrl).toURL(), OidcBearerAuthenticator.jwksRetriever)
+      .build()
 
   private val jwtProcessor: DefaultJWTProcessor[SecurityContext] =
     val processor = new DefaultJWTProcessor[SecurityContext]()
@@ -49,55 +57,72 @@ class OidcBearerAuthenticator(
     processor
 
   override def authenticate(token: String): Either[String, AuthenticatedProfile] =
+    // A signed token is the issuer's to build, and a tenant admin picks the issuer: a claim nested
+    // thousands of levels deep passes the signature check, and the code that prints or walks it
+    // (flattenClaims prints each claim with toString, a few frames a level) overflows the stack. A
+    // StackOverflowError is fatal to cats-effect, so one escaping here halted the whole manager
+    // under IOApp, on one anonymous callback or one bearer token. TooDeep.orElse catches it on the
+    // thread that overflowed, where the stack is unwound and nothing is left half-done, and the
+    // token is refused.
+    TooDeep.orElse[Either[String, AuthenticatedProfile]](
+      Left(s"$providerName token is nested too deeply")
+    )(validated(token))
+
+  private def validated(token: String): Either[String, AuthenticatedProfile] =
     try
       val claims: JWTClaimsSet = jwtProcessor.process(token, null)
-
-      // Validate issuer
-      val iss = Option(claims.getIssuer).getOrElse("")
-      if expectedIssuer.nonEmpty && iss != expectedIssuer then
-        return Left(s"$providerName: unexpected issuer '$iss' (expected: '$expectedIssuer')")
-
-      // Validate audience
-      if expectedAudience.nonEmpty then
-        val audiences = Option(claims.getAudience).map(_.toArray.toList).getOrElse(Nil)
-        if !audiences.contains(expectedAudience) then
-          return Left(s"$providerName: audience mismatch: $audiences")
-
-      // Check expiry
-      val exp = Option(claims.getExpirationTime)
-      if exp.exists(_.before(new Date())) then return Left(s"$providerName: token has expired")
-
-      // A token naming no one is refused rather than named "unknown", which a row could hold.
-      extractUsername(claims) match
-        case None =>
-          Left(s"$providerName: the token names no user (no preferred_username, email or sub)")
-        case Some(username) =>
-          val role   = RoleExtractor.extract(claims, roleClaim)
-          var groups = RoleExtractor.extractGroups(claims, "groups")
-
-          // Enrich groups from external lookup (e.g., Google Directory API)
-          groupsLookup.foreach { lookup =>
-            val email          = Option(claims.getStringClaim("email")).getOrElse(username)
-            val externalGroups = lookup(email)
-            if externalGroups.nonEmpty then
-              logger.debug(
-                s"Enriched groups for $email from $providerName directory: $externalGroups"
-              )
-              groups = groups ++ externalGroups
-          }
-
-          Right(
-            AuthenticatedProfile(
-              username = username,
-              role = role,
-              groups = groups + role,
-              claims = flattenClaims(claims),
-              authMethod = providerName
-            )
-          )
+      for
+        _ <- checkIssuer(claims)
+        _ <- checkAudience(claims)
+        _ <- checkExpiry(claims)
+        // A token naming no one is refused rather than named "unknown", which a row could hold.
+        username <- extractUsername(claims).toRight(
+          s"$providerName: the token names no user (no preferred_username, email or sub)"
+        )
+      yield profileOf(claims, username)
     catch
       case e: Exception =>
         Left(s"$providerName token validation failed: ${e.getMessage}")
+
+  private def checkIssuer(claims: JWTClaimsSet): Either[String, Unit] =
+    val iss = Option(claims.getIssuer).getOrElse("")
+    if expectedIssuer.nonEmpty && iss != expectedIssuer then
+      Left(s"$providerName: unexpected issuer '$iss' (expected: '$expectedIssuer')")
+    else Right(())
+
+  private def checkAudience(claims: JWTClaimsSet): Either[String, Unit] =
+    if expectedAudience.nonEmpty then
+      val audiences = Option(claims.getAudience).map(_.toArray.toList).getOrElse(Nil)
+      if !audiences.contains(expectedAudience) then
+        Left(s"$providerName: audience mismatch: $audiences")
+      else Right(())
+    else Right(())
+
+  private def checkExpiry(claims: JWTClaimsSet): Either[String, Unit] =
+    val exp = Option(claims.getExpirationTime)
+    if exp.exists(_.before(new Date())) then Left(s"$providerName: token has expired")
+    else Right(())
+
+  private def profileOf(claims: JWTClaimsSet, username: String): AuthenticatedProfile =
+    val role   = RoleExtractor.extract(claims, roleClaim)
+    var groups = RoleExtractor.extractGroups(claims, "groups")
+
+    // Enrich groups from external lookup (e.g., Google Directory API)
+    groupsLookup.foreach { lookup =>
+      val email          = Option(claims.getStringClaim("email")).getOrElse(username)
+      val externalGroups = lookup(email)
+      if externalGroups.nonEmpty then
+        logger.debug(s"Enriched groups for $email from $providerName directory: $externalGroups")
+        groups = groups ++ externalGroups
+    }
+
+    AuthenticatedProfile(
+      username = username,
+      role = role,
+      groups = groups + role,
+      claims = flattenClaims(claims),
+      authMethod = providerName
+    )
 
   private def extractUsername(claims: JWTClaimsSet): Option[String] =
     Option(claims.getStringClaim("preferred_username"))
@@ -130,3 +155,29 @@ class OidcBearerAuthenticator(
     claims.getClaims.asScala.collect {
       case (k, v) if v != null => k -> v.toString
     }.toMap
+
+object OidcBearerAuthenticator:
+
+  private val jwksClient: HttpClient =
+    HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build()
+
+  /** Reads a JWKS under a size limit and a deadline over the whole read. The URL can come from a
+    * discovery document, which a tenant admin picks, and anyone can then make the manager fetch it:
+    * Nimbus' default retriever has no deadline over a slow body, and it reads `file:` URLs. The JDK
+    * client refuses every scheme but http(s) and follows no redirect.
+    */
+  private[auth] val jwksRetriever: ResourceRetriever = url =>
+    val answer =
+      try
+        BoundedHttp.send(
+          jwksClient,
+          HttpRequest.newBuilder(url.toURI).GET().build(),
+          BoundedHttp.MaxJwksBytes,
+          BoundedHttp.JwksTimeoutMs,
+          "JWKS"
+        )
+      catch case e: IllegalArgumentException => Left(e.getMessage)
+    answer match
+      case Right((200, body)) => new Resource(body, "application/json")
+      case Right((code, _))   => throw new IOException(s"JWKS HTTP $code")
+      case Left(why)          => throw new IOException(why)

@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.sql.TooDeep
 import com.nimbusds.jwt.SignedJWT
 import com.typesafe.scalalogging.LazyLogging
 
@@ -28,6 +29,20 @@ class ResourceOwnerPasswordAuthenticator(
     .build()
 
   override def authenticate(
+      scope: AuthScope,
+      username: String,
+      password: String
+  ): Either[AuthFailure, AuthenticatedProfile] =
+    // The token is the identity provider's, and the email_verified claim is printed with toString,
+    // which recurses once per level of a nested value: a StackOverflowError is fatal to
+    // cats-effect, so one escaping here halted the whole manager under IOApp. TooDeep.orElse
+    // catches it on the thread that overflowed, and the login is refused (see
+    // OidcBearerAuthenticator.authenticate).
+    TooDeep.orElse[Either[AuthFailure, AuthenticatedProfile]](
+      Left(AuthFailure.InvalidCredentials(s"$name: token is nested too deeply"))
+    )(passwordGrant(scope, username, password))
+
+  private def passwordGrant(
       scope: AuthScope,
       username: String,
       password: String

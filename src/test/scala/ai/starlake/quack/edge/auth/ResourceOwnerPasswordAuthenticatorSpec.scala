@@ -114,3 +114,37 @@ class ResourceOwnerPasswordAuthenticatorSpec
       case Right(profile) =>
         fail(s"a token naming no user must be refused, got the name ${profile.username}")
   }
+
+  it should "refuse a token whose email_verified nests 30000 levels deep, and let its thread go on" in {
+    // The claim is printed with toString, which recurses once per level: the StackOverflowError is
+    // fatal to cats-effect. The case runs on a plain thread with a small stack, never a cats-effect
+    // one, so a regression fails the case and not the test JVM.
+    val token = NestedClaims.rs256(
+      JwtTestSigner.keyPair,
+      NestedClaims.claims(
+        "https://idp.example.test",
+        "qod-console",
+        "email_verified",
+        NestedClaims.Depth
+      )
+    )
+    idp.resetAll()
+    idp.stubFor(
+      WireMock
+        .post(WireMock.urlPathEqualTo("/token"))
+        .willReturn(WireMock.okJson(s"""{"access_token":"$token","token_type":"Bearer"}"""))
+    )
+    val authenticator = new ResourceOwnerPasswordAuthenticator(
+      "keycloak",
+      s"http://localhost:${idp.port()}/token",
+      "qod-console",
+      "qod-console-secret",
+      "role"
+    )
+
+    PlainThread.run()(
+      authenticator.authenticate(AuthScope.System, "typed-name", "pw")
+    ) shouldBe Right(
+      Left(AuthFailure.InvalidCredentials("keycloak-ropc: token is nested too deeply"))
+    )
+  }

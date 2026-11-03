@@ -1,7 +1,15 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.{Main, ManagerConfig}
-import ai.starlake.quack.edge.auth.{LocalIdp, OidcScope, OidcSsoError}
+import ai.starlake.quack.edge.BoundedHttp
+import ai.starlake.quack.edge.auth.{
+  EchoingServer,
+  LocalIdp,
+  NestedClaims,
+  OidcScope,
+  OidcSsoError,
+  PlainThread
+}
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
   AwsAuthConfig,
@@ -13,6 +21,7 @@ import ai.starlake.quack.edge.config.{
 }
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.auth.ManagementAuthMode
+import ai.starlake.quack.security.JwtTestSigner
 import org.scalatest.concurrent.Eventually
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -209,6 +218,19 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
         case other           => fail(s"expected a failed discovery, got $other")
     }
 
+  it should "answer an issuer nobody listens on with a Left that has a text" in {
+    // OidcDiscovery holds a failure's text in a table that takes no null: every GET it is given
+    // answers a text, the JDK's exceptions that have none of their own included.
+    val closed = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress)
+    val port   = closed.getLocalPort
+    closed.close()
+    val get = ManagementAuthWiring.discoveryGet(java.net.http.HttpClient.newHttpClient())
+
+    get(s"http://127.0.0.1:$port/.well-known/openid-configuration") match
+      case Left(why) => Option(why).exists(_.nonEmpty) shouldBe true
+      case Right(_)  => fail("nothing listens there")
+  }
+
   // The management SSO's code-to-token exchange. The form holds the client secret.
   private val clientSecretForm =
     "grant_type=authorization_code&code=abc&client_id=app&client_secret=hunter2-secret"
@@ -226,10 +248,11 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
   it should "refuse an answer over 256 KiB" in
     withIdp { idp =>
       idp.serve("/token", 200, s"""{"id_token":"the-jwt","pad":"${"x" * OverCap}"}""")
+      // A healthy 200 answer is refused only by the cap, and the Left says nothing of why.
       ManagementAuthWiring.tokenExchange(java.net.http.HttpClient.newHttpClient())(
         s"${idp.base}/token",
         clientSecretForm
-      ) shouldBe Left("token endpoint response exceeds 256 KiB")
+      ) shouldBe Left(BoundedHttp.TokenEndpointFailed)
     }
 
   it should "name a refused status by its code alone, never the answer or the form" in
@@ -268,4 +291,61 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
       // The POST reached the token endpoint, and the reader gave up on its answer.
       idp.requests.asScala.map(_._1).toList should contain("/sys/token")
       eventually(idp.aborted.get should be >= 1)
+    }
+
+  it should "answer a form that the server quotes back in a malformed answer with a fixed text, none of it in the Left" in
+    // The JDK's exception for a malformed answer quotes the line, and the form holds the client
+    // secret: a status line (or a Content-Length) that echoes the request put it in the Left.
+    List(EchoingServer.Shape.StatusLine, EchoingServer.Shape.ContentLength).foreach { shape =>
+      val server = new EchoingServer(shape)
+      try
+        val out = ManagementAuthWiring.tokenExchange(java.net.http.HttpClient.newHttpClient())(
+          s"${server.base}/token",
+          clientSecretForm
+        )
+        withClue(s"[$shape] $out ") {
+          out shouldBe Left(BoundedHttp.TokenEndpointFailed)
+          server.requests shouldBe 1
+        }
+      finally server.close()
+    }
+
+  // ----- a token an issuer signed with claims nested too deep -----
+  //
+  // The issuer is a tenant admin's choice and anyone can make the manager read its token (the SSO
+  // callback). A claim nested thousands of levels deep passed the signature check and then
+  // overflowed the stack of the code that printed the claims: a StackOverflowError, fatal to
+  // cats-effect, halted the manager (exit code 1 at -Xmx256m, reproduced). The case runs on a plain
+  // thread with a small stack, never a cats-effect one, so a regression fails the case and not the
+  // test JVM.
+
+  "ManagementAuthWiring SSO" should "refuse an id_token whose claim nests 30000 levels deep, and let its thread go on" in
+    withIdp { idp =>
+      val issuer = s"${idp.base}/sys"
+      idp.serve("/sys/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))
+      idp.serve("/sys/jwks", 200, JwtTestSigner.jwksJson().noSpaces)
+      val idToken = NestedClaims.rs256(
+        JwtTestSigner.keyPair,
+        NestedClaims.claims(issuer, "sys-app", "a", NestedClaims.Depth)
+      )
+      idp.serve("/sys/token", 200, s"""{"id_token":"$idToken"}""")
+      val sso = ManagementAuthWiring
+        .build(load("oidc", issuerUrl = issuer, clientId = "sys-app"), noProviders, noTenants)
+        .oidcSso
+        .getOrElse(fail("no SSO service"))
+      val started = sso
+        .startAuth(OidcScope.System, "/ui/", "wiring-spec")
+        .getOrElse(fail("the start failed"))
+
+      PlainThread.run()(
+        sso.completeAuth(
+          "code",
+          started.stateParam,
+          started.stateCookieValue,
+          System.currentTimeMillis()
+        )
+      ) shouldBe Right(Left(OidcSsoError.IdpError))
+
+      // It read the key set: the signature was checked before the claims were read.
+      idp.requests.asScala.map(_._1).toList should contain("/sys/jwks")
     }

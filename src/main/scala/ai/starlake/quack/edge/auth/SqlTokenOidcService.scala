@@ -3,8 +3,8 @@ package ai.starlake.quack.edge.auth
 import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import com.typesafe.scalalogging.LazyLogging
-import java.net.{URI, URLEncoder}
-import java.net.http.{HttpClient, HttpRequest}
+import java.net.URLEncoder
+import java.net.http.HttpClient
 import java.nio.charset.StandardCharsets
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -14,31 +14,19 @@ object SqlTokenOidcService extends LazyLogging:
 
   /** Default code->token exchange: POST grant_type=authorization_code to the token endpoint and
     * return the raw JSON body, or Left(reason). The answer is read under
-    * [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over the whole exchange,
-    * and no failure text carries the form (it holds the client secret): a refused status is named
-    * by its code alone.
+    * [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over the whole exchange.
+    * The callback page shows the reason, and the form holds the client secret, so no failure text
+    * carries any of the exchange: a refused status is named by its code alone, and any other
+    * failure by one fixed text ([[BoundedHttp.tokenExchange]]), never by the provider's answer or
+    * the JDK's exception, which may quote what the provider was sent.
     */
   def defaultExchange(tokenEndpoint: String, form: String): Either[String, String] =
-    try
-      val req = HttpRequest
-        .newBuilder()
-        .uri(URI.create(tokenEndpoint))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .POST(HttpRequest.BodyPublishers.ofString(form))
-        .timeout(java.time.Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
-        .build()
-      BoundedHttp
-        .send(
-          sharedClient,
-          req,
-          BoundedHttp.MaxIdpAnswerBytes,
-          BoundedHttp.IdpTimeoutMs,
-          "token endpoint"
-        )
-        .flatMap((code, body) =>
-          if code != 200 then Left(s"Token exchange failed (HTTP $code)") else Right(body)
-        )
-    catch case e: Exception => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
+    BoundedHttp.tokenExchange(
+      sharedClient,
+      tokenEndpoint,
+      form,
+      code => s"Token exchange failed (HTTP $code)"
+    )
 
 class SqlTokenOidcService(
     config: AuthenticationConfig,

@@ -64,31 +64,13 @@ object ManagementAuthWiring extends LazyLogging:
 
   /** The code-to-token exchange: `form` POSTed to the token endpoint, its body when the answer is
     * 200, else why not, under the same limits as [[discoveryGet]]. The form holds the client
-    * secret, so no failure text carries it: a refused status is named by its code alone, never by
-    * the provider's answer, which may echo what it was sent.
+    * secret, so no failure text carries any of the exchange: a refused status is named by its code
+    * alone, and any other failure by one fixed text ([[BoundedHttp.tokenExchange]]), never by the
+    * provider's answer or the JDK's exception, which may quote what the provider was sent.
     */
   private[boot] def tokenExchange(client: HttpClient): (String, String) => Either[String, String] =
     (url, form) =>
-      try
-        val req = HttpRequest
-          .newBuilder()
-          .uri(URI.create(url))
-          .header("Content-Type", "application/x-www-form-urlencoded")
-          .POST(HttpRequest.BodyPublishers.ofString(form))
-          .timeout(Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
-          .build()
-        BoundedHttp
-          .send(
-            client,
-            req,
-            BoundedHttp.MaxIdpAnswerBytes,
-            BoundedHttp.IdpTimeoutMs,
-            "token endpoint"
-          )
-          .flatMap((code, body) =>
-            if code == 200 then Right(body) else Left(s"token endpoint HTTP $code")
-          )
-      catch case e: Exception => Left(Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
+      BoundedHttp.tokenExchange(client, url, form, code => s"token endpoint HTTP $code")
 
   def build(
       mgrCfg: ManagerConfig,

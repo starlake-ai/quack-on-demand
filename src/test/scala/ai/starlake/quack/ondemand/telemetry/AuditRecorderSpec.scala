@@ -14,8 +14,16 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     val enabled  = true
     val events   = scala.collection.mutable.ListBuffer.empty[AuditEvent]
     var failNext = false
+
+    /** Like the Postgres insert: a NUL in any text of a row fails the whole row. */
+    var rejectNul                              = false
+    private def hasNul(e: AuditEvent): Boolean =
+      (List(e.actor, e.actorRealm, e.action, e.outcome) ++ e.tenant ++ e.target ++
+        e.detail.keys ++ e.detail.values).exists(_.contains('\u0000'))
     def appendAudit(es: List[AuditEvent]): Unit =
       if failNext then { failNext = false; throw new RuntimeException("pg down") }
+      if rejectNul && es.exists(hasNul) then
+        throw new RuntimeException("invalid byte sequence for encoding \"UTF8\": 0x00")
       events ++= es
     def listAudit(q: AuditQuery): List[AuditRow]                                     = Nil
     def purgeAudit(olderThan: Instant): Int                                          = 0
@@ -122,6 +130,145 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     val r       = new AuditRecorder(NoopTelemetryStore, _ => None, onDrop = dropped += _)
     r.rest(None, "control-plane", "role.create", "ok")
     dropped shouldBe 0
+  }
+
+  // ----- text a stranger chose -----
+  //
+  // A failed login writes the typed user name twice and the typed tenant once, up to 64 KiB each,
+  // for anyone who can reach the route: a row each is kept for the audit retention. And a NUL fails
+  // the insert, which erases the row of whoever sent one. restAs is where every REST row is
+  // written, so it strips and caps once, for every caller (ManagerServer's guard already did so for
+  // its path).
+
+  private val Nul = "\u0000"
+
+  // One character outside the Basic Multilingual Plane (U+20000, a CJK ideograph): two chars, a
+  // surrogate pair, in a Java string.
+  private val Supplementary = new String(Character.toChars(0x20000))
+
+  "restAs" should "write the row of a value holding a NUL, without it, in every field" in {
+    val store = new RecordingStore
+    store.rejectNul = true
+    var dropped = 0
+    val r       = new AuditRecorder(store, _ => None, onDrop = dropped += _)
+
+    r.restAs(
+      s"ali${Nul}ce",
+      "tenant",
+      "auth",
+      "auth.login.failure",
+      "denied",
+      tenant = Some(s"t${Nul}x"),
+      target = Some(s"${Nul}tg"),
+      detail = Map("username" -> s"a${Nul}b${Nul}")
+    )
+
+    dropped shouldBe 0
+    store.events.map(e => (e.actor, e.tenant, e.target, e.detail)).toList shouldBe
+      List(("alice", Some("tx"), Some("tg"), Map("username" -> "ab")))
+  }
+
+  it should "drop every control character: the C0 ones, DEL and the C1 ones, a tab and a newline among them" in {
+    val store = new RecordingStore
+    val r     = new AuditRecorder(store, _ => None)
+
+    r.restAs(
+      "a\u0007b\tc\nd\re\u001bf\u007fg\u0085h",
+      "tenant",
+      "auth",
+      "auth.login.failure",
+      "denied",
+      tenant = Some("t\u0001\u001f"),
+      target = Some("x\ny"),
+      detail = Map("username" -> "u\tv\nw\u009fz")
+    )
+
+    val e = store.events.head
+    e.actor shouldBe "abcdefgh"
+    e.tenant shouldBe Some("t")
+    e.target shouldBe Some("xy")
+    e.detail shouldBe Map("username" -> "uvwz")
+  }
+
+  it should "cap actor, tenant and target at 256 characters and each detail value at 1024" in {
+    val store = new RecordingStore
+    val r     = new AuditRecorder(store, _ => None)
+    val long  = "x" * 60000
+
+    r.restAs(
+      long,
+      "tenant",
+      "auth",
+      "auth.login.failure",
+      "denied",
+      tenant = Some(long),
+      target = Some(long),
+      detail = Map("username" -> long, "reason" -> "sso_required", "other" -> ("y" * 1025))
+    )
+
+    val e = store.events.head
+    e.actor shouldBe "x" * 256
+    e.tenant shouldBe Some("x" * 256)
+    e.target shouldBe Some("x" * 256)
+    e.detail shouldBe Map(
+      "username" -> ("x" * 1024),
+      "reason"   -> "sso_required",
+      "other"    -> ("y" * 1024)
+    )
+  }
+
+  it should "take the cap from what is left once the control characters are gone" in {
+    val store = new RecordingStore
+    val r     = new AuditRecorder(store, _ => None)
+
+    r.restAs(
+      ("\u0001" * 500) + ("a" * 300),
+      "tenant",
+      "auth",
+      "auth.login.failure",
+      "denied",
+      detail = Map("username" -> (("\n" * 2000) + ("b" * 1500)))
+    )
+
+    val e = store.events.head
+    e.actor shouldBe "a" * 256
+    e.detail shouldBe Map("username" -> ("b" * 1024))
+  }
+
+  it should "leave a short, clean value, non-ASCII text included, as it was" in {
+    val store = new RecordingStore
+    val r     = new AuditRecorder(store, _ => None)
+
+    val name = s"Zoë 日本語 $Supplementary"
+
+    r.restAs(
+      name,
+      "tenant",
+      "control-plane",
+      "role.create",
+      "ok",
+      tenant = Some("acme"),
+      target = Some("acme/tpch"),
+      detail = Map("name" -> "analyst", "note" -> "a b  c")
+    )
+
+    val e = store.events.head
+    (e.actor, e.tenant, e.target) shouldBe ((name, Some("acme"), Some("acme/tpch")))
+    e.detail shouldBe Map("name" -> "analyst", "note" -> "a b  c")
+  }
+
+  it should "not cut a surrogate pair in two when it caps" in {
+    val store = new RecordingStore
+    val r     = new AuditRecorder(store, _ => None)
+    // One plain character, then pairs: the 256th character is the first half of a pair.
+    val name = "a" + (Supplementary * 200)
+
+    r.restAs(name, "tenant", "auth", "auth.login.failure", "denied")
+
+    val actor = store.events.head.actor
+    actor.length should be <= 256
+    Character.isHighSurrogate(actor.last) shouldBe false
+    name.startsWith(actor) shouldBe true
   }
 
   "AuditRateLimiter" should "allow one event per key per interval" in {

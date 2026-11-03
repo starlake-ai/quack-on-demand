@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import ai.starlake.quack.edge.auth.EchoingServer
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
@@ -72,6 +73,14 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         ex.sendResponseHeaders(200, 256 * MiB)
         writeUntilBroken(ex, 32 * 1024, endlessWritten)
         endlessEnded.countDown()
+        ex.close()
+    )
+    // The same, for the cases that only read the text of a Left: it leaves the counters alone.
+    server.createContext(
+      "/endless-quiet",
+      ex =>
+        ex.sendResponseHeaders(200, 256 * MiB)
+        writeUntilBroken(ex, 32 * 1024, new AtomicLong)
         ex.close()
     )
     // The same with no declared length (chunked).
@@ -247,3 +256,65 @@ class BoundedHttpSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   "BoundedHttp.MaxIdpAnswerBytes" should "be 256 KiB" in {
     BoundedHttp.MaxIdpAnswerBytes shouldBe 256 * 1024
   }
+
+  "BoundedHttp.MaxJwksBytes and JwksTimeoutMs" should "be Nimbus' own 50 KiB, and 5 s over the whole read" in {
+    BoundedHttp.MaxJwksBytes shouldBe 50 * 1024
+    BoundedHttp.JwksTimeoutMs shouldBe 5000L
+  }
+
+  // ----- the token exchange: a form that holds the client secret, and a server that is not ours -----
+
+  private val Form = s"grant_type=authorization_code&code=abc&client_secret=$SecretInRequest"
+
+  private def exchange(url: String, refused: Int => String = c => s"refused $c") =
+    BoundedHttp.tokenExchange(client, url, Form, refused)
+
+  "BoundedHttp.tokenExchange" should "return the body of a 200 answer, sending the form to the endpoint" in {
+    exchange(base + "/small") shouldBe Right("""{"a":"é"}""")
+  }
+
+  it should "name a refused status with the caller's text for its code, never the answer" in {
+    exchange(base + "/status/503", c => s"token endpoint HTTP $c") shouldBe
+      Left("token endpoint HTTP 503")
+    exchange(base + "/status/404", c => s"Token exchange failed (HTTP $c)") shouldBe
+      Left("Token exchange failed (HTTP 404)")
+  }
+
+  it should "answer every other failure with the one fixed text, nothing of the exchange in it" in {
+    val unreachable =
+      val port = new ServerSocket(0, 1, InetAddress.getLoopbackAddress)
+      val free = port.getLocalPort
+      port.close()
+      s"http://127.0.0.1:$free/token"
+    val failures = List(
+      "unreachable"      -> exchange(unreachable),
+      "over the cap"     -> exchange(base + "/endless-quiet"),
+      "not a URL"        -> exchange("http://[not-a-url"),
+      "no scheme at all" -> exchange("/token")
+    )
+    failures.foreach { (what, out) =>
+      withClue(s"[$what] ")(out shouldBe Left(BoundedHttp.TokenEndpointFailed))
+    }
+    BoundedHttp.TokenEndpointFailed should not include SecretInRequest
+  }
+
+  it should "answer a server that quotes the form back in a malformed answer with the fixed text" in
+    // The JDK refuses a malformed status line (or Content-Length) with an exception whose message
+    // quotes it, so `send` itself passes the quote on, and a form echoed there holds the secret.
+    List(EchoingServer.Shape.StatusLine, EchoingServer.Shape.ContentLength).foreach { shape =>
+      val server = new EchoingServer(shape)
+      try
+        val request = HttpRequest
+          .newBuilder(URI.create(server.base + "/token"))
+          .timeout(Duration.ofSeconds(5))
+          .header("Content-Type", "application/x-www-form-urlencoded")
+          .POST(HttpRequest.BodyPublishers.ofString(Form))
+          .build()
+        val raw = BoundedHttp.send(client, request, 1024, 10000, "token endpoint")
+        withClue(s"[$shape] send says $raw, and ") {
+          // What send alone does, and why the helper exists: the JDK's message quotes the form.
+          raw.left.toOption.exists(_.contains(SecretInRequest)) shouldBe true
+        }
+        exchange(server.base + "/token") shouldBe Left(BoundedHttp.TokenEndpointFailed)
+      finally server.close()
+    }

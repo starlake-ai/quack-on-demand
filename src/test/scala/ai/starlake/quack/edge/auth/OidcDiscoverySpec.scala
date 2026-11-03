@@ -93,6 +93,41 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     gets.asked.get shouldBe 2
   }
 
+  private val Day = 24L * 3600 * Second
+
+  it should "fetch a document again once a day has passed since it was fetched" in {
+    val clock     = new Clock
+    val gets      = new Gets(_ => Right(docOf(IssuerA)))
+    val discovery = new OidcDiscovery(gets, nanoTime = clock.apply)
+    discovery.resolve(IssuerA).map(_.issuer) shouldBe Right(IssuerA)
+
+    // A document is kept for a day, however many calls read it: not extended by being read.
+    clock.nanos = Day / 2
+    discovery.resolve(IssuerA).map(_.issuer) shouldBe Right(IssuerA)
+    clock.nanos = Day - Second
+    discovery.resolve(IssuerA).map(_.issuer) shouldBe Right(IssuerA)
+    gets.asked.get shouldBe 1
+
+    // Past the day the issuer is asked again: before, a document lasted until the manager restarted.
+    clock.nanos = Day + Second
+    discovery.resolve(IssuerA).map(_.issuer) shouldBe Right(IssuerA)
+    gets.asked.get shouldBe 2
+  }
+
+  it should "answer a Left for an expired document whose issuer no longer answers, and remember that briefly" in {
+    val clock     = new Clock
+    var up        = true
+    val gets      = new Gets(_ => if up then Right(docOf(IssuerA)) else Left("gone"))
+    val discovery = new OidcDiscovery(gets, nanoTime = clock.apply)
+    discovery.resolve(IssuerA).map(_.issuer) shouldBe Right(IssuerA)
+
+    up = false
+    clock.nanos = Day + Second
+    discovery.resolve(IssuerA) shouldBe Left("gone")
+    discovery.resolve(IssuerA) shouldBe Left("gone")
+    gets.asked.get shouldBe 2
+  }
+
   it should "remember a failure per issuer: another issuer is still asked, and still cached" in {
     val gets = new Gets(url =>
       if url.startsWith(IssuerA) then Left("connection refused") else Right(docOf(IssuerB))
@@ -114,10 +149,16 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     gets.asked.get shouldBe 1
   }
 
-  it should "remember a failure that has no text" in {
-    val gets      = new Gets(_ => Left(null))
+  // The issuer is a tenant admin's choice, and every setting of a new one would leave an entry for
+  // the life of the process: a document can hold up to the 256 KiB that BoundedHttp lets through.
+  it should "hold at most 1024 documents, however many issuers are asked, and answer every one" in {
+    val gets = new Gets(url => Right(docOf(url.stripSuffix("/.well-known/openid-configuration"))))
     val discovery = new OidcDiscovery(gets)
-    discovery.resolve(IssuerA) shouldBe Left(null)
-    discovery.resolve(IssuerA) shouldBe Left(null)
-    gets.asked.get shouldBe 1
+    val issuers   = (1 to 3000).map(i => s"https://idp.example/$i")
+
+    issuers.foreach(i => discovery.resolve(i).map(_.issuer) shouldBe Right(i))
+
+    discovery.cachedDocuments should be <= 1024L
+    // One that was let go costs one more GET, never a wrong answer.
+    issuers.foreach(i => discovery.resolve(i).map(_.issuer) shouldBe Right(i))
   }
