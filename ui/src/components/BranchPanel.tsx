@@ -206,8 +206,9 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
     return () => { cancelled = true; };
   }, [tenant, tenantDb, branch.name, branch.status, branch.updatedAt, live]);
 
-  const hint = changes
-    ? rowConflictsHint(changes.tables, detail?.merges.find(m => m.status === 'proposed')?.onConflict)
+  // The open proposal's policy comes from `detail`: until it has loaded, a hint would guess it.
+  const hint = changes && detail
+    ? rowConflictsHint(changes.tables, detail.merges.find(m => m.status === 'proposed')?.onConflict)
     : null;
 
   return (
