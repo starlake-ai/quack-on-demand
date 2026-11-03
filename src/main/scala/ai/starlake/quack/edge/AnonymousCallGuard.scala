@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
   * (`PROXY_MAX_HEADER_BYTES`) and its message (`PROXY_MAX_INBOUND_MESSAGE_BYTES`, in Netty's own
   * budget), whose command may only ask for little
   * ([[FlightProducerImpl.MaxAnonymousCommandBytes]]). A flood can hold them all, which refuses only
-  * other calls with no credentials.
+  * other calls with no credentials. A refused call holds nothing once its reset is written
+  * ([[RefusedStream]]).
   *
   * An interceptor and not an Arrow middleware: a middleware hears only of a call the server closes,
   * and a client that leaves a call must give its place back.
@@ -35,17 +36,24 @@ final class AnonymousCallGuard(maxCalls: Int) extends ServerInterceptor:
     if FlightEdgeServer.authHeaderOf(new MetadataAdapter(headers)).isDefined then
       next.startCall(call, headers)
     else if !AnonymousCallGuard.isOpen(call.getMethodDescriptor.getFullMethodName) then
-      refuse(call, Status.UNAUTHENTICATED.withDescription("credentials required"))
+      refuse(call, headers, Status.UNAUTHENTICATED.withDescription("credentials required"))
     else if inFlight.incrementAndGet() > maxCalls then
       inFlight.decrementAndGet()
-      refuse(call, Status.UNAVAILABLE.withDescription("too many calls with no credentials; retry"))
+      refuse(
+        call,
+        headers,
+        Status.UNAVAILABLE.withDescription("too many calls with no credentials; retry")
+      )
     else counted(call, headers, next)
 
   private def refuse[ReqT, RespT](
       call: ServerCall[ReqT, RespT],
+      headers: Metadata,
       status: Status
   ): ServerCall.Listener[ReqT] =
+    RefusedStream.reset()
     call.close(status, new Metadata())
+    AnonymousCallGuard.forget(headers)
     new ServerCall.Listener[ReqT] {}
 
   private def counted[ReqT, RespT](
@@ -79,3 +87,17 @@ object AnonymousCallGuard:
 
   private def isOpen(fullMethodName: String): Boolean =
     Open(FlightMethod.fromProtocol(fullMethodName))
+
+  /** Arrow keeps a call's headers until its stream is gone, and a stream's reset waits behind
+    * whatever its client has not read: several connections that stopped reading could hold 10,000
+    * refused calls with their headers each. A header name that makes no key stays: it costs that
+    * only if its client stops reading too.
+    */
+  private def forget(headers: Metadata): Unit =
+    headers.keys().forEach { name =>
+      scala.util.Try(
+        if name.endsWith(Metadata.BINARY_HEADER_SUFFIX) then
+          headers.discardAll(Metadata.Key.of(name, Metadata.BINARY_BYTE_MARSHALLER))
+        else headers.discardAll(Metadata.Key.of(name, Metadata.ASCII_STRING_MARSHALLER))
+      )
+    }

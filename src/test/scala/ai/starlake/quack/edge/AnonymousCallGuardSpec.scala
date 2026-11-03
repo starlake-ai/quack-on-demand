@@ -1,6 +1,14 @@
 package ai.starlake.quack.edge
 
-import io.grpc.{Metadata, MethodDescriptor, ServerCall, ServerCallHandler, Status}
+import io.grpc.{
+  Context,
+  InternalMetadata,
+  Metadata,
+  MethodDescriptor,
+  ServerCall,
+  ServerCallHandler,
+  Status
+}
 import org.apache.arrow.flight.impl.FlightServiceGrpc
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -138,6 +146,55 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
       codes(admit(guard, handler, method)._1) shouldBe List(Status.Code.UNAVAILABLE)
     )
     handler.started shouldBe 2
+  }
+
+  it should "reset the stream of a call it refuses, and only of such a call" in {
+    def startedOn(run: => Any): Context.CancellableContext =
+      val tracer = RefusedStream.TracerFactory.newServerStreamTracer(getFlightInfo, new Metadata())
+      val inCall = tracer.filterContext(Context.ROOT).withCancellation()
+      inCall.call(() => run)
+      inCall
+
+    val handler = new FakeHandler
+    val closed  = FlightServiceGrpc.getDoPutMethod.getFullMethodName
+
+    val unauthenticated = startedOn(admit(new AnonymousCallGuard(1), handler, closed))
+    unauthenticated.cancellationCause() shouldBe a[java.util.concurrent.TimeoutException]
+
+    val overLimit = startedOn(admit(new AnonymousCallGuard(0), handler))
+    overLimit.cancellationCause() shouldBe a[java.util.concurrent.TimeoutException]
+
+    startedOn(admit(new AnonymousCallGuard(1), handler)).isCancelled shouldBe false
+    startedOn(
+      admit(new AnonymousCallGuard(0), handler, closed, header("Authorization", "Bearer abc"))
+    ).isCancelled shouldBe false
+  }
+
+  it should "forget the headers of a call it refuses, and only of such a call" in {
+    val guard   = new AnonymousCallGuard(1)
+    val handler = new FakeHandler
+    val doPut   = FlightServiceGrpc.getDoPutMethod.getFullMethodName
+
+    val refused = header("x-pad", "y" * 1024)
+    refused.put(Metadata.Key.of("x-pad-bin", Metadata.BINARY_BYTE_MARSHALLER), Array[Byte](1, 2))
+    admit(guard, handler, doPut, refused)
+    refused.keys() should have size 0
+
+    val admitted = header("x-pad", "y")
+    admit(guard, handler, getFlightInfo, admitted)
+    admitted.keys() should have size 1
+
+    val overLimit = header("x-pad", "y")
+    admit(guard, handler, getFlightInfo, overLimit)
+    overLimit.keys() should have size 0
+  }
+
+  it should "refuse a call whose header name makes no key" in {
+    val guard = new AnonymousCallGuard(1)
+    val odd   = InternalMetadata.newMetadata("x y".getBytes("US-ASCII"), "z".getBytes("US-ASCII"))
+    val doPut = FlightServiceGrpc.getDoPutMethod.getFullMethodName
+    val (call, _) = admit(guard, new FakeHandler, doPut, odd)
+    codes(call) shouldBe List(Status.Code.UNAUTHENTICATED)
   }
 
   it should "not hold a place for a refused call" in {

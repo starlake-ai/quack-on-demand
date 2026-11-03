@@ -334,6 +334,64 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       h.shutdown()
   }
 
+  // ---- refused calls -------------------------------------------------------------------------
+
+  // A refused stream stayed half open, with its headers, until the client ended it: 30,000 of them
+  // filled a 512 MiB heap. A reset is what frees them.
+  "the stream of a refused call" should "be reset after its status, its client saying nothing" in {
+    val h = boot(_.copy(maxAnonymousCalls = 2))
+    try
+      List(
+        ("a method closed to calls with no credentials", () => silentCalls(h.port, "DoPut", 8)),
+        ("a call past the limit on calls at once", () => silentCalls(h.port, "GetFlightInfo", 8)),
+        (
+          "credentials that fail",
+          () => silentCalls(h.port, "DoPut", 8, credentials = true, authorization = "Bearer nope")
+        )
+      ).foreach { (label, open) =>
+        withClue(s"$label: ") {
+          val socket = open()
+          try
+            // At least 6 of the 8 calls are refused, and each stream's status comes first.
+            val frames = framesUntil(socket, 5000)(_.count(_._1 == RstStream) >= 6)
+            val reset  = frames.groupBy(_._2).values.filter(_.exists(_._1 == RstStream)).toList
+            reset.size should be >= 6
+            reset.foreach(f => f.map(_._1) shouldBe List(Headers, RstStream))
+          finally socket.close()
+        }
+      }
+    finally h.shutdown()
+  }
+
+  it should "stay open for a call admitted with no credentials" in {
+    val h      = boot(identity)
+    val socket = silentCalls(h.port, "GetFlightInfo", 8)
+    try framesUntil(socket, 1000)(_ => false) shouldBe empty
+    finally
+      socket.close()
+      h.shutdown()
+  }
+
+  it should "cut off a client that stops reading" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    val socket = new Socket("127.0.0.1", h.port)
+    try
+      val out = new java.io.BufferedOutputStream(socket.getOutputStream, 1 << 16)
+      out.write(Preface)
+      out.write(frame(4, 0, 0, Array.empty))
+      val block = callHeaders(h.port, "DoPut", Array.empty)
+      // Enough to fill the socket buffers and queue more than 10,000 resets behind them.
+      val cut = scala.util
+        .Try((0 until 300000).foreach(i => out.write(frame(1, 0x4, 2 * i + 1, block))))
+      cut.isFailure shouldBe true
+      client.getInfo(sqlInfo, basic, timed) should not be null
+    finally
+      socket.close()
+      client.close()
+      h.shutdown()
+  }
+
   // ---- DoPut ---------------------------------------------------------------------------------
 
   private def updateDescriptor: FlightDescriptor =
@@ -499,15 +557,29 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       (stream & 0xff).toByte
     ) ++ payload
 
+  private val Headers   = 1
+  private val RstStream = 3
+
+  private def callHeaders(port: Int, method: String, more: Array[Array[Byte]]): Array[Byte] =
+    (Array(
+      literal(":method", "POST"),
+      literal(":scheme", "http"),
+      literal(":path", s"/arrow.flight.protocol.FlightService/$method"),
+      literal(":authority", s"127.0.0.1:$port"),
+      literal("content-type", "application/grpc"),
+      literal("te", "trailers")
+    ) ++ more).flatten
+
   /** Opens `count` calls of `method` on one plain HTTP/2 connection to the edge, each its HEADERS
-    * and nothing after them, as a client that stalls does, with the credentials of `basic` when
-    * `credentials` is set. Returns the open socket, which the caller closes.
+    * and nothing after them, as a client that stalls does, with the identity of `basic` and
+    * `authorization` when `credentials` is set. Returns the open socket, which the caller closes.
     */
   private def silentCalls(
       port: Int,
       method: String,
       count: Int,
-      credentials: Boolean = false
+      credentials: Boolean = false,
+      authorization: String = basicAuthorization
   ): Socket =
     val socket = new Socket("127.0.0.1", port)
     val out    = socket.getOutputStream
@@ -518,20 +590,35 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         Array(
           literal("tenant", SecurityFixtures.TenantName),
           literal("pool", SecurityFixtures.PoolName),
-          literal("authorization", basicAuthorization)
+          literal("authorization", authorization)
         )
       else Array.empty[Array[Byte]]
-    val block = (Array(
-      literal(":method", "POST"),
-      literal(":scheme", "http"),
-      literal(":path", s"/arrow.flight.protocol.FlightService/$method"),
-      literal(":authority", s"127.0.0.1:$port"),
-      literal("content-type", "application/grpc"),
-      literal("te", "trailers")
-    ) ++ identityHeaders).flatten
+    val block = callHeaders(port, method, identityHeaders)
     (0 until count).foreach(i => out.write(frame(1, 0x4, 2 * i + 1, block)))
     out.flush()
     socket
+
+  /** The (type, stream) of each frame the server sends on `socket` (SETTINGS, PING and
+    * WINDOW_UPDATE left out), until `done` holds for them or `waitMs` has passed.
+    */
+  private def framesUntil(socket: Socket, waitMs: Int)(
+      done: List[(Int, Int)] => Boolean
+  ): List[(Int, Int)] =
+    socket.setSoTimeout(100)
+    val in       = new DataInputStream(socket.getInputStream)
+    val deadline = System.nanoTime() + waitMs * 1000000L
+    val seen     = ArrayBuffer.empty[(Int, Int)]
+    while System.nanoTime() < deadline && !done(seen.toList) do
+      try
+        val head = new Array[Byte](9)
+        in.readFully(head)
+        val len = ((head(0) & 0xff) << 16) | ((head(1) & 0xff) << 8) | (head(2) & 0xff)
+        in.readFully(new Array[Byte](len))
+        val typ    = head(3) & 0xff
+        val stream = java.nio.ByteBuffer.wrap(head, 5, 4).getInt & 0x7fffffff
+        if typ != 4 && typ != 6 && typ != 8 then seen += ((typ, stream))
+      catch case _: SocketTimeoutException => ()
+    seen.toList
 
   /** Opens an anonymous GetFlightInfo call on a plain HTTP/2 connection to the edge, with one
     * header of `valueBytes`, never sends its message, and returns the types of the frames the

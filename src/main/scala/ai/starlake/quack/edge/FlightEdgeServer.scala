@@ -118,7 +118,9 @@ final class FlightEdgeServer(
     // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
     // headerAuth runs before the guard: for a call with no header it only mints a peer id.
     val installGuard: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
-      nettyBuilder => nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls))
+      nettyBuilder =>
+        nettyBuilder.addStreamTracerFactory(RefusedStream.TracerFactory)
+        nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls))
     executor = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
     val builder = FlightServer
       .builder(allocator, location, producer)
@@ -156,6 +158,13 @@ final class FlightEdgeServer(
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
+        try peerFor(headers)
+        catch
+          case refused: FlightRuntimeException =>
+            RefusedStream.reset()
+            throw refused
+
+      private def peerFor(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
         val authHeader    = FlightEdgeServer.authHeaderOf(headers)
         val bearer        = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
         val basicPair     = FlightEdgeServer.basicPairOf(authHeader)
