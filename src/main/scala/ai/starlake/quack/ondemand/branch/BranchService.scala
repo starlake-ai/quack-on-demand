@@ -1750,7 +1750,9 @@ object BranchService:
           "kind"     -> t.kind.wire.asJson,
           "inserted" -> t.inserted.asJson,
           "deleted"  -> t.deleted.asJson,
-          "updated"  -> t.updated.asJson
+          "updated"  -> t.updated.asJson,
+          // The system's count failed, so these zeros are no counts: a superuser reads them as is.
+          "countsUnavailable" -> t.countsUnavailable.asJson
         )
       }*),
       "unsupported" -> cs.unsupported.asJson

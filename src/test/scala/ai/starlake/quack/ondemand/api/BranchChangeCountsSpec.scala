@@ -439,6 +439,26 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       Set(("region", "root"), ("nation", "root"))
   }
 
+  it should "flag in the stored summary a table the system could not count, not store a real zero" in {
+    // On a real node: a proposal right after a refused merge finds the thawed branch's node
+    // unroutable until its next health probe, so the system's count fails.
+    val f = new Fixture
+    f.downTables += "nation"
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    nationIn(tablesOf(reply.merge.summary)) shouldBe (0L, true)
+    tablesOf(reply.merge.summary)
+      .find(_.hcursor.get[String]("table").toOption.contains("region"))
+      .map(t =>
+        (t.hcursor.get[Long]("inserted"), t.hcursor.get[Boolean]("countsUnavailable"))
+      ) shouldBe
+      Some((Right(7L), Right(false)))
+  }
+
   /** nation's counts as a summary or change-set JSON carries them: (inserted, countsUnavailable).
     */
   private def nationIn(tables: List[Json]): (Long, Boolean) =
