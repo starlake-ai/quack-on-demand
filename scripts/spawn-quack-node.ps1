@@ -581,18 +581,36 @@ $encryptionKey = Secret-Or 'encryptionKey' ''
 # refuses to change it from any session) and before loading quack and serving. Mirrors
 # spawn-quack-node.sh.
 #
+# Text this script splices into the init SQL without having written it (a database's or a pool's
+# trusted initSql, the manager's object-store SQL, the federation SQL) is closed by a `;` on a line
+# of its own. qod-node splits the whole stream on DuckDB's own tokenizer, so a text whose last
+# statement has no `;` would run into the statement that follows it, and both would be lost (`SET
+# threads = 2` then `INSTALL ducklake;` reads as one statement that does not parse). The `;` has a
+# line to itself because a text may end in a `-- comment` with no newline, which would swallow a `;`
+# written after it. Only this stream changes, never the stored text. After a text that already ends
+# in `;` the extra `;` is an empty statement, which qod-node's splitter drops, so the init log
+# counts nothing for it. A tenant admin's text needs none: qod-node cuts the stream at the marker
+# lines before it tokenizes anything, so the end marker closes that section. Mirrors SQL_CLOSE and
+# append_closed_sql in spawn-quack-node.sh.
+function Add-ClosedSql([System.Text.StringBuilder]$Builder, [string]$Sql) {
+  if ([string]::IsNullOrEmpty($Sql)) { return }
+  [void]$Builder.AppendLine($Sql)
+  [void]$Builder.AppendLine(';')
+}
+
 # A tenant's initSql as qod-node gets it, mirror of tenant_init_sql in spawn-quack-node.sh: a
-# ...Trusted file (a superuser's or the manager's text) as written, any other between the lines
-# `-- qod:untrusted-begin <nonce> <label>` and `-- qod:untrusted-end <nonce>`, a section qod-node runs
-# under its tenant initSql allowlist; <nonce> is this spawn's, so no other line is a marker. Every
-# line holding the marker text, in any case (-notmatch ignores case), is also dropped first.
-# Empty: ''. An untrusted text without a well-formed nonce stops the spawn: it never runs unmarked.
+# ...Trusted file (a superuser's or the manager's text) as written, closed by a `;` line (above),
+# any other between the lines `-- qod:untrusted-begin <nonce> <label>` and
+# `-- qod:untrusted-end <nonce>`, a section qod-node runs under its tenant initSql allowlist;
+# <nonce> is this spawn's, so no other line is a marker. Every line holding the marker text, in any
+# case (-notmatch ignores case), is also dropped first. Empty: ''. An untrusted text without a
+# well-formed nonce stops the spawn: it never runs unmarked.
 function Format-TenantInitSql([string]$Label, [string]$Sql, [bool]$Trusted) {
   if ([string]::IsNullOrEmpty($Sql)) { return '' }
   $kept = @($Sql -split "`n" | Where-Object { $_ -notmatch 'qod:untrusted-' })
   $clean = ($kept -join "`n").TrimEnd("`r", "`n")
   if ([string]::IsNullOrEmpty($clean)) { return '' }
-  if ($Trusted) { return $clean }
+  if ($Trusted) { return "$clean`n;" }
   if ($initNonce -cnotmatch '^[0-9a-f]{32,128}$') {
     [Console]::Error.WriteLine("ERROR: no well-formed init marker nonce (`$QOD_SECRETS_DIR\QOD_INIT_NONCE) for the $Label initSql")
     Exit-Spawn 1
@@ -619,7 +637,7 @@ foreach ($section in @((Format-TenantInitSql 'database' $tenantDbInitSqlTrusted 
 # Per-database object-store secret, emitted for EVERY kind: a `memory` or `duckdb-file`
 # database may carry an objectStore (TenantDb.validate permits it), and a `memory` database
 # of views over remote parquet reads nothing without the CREATE SECRET. Must precede ATTACH.
-if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
+Add-ClosedSql $sb $objectStoreSql
 # The data path's storage secret and extensions, for every kind, before any ATTACH (mirrors
 # spawn-quack-node.sh).
 if (-not [string]::IsNullOrEmpty($storageSql)) { [void]$sb.AppendLine($storageSql) }
@@ -685,7 +703,7 @@ foreach ($section in @((Format-TenantInitSql 'pool' $tenantPoolInitSqlTrusted $t
                        (Format-TenantInitSql 'pool' $tenantPoolInitSql $false))) {
   if (-not [string]::IsNullOrEmpty($section)) { [void]$sb.AppendLine($section) }
 }
-if (-not [string]::IsNullOrEmpty($extraSetupSql)) { [void]$sb.AppendLine($extraSetupSql) }
+Add-ClosedSql $sb $extraSetupSql
 
 $initSql = $sb.ToString()
 

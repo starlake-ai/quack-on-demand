@@ -139,3 +139,50 @@ class SpawnScriptTenantInitSpec extends AnyFlatSpec with Matchers with SpawnScri
   "an empty initSql" should "leave no section" in {
     initSql(Map.empty).exists(_.contains("qod:untrusted-")) shouldBe false
   }
+
+  // Task 18: qod-node splits the whole stream on DuckDB's own tokenizer, so a text whose last
+  // statement has no `;` ran into the statement after it (`SET threads = 2` then `INSTALL
+  // ducklake;` read as one statement that does not parse) and both were lost. The script closes
+  // every text it splices in with a `;` on a line of its own, whatever the text ends in, and never
+  // edits the text itself.
+  "a text with no final semicolon" should "be closed by a semicolon line of its own, as stored" in {
+    // Each ends differently: bare, and in a comment with no newline after it.
+    val secrets = Map(
+      NodeSecretFiles.TenantDbInitTrustedKey   -> "SET threads = 2",
+      "objectStoreSql"                         -> "SELECT 'store'",
+      NodeSecretFiles.TenantPoolInitTrustedKey -> "SET memory_limit = '1GB' -- one gb",
+      "extraSetupSql"                          -> "SELECT 'federation'"
+    )
+    val resource = "resourceSql" -> "SET threads = 8"
+    val lines    = initSql(secrets, resource)
+    (secrets.toList :+ resource).foreach { case (key, text) =>
+      val at = lines.indexOf(text)
+      withClue(s"$key: the text whole on a line of its own, in ${lines.mkString("\n")}")(
+        at should be >= 0
+      )
+      withClue(s"$key: the line after the text")(lines.lift(at + 1) shouldBe Some(";"))
+    }
+  }
+
+  "a tenant admin's text with no final semicolon" should
+    "need no terminator, its end marker closing it" in {
+      val lines = initSql(
+        Map(
+          NodeSecretFiles.TenantDbInitKey   -> "SET threads = 2",
+          NodeSecretFiles.TenantPoolInitKey -> "SET memory_limit = '1GB' -- one gb"
+        )
+      )
+      val db = lines.indexOf(s"$Begin database")
+      lines.slice(db + 1, db + 3) shouldBe Vector("SET threads = 2", End)
+      val pool = lines.indexOf(s"$Begin pool")
+      lines.slice(pool + 1, pool + 3) shouldBe Vector("SET memory_limit = '1GB' -- one gb", End)
+      lines.contains(";") shouldBe false
+    }
+
+  "an empty text" should "add no terminator" in {
+    initSql(Map.empty).contains(";") shouldBe false
+    // One terminator per text there is, nothing for the texts there are not.
+    initSql(
+      Map(NodeSecretFiles.TenantDbInitTrustedKey -> "SET threads = 2")
+    ).count(_ == ";") shouldBe 1
+  }

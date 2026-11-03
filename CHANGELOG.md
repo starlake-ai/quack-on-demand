@@ -882,6 +882,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Drain waits for in-flight statements before stopping a node, on FlightSQL and the native front
   door (#161, thanks `ItsM0rty`). The wait is bounded by the new `QOD_POOL_DRAIN_TIMEOUT_SEC`
   (default 20 s).
+- A database's or a pool's `initSql` whose last statement has no final `;`, even when the text ends
+  in a `-- comment`, no longer runs into the statement after it. Both were lost, so the node came up
+  without the setting and without whatever followed (DuckLake's own setup, at the database level).
+  The spawn scripts now close every text they add to the node's init SQL with a `;` on a line of
+  its own; the stored text is not changed.
 
 ## 0.10.1
 

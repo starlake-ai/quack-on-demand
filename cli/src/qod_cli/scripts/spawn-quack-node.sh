@@ -545,6 +545,23 @@ fi
 #                 no ATTACH needed. Federation aliases (in extraSetupSql)
 #                 are typically the only catalogs available.
 
+# Text this script splices into INIT_SQL without having written it (a database's or a pool's trusted
+# initSql, the manager's resource and object-store SQL, the federation SQL) is closed by a `;` on a
+# line of its own: SQL_CLOSE. qod-node splits the whole stream on DuckDB's own tokenizer, so a text
+# whose last statement has no `;` would run into the statement that follows it, and both would be
+# lost (`SET threads = 2` then `INSTALL ducklake;` reads as one statement that does not parse). The
+# `;` has a line to itself because a text may end in a `-- comment` with no newline, which would
+# swallow a `;` written after it. Only this stream changes, never the stored text. After a text that
+# already ends in `;` the extra `;` is an empty statement, which qod-node's splitter drops, so the
+# init log counts nothing for it. A tenant admin's text needs none: qod-node cuts the stream at the
+# marker lines before it tokenizes anything, so the end marker closes that section (see below).
+SQL_CLOSE=$'\n;\n'
+# Appends $1 to INIT_SQL, closed by SQL_CLOSE; nothing for an empty text.
+append_closed_sql() {
+  [[ -n "$1" ]] || return 0
+  INIT_SQL+="$1$SQL_CLOSE"
+}
+
 # A tenant's initSql as qod-node gets it. The file's name says who wrote it: tenantDbInitSqlTrusted
 # and tenantPoolInitSqlTrusted (a superuser or the manager) run as written; tenantDbInitSql and
 # tenantPoolInitSql (a tenant admin) go between `-- qod:untrusted-begin <nonce> <label>` and
@@ -572,14 +589,15 @@ strip_init_markers() {
   fi
   printf '%s' "$out"
 }
-# Prints the section for one initSql (nothing for an empty one), newline-terminated. Fails, writing
-# nothing, for an untrusted text without a well-formed nonce: it is never run unmarked.
+# Prints the section for one initSql (nothing for an empty one), newline-terminated: a trusted text
+# closed by SQL_CLOSE (above), an untrusted one between its marker lines. Fails, writing nothing,
+# for an untrusted text without a well-formed nonce: it is never run unmarked.
 tenant_init_sql() {
   local label="$1" sql trusted="$3"
   sql="$(strip_init_markers "$2")"
   [[ -n "$sql" ]] || return 0
   if [[ "$trusted" == "trusted" ]]; then
-    printf '%s\n' "$sql"
+    printf '%s%s' "$sql" "$SQL_CLOSE"
   elif [[ "$INIT_NONCE" =~ ^[0-9a-f]{32,128}$ ]]; then
     printf -- '-- qod:untrusted-begin %s %s\n%s\n-- qod:untrusted-end %s\n' "$INIT_NONCE" "$label" "$sql" \
       "$INIT_NONCE"
@@ -615,9 +633,7 @@ INIT_SQL+="$PROXY_SQL"$'\n'
 # tenant's initSql, so an operator's own "SET memory_limit=..." / "SET threads=..." there still
 # wins - DuckDB's SET is a plain reassignment, so the later statement is the one that sticks.
 INIT_SQL+="$RESOURCE_SQL"
-if [[ -n "${resourceSql:-}" ]]; then
-  INIT_SQL+="$resourceSql"$'\n'
-fi
+append_closed_sql "${resourceSql:-}"
 # qod-node opens the database with autoinstall_known_extensions off (decision 17), so a statement no
 # longer downloads the known extension it needs. Install, without loading, the two QoD's own setup
 # reached only that way: httpfs (s3 and http reads, and Iceberg REST catalogs, on a node whose data
@@ -638,9 +654,7 @@ append_tenant_init_sql database "${tenantDbInitSql:-}" untrusted
 # `memory` database of views over s3:// parquet (the `qod serve` remote-prefix case) reads nothing
 # without it. Must precede any ATTACH, and runs right before STORAGE_SQL, which adds
 # qod_data_s3 only when objectStoreSql is empty.
-if [[ -n "${objectStoreSql:-}" ]]; then
-  INIT_SQL+="$objectStoreSql"$'\n'
-fi
+append_closed_sql "${objectStoreSql:-}"
 
 # The data path's storage secret and extensions (STORAGE_SQL, above), for every kind: a duckdb-file
 # or memory database on an object store needs its scoped secret as much as a DuckLake one. Before any
@@ -706,9 +720,7 @@ esac
 # federated source is attached.
 append_tenant_init_sql pool "${tenantPoolInitSqlTrusted:-}" trusted
 append_tenant_init_sql pool "${tenantPoolInitSql:-}" untrusted
-if [[ -n "${extraSetupSql:-}" ]]; then
-  INIT_SQL+="$extraSetupSql"$'\n'
-fi
+append_closed_sql "${extraSetupSql:-}"
 
 # Test seam: print the assembled init SQL and exit without launching qod-node.
 # Used by SpawnScriptEncryptionSpec to assert the emitted SQL, which is the only
