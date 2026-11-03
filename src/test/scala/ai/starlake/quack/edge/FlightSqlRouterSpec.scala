@@ -2291,6 +2291,29 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
+  it should "carry the failure of a first try into the answer when no other node can take it" in:
+    // One node: the stamp's transient failure leaves nowhere to retry. The answer names what
+    // failed, not only that no node was left.
+    val f = stampedFixture(
+      nodes = 1,
+      requiredAnswer = List(
+        () => QuackResponse.Failed(QuackError.Transient("connection reset", notSent = true), 3L)
+      )
+    )
+    f.router
+      .execute(
+        "c-s19",
+        "alice",
+        poolKey,
+        "CREATE TABLE t9 AS SELECT 1 AS i",
+        commitMessage = Some("m")
+      )
+      .unsafeRunSync() match
+      case Left(failure: RouterFailure.Unavailable) =>
+        failure.reason should include("connection reset")
+        failure.reason should include("no fallback node")
+      case other => fail(s"expected Unavailable, got $other")
+
   it should "try a named write whose stamp failed on another node, stamped again" in:
     // notSent: the statement never left, so another node may take it, and takes it with its stamp.
     val f = stampedFixture(

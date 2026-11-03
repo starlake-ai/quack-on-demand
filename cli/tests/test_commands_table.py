@@ -895,3 +895,35 @@ def test_branch_propose_and_merge_wait_for_the_server(runner):
         assert limits["read"] is None
         assert limits["connect"] == 30.0
     assert listing.calls.last.request.extensions["timeout"]["read"] == 30.0
+
+
+@respx.mock
+def test_catalog_restore_and_undrop_wait_for_the_server(runner):
+    # The server bounds a restore's replace and an undrop's CTAS (restoreTimeoutSec, undropTimeoutSec)
+    # and goes on past a client that gave up: a fixed read limit reports a failure for a write that
+    # then lands, and a retry meets concurrent_write or restores twice. The dry run is a bounded read
+    # and keeps the default limit.
+    restore = respx.post(f"{BASE}/api/catalog/restore").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={"schema": "main", "table": "orders", "toSnapshot": 39, "currentSnapshot": 42, "dryRun": True},
+            ),
+            httpx.Response(200, json={}),
+        ]
+    )
+    undrop = respx.post(f"{BASE}/api/catalog/undrop").mock(return_value=httpx.Response(200, json={}))
+    mine = respx.post(f"{BASE}/api/profile/undrop").mock(return_value=httpx.Response(200, json={}))
+    listing = respx.get(f"{BASE}/api/tenant/list").mock(return_value=httpx.Response(200, json=[]))
+    base = ["--db", "tpch1", "--schema", "main", "--table", "orders"]
+    assert runner.invoke(app, ["catalog", "restore", "--tenant", "acme", *base, "--to", "39", "--yes"]).exit_code == 0
+    assert runner.invoke(app, ["catalog", "undrop", "--tenant", "acme", *base]).exit_code == 0
+    assert runner.invoke(app, ["profile", "undrop", *base]).exit_code == 0
+    assert runner.invoke(app, ["tenant", "list"]).exit_code == 0
+    dry_run, replace = restore.calls[0], restore.calls[1]
+    assert dry_run.request.extensions["timeout"]["read"] == 30.0
+    for call in (replace, undrop.calls.last, mine.calls.last):
+        limits = call.request.extensions["timeout"]
+        assert limits["read"] is None
+        assert limits["connect"] == 30.0
+    assert listing.calls.last.request.extensions["timeout"]["read"] == 30.0

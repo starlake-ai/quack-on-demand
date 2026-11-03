@@ -830,6 +830,15 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
   that failed, it used to land with no message, and an answer lost afterwards could not be settled
   from the catalog. A table restore, whose commit fence matches its message, does the same.
+- A table restore whose outcome only the catalog can tell (its COMMIT failed, or a timeout) answers
+  `502 restore_outcome_unknown`, audited, when the catalog cannot be read, instead of a bare 500: check
+  the table before retrying. Every clean answer is confirmed by the restore's own commit: its snapshot
+  is `newSnapshot`, and none in the catalog is a refusal (`restore_failed`, the table unchanged). A
+  restore that outlives `restoreTimeoutSec` rolls back when its statement answers. An undrop whose
+  stamp failed answers `undrop_failed` with `retryable: true`, its cause and "nothing was
+  committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no other node says what failed
+  first. `qod catalog restore`, `qod catalog undrop` and `qod profile undrop` wait for the server's
+  answer instead of giving up at 30 s.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

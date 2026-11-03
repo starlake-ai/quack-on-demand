@@ -289,5 +289,5 @@ object QuackHttpAdapter:
   /** Why a write that must carry its commit message was refused for want of a stamp to send. */
   val NoStamp: String =
     "this write names its commit message and cannot be sent without the stamp that carries it, " +
-      "and no stamp applies to it here (it needs a DuckLake pool, no open transaction, and a " +
-      "recorded execution)"
+      "and no stamp applies to it here (it needs a DuckLake pool with a catalog alias, no open " +
+      "transaction, and a recorded execution)"

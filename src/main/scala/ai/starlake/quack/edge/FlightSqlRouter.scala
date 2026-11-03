@@ -361,7 +361,7 @@ final class FlightSqlRouter(
         * by it). The router's own stamp prelude carries it, so it is never client SQL. A write that
         * names one is stamped whatever `stampWrites` says, and the stamp is required: a stamp that
         * fails fails the write with nothing sent, and a write no stamp applies to (a pool that is
-        * not DuckLake, a transaction open, no recorded execution) is refused
+        * not DuckLake, a transaction open, no recorded execution, no catalog alias) is refused
         * ([[QuackHttpAdapter.sendStampRequired]]). A statement that is not a write leaves it
         * unused.
         */
@@ -1525,6 +1525,7 @@ final class FlightSqlRouter(
                                 finalSql,
                                 clientSql = activeSql,
                                 exclude = nodeId,
+                                cause = m,
                                 send = send,
                                 principal = principal,
                                 recordLoad = recordExecution,
@@ -1681,7 +1682,8 @@ final class FlightSqlRouter(
     * registry shows `clientSql` (the caller's text, a system statement's values masked), the entry
     * is registered before the send so a kill reaches the retry from its first wire byte, and the
     * manager's own reads (`internal`) are registered too, a kill while one runs stopping the
-    * statement that would use its value.
+    * statement that would use its value. `cause` is what failed the first try: with no other node
+    * to take it, the answer says so beside the fact, never the fact alone.
     */
   private def retryOnce[A](
       connectionId: String,
@@ -1691,6 +1693,7 @@ final class FlightSqlRouter(
       sql: String,
       clientSql: String,
       exclude: String,
+      cause: String,
       send: FlightSqlRouter.NodeSend[A],
       principal: ai.starlake.quack.edge.authz.NodePrincipal,
       recordLoad: Boolean,
@@ -1750,9 +1753,13 @@ final class FlightSqlRouter(
                       )
                   }
               case None =>
-                IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
+                IO.pure(Left(RouterFailure.Unavailable(noFallback(cause))))
           case _ =>
-            IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
+            IO.pure(Left(RouterFailure.Unavailable(noFallback(cause))))
+
+  /** Why a retry found nowhere to go: the transient failure of the first try is named. */
+  private def noFallback(cause: String): String =
+    s"no fallback node available after a transient failure: $cause"
 
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
     * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes

@@ -164,27 +164,27 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       protectedWriteGuard = ProtectedWriteGuard.disabled
     )
 
-  /** The write executor of `Main`'s restore, bound to `router` for the root caller. With `slow` the
-    * replace is slowed as the class comment says; the statement the handler hands it is otherwise
-    * sent as it is, whatever its shape.
+  /** The write executor of `Main`'s restore, bound to `router` for the root caller. With `sleepMs`
+    * the replace is slowed as the class comment says; the statement the handler hands it is
+    * otherwise sent as it is, whatever its shape.
     */
   private def writeExecutor(
       router: FlightSqlRouter,
-      slow: Boolean
+      sleepMs: Option[Int]
   ): CatalogPreviewHandlers.PreviewExecutor =
     (caller, key, sql) =>
       router.execute(
         caller.connectionId,
         caller.identity,
         key,
-        if slow then
+        sleepMs.fold(sql)(ms =>
           AtVersion.replaceAllIn(
             sql,
             m =>
               java.util.regex.Matcher
-                .quoteReplacement(s"${m.matched} WHERE sleep_ms($SleepMs) IS NULL")
+                .quoteReplacement(s"${m.matched} WHERE sleep_ms($ms) IS NULL")
           )
-        else sql,
+        ),
         effectiveSet = Some(root),
         recordExecution = true,
         patId = caller.patId,
@@ -201,9 +201,14 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   )
 
   /** A table `name` of one row, then two, and a restore of it to its one-row version through
-    * `router`.
+    * `router`, its replace slowed by `sleepMs` and the whole bounded by `boundSec`.
     */
-  private def restoreOneRowTable(name: String, router: FlightSqlRouter, slow: Boolean): Restored =
+  private def restoreOneRowTable(
+      name: String,
+      router: FlightSqlRouter,
+      sleepMs: Option[Int],
+      boundSec: Int
+  ): Restored =
     query(s"CREATE TABLE $Catalog.tpch1.$name (id BIGINT, note VARCHAR)")
     query(s"INSERT INTO $Catalog.tpch1.$name VALUES (1, 'one')")
     val to = query(s"SELECT max(snapshot_id) FROM ducklake_snapshots('$Catalog')").head.toLong
@@ -235,9 +240,9 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       sup,
       store,
       (_, _, _) => IO.never,
-      writeExecutor(router, slow),
+      writeExecutor(router, sleepMs),
       (_, _) => reader,
-      CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, restoreTimeoutSec = 240),
+      CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, restoreTimeoutSec = boundSec),
       IdentityFixtures.restCaller(),
       fence,
       catalogAlias = (_, _) => Catalog
@@ -257,7 +262,12 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
   "a table restore" should "land when its replace runs past what one session handle lives" in {
     assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
-    val r = restoreOneRowTable("slow_orders", routerWith(stampWrites = true), slow = true)
+    val r = restoreOneRowTable(
+      "slow_orders",
+      routerWith(stampWrites = true),
+      sleepMs = Some(SleepMs),
+      boundSec = 240
+    )
     withClue(s"restore answered ${r.answer} after ${r.seconds}s: ") {
       r.answer.isRight shouldBe true
     }
@@ -272,7 +282,12 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
   it should "carry its own commit message whatever QOD_STAMP_WRITES says" in {
     assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
-    val r = restoreOneRowTable("quick_orders", routerWith(stampWrites = false), slow = false)
+    val r = restoreOneRowTable(
+      "quick_orders",
+      routerWith(stampWrites = false),
+      sleepMs = None,
+      boundSec = 240
+    )
     withClue(s"restore answered ${r.answer}: ") {
       r.answer.isRight shouldBe true
     }
@@ -282,4 +297,28 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     query(
       s"SELECT author FROM ducklake_snapshots('$Catalog') WHERE commit_message = '${r.message}'"
     ) shouldBe List("tenant:acme/user:root")
+  }
+
+  it should "roll back, not commit behind its timeout, when its replace outlives restoreTimeoutSec" in {
+    assume(nodeReady, "no qod-node build (QOD_NODE_BIN or a local build)")
+    // A replace of 5 s under a 2 s bound: the bound cancels the call, which is seen once the replace
+    // answers, and the connection is closed without its COMMIT, so the open transaction rolls back.
+    val r = restoreOneRowTable(
+      "late_orders",
+      routerWith(stampWrites = true),
+      sleepMs = Some(5000),
+      boundSec = 2
+    )
+    r.answer match
+      case Left((status, error)) =>
+        status shouldBe StatusCode.BadGateway
+        error.error shouldBe "restore_failed"
+        error.message should include("timed out after 2s")
+      case Right(done) => fail(s"a restore past its bound reported success: $done")
+    // The table is as it was, and no commit carries the restore's message.
+    query(s"SELECT note FROM $Catalog.tpch1.late_orders ORDER BY id") shouldBe
+      List("one", "two")
+    query(
+      s"SELECT count(*) FROM ducklake_snapshots('$Catalog') WHERE commit_message = '${r.message}'"
+    ) shouldBe List("0")
   }

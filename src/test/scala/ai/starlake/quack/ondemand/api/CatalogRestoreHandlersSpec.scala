@@ -113,12 +113,14 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
 
   /** Stub reader for restore: snapshots 12, 39, 42 exist, max 42; `live` maps live tables to their
-    * (tableId, beginSnapshot); `latest` is the table's newest touching snapshot.
+    * (tableId, beginSnapshot); `latest` is the table's newest touching snapshot; `ownCommit` is the
+    * catalog's answer for the snapshot a commit message names (none unless a case says so).
     */
   private def stubReader(
       live: Map[(String, String), (Long, Long)] = Map(("tpch1", "orders") -> (7L, 40L)),
       latest: Long = 40L,
-      existsAt: (String, String, Long) => Boolean = (_, _, _) => true
+      existsAt: (String, String, Long) => Boolean = (_, _, _) => true,
+      ownCommit: String => Option[Long] = _ => None
   ): DuckLakeCatalogReader =
     new DuckLakeCatalogReader(null):
       override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
@@ -129,8 +131,12 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         live.get((schema, table)).map(_ => latest)
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
         live.contains((schema, table)) && existsAt(schema, table, snapshotId)
-      // No commit carries this restore's message unless a case says so.
-      override def snapshotByCommitMessage(commitMessage: String): Option[Long] = None
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long] =
+        ownCommit(commitMessage)
+
+  /** A catalog whose read of a commit by its message fails: its Postgres is down. */
+  private def unreadableCatalog(): DuckLakeCatalogReader =
+    stubReader(ownCommit = _ => throw new java.sql.SQLException("catalog down"))
 
   trait Stubs:
     val (sup, store)               = supervisor()
@@ -163,6 +169,12 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       )
     var writeResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
+    // The commits that landed, by message, as the catalog tells them: the write executor records
+    // the caller's own message when it answers with a result, unless a case says that result's
+    // COMMIT did not land (`commitLands` false: it failed, or its answer was lost and it was
+    // refused).
+    var commitLands = true
+    val commits     = scala.collection.mutable.Map.empty[String, Long]
     // The commit fence the replace is held by: (message, base snapshot, table id) per arm.
     val fenceArms    = scala.collection.mutable.ListBuffer.empty[(String, Long, Long)]
     val fenceDisarms = scala.collection.mutable.ListBuffer.empty[String]
@@ -184,11 +196,22 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       (caller, poolKey, sql) => {
         writeSql = Some(sql); writePool = Some(poolKey); writeUser = Some(caller.identity)
         writeCallers = writeCallers :+ caller
-        writeResult
+        // The answer cancelable, as a node call is; the bookkeeping of the commit it stands for
+        // masked with it, so that it adds no unmasked step after the answer.
+        IO.uncancelable { poll =>
+          poll(writeResult).flatTap {
+            case Right(_) if commitLands =>
+              IO(caller.commitMessage.foreach(m => commits.put(m, 43L)): Unit)
+            case _ => IO.unit
+          }
+        }
       }
 
+    // The catalog as the commits above leave it.
+    lazy val committedReader: DuckLakeCatalogReader = stubReader(ownCommit = commits.get)
+
     def handlers(
-        readerOverride: DuckLakeCatalogReader = stubReader(),
+        readerOverride: DuckLakeCatalogReader = committedReader,
         cfgOverride: CatalogConfig = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30),
         sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None,
         patsOverride: String => Option[PatPrincipal] = _ => None
@@ -339,7 +362,8 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     writeCallers.map(_.commitMessage) shouldBe List(Some(message))
     closed shouldBe true
     val r = out.toOption.get
-    r.newSnapshot shouldBe Some(40L)
+    // The snapshot of the restore's own commit, as the catalog names it (the table's record says 40).
+    r.newSnapshot shouldBe Some(43L)
     r.summary shouldBe None
     r.dryRun shouldBe false
     val ok = telemetryStore.events.last
@@ -379,6 +403,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "not report success when the commit fails while the result is read" in new Stubs:
     var shut = false
+    commitLands = false
     writeResult = IO.pure(
       Right(QueryResult(failingReader("COMMIT failed: boom"), () => shut = true, "node-1", 1L))
     )
@@ -390,6 +415,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     shut shouldBe true
 
   it should "409 when the commit read at the end of the result reports a conflict" in new Stubs:
+    commitLands = false
     writeResult = IO.pure(
       Right(QueryResult(failingReader("write-write conflict"), () => (), "node-1", 1L))
     )
@@ -401,39 +427,92 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     writeResult = IO.pure(
       Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
     )
-    val committed = new DuckLakeCatalogReader(null):
-      override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
-      override def maxSnapshotId(): Option[Long]     = Some(42L)
-      override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] =
-        Some((7L, 40L))
-      override def latestTableSnapshot(schema: String, table: String): Option[Long] = Some(40L)
-      override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = true
-      override def snapshotByCommitMessage(commitMessage: String): Option[Long]            =
-        Option.when(commitMessage.startsWith("restore tpch1.orders to snapshot 39 ["))(43L)
-    restore(handlers(readerOverride = committed), to = "39").toOption.get.newSnapshot shouldBe
-      Some(43L)
+    // It landed.
+    restore(handlers(), to = "39").toOption.get.newSnapshot shouldBe Some(43L)
     telemetryStore.events.last.outcome shouldBe "ok"
-    // Without that commit it is the failure it reads as.
+    // It did not: it is the failure it reads as.
+    commitLands = false
     val lost = restore(handlers(), to = "39")
     lost.left.toOption.get._1 shouldBe StatusCode.BadGateway
     lost.left.toOption.get._2.error shouldBe "restore_failed"
 
-  it should "reflect a post-execute begin_snapshot that differs from the pre-capture" in new Stubs:
-    var info   = (7L, 40L)
-    val reader = new DuckLakeCatalogReader(null):
-      override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
-      override def maxSnapshotId(): Option[Long]     = Some(42L)
-      override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] =
-        Some(info)
-      override def latestTableSnapshot(schema: String, table: String): Option[Long] = Some(40L)
-      override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = true
-    writeResult = IO {
-      info = (8L, 43L)
-      Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L))
-    }
-    val h   = handlers(readerOverride = reader)
-    val out = restore(h, to = "39")
+  it should "say its outcome is unknown, audited, when a COMMIT fails and the catalog cannot be read" in new Stubs:
+    // The catalog's Postgres being down is what makes a COMMIT fail, and what makes the read that
+    // settles it fail too: neither success nor a plain failure, and never a bare 500.
+    commitLands = false
+    writeResult = IO.pure(
+      Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
+    )
+    val out             = restore(handlers(readerOverride = unreadableCatalog()), to = "39")
+    val (status, error) = out.left.toOption.get
+    status shouldBe StatusCode.BadGateway
+    error.error shouldBe "restore_outcome_unknown"
+    error.message should include("connection reset")
+    error.message should include("catalog down")
+    error.message should include("check tpch1.orders before retrying")
+    telemetryStore.events.last.outcome shouldBe "denied"
+
+  it should "say the same when a timeout leaves it to a catalog that cannot be read" in new Stubs:
+    writeResult = IO.never
+    val h = handlers(
+      readerOverride = unreadableCatalog(),
+      cfgOverride =
+        CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, restoreTimeoutSec = 1)
+    )
+    val out             = restore(h, to = "39")
+    val (status, error) = out.left.toOption.get
+    status shouldBe StatusCode.BadGateway
+    error.error shouldBe "restore_outcome_unknown"
+    error.message should include("timed out")
+    error.message should include("check tpch1.orders before retrying")
+    telemetryStore.events.last.outcome shouldBe "denied"
+
+  it should "confirm a clean answer by its own commit, and report that commit's snapshot" in new Stubs:
+    // The table's own record says 40; the commit this restore made is snapshot 43.
+    val out = restore(handlers(), to = "39")
     out.toOption.get.newSnapshot shouldBe Some(43L)
+    telemetryStore.events.last.detail.get("newSnapshot") shouldBe Some("43")
+
+  it should "refuse, not report success, when its COMMIT answered and no commit carries its message" in new Stubs:
+    // The result read clean to its end, yet the catalog holds no commit of this restore: a fence
+    // refusal nobody saw (a kill between the answer and the read), so the table is unchanged.
+    commitLands = false
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.error shouldBe "restore_failed"
+    out.left.toOption.get._2.message should include("no commit")
+    telemetryStore.events.last.outcome shouldBe "denied"
+    closed shouldBe true
+
+  it should "say its outcome is unknown when a clean answer cannot be confirmed" in new Stubs:
+    val out = restore(handlers(readerOverride = unreadableCatalog()), to = "39")
+    out.left.toOption.get._2.error shouldBe "restore_outcome_unknown"
+    telemetryStore.events.last.outcome shouldBe "denied"
+
+  it should "read and close a result that arrives as the timeout fires, and settle it from the catalog" in new Stubs:
+    // The executor goes on to its answer past the bound: that result must still be read to its end
+    // (its COMMIT sent) and closed, never dropped with its node connection, and the catalog then
+    // says whether the commit landed.
+    writeResult = IO.uncancelable(_ =>
+      IO.blocking {
+        Thread.sleep(1500)
+        Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L))
+      }
+    )
+    val h = handlers(cfgOverride =
+      CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, restoreTimeoutSec = 1)
+    )
+    val out = restore(h, to = "39")
+    closed shouldBe true
+    out.toOption.get.newSnapshot shouldBe Some(43L)
+
+  it should "report the snapshot its own commit carries, not what the table's record says" in new Stubs:
+    val stale = stubReader(
+      live = Map(("tpch1", "orders") -> (7L, 40L)),
+      ownCommit = m => Option.when(m.startsWith("restore tpch1.orders to snapshot 39 ["))(44L)
+    )
+    restore(handlers(readerOverride = stale), to = "39").toOption.get.newSnapshot shouldBe
+      Some(44L)
 
   it should "403 acl_denied when the executor reports AccessDenied" in new Stubs:
     writeResult = IO.pure(Left(RouterFailure.AccessDenied("nope")))

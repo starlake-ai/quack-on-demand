@@ -151,6 +151,23 @@ refuses every handle of another version, the probe's included (and a protocol 6 
 Restart every node after upgrading. What a principal may do is decided on
 the node (below).
 
+A handle lives 60 s and the node checks it at each bind, so a write that may run long sends one PREPARE
+per statement, each after a handle of its own: a stamped write (`QuackHttpClient.queryStamped`: the
+stamp, the statement, the COMMIT, which fires when the result is read) and the merge
+(`QuackHttpAdapter.sendAll`). A table restore and an undrop are stamped writes: one statement under
+its own commit message (`ExecCaller.commitMessage`), so the replace may run as long as
+`restoreTimeoutSec` (`undropTimeoutSec`). A write that names its commit message is stamped whatever
+`QOD_STAMP_WRITES` says (the knob governs the `flightsql <verb>` stamp of client writes) and its stamp
+is never best-effort: a restore's commit fence matches that message and both settle a lost answer by
+it. `QuackHttpClient.queryStampedRequired` sends nothing when the stamp fails (a transient failure is
+`notSent`, so the router may try another node; a node's own refusal is not retried), and the router
+refuses a named write no stamp applies to (`QuackHttpAdapter.NoStamp`). A client write's stamp stays
+best-effort (`queryStamped`). A replace that outlives the bound is cancelled and rolls back when its
+statement answers; only a COMMIT already in flight can land, and a restore settles it by the catalog
+(its commit's message), which also confirms every clean answer and names `newSnapshot`: a catalog that
+cannot be read leaves the outcome unknown (`restore_outcome_unknown`, `undrop_outcome_unknown`: check
+the table before retrying).
+
 **Node-side authorization (node protocol 6).** A non-superuser statement is decided on what
 DuckDB resolved for it, on the node, before it runs, and nowhere else. The parse screen re-parses every PREPARE with
 DuckDB's own parser and refuses what binding would already do outside the node (IMPORT, CONNECT,
@@ -461,15 +478,7 @@ restore's latency lands on the next request thread. A multi-statement submission
 as it reaches it, under the one handle sent before its PREPARE, so a statement that binds more than
 60 s after the send is refused `qod-node: this connection has no verified principal`, COMMIT included,
 for superusers too (a single statement may run longer). The merge is not affected: it sends one PREPARE
-per statement. Nor is a table restore: its `CREATE OR REPLACE TABLE` is one statement under its own
-commit message (`ExecCaller.commitMessage`, as an undrop's), which the router stamps, so the stamp, the
-replace and the COMMIT each follow a handle of their own and the replace may run as long as
-`restoreTimeoutSec`. Such a write is stamped whatever `QOD_STAMP_WRITES` says (the knob governs the
-`flightsql <verb>` stamp of client writes) and the stamp is never best-effort: a restore's commit fence
-matches its message and both settle a lost answer by it, so `QuackHttpClient.queryStampedRequired`
-sends nothing when the stamp fails (`notSent`: the router may try another node) and the router refuses
-a named write no stamp applies to (`QuackHttpAdapter.NoStamp`). A client write's stamp stays
-best-effort (`queryStamped`).
+per statement.
 
 Which binary: `QodNodeBinary` (`ondemand/runtime/`) resolves it once at boot for every manager that
 starts nodes on its host (runtime local, or fleet with `QOD_FLEET_EPHEMERAL=local`) and refuses to

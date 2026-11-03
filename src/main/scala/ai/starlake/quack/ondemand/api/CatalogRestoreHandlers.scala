@@ -362,18 +362,17 @@ final class CatalogRestoreHandlers(
             s"SELECT * FROM ${quoteIdent(req.schema)}.${quoteIdent(req.table)} " +
             s"AT (VERSION => $toSnapshot)"
         val stamped = caller.copy(commitMessage = Some(message))
+        // `newSnapshot` is the snapshot of this restore's own commit, as the catalog names it.
         def committedResponse(
-            committedAt: Option[Long] = None
+            newSnapshot: Long
         ): Either[(StatusCode, ErrorResponse), RestoreResponse] =
-          val newSnapshot =
-            committedAt.orElse(reader.currentTableInfo(req.schema, req.table).map(_._2))
           okAudit(
             Map(
               "schema"      -> req.schema,
               "table"       -> req.table,
               "toSnapshot"  -> toSnapshot.toString,
               "dryRun"      -> "false",
-              "newSnapshot" -> newSnapshot.map(_.toString).getOrElse("unknown")
+              "newSnapshot" -> newSnapshot.toString
             )
           )
           Right(
@@ -383,7 +382,7 @@ final class CatalogRestoreHandlers(
               toSnapshot,
               currentSnapshot,
               summary = None,
-              newSnapshot = newSnapshot,
+              newSnapshot = Some(newSnapshot),
               dryRun = false
             )
           )
@@ -392,14 +391,31 @@ final class CatalogRestoreHandlers(
         // the same); a false positive requires "conflict" in an unrelated engine error.
         def isConflict(reason: String): Boolean =
           reason.toLowerCase(Locale.ROOT).contains("conflict")
-        // A write whose outcome the answer cannot tell (a timeout, a broken stream): the catalog
-        // decides, by this restore's own commit, the snapshot its unique message names. A changed
-        // table id proves nothing: another writer's replace changes it too.
-        def settledByCatalog(reason: String): Either[(StatusCode, ErrorResponse), RestoreResponse] =
-          val ours = reader.snapshotByCommitMessage(message)
-          if ours.isDefined then committedResponse(ours)
-          else if isConflict(reason) then denied(StatusCode.Conflict, "concurrent_write", reason)
-          else denied(StatusCode.BadGateway, "restore_failed", reason)
+        // A write whose outcome the answer cannot tell (a timeout, a broken stream), and every
+        // clean answer too: the catalog decides, by this restore's own commit, the snapshot its
+        // unique message names. A changed table id proves nothing: another writer's replace
+        // changes it too. `notThere` is the refusal when no commit of this restore is in the
+        // catalog (`reason`, the failure's own words, by default). A catalog that cannot be read
+        // leaves the outcome unknown, answered as such and audited, never a bare 500: the table
+        // is to be checked before a retry, as the undrop says.
+        def settledByCatalog(
+            reason: String,
+            notThere: Option[String] = None
+        ): Either[(StatusCode, ErrorResponse), RestoreResponse] =
+          scala.util.Try(reader.snapshotByCommitMessage(message)) match
+            case scala.util.Success(Some(ours)) => committedResponse(ours)
+            case scala.util.Success(None)       =>
+              val refusal = notThere.getOrElse(reason)
+              if isConflict(refusal) then denied(StatusCode.Conflict, "concurrent_write", refusal)
+              else denied(StatusCode.BadGateway, "restore_failed", refusal)
+            case scala.util.Failure(t) =>
+              denied(
+                StatusCode.BadGateway,
+                "restore_outcome_unknown",
+                s"$reason; the catalog could not be read to settle it " +
+                  s"(${Option(t.getMessage).getOrElse(t.getClass.getSimpleName)}): check " +
+                  s"${req.schema}.${req.table} before retrying"
+              )
         // The table as validated: `currentSnapshot` (the expectedCurrentSnapshot when the caller
         // sent one) is the newest snapshot that touched it, and `preTableId` its id. Any other
         // commit touching it from here on makes this one's commit refused, atomically with it.
@@ -409,7 +425,7 @@ final class CatalogRestoreHandlers(
           case Left(why) =>
             IO.pure(denied(StatusCode.BadGateway, "restore_failed", why))
           case Right(_) =>
-            // The replace and its COMMIT both run inside the bound: the COMMIT fires when the
+            // The replace and its COMMIT both run under the bound: the COMMIT fires when the
             // result is read to its end, and a commit failing there (the fence's refusal included)
             // is a failure. Once the executor has answered, the result is always read and closed
             // (masked), so a timeout landing right then cannot orphan its node connection.
@@ -422,8 +438,10 @@ final class CatalogRestoreHandlers(
               .attempt
               .map {
                 case Left(e) =>
-                  // Cancellation of the blocking HTTP leg is best-effort, so a replace that
-                  // outlives the timeout may still have committed.
+                  // A replace that outlives the bound is cancelled, which its statement sees when
+                  // it answers: the connection closes without the COMMIT and the transaction rolls
+                  // back. Only a COMMIT already in flight can still land, and the catalog says
+                  // whether it did.
                   val msg = e match
                     case _: java.util.concurrent.TimeoutException =>
                       s"restore timed out after ${cfg.restoreTimeoutSec}s"
@@ -435,7 +453,19 @@ final class CatalogRestoreHandlers(
                   denied(StatusCode.Conflict, "concurrent_write", failure.reason)
                 case Right(Left(failure)) =>
                   denied(StatusCode.BadGateway, "restore_failed", failure.reason)
-                case Right(Right(Right(_)))  => committedResponse()
+                // The COMMIT answered: confirmed by this restore's own commit, which also gives
+                // `newSnapshot` exactly. A kill landing between the statement's answer and the
+                // read can close the result, and with it swallow a refusal of the COMMIT, so a
+                // clean answer alone does not say the replace landed.
+                case Right(Right(Right(_))) =>
+                  settledByCatalog(
+                    "the restore's COMMIT answered",
+                    notThere = Some(
+                      "the restore's COMMIT answered, but no commit of the catalog carries its " +
+                        "message: the replace did not land (a write reached the table meanwhile, " +
+                        "or the statement was stopped), and the table is unchanged"
+                    )
+                  )
                 case Right(Right(Left(why))) => settledByCatalog(s"restore failed: $why")
               }
               .guarantee(IO.blocking(fence.disarm(catalogMeta, message)))

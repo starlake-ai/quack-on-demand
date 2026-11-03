@@ -1715,7 +1715,8 @@ object Main extends IOApp with LazyLogging:
               // each other, but metering and audit must not move just because OPA needs a tag.
               // Only the OPA input's client.edge is set to "mcp" here.
               edge = "mcp",
-              // A handler's own commit message for its write (undrop), else the verb's.
+              // A handler's own commit message for its write (a restore, an undrop), else the
+              // verb's.
               commitMessage = caller.commitMessage
             )
         )(recordExecution)

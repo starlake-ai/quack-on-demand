@@ -3,6 +3,7 @@ import sys
 import typer
 
 from ..registry import covers
+from ..rest import UNTIL_ANSWERED
 from ._run import call
 
 app = typer.Typer(help="Your own profile: usage, recent statements and the pools you may use (any session).")
@@ -70,7 +71,8 @@ def undrop(
         body["asName"] = as_name
     if table_id is not None:
         body["tableId"] = table_id
-    call(ctx, "POST", "/api/profile/undrop", body=body)
+    # The server bounds the recovery's CTAS (undropTimeoutSec) and goes on past a client that gave up.
+    call(ctx, "POST", "/api/profile/undrop", body=body, timeout=UNTIL_ANSWERED)
 
 
 s3_app = typer.Typer(help="Your own S3 credentials: the keys your statements reach S3 with, each under a scope.")
