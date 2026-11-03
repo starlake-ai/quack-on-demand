@@ -62,7 +62,9 @@ final class AuthzStack(
     /** Manager modules booted with the stack, as `ModuleLoader.discover()` hands them to Main. */
     modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
     /** How often the maintenance drain looks for a queued run, for a spec that waits on one. */
-    maintenanceTickSec: Option[Int] = None
+    maintenanceTickSec: Option[Int] = None,
+    /** `quack-on-demand.stampWrites` (`QOD_STAMP_WRITES`), the manager's own default. */
+    stampWrites: Boolean = true
 ):
   import Main.given
 
@@ -104,6 +106,7 @@ final class AuthzStack(
          |  tenantFiles.root = "$filesRoot"
          |  userS3.allowedEndpoints = "$userS3Endpoints"
          |  ${maintenanceTickSec.fold("")(sec => s"maintenance.tickSec = $sec")}
+         |  stampWrites = $stampWrites
          |  defaultMetastore {
          |    pgHost = "${TestPostgres.pgHost}"
          |    pgPort = "${TestPostgres.pgPort}"

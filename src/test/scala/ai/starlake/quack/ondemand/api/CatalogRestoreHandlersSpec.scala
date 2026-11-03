@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
-import ai.starlake.quack.edge.{QueryResult, RouterFailure}
+import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
@@ -323,18 +323,20 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     restore(h, to = "39", apiKey = Some("alice-tok"))
     writeUser shouldBe Some("alice")
 
-  it should "execute the CREATE OR REPLACE and report the new snapshot" in new Stubs:
+  it should "execute one CREATE OR REPLACE, never a batch, and report the new snapshot" in new Stubs:
     val h               = handlers()
     val out             = restore(h, to = "39")
     val (message, _, _) = fenceArms.head
-    // Its own transaction, stamped with the message the fence singles it out by, the COMMIT inside
-    // the request.
-    writeSql.get.split(";\n").toList shouldBe List(
-      "BEGIN",
-      s"CALL ducklake_set_commit_message('acme_tpch1', 'tenant:acme/user:${IdentityFixtures.RootUsername}', '$message')",
-      """CREATE OR REPLACE TABLE "tpch1"."orders" AS SELECT * FROM "tpch1"."orders" AT (VERSION => 39)""",
-      "COMMIT"
+    // One statement. A batch binds each of its statements under the one session handle sent before
+    // it, so a replace running past 60 s would be refused at its COMMIT's bind, for good.
+    writeSql shouldBe Some(
+      """CREATE OR REPLACE TABLE "tpch1"."orders" AS SELECT * FROM "tpch1"."orders" AT (VERSION => 39)"""
     )
+    FlightSqlRouter.isMultiStatement(writeSql.get) shouldBe false
+    // The commit message the fence singles this commit out by rides on the caller, not in the SQL:
+    // the router stamps the statement with it (BEGIN and the message, the statement, the COMMIT,
+    // each PREPARE after a session handle of its own).
+    writeCallers.map(_.commitMessage) shouldBe List(Some(message))
     closed shouldBe true
     val r = out.toOption.get
     r.newSnapshot shouldBe Some(40L)
@@ -392,6 +394,29 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       Right(QueryResult(failingReader("write-write conflict"), () => (), "node-1", 1L))
     )
     restore(handlers(), to = "39").left.toOption.get._2.error shouldBe "concurrent_write"
+
+  it should "settle a COMMIT whose answer was lost from the catalog, by this restore's own commit" in new Stubs:
+    // The COMMIT is sent when the result is read, after the replace: the stream breaking there says
+    // nothing of whether it landed. The commit carrying this restore's message does.
+    writeResult = IO.pure(
+      Right(QueryResult(failingReader("connection reset"), () => (), "node-1", 1L))
+    )
+    val committed = new DuckLakeCatalogReader(null):
+      override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
+      override def maxSnapshotId(): Option[Long]     = Some(42L)
+      override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] =
+        Some((7L, 40L))
+      override def latestTableSnapshot(schema: String, table: String): Option[Long] = Some(40L)
+      override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean = true
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long]            =
+        Option.when(commitMessage.startsWith("restore tpch1.orders to snapshot 39 ["))(43L)
+    restore(handlers(readerOverride = committed), to = "39").toOption.get.newSnapshot shouldBe
+      Some(43L)
+    telemetryStore.events.last.outcome shouldBe "ok"
+    // Without that commit it is the failure it reads as.
+    val lost = restore(handlers(), to = "39")
+    lost.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    lost.left.toOption.get._2.error shouldBe "restore_failed"
 
   it should "reflect a post-execute begin_snapshot that differs from the pre-capture" in new Stubs:
     var info   = (7L, 40L)

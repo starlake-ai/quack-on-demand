@@ -826,6 +826,10 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - The restore dry run (REST `POST /api/catalog/restore` with `dryRun`, MCP `restore_snapshot`)
   counts as the requester instead of the system caller; a table they may not read answers 403
   `acl_denied`.
+- An undrop (REST, MCP, `UNDROP TABLE`) stamps its commit with its own message whatever
+  `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
+  that failed, it used to land with no message, and an answer lost afterwards could not be settled
+  from the catalog. A table restore, whose commit fence matches its message, does the same.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is

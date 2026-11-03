@@ -39,16 +39,47 @@ final class QuackHttpAdapter(
       /** Told every handle minted for the call: the OPA dry run collects their nonces. */
       onMint: MintedHandle => Unit = _ => ()
   ): IO[QuackResponse] =
-    // Quack's URI scheme; QuackProtocol maps it to http://host:port/quack.
-    val endpoint  = s"quack:${node.host}:${node.port}"
-    val authorize = authorizer(node, principal, onMint)
-    val call      = IO.defer {
+    call(node, principal, recordLoad, onMint) { (endpoint, authorize) =>
       stampPrelude match
         case Some(p) => client.queryStamped(endpoint, node.token, authorize, p, sql)
         case None    => client.query(endpoint, node.token, sql, session, authorize)
     }
+
+  /** [[send]] for a write that must carry its commit message (a restore's or an undrop's: its
+    * commit fence and its lost answers are settled by it): the stamp is never best-effort
+    * ([[QuackHttpClient.queryStampedRequired]]), and a write with no stamp to send is refused here,
+    * nothing sent, instead of landing unstamped. `prelude` is what
+    * [[ai.starlake.quack.edge.FlightSqlRouter]] builds for it, None where none applies.
+    */
+  def sendStampRequired(
+      node: RunningNode,
+      sql: String,
+      principal: NodePrincipal,
+      prelude: Option[String],
+      recordLoad: Boolean
+  ): IO[QuackResponse] =
+    prelude match
+      // Refused before the node is touched: nothing is booked against it.
+      case None    => IO.pure(QuackResponse.Failed(QuackError.Permanent(QuackHttpAdapter.NoStamp)))
+      case Some(p) =>
+        call(node, principal, recordLoad, _ => ()) { (endpoint, authorize) =>
+          client.queryStampedRequired(endpoint, node.token, authorize, p, sql)
+        }
+
+  /** One node call under the tracker's bookkeeping: `run` gets the node's endpoint (Quack's URI
+    * scheme; QuackProtocol maps it to http://host:port/quack) and the principal's handle producer.
+    * A draining node answers Transient, nothing sent.
+    */
+  private def call(
+      node: RunningNode,
+      principal: NodePrincipal,
+      recordLoad: Boolean,
+      onMint: MintedHandle => Unit
+  )(run: (String, () => String) => IO[QuackResponse]): IO[QuackResponse] =
+    val endpoint  = s"quack:${node.host}:${node.port}"
+    val authorize = authorizer(node, principal, onMint)
     withLoad(node, recordLoad, admitDraining = false)(
-      call,
+      IO.defer(run(endpoint, authorize)),
       QuackResponse.Failed(
         QuackError.Transient(QuackHttpAdapter.draining(node.nodeId), notSent = true)
       )
@@ -254,3 +285,9 @@ object QuackHttpAdapter:
     * tries another node.
     */
   def draining(nodeId: String): String = s"node $nodeId is draining"
+
+  /** Why a write that must carry its commit message was refused for want of a stamp to send. */
+  val NoStamp: String =
+    "this write names its commit message and cannot be sent without the stamp that carries it, " +
+      "and no stamp applies to it here (it needs a DuckLake pool, no open transaction, and a " +
+      "recorded execution)"

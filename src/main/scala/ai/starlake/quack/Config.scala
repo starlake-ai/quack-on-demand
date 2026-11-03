@@ -518,7 +518,9 @@ final case class ManagerConfig(
       envVar = "QOD_STAMP_WRITES",
       description =
         "Stamp DuckLake snapshots created by FlightSQL DML/DDL with author and commit message " +
-          "(native wire bracket; fail-open). Off = writes are never bracketed."
+          "(native wire bracket; fail-open). Off = client writes are never bracketed. A manager " +
+          "handler's own write that names its commit message (a table restore, an undrop) is " +
+          "stamped whatever this says, and is not sent when its stamp fails."
     )
     stampWrites: Boolean,
     @field @ConfigField(

@@ -3,7 +3,6 @@ package ai.starlake.quack.ondemand.api
 import java.util.Locale
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
-import ai.starlake.quack.model.SqlLiterals
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -348,21 +347,21 @@ final class CatalogRestoreHandlers(
           )
         )
       case Some(poolKey) =>
-        // Its own transaction under a unique commit message, so that (1) the commit fence below
-        // can single out this commit, and (2) the COMMIT runs inside the request and a refused one
-        // comes back as the request's failure, never as a success.
+        // ONE statement, stamped under a unique commit message, so that (1) the commit fence
+        // below can single out this commit, and (2) the COMMIT, which the router sends when the
+        // result is read, still comes back as the restore's failure when refused, never as a
+        // success. Never a `BEGIN; ...; COMMIT` request: the node binds each statement of a
+        // request under the one session handle sent before it, so a replace running past 60 s
+        // would be refused at its COMMIT's bind, whatever `restoreTimeoutSec` says. Stamped, the
+        // router sends the stamp, the replace and the COMMIT each after a handle of its own, as the
+        // caller, with the author `tenant:<tenant>/user:<user>`.
         val message =
           s"restore ${req.schema}.${req.table} to snapshot $toSnapshot [${java.util.UUID.randomUUID()}]"
-        val author = s"tenant:$tid/user:${caller.identity}"
-        val sql    = List(
-          "BEGIN",
-          s"CALL ducklake_set_commit_message(${SqlLiterals.duckdbLiteral(catalogAlias(tid, db))}, " +
-            s"${SqlLiterals.duckdbLiteral(author)}, ${SqlLiterals.duckdbLiteral(message)})",
+        val sql =
           s"CREATE OR REPLACE TABLE ${quoteIdent(req.schema)}.${quoteIdent(req.table)} AS " +
             s"SELECT * FROM ${quoteIdent(req.schema)}.${quoteIdent(req.table)} " +
-            s"AT (VERSION => $toSnapshot)",
-          "COMMIT"
-        ).mkString(";\n")
+            s"AT (VERSION => $toSnapshot)"
+        val stamped = caller.copy(commitMessage = Some(message))
         def committedResponse(
             committedAt: Option[Long] = None
         ): Either[(StatusCode, ErrorResponse), RestoreResponse] =
@@ -410,8 +409,16 @@ final class CatalogRestoreHandlers(
           case Left(why) =>
             IO.pure(denied(StatusCode.BadGateway, "restore_failed", why))
           case Right(_) =>
-            writeExecutor(caller, poolKey, sql)
-              .timeout(cfg.restoreTimeoutSec.seconds)
+            // The replace and its COMMIT both run inside the bound: the COMMIT fires when the
+            // result is read to its end, and a commit failing there (the fence's refusal included)
+            // is a failure. Once the executor has answered, the result is always read and closed
+            // (masked), so a timeout landing right then cannot orphan its node connection.
+            IO.uncancelable { poll =>
+              poll(writeExecutor(stamped, poolKey, sql)).flatMap {
+                case Left(failure) => IO.pure(Left(failure))
+                case Right(result) => IO.blocking(WriteResults.drain(result)).map(Right(_))
+              }
+            }.timeout(cfg.restoreTimeoutSec.seconds)
               .attempt
               .map {
                 case Left(e) =>
@@ -428,11 +435,8 @@ final class CatalogRestoreHandlers(
                   denied(StatusCode.Conflict, "concurrent_write", failure.reason)
                 case Right(Left(failure)) =>
                   denied(StatusCode.BadGateway, "restore_failed", failure.reason)
-                case Right(Right(result)) =>
-                  // Read to its end before answering: a commit failing there is a failure.
-                  WriteResults.drain(result) match
-                    case Right(_)  => committedResponse()
-                    case Left(why) => settledByCatalog(s"restore failed: $why")
+                case Right(Right(Right(_)))  => committedResponse()
+                case Right(Right(Left(why))) => settledByCatalog(s"restore failed: $why")
               }
               .guarantee(IO.blocking(fence.disarm(catalogMeta, message)))
         }

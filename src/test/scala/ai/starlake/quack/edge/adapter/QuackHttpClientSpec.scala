@@ -1066,3 +1066,92 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         )
       finally allocator.close()
     }
+
+  describe("a stamp that must land (queryStampedRequired)"):
+    /** A write with a required stamp through `transport`, its handles minted `h1`, `h2`, ... */
+    def required(transport: ScriptedTransport, allocator: RootAllocator): QuackResponse =
+      clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        .queryStampedRequired(
+          endpoint,
+          token,
+          minting(),
+          "BEGIN; CALL stamp()",
+          "INSERT INTO t VALUES (1)"
+        )
+        .unsafeRunSync()
+
+    it("sends the stamp, the write and the COMMIT behind a handle each, as queryStamped does") {
+      val transport = ScriptedTransport(_ => IO(prepareOk))
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case ok: QuackResponse.Ok =>
+            try while ok.rows.loadNextBatch() do ()
+            finally ok.close()
+          case other => unexpected(other, "Ok")
+        transport.steps shouldBe List(
+          "connect",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "disconnect"
+        )
+        transport.handles shouldBe List("h1", "h2", "h3")
+      finally allocator.close()
+    }
+
+    it("never sends the write when the stamp fails: no retry on a fresh connection") {
+      val transport = ScriptedTransport {
+        case 1 => IO(QuackTestFixtures.serializeSampleErrorResponse("no stamp function"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Permanent(msg), _) =>
+            msg should include("no stamp function")
+          case other => unexpected(other, "Failed(Permanent)")
+        // queryStamped would now send the write bare on a fresh connection. Here the stamp's
+        // failure is the end: the DISCONNECT rolls its BEGIN back, and not one more PREPARE goes
+        // out, the write's included.
+        transport.steps shouldBe List("connect", "handle", "prepare", "disconnect")
+        transport.handles shouldBe List("h1")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("answers a stamp lost in transport as Transient and not sent, so another node may take it") {
+      val transport = ScriptedTransport {
+        case 1 => IO.raiseError(new java.io.IOException("connection reset"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Transient(msg, notSent), _) =>
+            msg should include("connection reset")
+            notSent shouldBe true
+          case other => unexpected(other, "Failed(Transient)")
+        transport.steps shouldBe List("connect", "handle", "prepare", "disconnect")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("answers a 5xx on the stamp as Transient and not sent") {
+      val transport = ScriptedTransport {
+        case 1 => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Transient(msg, notSent), _) =>
+            msg should include("503")
+            notSent shouldBe true
+          case other => unexpected(other, "Failed(Transient)")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }

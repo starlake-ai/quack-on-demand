@@ -253,7 +253,7 @@ open class QuackHttpClient(
     * Fail-open: a failure of the stamp prelude itself never blocks the write. The bracket
     * connection is dropped (server-side session teardown rolls the BEGIN back) and the statement is
     * re-sent unstamped on a fresh plain connection, after a session handle of its own, with a
-    * warning.
+    * warning. A write that cannot do without its stamp uses [[queryStampedRequired]].
     */
   def queryStamped(
       endpoint: String,
@@ -261,6 +261,38 @@ open class QuackHttpClient(
       authorize: () => String,
       prelude: String,
       sql: String
+  ): IO[QuackResponse] =
+    stamped(endpoint, token, authorize, prelude, sql, failOpen = true)
+
+  /** [[queryStamped]] for a write whose commit message must land on its commit: a table restore,
+    * whose commit fence matches that message and whose lost answers are settled by it, and an
+    * undrop, settled the same way. The stamp is never best-effort here: when the prelude fails, the
+    * connection is dropped (the open BEGIN rolls back with it) and `sql` is never sent, so the
+    * write cannot land unfenced and unfindable. The failure says `notSent`, so a caller may try
+    * another node: the JDK client's own failure (no answer came) is Transient, as in a list.
+    */
+  def queryStampedRequired(
+      endpoint: String,
+      token: String,
+      authorize: () => String,
+      prelude: String,
+      sql: String
+  ): IO[QuackResponse] =
+    stamped(endpoint, token, authorize, prelude, sql, failOpen = false)
+
+  /** The failure of a stamp that is required ([[queryStampedRequired]]): `sql` never went out. */
+  private def stampFailed(t: Throwable, startNanos: FiniteDuration): IO[QuackResponse] =
+    IO.monotonic.map { endNanos =>
+      QuackResponse.Failed(listError(t, sent = false), (endNanos - startNanos).toMillis)
+    }
+
+  private def stamped(
+      endpoint: String,
+      token: String,
+      authorize: () => String,
+      prelude: String,
+      sql: String,
+      failOpen: Boolean
   ): IO[QuackResponse] =
     IO.uncancelable { poll =>
       IO.monotonic.flatMap { startNanos =>
@@ -274,12 +306,17 @@ open class QuackHttpClient(
                 case Left(t)   => conn.close() *> mapNativeFailure(t, startNanos, sent = false)
                 case Right(()) =>
                   conn.executeDiscard(prelude).attempt.flatMap {
-                    case Left(t) =>
+                    case Left(t) if failOpen =>
                       logger.warn(
                         s"stamping prelude failed on $endpoint; write proceeds unstamped: ${t.getMessage}"
                       )
                       // Nothing is held once conn is closed, so the fallback may be cancelled whole.
                       conn.close() *> poll(queryNative(endpoint, token, sql, Some(authorize)))
+                    case Left(t) =>
+                      logger.warn(
+                        s"stamping prelude failed on $endpoint; the write is not sent: ${t.getMessage}"
+                      )
+                      conn.close() *> stampFailed(t, startNanos)
                     case Right(()) =>
                       val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
                       (checkpoint(poll, conn.close()) *> install(poll, conn, Some(authorize)) *>

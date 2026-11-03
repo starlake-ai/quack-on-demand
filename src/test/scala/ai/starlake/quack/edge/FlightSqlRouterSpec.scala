@@ -2058,11 +2058,34 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   // ---------- EPIC P1: author stamping ----------
 
+  /** What [[stampedFixture]] builds. `calls`: what the client saw of a plain or a best-effort
+    * stamped send, as (the stamp prelude or None, the SQL). `required`: what it saw of a send whose
+    * stamp is required, as (the prelude, the SQL).
+    */
+  private final case class StampedFixture(
+      router: FlightSqlRouter,
+      sessions: SessionRegistry,
+      sup: PoolSupervisor,
+      calls: scala.collection.mutable.ListBuffer[(Option[String], String)],
+      required: scala.collection.mutable.ListBuffer[(String, String)]
+  )
+
+  /** [[stampedFixture]] as the 4-tuple most cases take apart. */
+  private def stampedSetup(stampWrites: Boolean = true) =
+    val f = stampedFixture(stampWrites)
+    (f.router, f.sessions, f.sup, f.calls)
+
   /** Like setup() but the pool is DuckLake-kind (kindWire "ducklake" + metastore dbName), the
     * client records (prelude, sql) pairs, and stampWrites is on. DuckLake pre-init inside
     * createTenantDb fails fast against pgPort 0 and is swallowed with a warning by design.
+    * `nodes` dual nodes serve the pool; `requiredAnswer` is what a send whose stamp is required
+    * answers, in call order (the last repeats).
     */
-  private def stampedSetup(stampWrites: Boolean = true) =
+  private def stampedFixture(
+      stampWrites: Boolean = true,
+      nodes: Int = 1,
+      requiredAnswer: List[() => QuackResponse] = List(() => TestArrow.okResponse())
+  ): StampedFixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
@@ -2112,10 +2135,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         "/tmp/qod-stamp-test"
       )
       .unsafeRunSync()
-    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, nodes)).unsafeRunSync()
 
-    val calls  = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
-    val client =
+    val calls    = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
+    val required = scala.collection.mutable.ListBuffer.empty[(String, String)]
+    val client   =
       new QuackHttpClient(TestArrow.sharedAllocator):
         override def query(
             endpoint: String,
@@ -2133,6 +2157,17 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             sql: String
         ) =
           IO { calls += ((Some(prelude), sql)); TestArrow.okResponse() }
+        override def queryStampedRequired(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
+          IO {
+            required += ((prelude, sql))
+            requiredAnswer(math.min(required.size - 1, requiredAnswer.size - 1))()
+          }
     val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
@@ -2145,7 +2180,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       metadataFilterRewriter = mountedFilter,
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
-    (router, sessions, sup, calls)
+    StampedFixture(router, sessions, sup, calls, required)
 
   it should "stamp a DML statement on a ducklake pool with author tenant:<t>/user:<u>" in:
     val (router, _, sup, calls) = stampedSetup()
@@ -2163,8 +2198,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     calls.head._1.get should include("'flightsql create'")
 
   it should "stamp a write with the caller's own commit message in place of the verb's" in:
-    val (router, _, sup, calls) = stampedSetup()
-    router
+    val f = stampedFixture()
+    f.router
       .execute(
         "c-s10",
         "alice",
@@ -2173,22 +2208,129 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         commitMessage = Some("undrop main.t3 as main.t3 from snapshot 7 [u-1]")
       )
       .unsafeRunSync()
-    val db = sup.get(poolKey).get.metastore("dbName")
-    calls.head._1.get shouldBe
+    val db = f.sup.get(poolKey).get.metastore("dbName")
+    f.required.map(_._1).toList shouldBe List(
       s"BEGIN; CALL ducklake_set_commit_message('$db', 'tenant:acme/user:alice', " +
-      "'undrop main.t3 as main.t3 from snapshot 7 [u-1]')"
+        "'undrop main.t3 as main.t3 from snapshot 7 [u-1]')"
+    )
 
   it should "escape a single quote in a caller's commit message" in:
-    val (router, _, _, calls) = stampedSetup()
-    router
+    val f = stampedFixture()
+    f.router
       .execute("c-s11", "alice", poolKey, "INSERT INTO t VALUES (1)", commitMessage = Some("it's"))
       .unsafeRunSync()
-    calls.head._1.get should include("'it''s')")
+    f.required.head._1 should include("'it''s')")
 
   it should "leave a caller's commit message unused on a statement it does not stamp" in:
     val (router, _, _, calls) = stampedSetup()
     router.execute("c-s12", "alice", poolKey, "SELECT 1", commitMessage = Some("x")).unsafeRunSync()
     calls.head._1 shouldBe None
+
+  // A write that names its commit message (a restore's: its commit fence matches it; an undrop's:
+  // its lost answer is settled by it) never goes out without the stamp that carries it.
+  it should "stamp a write that names its commit message whatever stampWrites says" in:
+    val f = stampedFixture(stampWrites = false)
+    f.router
+      .execute(
+        "c-s13",
+        "alice",
+        poolKey,
+        "CREATE OR REPLACE TABLE t4 AS SELECT * FROM t4 AT (VERSION => 3)",
+        commitMessage = Some("restore main.t4 to snapshot 3 [r-1]")
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    val db = f.sup.get(poolKey).get.metastore("dbName")
+    f.required.map(_._1).toList shouldBe List(
+      s"BEGIN; CALL ducklake_set_commit_message('$db', 'tenant:acme/user:alice', " +
+        "'restore main.t4 to snapshot 3 [r-1]')"
+    )
+    f.calls shouldBe empty
+
+  it should "send a named write with its stamp required, never best-effort" in:
+    val f = stampedFixture()
+    f.router
+      .execute(
+        "c-s14",
+        "alice",
+        poolKey,
+        "CREATE TABLE t5 AS SELECT 1 AS i",
+        commitMessage = Some("m")
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    f.required.size shouldBe 1
+    f.required.head._2 should include("CREATE TABLE t5")
+    // Not by the send that falls back to the bare statement when its stamp fails.
+    f.calls shouldBe empty
+
+  it should "keep the client's own writes best-effort" in:
+    val f = stampedFixture()
+    f.router.execute("c-s15", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    f.calls.map(_._1.isDefined).toList shouldBe List(true)
+    f.required shouldBe empty
+
+  it should "never send a named write once its stamp failed, whatever the failure" in:
+    List[QuackResponse](
+      QuackResponse.Failed(QuackError.Permanent("Catalog Error: no such function"), 3L),
+      QuackResponse.Failed(QuackError.Transient("connection reset", notSent = true), 3L)
+    ).foreach { failure =>
+      val f = stampedFixture(nodes = 1, requiredAnswer = List(() => failure))
+      val out = f.router
+        .execute(
+          "c-s16",
+          "alice",
+          poolKey,
+          "CREATE TABLE t6 AS SELECT 1 AS i",
+          commitMessage = Some("m")
+        )
+        .unsafeRunSync()
+      withClue(s"$failure: ") {
+        out shouldBe a[Left[?, ?]]
+        // The one send that carries the stamp was the only one: nothing ran the statement bare.
+        f.required.size shouldBe 1
+        f.calls shouldBe empty
+      }
+    }
+
+  it should "try a named write whose stamp failed on another node, stamped again" in:
+    // notSent: the statement never left, so another node may take it, and takes it with its stamp.
+    val f = stampedFixture(
+      nodes = 2,
+      requiredAnswer = List(
+        () => QuackResponse.Failed(QuackError.Transient("connection reset", notSent = true), 3L),
+        () => TestArrow.okResponse()
+      )
+    )
+    f.router
+      .execute(
+        "c-s17",
+        "alice",
+        poolKey,
+        "CREATE TABLE t7 AS SELECT 1 AS i",
+        commitMessage = Some("m")
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    f.required.size shouldBe 2
+    f.required.map(_._1).distinct.size shouldBe 1
+    f.calls shouldBe empty
+
+  it should "refuse a named write that no stamp applies to, sending nothing" in:
+    // A probe (recordExecution = false) is never stamped, so there is no stamp to require.
+    val f   = stampedFixture()
+    val out = f.router
+      .execute(
+        "c-s18",
+        "alice",
+        poolKey,
+        "CREATE TABLE t8 AS SELECT 1 AS i",
+        recordExecution = false,
+        commitMessage = Some("m")
+      )
+      .unsafeRunSync()
+    out match
+      case Left(failure) => failure.reason should include("cannot be sent without the stamp")
+      case Right(_)      => fail("a write no stamp applies to went out")
+    f.required shouldBe empty
+    f.calls shouldBe empty
 
   it should "escape a single quote in the user name (injection guard)" in:
     val (router, _, _, calls) = stampedSetup()

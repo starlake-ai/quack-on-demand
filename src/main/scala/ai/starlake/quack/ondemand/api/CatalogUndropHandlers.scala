@@ -547,9 +547,11 @@ final class CatalogUndropHandlers(
                       Right(UndropResponse(entry.schema, entry.table, target, fromSnapshot))
                     // Unique to this run: the router stamps the CTAS's commit with it in place of
                     // `flightsql create` (its own prelude, never client SQL, so no policy screen
-                    // sees a commit-message call). A failure that may hide a commit is settled by
-                    // this commit alone, never by whatever table holds the name now: another
-                    // writer's CREATE, or another undrop's, would hold it too.
+                    // sees a commit-message call). The stamp is required: sent whatever
+                    // QOD_STAMP_WRITES says, and a CTAS whose stamp fails is never sent, so a
+                    // commit of this run always carries the message. A failure that may hide a
+                    // commit is settled by this commit alone, never by whatever table holds the
+                    // name now: another writer's CREATE, or another undrop's, would hold it too.
                     val message =
                       s"undrop ${entry.schema}.${entry.table} as ${entry.schema}.$target " +
                         s"from snapshot $fromSnapshot [${java.util.UUID.randomUUID()}]"
@@ -575,8 +577,7 @@ final class CatalogUndropHandlers(
                             "undrop_outcome_unknown",
                             s"$reason; a table now holds ${entry.schema}.$target, but the " +
                               "catalog shows no commit by this undrop (another writer may have " +
-                              "created it, or writes are not stamped: QOD_STAMP_WRITES); check " +
-                              "it before retrying"
+                              "created it); check it before retrying"
                           )
                         case scala.util.Success(None) =>
                           err(StatusCode.BadGateway, "undrop_failed", reason)

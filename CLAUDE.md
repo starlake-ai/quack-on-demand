@@ -460,9 +460,16 @@ a WARN and owed to the next local mutation, NOTIFY or snapshot refresh; a slow `
 restore's latency lands on the next request thread. A multi-statement submission binds each statement
 as it reaches it, under the one handle sent before its PREPARE, so a statement that binds more than
 60 s after the send is refused `qod-node: this connection has no verified principal`, COMMIT included,
-for superusers too (a single statement may run longer). A table restore is sent that way, so one whose
-`CREATE OR REPLACE TABLE` runs past 60 s fails `restore_failed` at COMMIT's bind, a hard cap. The
-merge is not affected: it sends one PREPARE per statement.
+for superusers too (a single statement may run longer). The merge is not affected: it sends one PREPARE
+per statement. Nor is a table restore: its `CREATE OR REPLACE TABLE` is one statement under its own
+commit message (`ExecCaller.commitMessage`, as an undrop's), which the router stamps, so the stamp, the
+replace and the COMMIT each follow a handle of their own and the replace may run as long as
+`restoreTimeoutSec`. Such a write is stamped whatever `QOD_STAMP_WRITES` says (the knob governs the
+`flightsql <verb>` stamp of client writes) and the stamp is never best-effort: a restore's commit fence
+matches its message and both settle a lost answer by it, so `QuackHttpClient.queryStampedRequired`
+sends nothing when the stamp fails (`notSent`: the router may try another node) and the router refuses
+a named write no stamp applies to (`QuackHttpAdapter.NoStamp`). A client write's stamp stays
+best-effort (`queryStamped`).
 
 Which binary: `QodNodeBinary` (`ondemand/runtime/`) resolves it once at boot for every manager that
 starts nodes on its host (runtime local, or fleet with `QOD_FLEET_EPHEMERAL=local`) and refuses to
