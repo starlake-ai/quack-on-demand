@@ -2157,6 +2157,46 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       }
     }
 
+  it should "settle a commit that lands ahead of a history gap: merged, not closed as a gap" in
+    List(2, 1).foreach { nth =>
+      def proposed: Fixture =
+        val f = new Fixture
+        f.create("x")
+        f.touchBranch()
+        f.propose().isRight shouldBe true
+        f
+      // Main's snapshot 12 is gone: no merge can read main's changes across it.
+      def hole(f: Fixture): Unit = f.mainReader.changes = List((11L, ""), (13L, ""))
+
+      withClue(s"at the head read $nth: ") {
+        // With no commit on main, this hole closes the proposal.
+        val closed = proposed
+        val open   = closed.openProposal()
+        closed.onHeadRead(nth) { () =>
+          closed.mainReader.head = 13L
+          hole(closed)
+        }
+        closed.merge().left.map(_.code) shouldBe Left("history_gap")
+        closed.row(open).status shouldBe BranchMergeStatus.Failed
+
+        // With the proposal's commit on main, the same hole settles it.
+        val f  = proposed
+        val id = f.openProposal()
+        f.onHeadRead(nth) { () =>
+          f.land(id, 13L)
+          hole(f)
+        }
+        f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+        val m = f.row(id)
+        m.status shouldBe BranchMergeStatus.Merged
+        m.error shouldBe None
+        m.mainSnapshotAfter shouldBe Some(13L)
+        f.store.findSnapshotTag("acme", f.parent.name, m.tagName.get).map(_.snapshotId) shouldBe
+          Some(13L)
+        f.store.findBranch(f.parent.id, "x") shouldBe None
+      }
+    }
+
   it should "settle a commit that lands during Decide, ahead of Decide's refusal" in {
     val f = new Fixture
     f.create("x")

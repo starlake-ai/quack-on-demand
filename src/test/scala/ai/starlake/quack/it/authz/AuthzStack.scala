@@ -60,7 +60,9 @@ final class AuthzStack(
       */
     stackPrefixes: List[String] = Nil,
     /** Manager modules booted with the stack, as `ModuleLoader.discover()` hands them to Main. */
-    modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
+    modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
+    /** How often the maintenance drain looks for a queued run, for a spec that waits on one. */
+    maintenanceTickSec: Option[Int] = None
 ):
   import Main.given
 
@@ -101,6 +103,7 @@ final class AuthzStack(
          |  nodeAuthz.internalUrl = "http://127.0.0.1:$replicaPort"
          |  tenantFiles.root = "$filesRoot"
          |  userS3.allowedEndpoints = "$userS3Endpoints"
+         |  ${maintenanceTickSec.fold("")(sec => s"maintenance.tickSec = $sec")}
          |  defaultMetastore {
          |    pgHost = "${TestPostgres.pgHost}"
          |    pgPort = "${TestPostgres.pgPort}"
@@ -306,9 +309,10 @@ final class AuthzStack(
       password: String,
       tenant: String,
       pool: String,
-      superuser: Boolean = false
+      superuser: Boolean = false,
+      branch: Option[String] = None
   ): Either[String, List[String]] =
-    flightCall(sql, user, password, tenant, pool, superuser).left.map(_.getMessage)
+    flightCall(sql, user, password, tenant, pool, superuser, branch).left.map(_.getMessage)
 
   /** As [[flight]], the failure as the client got it: its Flight status code and description. */
   def flightCall(
@@ -317,7 +321,8 @@ final class AuthzStack(
       password: String,
       tenant: String,
       pool: String,
-      superuser: Boolean = false
+      superuser: Boolean = false,
+      branch: Option[String] = None
   ): Either[FlightRuntimeException, List[String]] =
     val allocator = new RootAllocator()
     val raw       =
@@ -327,6 +332,7 @@ final class AuthzStack(
       hdrs.insert("tenant", tenant)
       hdrs.insert("pool", pool)
       if superuser then hdrs.insert("superuser", "true")
+      branch.foreach(b => hdrs.insert("branch", b))
       hdrs.insert(
         "authorization",
         "Basic " + Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))
