@@ -164,6 +164,12 @@ services:
       QOD_MIN_PORT: "${QUACK_MIN_PORT:-21900}"
       QOD_MAX_PORT: "${QUACK_MAX_PORT:-22500}"
 
+      # ----- Extra JVM flags for the manager (optional) -----
+      # The image's ENTRYPOINT expands this, e.g. JAVA_OPTS=-Xmx2g. The listeners take no more
+      # connections than a fifth of the heap holds, and boot says so when that is fewer: raise the
+      # heap here to take more. Empty = the JVM's defaults.
+      JAVA_OPTS: ${JAVA_OPTS:-}
+
       # ----- DuckLake on S3-compatible object storage (optional) -----
       # When QOD_DUCKLAKE_DATA_PATH starts with s3:// (or gs://, az://,
       # azure://, abfss://), spawn-quack-node.sh + load-tpch-dbgen.sh skip

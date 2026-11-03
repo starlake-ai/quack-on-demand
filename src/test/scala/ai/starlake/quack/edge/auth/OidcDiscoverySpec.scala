@@ -186,6 +186,30 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     gets.asked.get shouldBe 1
   }
 
+  // A 200 answer that is no JSON is the issuer's text, and the parser's own failure quotes the start
+  // of it ("expected json value got 'Secret...' (line 1, column 1)"). The failure is remembered and
+  // shown (the SQL token page prints it), and the issuer is a URL the manager reads for anyone who
+  // asks, so the failure is one fixed text whatever the issuer sent.
+  it should "answer a document that is not JSON with a fixed text that quotes none of it" in
+    List(
+      "Secret-marker-7f3a is not JSON",
+      "<html>login</html>",
+      """{"issuer": marker-7f3a}""",
+      """{"issuer":"https://idp.example/a",""",
+      ""
+    ).foreach { body =>
+      withClue(s"[$body] ") {
+        val gets      = new Gets(_ => Right(body))
+        val discovery = new OidcDiscovery(gets)
+        val refused   = discovery.resolve(IssuerA)
+
+        refused shouldBe Left("discovery document is not valid JSON")
+        // Remembered like any other failure: no second GET.
+        discovery.resolve(IssuerA) shouldBe refused
+        gets.asked.get shouldBe 1
+      }
+    }
+
   // The issuer is a tenant admin's choice, and every setting of a new one would leave an entry for
   // the life of the process.
   it should "hold at most 1024 documents, however many issuers are asked, and answer every one" in {

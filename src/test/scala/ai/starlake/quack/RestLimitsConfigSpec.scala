@@ -6,7 +6,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import pureconfig.ConfigSource
 
-/** Pins the restLimits block: the defaults the bundled application.conf gives, the five variables,
+/** Pins the restLimits block: the defaults the bundled application.conf gives, the six variables,
   * the values boot refuses, and the registry rows the admin UI and the docs page are built from.
   */
 class RestLimitsConfigSpec extends AnyFlatSpec with Matchers:
@@ -23,10 +23,11 @@ class RestLimitsConfigSpec extends AnyFlatSpec with Matchers:
   private def load(env: Map[String, String] = Map.empty): ManagerConfig =
     loadOverlay(env.map((k, v) => s"$k = \"$v\"").mkString("\n"))
 
-  "RestLimitsConfig" should "default to 16 MiB, 64 KiB, 30 s, 1024 connections and 8 KiB headers" in {
-    RestLimitsConfig() shouldBe RestLimitsConfig(16777216L, 65536L, 30L, 1024, 8192)
+  "RestLimitsConfig" should "default to 16 MiB, 64 KiB, 30 s, 1024 connections, 8 KiB headers and 1 MiB on a module's public route" in {
+    RestLimitsConfig() shouldBe RestLimitsConfig(16777216L, 65536L, 30L, 1024, 8192, 1048576L)
     load().restLimits shouldBe RestLimitsConfig()
     load().restLimits.maxHeaderBytes shouldBe 8192
+    load().restLimits.maxModulePublicBodyBytes shouldBe 1048576L
   }
 
   it should "take each limit from its variable" in {
@@ -40,6 +41,8 @@ class RestLimitsConfigSpec extends AnyFlatSpec with Matchers:
       RestLimitsConfig(maxConnections = 64)
     load(Map("QOD_REST_MAX_HEADER_BYTES" -> "16384")).restLimits shouldBe
       RestLimitsConfig(maxHeaderBytes = 16384)
+    load(Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> "4096")).restLimits shouldBe
+      RestLimitsConfig(maxModulePublicBodyBytes = 4096L)
     // The camelCase keys of application.conf reach the reader (a missing ProductHint would leave
     // every value at its default and ignore the block).
     loadOverlay("quack-on-demand.restLimits { bodyTimeoutSec = 9 }").restLimits shouldBe
@@ -48,24 +51,33 @@ class RestLimitsConfigSpec extends AnyFlatSpec with Matchers:
 
   it should "refuse a value the listener cannot honour" in {
     List(
-      Map("QOD_REST_MAX_BODY_BYTES"        -> "0"),
-      Map("QOD_REST_MAX_BODY_BYTES"        -> (Int.MaxValue - 7L).toString),
-      Map("QOD_REST_MAX_PUBLIC_BODY_BYTES" -> "-1"),
-      Map("QOD_REST_MAX_PUBLIC_BODY_BYTES" -> (Int.MaxValue - 7L).toString),
-      Map("QOD_REST_BODY_TIMEOUT_SEC"      -> "0"),
-      Map("QOD_REST_BODY_TIMEOUT_SEC"      -> "86401"),
-      Map("QOD_REST_MAX_CONNECTIONS"       -> "0"),
-      Map("QOD_REST_MAX_CONNECTIONS"       -> "lots"),
-      Map("QOD_REST_MAX_HEADER_BYTES"      -> "1023"),
-      Map("QOD_REST_MAX_HEADER_BYTES"      -> "1048577"),
-      Map("QOD_REST_MAX_HEADER_BYTES"      -> "0"),
-      Map("QOD_REST_MAX_HEADER_BYTES"      -> "-8192")
+      Map("QOD_REST_MAX_BODY_BYTES"               -> "0"),
+      Map("QOD_REST_MAX_BODY_BYTES"               -> (Int.MaxValue - 7L).toString),
+      Map("QOD_REST_MAX_PUBLIC_BODY_BYTES"        -> "-1"),
+      Map("QOD_REST_MAX_PUBLIC_BODY_BYTES"        -> (Int.MaxValue - 7L).toString),
+      Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> "0"),
+      Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> "-1"),
+      Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> (Int.MaxValue - 7L).toString),
+      Map("QOD_REST_BODY_TIMEOUT_SEC"             -> "0"),
+      Map("QOD_REST_BODY_TIMEOUT_SEC"             -> "86401"),
+      Map("QOD_REST_MAX_CONNECTIONS"              -> "0"),
+      Map("QOD_REST_MAX_CONNECTIONS"              -> "lots"),
+      Map("QOD_REST_MAX_HEADER_BYTES"             -> "1023"),
+      Map("QOD_REST_MAX_HEADER_BYTES"             -> "1048577"),
+      Map("QOD_REST_MAX_HEADER_BYTES"             -> "0"),
+      Map("QOD_REST_MAX_HEADER_BYTES"             -> "-8192")
     ).foreach(env => withClue(env)(an[Exception] should be thrownBy load(env)))
     load(
       Map("QOD_REST_MAX_BODY_BYTES" -> (Int.MaxValue - 8L).toString)
     ).restLimits.maxBodyBytes shouldBe
       Int.MaxValue - 8L
     load(Map("QOD_REST_MAX_PUBLIC_BODY_BYTES" -> "1")).restLimits.maxPublicBodyBytes shouldBe 1L
+    load(
+      Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> "1")
+    ).restLimits.maxModulePublicBodyBytes shouldBe 1L
+    load(
+      Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> (Int.MaxValue - 8L).toString)
+    ).restLimits.maxModulePublicBodyBytes shouldBe Int.MaxValue - 8L
     load(Map("QOD_REST_BODY_TIMEOUT_SEC" -> "86400")).restLimits.bodyTimeoutSec shouldBe 86400L
   }
 
@@ -78,14 +90,21 @@ class RestLimitsConfigSpec extends AnyFlatSpec with Matchers:
     load(Map("QOD_REST_MAX_HEADER_BYTES" -> "1048576")).restLimits.maxHeaderBytes shouldBe 1048576
   }
 
+  it should "name QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES when it refuses that limit" in
+    List("0", (Int.MaxValue - 7L).toString).foreach { v =>
+      val e = intercept[Exception](load(Map("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES" -> v)))
+      withClue(v)(e.getMessage should include("QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES"))
+    }
+
   it should "register each limit under its variable, none sensitive" in {
     val entries = ConfigRegistry.collect(List("quack-on-demand" -> classOf[ManagerConfig]))
     List(
-      "maxBodyBytes"       -> "QOD_REST_MAX_BODY_BYTES",
-      "maxPublicBodyBytes" -> "QOD_REST_MAX_PUBLIC_BODY_BYTES",
-      "bodyTimeoutSec"     -> "QOD_REST_BODY_TIMEOUT_SEC",
-      "maxConnections"     -> "QOD_REST_MAX_CONNECTIONS",
-      "maxHeaderBytes"     -> "QOD_REST_MAX_HEADER_BYTES"
+      "maxBodyBytes"             -> "QOD_REST_MAX_BODY_BYTES",
+      "maxPublicBodyBytes"       -> "QOD_REST_MAX_PUBLIC_BODY_BYTES",
+      "bodyTimeoutSec"           -> "QOD_REST_BODY_TIMEOUT_SEC",
+      "maxConnections"           -> "QOD_REST_MAX_CONNECTIONS",
+      "maxHeaderBytes"           -> "QOD_REST_MAX_HEADER_BYTES",
+      "maxModulePublicBodyBytes" -> "QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES"
     ).foreach { case (key, envVar) =>
       entries
         .find(_.path == s"quack-on-demand.restLimits.$key")
@@ -106,4 +125,16 @@ class RestLimitsConfigSpec extends AnyFlatSpec with Matchers:
     description("maxConnections").get should include(
       "Fewer when a fifth of the heap cannot hold that many: boot says so."
     )
+  }
+
+  it should "tell an operator which routes each body limit applies to" in {
+    val entries = ConfigRegistry.collect(List("quack-on-demand" -> classOf[ManagerConfig]))
+    def description(key: String) =
+      entries.find(_.path == s"quack-on-demand.restLimits.$key").map(_.description).get
+    description("maxModulePublicBodyBytes") shouldBe
+      "Largest request body the REST port reads on a module's public route, in bytes: read " +
+      "before any credential is checked. Raising it lowers how many connections fit the heap on " +
+      "a manager with such routes."
+    // A module's public route is read before any credential: it is no admitted caller's.
+    description("maxBodyBytes") should not include "module"
   }

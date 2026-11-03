@@ -52,7 +52,9 @@ final class NodeInternalServer(
             NodeInternalServer.MaxHeaderBytes,
             DecideRoute.MaxBodyBytes,
             tls = false
-          )
+          ),
+          // Both limits are constants: only the heap takes more.
+          limitsTunable = false
         )
       )
       .withReceiveBufferSize(BoundedBody.ReadBufferBytes)

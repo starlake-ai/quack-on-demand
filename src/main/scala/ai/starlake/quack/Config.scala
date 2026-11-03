@@ -485,9 +485,7 @@ object TelemetryConfig:
 final case class RestLimitsConfig(
     @field @ConfigField(
       envVar = "QOD_REST_MAX_BODY_BYTES",
-      description =
-        "Largest request body the REST port reads for an admitted caller or a module's public " +
-          "route, in bytes."
+      description = "Largest request body the REST port reads for an admitted caller, in bytes."
     )
     maxBodyBytes: Long = 16777216L,
     @field @ConfigField(
@@ -515,12 +513,22 @@ final case class RestLimitsConfig(
         "Largest request line, and largest header block, the REST port reads, in bytes each. " +
           "Raising it lowers how many connections fit the heap."
     )
-    maxHeaderBytes: Int = 8192
+    maxHeaderBytes: Int = 8192,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES",
+      description =
+        "Largest request body the REST port reads on a module's public route, in bytes: read " +
+          "before any credential is checked. Raising it lowers how many connections fit the " +
+          "heap on a manager with such routes."
+    )
+    maxModulePublicBodyBytes: Long = 1048576L
 ):
   require(
-    maxBodyBytes > 0 && maxPublicBodyBytes > 0 && bodyTimeoutSec > 0 && maxConnections > 0,
+    maxBodyBytes > 0 && maxPublicBodyBytes > 0 && maxModulePublicBodyBytes > 0 &&
+      bodyTimeoutSec > 0 && maxConnections > 0,
     "restLimits (QOD_REST_MAX_BODY_BYTES, QOD_REST_MAX_PUBLIC_BODY_BYTES, " +
-      "QOD_REST_BODY_TIMEOUT_SEC, QOD_REST_MAX_CONNECTIONS) must be positive"
+      "QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES, QOD_REST_BODY_TIMEOUT_SEC, " +
+      "QOD_REST_MAX_CONNECTIONS) must be positive"
   )
   require(
     maxHeaderBytes >= 1024 && maxHeaderBytes <= 1048576,
@@ -529,8 +537,10 @@ final case class RestLimitsConfig(
   )
   // A body is held in one array, which stops short of 2 GiB.
   require(
-    maxBodyBytes <= Int.MaxValue - 8L && maxPublicBodyBytes <= Int.MaxValue - 8L,
-    s"QOD_REST_MAX_BODY_BYTES and QOD_REST_MAX_PUBLIC_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
+    maxBodyBytes <= Int.MaxValue - 8L && maxPublicBodyBytes <= Int.MaxValue - 8L &&
+      maxModulePublicBodyBytes <= Int.MaxValue - 8L,
+    s"QOD_REST_MAX_BODY_BYTES, QOD_REST_MAX_PUBLIC_BODY_BYTES and " +
+      s"QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
   )
   require(bodyTimeoutSec <= 86400L, "QOD_REST_BODY_TIMEOUT_SEC must be at most 86400")
 

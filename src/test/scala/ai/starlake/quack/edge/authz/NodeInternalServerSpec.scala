@@ -45,6 +45,16 @@ class NodeInternalServerSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
 
+  it should "tell an operator whose heap fits fewer connections to raise the heap, its limits being fixed" in:
+    // More connections than any heap fits, so that boot prints the line whatever this JVM's heap.
+    val out = new java.io.ByteArrayOutputStream()
+    Console.withOut(out)(new NodeInternalServer("127.0.0.1", 0, Int.MaxValue, List(routes)))
+    val printed = out.toString(UTF_8)
+    printed should include("The node verdict listener takes at most")
+    printed should include("QOD_INTERNAL_MAX_CONNECTIONS")
+    printed should include("Raise the heap (-Xmx) to take more")
+    printed should not include "lower the limits"
+
   it should "name QOD_INTERNAL_PORT when it cannot bind" in:
     val taken = new ServerSocket(0, 50, InetAddress.getLoopbackAddress)
     try

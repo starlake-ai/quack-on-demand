@@ -38,26 +38,37 @@ object ConnectionBudget:
   def fit(configured: Int, heldBytes: Long, maxHeapBytes: Long): Int =
     math.max(1L, math.min(configured.toLong, maxHeapBytes / HeapParts / heldBytes)).toInt
 
-  /** What boot says when a listener takes fewer connections than it is configured to. */
+  /** What boot says when a listener takes fewer connections than it is configured to.
+    * `limitsTunable` is false for a listener whose header and body limits are constants: lowering
+    * them is no way to take more there, so the line says only to raise the heap.
+    */
   private[edge] def notice(
       listener: String,
       envVar: String,
       configured: Int,
       taken: Int,
       heldBytes: Long,
-      maxHeapBytes: Long
+      maxHeapBytes: Long,
+      limitsTunable: Boolean = true
   ): String =
     s"$listener takes at most $taken of the $configured connections of $envVar: each can hold " +
       s"${heldBytes / 1024} KiB before any credential, against a fifth of this " +
-      s"${maxHeapBytes / (1024 * 1024)} MiB heap. Raise the heap (-Xmx) or lower the limits to " +
-      "take more"
+      s"${maxHeapBytes / (1024 * 1024)} MiB heap. " +
+      (if limitsTunable then "Raise the heap (-Xmx) or lower the limits to take more"
+       else "Raise the heap (-Xmx) to take more")
 
   /** [[fit]] for this JVM's heap, saying so at boot when that is fewer than `configured` (println,
     * as the logger's default level would swallow it).
     */
-  def slots(listener: String, envVar: String, configured: Int, heldBytes: Long): Int =
+  def slots(
+      listener: String,
+      envVar: String,
+      configured: Int,
+      heldBytes: Long,
+      limitsTunable: Boolean = true
+  ): Int =
     val maxHeap = Runtime.getRuntime.maxMemory
     val taken   = fit(configured, heldBytes, maxHeap)
     if taken < configured then
-      println(notice(listener, envVar, configured, taken, heldBytes, maxHeap))
+      println(notice(listener, envVar, configured, taken, heldBytes, maxHeap, limitsTunable))
     taken

@@ -124,7 +124,9 @@ class OidcDiscovery(
     else Left(s"field '$field' in discovery document is not an absolute http(s) URL")
 
   private def parseDoc(body: String): Either[String, OidcDiscoveryDoc] =
-    parse(body).left.map(_.getMessage).flatMap { json =>
+    // The parser's own failure quotes the start of the body ("expected json value got 'Secret...'"),
+    // which is the issuer's text: one fixed text, as the Lefts below name a field and never a value.
+    parse(body).left.map(_ => OidcDiscovery.NotJson).flatMap { json =>
       val c = json.hcursor
       // The Left names the field, never its value: it is remembered and shown.
       def bounded(field: String, value: String): Either[String, String] =
@@ -177,6 +179,9 @@ object OidcDiscovery:
 
   /** The most characters of an issuer URL, the key of both tables: a longer one is refused. */
   val MaxIssuerUrlChars: Int = 2048
+
+  /** What a body that is no JSON is answered, whatever the issuer sent. */
+  val NotJson: String = "discovery document is not valid JSON"
 
   /** True for an absolute `http` or `https` URL with a host (the scheme in any case), the only kind
     * the JDK client reads and the only kind a browser is sent to. `file:`, `ftp:`, `javascript:`, a

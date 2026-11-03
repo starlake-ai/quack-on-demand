@@ -900,17 +900,38 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "give a module's public route the larger limit" in {
+  it should "give a module's public route a limit of its own" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(
       fix.store,
       modulePublicPrefixes = Set("/api/hosted/signup"),
-      restLimits = RestLimitsConfig(maxBodyBytes = 4096, maxPublicBodyBytes = 1024)
+      restLimits = RestLimitsConfig(
+        maxBodyBytes = 16384,
+        maxPublicBodyBytes = 1024,
+        maxModulePublicBodyBytes = 4096
+      )
     )
     try
+      // Over a core public route's limit, within the module's.
       post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * 2048)
         .statusCode() should not be 413
+      post(h.httpClient, s"${h.baseUrl}/api/auth/login", "x" * 2048).statusCode() shouldBe 413
+      // Over the module's, though within an admitted caller's.
       post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * 4097).statusCode() shouldBe 413
+    finally h.shutdown()
+  }
+
+  it should "limit a module's public route to 1 MiB by default, not to an admitted caller's 16 MiB" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, modulePublicPrefixes = Set("/api/hosted/signup"))
+    try
+      val oneMiB = 1048576
+      // Over a core public route's 64 KiB, within the module's limit.
+      post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * oneMiB)
+        .statusCode() should not be 413
+      val over = post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * (oneMiB + 1))
+      over.statusCode() shouldBe 413
+      errorCode(over.body()) should contain("payload_too_large")
     finally h.shutdown()
   }
 
@@ -1147,6 +1168,62 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         finally client.close()
       finally holders.foreach(_.close())
     finally h.shutdown()
+  }
+
+  /** Whether a further client is answered while `held` connections, each answered and kept open,
+    * hold the slots of the server at `baseUrl`.
+    */
+  private def answeredWhileHolding(baseUrl: String, held: Int): Boolean =
+    val uri     = java.net.URI.create(baseUrl)
+    val holders = List.fill(held) {
+      val holder = new java.net.Socket(uri.getHost, uri.getPort)
+      holder.setSoTimeout(15000)
+      sendHealth(holder)
+      rawStatus(new java.io.BufferedInputStream(holder.getInputStream)) shouldBe 200
+      holder
+    }
+    try
+      val client = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        sendHealth(client)
+        client.setSoTimeout(1500)
+        try
+          client.getInputStream.read()
+          true
+        catch case _: java.net.SocketTimeoutException => false
+      finally client.close()
+    finally holders.foreach(_.close())
+
+  it should "count the larger public body limit of a module and the core when a module has public routes, else the core's" in {
+    def slotsAt(bodyBytes: Long, limits: RestLimitsConfig): Int =
+      ConnectionBudget.fit(
+        limits.maxConnections,
+        ConnectionBudget.heldBytes(limits.maxHeaderBytes, bodyBytes, tls = false),
+        Runtime.getRuntime.maxMemory
+      )
+    def answered(limits: RestLimitsConfig, modulePublic: Set[String], held: Int): Boolean =
+      val h = ManagerServerHarness.boot(
+        SecurityFixtures.freshStore().store,
+        restLimits = limits,
+        modulePublicPrefixes = modulePublic
+      )
+      try answeredWhileHolding(h.baseUrl, held)
+      finally h.shutdown()
+    val huge    = Int.MaxValue - 8L
+    val module  = Set("/api/hosted/signup")
+    val bigMod  = RestLimitsConfig(maxConnections = 1024, maxModulePublicBodyBytes = huge)
+    val bigCore = RestLimitsConfig(maxConnections = 1024, maxPublicBodyBytes = huge)
+
+    // A module has public routes and its limit is the larger: a connection may hold 2 GiB.
+    val modSlots = slotsAt(bigMod.maxModulePublicBodyBytes, bigMod)
+    modSlots should be < 64
+    answered(bigMod, module, modSlots) shouldBe false
+    // The core's limit is the larger: the same.
+    val coreSlots = slotsAt(bigCore.maxPublicBodyBytes, bigCore)
+    coreSlots should be < 64
+    answered(bigCore, module, coreSlots) shouldBe false
+    // No module has public routes: no route reads the module's limit, so it counts for nothing.
+    answered(bigMod, Set.empty, modSlots) shouldBe true
   }
 
   // /metrics is public (a scraper holds no credential) and is mounted from the harness's own

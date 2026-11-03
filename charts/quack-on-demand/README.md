@@ -1,6 +1,6 @@
 # quack-on-demand Helm chart
 
-Deploys the [quack-on-demand](https://github.com/starlake-ai/quack-on-demand) manager onto Kubernetes. The manager serves the admin REST/UI on `:20900` and the FlightSQL edge on `:31338`, and supervises Quack node pods in the same namespace via its built-in `KubernetesQuackBackend`.
+Deploys the [quack-on-demand](https://github.com/starlake-ai/quack-on-demand) manager onto Kubernetes. The manager serves the admin REST/UI on `:20900`, the FlightSQL edge on `:31338` and the native Quack protocol front door on `:9494`, and supervises Quack node pods in the same namespace via its built-in `KubernetesQuackBackend`.
 
 ## Prerequisites
 
@@ -71,7 +71,7 @@ helm package charts/quack-on-demand -d /tmp
 helm push /tmp/quack-on-demand-*.tgz oci://your-registry.example.com/charts
 ```
 
-OCI publication to a public registry is a planned follow-up.
+Every release is published to GHCR as `oci://ghcr.io/starlake-ai/charts/quack-on-demand` (see Quick install above).
 
 ## What the chart creates
 
@@ -79,8 +79,9 @@ OCI publication to a public registry is a planned follow-up.
 |---|---|
 | `Deployment` | The manager pod. Default `replicas: 1` (see the Resilience guide at https://starlake-ai.github.io/quack-on-demand/operating/resilience and #11). |
 | `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`. |
-| Container port `internal` | `:20901`, no Service: node pods call the manager pod directly for verdicts. |
+| Container port `internal` | `:20901`, no Service: node pods call the manager pod directly for verdicts. Any pod that reaches it can hold its connection slots, which stops authorization for every tenant, so set `networkPolicy.enabled=true` (off by default), or in a NetworkPolicy of your own open the port to node pods alone. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
+| `Service` (Quack) | ClusterIP on `:9494` for the native Quack protocol front door, which a DuckDB client `ATTACH`es to (when `quack.enabled`, the default). |
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
 | `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |

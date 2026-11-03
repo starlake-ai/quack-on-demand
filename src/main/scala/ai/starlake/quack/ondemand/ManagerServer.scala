@@ -133,8 +133,9 @@ final class ManagerServer(
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
     catch case _: Exception => ""
 
-  /** A public path a module declared. It takes the larger body limit: a provider's webhook does not
-    * fit the core public routes' limit, and no core route lives there.
+  /** A public path a module declared. It takes a body limit of its own,
+    * `restLimits.maxModulePublicBodyBytes`: a provider's webhook does not fit the core public
+    * routes' limit, and no core route lives there.
     */
   private def isModulePublic(path: String): Boolean =
     modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
@@ -191,6 +192,14 @@ final class ManagerServer(
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
   private val limits = cfg.restLimits
+
+  /** The largest body a connection reads before any credential is checked: a core public route's,
+    * or, when a module has public routes, the larger of that and the module's.
+    */
+  private val unauthenticatedBodyBytes: Long =
+    if modulePublicPrefixes.nonEmpty then
+      math.max(limits.maxPublicBodyBytes, limits.maxModulePublicBodyBytes)
+    else limits.maxPublicBodyBytes
 
   private val bodyDeadline = FiniteDuration(limits.bodyTimeoutSec, SECONDS)
 
@@ -307,10 +316,11 @@ final class ManagerServer(
     *
     * Request bodies are read here, whole, before a route sees one ([[withBoundedBody]]), within
     * `restLimits.bodyTimeoutSec`. A public route takes no chunked framing, as no credential has
-    * been checked: a core one reads at most `restLimits.maxPublicBodyBytes`, a module's and an
-    * admitted caller's at most `restLimits.maxBodyBytes`. A body nesting too deep is refused there
-    * too (see [[BoundedBody.MaxNesting]]). No route outside `/api` reads a body except `/mcp`,
-    * which applies the limit itself, so nothing is read here for such a path.
+    * been checked: a core one reads at most `restLimits.maxPublicBodyBytes`, a module's at most
+    * `restLimits.maxModulePublicBodyBytes`, and an admitted caller's at most
+    * `restLimits.maxBodyBytes`. A body nesting too deep is refused there too (see
+    * [[BoundedBody.MaxNesting]]). No route outside `/api` reads a body except `/mcp`, which applies
+    * the limit itself, so nothing is read here for such a path.
     *
     * What blocks on the database leaves the compute threads: a PAT is resolved on `IO.blocking`
     * ([[resolveCredential]]), and so are the two denial audit rows the guard writes. A session JWT
@@ -342,7 +352,8 @@ final class ManagerServer(
           )
         else
           val maxBytes =
-            if isModulePublic(path) then limits.maxBodyBytes else limits.maxPublicBodyBytes
+            if isModulePublic(path) then limits.maxModulePublicBodyBytes
+            else limits.maxPublicBodyBytes
           withBoundedBody(req, maxBytes)(routes)
       else
         // Admit on X-API-Key header OR on the qod_session cookie. The cookie
@@ -1314,7 +1325,7 @@ final class ManagerServer(
           "The REST port",
           "QOD_REST_MAX_CONNECTIONS",
           limits.maxConnections,
-          ConnectionBudget.heldBytes(limits.maxHeaderBytes, limits.maxPublicBodyBytes, tls = false)
+          ConnectionBudget.heldBytes(limits.maxHeaderBytes, unauthenticatedBodyBytes, tls = false)
         )
       )
       .withReceiveBufferSize(BoundedBody.ReadBufferBytes)

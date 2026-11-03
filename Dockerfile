@@ -163,7 +163,9 @@ ENV QOD_ON_DEMAND_HOST=0.0.0.0 \
     JAVA_OPTS=""
 
 # `-Darrow.allocation.manager.type=Unsafe` pins Arrow to arrow-memory-unsafe;
-# without it Arrow picks netty and crashes with NoSuchFieldError on Java 17+.
-# Add-Opens is set in the jar manifest, so no extra --add-opens flags here.
+# without it Arrow picks netty and crashes with NoSuchFieldError: chunkSize.
+# Add-Opens is set in the jar manifest (Java 17 and later block the reflection
+# Arrow's unsafe allocator needs unless it is opened), so no extra --add-opens
+# flags here. The manager needs JDK 21 or later; this image has it.
 # sh expands JAVA_OPTS; exec keeps the JVM as tini's child, so it gets the signals.
 ENTRYPOINT ["/usr/bin/tini", "--", "sh", "-c", "exec java -Darrow.allocation.manager.type=Unsafe $JAVA_OPTS -jar /app/quack-on-demand.jar \"$@\"", "--"]

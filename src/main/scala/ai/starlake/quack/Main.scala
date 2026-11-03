@@ -1584,10 +1584,9 @@ object Main extends IOApp with LazyLogging:
             sessionTtlSec = edgeCfg.sessionTtlSec,
             maxHeartbeatSec = quackCfgResolved.maxHeartbeatTimeoutSec
           )
-          // HTTP/1.1 only, like every client of ours: the JDK offers `Upgrade: h2c` on every
-          // http:// request, and its HTTP/2 reader queues inbound frames with no bound (see
-          // BoundedHttp). A node is ours, but the client costs nothing to keep to what the node
-          // speaks.
+          // HTTP/1.1 only: the JDK offers `Upgrade: h2c` on every http:// request, and its HTTP/2
+          // reader queues inbound frames with no bound (see BoundedHttp). A node is ours, but the
+          // client costs nothing to keep to what the node speaks.
           val transport = new ai.starlake.quack.edge.adapter.QuackProtocol.JdkHttpTransport(
             java.net.http.HttpClient
               .newBuilder()

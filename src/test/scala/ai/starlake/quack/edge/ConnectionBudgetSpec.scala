@@ -136,3 +136,21 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
     line should include("Raise the heap (-Xmx) or lower the limits to take more")
     // It does not claim that a fifth of the heap holds what it does not.
     line should not include "holds no more"
+
+  it should "say only to raise the heap when the listener's limits are constants" in:
+    // The node verdict listener's header and body limits are fixed: lowering them is no way to take
+    // more, and no setting does it.
+    val line = ConnectionBudget.notice(
+      "The node verdict listener",
+      "QOD_INTERNAL_MAX_CONNECTIONS",
+      256,
+      ConnectionBudget.fit(256, listener, oneGiB),
+      listener,
+      oneGiB,
+      limitsTunable = false
+    )
+    line shouldBe
+      "The node verdict listener takes at most 145 of the 256 connections of " +
+      "QOD_INTERNAL_MAX_CONNECTIONS: each can hold 1446 KiB before any credential, against a " +
+      "fifth of this 1024 MiB heap. Raise the heap (-Xmx) to take more"
+    line should not include "lower the limits"

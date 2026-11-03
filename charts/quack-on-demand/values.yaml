@@ -148,7 +148,9 @@ pdb:
 # --- NetworkPolicy (opt-in) ---------------------------------------------------
 # Off by default so existing clusters are unaffected. Flip to true to lock
 # down traffic to/from the manager and the spawned Quack node pods to just
-# what the control plane actually needs.
+# what the control plane actually needs. Left off, any pod can reach the
+# manager's node verdict listener (20901) and hold its connection slots, which
+# stops authorization for every tenant.
 networkPolicy:
   enabled: false
   # Ports the manager assigns to spawned Quack node pods (LocalQuackBackend /
@@ -165,8 +167,8 @@ networkPolicy:
   # provider's published IP ranges).
   objectStore:
     cidrs: []
-  # Peers allowed to reach the manager's REST/UI (20900) and FlightSQL
-  # (31338) ports. Empty = allow from anywhere (e.g. behind an Ingress /
+  # Peers allowed to reach the manager's REST/UI (20900), FlightSQL
+  # (31338) and Quack (9494) ports. Empty = allow from anywhere (e.g. behind an Ingress /
   # LoadBalancer already restricting access upstream). Node pods always reach
   # 20901, the verdict listener, for their verdict calls, whatever this says.
   ingressFrom: []
