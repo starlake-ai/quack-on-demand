@@ -168,6 +168,10 @@ final class BranchService(
         .map(b => (b, store.listBranchMerges(b.id)))
     }
 
+  /** The branch's open proposal, if any. */
+  def proposalOf(b: Branch): Option[BranchMerge] =
+    store.listBranchMerges(b.id).find(_.status == BranchMergeStatus.Proposed)
+
   /** A non-admin may act on a parent iff it can connect to at least one of its pools: exactly the
     * FlightSQL handshake gate, so "may query" and "may branch" are the same permission. Admins
     * (tenant admins and superusers) never reach the gate, so it runs with

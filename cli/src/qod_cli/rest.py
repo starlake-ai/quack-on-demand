@@ -12,6 +12,9 @@ import httpx
 
 from .config import Settings
 
+# For a call whose stages the server bounds itself: the connect limit stays, the read limit goes.
+UNTIL_ANSWERED = httpx.Timeout(30.0, read=None)
+
 
 # Endpoints that check a credential carried in the body. Their 401 means that credential is
 # wrong, so the server's message passes through instead of the login hint below.
@@ -52,6 +55,7 @@ class RestClient:
         params: dict | None = None,
         body: Any | None = None,
         text: bool = False,
+        timeout: httpx.Timeout | float = 30.0,
     ) -> Any:
         settings = self._settings
         headers = {}
@@ -62,7 +66,7 @@ class RestClient:
             if value is None:
                 continue
             query[name] = "true" if value is True else "false" if value is False else str(value)
-        kwargs: dict = {"params": query, "headers": headers, "timeout": 30.0}
+        kwargs: dict = {"params": query, "headers": headers, "timeout": timeout}
         if isinstance(body, str):
             kwargs["content"] = body.encode()
             headers["Content-Type"] = "text/plain"

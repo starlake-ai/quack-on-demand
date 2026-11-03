@@ -83,7 +83,7 @@ object BranchEndpoints:
         "The branch's change set since its fork: touched tables classified as created, dropped, " +
           "recreated, modified or altered (with insert/delete/update counts unless counts=false), " +
           "the conflicts against main, and the changes v1 cannot merge. `mergeable` is the " +
-          "fast-forward verdict."
+          "merge verdict."
       )
 
   val diffEndpoint: PublicEndpoint[
@@ -133,20 +133,25 @@ object BranchEndpoints:
       )
 
   val proposeEndpoint: PublicEndpoint[
-    (BranchOpRequest, Option[String]),
+    (BranchProposeRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     BranchProposeResponse,
     Any
   ] =
     base.post
       .in("branch" / "propose")
-      .in(jsonBody[BranchOpRequest])
+      .in(jsonBody[BranchProposeRequest])
       .in(Endpoints.authToken)
       .out(jsonBody[BranchProposeResponse])
       .description(
-        "Propose the branch for merge: records a merge request with the change set and the " +
-          "conflicts computed now. A branch with conflicts can be proposed; merge refuses it. " +
-          "409 already_proposed."
+        "Propose the branch for merge: records a merge request with the change set and what a " +
+          "merge would do to its rows now, read on a merge node. A branch with conflicts can be " +
+          "proposed; merge refuses it. onConflict (main or branch) names the side that wins a " +
+          "conflicting cell; keys names the columns that catch rows both sides inserted. Proposing " +
+          "again replaces an open proposal, unless its last merge may have landed (409 " +
+          "proposal_unsettled: merge again, or discard; only a discard when another proposal's " +
+          "commit is on main). 400 invalid_on_conflict, invalid_key; " +
+          "409 history_gap."
       )
 
   val mergeEndpoint: PublicEndpoint[
@@ -161,12 +166,20 @@ object BranchEndpoints:
       .in(Endpoints.authToken)
       .out(jsonBody[BranchMergeResponse])
       .description(
-        "Fast-forward merge a proposed branch onto main in one stamped snapshot, tag it, and " +
-          "tear the branch down. Human-gated: the approver must differ from the proposer (403 " +
-          "self_merge_forbidden) and no MCP tool exposes it. 409 merge_conflict lists the tables " +
-          "main changed since the fork; 409 concurrent_write on an expectedMainSnapshot mismatch " +
-          "or a lost commit race (retry); 422 merge_unsupported for schema changes, views and " +
-          "macros; 502 merge_failed."
+        "Merge a proposed branch onto main in one stamped snapshot, tag it, and tear the branch " +
+          "down. Tables both sides changed merge cell by cell. Human-gated: the approver must " +
+          "differ from the proposer (403 self_merge_forbidden) and no MCP tool exposes it. " +
+          "proposalId names the open proposal the approver read: another one in its place is 409 " +
+          "proposal_replaced, and nothing changes. 409 proposal_unsettled: another proposal of this " +
+          "branch landed; discard the branch. " +
+          "holdWriters refuses other commits on the merged tables until the merge ends; " +
+          "DuckLake retries them for about 9 seconds. 409 merge_conflict names the tables in " +
+          "conflict and closes the proposal; 409 conflicts_changed, proposal_stale and " +
+          "history_gap close it too; 409 concurrent_write on an expectedMainSnapshot mismatch or " +
+          "when main kept moving keeps it open (merge again, or with holdWriters); 422 " +
+          "merge_unsupported for schema changes, views and macros; 422 nothing_to_merge; 502 " +
+          "merge_failed closes it when the node failed, and keeps it open after a timeout or when " +
+          "the fence could not be armed: merge again."
       )
 
   val discardEndpoint: PublicEndpoint[

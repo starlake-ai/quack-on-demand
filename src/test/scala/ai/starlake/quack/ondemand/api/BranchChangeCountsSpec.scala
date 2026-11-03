@@ -87,7 +87,10 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     root.close()
     new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
 
-  private final class Fixture:
+  private final class Fixture(
+      node: ai.starlake.quack.ondemand.branch.MergeNode =
+        ai.starlake.quack.ondemand.branch.ZeroRowsMergeNode
+  ):
     val store = new InMemoryControlPlaneStore()
     val admin = new DbAdmin:
       def createDatabase(name: String): Either[String, Unit] = Right(())
@@ -152,7 +155,11 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       store = store,
       resolveReader = (_, db) => if db == parent.name then mainReader else branchReader,
       cloneCatalog = (_, _, _, _) => Right(CloneResult(10L, 2, 10L)),
-      mergeExecutor = ai.starlake.quack.ondemand.branch.ZeroRowsMergeExecutor,
+      mergeExecutor = new ai.starlake.quack.ondemand.branch.MergeExecutor:
+        def withNode[A](spec: ai.starlake.quack.model.NodeSpec)(
+            body: ai.starlake.quack.ondemand.branch.MergeNode => IO[Either[String, A]]
+        ): IO[Either[String, A]] = body(node)
+      ,
       mergeFence = new MergeFence:
         def arm(
             m: Map[String, String],
@@ -329,7 +336,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     )
     refused(
       f.handlers
-        .propose(BranchOpRequest("acme", f.parent.name, "feature"), tok)(AliceScope)
+        .propose(BranchProposeRequest("acme", f.parent.name, "feature"), tok)(AliceScope)
         .unsafeRunSync()
     )
     // Nothing was counted for it.
@@ -373,7 +380,9 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     // superuser (their own row through the handshake), the stored summary as the system.
     val f     = new Fixture
     val reply = f.handlers
-      .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(RootScope)
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
       .unsafeRunSync()
       .fold(e => fail(s"propose: $e"), identity)
     reply.changes.tables.map(t => t.table -> t.inserted).toMap shouldBe
@@ -403,7 +412,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   "a proposal" should "never hand the proposer the system's counts of a table they may not count, over REST" in {
     val f     = new Fixture
     val reply = f.handlers
-      .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
       .unsafeRunSync()
       .fold(e => fail(s"propose: $e"), identity)
     val changes = reply.changes.tables.map(t => t.table -> (t.inserted, t.countsUnavailable)).toMap
@@ -445,4 +454,140 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .fold(e => fail(s"get: $e"), identity)
     detail.merges.map(m => nationIn(tablesOf(m.summary))) shouldBe List((0L, true))
+  }
+
+  /** A node whose Decide finds 2 conflicting cells in column `x`, on every table. */
+  private object ConflictingNode extends ai.starlake.quack.ondemand.branch.MergeNode:
+    def exec(batch: String) = IO.pure(Right(()))
+    def rows(sql: String)   = IO.pure(
+      Right(
+        if sql.contains("_need") then List(List(Json.fromLong(0L), Json.fromLong(0L)))
+        else if sql.contains("AS kind") then List(List(Json.fromString("cell"), Json.fromLong(70L)))
+        else List(List(1L, 0L, 0L, 2L, 0L, 0L, 0L, 1L, 1L, 5L, 2L).map(Json.fromLong))
+      )
+    )
+
+  "row conflicts" should "show their numbers only for tables the requester may count" in {
+    val f     = new Fixture(ConflictingNode)
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    val byTable = reply.changes.tables.map(t => t.table -> t.rowConflicts).toMap
+    val region  = byTable("region").get
+    (region.cellConflicts, region.hasConflicts, region.countsUnavailable) shouldBe (2L, true, false)
+    region.samples shouldBe Map("cell" -> List(70L))
+    region.mainRowsByKey shouldBe 5L
+    // alice holds no grant on nation: she learns it has conflicts, not how many.
+    val nation = byTable("nation").get
+    (nation.cellConflicts, nation.hasConflicts, nation.countsUnavailable) shouldBe (0L, true, true)
+    nation.samples shouldBe Map.empty
+    nation.mainRowsByKey shouldBe 0L
+    // The merge row a tenant admin reads carries no numbers either; a superuser's does.
+    reply.merge.rowConflicts
+      .map(c => (c.table, c.cellConflicts, c.countsUnavailable))
+      .toSet shouldBe
+      Set(("region", 0L, true), ("nation", 0L, true))
+    val asRoot = f.handlers
+      .get("acme", f.parent.name, "feature", Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"get: $e"), identity)
+    asRoot.merges.flatMap(_.rowConflicts).map(c => (c.table, c.cellConflicts)).toSet shouldBe
+      Set(("region", 2L), ("nation", 2L))
+  }
+
+  it should "reach `changes` from the open proposal, under the same rule" in {
+    val f = new Fixture(ConflictingNode)
+    f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val tables = f.restTables(SessionTok, AliceScope).map(t => t.table -> t).toMap
+    tables("region").rowConflicts.map(_.cellConflicts) shouldBe Some(2L)
+    tables("nation").rowConflicts.map(_.countsUnavailable) shouldBe Some(true)
+    // No counts asked for: nothing to judge by, so no numbers.
+    val noCounts = f.handlers
+      .changes("acme", f.parent.name, "feature", Some(false), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"changes: $e"), identity)
+    noCounts.tables.flatMap(_.rowConflicts).map(_.cellConflicts) shouldBe List(0L, 0L)
+    // A superuser sees every number, counts asked for or not.
+    val asRoot = f.handlers
+      .changes("acme", f.parent.name, "feature", Some(false), Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"changes: $e"), identity)
+    asRoot.tables.flatMap(_.rowConflicts).map(_.cellConflicts) shouldBe List(2L, 2L)
+  }
+
+  it should "say so when a proposal's counts cannot be read, rather than show none" in {
+    val f     = new Fixture(ConflictingNode)
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    val stored = f.store.getBranchMerge(reply.merge.id).get
+    f.store.createBranchMerge(stored.copy(rowConflictsJson = "not json"))
+    val entry = f.handlers
+      .get("acme", f.parent.name, "feature", Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"get: $e"), identity)
+      .merges
+      .find(_.id == reply.merge.id)
+      .get
+    entry.rowConflicts shouldBe Nil
+    entry.error shouldBe Some("the proposal's counts cannot be read; propose again")
+  }
+
+  "propose" should "refuse a bad policy and a bad key before doing anything" in {
+    val f                               = new Fixture
+    def code(req: BranchProposeRequest) = f.handlers
+      .propose(req, Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .left
+      .map(_._2.error)
+    code(BranchProposeRequest("acme", f.parent.name, "feature", onConflict = Some("ours"))) shouldBe
+      Left("invalid_on_conflict")
+    code(
+      BranchProposeRequest("acme", f.parent.name, "feature", keys = Map("nodot" -> List("k")))
+    ) shouldBe
+      Left("invalid_key")
+    f.counted shouldBe empty
+  }
+
+  it should "take the policy and keys over MCP" in {
+    val f    = new Fixture
+    val pat  = patOf(PatTok).get
+    val tool = new McpBranchTools(f.handlers, AliceScope).tools.find(_.name == "propose_merge").get
+    val out  = tool
+      .run(
+        new McpPrincipal.Pat(pat, PatTok),
+        JsonObject(
+          "database"   -> Json.fromString(f.parent.name),
+          "branch"     -> Json.fromString("feature"),
+          "onConflict" -> Json.fromString("main"),
+          "keys"       -> Json.obj("main.region" -> Json.arr(Json.fromString("x")))
+        )
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose_merge: $e"), identity)
+    out.hcursor.downField("merge").get[String]("onConflict") shouldBe Right("main")
+    out.hcursor.downField("merge").downField("keys").get[List[String]]("main.region") shouldBe
+      Right(List("x"))
+  }
+
+  it should "refuse a malformed keys argument over MCP" in {
+    val f    = new Fixture
+    val pat  = patOf(PatTok).get
+    val tool = new McpBranchTools(f.handlers, AliceScope).tools.find(_.name == "propose_merge").get
+    tool
+      .run(
+        new McpPrincipal.Pat(pat, PatTok),
+        JsonObject(
+          "database" -> Json.fromString(f.parent.name),
+          "branch"   -> Json.fromString("feature"),
+          "keys"     -> Json.fromString("main.region=x")
+        )
+      )
+      .unsafeRunSync()
+      .isLeft shouldBe true
   }

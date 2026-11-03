@@ -3,6 +3,7 @@ package ai.starlake.quack.mcp
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
+import io.circe.JsonObject
 import io.circe.syntax._
 import Dtos.given
 
@@ -92,7 +93,7 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     description =
       "The branch's change set since its fork: touched tables (created, dropped, recreated, " +
         "modified with insert/delete/update counts, or altered), conflicts against the live " +
-        "database, and anything v1 cannot merge. `mergeable` is the fast-forward verdict.",
+        "database, and anything v1 cannot merge. `mergeable` is the merge verdict.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -158,13 +159,22 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
   private val proposeMergeTool = McpToolDef(
     name = "propose_merge",
     description =
-      "Propose the branch for merge: records a merge request carrying the change set and the " +
-        "conflicts as of now. A human with a different identity reviews and merges (there is no " +
-        "merge tool). Refused when the branch is already proposed.",
+      "Propose the branch for merge: records a merge request carrying the change set and what a " +
+        "merge would do to its rows now. A human with a different identity reviews and merges " +
+        "(there is no merge tool). Proposing again replaces an open proposal, unless its last " +
+        "merge may have landed: that refuses with proposal_unsettled, and the human merges it " +
+        "again or discards the branch, as the refusal says.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
-      "branch" -> strProp("Branch name."),
+      "branch"     -> strProp("Branch name."),
+      "onConflict" -> strProp(
+        "Which side wins a conflicting cell: main or branch. Absent, any conflict refuses the merge."
+      ),
+      "keys" -> objProp(
+        "schema.table to an array of column names: rows both sides inserted with the same key " +
+          "become conflicts."
+      ),
       tenantProp
     ),
     adminOnly = false,
@@ -172,13 +182,28 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
       (for
         (tenant, database) <- tenantAndDb(principal, args)
         branch             <- str(args, "branch").toRight("the 'branch' argument is required")
-      yield (tenant, database, branch)) match
-        case Left(err)                         => IO.pure(Left(err))
-        case Right((tenant, database, branch)) =>
+        keys               <- keysArg(args)
+      yield (tenant, database, branch, keys)) match
+        case Left(err)                               => IO.pure(Left(err))
+        case Right((tenant, database, branch, keys)) =>
           branches
-            .propose(BranchOpRequest(tenant, database, branch), principal.rawToken)(scopeOf)
+            .propose(
+              BranchProposeRequest(tenant, database, branch, str(args, "onConflict"), keys),
+              principal.rawToken
+            )(scopeOf)
             .map(res => bridge(res).map(_.asJson))
   )
+
+  /** `{"schema.table": ["column", ...]}`. Any other shape is an error, never "no key": a malformed
+    * key must not switch the check off.
+    */
+  private def keysArg(args: JsonObject): Either[String, Map[String, List[String]]] =
+    val err = "the 'keys' argument must be an object of schema.table to an array of column names"
+    args("keys") match
+      case None                => Right(Map.empty)
+      case Some(j) if j.isNull => Right(Map.empty)
+      case Some(j)             =>
+        j.as[Map[String, List[String]]].left.map(_ => err)
 
   private val discardTool = McpToolDef(
     name = "discard",

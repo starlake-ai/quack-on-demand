@@ -1049,7 +1049,7 @@ paths:
       description: 'The branch''s change set since its fork: touched tables classified
         as created, dropped, recreated, modified or altered (with insert/delete/update
         counts unless counts=false), the conflicts against main, and the changes v1
-        cannot merge. `mergeable` is the fast-forward verdict.'
+        cannot merge. `mergeable` is the merge verdict.'
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchChanges
       parameters:
       - name: tenant
@@ -4657,12 +4657,20 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/branch/merge:
     post:
-      description: 'Fast-forward merge a proposed branch onto main in one stamped
-        snapshot, tag it, and tear the branch down. Human-gated: the approver must
-        differ from the proposer (403 self_merge_forbidden) and no MCP tool exposes
-        it. 409 merge_conflict lists the tables main changed since the fork; 409 concurrent_write
-        on an expectedMainSnapshot mismatch or a lost commit race (retry); 422 merge_unsupported
-        for schema changes, views and macros; 502 merge_failed.'
+      description: 'Merge a proposed branch onto main in one stamped snapshot, tag
+        it, and tear the branch down. Tables both sides changed merge cell by cell.
+        Human-gated: the approver must differ from the proposer (403 self_merge_forbidden)
+        and no MCP tool exposes it. proposalId names the open proposal the approver
+        read: another one in its place is 409 proposal_replaced, and nothing changes.
+        409 proposal_unsettled: another proposal of this branch landed; discard the
+        branch. holdWriters refuses other commits on the merged tables until the merge
+        ends; DuckLake retries them for about 9 seconds. 409 merge_conflict names
+        the tables in conflict and closes the proposal; 409 conflicts_changed, proposal_stale
+        and history_gap close it too; 409 concurrent_write on an expectedMainSnapshot
+        mismatch or when main kept moving keeps it open (merge again, or with holdWriters);
+        422 merge_unsupported for schema changes, views and macros; 422 nothing_to_merge;
+        502 merge_failed closes it when the node failed, and keeps it open after a
+        timeout or when the fence could not be armed: merge again.'
       operationId: postApiBranchMerge
       parameters:
       - name: X-API-Key
@@ -4704,8 +4712,13 @@ paths:
   /api/branch/propose:
     post:
       description: 'Propose the branch for merge: records a merge request with the
-        change set and the conflicts computed now. A branch with conflicts can be
-        proposed; merge refuses it. 409 already_proposed.'
+        change set and what a merge would do to its rows now, read on a merge node.
+        A branch with conflicts can be proposed; merge refuses it. onConflict (main
+        or branch) names the side that wins a conflicting cell; keys names the columns
+        that catch rows both sides inserted. Proposing again replaces an open proposal,
+        unless its last merge may have landed (409 proposal_unsettled: merge again,
+        or discard; only a discard when another proposal''s commit is on main). 400
+        invalid_on_conflict, invalid_key; 409 history_gap.'
       operationId: postApiBranchPropose
       parameters:
       - name: X-API-Key
@@ -4722,7 +4735,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/BranchOpRequest'
+              $ref: '#/components/schemas/BranchProposeRequest'
         required: true
       responses:
         '200':
@@ -7742,6 +7755,9 @@ components:
       - mainSnapshotAtPropose
       - summary
       - conflicts
+      - keys
+      - holdWriters
+      - attempts
       properties:
         id:
           type: string
@@ -7769,6 +7785,19 @@ components:
         decidedAt:
           type: string
           format: date-time
+        onConflict:
+          type: string
+        keys:
+          $ref: '#/components/schemas/Map_List_String'
+        holdWriters:
+          type: boolean
+        attempts:
+          type: integer
+          format: int32
+        rowConflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/BranchRowConflicts'
     BranchMergeRequest:
       title: BranchMergeRequest
       type: object
@@ -7776,6 +7805,8 @@ components:
       - tenant
       - tenantDb
       - branch
+      - proposalId
+      - holdWriters
       properties:
         tenant:
           type: string
@@ -7783,9 +7814,13 @@ components:
           type: string
         branch:
           type: string
+        proposalId:
+          type: string
         expectedMainSnapshot:
           type: integer
           format: int64
+        holdWriters:
+          type: boolean
     BranchMergeResponse:
       title: BranchMergeResponse
       type: object
@@ -7814,6 +7849,25 @@ components:
           type: string
         branch:
           type: string
+    BranchProposeRequest:
+      title: BranchProposeRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - branch
+      - keys
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        branch:
+          type: string
+        onConflict:
+          type: string
+        keys:
+          $ref: '#/components/schemas/Map_List_String'
     BranchProposeResponse:
       title: BranchProposeResponse
       type: object
@@ -7828,6 +7882,61 @@ components:
           $ref: '#/components/schemas/BranchMergeEntry'
         changes:
           $ref: '#/components/schemas/BranchChangesResponse'
+    BranchRowConflicts:
+      title: BranchRowConflicts
+      type: object
+      required:
+      - schema
+      - table
+      - hasConflicts
+      - countsUnavailable
+      - toUpdate
+      - toDelete
+      - toInsert
+      - cellConflicts
+      - updateDeleteConflicts
+      - deleteUpdateConflicts
+      - keyMatches
+      - mainRowsByKey
+      - columnConflicts
+      - samples
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        hasConflicts:
+          type: boolean
+        countsUnavailable:
+          type: boolean
+        toUpdate:
+          type: integer
+          format: int64
+        toDelete:
+          type: integer
+          format: int64
+        toInsert:
+          type: integer
+          format: int64
+        cellConflicts:
+          type: integer
+          format: int64
+        updateDeleteConflicts:
+          type: integer
+          format: int64
+        deleteUpdateConflicts:
+          type: integer
+          format: int64
+        keyMatches:
+          type: integer
+          format: int64
+        mainRowsByKey:
+          type: integer
+          format: int64
+        columnConflicts:
+          $ref: '#/components/schemas/Map_Long'
+        samples:
+          $ref: '#/components/schemas/Map_List_Long'
     BranchTableChange:
       title: BranchTableChange
       type: object
@@ -7840,6 +7949,7 @@ components:
       - updated
       - mergeable
       - countsUnavailable
+      - threeWay
       properties:
         schema:
           type: string
@@ -7862,6 +7972,10 @@ components:
           type: string
         countsUnavailable:
           type: boolean
+        threeWay:
+          type: boolean
+        rowConflicts:
+          $ref: '#/components/schemas/BranchRowConflicts'
     CatalogAttachFailureDto:
       title: CatalogAttachFailureDto
       type: object
@@ -9493,6 +9607,27 @@ components:
         users:
           type: integer
           format: int32
+    Map_List_Long:
+      title: Map_List_Long
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: integer
+          format: int64
+    Map_List_String:
+      title: Map_List_String
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: string
+    Map_Long:
+      title: Map_Long
+      type: object
+      additionalProperties:
+        type: integer
+        format: int64
     Map_String:
       title: Map_String
       type: object

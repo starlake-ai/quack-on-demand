@@ -133,7 +133,9 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
     )
     unauthorized(
       f.handlers
-        .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(SuperuserScope)
+        .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some("garbage"))(
+          SuperuserScope
+        )
         .unsafeRunSync()
     )
     unauthorized(

@@ -1683,13 +1683,28 @@ final case class BranchCreateRequest(
 
 final case class BranchOpRequest(tenant: String, tenantDb: String, branch: String)
 
-/** `expectedMainSnapshot`: refuse with 409 `concurrent_write` when main moved past it. */
+/** `onConflict`: `main` or `branch`; absent, any conflict refuses the merge. `keys`: `schema.table`
+  * to the columns that catch rows both sides inserted.
+  */
+final case class BranchProposeRequest(
+    tenant: String,
+    tenantDb: String,
+    branch: String,
+    onConflict: Option[String] = None,
+    keys: Map[String, List[String]] = Map.empty
+)
+
+/** `proposalId`: the open proposal the approver read; another one in its place is 409
+  * `proposal_replaced`. `expectedMainSnapshot`: refuse with 409 `concurrent_write` when main moved
+  * past it. `holdWriters`: refuse other commits on the merged tables until the merge ends.
+  */
 final case class BranchMergeRequest(
     tenant: String,
     tenantDb: String,
     branch: String,
     proposalId: String,
-    expectedMainSnapshot: Option[Long] = None
+    expectedMainSnapshot: Option[Long] = None,
+    holdWriters: Boolean = false
 )
 
 /** `database` is the PARENT tenant-db; `catalogDb` the branch's own catalog database and `pool` its
@@ -1712,6 +1727,9 @@ final case class BranchEntry(
 
 final case class BranchListResponse(branches: List[BranchEntry])
 
+/** One merge request of a branch. On an open proposal, an `error` starting `timeout: ` means a send
+  * has no answer: a merge is running, or its batch can still land.
+  */
 final case class BranchMergeEntry(
     id: String,
     status: String,
@@ -1724,14 +1742,40 @@ final case class BranchMergeEntry(
     summary: Json,
     conflicts: Json,
     createdAt: Option[java.time.Instant] = None,
-    decidedAt: Option[java.time.Instant] = None
+    decidedAt: Option[java.time.Instant] = None,
+    onConflict: Option[String] = None,
+    keys: Map[String, List[String]] = Map.empty,
+    holdWriters: Boolean = false,
+    attempts: Int = 0,
+    rowConflicts: List[BranchRowConflicts] = Nil
 )
 
 final case class BranchDetailResponse(branch: BranchEntry, merges: List[BranchMergeEntry])
 
+/** What a merge would do to one table's rows, as the proposal saw it. Numbers and rowids only. A
+  * viewer who may not count the table gets `hasConflicts` and `countsUnavailable`, nothing else.
+  */
+final case class BranchRowConflicts(
+    schema: String,
+    table: String,
+    hasConflicts: Boolean,
+    countsUnavailable: Boolean = false,
+    toUpdate: Long = 0L,
+    toDelete: Long = 0L,
+    toInsert: Long = 0L,
+    cellConflicts: Long = 0L,
+    updateDeleteConflicts: Long = 0L,
+    deleteUpdateConflicts: Long = 0L,
+    keyMatches: Long = 0L,
+    mainRowsByKey: Long = 0L,
+    columnConflicts: Map[String, Long] = Map.empty,
+    samples: Map[String, List[Long]] = Map.empty
+)
+
 /** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed;
   * `countsUnavailable`: they were asked for and refused to the requester or failed, so the zeros
-  * are no counts.
+  * are no counts. `rowConflicts` carries numbers only for a superuser and for a viewer whose own
+  * count of the table succeeded: for anyone else it says `countsUnavailable`, and nothing more.
   */
 final case class BranchTableChange(
     schema: String,
@@ -1742,7 +1786,11 @@ final case class BranchTableChange(
     updated: Long = 0L,
     mergeable: Boolean = true,
     reason: Option[String] = None,
-    countsUnavailable: Boolean = false
+    countsUnavailable: Boolean = false,
+    /** Main changed this table's rows too: it merges cell by cell. */
+    threeWay: Boolean = false,
+    /** From the open proposal, when there is one. */
+    rowConflicts: Option[BranchRowConflicts] = None
 )
 
 final case class BranchConflictEntry(schema: String, table: String, reason: String)
@@ -2087,9 +2135,11 @@ object Dtos:
   // Branches (Epic 1)
   given Codec[BranchCreateRequest]   = ConfiguredCodec.derived
   given Codec[BranchOpRequest]       = ConfiguredCodec.derived
+  given Codec[BranchProposeRequest]  = ConfiguredCodec.derived
   given Codec[BranchMergeRequest]    = ConfiguredCodec.derived
   given Codec[BranchEntry]           = ConfiguredCodec.derived
   given Codec[BranchListResponse]    = ConfiguredCodec.derived
+  given Codec[BranchRowConflicts]    = ConfiguredCodec.derived
   given Codec[BranchMergeEntry]      = ConfiguredCodec.derived
   given Codec[BranchDetailResponse]  = ConfiguredCodec.derived
   given Codec[BranchTableChange]     = ConfiguredCodec.derived

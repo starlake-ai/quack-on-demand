@@ -7,7 +7,10 @@ import ai.starlake.quack.ondemand.branch.{
   BranchActor,
   BranchChangeSet,
   BranchFailure,
-  BranchService
+  BranchService,
+  ProposeOptions,
+  RowCounts,
+  TableChange
 }
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
@@ -78,8 +81,31 @@ final class BranchHandlers(
       updatedAt = b.updatedAt
     )
 
-  /** A merge row as the wire shows it. Its stored summary was counted as the system caller (the
-    * lifecycle's record, `BranchService.propose`), so its per-table counts are shown only to a
+  /** One table's stored row numbers as the viewer may see them. Decide ran as the system principal,
+    * so the numbers show only where the viewer's own count of the table succeeded: otherwise they
+    * learn the table has conflicts, not how many.
+    */
+  private def rowConflicts(c: RowCounts, visible: Boolean): BranchRowConflicts =
+    if visible then
+      BranchRowConflicts(
+        schema = c.schema,
+        table = c.table,
+        hasConflicts = c.conflicts > 0L,
+        toUpdate = c.toUpdate,
+        toDelete = c.toDelete,
+        toInsert = c.toInsert,
+        cellConflicts = c.cellConflicts,
+        updateDeleteConflicts = c.updateDeleteConflicts,
+        deleteUpdateConflicts = c.deleteUpdateConflicts,
+        keyMatches = c.keyMatches,
+        mainRowsByKey = c.mainRowsByKey,
+        columnConflicts = c.columnConflicts,
+        samples = c.samples
+      )
+    else BranchRowConflicts(c.schema, c.table, c.conflicts > 0L, countsUnavailable = true)
+
+  /** A merge row as the wire shows it. Its stored summary and row numbers were produced as the
+    * system caller (the lifecycle's record, `BranchService.propose`), so they are shown only to a
     * superuser (`systemCounts`): everyone else reaching here is a tenant admin, whom the nodes
     * judge by their grants like any tenant user (Phase D), so they get the counts zeroed and
     * flagged `countsUnavailable` and ask `changes` for the ones they may read.
@@ -94,14 +120,31 @@ final class BranchHandlers(
       mainSnapshotAtPropose = m.mainSnapshotAtPropose,
       mainSnapshotAfter = m.mainSnapshotAfter,
       tagName = m.tagName,
-      error = m.error,
+      // rowConflicts below is empty when the counts cannot be read, which would read as no conflicts.
+      error = m.error.orElse(RowCounts.listFromJson(m.rowConflictsJson).left.toOption),
       summary = if systemCounts then summary else BranchHandlers.withoutCounts(summary),
       conflicts = io.circe.parser.parse(m.conflictsJson).getOrElse(io.circe.Json.Null),
       createdAt = m.createdAt,
-      decidedAt = m.decidedAt
+      decidedAt = m.decidedAt,
+      onConflict = m.onConflict,
+      holdWriters = m.holdWriters,
+      // What the proposal's id pins, for the approver to read. Unreadable keys: the merge refuses them.
+      keys = BranchService.keysOf(m.mergeKeysJson).getOrElse(Map.empty),
+      attempts = m.attempts,
+      // Unreadable counts show no numbers; the merge itself refuses them.
+      rowConflicts =
+        RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil).map(rowConflicts(_, systemCounts))
     )
 
-  private def changesResponse(b: Branch, cs: BranchChangeSet): BranchChangesResponse =
+  /** `proposal`: whose row numbers to attach. `visible`: whether the viewer may see a table's. */
+  private def changesResponse(
+      b: Branch,
+      cs: BranchChangeSet,
+      proposal: Option[BranchMerge],
+      visible: TableChange => Boolean
+  ): BranchChangesResponse =
+    val rows =
+      proposal.toList.flatMap(m => RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil))
     BranchChangesResponse(
       branch = b.name,
       forkSnapshot = cs.forkSnapshot,
@@ -117,7 +160,11 @@ final class BranchHandlers(
           updated = t.updated,
           mergeable = t.mergeable,
           reason = t.reason,
-          countsUnavailable = t.countsUnavailable
+          countsUnavailable = t.countsUnavailable,
+          threeWay = t.threeWay,
+          rowConflicts = rows
+            .find(c => c.schema == t.schema && c.table == t.table)
+            .map(rowConflicts(_, visible(t)))
         )
       ),
       conflicts = cs.conflicts.map(c => BranchConflictEntry(c.schema, c.table, c.reason)),
@@ -180,9 +227,24 @@ final class BranchHandlers(
     yield (tid, db, actor, countsAs)) match
       case Left(e)                           => IO.pure(Left(e))
       case Right((tid, db, actor, countsAs)) =>
+        val countsAsked = countsAs.nonEmpty
+        val superuser   = scopeOf(apiKey).superuser
         service
           .changes(tid, db, branch, countsAs, actor, apiKey)
-          .map(_.left.map(toErr).map { case (b, cs) => changesResponse(b, cs) })
+          .flatMap {
+            case Left(f)        => IO.pure(Left(toErr(f)))
+            case Right((b, cs)) =>
+              IO.blocking(service.proposalOf(b)).map { proposal =>
+                Right(
+                  changesResponse(
+                    b,
+                    cs,
+                    proposal,
+                    t => superuser || (countsAsked && !t.countsUnavailable)
+                  )
+                )
+              }
+          }
 
   /** Delegates to the catalog data-diff on the BRANCH tenant-db over `(fork, head]`. */
   def diff(
@@ -248,7 +310,7 @@ final class BranchHandlers(
           )
     }
 
-  def propose(req: BranchOpRequest, apiKey: Option[String])(
+  def propose(req: BranchProposeRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchProposeResponse] =
     // The reply's change set counts as the proposer (resolved like `changes`); the stored summary
@@ -256,22 +318,19 @@ final class BranchHandlers(
     (for
       (tid, db, actor) <- gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf)
       countsAs         <- callerOf(s"branch-propose-$tid-$db", apiKey)
-    yield (tid, db, actor, countsAs)) match
-      case Left(e)                           => IO.pure(Left(e))
-      case Right((tid, db, actor, countsAs)) =>
+      options          <- ProposeOptions.parse(req.onConflict, req.keys).left.map(toErr)
+    yield (tid, db, actor, countsAs, options)) match
+      case Left(e)                                    => IO.pure(Left(e))
+      case Right((tid, db, actor, countsAs, options)) =>
         val systemCounts = scopeOf(apiKey).superuser
         service
-          .propose(
-            tid,
-            db,
-            req.branch,
-            ai.starlake.quack.ondemand.branch.ProposeOptions(),
-            actor,
-            countsAs,
-            apiKey
-          )
+          .propose(tid, db, req.branch, options, actor, countsAs, apiKey)
           .map(_.left.map(toErr).map { case (b, m, cs) =>
-            BranchProposeResponse(entry(b), mergeEntry(m, systemCounts), changesResponse(b, cs))
+            BranchProposeResponse(
+              entry(b),
+              mergeEntry(m, systemCounts),
+              changesResponse(b, cs, Some(m), t => systemCounts || !t.countsUnavailable)
+            )
           })
 
   def merge(req: BranchMergeRequest, apiKey: Option[String])(
@@ -280,6 +339,7 @@ final class BranchHandlers(
     gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e)                 => IO.pure(Left(e))
       case Right((tid, db, actor)) =>
+        val superuser = scopeOf(apiKey).superuser
         service
           .merge(
             tid,
@@ -287,15 +347,15 @@ final class BranchHandlers(
             req.branch,
             req.proposalId,
             req.expectedMainSnapshot,
-            holdWriters = false,
+            req.holdWriters,
             actor,
             apiKey
           )
           .map(_.left.map(toErr).map { case (b, m, cs) =>
             BranchMergeResponse(
               entry(b),
-              mergeEntry(m, scopeOf(apiKey).superuser),
-              changesResponse(b, cs)
+              mergeEntry(m, superuser),
+              changesResponse(b, cs, Some(m), _ => superuser)
             )
           })
 
