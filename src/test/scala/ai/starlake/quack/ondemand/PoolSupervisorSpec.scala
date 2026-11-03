@@ -2222,11 +2222,43 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   // which spawn-quack-node.sh runs after the catalog ATTACH. It rides its own
   // NodeSpec.tenantDbInitSql field (a secret file) with its trust flag instead.
 
-  "joinInitAndBlob" should "join two fragments of the manager's SQL, skipping blanks" in {
-    PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\nATTACH x;"
+  "joinInitAndBlob" should "join two fragments of the manager's SQL, the first closed, skipping blanks" in {
+    PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\n;\nATTACH x;"
     PoolSupervisor.joinInitAndBlob("SET b=2;", "") shouldBe "SET b=2;"
     PoolSupervisor.joinInitAndBlob("", "ATTACH x;") shouldBe "ATTACH x;"
     PoolSupervisor.joinInitAndBlob("  ", "") shouldBe ""
+  }
+
+  // A federation blob can end in a `sql` source's text with no final `;`, or in a comment: the
+  // statement after it (the merge node's branch attach) must start a statement of its own.
+  it should "close a first fragment with no final semicolon, or ending in a comment, on its own line" in {
+    PoolSupervisor.joinInitAndBlob("SET b=2", "ATTACH x;") shouldBe "SET b=2\n;\nATTACH x;"
+    PoolSupervisor.joinInitAndBlob("SET b=2 -- two", "ATTACH x;") shouldBe
+      "SET b=2 -- two\n;\nATTACH x;"
+    PoolSupervisor.joinInitAndBlob("SET b=2;\n", "\n ATTACH x;") shouldBe "SET b=2;\n;\nATTACH x;"
+  }
+
+  // The merge node's init SQL is the donor pool's blob and the branch attach, through that join.
+  "mergeNodeSpec" should "close the donor's federation blob before the branch attach" in {
+    val blob = "-- BEGIN federation: fedx\nCREATE TABLE t AS SELECT 1\n-- END federation: fedx"
+    val sup  = new PoolSupervisor(
+      new CapturingBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      federationBlobOf = _ => IO.pure(Some(blob))
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
+      metastore = Map.empty, dataPath = ""
+    ).unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val sql = sup
+      .mergeNodeSpec("acme", "acme_default", "acme_default__br_ab12cd34", "/var/lake__br_ab12cd34/")
+      .get
+      .extraSetupSql
+    sql should startWith(s"$blob\n;\nCREATE OR REPLACE TEMPORARY SECRET")
+    sql should include("ATTACH 'ducklake:postgres:")
   }
 
   "createPool" should "ship each initSql on its own NodeSpec field, never in extraSetupSql" in {

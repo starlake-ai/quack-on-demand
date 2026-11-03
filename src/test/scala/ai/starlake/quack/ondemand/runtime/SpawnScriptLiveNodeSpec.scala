@@ -1,8 +1,12 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.BuildVersions
-import ai.starlake.quack.ondemand.DuckDbExtensionSource
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.ondemand.{DuckDbExtensionSource, PoolSupervisor}
+import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, PostgresSecretResolver}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -254,16 +258,21 @@ class SpawnScriptLiveNodeSpec
         secrets + ("pgPassword" -> TestPostgres.pgPass)
       )
       try
-        // First, so a failure names the cause: qod-node reports a statement it cannot parse as
-        // `init: statement 4 of 17 failed: Parser Error: syntax error at or near "INSTALL"`.
-        Files
-          .readString(tempDir.resolve("node.log"))
-          .linesIterator
-          .filter(_.contains("syntax error"))
-          .toList shouldBe Nil
+        parseErrors shouldBe Nil
         body(port, db)
       finally hardStop(p)
     finally onPostgres(s"""DROP DATABASE IF EXISTS "$db" WITH (FORCE)""")
+
+  /** What qod-node reported for a statement of its init SQL it could not parse, as `init: statement
+    * 4 of 17 failed: Parser Error: syntax error at or near "INSTALL"`. Asserted first, so a failure
+    * names the cause.
+    */
+  private def parseErrors: List[String] =
+    Files
+      .readString(tempDir.resolve("node.log"))
+      .linesIterator
+      .filter(_.contains("syntax error"))
+      .toList
 
   /** The node attached its DuckLake catalog `db`. */
   private def lakeUp(port: Int, db: String): Unit =
@@ -352,6 +361,89 @@ class SpawnScriptLiveNodeSpec
           "SELECT count(*) FROM duckdb_secrets() WHERE name = 'qod_db_store'"
         ) shouldBe List("1")
         lakeUp(port, db)
+      }
+    }
+
+  // The same defect one layer up. A `sql` federated source's setupSql is the operator's own text,
+  // and the manager puts each source's block into the node's init SQL as stored: one with no final
+  // `;` ran into the next block's first statement, and both were lost. FederationBlobBuilder now
+  // ends every block that another follows with a `;` line of its own, and
+  // PoolSupervisor.joinInitAndBlob does the same between a merge node's blob and its branch attach.
+  // The nodes below get the blob the real builder makes from stored sources, through the script.
+
+  private def sqlSource(alias: String, setupSql: String) =
+    FederatedSource(s"src-$alias", "td-live", alias, setupSql)
+
+  /** The federation blob the manager ships for `sources`, from the real builder. */
+  private def blobOf(sources: List[FederatedSource], secrets: List[FederatedSecret] = Nil) =
+    new FederationBlobBuilder(
+      loadEnabled = _ => IO.pure(sources),
+      loadSecrets = id => IO.pure(secrets.filter(_.federatedSourceId == id)),
+      resolver = new PostgresSecretResolver(),
+      catalogAliasOf = _ => IO.pure(None)
+    ).build("td-live").unsafeRunSync().getOrElse("")
+
+  "a sql federated source with no final semicolon" should
+    "run, and not swallow the next source's block" in {
+      val blob = blobOf(
+        List(
+          sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT 1 AS v"),
+          sqlSource("fed_b", "CREATE TABLE memory.main.fed_b AS SELECT 2 AS v;")
+        )
+      )
+      withNode(blob) { port =>
+        parseErrors shouldBe Nil
+        onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("1")
+        onNode(port, "SELECT v FROM memory.main.fed_b") shouldBe List("2")
+      }
+    }
+
+  it should "run when its text ends in a comment with no newline" in {
+    val blob = blobOf(
+      List(
+        sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT 1 AS v -- the first source"),
+        sqlSource("fed_b", "CREATE TABLE memory.main.fed_b AS SELECT 2 AS v")
+      )
+    )
+    withNode(blob) { port =>
+      parseErrors shouldBe Nil
+      onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("1")
+      onNode(port, "SELECT v FROM memory.main.fed_b") shouldBe List("2")
+    }
+  }
+
+  // Stored sources are resolved as before: a placeholder inside a literal takes its secret (quote
+  // doubled), and the block of a source with an unquoted placeholder holding anything but a plain
+  // token is left out, with no stray separator and without costing its siblings theirs.
+  it should "keep its secrets substituted, and a block left out costs its siblings nothing" in {
+    // Sorted by alias, the left-out block is the middle one.
+    val a      = sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT '{{secret.V}}' AS v")
+    val legacy =
+      sqlSource("fed_b", "CREATE TABLE memory.main.fed_legacy AS SELECT {{secret.P}} AS v")
+    val c       = sqlSource("fed_c", "CREATE TABLE memory.main.fed_c AS SELECT 3 AS v")
+    val secrets = List(
+      FederatedSecret("sec-a-v", a.id, "V", Some("O'Brien"), None),
+      FederatedSecret("sec-legacy-p", legacy.id, "P", Some("1 UNION SELECT 2"), None)
+    )
+    withNode(blobOf(List(a, legacy, c), secrets)) { port =>
+      parseErrors shouldBe Nil
+      onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("O'Brien")
+      onNode(port, "SELECT v FROM memory.main.fed_c") shouldBe List("3")
+      onNode(
+        port,
+        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'fed_legacy'"
+      ) shouldBe List("0")
+    }
+  }
+
+  "a merge node's federation blob with no final semicolon" should
+    "not swallow the branch attach joined after it" in {
+      val blob = blobOf(List(sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT 1 AS v")))
+      val attach = "CREATE TABLE memory.main.attached AS SELECT 'attached' AS v;"
+      withNode(PoolSupervisor.joinInitAndBlob(blob, attach)) { port =>
+        parseErrors shouldBe Nil
+        onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("1")
+        onNode(port, "SELECT v FROM memory.main.attached") shouldBe List("attached")
       }
     }
 

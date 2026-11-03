@@ -887,6 +887,10 @@ In-engine authorization, Phase D: the node decides every statement alone.
   without the setting and without whatever followed (DuckLake's own setup, at the database level).
   The spawn scripts now close every text they add to the node's init SQL with a `;` on a line of
   its own; the stored text is not changed.
+- A `sql` federated source whose text has no final `;`, even when it ends in a `-- comment`, no
+  longer runs into the first statement of the next source's block, which lost both; and a merge
+  node's federation blob ending that way no longer swallows the branch attach. The manager now puts
+  a `;` on a line of its own between the blocks; the stored text is not changed.
 
 ## 0.10.1
 
