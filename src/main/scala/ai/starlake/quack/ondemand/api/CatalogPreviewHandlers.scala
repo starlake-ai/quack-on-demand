@@ -194,6 +194,22 @@ final class CatalogPreviewHandlers(
       to: String,
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
+    schemaDiffHiding(tenant, tenantDb, schema, table, from, to, apiKey, (_, _) => false)(scopeOf)
+
+  /** [[schemaDiff]] for a caller who may not see every table: a table `hidden` names answers
+    * exactly as one that does not exist, at the point where that one does, so that nothing else in
+    * the request tells them apart.
+    */
+  def schemaDiffHiding(
+      tenant: String,
+      tenantDb: String,
+      schema: String,
+      table: String,
+      from: String,
+      to: String,
+      apiKey: Option[String],
+      hidden: (String, String) => Boolean
+  )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
@@ -227,7 +243,7 @@ final class CatalogPreviewHandlers(
           case Right((fromId, toId)) =>
             val bounds = Map("from" -> fromId.toString, "to" -> toId.toString)
             if !(reader.tableExistsAt(schema, table, toId) ||
-                reader.tableExistsAt(schema, table, fromId))
+                reader.tableExistsAt(schema, table, fromId)) || hidden(schema, table)
             then
               denyAudit(bounds)
               IO.pure(
@@ -465,6 +481,37 @@ final class CatalogPreviewHandlers(
       changeType: Option[String],
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
+    dataDiffHiding(
+      tenant,
+      tenantDb,
+      schema,
+      table,
+      from,
+      to,
+      limit,
+      cursor,
+      changeType,
+      apiKey,
+      (_, _) => false
+    )(scopeOf)
+
+  /** [[dataDiff]] for a caller who may not see every table: a table `hidden` names answers exactly
+    * as one that does not exist, at the point where that one does, so that nothing else in the
+    * request (a bad filter or cursor) tells them apart.
+    */
+  def dataDiffHiding(
+      tenant: String,
+      tenantDb: String,
+      schema: String,
+      table: String,
+      from: String,
+      to: String,
+      limit: Option[Int],
+      cursor: Option[String],
+      changeType: Option[String],
+      apiKey: Option[String],
+      hidden: (String, String) => Boolean
+  )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogDataDiffRead, "denied")
@@ -530,7 +577,7 @@ final class CatalogPreviewHandlers(
                     // name snapshot to + 1, which the engine rejects as an error when it does not
                     // exist (verified live), not as an empty result. The table probe still runs so
                     // from == to and from < to agree on the 404 for an unknown table.
-                    if !reader.tableExistsAt(schema, table, toId) then
+                    if !reader.tableExistsAt(schema, table, toId) || hidden(schema, table) then
                       IO.pure(
                         denied(
                           StatusCode.NotFound,
@@ -569,7 +616,7 @@ final class CatalogPreviewHandlers(
                       )
                   case Right((fromId, toId)) =>
                     if !(reader.tableExistsAt(schema, table, toId) ||
-                        reader.tableExistsAt(schema, table, fromId))
+                        reader.tableExistsAt(schema, table, fromId)) || hidden(schema, table)
                     then
                       IO.pure(
                         denied(

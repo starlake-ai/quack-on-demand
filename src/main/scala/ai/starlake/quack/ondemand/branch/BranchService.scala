@@ -30,13 +30,33 @@ import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
-/** Who is asking. `isAdmin` = tenant admin on the tenant, or superuser; every other principal is a
-  * plain data-plane user and must be able to connect to the parent. No handler reaches the
-  * non-admin case today: `TenantDbGate` admits only admins. `branchOnly` = the credential is a PAT
-  * restricted to branch writes: it may create and write branches, but a merge writes main, so merge
-  * refuses it (`branch_only_token`).
+/** Who is asking, on the tenant in hand. `isAdmin` = tenant admin of that tenant, or superuser;
+  * every other principal is a plain data-plane user and must be able to connect to the parent. No
+  * handler reaches the non-admin case today: `TenantDbGate` admits only admins. `sees`: whether a
+  * reply may name a table (schema, table): an admin sees them all, anyone else the tables they hold
+  * a grant on, as filtered metadata does. `branchOnly` = the credential is a PAT restricted to
+  * branch writes: it may create and write branches, but a merge writes main, so merge refuses it
+  * (`branch_only_token`).
   */
-final case class BranchActor(identity: String, isAdmin: Boolean, branchOnly: Boolean = false)
+final case class BranchActor private (
+    identity: String,
+    isAdmin: Boolean,
+    sees: (String, String) => Boolean,
+    branchOnly: Boolean
+):
+  def seesTable(t: TableChange): Boolean = sees(t.schema, t.table)
+
+object BranchActor:
+  def admin(identity: String, branchOnly: Boolean = false): BranchActor =
+    new BranchActor(identity, isAdmin = true, (_, _) => true, branchOnly)
+
+  /** `sees` has no default: what a plain user may see is for the caller to say. */
+  def plain(
+      identity: String,
+      sees: (String, String) => Boolean,
+      branchOnly: Boolean = false
+  ): BranchActor =
+    new BranchActor(identity, isAdmin = false, sees, branchOnly)
 
 /** A refusal, with the HTTP status the REST layer maps it to. Codes are the stable snake_case
   * vocabulary of design section 4.
@@ -498,45 +518,50 @@ final class BranchService(
     pre match
       case Left(f)            => IO.pure(Left(f))
       case Right((parent, b)) =>
-        computeChanges(tenant, parent, b, countsAs).map { cs =>
-          audit.rest(
-            apiKey,
-            "control-plane",
-            AuditActions.BranchChangesRead,
-            "ok",
-            tenant = Some(tenant),
-            target = Some(s"${parent.name}/$name"),
-            detail =
-              Map("tables" -> cs.tables.size.toString, "conflicts" -> cs.conflicts.size.toString)
-          )
-          Right((b, cs))
-        }
+        computeChanges(tenant, parent, b)
+          .flatMap { shape =>
+            countsAs.fold(IO.pure(shape))(countAs(tenant, parent, b, shape, _, actor.seesTable))
+          }
+          .map { cs =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.BranchChangesRead,
+              "ok",
+              tenant = Some(tenant),
+              target = Some(s"${parent.name}/$name"),
+              detail =
+                Map("tables" -> cs.tables.size.toString, "conflicts" -> cs.conflicts.size.toString)
+            )
+            Right((b, cs))
+          }
 
-  private def computeChanges(
-      tenant: String,
-      parent: TenantDb,
-      b: Branch,
-      countsAs: Option[ai.starlake.quack.ondemand.api.ExecCaller]
-  ): IO[BranchChangeSet] =
+  private def computeChanges(tenant: String, parent: TenantDb, b: Branch): IO[BranchChangeSet] =
     IO.blocking {
       val br = resolveReader(tenant, b.tenantDbName)
       val mr = resolveReader(tenant, parent.name)
       BranchChanges.compute(br, mr, b.forkSnapshot)
-    }.flatMap(cs => countsAs.fold(IO.pure(cs))(caller => countAs(tenant, parent, b, cs, caller)))
+    }
 
-  /** `cs` with change-feed counts of its modified tables, each counted as `caller`. */
+  /** `cs` with change-feed counts of its modified tables, each counted as `caller`. A table `only`
+    * leaves out shows no counts and no statement names it: its answer would be dropped from the
+    * reply anyway, and a refused count is a decide call, a refusal in the authorization metrics and
+    * a WARN, for anyone reading the branch to cause at will.
+    */
   private def countAs(
       tenant: String,
       parent: TenantDb,
       b: Branch,
       cs: BranchChangeSet,
-      caller: ai.starlake.quack.ondemand.api.ExecCaller
+      caller: ai.starlake.quack.ondemand.api.ExecCaller,
+      only: TableChange => Boolean
   ): IO[BranchChangeSet] =
     val alias = parentAliasOf(tenant, parent)
     cs.tables
       .foldLeft(IO.pure(List.empty[TableChange])) { (acc, t) =>
         acc.flatMap { done =>
           if t.kind != ChangeKind.Modified then IO.pure(done :+ t)
+          else if !only(t) then IO.pure(done :+ t.copy(countsUnavailable = true))
           else
             counter.count(caller, tenant, b, alias, t, cs.forkSnapshot, cs.headSnapshot).map {
               case Right((ins, del, upd)) =>
@@ -609,15 +634,15 @@ final class BranchService(
               // as the system caller, whoever proposes. The proposer's reply counts as the proposer.
               val system =
                 ai.starlake.quack.ondemand.api.ExecCaller.system(s"branch-counts-$tenant")
-              computeChanges(tenant, parent, b, countsAs = None).flatMap { shape =>
-                analyze(tenant, parent, b, shape, options).flatMap {
+              computeChanges(tenant, parent, b).flatMap { shape =>
+                analyze(tenant, parent, b, shape, options, actor).flatMap {
                   case Left(f)     => denied(f)
                   case Right(rows) =>
                     (for
-                      stored <- countAs(tenant, parent, b, shape, system)
+                      stored <- countAs(tenant, parent, b, shape, system, _ => true)
                       reply  <-
                         if countsAs.system then IO.pure(stored)
-                        else countAs(tenant, parent, b, shape, countsAs)
+                        else countAs(tenant, parent, b, shape, countsAs, actor.seesTable)
                     yield (stored, reply)).flatMap { (cs, reply) =>
                       IO.blocking {
                         // A discard or an expiry does not take the lock: the analysis may have
@@ -780,14 +805,17 @@ final class BranchService(
       parent: TenantDb,
       b: Branch,
       cs: BranchChangeSet,
-      options: ProposeOptions
+      options: ProposeOptions,
+      actor: BranchActor
   ): IO[Res[List[RowCounts]]] =
     IO.blocking {
       val br = resolveReader(tenant, b.tenantDbName)
       MergeDecision
         .keyProblem(
           options.keys,
-          cs.tables,
+          // A table the proposer does not see reads as one not in the change set: its columns are
+          // not theirs to probe.
+          cs.tables.filter(actor.seesTable),
           t => t.tableId.toList.flatMap(br.topLevelColumnsOfTableAt(_, cs.headSnapshot)).map(_.name)
         )
         .map(BranchFailure.badRequest("invalid_key", _))
@@ -931,7 +959,7 @@ final class BranchService(
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
     // This proposal's commit, found on main: tagged and torn down, never applied again.
     def settle(snapshot: Long, attempts: Int): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
-      computeChanges(tenant, parent, b, countsAs = None).flatMap(cs =>
+      computeChanges(tenant, parent, b).flatMap(cs =>
         finishMerge(
           tenant,
           parent,
@@ -1019,12 +1047,12 @@ final class BranchService(
     // Validated twice: once before the freeze, so a merge refused anyway never restarts the
     // branch's node, and again on the frozen branch, whose head can no longer move.
     def validateAndRun: IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
-      computeChanges(tenant, parent, b, countsAs = None).flatMap { early =>
+      computeChanges(tenant, parent, b).flatMap { early =>
         refusalOf(b, merge, early, expectedMainSnapshot) match
           case Some((f, closes)) => refuse(f, closes, 0)
           case None              =>
             withFrozenBranch(b) {
-              computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
+              computeChanges(tenant, parent, b).flatMap { cs =>
                 refusalOf(b, merge, cs, expectedMainSnapshot) match
                   case Some((f, closes)) => refuse(f, closes, 0)
                   case None              =>
@@ -1328,7 +1356,7 @@ final class BranchService(
       }
 
     def attempt(node: MergeNode, n: Int, ranged: Boolean): IO[(AttemptEnd, Int)] =
-      computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
+      computeChanges(tenant, parent, b).flatMap { cs =>
         // Past the first look, node start and Prepare are a long window for a late commit to land
         // in, below the S this attempt's fence starts at, where neither the fence nor DuckLake's
         // own check sees it. Reading S first makes this look complete: a landing it misses is above

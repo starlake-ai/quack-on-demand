@@ -7634,6 +7634,7 @@ components:
       - headSnapshot
       - mainSnapshot
       - mergeable
+      - otherTables
       properties:
         branch:
           type: string
@@ -7660,6 +7661,9 @@ components:
             type: string
         mergeable:
           type: boolean
+        otherTables:
+          type: integer
+          format: int32
     BranchConflictEntry:
       title: BranchConflictEntry
       type: object

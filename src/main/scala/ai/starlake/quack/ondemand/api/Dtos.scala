@@ -1752,9 +1752,9 @@ final case class BranchMergeEntry(
 
 final case class BranchDetailResponse(branch: BranchEntry, merges: List[BranchMergeEntry])
 
-/** What a merge would do to one table's rows, as the proposal saw it. Numbers and rowids only. A
-  * viewer who may not count the table gets `hasConflicts` and `countsUnavailable`, and zeros in the
-  * other fields that are no counts.
+/** What a merge would do to one table's rows, as the proposal saw it. Numbers and rowids only. An
+  * admin who may not count the table gets `hasConflicts` and `countsUnavailable`, and zeros in the
+  * other fields that are no counts. Anyone else who may not count it gets no entry at all.
   */
 final case class BranchRowConflicts(
     schema: String,
@@ -1776,8 +1776,8 @@ final case class BranchRowConflicts(
 /** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed;
   * `countsUnavailable`: they were asked for and refused to the requester or failed, so the zeros
   * are no counts. `rowConflicts` carries numbers only for a superuser and for a viewer whose own
-  * count of the table succeeded: for anyone else it says `countsUnavailable`, with zeros that are
-  * no counts.
+  * count of the table succeeded: for any other admin it says `countsUnavailable`, with zeros that
+  * are no counts, and for anyone else it is absent.
   */
 final case class BranchTableChange(
     schema: String,
@@ -1797,6 +1797,10 @@ final case class BranchTableChange(
 
 final case class BranchConflictEntry(schema: String, table: String, reason: String)
 
+/** `tables` and `conflicts` name what the viewer may see: an admin, every table; anyone else, the
+  * tables they hold a grant on, and no `unsupported` (raw verbs can name views and macros).
+  * `otherTables` counts what that left out. `mergeable` is the whole branch's, whatever is listed.
+  */
 final case class BranchChangesResponse(
     branch: String,
     forkSnapshot: Long,
@@ -1805,7 +1809,8 @@ final case class BranchChangesResponse(
     tables: List[BranchTableChange],
     conflicts: List[BranchConflictEntry],
     unsupported: List[String],
-    mergeable: Boolean
+    mergeable: Boolean,
+    otherTables: Int = 0
 )
 
 final case class BranchProposeResponse(

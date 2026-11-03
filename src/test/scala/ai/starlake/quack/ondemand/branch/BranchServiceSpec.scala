@@ -168,7 +168,10 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val fenceDisarms = mutable.ListBuffer.empty[String]
     val purged       = mutable.ListBuffer.empty[String]
     val auditStore   = new RecordingTelemetryStore
-    val service      = new BranchService(
+
+    /** Each change count asked for: who it ran as, and of which table. */
+    val countedAs = mutable.ListBuffer.empty[(String, String)]
+    val service   = new BranchService(
       cfg = cfg,
       sup = sup,
       store = store,
@@ -248,6 +251,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
             f: Long,
             h: Long
         ) =
+          countedAs += ((caller.identity, c.table))
           IO.pure(Right((3L, 1L, 2L)))
       ,
       purgeFiles = (path, _) => { purged += path; Right(()) },
@@ -257,9 +261,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       holdSettle = holdSettle
     )
 
-    val admin1 = BranchActor("root", isAdmin = true)
-    val admin2 = BranchActor("boss", isAdmin = true)
-    val alice  = BranchActor("alice", isAdmin = false)
+    val admin1 = BranchActor.admin("root")
+    val admin2 = BranchActor.admin("boss")
+    val alice  = BranchActor.plain("alice", sees = (_, _) => true)
 
     def grantConnect(username: String): Unit =
       val user =
@@ -428,7 +432,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
 
   it should "bind a non-admin actor to the parent tenant's own row, never a same-named superuser row" in {
     val f     = new Fixture
-    val carol = BranchActor("carol", isAdmin = false)
+    val carol = BranchActor.plain("carol", sees = (_, _) => true)
     // A superuser row named carol; the tenant holds no carol row yet.
     f.store.upsertUserIdentity(
       RbacUser(id = "u-su-carol", tenant = None, username = "carol", kind = "admin")
@@ -853,6 +857,66 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       List((first.id, BranchMergeStatus.Proposed))
   }
 
+  "a table a non-admin does not see" should "never be counted as them, in changes or in a proposal's reply" in {
+    val f = new Fixture
+    f.grantConnect("alice")
+    val blind = BranchActor.plain("alice", sees = (_, _) => false)
+    f.create("x", actor = blind).isRight shouldBe true
+    f.touchBranch()
+    val asAlice = ai.starlake.quack.ondemand.api.ExecCaller.unrestricted("c", "alice", false)
+    val (_, cs) = f.service
+      .changes("acme", f.parent.name, "x", Some(asAlice), blind, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+    cs.tables.map(t => (t.table, t.countsUnavailable)) shouldBe List(("region", true))
+    f.countedAs shouldBe empty
+    // The stored summary still counts as the system; the proposer's reply asks nothing as them.
+    val (_, _, reply) = f.service
+      .propose("acme", f.parent.name, "x", ProposeOptions(), blind, asAlice, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+    reply.tables.map(t => (t.table, t.countsUnavailable)) shouldBe List(("region", true))
+    f.countedAs.map(_._1).toList.distinct should not contain "alice"
+    f.countedAs.map(_._2) should contain("region")
+  }
+
+  it should "still be counted for an actor who sees it" in {
+    val f = new Fixture
+    f.grantConnect("alice")
+    f.create("x", actor = f.alice).isRight shouldBe true
+    f.touchBranch()
+    val asAlice = ai.starlake.quack.ondemand.api.ExecCaller.unrestricted("c", "alice", false)
+    f.service
+      .changes("acme", f.parent.name, "x", Some(asAlice), f.alice, None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.countedAs.toList shouldBe List(("alice", "region"))
+  }
+
+  it should "answer a key on it as a table not in the change set, so its columns cannot be probed" in {
+    val f = new Fixture
+    f.grantConnect("alice")
+    val blind = BranchActor.plain("alice", sees = (_, t) => t != "region")
+    f.create("x", actor = blind).isRight shouldBe true
+    f.touchBranch()
+    def refusal(key: String, column: String, actor: BranchActor = blind) = f
+      .propose(options = ProposeOptions(keys = Map(key -> List(column))), actor = actor)
+      .left
+      .map(e => (e.status, e.code, e.message))
+    // A column the table has (`x`), one it lacks: the same words as a table not in the change set.
+    val notChanged         = refusal("tpch1.other", "x")
+    def asOther(t: String) = notChanged.left.map((s, c, m) => (s, c, m.replace("tpch1.other", t)))
+    notChanged.left.map(_._2) shouldBe Left("invalid_key")
+    refusal("tpch1.region", "x") shouldBe asOther("tpch1.region")
+    refusal("tpch1.region", "nope") shouldBe asOther("tpch1.region")
+    // An actor who sees it gets the column answer.
+    refusal("tpch1.region", "nope", f.admin1).left.map(_._3) shouldBe
+      Left("key on 'tpch1.region': no column named 'nope'")
+    f.nodesStarted shouldBe 0
+  }
+
   "merge" should "refuse the proposer, non-admins and unproposed branches" in {
     val f = new Fixture
     f.grantConnect("alice")
@@ -861,7 +925,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.merge(actor = f.admin1).left.map(_.code) shouldBe Left("not_proposed")
     f.propose(actor = f.alice).isRight shouldBe true
     f.merge(actor = f.alice).left.map(_.code) shouldBe Left("admin_required")
-    f.merge(actor = BranchActor("alice", isAdmin = true)).left.map(_.code) shouldBe
+    f.merge(actor = BranchActor.admin("alice")).left.map(_.code) shouldBe
       Left("self_merge_forbidden")
   }
 
@@ -870,7 +934,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.create("x")
     f.touchBranch()
     f.propose().isRight shouldBe true
-    val refused = f.merge(actor = BranchActor("boss", isAdmin = true, branchOnly = true))
+    val refused = f.merge(actor = BranchActor.admin("boss", branchOnly = true))
     refused.left.map(f => (f.status, f.code)) shouldBe Left((403, "branch_only_token"))
     f.nodesStarted shouldBe 1 // the proposal's analysis only
     f.merge().isRight shouldBe true
@@ -2678,7 +2742,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.grantConnect("bob")
     f.create("x", actor = f.alice)
     f.service
-      .discard("acme", f.parent.name, "x", BranchActor("bob", isAdmin = false), None)
+      .discard("acme", f.parent.name, "x", BranchActor.plain("bob", sees = (_, _) => true), None)
       .unsafeRunSync()
       .left
       .map(_.code) shouldBe Left("not_owner")

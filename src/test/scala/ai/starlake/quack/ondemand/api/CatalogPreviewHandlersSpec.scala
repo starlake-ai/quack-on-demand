@@ -269,6 +269,93 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         IO.pure(Right(QueryResult(changesReader(page), () => (), "node-1", 5L)))
       )
 
+  // A table the caller may not see answers exactly as one that does not exist, whatever else the
+  // request holds: only the known table `region` exists here, and `ghost` does not.
+  private val onlyRegion = stubReader(knownTables = Set(("tpch1", "region")))
+
+  /** Hides `region`: from here on it must read as `ghost` does. */
+  private val hidesRegion: (String, String) => Boolean = (_, t) => t == "region"
+
+  private def withTable(
+      out: Either[(StatusCode, ErrorResponse), ?],
+      table: String
+  ): Either[(StatusCode, ErrorResponse), ?] =
+    out.left.map((code, e) => (code, e.copy(message = e.message.replace(table, "<table>"))))
+
+  "a hidden table" should "answer a schema diff as a table that does not exist" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    def diff(table: String, from: String = "12", to: String = "42") = h
+      .schemaDiffHiding("acme", "acme_tpch1", "tpch1", table, from, to, RootKey, hidesRegion)(
+        SuperuserScope
+      )
+      .unsafeRunSync()
+    val absent = diff("ghost")
+    absent.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.NotFound, "not_found"))
+    withTable(diff("region"), "region") shouldBe withTable(absent, "ghost")
+    // A selector error comes first for both: nothing tells them apart there either.
+    withTable(diff("region", from = "99"), "region") shouldBe
+      withTable(diff("ghost", from = "99"), "ghost")
+
+  it should "answer a data diff as a table that does not exist, filter and cursor errors included" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    def diff(
+        table: String,
+        from: String = "12",
+        to: String = "42",
+        cursor: Option[String] = None,
+        changeType: Option[String] = None
+    ) = h
+      .dataDiffHiding(
+        "acme",
+        "acme_tpch1",
+        "tpch1",
+        table,
+        from,
+        to,
+        None,
+        cursor,
+        changeType,
+        RootKey,
+        hidesRegion
+      )(SuperuserScope)
+      .unsafeRunSync()
+    val absent = diff("ghost")
+    absent.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.NotFound, "not_found"))
+    withTable(diff("region"), "region") shouldBe withTable(absent, "ghost")
+    // from == to has its own arm.
+    withTable(diff("region", from = "42"), "region") shouldBe
+      withTable(diff("ghost", from = "42"), "ghost")
+    // A bad filter or cursor is refused before the table is looked at, for both.
+    val badFilter = diff("region", changeType = Some("nope"))
+    badFilter.left.toOption.map(_._2.error) shouldBe Some("invalid_filter")
+    withTable(badFilter, "region") shouldBe withTable(
+      diff("ghost", changeType = Some("nope")),
+      "ghost"
+    )
+    val badCursor = diff("region", cursor = Some("x"))
+    badCursor.left.toOption.map(_._2.error) shouldBe Some("invalid_cursor")
+    withTable(badCursor, "region") shouldBe withTable(diff("ghost", cursor = Some("x")), "ghost")
+    seenSqls shouldBe Nil
+    seenSql shouldBe None
+
+  it should "still answer the plain diffs for a caller who hides nothing" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    schemaDiff(h).isRight shouldBe true
+    h.schemaDiffHiding(
+      "acme",
+      "acme_tpch1",
+      "tpch1",
+      "region",
+      "12",
+      "42",
+      RootKey,
+      (_, _) => false
+    )(SuperuserScope)
+      .unsafeRunSync()
+      .isRight shouldBe true
+
   "preview" should "404 an unknown tenant" in new Stubs:
     val h   = handlers()
     val out = preview(h, tenant = "nope")

@@ -258,7 +258,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     val handlers =
       new BranchHandlers(sup, service, preview, BranchHandlers.actorResolver(callers), callers)
     val feature = service
-      .create("acme", parent.name, "feature", None, None, BranchActor("root", true), None)
+      .create("acme", parent.name, "feature", None, None, BranchActor.admin("root"), None)
       .unsafeRunSync()
       .fold(f => fail(s"branch create: $f"), identity)
 

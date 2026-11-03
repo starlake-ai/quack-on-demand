@@ -14,6 +14,7 @@ import ai.starlake.quack.ondemand.branch.{
 }
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
+import io.circe.Json
 import sttp.model.StatusCode
 
 /** REST handlers for branches (Epic 1). Gate = [[TenantDbGate]] on the PARENT tenant-db (tenant
@@ -82,97 +83,6 @@ final class BranchHandlers(
       updatedAt = b.updatedAt
     )
 
-  /** One table's stored row numbers as the viewer may see them. Decide ran as the system principal,
-    * so the numbers show only where the viewer's own count of the table succeeded: otherwise they
-    * learn the table has conflicts, not how many.
-    */
-  private def rowConflicts(c: RowCounts, visible: Boolean): BranchRowConflicts =
-    if visible then
-      BranchRowConflicts(
-        schema = c.schema,
-        table = c.table,
-        hasConflicts = c.conflicts > 0L,
-        toUpdate = c.toUpdate,
-        toDelete = c.toDelete,
-        toInsert = c.toInsert,
-        cellConflicts = c.cellConflicts,
-        updateDeleteConflicts = c.updateDeleteConflicts,
-        deleteUpdateConflicts = c.deleteUpdateConflicts,
-        keyMatches = c.keyMatches,
-        mainRowsByKey = c.mainRowsByKey,
-        columnConflicts = c.columnConflicts,
-        samples = c.samples
-      )
-    else BranchRowConflicts(c.schema, c.table, c.conflicts > 0L, countsUnavailable = true)
-
-  /** A merge row as the wire shows it. Its stored summary and row numbers were produced as the
-    * system caller (the lifecycle's record, `BranchService.propose`), so they are shown only to a
-    * superuser (`systemCounts`): everyone else reaching here is a tenant admin, whom the nodes
-    * judge by their grants like any tenant user (Phase D), so they get the counts zeroed and
-    * flagged `countsUnavailable` and ask `changes` for the ones they may read.
-    */
-  private def mergeEntry(m: BranchMerge, systemCounts: Boolean): BranchMergeEntry =
-    val summary = io.circe.parser.parse(m.summaryJson).getOrElse(io.circe.Json.Null)
-    BranchMergeEntry(
-      id = m.id,
-      status = m.status.wire,
-      proposer = m.proposer,
-      approver = m.approver,
-      mainSnapshotAtPropose = m.mainSnapshotAtPropose,
-      mainSnapshotAfter = m.mainSnapshotAfter,
-      tagName = m.tagName,
-      // rowConflicts below is empty when the counts cannot be read, which would read as no conflicts.
-      error = m.error.orElse(RowCounts.listFromJson(m.rowConflictsJson).left.toOption),
-      summary = if systemCounts then summary else BranchHandlers.withoutCounts(summary),
-      conflicts = io.circe.parser.parse(m.conflictsJson).getOrElse(io.circe.Json.Null),
-      createdAt = m.createdAt,
-      decidedAt = m.decidedAt,
-      onConflict = m.onConflict,
-      holdWriters = m.holdWriters,
-      // What the proposal's id pins, for the approver to read. Unreadable keys: the merge refuses them.
-      keys = BranchService.keysOf(m.mergeKeysJson).getOrElse(Map.empty),
-      attempts = m.attempts,
-      // Unreadable counts show no numbers; the merge itself refuses them.
-      rowConflicts =
-        RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil).map(rowConflicts(_, systemCounts))
-    )
-
-  /** `proposal`: whose row numbers to attach. `visible`: whether the viewer may see a table's. */
-  private def changesResponse(
-      b: Branch,
-      cs: BranchChangeSet,
-      proposal: Option[BranchMerge],
-      visible: TableChange => Boolean
-  ): BranchChangesResponse =
-    val rows =
-      proposal.toList.flatMap(m => RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil))
-    BranchChangesResponse(
-      branch = b.name,
-      forkSnapshot = cs.forkSnapshot,
-      headSnapshot = cs.headSnapshot,
-      mainSnapshot = cs.mainSnapshot,
-      tables = cs.tables.map(t =>
-        BranchTableChange(
-          schema = t.schema,
-          table = t.table,
-          kind = t.kind.wire,
-          inserted = t.inserted,
-          deleted = t.deleted,
-          updated = t.updated,
-          mergeable = t.mergeable,
-          reason = t.reason,
-          countsUnavailable = t.countsUnavailable,
-          threeWay = t.threeWay,
-          rowConflicts = rows
-            .find(c => c.schema == t.schema && c.table == t.table)
-            .map(rowConflicts(_, visible(t)))
-        )
-      ),
-      conflicts = cs.conflicts.map(c => BranchConflictEntry(c.schema, c.table, c.reason)),
-      unsupported = cs.unsupported,
-      mergeable = cs.mergeable
-    )
-
   def create(req: BranchCreateRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchEntry] =
@@ -203,10 +113,13 @@ final class BranchHandlers(
   def get(tenant: String, tenantDb: String, branch: String, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[BranchDetailResponse] = IO.blocking {
-    gate(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db) =>
+    gatedActor(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db, actor) =>
       service.get(tid, db, branch).left.map(toErr).map { case (b, merges) =>
         val systemCounts = scopeOf(apiKey).superuser
-        BranchDetailResponse(entry(b), merges.map(mergeEntry(_, systemCounts)))
+        BranchDetailResponse(
+          entry(b),
+          merges.map(BranchHandlers.mergeEntry(_, systemCounts, actor))
+        )
       }
     }
   }
@@ -237,10 +150,11 @@ final class BranchHandlers(
             case Right((b, cs)) =>
               IO.blocking(service.proposalOf(b)).map { proposal =>
                 Right(
-                  changesResponse(
+                  BranchHandlers.changesResponse(
                     b,
                     cs,
                     proposal,
+                    actor,
                     t => superuser || (countsAsked && t.counted)
                   )
                 )
@@ -259,13 +173,13 @@ final class BranchHandlers(
       changeType: Option[String],
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
-    gate(tenant, tenantDb, apiKey)(scopeOf) match
-      case Left(e)          => IO.pure(Left(e))
-      case Right((tid, db)) =>
+    gatedActor(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e)                 => IO.pure(Left(e))
+      case Right((tid, db, actor)) =>
         bounds(tid, db, branch) match
           case Left(e)              => IO.pure(Left(e))
           case Right((b, from, to)) =>
-            preview.dataDiff(
+            preview.dataDiffHiding(
               tid,
               b.tenantDbName,
               schema,
@@ -275,7 +189,8 @@ final class BranchHandlers(
               limit,
               cursor,
               changeType,
-              apiKey
+              apiKey,
+              (s, t) => !actor.sees(s, t)
             )(
               scopeOf
             )
@@ -288,13 +203,22 @@ final class BranchHandlers(
       table: String,
       apiKey: Option[String]
   )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
-    gate(tenant, tenantDb, apiKey)(scopeOf) match
-      case Left(e)          => IO.pure(Left(e))
-      case Right((tid, db)) =>
+    gatedActor(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e)                 => IO.pure(Left(e))
+      case Right((tid, db, actor)) =>
         bounds(tid, db, branch) match
           case Left(e)              => IO.pure(Left(e))
           case Right((b, from, to)) =>
-            preview.schemaDiff(tid, b.tenantDbName, schema, table, from, to, apiKey)(scopeOf)
+            preview.schemaDiffHiding(
+              tid,
+              b.tenantDbName,
+              schema,
+              table,
+              from,
+              to,
+              apiKey,
+              (s, t) => !actor.sees(s, t)
+            )(scopeOf)
 
   /** `(branch, fork, head)` as the numeric bound strings the catalog diff handlers parse. */
   private def bounds(
@@ -329,8 +253,8 @@ final class BranchHandlers(
           .map(_.left.map(toErr).map { case (b, m, cs) =>
             BranchProposeResponse(
               entry(b),
-              mergeEntry(m, systemCounts),
-              changesResponse(b, cs, Some(m), t => systemCounts || t.counted)
+              BranchHandlers.mergeEntry(m, systemCounts, actor),
+              BranchHandlers.changesResponse(b, cs, Some(m), actor, t => systemCounts || t.counted)
             )
           })
 
@@ -355,8 +279,8 @@ final class BranchHandlers(
           .map(_.left.map(toErr).map { case (b, m, cs) =>
             BranchMergeResponse(
               entry(b),
-              mergeEntry(m, superuser),
-              changesResponse(b, cs, Some(m), _ => superuser)
+              BranchHandlers.mergeEntry(m, superuser, actor),
+              BranchHandlers.changesResponse(b, cs, Some(m), actor, _ => superuser)
             )
           })
 
@@ -371,6 +295,173 @@ final class BranchHandlers(
           .map(_.left.map(toErr).map(entry))
 
 object BranchHandlers:
+
+  /** One table's stored row numbers, for a viewer who may see them. */
+  private def rowNumbers(c: RowCounts): BranchRowConflicts =
+    BranchRowConflicts(
+      schema = c.schema,
+      table = c.table,
+      hasConflicts = c.conflicts > 0L,
+      toUpdate = c.toUpdate,
+      toDelete = c.toDelete,
+      toInsert = c.toInsert,
+      cellConflicts = c.cellConflicts,
+      updateDeleteConflicts = c.updateDeleteConflicts,
+      deleteUpdateConflicts = c.deleteUpdateConflicts,
+      keyMatches = c.keyMatches,
+      mainRowsByKey = c.mainRowsByKey,
+      columnConflicts = c.columnConflicts,
+      samples = c.samples
+    )
+
+  /** One table's stored row numbers for an admin who may not see them: they learn the table has
+    * conflicts, not how many.
+    */
+  private def flaggedOnly(c: RowCounts): BranchRowConflicts =
+    BranchRowConflicts(c.schema, c.table, c.conflicts > 0L, countsUnavailable = true)
+
+  /** The `schema` and `table` of a stored entry of a summary or a conflict list, when it has both.
+    */
+  private def nameOf(entry: Json): Option[(String, String)] =
+    for
+      schema <- entry.hcursor.get[String]("schema").toOption
+      table  <- entry.hcursor.get[String]("table").toOption
+    yield (schema, table)
+
+  /** The entries of a stored list that `actor` sees. Anything else, an entry with no name or a list
+    * that is no list, shows nothing.
+    */
+  private def entriesSeen(actor: BranchActor, list: Option[Json]): Vector[Json] =
+    list
+      .flatMap(_.asArray)
+      .getOrElse(Vector.empty)
+      .filter(e => nameOf(e).exists((schema, table) => actor.sees(schema, table)))
+
+  /** A merge row as the wire shows it. Its stored summary and row numbers were produced as the
+    * system caller (the lifecycle's record, `BranchService.propose`), so they are shown only to a
+    * superuser (`systemCounts`): every other admin is judged by the nodes on their grants like any
+    * tenant user (Phase D), so they get the counts zeroed and flagged `countsUnavailable` and ask
+    * `changes` for the ones they may read. A non-admin gets those counts too, no row numbers at all
+    * (see [[changesResponse]]) and only what [[BranchActor.sees]] lets them: the summary's tables,
+    * none of its raw verbs (they can name views and macros), and the conflicts and keys of those
+    * tables. `error` stays as recorded, though refusal text can name a table of the change set.
+    */
+  private[api] def mergeEntry(
+      m: BranchMerge,
+      systemCounts: Boolean,
+      actor: BranchActor
+  ): BranchMergeEntry =
+    val summary = io.circe.parser.parse(m.summaryJson).getOrElse(Json.Null)
+    val shown   = if systemCounts then summary else withoutCounts(summary)
+    // What the proposal's id pins, for the approver to read. Unreadable keys: the merge refuses them.
+    val keys                = BranchService.keysOf(m.mergeKeysJson).getOrElse(Map.empty)
+    val conflicts           = io.circe.parser.parse(m.conflictsJson).getOrElse(Json.Null)
+    def seenTables(s: Json) = entriesSeen(actor, s.hcursor.downField("tables").focus)
+    BranchMergeEntry(
+      id = m.id,
+      status = m.status.wire,
+      proposer = m.proposer,
+      approver = m.approver,
+      mainSnapshotAtPropose = m.mainSnapshotAtPropose,
+      mainSnapshotAfter = m.mainSnapshotAfter,
+      tagName = m.tagName,
+      // rowConflicts below is empty when the counts cannot be read, which would read as no conflicts.
+      error = m.error.orElse(RowCounts.listFromJson(m.rowConflictsJson).left.toOption),
+      summary =
+        if actor.isAdmin then shown
+        else
+          shown.mapObject(
+            _.add("tables", Json.fromValues(seenTables(shown)))
+              .add("unsupported", Json.arr())
+          )
+      ,
+      conflicts =
+        if actor.isAdmin then conflicts
+        else Json.fromValues(entriesSeen(actor, Some(conflicts))),
+      createdAt = m.createdAt,
+      decidedAt = m.decidedAt,
+      onConflict = m.onConflict,
+      holdWriters = m.holdWriters,
+      keys =
+        if actor.isAdmin then keys
+        else
+          // A key's `schema.table` is matched against the summary's own names, since either part can
+          // hold a dot: a key on no table the viewer sees does not show.
+          val named = seenTables(summary).flatMap(nameOf).map((s, t) => s"$s.$t").toSet
+          keys.filter((table, _) => named(table))
+      ,
+      attempts = m.attempts,
+      // Unreadable counts show no numbers; the merge itself refuses them.
+      rowConflicts =
+        if !actor.isAdmin then Nil
+        else
+          RowCounts
+            .listFromJson(m.rowConflictsJson)
+            .getOrElse(Nil)
+            .map(c => if systemCounts then rowNumbers(c) else flaggedOnly(c))
+    )
+
+  /** `proposal`: whose row numbers to attach. `mayCount`: whether the viewer may see a table's.
+    *
+    * A proposal's numbers come from Decide, which compares as the system principal, so they show
+    * only to a viewer who may count the table. An admin who may not gets the flag alone: they can
+    * lift their own mask, so it tells them nothing new. A non-admin who may not gets no entry at
+    * all: with a write grant and a mask or a row policy, `hasConflicts` is an equality oracle on
+    * what main wrote since the fork, through a key on the column or an UPDATE of a cell main also
+    * changed. A non-admin who may count holds no policy at all, since a policy holder's count is
+    * refused on every table, so the numbers tell them nothing they cannot read.
+    *
+    * A non-admin's lists name only the tables they see, and `otherTables` counts the rest, with the
+    * raw verbs of `unsupported`, which can name views and macros. `mergeable` is the whole
+    * branch's.
+    */
+  private[api] def changesResponse(
+      b: Branch,
+      cs: BranchChangeSet,
+      proposal: Option[BranchMerge],
+      actor: BranchActor,
+      mayCount: TableChange => Boolean
+  ): BranchChangesResponse =
+    val rows =
+      proposal.toList.flatMap(m => RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil))
+    val named =
+      cs.tables.map(t => (t.schema, t.table)) ++ cs.conflicts.map(c => (c.schema, c.table))
+    val others = named.distinct.count((schema, table) => !actor.sees(schema, table))
+    BranchChangesResponse(
+      branch = b.name,
+      forkSnapshot = cs.forkSnapshot,
+      headSnapshot = cs.headSnapshot,
+      mainSnapshot = cs.mainSnapshot,
+      tables = cs.tables
+        .filter(actor.seesTable)
+        .map(t =>
+          BranchTableChange(
+            schema = t.schema,
+            table = t.table,
+            kind = t.kind.wire,
+            inserted = t.inserted,
+            deleted = t.deleted,
+            updated = t.updated,
+            mergeable = t.mergeable,
+            reason = t.reason,
+            countsUnavailable = t.countsUnavailable,
+            threeWay = t.threeWay,
+            rowConflicts = rows
+              .find(c => c.schema == t.schema && c.table == t.table)
+              .flatMap(c =>
+                if mayCount(t) then Some(rowNumbers(c))
+                else if actor.isAdmin then Some(flaggedOnly(c))
+                else None
+              )
+          )
+        ),
+      conflicts = cs.conflicts
+        .filter(c => actor.sees(c.schema, c.table))
+        .map(c => BranchConflictEntry(c.schema, c.table, c.reason)),
+      unsupported = if actor.isAdmin then cs.unsupported else Nil,
+      mergeable = cs.mergeable,
+      otherTables = if actor.isAdmin then 0 else others + cs.unsupported.size
+    )
 
   /** A stored merge summary with every table's counts zeroed and flagged `countsUnavailable`, the
     * shape a refused count has in a change set.
@@ -405,10 +496,11 @@ object BranchHandlers:
     apiKey =>
       callers.resolve(apiKey).map {
         case RestCaller.Principal.Session(s) =>
-          BranchActor(
-            s.profile.username,
-            isAdmin = s.scope.superuser || s.scope.manageableTenants.nonEmpty
-          )
+          if s.scope.superuser || s.scope.manageableTenants.nonEmpty then
+            BranchActor.admin(s.profile.username)
+          else BranchActor.plain(s.profile.username, sees = (_, _) => false)
         case RestCaller.Principal.Pat(p) =>
-          BranchActor(p.user.username, isAdmin = p.isAdmin, branchOnly = p.restriction.branchOnly)
+          val branchOnly = p.restriction.branchOnly
+          if p.isAdmin then BranchActor.admin(p.user.username, branchOnly)
+          else BranchActor.plain(p.user.username, sees = (_, _) => false, branchOnly)
       }
