@@ -1499,7 +1499,8 @@ export interface BranchListResponse {
 }
 
 // What a merge would do to one table's rows, as its proposal saw it. A viewer who may not count the
-// table gets hasConflicts and countsUnavailable, nothing else. Never a cell value.
+// table gets hasConflicts and countsUnavailable, and zeros in the other fields that are no counts.
+// Never a cell value.
 export interface BranchRowConflicts {
   schema: string;
   table: string;

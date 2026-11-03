@@ -5,7 +5,7 @@ import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.parser.decode
 import io.circe.syntax.*
 
-/** Which side's value a conflicting cell takes, named on the proposal. */
+/** Which side wins a conflict, named on the proposal. */
 enum ConflictPolicy(val wire: String):
   case Main   extends ConflictPolicy("main")
   case Branch extends ConflictPolicy("branch")

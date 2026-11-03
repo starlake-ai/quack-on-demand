@@ -1,6 +1,8 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import { branchCount, rowConflictsHint, rowConflictsText } from '../api/branchCounts';
+import {
+  branchCount, conflictPolicyText, proposalErrorNote, rowConflictsHint, rowConflictsText,
+} from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import type {
   BranchChangesResponse,
@@ -181,8 +183,11 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
 
 /** The change set of one branch: touched tables with counts, plus the merge history. Expanded
   * inline under the branch row. */
-function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
+function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
   tenant: string; tenantDb: string; branch: BranchEntry;
+  // Bumped by the panel to read again when the branch row itself did not change: a merge that timed
+  // out writes only its merge row, so `updatedAt` stays.
+  refresh: number;
   onDiff: (schema: string, table: string) => void;
 }) {
   const live = branch.status === 'open' || branch.status === 'proposed';
@@ -204,7 +209,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
         .catch(e => { if (!cancelled) setError(errText(e)); });
     }
     return () => { cancelled = true; };
-  }, [tenant, tenantDb, branch.name, branch.status, branch.updatedAt, live]);
+  }, [tenant, tenantDb, branch.name, branch.status, branch.updatedAt, live, refresh]);
 
   // The open proposal's policy comes from `detail`: until it has loaded, a hint would guess it.
   const hint = changes && detail
@@ -325,9 +330,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                     {statusChip(m.status)}
                     {m.error && (
                       <span className="subtle" title={m.error}>
-                        {m.status === 'proposed' && m.error.startsWith('timeout: ')
-                          ? ' (a merge is running, or may have landed: merge again, or discard)'
-                          : ' (error)'}
+                        {' '}{proposalErrorNote(m.status, m.error)}
                       </span>
                     )}
                   </td>
@@ -372,6 +375,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
   const [mergeFor, setMergeFor] = useState<BranchEntry | null>(null);
   const [mProposal, setMProposal] = useState<BranchMergeEntry | null>(null);
   const [mHold, setMHold] = useState(false);
+  // Bumped to make an expanded panel read again, by Refresh and by a refused action. Not by a plain
+  // `reload`: each re-run of the panel's effect counts the change set again.
+  const [refresh, setRefresh] = useState(0);
 
   function openForm() {
     setFName('');
@@ -414,11 +420,18 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
     setBusy(b.name);
     run()
       .then(r => { setNote(onOk(r)); reload(); })
-      .catch(e => setError(`${label} '${b.name}': ${errText(e)}`))
+      .catch(e => {
+        // A refusal can leave the list and the panel stale (a replaced proposal, a proposal the
+        // refusal closed). `reload` clears the error, so it goes first.
+        reload();
+        setRefresh(n => n + 1);
+        setError(`${label} '${b.name}': ${errText(e)}`);
+      })
       .finally(() => setBusy(null));
   }
 
   const openPropose = (b: BranchEntry) => {
+    setMergeFor(null);
     setPOnConflict('');
     setPKeys('');
     setPError(null);
@@ -431,24 +444,35 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
     const parsed = parseBranchKeys(pKeys);
     if ('error' in parsed) { setPError(parsed.error); return; }
     const b = proposeFor;
-    setProposeFor(null);
-    act('propose', b, () => api.proposeBranch({
+    // Stays open until the server answers: only the server catches a wrong column or table, so a
+    // refusal must not cost the typed keys.
+    setPError(null);
+    setError(null);
+    setNote(null);
+    setBusy(b.name);
+    api.proposeBranch({
       tenant,
       tenantDb,
       branch: b.name,
       ...(pOnConflict === '' ? {} : { onConflict: pOnConflict }),
       ...(Object.keys(parsed.keys).length === 0 ? {} : { keys: parsed.keys }),
-    }), r => {
-      const res = r as { changes: BranchChangesResponse };
-      const conflicted = res.changes.tables.filter(t => t.rowConflicts?.hasConflicts).length;
-      return `branch '${b.name}' proposed: ${res.changes.tables.length} table(s), ` +
-        `${res.changes.conflicts.length} table conflict(s), ${conflicted} with row conflicts` +
-        (res.changes.mergeable ? '' : ', not mergeable as is');
-    });
+    })
+      .then(res => {
+        const conflicted = res.changes.tables.filter(t => t.rowConflicts?.hasConflicts).length;
+        setNote(`branch '${b.name}' proposed: ${res.changes.tables.length} table(s), ` +
+          `${res.changes.conflicts.length} table conflict(s), ${conflicted} with row conflicts` +
+          (res.changes.mergeable ? '' : ', not mergeable as is'));
+        setProposeFor(null);
+        reload();
+      })
+      .catch(e => setPError(errText(e)))
+      .finally(() => setBusy(null));
   };
 
   // Read here and submitted by its id: a proposal replaced after this is refused, not merged unread.
   const openMerge = (b: BranchEntry) => {
+    setProposeFor(null);
+    setMergeFor(null);
     setError(null);
     setMHold(false);
     reload(); // the expanded panel's numbers follow the listed row
@@ -493,7 +517,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
             <input type="checkbox" checked={showAll} onChange={ev => setShowAll(ev.target.checked)} />
             {' '}<span className="subtle">Include merged, discarded and expired</span>
           </label>
-          <button type="button" className="link-button" onClick={reload}>Refresh</button>
+          <button type="button" className="link-button" onClick={() => { reload(); setRefresh(n => n + 1); }}>Refresh</button>
         </div>
         {!formOpen && <button type="button" className="link-button" onClick={openForm}>Create branch</button>}
       </div>
@@ -557,6 +581,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                           tenant={tenant}
                           tenantDb={tenantDb}
                           branch={b}
+                          refresh={refresh}
                           onDiff={(schema, table) => setDiffTarget({ branch: b.name, schema, table })}
                         />
                       </td>
@@ -595,7 +620,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           <div className="cred-form-title">Propose branch {proposeFor.name}</div>
           <div className="cred-grid">
             <label>
-              When a cell conflicts
+              On a conflict
               <select value={pOnConflict} onChange={ev => setPOnConflict(ev.target.value as '' | 'main' | 'branch')}>
                 <option value="">refuse the merge</option>
                 <option value="main">main wins</option>
@@ -610,7 +635,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           </div>
           {pError && <div className="login-err" style={{ marginTop: '.75rem' }}>{pError}</div>}
           <div className="cred-form-actions">
-            <button type="submit">Propose</button>
+            <button type="submit" disabled={busy === proposeFor.name}>Propose</button>
             <button type="button" className="secondary" onClick={() => setProposeFor(null)}>Cancel</button>
           </div>
         </form>
@@ -624,9 +649,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           </p>
           <p className="subtle">
             Proposal {mProposal.id} by {mProposal.proposer}.{' '}
-            {mProposal.onConflict
-              ? `A conflicting cell takes ${mProposal.onConflict}'s value.`
-              : 'Any conflict refuses the merge.'}
+            {conflictPolicyText(mProposal.onConflict)}
             {Object.keys(mProposal.keys ?? {}).length > 0 && ' Keys: ' +
               Object.entries(mProposal.keys ?? {}).map(([t, cols]) => `${t}=${cols.join(',')}`).join('; ') + '.'}
           </p>

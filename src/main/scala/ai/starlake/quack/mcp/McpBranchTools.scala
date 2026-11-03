@@ -172,7 +172,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
       props = "database" -> strProp("Database (tenant-db) name."),
       "branch"      -> strProp("Branch name."),
       "on_conflict" -> strProp(
-        "Which side wins a conflicting cell: main or branch. Absent, any conflict refuses the merge."
+        "Which side wins every conflict (a cell, a row one side deleted and the other updated, " +
+          "rows matching a key): main or branch. Absent, any conflict refuses the merge."
       ),
       "keys" -> objProp(
         "schema.table to an array of column names: rows both sides inserted with the same key " +

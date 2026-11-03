@@ -4718,7 +4718,8 @@ paths:
       description: 'Propose the branch for merge: records a merge request with the
         change set and what a merge would do to its rows now, read on a merge node.
         A branch with conflicts can be proposed; merge refuses it. onConflict (main
-        or branch) names the side that wins a conflicting cell; keys names the columns
+        or branch) names the side that wins every conflict: a cell, a row one side
+        deleted and the other updated, rows matching a key; keys names the columns
         that catch rows both sides inserted. Proposing again replaces an open proposal,
         unless its last merge may have landed (409 proposal_unsettled: merge again,
         or discard; only a discard when another proposal''s commit is on main). 400

@@ -57,6 +57,32 @@ export function rowConflictsHint(
 ): string | null {
   if (!tables.some(t => t.rowConflicts?.hasConflicts)) return null;
   return onConflict
-    ? `A conflicting cell takes ${onConflict}'s value.`
+    ? conflictPolicyText(onConflict)
     : 'Any conflict refuses the merge: propose again with a conflict policy.';
+}
+
+/** What a proposal's policy does to every kind of conflict. An approver with no grant on a table sees
+  * no numbers, so this can be all they read. */
+export function conflictPolicyText(onConflict?: string | null): string {
+  if (onConflict === 'main') {
+    return 'Main wins every conflict: a conflicting cell keeps its value, a row it deleted stays ' +
+      'deleted, a row it updated stays even if the branch deleted it, and a branch row matching a ' +
+      'key is dropped.';
+  }
+  if (onConflict === 'branch') {
+    return 'The branch wins every conflict: a conflicting cell takes its value, a row it deleted is ' +
+      'deleted from main even if main updated it, a row it updated returns even if main deleted ' +
+      "it, and main's rows matching a key are deleted.";
+  }
+  return 'Any conflict refuses the merge.';
+}
+
+/** The note after a merge request's status chip, for a request that carries an error. On an open
+  * proposal an error starting `timeout: ` is no failure: a send was made and has not answered, so a
+  * merge is running or may have landed. The server tests the prefix and never the word, since an
+  * engine error can hold it too (a lock timeout). */
+export function proposalErrorNote(status: string, error: string): string {
+  return status === 'proposed' && error.startsWith('timeout: ')
+    ? '(a merge is running, or may have landed: merge again, or discard)'
+    : '(error)';
 }

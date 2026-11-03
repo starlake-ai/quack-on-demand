@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { branchCount, CountsUnavailableTitle, rowConflictsHint, rowConflictsText } from './branchCounts';
+import {
+  branchCount,
+  conflictPolicyText,
+  CountsUnavailableTitle,
+  proposalErrorNote,
+  rowConflictsHint,
+  rowConflictsText,
+} from './branchCounts';
 import type { BranchRowConflicts } from './types';
 
 describe('branchCount', () => {
@@ -100,10 +107,58 @@ describe('rowConflictsHint', () => {
   });
 
   it('says which side wins when the proposal names one', () => {
-    expect(rowConflictsHint([conflicted], 'branch')).toBe("A conflicting cell takes branch's value.");
+    expect(rowConflictsHint([conflicted], 'branch')).toBe(conflictPolicyText('branch'));
   });
 
   it('names whichever side the proposal chose', () => {
-    expect(rowConflictsHint([conflicted], 'main')).toBe("A conflicting cell takes main's value.");
+    expect(rowConflictsHint([conflicted], 'main')).toBe(conflictPolicyText('main'));
+  });
+});
+
+// An approver with no grant on a table sees no numbers (design 8.2), so these sentences can be all
+// they read before approving: each must say what the policy does to every kind of conflict, and
+// not only to cells (a row one side deleted and the other updated, rows matching a key).
+describe('conflictPolicyText', () => {
+  it('says what main winning does to every kind of conflict', () => {
+    expect(conflictPolicyText('main')).toBe(
+      'Main wins every conflict: a conflicting cell keeps its value, a row it deleted stays ' +
+        'deleted, a row it updated stays even if the branch deleted it, and a branch row matching a ' +
+        'key is dropped.',
+    );
+  });
+
+  it('says what the branch winning does to every kind of conflict', () => {
+    expect(conflictPolicyText('branch')).toBe(
+      'The branch wins every conflict: a conflicting cell takes its value, a row it deleted is ' +
+        'deleted from main even if main updated it, a row it updated returns even if main deleted ' +
+        "it, and main's rows matching a key are deleted.",
+    );
+  });
+
+  it('says that any conflict refuses the merge when the proposal names no policy', () => {
+    expect(conflictPolicyText(null)).toBe('Any conflict refuses the merge.');
+    expect(conflictPolicyText(undefined)).toBe('Any conflict refuses the merge.');
+  });
+});
+
+describe('proposalErrorNote', () => {
+  it('tells of a merge that may have landed when an open proposal has a send with no answer', () => {
+    expect(proposalErrorNote('proposed', 'timeout: no answer from the merge node')).toBe(
+      '(a merge is running, or may have landed: merge again, or discard)',
+    );
+  });
+
+  it('calls any other error of an open proposal an error, even one that mentions a timeout', () => {
+    expect(proposalErrorNote('proposed', 'merge_failed: out of memory')).toBe('(error)');
+    // The server tests startsWith, never contains: an engine error can hold the word too, and the
+    // prefix is `timeout: ` whole, so an error that merely starts with the word is no timeout.
+    expect(proposalErrorNote('proposed', 'lock timeout: try again')).toBe('(error)');
+    expect(proposalErrorNote('proposed', 'timeout waiting for the lock')).toBe('(error)');
+  });
+
+  it('calls the error of a closed proposal an error, even when it starts like a timeout', () => {
+    for (const status of ['failed', 'abandoned', 'merged']) {
+      expect(proposalErrorNote(status, 'timeout: no answer from the merge node')).toBe('(error)');
+    }
   });
 });
