@@ -194,7 +194,10 @@ final class MaintenanceRunner(
         // expire call: a protected tag created while the run went on (the lock serializes it with
         // this step) is seen here, never expired after the fact. The floor is the oldest live
         // branch's fork: nothing at or after it expires, because a merge reads main's changes over
-        // (fork, head] and a gap in that range cannot be read. Both count as skipped.
+        // (fork, head] and a snapshot gone from that range hides its table touches from the merge,
+        // which refuses history_gap. Both count as skipped. Branch creation does not take this
+        // lock: a run that read its floor before the branch's row landed can still expire the fork
+        // or a later snapshot, and the merge then refuses history_gap.
         expireIO = IO.defer {
           if tableScope.isDefined || candidates.isEmpty || !wants(run, "expire") then IO.pure(true)
           else

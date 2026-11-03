@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.branch
 
+import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -839,8 +840,46 @@ class ThreeWayMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMerge
         try
           val cs = BranchChanges.compute(br, parent, fork)
           RowMergeTable.plan(cs, br, parent, Map.empty) shouldBe
-            Left(RowMergeTable.Problem.HistoryGap(fork + 1))
+            Left(RowMergeTable.Problem.HistoryGap("main", fork + 1))
         finally br.close()
+      }
+    }
+
+  it should "refuse a hole in the branch's history, and the fork itself on either side, after a manual expiry" in
+    withCatalog("twgapb", seed) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork                  = cloneBranch(branchDb, branchDir)
+        def onBranch(sql: String) = duck(sql, Some(branchDb), Some(branchDir))
+        def withBranch[A](body: DuckLakeCatalogReader => A): A =
+          val br = branchReader(branchDb)
+          try body(br)
+          finally br.close()
+        // The branch creates a table (the only trace of it is that snapshot), then changes another.
+        onBranch("CREATE TABLE qod_branch.tpch1.made (id BIGINT);")
+        onBranch("UPDATE qod_branch.tpch1.fact SET note = 'b' WHERE id = 3;")
+        duck("UPDATE lake.tpch1.fact SET note = 'm1' WHERE id = 4;")
+        duck("UPDATE lake.tpch1.fact SET note = 'm2' WHERE id = 5;")
+        def plan(): Either[RowMergeTable.Problem, List[RowMergeTable]] =
+          withBranch(br =>
+            RowMergeTable.plan(BranchChanges.compute(br, parent, fork), br, parent, Map.empty)
+          )
+        def expire(catalog: String, snapshot: Long): Unit =
+          onBranch(s"CALL ducklake_expire_snapshots('$catalog', versions => [$snapshot]);"): Unit
+        // Whole on both sides: the ids from the fork on are consecutive, the fork's own included.
+        plan().isRight shouldBe true
+        // The snapshot that created `made` goes, and with it the branch's only trace of the table.
+        expire("qod_branch", fork + 1)
+        withBranch(br => BranchChanges.compute(br, parent, fork).tables.map(_.table)) shouldBe
+          List("fact")
+        plan() shouldBe Left(RowMergeTable.Problem.HistoryGap("branch", fork + 1))
+        // Then the fork itself: the lowest missing id is the one named.
+        expire("qod_branch", fork)
+        plan() shouldBe Left(RowMergeTable.Problem.HistoryGap("branch", fork))
+        // Main is checked first, whatever the branch lost.
+        expire("lake", fork + 1)
+        plan() shouldBe Left(RowMergeTable.Problem.HistoryGap("main", fork + 1))
+        expire("lake", fork)
+        plan() shouldBe Left(RowMergeTable.Problem.HistoryGap("main", fork))
       }
     }
 

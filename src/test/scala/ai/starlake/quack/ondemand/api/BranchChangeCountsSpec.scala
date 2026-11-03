@@ -62,6 +62,9 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   private val AliceScope: SessionScope.Resolver = _ => SessionScope(false, Set("acme"))
   private val RootScope: SessionScope.Resolver  = _ => SessionScope.Superuser
 
+  /** The snapshot every branch of this spec is cut at: what the fixture's clone answers. */
+  private val Fork = 10L
+
   private class FakeReader(var head: Long, var changes: List[(Long, String)])
       extends DuckLakeCatalogReader(null):
     /** The commit messages found on this catalog, each with its snapshot: what a merge looks for.
@@ -73,11 +76,12 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       TableVersion(2L, "main", "region", 1L, None),
       TableVersion(3L, "main", "nation", 1L, None)
     )
-    override def snapshotByCommitMessage(msg: String): Option[Long]     = committed.get(msg)
-    override def maxSnapshotId(): Option[Long]                          = Some(head)
-    override def tableVersions(): List[TableVersion]                    = versions
+    override def snapshotByCommitMessage(msg: String): Option[Long] = committed.get(msg)
+    override def maxSnapshotId(): Option[Long]                      = Some(head)
+    override def tableVersions(): List[TableVersion]                = versions
+    // The fork's own row too, which both real catalogs hold: `changes` lists the snapshots since.
     override def snapshotChangesSince(fork: Long): List[(Long, String)] =
-      changes.filter(_._1 > fork)
+      (if fork < Fork then List((Fork, "")) else Nil) ++ changes.filter(_._1 > fork)
     override def columnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
       List(CatalogColumnEntry(0, "x", "INTEGER", true, false))
     override def topLevelColumnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
@@ -195,7 +199,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       sup = sup,
       store = store,
       resolveReader = (_, db) => if db == parent.name then mainReader else branchReader,
-      cloneCatalog = (_, _, _, _) => Right(CloneResult(10L, 2, 10L)),
+      cloneCatalog = (_, _, _, _) => Right(CloneResult(Fork, 2, 10L)),
       mergeExecutor = new ai.starlake.quack.ondemand.branch.MergeExecutor:
         def withNode[A](spec: ai.starlake.quack.model.NodeSpec)(
             body: ai.starlake.quack.ondemand.branch.MergeNode => IO[Either[String, A]]

@@ -732,7 +732,25 @@ final class BranchService(
       s"merge ${m.id} landed as snapshot $snapshot; discard this branch"
     )
 
-  /** The tables of `cs` that merge by rows, or why they cannot be read. */
+  /** The refusal for a history or a snapshot the row merge cannot read. */
+  private def failureOf(problem: RowMergeTable.Problem): BranchFailure = problem match
+    case RowMergeTable.Problem.HistoryGap(catalog, missing) =>
+      val whose = if catalog == "main" then "main's" else s"the $catalog's"
+      BranchFailure.conflict(
+        "history_gap",
+        s"$whose snapshot $missing, at or after the fork, is gone, so its changes cannot be " +
+          "read; discard this branch and create it again"
+      )
+    case RowMergeTable.Problem.MixedSnapshots(schema, table, snapshots) =>
+      BranchFailure.unprocessable(
+        "merge_unsupported",
+        s"$schema.$table: snapshot(s) ${snapshots.mkString(", ")} cannot be read correctly: " +
+          "they mix maintenance and data, or hold a change this version does not know"
+      )
+
+  /** The tables of `cs` that merge by rows, or why they cannot be read. A history with a snapshot
+    * gone from either catalog is refused here first, whether or not any table merges by rows.
+    */
   private def rowTables(
       tenant: String,
       parent: TenantDb,
@@ -748,23 +766,12 @@ final class BranchService(
         keys
       )
       .left
-      .map {
-        case RowMergeTable.Problem.HistoryGap(missing) =>
-          BranchFailure.conflict(
-            "history_gap",
-            s"main's snapshot $missing since the fork is gone, so its changes cannot be read; " +
-              "discard this branch and create it again"
-          )
-        case RowMergeTable.Problem.MixedSnapshots(schema, table, snapshots) =>
-          BranchFailure.unprocessable(
-            "merge_unsupported",
-            s"$schema.$table: snapshot(s) ${snapshots.mkString(", ")} cannot be read correctly: " +
-              "they mix maintenance and data, or hold a change this version does not know"
-          )
-      }
+      .map(failureOf)
 
   /** What a merge would do to the rows of `cs` now. Nothing to read when nothing merges by rows, or
-    * when a table conflict or an unsupported change already rules the merge out.
+    * when a table conflict or an unsupported change already rules the merge out. The history is
+    * checked in every case, since a snapshot gone from either catalog hides touches from `cs` and a
+    * proposal over it would record a change set that is not the branch's.
     */
   private def analyze(
       tenant: String,
@@ -784,7 +791,12 @@ final class BranchService(
         .map(BranchFailure.badRequest("invalid_key", _))
         .toLeft(())
         .flatMap(_ =>
-          if !cs.mergeable then Right(Nil)
+          // `rowTables` checks the history itself; where it is skipped, the check still runs.
+          if !cs.mergeable then
+            RowMergeTable
+              .historyGap(cs, br, resolveReader(tenant, parent.name))
+              .map(failureOf)
+              .toLeft(Nil)
           else rowTables(tenant, parent, b, cs, options.keys)
         )
     }.flatMap {

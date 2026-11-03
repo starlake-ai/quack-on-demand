@@ -466,14 +466,19 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Right(List(SnapshotRange(11L, 12L)))
   }
 
-  "historyGap" should "find the first missing snapshot since the fork" in {
-    BranchChanges.historyGap(List((11L, ""), (12L, ""), (13L, "")), 10L, 13L) shouldBe None
-    BranchChanges.historyGap(List((11L, ""), (13L, "")), 10L, 13L) shouldBe Some(12L)
-    BranchChanges.historyGap(List((12L, ""), (13L, "")), 10L, 13L) shouldBe Some(11L)
-    BranchChanges.historyGap(List((11L, "")), 10L, 13L) shouldBe Some(12L)
-    BranchChanges.historyGap(Nil, 10L, 10L) shouldBe None
+  "historyGap" should "find the first missing snapshot from the fork itself" in {
+    def rows(ids: Long*) = ids.toList.map(_ -> "")
+    BranchChanges.historyGap(rows(10L, 11L, 12L, 13L), 10L, 13L) shouldBe None
+    BranchChanges.historyGap(rows(10L, 11L, 13L), 10L, 13L) shouldBe Some(12L)
+    BranchChanges.historyGap(rows(10L, 12L, 13L), 10L, 13L) shouldBe Some(11L)
+    BranchChanges.historyGap(rows(10L, 11L), 10L, 13L) shouldBe Some(12L)
+    // The fork's own row counts: a read AT the fork stands on it, and the lowest missing id wins.
+    BranchChanges.historyGap(rows(11L, 12L, 13L), 10L, 13L) shouldBe Some(10L)
+    BranchChanges.historyGap(rows(13L), 10L, 13L) shouldBe Some(10L)
+    BranchChanges.historyGap(Nil, 10L, 10L) shouldBe Some(10L)
+    BranchChanges.historyGap(rows(10L), 10L, 10L) shouldBe None
     // A snapshot past head is not part of the question.
-    BranchChanges.historyGap(List((11L, ""), (15L, "")), 10L, 11L) shouldBe None
+    BranchChanges.historyGap(rows(10L, 11L, 15L), 10L, 11L) shouldBe None
   }
 
   "compute" should "carry fork, head and main snapshot ids" in {

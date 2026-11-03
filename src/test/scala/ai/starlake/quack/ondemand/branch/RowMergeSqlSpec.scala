@@ -340,10 +340,35 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
   private def changeSet(tables: TableChange*) =
     BranchChangeSet(10L, 12L, 13L, tables.toList, Nil, Nil)
 
+  /** A catalog's snapshot rows from the fork (10) to `head`, each empty unless `verbs` gives it
+    * some: both real catalogs hold the fork's own row.
+    */
+  private def rows(head: Long, verbs: (Long, String)*): List[(Long, String)] =
+    val byId = verbs.toMap
+    (10L to head).toList.map(id => id -> byId.getOrElse(id, ""))
+
+  /** `catalog` after a manual expiry of the snapshots `ids`. */
+  private def expired(catalog: List[(Long, String)], ids: Long*): List[(Long, String)] =
+    catalog.filterNot(r => ids.contains(r._1))
+
   "RowMergeTable.plan" should "take row-merged tables only, with their ranges, columns and keys" in {
-    val branch = new Fake(List((11L, "inserted_into_table:2"), (12L, "deleted_from_table:2")))
-    val main   = new Fake(
-      List((11L, "rewrite_delete:2"), (12L, "inlined_insert:2"), (13L, "inlined_delete:2"))
+    // The fork's own row carries a data touch: it is the fork, not a change since it.
+    val branch = new Fake(
+      rows(
+        12L,
+        10L -> "inserted_into_table:2",
+        11L -> "inserted_into_table:2",
+        12L -> "deleted_from_table:2"
+      )
+    )
+    val main = new Fake(
+      rows(
+        13L,
+        10L -> "inserted_into_table:2",
+        11L -> "rewrite_delete:2",
+        12L -> "inlined_insert:2",
+        13L -> "inlined_delete:2"
+      )
     )
     val cs = changeSet(
       TableChange("s", "made", ChangeKind.Created),
@@ -364,15 +389,53 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
     )
   }
 
-  it should "refuse a gap in main's history and a snapshot mixing maintenance and data" in {
-    val branch = new Fake(List((11L, "inserted_into_table:2")))
+  it should "refuse a snapshot gone from main, the fork itself included, naming main" in {
+    val branch = new Fake(rows(12L, 11L -> "inserted_into_table:2"))
     val cs     = changeSet(TableChange("s", "t", ChangeKind.Modified, tableId = Some(2L)))
-    RowMergeTable.plan(cs, branch, new Fake(List((11L, ""), (13L, ""))), Map.empty) shouldBe
-      Left(RowMergeTable.Problem.HistoryGap(12L))
+    def plan(main: List[(Long, String)]) = RowMergeTable.plan(cs, branch, new Fake(main), Map.empty)
+    plan(rows(13L)).isRight shouldBe true
+    plan(expired(rows(13L), 12L)) shouldBe Left(RowMergeTable.Problem.HistoryGap("main", 12L))
+    // Prepare reads the table AT the fork, so its row is part of the history. The lowest missing
+    // id is the one named.
+    plan(expired(rows(13L), 10L)) shouldBe Left(RowMergeTable.Problem.HistoryGap("main", 10L))
+    plan(expired(rows(13L), 10L, 12L)) shouldBe Left(RowMergeTable.Problem.HistoryGap("main", 10L))
+  }
+
+  it should "refuse a snapshot gone from the branch, the fork itself included, naming the branch" in {
+    val main = new Fake(rows(13L))
+    val cs   = changeSet(TableChange("s", "t", ChangeKind.Modified, tableId = Some(2L)))
+    def plan(branch: List[(Long, String)]) =
+      RowMergeTable.plan(cs, new Fake(branch), main, Map.empty)
+    plan(rows(12L, 11L -> "inserted_into_table:2")).isRight shouldBe true
+    // The snapshot that touched `t` is the one that is gone: nothing left says that it changed.
+    plan(expired(rows(12L, 11L -> "inserted_into_table:2"), 11L)) shouldBe
+      Left(RowMergeTable.Problem.HistoryGap("branch", 11L))
+    plan(expired(rows(12L), 10L)) shouldBe Left(RowMergeTable.Problem.HistoryGap("branch", 10L))
+    plan(expired(rows(12L), 10L, 11L)) shouldBe
+      Left(RowMergeTable.Problem.HistoryGap("branch", 10L))
+  }
+
+  it should "check main first, and check the history when no table merges by rows" in {
+    // The branch created a table, and its only other touch was in a snapshot since expired there:
+    // the change set holds nothing to read by rows, and would merge without that touch.
+    val cs     = changeSet(TableChange("s", "made", ChangeKind.Created))
+    val branch = rows(12L, 12L -> """created_table:"s"."made"""")
+    def plan(b: List[(Long, String)], m: List[(Long, String)]) =
+      RowMergeTable.plan(cs, new Fake(b), new Fake(m), Map.empty)
+    plan(branch, rows(13L)) shouldBe Right(Nil)
+    plan(expired(branch, 11L), rows(13L)) shouldBe
+      Left(RowMergeTable.Problem.HistoryGap("branch", 11L))
+    plan(expired(branch, 11L), expired(rows(13L), 12L)) shouldBe
+      Left(RowMergeTable.Problem.HistoryGap("main", 12L))
+  }
+
+  it should "refuse a snapshot mixing maintenance and data" in {
+    val branch = new Fake(rows(12L, 11L -> "inserted_into_table:2"))
+    val cs     = changeSet(TableChange("s", "t", ChangeKind.Modified, tableId = Some(2L)))
     RowMergeTable.plan(
       cs,
       branch,
-      new Fake(List((11L, ""), (12L, "rewrite_delete:2,inserted_into_table:2"), (13L, ""))),
+      new Fake(rows(13L, 12L -> "rewrite_delete:2,inserted_into_table:2")),
       Map.empty
     ) shouldBe Left(RowMergeTable.Problem.MixedSnapshots("s", "t", List(12L)))
   }
@@ -380,12 +443,7 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
   it should "fail loudly on a modified table with no id, which only a bug can produce" in {
     val cs = changeSet(TableChange("s", "t", ChangeKind.Modified))
     an[IllegalArgumentException] should be thrownBy
-      RowMergeTable.plan(
-        cs,
-        new Fake(Nil),
-        new Fake(List((11L, ""), (12L, ""), (13L, ""))),
-        Map.empty
-      )
+      RowMergeTable.plan(cs, new Fake(rows(12L)), new Fake(rows(13L)), Map.empty)
   }
 
   it should "fail loudly on a table with a reserved column, which its callers must refuse first" in {
@@ -395,12 +453,7 @@ class RowMergeSqlSpec extends AnyFlatSpec with Matchers:
       TableChange("s", "t", ChangeKind.Modified, tableId = Some(2L), reservedColumn = Some("rowid"))
     )
     val thrown = the[IllegalArgumentException] thrownBy
-      RowMergeTable.plan(
-        cs,
-        new Fake(Nil),
-        new Fake(List((11L, ""), (12L, ""), (13L, ""))),
-        Map.empty
-      )
+      RowMergeTable.plan(cs, new Fake(rows(12L)), new Fake(rows(13L)), Map.empty)
     thrown.getMessage should include("s.t")
     thrown.getMessage should include("rowid")
   }

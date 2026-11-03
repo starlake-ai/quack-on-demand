@@ -25,8 +25,12 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       // Snapshots protected while the run goes on: pinned as soon as the flush step ran.
       pinnedDuringRun: Set[Long] = Set.empty,
       // The oldest live branch's fork: nothing at or after it may expire, because a merge reads
-      // main's changes over (fork, head] and a gap in that range cannot be read.
-      floor: Option[Long] = None
+      // main's changes over (fork, head] and a snapshot gone from that range hides its table
+      // touches from the merge.
+      floor: Option[Long] = None,
+      // A floor that appears while the run goes on, as soon as the flush step ran: a branch created
+      // meanwhile.
+      floorDuringRun: Option[Long] = None
   ):
     val store    = new InMemoryControlPlaneStore()
     var executed = List.empty[String]
@@ -34,6 +38,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     var started  = 0
     var mergeRan = false
     var pinsNow  = pinnedSnaps
+    var floorNow = floor
     val node     = RunningNode(
       "maint-n1",
       PoolKey("acme", "acme_db", "__maint"),
@@ -55,13 +60,15 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
         IO {
           executed = executed :+ sql
           if sql.contains("merge_adjacent_files") then mergeRan = true
-          if sql.contains("flush_inlined_data") then pinsNow = pinsNow ++ pinnedDuringRun
+          if sql.contains("flush_inlined_data") then
+            pinsNow = pinsNow ++ pinnedDuringRun
+            floorNow = (floorNow.toList ++ floorDuringRun.toList).minOption
           if failOn.exists(sql.contains) then Left("boom")
           else Right(if sql.contains("cleanup_old_files") then cleanupRows else 0L)
         },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L), // 4 candidates
       pinnedSnapshotsOf = (_, _) => pinsNow,
-      expiryFloorOf = (_, _) => floor,
+      expiryFloorOf = (_, _) => floorNow,
       hasLiveBranchOf = {
         val answers = liveBranch.iterator
         var last    = false
@@ -131,6 +138,16 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     expire should include("[1, 3, 4]")
     fin.counters.snapshotsSkippedPinned shouldBe 1
     fin.counters.snapshotsExpired shouldBe 3
+  }
+
+  it should "read the floor when the expire step starts, not in the chain's prelude" in {
+    // Twin of the case above: the floor is a fact of the control plane that moves while the run
+    // goes on (a branch created after the candidates were listed), so it is read with the pins.
+    val f   = new Fixture(floorDuringRun = Some(3L))
+    val fin = f.enqueueAndRun()
+    f.executed.find(_.contains("expire_snapshots")).get should include("[1, 2]")
+    fin.counters.snapshotsSkippedPinned shouldBe 2
+    fin.counters.snapshotsExpired shouldBe 2
   }
 
   it should "hold the snapshot-pin lock through the expire call, and only then" in {

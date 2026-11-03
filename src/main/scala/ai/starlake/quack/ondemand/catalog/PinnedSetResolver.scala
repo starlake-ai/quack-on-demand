@@ -39,9 +39,11 @@ final class PinnedSetResolver(store: ControlPlaneStore):
     liveBranches(tenant, tenantDb).nonEmpty
 
   /** Every snapshot at or after this must outlive the live branches: a three-way merge reads main's
-    * changes over `(fork, head]`, and a gap in that range cannot be read (design section 9.1). None
-    * without a live branch. Cheap: merge and cleanup are already skipped while a branch is live, so
-    * this keeps catalog rows, and branch TTLs bound how long.
+    * changes over `(fork, head]` and the tables at the fork, and a snapshot gone from
+    * `[fork, head]` hides its table touches from the merge, which refuses `history_gap` (design
+    * section 9.1). None without a live branch. Cheap: merge and cleanup are already skipped while a
+    * branch is live, so this keeps catalog rows, and a branch's TTL, when it has one, bounds how
+    * long: with no TTL, expiry above that fork stops until a merge or a discard.
     */
   def expiryFloor(tenant: String, tenantDb: String): Option[Long] =
     liveBranches(tenant, tenantDb).map(_.forkSnapshot).minOption

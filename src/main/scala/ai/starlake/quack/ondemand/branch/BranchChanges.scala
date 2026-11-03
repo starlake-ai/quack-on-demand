@@ -82,6 +82,10 @@ final case class BranchChangeSet(
 trait ChangeSource:
   def maxSnapshotId(): Option[Long]
   def tableVersions(): List[TableVersion]
+
+  /** `(snapshot id, changes_made)` of every snapshot with an id strictly above `fork`, ascending.
+    * `fork - 1` reads from the fork itself.
+    */
   def snapshotChangesSince(fork: Long): List[(Long, String)]
   def columnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry]
 
@@ -400,9 +404,12 @@ object BranchChanges:
         }
       Right(ranges.reverse)
 
-  /** The first snapshot id missing from `(fork, head]`: a manual expiry, or a branch older than the
-    * maintenance rule that keeps them. `changes` is what `snapshotChangesSince(fork)` returned.
+  /** The first snapshot id missing from `[fork, head]`: a manual expiry, or a branch older than the
+    * maintenance rule that keeps them. The fork's own row counts, because the merge reads the
+    * tables AT the fork; and a snapshot gone from a catalog hides its table touches from
+    * [[classify]], so a table touched only there would leave the change set. `changes` is what
+    * `snapshotChangesSince(fork - 1)` returned: the rows from the fork on.
     */
   def historyGap(changes: List[(Long, String)], fork: Long, head: Long): Option[Long] =
     val present = changes.iterator.map(_._1).toSet
-    (fork + 1 to head).find(id => !present.contains(id))
+    (fork to head).find(id => !present.contains(id))

@@ -21,56 +21,93 @@ final case class RowMergeTable(
 object RowMergeTable:
 
   enum Problem:
-    case HistoryGap(missing: Long)
+    /** A snapshot at or after the fork is gone from `catalog`, `main` or `branch`. */
+    case HistoryGap(catalog: String, missing: Long)
     case MixedSnapshots(schema: String, table: String, snapshots: List[Long])
 
-  /** The tables of `cs` that merge by rows, read up to `cs.mainSnapshot` on main. */
+  /** Each catalog's snapshot rows from the fork itself on, `(main's, the branch's)`, or the first
+    * snapshot gone from one of them, a [[Problem.HistoryGap]]: main's over `[fork, S]`, checked
+    * first, then the branch's over `[fork, head]`. The fork is part of it because Prepare reads the
+    * tables AT it, and a snapshot gone from either catalog hides its table touches from the
+    * classifier, so a table touched only there would leave the change set and the merge would
+    * succeed without it.
+    */
+  private def history(
+      cs: BranchChangeSet,
+      branch: ChangeSource,
+      main: ChangeSource
+  ): Either[Problem, (List[(Long, String)], List[(Long, String)])] =
+    val fork          = cs.forkSnapshot
+    val mainChanges   = main.snapshotChangesSince(fork - 1)
+    val branchChanges = branch.snapshotChangesSince(fork - 1)
+    BranchChanges
+      .historyGap(mainChanges, fork, cs.mainSnapshot)
+      .map(Problem.HistoryGap("main", _))
+      .orElse(
+        BranchChanges
+          .historyGap(branchChanges, fork, cs.headSnapshot)
+          .map(Problem.HistoryGap("branch", _))
+      )
+      .toLeft((mainChanges, branchChanges))
+
+  /** The first snapshot gone from either catalog (a [[Problem.HistoryGap]]), for a caller that does
+    * not [[plan]]: a proposal is never recorded over a history that is not whole, whatever else
+    * rules the merge out.
+    */
+  def historyGap(
+      cs: BranchChangeSet,
+      branch: ChangeSource,
+      main: ChangeSource
+  ): Option[Problem] = history(cs, branch, main).left.toOption
+
+  /** The tables of `cs` that merge by rows, read up to `cs.mainSnapshot` on main. A history that is
+    * not whole is refused first, whether or not any table merges by rows.
+    */
   def plan(
       cs: BranchChangeSet,
       branch: ChangeSource,
       main: ChangeSource,
       keys: Map[String, List[String]]
   ): Either[Problem, List[RowMergeTable]] =
-    val fork        = cs.forkSnapshot
-    val mainChanges = main.snapshotChangesSince(fork)
-    BranchChanges.historyGap(mainChanges, fork, cs.mainSnapshot) match
-      case Some(missing) => Left(Problem.HistoryGap(missing))
-      case None          =>
-        val branchEntries = BranchChanges.parseEntries(branch.snapshotChangesSince(fork))
-        val mainEntries   = BranchChanges.parseEntries(mainChanges)
-        cs.tables
-          .filter(_.kind == ChangeKind.Modified)
-          .zipWithIndex
-          .foldLeft[Either[Problem, List[RowMergeTable]]](Right(Nil)) { case (acc, (t, i)) =>
-            val id = t.tableId.getOrElse(
-              throw new IllegalArgumentException(s"modified table ${t.schema}.${t.table} has no id")
+    val fork = cs.forkSnapshot
+    history(cs, branch, main).flatMap { (mainChanges, branchChanges) =>
+      // Only what came after the fork is a change: the fork's own row is there to be counted.
+      val branchEntries = BranchChanges.parseEntries(branchChanges.filter(_._1 > fork))
+      val mainEntries   = BranchChanges.parseEntries(mainChanges.filter(_._1 > fork))
+      cs.tables
+        .filter(_.kind == ChangeKind.Modified)
+        .zipWithIndex
+        .foldLeft[Either[Problem, List[RowMergeTable]]](Right(Nil)) { case (acc, (t, i)) =>
+          val id = t.tableId.getOrElse(
+            throw new IllegalArgumentException(s"modified table ${t.schema}.${t.table} has no id")
+          )
+          // Such a column hides the row identifier from the merge's writes but not from the feed
+          // it reads, so wrong rows would be written, silently. Callers refuse the table first.
+          t.reservedColumn.foreach(c =>
+            throw new IllegalArgumentException(
+              s"table ${t.schema}.${t.table} has a column named $c and is not mergeable"
             )
-            // Such a column hides the row identifier from the merge's writes but not from the feed
-            // it reads, so wrong rows would be written, silently. Callers refuse the table first.
-            t.reservedColumn.foreach(c =>
-              throw new IllegalArgumentException(
-                s"table ${t.schema}.${t.table} has a column named $c and is not mergeable"
-              )
-            )
-            def ranges(es: List[BranchChanges.Entry], head: Long) =
-              BranchChanges
-                .readRanges(es, id, fork, head)
-                .left
-                .map(Problem.MixedSnapshots(t.schema, t.table, _))
-            for
-              done         <- acc
-              branchRanges <- ranges(branchEntries, cs.headSnapshot)
-              mainRanges   <- ranges(mainEntries, cs.mainSnapshot)
-            yield done :+ RowMergeTable(
-              i,
-              t.schema,
-              t.table,
-              branch.topLevelColumnsOfTableAt(id, cs.headSnapshot).map(_.name),
-              keys.getOrElse(s"${t.schema}.${t.table}", Nil),
-              branchRanges,
-              mainRanges
-            )
-          }
+          )
+          def ranges(es: List[BranchChanges.Entry], head: Long) =
+            BranchChanges
+              .readRanges(es, id, fork, head)
+              .left
+              .map(Problem.MixedSnapshots(t.schema, t.table, _))
+          for
+            done         <- acc
+            branchRanges <- ranges(branchEntries, cs.headSnapshot)
+            mainRanges   <- ranges(mainEntries, cs.mainSnapshot)
+          yield done :+ RowMergeTable(
+            i,
+            t.schema,
+            t.table,
+            branch.topLevelColumnsOfTableAt(id, cs.headSnapshot).map(_.name),
+            keys.getOrElse(s"${t.schema}.${t.table}", Nil),
+            branchRanges,
+            mainRanges
+          )
+        }
+    }
 
 /** Renders the row merge's stages (design section 6): pure strings. Working tables live in the
   * merge node's in-memory database, which survives between requests and dies with the node. Each

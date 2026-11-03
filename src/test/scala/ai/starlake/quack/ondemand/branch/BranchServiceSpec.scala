@@ -47,6 +47,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
   private val FenceRefused = "qod merge fence: a merged table moved past snapshot 10"
   private val ServiceLog   = classOf[BranchService].getName
 
+  /** The snapshot every branch of this spec is cut at: what the fixture's clone answers. */
+  private val Fork = 10L
+
   /** A metadata reader over hand-built state, so change sets are deterministic. */
   private class FakeReader(
       var head: Long,
@@ -54,10 +57,16 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       var changes: List[(Long, String)] = Nil,
       var committed: mutable.Map[String, Long] = mutable.Map.empty
   ) extends DuckLakeCatalogReader(null):
-    override def maxSnapshotId(): Option[Long]                          = Some(head)
-    override def tableVersions(): List[TableVersion]                    = versions
+    override def maxSnapshotId(): Option[Long]       = Some(head)
+    override def tableVersions(): List[TableVersion] = versions
+
+    /** The fork's own snapshot row, which both real catalogs hold (the branch's is a copy of
+      * main's): `changes` lists the snapshots since the fork. A test that expires the fork turns it
+      * off.
+      */
+    var forkRow                                                         = true
     override def snapshotChangesSince(fork: Long): List[(Long, String)] =
-      changes.filter(_._1 > fork)
+      (if forkRow && fork < Fork then List((Fork, "")) else Nil) ++ changes.filter(_._1 > fork)
     override def columnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
       List(CatalogColumnEntry(0, "x", "INTEGER", true, false))
     override def topLevelColumnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
@@ -162,7 +171,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       resolveReader = (_, db) => readers.getOrElseUpdate(db, branchReader),
       cloneCatalog = (_, parentDb, branchDb, path) =>
         cloneCalls += ((parentDb, branchDb, path))
-        if cloneFails then Left("boom") else Right(CloneResult(10L, 30, 100L))
+        if cloneFails then Left("boom") else Right(CloneResult(Fork, 30, 100L))
       ,
       mergeExecutor = new MergeExecutor:
         def withNode[A](spec: NodeSpec)(
@@ -571,17 +580,89 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       Some(Instant.parse("2026-09-20T12:00:00Z"))
   }
 
-  it should "refuse a gap in main's history since the fork" in {
+  it should "refuse a gap in main's history since the fork, naming main" in {
     val f = new Fixture
     f.create("x")
     f.touchBranch()
     f.mainReader.head = 13L
     f.mainReader.changes = List((11L, ""), (13L, "inlined_insert:2"))
-    f.service
-      .propose("acme", f.parent.name, "x", ProposeOptions(), f.admin1, Proposer, None)
-      .unsafeRunSync()
-      .left
-      .map(f => (f.status, f.code)) shouldBe Left((409, "history_gap"))
+    val refused = f.propose().left.toOption.get
+    (refused.status, refused.code) shouldBe (409, "history_gap")
+    refused.message shouldBe "main's snapshot 12, at or after the fork, is gone, so its changes " +
+      "cannot be read; discard this branch and create it again"
+  }
+
+  it should "refuse the fork itself gone from main, before any node" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.mainReader.forkRow = false
+    val refused = f.propose().left.toOption.get
+    refused.code shouldBe "history_gap"
+    refused.message should startWith("main's snapshot 10, at or after the fork, is gone")
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "refuse a gap in the branch's history since the fork, naming the branch" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.branchReader.head = 13L
+    f.branchReader.changes = List((11L, "inlined_insert:2"), (13L, "inlined_delete:2"))
+    val refused = f.propose().left.toOption.get
+    (refused.status, refused.code) shouldBe (409, "history_gap")
+    refused.message shouldBe "the branch's snapshot 12, at or after the fork, is gone, so its " +
+      "changes cannot be read; discard this branch and create it again"
+    f.nodesStarted shouldBe 0
+    f.store.listBranchMerges(f.store.findBranch(f.parent.id, "x").get.id) shouldBe Nil
+  }
+
+  it should "refuse the fork itself gone from the branch, before any node" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.branchReader.forkRow = false
+    val refused = f.propose().left.toOption.get
+    refused.code shouldBe "history_gap"
+    refused.message should startWith("the branch's snapshot 10, at or after the fork, is gone")
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "refuse a table that only a snapshot gone from the branch touched, not leave it out" in {
+    val f = new Fixture
+    f.create("x")
+    // The branch created `extra` at 11 and changed region at 12. Expiry took snapshot 11, the
+    // only trace of `extra`: the change set lists region alone, and would merge without it.
+    f.branchReader.head = 12L
+    f.branchReader.versions =
+      f.branchReader.versions :+ TableVersion(3L, "tpch1", "extra", 11L, None)
+    f.branchReader.changes = List((12L, "inlined_insert:2"))
+    f.propose().left.map(_.code) shouldBe Left("history_gap")
+  }
+
+  it should "refuse a gap when the branch only created a table and nothing merges by rows" in {
+    val f = new Fixture
+    f.create("x")
+    // `extra` is all that is left on the branch: 11 and 12, which changed region, are gone.
+    f.branchReader.head = 13L
+    f.branchReader.versions =
+      f.branchReader.versions :+ TableVersion(3L, "tpch1", "extra", 13L, None)
+    f.branchReader.changes = List((13L, """created_table:"tpch1"."extra""""))
+    f.propose().left.map(_.code) shouldBe Left("history_gap")
+    f.nodesStarted shouldBe 0
+  }
+
+  it should "refuse a gap whatever else rules the merge out, recording nothing" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    // main dropped the table the branch changed, so the merge is ruled out anyway, and main's
+    // history has a hole: the conflict it would record is read from a history that is not whole.
+    f.mainReader.head = 13L
+    f.mainReader.versions = List(TableVersion(2L, "tpch1", "region", 1L, Some(11L)))
+    f.mainReader.changes = List((11L, "dropped_table:2"), (13L, ""))
+    f.propose().left.map(_.code) shouldBe Left("history_gap")
+    f.store.listBranchMerges(f.store.findBranch(f.parent.id, "x").get.id) shouldBe Nil
   }
 
   it should "refuse that gap whatever the branch changed, before any node" in {
@@ -1015,6 +1096,50 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.mainReader.changes = List((11L, ""), (13L, ""))
     f.merge().left.map(_.code) shouldBe Left("history_gap")
     f.store.findBranch(f.parent.id, "x").get.status shouldBe BranchStatus.Open
+  }
+
+  it should "close the proposal when the branch's history has a gap at merge time, writing nothing" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    // Snapshot 11 expires on the branch: region is still a modified table (12 touches it), so
+    // nothing but the gap check can tell that the change set is not the branch's.
+    f.branchReader.changes = List((12L, "inlined_delete:2"))
+    val refused = f.merge().left.toOption.get
+    refused.code shouldBe "history_gap"
+    refused.message should startWith("the branch's snapshot 11, at or after the fork, is gone")
+    f.mergeBatches shouldBe empty
+    f.store.findBranch(f.parent.id, "x").get.status shouldBe BranchStatus.Open
+  }
+
+  it should "refuse, not merge, a branch that created a table once its other touch is gone" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.createdOnBranch() // region changed at 11 and 12, `extra` created at 13
+    f.propose().isRight shouldBe true
+    val stages = f.nodeBatches.size
+    // 11 and 12 expire on the branch: what is left is `extra` alone, a change set with nothing to
+    // read by rows, which would merge and drop the changes to region without a word.
+    f.branchReader.changes = List((13L, """created_table:"tpch1"."extra""""))
+    f.merge().left.map(_.code) shouldBe Left("history_gap")
+    f.mergeBatches shouldBe empty
+    f.nodeBatches.size shouldBe stages // refused before Prepare
+    f.store.findBranch(f.parent.id, "x").get.status shouldBe BranchStatus.Open
+  }
+
+  it should "refuse at merge time the fork itself gone from either catalog" in {
+    def refused(expire: Fixture => Unit): Unit =
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.propose().isRight shouldBe true
+      expire(f)
+      f.merge().left.map(_.code) shouldBe Left("history_gap")
+      f.mergeBatches shouldBe empty
+    refused(f => f.mainReader.forkRow = false)
+    refused(f => f.branchReader.forkRow = false)
   }
 
   it should "keep the proposal open when a snapshot mixes maintenance and data" in {
