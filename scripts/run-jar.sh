@@ -792,13 +792,13 @@ echo ""
 
 # ---- Port preflight ----
 # Aborts before the JVM boots if any port the manager will need is held
-# by another process. The truly nasty failure mode is an orphan Quack
-# node from a prior run still listening inside the [minPort, maxPort]
-# range. The supervisor's port allocator skips a port something listens
-# on, so a fresh spawn avoids it, but the orphan keeps its memory until
-# you kill it by hand. NUKE=1
-# wipes Postgres state but not OS processes - so a "fresh" NUKE boot
-# is exactly when this trap snaps shut.
+# by another process. An orphan Quack node from a prior run, still
+# listening inside the [minPort, maxPort] range, is the case that
+# matters most. The supervisor's port allocator skips a port something
+# listens on, so a fresh spawn avoids it, but the orphan keeps its
+# memory until you kill it by hand. NUKE=1 wipes Postgres state but not
+# OS processes, which leaves every earlier node without a row: a
+# "fresh" NUKE boot is where such orphans pile up.
 #
 # Three port classes are checked:
 #   1. REST/UI port (manager would crash at bind, but we'd rather say so up-front)

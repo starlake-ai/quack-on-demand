@@ -11,7 +11,7 @@ the details.
 
 Before upgrading:
 
-1. Back up the control-plane database. Liquibase `0047` to `0055` run at boot, and `0055` drops
+1. Back up the control-plane database. Liquibase `0047` to `0056` run at boot, and `0055` drops
    the `qodstate_pool.lockdown` column the previous release reads.
 2. Replace the static API key: mint PATs for automation (`qod login`, then `qod auth pat create`),
    point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every
@@ -739,6 +739,14 @@ In-engine authorization, Phase D: the node decides every statement alone.
   developer shell exporting a removed variable fails every in-process boot test (run them under
   `env -u`). Manager modules must be recompiled (constructor changes: `FlightSqlRouter`,
   `NodeKeys`, `QuackHttpAdapter`, the backends, `MetricsBindings`, `FederatedSourceHandlers`, ...).
+- Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
+  `--proposal`: the approver names the proposal they read, and another one in its place is
+  `409 proposal_replaced`.
+- Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
+  used to take the newer head. Proposing a branch that is already proposed replaces its open
+  proposal, and `409 already_proposed` is gone.
+- Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
+  rename the column), as one named `rowid` already did not.
 
 ### Added
 
@@ -788,14 +796,15 @@ In-engine authorization, Phase D: the node decides every statement alone.
   system caller, for a module's own provisioning statements, never SQL a user supplied; each is
   labelled `module:<name>` in statement history and audited as `module.sql`, both shown to the
   tenant's admins with the statement's values masked (as the stdout audit sink masks them).
-- **Branches merge three ways.** Tables both sides changed merge cell by cell, by `rowid`; a conflict
-  refuses the merge unless the proposal names a winner (`--on-conflict main|branch`), `--key` catches
-  rows both sides inserted, `--hold-writers` holds other commits on the merged tables. BREAKING:
-  `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires `--proposal`: the
-  approver names the proposal they read, and another one in its place is `409 proposal_replaced`. A
-  merge that may have landed refuses propose with `409 proposal_unsettled`: merge again, or discard.
-  BREAKING: a merge now refuses `proposal_stale` when the branch moved since the proposal, where it
-  used to take the newer head.
+- **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
+  (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
+  proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,
+  `--hold-writers` holds other commits on the merged tables. A merge that may have landed refuses
+  propose with `409 proposal_unsettled`: merge again, or discard. Maintenance expires no snapshot at or
+  after the oldest live branch's fork (a merge reads main's changes over consecutive snapshots), so
+  with no TTL, expiry above that fork stops until the branch is merged or discarded. New settings
+  `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (20000000). The API
+  changes are under Breaking.
 
 ### Fixed
 

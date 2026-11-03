@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Two-minute branching demo (Epic 1): an agent proposes a change on a branch, a human
 # reviews the diff and merges. Needs a running manager with the demo tenants loaded
-# (`qod demo` or LOAD_TPC=1 ./scripts/run-jar.sh) and two CLI profiles:
-#   - the default profile logged in as a tenant admin of `acme` (the reviewer)
+# (`qod demo` or LOAD_TPC=1 ./scripts/run-jar.sh) and two tenant admins of `acme` (the demo has
+# `alice` and `acme-admin`), one CLI profile each. A token acts as its owner and a merge refuses its
+# own proposer (403 self_merge_forbidden), so the agent's token comes from the other admin:
+#   - the default profile logged in as one tenant admin of `acme` (the reviewer)
 #   - AGENT_PAT: a branch-only personal access token for the agent (the agent's
-#       commands below run with QOD_TOKEN set to it), minted with
-#       qod auth pat create --name agent --branch-only --database acme_tpch1
+#       commands below run with QOD_TOKEN set to it), minted from the other admin's profile with
+#       qod --profile <other-admin> auth pat create --name agent --branch-only --database acme_tpch1
 # Every step is a plain `qod` call so the same flow works from Claude Code, Codex or a shell.
 set -euo pipefail
 

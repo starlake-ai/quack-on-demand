@@ -564,8 +564,21 @@ grants, policies and user SQL apply unchanged (`TenantDb.catalogAlias` is the on
 helper every alias-derivation site goes through; the spawn scripts honour
 `catalogAlias`). Rows live in `qodstate_branch` / `qodstate_branch_merge`
 (Liquibase `0037`). `BranchService` owns the lifecycle: create -> propose ->
-merge (approver != proposer, on an ephemeral `__merge` node with the branch attached as `qod_branch`;
-tables both sides changed merge cell by cell, matched by `rowid`, in three stages: Prepare once, then
+merge / discard / TTL expiry (`BranchWiring` sweep, leader-gated); the merge is described after this
+paragraph. Change sets come from `BranchChanges` (pure, over `ducklake_snapshot_changes` verbs; flush
+artifacts and compaction are not touches). `PinnedSetResolver` pins every live branch's fork
+snapshot, and maintenance expires nothing at or after the oldest one (`expiryFloor`), since reading
+main's changes needs consecutive snapshots; the maintenance scheduler skips branch rows;
+`deleteTenantDb` refuses a parent with live branches. Targeting: FlightSQL header `branch=<name>`
+(authorized against the named parent pool), MCP `branch` argument, `qod sql --branch`.
+`TokenRestriction.branchOnly` (PAT `--branch-only`, column `branch_only`) refuses
+WRITE/DDL on a non-branch pool in `routedExecutor`. Merge is REST/CLI only (no
+MCP tool, `McpCoverageSpec` exclusion). See
+docs/superpowers/specs/2026-09-20-branching-v1-design.md and 2026-11-01-branch-three-way-merge-design.md.
+
+**Merge:** approver != proposer, on an ephemeral `__merge` node with the branch attached as `qod_branch`;
+every table the branch modified merges cell by cell, matched by `rowid` (main's side is empty when only
+the branch changed it), in three stages: Prepare once, then
 Decide and Apply per attempt, `RowMergeRunner` and `RowMergeSql`, working tables in the node's
 in-memory database; a statement with an empty rowid set is never sent, because a semi-join on an empty
 table reads the whole table; Apply is DELETE, UPDATE, INSERT in that order, because an UPDATE costs the
@@ -595,17 +608,7 @@ tagged `merge-<branch>-<id8>`, then the branch is torn down; `MergeFence` holds 
 validated main snapshot through a trigger on `ducklake_snapshot_changes` in the parent catalog DB,
 schema `qod_merge_fence`, refusing unless every later snapshot is row data or maintenance on other
 tables, because DuckLake's own conflict check misses main writes that land before the merge's first read
-or into a table the merge drops) / discard / TTL expiry (`BranchWiring` sweep, leader-gated). Change sets
-come from `BranchChanges` (pure, over `ducklake_snapshot_changes` verbs; flush
-artifacts and compaction are not touches). `PinnedSetResolver` pins every live branch's fork
-snapshot, and maintenance expires nothing at or after the oldest one (`expiryFloor`), since reading
-main's changes needs consecutive snapshots; the maintenance scheduler skips branch rows; `deleteTenantDb` refuses a
-parent with live branches. Targeting: FlightSQL header `branch=<name>` (authorized
-against the named parent pool), MCP `branch` argument, `qod sql --branch`.
-`TokenRestriction.branchOnly` (PAT `--branch-only`, column `branch_only`) refuses
-WRITE/DDL on a non-branch pool in `routedExecutor`. Merge is REST/CLI only (no
-MCP tool, `McpCoverageSpec` exclusion). See
-docs/superpowers/specs/2026-09-20-branching-v1-design.md and 2026-11-01-branch-three-way-merge-design.md.
+or into a table the merge drops.
 
 ### Pool suspend/resume (scale-to-zero)
 
@@ -932,4 +935,4 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
 - **Refresh the bundled copies whenever you touch `scripts/` or the operator skill.** The CLI wheel ships its own copies at `cli/src/qod_cli/scripts/spawn-quack-node.{sh,ps1}` and `cli/src/qod_cli/skills/quack-on-demand/SKILL.md`. Nothing generates them: a plain `cp` is the mechanism, and `cli/tests/test_demo.py` / `test_skill_freshness.py` are the only enforcement. Editing a canonical script without refreshing its copy fails those tests in a way that reads like an unrelated pre-existing failure.
 - **Never put two statements on one line of SQL fed to the DuckDB CLI** (the demo seeder, the loaders). When a statement fails, the CLI skips the rest of that line, so a failing `INSTALL` would silently skip the `LOAD` after it. A single statement may span several lines. (qod-node splits a node's init SQL on DuckDB's own tokenizer, so this does not bite there.)
 - **Don't edit the bundled `application.conf` for local tweaks** - set the `QOD_*` env var instead, or the change vanishes on the next `sbt assembly`.
-- **Always tear the manager down with `scripts/stop-jar.sh`, never an IDE/JVM kill** (or a bare `kill` of the java PID). Each node's qod-node lives exactly as long as its `spawn-quack-node.sh` wrapper (it watches the wrapper's process), so an unclean manager exit leaves the wrappers, reparented to PID 1, and their nodes running and holding node ports `21900+`. The next manager skips a port something listens on (`PortAllocator`), so its own nodes come up, but the orphans keep their memory and ports until swept, and a merge node left this way can hold many GB; one bound to another address (`QOD_NODE_BIND`) goes unseen. Recovery: kill the orphans with `scripts/kill-quack-nodes.sh --port <that manager's REST port>` (`--all` is the explicit blunt reset that sweeps every node on the host, every manager's, and the only mode that matches the orphans of a released manager from before the per-manager marker, whose wrappers carry the node token where the marker now goes; `--unmarked` matches only wrappers whose argv ends at the port, which at HEAD means a `qod fleet join` node on this host). `stop-jar.sh` does SIGTERM -> wait -> SIGKILL and reaps its own manager's children, so it never leaves its own orphans; other managers' nodes it deliberately leaves alone (it counts only port-only `--unmarked` wrappers in its note, so an earlier release's orphans go unreported). Stops are per-manager: the wrapper argv and node directory carry the manager's marker `<rest-port>-<boot id>`, and `stop-jar.sh` / `stop-jar.ps1` / `qod stop` / `kill-quack-nodes.sh` only touch the nodes of the manager on their `QOD_ON_DEMAND_PORT`, so stopping an isolated test stack never takes down the nodes of the manager on :20900. Ctrl-C on a foreground `run-jar.sh` (or `qod start`) is safe: both supervise the JVM in its own process group and turn the interrupt into that same teardown.
+- **Always tear the manager down with `scripts/stop-jar.sh`, never an IDE/JVM kill** (or a bare `kill` of the java PID). Each node's qod-node lives exactly as long as its `spawn-quack-node.sh` wrapper (it watches the wrapper's process), so an unclean manager exit leaves the wrappers, reparented to PID 1, and their nodes running and holding node ports `21900+`. The next manager adopts a live leftover it has a row for, or stops it before replacing it (`LocalQuackBackend.stopStray`), and skips any other port something listens on (`PortAllocator`), so its own nodes come up; a leftover with no row (a merge or maintenance node, or any node after a NUKE) keeps its memory and port until swept, and a merge node left this way can hold many GB; one bound to another address (`QOD_NODE_BIND`) goes unseen. Recovery: kill the orphans with `scripts/kill-quack-nodes.sh --port <that manager's REST port>` (`--all` is the explicit blunt reset that sweeps every node on the host, every manager's, and the only mode that matches the orphans of a released manager from before the per-manager marker, whose wrappers carry the node token where the marker now goes; `--unmarked` matches only wrappers whose argv ends at the port, which at HEAD means a `qod fleet join` node on this host). `stop-jar.sh` does SIGTERM -> wait -> SIGKILL and reaps its own manager's children, so it never leaves its own orphans; other managers' nodes it deliberately leaves alone (it counts only port-only `--unmarked` wrappers in its note, so an earlier release's orphans go unreported). Stops are per-manager: the wrapper argv and node directory carry the manager's marker `<rest-port>-<boot id>`, and `stop-jar.sh` / `stop-jar.ps1` / `qod stop` / `kill-quack-nodes.sh` only touch the nodes of the manager on their `QOD_ON_DEMAND_PORT`, so stopping an isolated test stack never takes down the nodes of the manager on :20900. Ctrl-C on a foreground `run-jar.sh` (or `qod start`) is safe: both supervise the JVM in its own process group and turn the interrupt into that same teardown.
