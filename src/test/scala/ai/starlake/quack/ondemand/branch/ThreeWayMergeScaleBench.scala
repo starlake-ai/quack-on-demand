@@ -66,8 +66,7 @@ object ThreeWayMergeScaleBench:
   * `QOD_BENCH_SETUP_SQL` (statements run first, such as a secret; never printed),
   * `QOD_BENCH_VERIFY` (`1`: check the result against a full three-way scan, at
   * `QOD_BENCH_VERIFY_MEMORY`, 48GB by default). What that scan spills, measured under a limit
-  * scaled from 48GB at 1B rows: 72 GiB at 200M, 140 GiB at 400M, so about 360 GiB at 1B. Under one
-  * scaled from 80GB, 59 GiB at 200M.
+  * scaled from 48GB at 1B rows: 52 GiB at 200M, 103 GiB at 400M, so about 260 GiB at 1B.
   */
 class ThreeWayMergeScaleBench extends AnyFlatSpec with Matchers:
   import ThreeWayMergeScaleBench.{changes, createTable, Columns}
@@ -265,6 +264,10 @@ class ThreeWayMergeScaleBench extends AnyFlatSpec with Matchers:
           if env("QOD_BENCH_VERIFY").contains("1") then
             statements(
               conn,
+              // The stages are reported, and the scan reads none of their tables. Kept, their spill
+              // would count against DuckDB's cap, fixed at the first spill as 90% of the free disk:
+              // on a large run, the difference between a verdict and none.
+              """DROP SCHEMA "memory"."qod_merge" CASCADE""",
               "SET GLOBAL threads = " + Runtime.getRuntime.availableProcessors(),
               s"SET GLOBAL memory_limit = '${env("QOD_BENCH_VERIFY_MEMORY").getOrElse("48GB")}'"
             )

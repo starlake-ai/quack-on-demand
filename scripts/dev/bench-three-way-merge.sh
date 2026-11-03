@@ -2,7 +2,7 @@
 # The three-way merge at scale, outside `sbt test`. Usage:
 #   scripts/dev/bench-three-way-merge.sh <rows> <changed rows per side>
 # See ThreeWayMergeScaleBench for the environment it reads. Needs the local test Postgres, and about
-# 32 bytes per row of disk, plus with QOD_BENCH_VERIFY=1 a spill of about 360 GiB at 1B rows
+# 32 bytes per row of disk, plus with QOD_BENCH_VERIFY=1 a spill of about 260 GiB at 1B rows
 # (measured at 200M and 400M, under a limit scaled from the 48GB the scan runs at).
 set -euo pipefail
 
