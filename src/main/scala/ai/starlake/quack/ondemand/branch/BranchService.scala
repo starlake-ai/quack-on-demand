@@ -943,9 +943,19 @@ final class BranchService(
           attempts,
           actor,
           apiKey,
-          afterRecord = letGo(tenant, parent, b, merge, cs, snapshot, holdWriters)
+          afterRecord = letGo(tenant, parent, b, merge, cs, snapshot)
         )
       )
+
+    // A look for the branch's commits: this proposal's settles, another's refuses.
+    def unlessFound(
+        next: => IO[Res[(Branch, BranchMerge, BranchChangeSet)]]
+    ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+      IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+        case Some((landed, snapshot)) if landed.id == merge.id => settle(snapshot, merge.attempts)
+        case Some((landed, snapshot)) => refuse(landedElsewhere(landed, snapshot), false, 0)
+        case None                     => next
+      }
 
     // What a refusal does to the proposal (design section 8.4): one that no longer reflects reality
     // closes, and the branch reopens for a new one; otherwise it stays open for a retry. A proposal
@@ -1026,7 +1036,7 @@ final class BranchService(
                       case Left(reason) =>
                         refuse(BranchFailure.upstream("merge_failed", reason), true, 0)
                       case Right((keys, proposed)) =>
-                        runAttempts(
+                        def run = runAttempts(
                           tenant,
                           parent,
                           b,
@@ -1040,6 +1050,11 @@ final class BranchService(
                           apiKey,
                           refuse
                         )
+                        // A held run arms at this head before its attempts look, and `release` arms
+                        // there again, so it looks first, as `attempt` does before its own arm: a
+                        // commit at or below this head settles here, and one that lands after this
+                        // read lands above it, which those arms refuse.
+                        if holdWriters then unlessFound(run) else run
               }
             }
       }
@@ -1047,11 +1062,7 @@ final class BranchService(
     // A commit that landed and never settled (the manager died between them) is finished, never
     // applied again: with no key, a row merge would insert the branch's new rows a second time, and
     // nothing would notice.
-    IO.blocking(landedCommit(tenant, parent, b)).flatMap {
-      case Some((landed, snapshot)) if landed.id == merge.id => settle(snapshot, merge.attempts)
-      case Some((landed, snapshot)) => refuse(landedElsewhere(landed, snapshot), false, 0)
-      case None                     => validateAndRun
-    }
+    unlessFound(validateAndRun)
 
   /** Why `cs` cannot be merged, if it cannot, and whether that closes the proposal. */
   private def refusalOf(
@@ -1210,7 +1221,9 @@ final class BranchService(
     // S and that read has no check at all, and its stale UPDATE can overwrite it. A known residual,
     // in the design. A retry's hold still ends with the merge: arming with no hold clears it and
     // keeps the fence. A timed-out run's own hold has expired by then, unless a look finds the
-    // commit first: the settle ends it and keeps the row too ([[letGo]]).
+    // commit first: the settle ends it and keeps the row too ([[letGo]]). Every arm's base is below
+    // any commit of this message: an attempt looks before its arm, a held run before its first, and
+    // a settle arms below the commit it found.
     val earlierTimeout    = merge.error.exists(_.startsWith(MergeExecutor.TimedOut))
     def release: IO[Unit] =
       if !earlierTimeout then IO.blocking(mergeFence.disarm(parentMeta, message))
@@ -1289,12 +1302,9 @@ final class BranchService(
               // A manager that dies in this send leaves what a send that timed out leaves: a
               // COMMIT in flight can still land, and nothing comes after the statement in flight.
               // Whatever the send answers replaces this mark, since `refuse` and `finishMerge` copy
-              // from the row read at the start of the run. The hold goes on record here, for the
-              // merge that settles such a commit to end it.
+              // from the row read at the start of the run.
               IO.blocking(
-                store.updateBranchMerge(
-                  merge.copy(error = Some(BranchService.ApplySent), holdWriters = holdWriters)
-                )
+                store.updateBranchMerge(merge.copy(error = Some(BranchService.ApplySent)))
               ) >>
                 node.exec(statements).flatMap { sent =>
                   lookAfter(sent.left.toOption).map {
@@ -1400,7 +1410,8 @@ final class BranchService(
 
     /** Holds writers before main's head is read. A commit between that read and the arm is not
       * held, and the fence refuses the attempt: on a hot table, every attempt. `holdSettle` lets
-      * commits already past the hold land first; the arm at main's head then starts after them.
+      * commits already past the hold land first; the arm at main's head then starts after them. Its
+      * base is below any commit of this branch: a held run looks once it has read `first`.
       */
     def holdFirst: IO[Either[String, Unit]] =
       if !holdWriters then IO.pure(Right(()))
@@ -1489,7 +1500,7 @@ final class BranchService(
                     attempts,
                     actor,
                     apiKey,
-                    afterRecord = letGo(tenant, parent, b, merge, first, snapshot, holdWriters)
+                    afterRecord = letGo(tenant, parent, b, merge, first, snapshot)
                   )
                 // This send's own commit can still land when it timed out: `failed` keeps its
                 // prefix, and the next look refuses.
@@ -1501,9 +1512,9 @@ final class BranchService(
               case Left(reason)                                   => unlessLanded(reason, 0)
               case Right((AttemptEnd.Committed(snapshot, cs), n)) =>
                 // With an earlier send behind it, this is a settle like the others, whichever send
-                // landed: the hold goes, whichever run armed it, and the fence stays below this
-                // commit, which a held retry's arms need not be. With none, nothing else can land,
-                // and the guarantee above has dealt with the fence.
+                // landed: the hold goes, whichever run armed it, and the row stays below this
+                // commit. With none, nothing else can land, and the guarantee above has dealt with
+                // the fence.
                 finishMerge(
                   tenant,
                   parent,
@@ -1516,8 +1527,7 @@ final class BranchService(
                   actor,
                   apiKey,
                   afterRecord =
-                    if earlierTimeout then
-                      letGo(tenant, parent, b, merge, cs, snapshot, holdWriters)
+                    if earlierTimeout then letGo(tenant, parent, b, merge, cs, snapshot)
                     else IO.unit
                 )
               case Right((AttemptEnd.Refused(f, closes), n)) => refuse(f, closes, n)
@@ -1532,10 +1542,10 @@ final class BranchService(
   /** Ends the hold of a proposal that a look found landed: the outcome a timed-out send or a lost
     * answer left unknown is known now, so writers must not stay refused until the hold expires. The
     * row stays: another send of it can still be alive, and only the row refuses that COMMIT
-    * ([[MergeFence.settled]]). Only when a run of this proposal asked for a hold, this one or an
-    * earlier one, since the merge that settles a commit need not be the one that sent it. With none
-    * there is nothing to end, and the row stays as it is. Best effort: a hold left behind expires,
-    * so a failure is logged and changes no answer.
+    * ([[MergeFence.settled]]). At every settle, whoever asked for a hold: the merge that settles a
+    * commit need not be the one that sent it, nor does the record keep every run's flag, and this
+    * row is never worse than the one there. Best effort: a hold left behind expires, and the row
+    * there is already below the commit, so a failure is logged and changes no answer.
     */
   private def letGo(
       tenant: String,
@@ -1543,22 +1553,21 @@ final class BranchService(
       b: Branch,
       merge: BranchMerge,
       cs: BranchChangeSet,
-      snapshot: Long,
-      holdWriters: Boolean
+      snapshot: Long
   ): IO[Unit] =
-    def notCleared(why: String): IO[Unit] =
-      IO.blocking(logger.error(s"branch merge: hold not cleared, it expires: $why"))
-    if !holdWriters && !merge.holdWriters then IO.unit
-    else
+    def notSettled(why: String): IO[Unit] =
       IO.blocking(
-        mergeFence.settled(
-          parentMetaOf(tenant, parent),
-          BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer),
-          snapshot,
-          BranchService.fencedIds(cs.tables)
-        )
-      ).flatMap(_.fold(notCleared, _ => IO.unit))
-        .handleErrorWith(e => notCleared(e.getMessage))
+        logger.error(s"branch merge: fence not updated at a settle, a hold expires: $why")
+      )
+    IO.blocking(
+      mergeFence.settled(
+        parentMetaOf(tenant, parent),
+        BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer),
+        snapshot,
+        BranchService.fencedIds(cs.tables)
+      )
+    ).flatMap(_.fold(notSettled, _ => IO.unit))
+      .handleErrorWith(e => notSettled(e.getMessage))
 
   /** `afterRecord` runs once the merge is on record and before the teardown, whose purge can take
     * its time: required, since each caller knows what is left of the fence.

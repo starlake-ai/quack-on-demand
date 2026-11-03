@@ -74,8 +74,12 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     override def droppedSchemasSince(fork: Long): Set[String] = Set.empty
 
     /** Every look for a commit fails while this is set, as on a stalled catalog. */
-    var lookFails                                                   = false
+    var lookFails = false
+
+    /** How many reads looked for a commit. */
+    var looks                                                       = 0
     override def snapshotByCommitMessage(msg: String): Option[Long] =
+      looks += 1
       if lookFails then throw new java.sql.SQLException("the catalog does not answer")
       else committed.get(msg)
     override def close(): Unit = ()
@@ -1417,7 +1421,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.fenceDisarms shouldBe empty
     f.mergeFails = None
     f.merge().isRight shouldBe true
-    f.fenceArms.size shouldBe 2
+    // That run's, the retry's, and the settle's, below the commit at 11.
+    f.fenceArms.map(a => (a._3, a._5)).toList shouldBe List((10L, None), (10L, None), (10L, None))
     f.fenceDisarms shouldBe empty
   }
 
@@ -2224,7 +2229,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       ) shouldBe 1
   }
 
-  it should "touch no fence row at a settle when no run of the proposal asked for a hold" in {
+  it should "keep the row below the commit at every settle, when no run asked for a hold too" in {
     val f = new Fixture
     f.create("x")
     f.touchBranch()
@@ -2234,9 +2239,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.merge().left.map(_.code) shouldBe Left("merge_failed")
     f.mergeFails = None
     val armed = f.fenceArms.size
-    f.land(id)
-    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
-    f.fenceArms.size shouldBe armed
+    f.land(id, 13L)
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+    f.fenceArms.drop(armed).map(a => (a._3, a._5)).toList shouldBe List((12L, None))
     f.fenceDisarms shouldBe empty
 
     // The look after a send.
@@ -2246,9 +2251,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     g.propose().isRight shouldBe true
     val sent = g.openProposal()
     g.mergeFails = Some(TimedOutSend)
-    g.afterNode = () => g.land(sent)
-    g.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
-    g.fenceArms.map(a => (a._3, a._5)).toList shouldBe List((10L, None))
+    g.afterNode = () => g.land(sent, 13L)
+    g.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+    g.fenceArms.map(a => (a._3, a._5)).toList shouldBe List((10L, None), (12L, None))
     g.fenceDisarms shouldBe empty
 
     // The look inside an attempt.
@@ -2261,30 +2266,34 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     h.merge().left.map(_.code) shouldBe Left("merge_failed")
     h.mergeFails = None
     val armedInside = h.fenceArms.size
-    h.duringAnalysis = () => if h.mainReader.committed.isEmpty then h.land(inside)
-    h.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
-    h.fenceArms.size shouldBe armedInside
+    h.duringAnalysis = () => if h.mainReader.committed.isEmpty then h.land(inside, 13L)
+    h.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+    h.fenceArms.drop(armedInside).map(a => (a._3, a._5)).toList shouldBe List((12L, None))
     h.fenceDisarms shouldBe empty
   }
 
-  it should "record the hold before the send, so the merge after a dead manager ends it" in {
+  it should "end a hold at a settle, even when a later run's record says none was asked" in {
     val f = new Fixture
     f.create("x")
     f.touchBranch()
     f.propose().isRight shouldBe true
-    val id         = f.openProposal()
-    var heldAtSend = false
-    // The row is all a dead manager leaves.
-    f.beforeRun = () =>
-      heldAtSend = f.row(id).holdWriters
-      throw new IllegalStateException("the manager dies")
-    an[IllegalStateException] should be thrownBy f.merge(hold = true)
-    heldAtSend shouldBe true
-    f.beforeRun = () => ()
+    val id = f.openProposal()
+    f.mergeFails = Some(LostAnswer)
+    f.merge(hold = true).left.map(_.code) shouldBe Left("merge_failed")
+    f.mergeFails = None
+    f.fenceArms.last._5 shouldBe Some(600)
+    val armed = f.fenceArms.size
+    // A run with no hold, refused inside its attempt before it arms: it writes over the record.
+    f.duringAnalysis = () =>
+      f.mainReader.head = 11L
+      f.mainReader.changes = List((11L, "inlined_insert:5"))
+    f.merge(expected = Some(10L)).left.map(_.code) shouldBe Left("concurrent_write")
+    f.fenceArms.size shouldBe armed
+    f.row(id).holdWriters shouldBe false
+    f.duringAnalysis = () => ()
     f.land(id, 13L)
     f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
-    f.fenceArms.last._3 shouldBe 12L
-    f.fenceArms.last._5 shouldBe None
+    f.fenceArms.drop(armed).map(a => (a._3, a._5)).toList shouldBe List((12L, None))
   }
 
   it should "end an earlier run's hold when a no-hold retry finds its commit inside an attempt" in {
@@ -2310,7 +2319,33 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     atClear() shouldBe Some((BranchMergeStatus.Merged, false))
   }
 
-  it should "keep the fence below a commit a held retry finds at or below its head" in {
+  it should "settle at the look before a held retry arms, never leaving the base at the commit" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(TimedOutSend)
+    f.merge().left.map(_.code) shouldBe Left("merge_failed")
+    f.mergeFails = None
+    f.row(id).attempts shouldBe 1
+    val armed   = f.fenceArms.size
+    val started = f.nodesStarted
+    f.mergeBatches.clear()
+    // It lands before the retry reads main's head on the frozen branch: that head holds the commit.
+    f.onHeadRead(2)(() => f.land(id))
+    val (message, atClear) = watchingArms(f, id)
+    f.merge(hold = true).map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    f.fenceArms.drop(armed).map(a => (a._2, a._3, a._4, a._5)).toList shouldBe
+      List((message, 10L, Set(2L), None))
+    f.fenceDisarms shouldBe empty
+    atClear() shouldBe Some((BranchMergeStatus.Merged, false))
+    f.nodesStarted shouldBe started
+    f.mergeBatches shouldBe empty
+    f.row(id).attempts shouldBe 1
+  }
+
+  it should "fence a held retry below a commit that lands after that look" in {
     val f = new Fixture
     f.create("x")
     f.touchBranch()
@@ -2321,18 +2356,50 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.mergeFails = None
     val armed = f.fenceArms.size
     f.mergeBatches.clear()
-    // It lands before the retry reads main's head on the frozen branch: that head holds the commit,
-    // so the retry's own arms start at it, and it refuses no other send.
-    f.onHeadRead(2)(() => f.land(id))
-    val (message, atClear) = watchingArms(f, id)
+    // During Prepare: above the head the retry read, and before its hold's arm.
+    f.duringAnalysis = () => if f.mainReader.committed.isEmpty then f.land(id)
     f.merge(hold = true).map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
-    f.mergeBatches shouldBe empty
     f.fenceArms.drop(armed).map(a => (a._3, a._5)).toList shouldBe
-      List((11L, Some(600)), (11L, None), (10L, None))
-    f.fenceArms.last._2 shouldBe message
-    f.fenceArms.last._4 shouldBe Set(2L)
+      List((10L, Some(600)), (10L, None), (10L, None))
     f.fenceDisarms shouldBe empty
-    atClear() shouldBe Some((BranchMergeStatus.Merged, false))
+    f.mergeBatches shouldBe empty
+  }
+
+  it should "refuse at that look when it finds another proposal's commit, arming nothing" in {
+    val f                = new Fixture
+    val (replaced, open) = f.replacedAndOpen()
+    val started          = f.nodesStarted
+    f.onHeadRead(2)(() => f.land(replaced))
+    f.merge(hold = true).left.map(_.code) shouldBe Left("proposal_unsettled")
+    f.openProposal() shouldBe open
+    f.fenceArms shouldBe empty
+    f.nodesStarted shouldBe started
+  }
+
+  it should "arm nothing when that look fails, leaving the proposal open" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id      = f.openProposal()
+    val started = f.nodesStarted
+    f.onHeadRead(2)(() => f.mainReader.lookFails = true)
+    an[java.sql.SQLException] should be thrownBy f.merge(hold = true)
+    f.fenceArms shouldBe empty
+    f.nodesStarted shouldBe started
+    f.row(id).status shouldBe BranchMergeStatus.Proposed
+    f.status shouldBe BranchStatus.Proposed
+  }
+
+  it should "pay for that look with one catalog read per proposal, and only when holding writers" in {
+    def looks(hold: Boolean): Int =
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.propose().isRight shouldBe true
+      f.merge(hold = hold).isRight shouldBe true
+      f.mainReader.looks
+    looks(hold = true) shouldBe looks(hold = false) + 1
   }
 
   it should "answer a settle inside an attempt whatever the clear does, and log a clear that failed" in {
