@@ -10,7 +10,16 @@ import org.apache.arrow.memory.RootAllocator
 
 import java.io.File
 import java.util.UUID
-import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{
+  ExecutorService,
+  Executors,
+  LinkedBlockingQueue,
+  ScheduledExecutorService,
+  ThreadFactory,
+  ThreadPoolExecutor,
+  TimeUnit
+}
+import java.util.concurrent.atomic.AtomicInteger
 
 final class FlightEdgeServer(
     cfg: EdgeConfig,
@@ -71,6 +80,11 @@ final class FlightEdgeServer(
     */
   private var sweeper: ScheduledExecutorService = null.asInstanceOf[ScheduledExecutorService]
 
+  /** gRPC callbacks and DoPut tasks. Ours to shut down: Arrow does not own an executor it is
+    * handed.
+    */
+  private var executor: ExecutorService = null.asInstanceOf[ExecutorService]
+
   def start(): Unit =
     val producer = new FlightProducerImpl(
       router,
@@ -105,9 +119,11 @@ final class FlightEdgeServer(
     // headerAuth runs before the guard: for a call with no header it only mints a peer id.
     val installGuard: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
       nettyBuilder => nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls))
+    executor = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
     val builder = FlightServer
       .builder(allocator, location, producer)
       .headerAuthenticator(headerAuth)
+      .executor(executor)
       .maxInboundMessageSize(cfg.maxInboundMessageBytes)
       .setMaxHeaderListSize(cfg.maxHeaderBytes)
       .transportHint("grpc.builderConsumer", installGuard)
@@ -278,6 +294,9 @@ final class FlightEdgeServer(
     if server != null then
       server.close()
       server = null.asInstanceOf[FlightServer]
+    if executor != null then
+      executor.shutdownNow()
+      executor = null.asInstanceOf[ExecutorService]
 
 object FlightEdgeServer:
 
@@ -291,6 +310,26 @@ object FlightEdgeServer:
 
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
+
+  /** A pool of at most `threads` daemon threads, named `<name>-<n>`. A saturated pool makes calls
+    * wait and never fails them; idle threads leave after a minute.
+    */
+  def boundedExecutor(threads: Int, name: String): ExecutorService =
+    val counter                = new AtomicInteger(0)
+    val factory: ThreadFactory = r =>
+      val t = new Thread(r, s"$name-${counter.incrementAndGet()}")
+      t.setDaemon(true)
+      t
+    val pool = new ThreadPoolExecutor(
+      threads,
+      threads,
+      60L,
+      TimeUnit.SECONDS,
+      new LinkedBlockingQueue[Runnable](),
+      factory
+    )
+    pool.allowCoreThreadTimeOut(true)
+    pool
 
   /** The peer id prefix of a call with no credentials. */
   val AnonymousPeerPrefix: String = "anonymous-"

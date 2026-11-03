@@ -20,7 +20,7 @@ final case class EdgeConfig(
     maxHeaderBytes: Int = 65536,
     // Calls with no credentials at once (GetFlightInfo and DoGet: AnonymousCallGuard).
     maxAnonymousCalls: Int = 256,
-    // Threads for gRPC callbacks and DoPut tasks: a quarter of them may wait for DoPut data.
+    // Threads of the edge's fixed executor, for gRPC callbacks and DoPut tasks alike.
     flightThreads: Int = 512,
     // How long a DoPut may wait for its first message and its data. Not a setting: bound parameters
     // are never read, and a real client half-closes at once.

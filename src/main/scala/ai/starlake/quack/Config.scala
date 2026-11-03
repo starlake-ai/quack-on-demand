@@ -1448,13 +1448,21 @@ final case class FlightConfig(
           "them, for clients that ask before they present their credentials; past this they are " +
           "refused with UNAVAILABLE."
     )
-    maxAnonymousCalls: Int = 256
+    maxAnonymousCalls: Int = 256,
+    @field @ConfigField(
+      envVar = "PROXY_FLIGHT_THREADS",
+      description =
+        "Threads of the FlightSQL edge's fixed executor, at least 16. A call waits for a free one. " +
+          "A quarter of them is the most DoPuts that may wait for their data at once."
+    )
+    flightThreads: Int = 512
 ):
   require(
     maxInboundMessageBytes > 0 && maxHeaderBytes > 0 && maxAnonymousCalls > 0,
     "PROXY_MAX_INBOUND_MESSAGE_BYTES, PROXY_MAX_HEADER_BYTES and PROXY_MAX_ANONYMOUS_CALLS must " +
       s"be positive (got $maxInboundMessageBytes, $maxHeaderBytes and $maxAnonymousCalls)"
   )
+  require(flightThreads >= 16, s"PROXY_FLIGHT_THREADS must be at least 16 (got $flightThreads)")
 
 /** The native Quack protocol front door (`quack-native` block): the listener DuckDB clients
   * `ATTACH 'quack:host:port'` to. Identity, routing, policies and audit are the FlightSQL edge's;

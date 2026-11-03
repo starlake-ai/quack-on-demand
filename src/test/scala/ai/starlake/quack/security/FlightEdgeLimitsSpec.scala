@@ -30,6 +30,7 @@ import java.net.{Socket, SocketTimeoutException}
 import java.util.Base64
 import java.util.logging.{Level, Logger}
 import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
@@ -78,6 +79,12 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     FlightDescriptor.command(
       ProtoAny.pack(FlightSql.CommandGetSqlInfo.getDefaultInstance).toByteArray
     )
+
+  private def soon[A](body: => A): A =
+    org.scalatest.concurrent.Eventually.eventually(
+      org.scalatest.concurrent.Eventually.timeout(10.seconds),
+      org.scalatest.concurrent.Eventually.interval(100.millis)
+    )(body)
 
   // ---- messages ------------------------------------------------------------------------------
 
@@ -158,6 +165,34 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       h.shutdown()
   }
 
+  // ---- threads -------------------------------------------------------------------------------
+
+  private def edgeThreads(port: Int): Int =
+    Thread.getAllStackTraces.keySet.asScala.count(_.getName.startsWith(s"flight-edge-$port-"))
+
+  it should "serve many calls on a fixed number of threads" in {
+    val h                  = boot(_.copy(flightThreads = 16))
+    val client             = h.newClient()
+    given ExecutionContext = ExecutionContext.global
+    try
+      val calls = Future.sequence((1 to 64).map(_ => Future(client.getInfo(sqlInfo))))
+      Await.result(calls, 60.seconds).size shouldBe 64
+      edgeThreads(h.port) should (be > 0 and be <= 16)
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "leave none of its threads behind when it stops" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    try client.getInfo(sqlInfo) should not be null
+    finally
+      client.close()
+      h.shutdown()
+    soon(edgeThreads(h.port) shouldBe 0)
+  }
+
   // ---- calls with no credentials -------------------------------------------------------------
 
   private val timed = CallOptions.timeout(10, java.util.concurrent.TimeUnit.SECONDS)
@@ -165,12 +200,6 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def unauthenticated(body: => Any): org.scalatest.Assertion =
     val ex = intercept[FlightRuntimeException](body)
     ex.status().code() shouldBe FlightStatusCode.UNAUTHENTICATED
-
-  private def soon[A](body: => A): A =
-    org.scalatest.concurrent.Eventually.eventually(
-      org.scalatest.concurrent.Eventually.timeout(10.seconds),
-      org.scalatest.concurrent.Eventually.interval(100.millis)
-    )(body)
 
   "a call with no credentials" should "be refused on every method but GetFlightInfo and DoGet" in {
     val h      = boot(identity)
@@ -417,6 +446,21 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       withClue(value)(
         an[Exception] should be thrownBy load(Map("PROXY_MAX_ANONYMOUS_CALLS" -> value))
       )
+    )
+
+  "the edge's threads" should "default to 512, in the edge and in the shipped configuration" in {
+    EdgeConfig("127.0.0.1", 31338, tlsEnabled = false, "", "").flightThreads shouldBe 512
+    load().flightThreads shouldBe 512
+  }
+
+  it should "come from PROXY_FLIGHT_THREADS" in {
+    load(Map("PROXY_FLIGHT_THREADS" -> "16")).flightThreads shouldBe 16
+    load(Map("PROXY_FLIGHT_THREADS" -> "1024")).flightThreads shouldBe 1024
+  }
+
+  it should "be refused at boot below 16" in
+    List("15", "0", "-1", "lots").foreach(value =>
+      withClue(value)(an[Exception] should be thrownBy load(Map("PROXY_FLIGHT_THREADS" -> value)))
     )
 
   // ---- a client that speaks HTTP/2 by hand ---------------------------------------------------

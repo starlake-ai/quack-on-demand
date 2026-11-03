@@ -1560,7 +1560,8 @@ object Main extends IOApp with LazyLogging:
               edgeCfg.sessionTtlSec,
               edgeCfg.maxInboundMessageBytes,
               edgeCfg.maxHeaderBytes,
-              maxAnonymousCalls = edgeCfg.maxAnonymousCalls
+              maxAnonymousCalls = edgeCfg.maxAnonymousCalls,
+              flightThreads = edgeCfg.flightThreads
             ),
             fsRouter,
             authService,
