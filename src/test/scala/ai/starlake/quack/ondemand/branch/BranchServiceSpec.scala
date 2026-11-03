@@ -144,12 +144,6 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     var onArm      = () => ()
     var fenceFails = Option.empty[String]
 
-    /** Runs on every disarm of the fence. */
-    var onDisarm = () => ()
-
-    /** What every disarm raises. */
-    var disarmFails = Option.empty[String]
-
     /** The counts row Decide reads: to update, delete, insert, cell, update-delete, delete-update,
       * key matches, min and max update rowid, main's rows the key matches, then conflicts per
       * column.
@@ -238,10 +232,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
           fenceArms += ((meta("dbName"), message, base, ids, hold))
           onArm()
           fenceFails.toLeft(())
-        def disarm(meta: Map[String, String], message: String) =
-          fenceDisarms += message
-          onDisarm()
-          disarmFails.foreach(e => throw new IllegalStateException(e))
+        def disarm(meta: Map[String, String], message: String) = fenceDisarms += message: Unit
       ,
       counter = new ChangeCounter:
         def count(
@@ -2139,19 +2130,23 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.fenceArms shouldBe empty
   }
 
-  /** The message of the proposal `id`, and what the disarm saw: the row's status, and whether the
-    * teardown had started.
+  /** The message of the proposal `id`, and what the latest arm of the fence saw: the row's status,
+    * and whether the teardown had started.
     */
-  private def watchingDisarm(f: Fixture, id: String) =
-    var atDisarm = Option.empty[(BranchMergeStatus, Boolean)]
-    f.onDisarm = () => atDisarm = Some((f.row(id).status, f.purged.nonEmpty))
-    (BranchMergeSql.commitMessage("x", id, "root"), () => atDisarm)
+  private def watchingArms(f: Fixture, id: String) =
+    var atArm = Option.empty[(BranchMergeStatus, Boolean)]
+    f.onArm = () => atArm = Some((f.row(id).status, f.purged.nonEmpty))
+    (BranchMergeSql.commitMessage("x", id, "root"), () => atArm)
 
   private val LostAnswer =
     s"${MergeExecutor.TimedOut}the answer to COMMIT was lost, so it may have landed: connection reset"
 
-  it should "let the hold go when the next merge's first look settles, once the record is written" in
-    List(TimedOutSend, LostAnswer).foreach { reason =>
+  it should "end the hold and keep the row when the next merge's first look settles, once the record is written" in {
+    for
+      reason <- List(TimedOutSend, LostAnswer)
+      // The merge that settles it need not ask for the hold an earlier run armed.
+      hold <- List(true, false)
+    do
       val f = new Fixture
       f.create("x")
       f.touchBranch()
@@ -2159,20 +2154,21 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       val id = f.openProposal()
       f.mergeFails = Some(reason)
       f.merge(hold = true).left.map(_.code) shouldBe Left("merge_failed")
-      f.fenceArms.exists(_._5.nonEmpty) shouldBe true
-      f.fenceDisarms shouldBe empty
+      f.fenceArms.last._5 shouldBe Some(600)
       val armed = f.fenceArms.size
-      // It lands past that run's last look. The merge that settles it need not ask for the hold.
-      f.land(id)
-      val (message, atDisarm) = watchingDisarm(f, id)
-      f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
-      f.fenceArms.size shouldBe armed
-      f.fenceDisarms.toList shouldBe List(message)
+      // It lands past that run's last look, with main past that run's base.
+      f.land(id, 13L)
+      val (message, atClear) = watchingArms(f, id)
+      f.merge(hold = hold).map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+      // Below the landed commit, which then refuses another send's late COMMIT.
+      f.fenceArms.drop(armed).map(a => (a._2, a._3, a._4, a._5)).toList shouldBe
+        List((message, 12L, Set(2L), None))
+      f.fenceDisarms shouldBe empty
       // On record, and writers wait for no teardown.
-      atDisarm() shouldBe Some((BranchMergeStatus.Merged, false))
-    }
+      atClear() shouldBe Some((BranchMergeStatus.Merged, false))
+  }
 
-  it should "let the hold go when the look after a send settles, once the record is written" in
+  it should "end the hold and keep the row when the look after a send settles, once the record is written" in
     List(TimedOutSend, LostAnswer).foreach { reason =>
       val f = new Fixture
       f.create("x")
@@ -2181,35 +2177,44 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       val id = f.openProposal()
       f.mergeFails = Some(reason)
       // It lands past the attempt's own look, as the node stops.
-      f.afterNode = () => f.land(id)
-      val (message, atDisarm) = watchingDisarm(f, id)
-      f.merge(hold = true).map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
-      f.fenceArms.exists(_._5.nonEmpty) shouldBe true
-      f.fenceDisarms.toList shouldBe List(message)
-      atDisarm() shouldBe Some((BranchMergeStatus.Merged, false))
+      f.afterNode = () => f.land(id, 13L)
+      val (message, atClear) = watchingArms(f, id)
+      f.merge(hold = true).map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+      f.fenceArms.map(a => (a._3, a._5)).toList shouldBe
+        List((10L, Some(600)), (10L, Some(600)), (12L, None))
+      f.fenceArms.last._2 shouldBe message
+      f.fenceArms.last._4 shouldBe Set(2L)
+      f.fenceDisarms shouldBe empty
+      atClear() shouldBe Some((BranchMergeStatus.Merged, false))
     }
 
-  it should "answer a settle whatever the disarm does, and log a disarm that failed" in
-    List[Fixture => String => Unit](
-      f =>
-        id =>
+  it should "answer a settle whatever the clear does, and log a clear that failed" in {
+    for
+      fails <- List[Fixture => Unit](
+        _.fenceFails = Some("cannot reach the catalog"),
+        _.onArm = () => throw new IllegalStateException("cannot reach the catalog")
+      )
+      before <- List[(Fixture, String) => Unit](
+        (f, id) =>
           f.mergeFails = Some(TimedOutSend)
           f.merge(hold = true).left.map(_.code) shouldBe Left("merge_failed")
           f.mergeFails = None
           f.land(id)
-      ,
-      f =>
-        id =>
+          fails(f)
+        ,
+        (f, id) =>
           f.mergeFails = Some(TimedOutSend)
-          f.afterNode = () => f.land(id)
-    ).foreach { before =>
+          f.afterNode = () =>
+            f.land(id)
+            fails(f)
+      )
+    do
       val f = new Fixture
       f.create("x")
       f.touchBranch()
       f.propose().isRight shouldBe true
       val id = f.openProposal()
-      before(f)(id)
-      f.disarmFails = Some("cannot reach the catalog")
+      before(f, id)
       val (res, logs) = LogCapture.logged(ServiceLog)(f.merge(hold = true))
       res.map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
       f.row(id).status shouldBe BranchMergeStatus.Merged
@@ -2217,14 +2222,63 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       logs.count(e =>
         e.getLevel == Level.ERROR && e.getFormattedMessage.contains("cannot reach the catalog")
       ) shouldBe 1
-    }
+  }
+
+  it should "touch no fence row at a settle when no run of the proposal asked for a hold" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(TimedOutSend)
+    f.merge().left.map(_.code) shouldBe Left("merge_failed")
+    f.mergeFails = None
+    val armed = f.fenceArms.size
+    f.land(id)
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    f.fenceArms.size shouldBe armed
+    f.fenceDisarms shouldBe empty
+
+    // The look after a send.
+    val g = new Fixture
+    g.create("x")
+    g.touchBranch()
+    g.propose().isRight shouldBe true
+    val sent = g.openProposal()
+    g.mergeFails = Some(TimedOutSend)
+    g.afterNode = () => g.land(sent)
+    g.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    g.fenceArms.map(a => (a._3, a._5)).toList shouldBe List((10L, None))
+    g.fenceDisarms shouldBe empty
+  }
+
+  it should "record the hold before the send, so the merge after a dead manager ends it" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id         = f.openProposal()
+    var heldAtSend = false
+    // The row is all a dead manager leaves.
+    f.beforeRun = () =>
+      heldAtSend = f.row(id).holdWriters
+      throw new IllegalStateException("the manager dies")
+    an[IllegalStateException] should be thrownBy f.merge(hold = true)
+    heldAtSend shouldBe true
+    f.beforeRun = () => ()
+    f.land(id, 13L)
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+    f.fenceArms.last._3 shouldBe 12L
+    f.fenceArms.last._5 shouldBe None
+  }
 
   it should "leave another proposal's fence row alone: its commit on main is a refusal, not a settle" in {
     val f                = new Fixture
     val (replaced, open) = f.replacedAndOpen()
     f.land(replaced)
-    f.merge().left.map(_.code) shouldBe Left("proposal_unsettled")
+    f.merge(hold = true).left.map(_.code) shouldBe Left("proposal_unsettled")
     f.openProposal() shouldBe open
+    f.fenceArms shouldBe empty
     f.fenceDisarms shouldBe empty
   }
 
@@ -2338,7 +2392,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     }
     f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
     f.row(id).attempts shouldBe 1
-    f.fenceDisarms.toList shouldBe List(BranchMergeSql.commitMessage("x", id, "root"))
+    // That run's fence row stays, as at every settle: another send can be alive.
+    f.fenceDisarms shouldBe empty
   }
 
   it should "settle ahead of proposal_stale too, saying that the branch moved" in {

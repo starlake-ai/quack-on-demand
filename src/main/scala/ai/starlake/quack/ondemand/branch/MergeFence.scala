@@ -50,6 +50,21 @@ trait MergeFence:
     */
   def disarm(parentMeta: Map[String, String], message: String): Unit
 
+  /** The commit stamped `message` has landed as `landedSnapshot`: ends its hold and keeps its row.
+    * A look that finds one commit cannot tell how many sends are behind it: with two sends that had
+    * no answer and a settle between their landings, the other COMMIT arrives later still, and only
+    * this row refuses it: DuckLake's own check does not, on an insert-only merge, and the rows
+    * would land twice. The base sits below the landed commit, so that commit is what refuses the
+    * late one: a base at the commit would let it pass. `Left` as for [[arm]].
+    */
+  final def settled(
+      parentMeta: Map[String, String],
+      message: String,
+      landedSnapshot: Long,
+      tableIds: Set[Long]
+  ): Either[String, Unit] =
+    arm(parentMeta, message, landedSnapshot - 1, tableIds, None)
+
 /** Binds a single-table write's commit to the table's state it was validated against: the commit
   * stamped `message` lands only if no other snapshot after `baseSnapshot` touched table `tableId`.
   * Commits on other tables go on meanwhile. A restore validates `expectedCurrentSnapshot` before

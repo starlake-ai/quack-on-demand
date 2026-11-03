@@ -943,8 +943,7 @@ final class BranchService(
           attempts,
           actor,
           apiKey,
-          afterRecord =
-            letGo(tenant, parent, BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer))
+          afterRecord = letGo(tenant, parent, b, merge, cs, snapshot, holdWriters)
         )
       )
 
@@ -1211,7 +1210,7 @@ final class BranchService(
     // S and that read has no check at all, and its stale UPDATE can overwrite it. A known residual,
     // in the design. A retry's hold still ends with the merge: arming with no hold clears it and
     // keeps the fence. A timed-out run's own hold has expired by then, unless a look finds the
-    // commit first: the settle takes the row down ([[letGo]]).
+    // commit first: the settle ends it and keeps the row too ([[letGo]]).
     val earlierTimeout    = merge.error.exists(_.startsWith(MergeExecutor.TimedOut))
     def release: IO[Unit] =
       if !earlierTimeout then IO.blocking(mergeFence.disarm(parentMeta, message))
@@ -1290,9 +1289,12 @@ final class BranchService(
               // A manager that dies in this send leaves what a send that timed out leaves: a
               // COMMIT in flight can still land, and nothing comes after the statement in flight.
               // Whatever the send answers replaces this mark, since `refuse` and `finishMerge` copy
-              // from the row read at the start of the run.
+              // from the row read at the start of the run. The hold goes on record here, for the
+              // merge that settles such a commit to end it.
               IO.blocking(
-                store.updateBranchMerge(merge.copy(error = Some(BranchService.ApplySent)))
+                store.updateBranchMerge(
+                  merge.copy(error = Some(BranchService.ApplySent), holdWriters = holdWriters)
+                )
               ) >>
                 node.exec(statements).flatMap { sent =>
                   lookAfter(sent.left.toOption).map {
@@ -1487,7 +1489,7 @@ final class BranchService(
                     attempts,
                     actor,
                     apiKey,
-                    afterRecord = letGo(tenant, parent, message)
+                    afterRecord = letGo(tenant, parent, b, merge, first, snapshot, holdWriters)
                   )
                 // This send's own commit can still land when it timed out: `failed` keeps its
                 // prefix, and the next look refuses.
@@ -1521,19 +1523,36 @@ final class BranchService(
     val meta = sup.effectiveMetastoreFor(tenant, parent.name)
     meta.updated("dbName", meta.getOrElse("dbName", parent.name))
 
-  /** Takes down the fence row of a proposal that a look found landed: the outcome a timed-out send
-    * or a lost answer left unknown is known now, so writers must not stay refused until the hold
-    * expires. Best effort, like every disarm: a row left behind matches only this message and its
-    * hold expires, so a failure is logged and changes no answer. A second send of this proposal
-    * with its COMMIT still in flight would then pass the fence and meet only DuckLake's own check.
-    * That takes two sends with no answer, on nodes that outlived their stops, both stalled.
+  /** Ends the hold of a proposal that a look found landed: the outcome a timed-out send or a lost
+    * answer left unknown is known now, so writers must not stay refused until the hold expires. The
+    * row stays: another send of it can still be alive, and only the row refuses that COMMIT
+    * ([[MergeFence.settled]]). Only when a run of this proposal asked for a hold, this one or an
+    * earlier one, since the merge that settles a commit need not be the one that sent it. With none
+    * there is nothing to end, and the row stays as it is. Best effort: a hold left behind expires,
+    * so a failure is logged and changes no answer.
     */
-  private def letGo(tenant: String, parent: TenantDb, message: String): IO[Unit] =
-    IO.blocking(mergeFence.disarm(parentMetaOf(tenant, parent), message)).handleErrorWith { e =>
+  private def letGo(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch,
+      merge: BranchMerge,
+      cs: BranchChangeSet,
+      snapshot: Long,
+      holdWriters: Boolean
+  ): IO[Unit] =
+    def notCleared(why: String): IO[Unit] =
+      IO.blocking(logger.error(s"branch merge: hold not cleared, it expires: $why"))
+    if !holdWriters && !merge.holdWriters then IO.unit
+    else
       IO.blocking(
-        logger.error(s"branch merge: fence row not removed, its hold expires: ${e.getMessage}")
-      )
-    }
+        mergeFence.settled(
+          parentMetaOf(tenant, parent),
+          BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer),
+          snapshot,
+          BranchService.fencedIds(cs.tables)
+        )
+      ).flatMap(_.fold(notCleared, _ => IO.unit))
+        .handleErrorWith(e => notCleared(e.getMessage))
 
   /** `afterRecord` runs once the merge is on record and before the teardown, whose purge can take
     * its time: required, since each caller knows what is left of the fence.

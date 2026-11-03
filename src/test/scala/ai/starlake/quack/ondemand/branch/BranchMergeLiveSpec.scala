@@ -881,6 +881,69 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
       }
     }
 
+  it should "end at a settle and keep the row: a late COMMIT is refused, and writers commit" in
+    withCatalog("hdsettle", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = cloneBranch(branchDb, branchDir)
+        // Insert-only: DuckLake's own check lets a second copy of these rows through.
+        duck(
+          "INSERT INTO qod_branch.tpch1.region VALUES (6, 'NEW', 'g');",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br = branchReader(branchDb)
+        try
+          val cs      = BranchChanges.compute(br, parent, fork)
+          val message = BranchMergeSql.commitMessage("feature", "mg-settled", "alice")
+          val writer  = "INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');"
+          PostgresMergeFence.arm(parentMeta, message, cs.mainSnapshot, ids(cs), Some(120)) shouldBe
+            Right(())
+          try
+            var landed = 0L
+            // Two sends with no answer: at this one's COMMIT the other lands, and a look settles it.
+            val late = withNode(
+              branchDb,
+              branchDir,
+              beforeCommit = () =>
+                withNode(branchDb, branchDir)(node =>
+                  runMerge(node, cs, br, parent, message)
+                ) shouldBe a[Right[?, ?]]
+                landed = parent.snapshotByCommitMessage(message).get
+                // Until that settle, the hold is up.
+                duckAttempt(writer).left.toOption.get should include("table is being merged")
+                PostgresMergeFence.settled(
+                  parentMeta,
+                  message,
+                  landed,
+                  BranchService.fencedIds(cs.tables)
+                ) shouldBe Right(()): Unit
+            )(node => runMerge(node, cs, br, parent, message))
+            duck("SELECT count(*) FROM lake.tpch1.region WHERE r_regionkey = 6;") shouldBe List("1")
+            late.left.toOption.getOrElse("it landed") should include("qod merge fence:")
+            parent.snapshotByCommitMessage(message) shouldBe Some(landed)
+            // A held writer would run out of DuckLake's retries, and `duck` fails on its error.
+            duck(writer)
+            duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 7;") shouldBe
+              List("WRITER")
+            // The row stays, with no hold.
+            onCatalog { c =>
+              val ps = c.prepareStatement(
+                s"SELECT base_snapshot, hold_until FROM ${PostgresMergeFence.FenceSchema}.fence " +
+                  "WHERE commit_message = ?"
+              )
+              try
+                ps.setString(1, message)
+                val rs = ps.executeQuery()
+                rs.next() shouldBe true
+                rs.getLong(1) shouldBe landed - 1
+                Option(rs.getObject(2)) shouldBe None
+              finally ps.close()
+            }
+          finally PostgresMergeFence.disarm(parentMeta, message)
+        finally br.close()
+      }
+    }
+
   /** A duckdb CLI committing single-row inserts on `region`, each with `r_name = 'W'`, one after
     * another, until the answer stops it or its statements run out, about 20 s at full speed. A
     * statement the hold fails does not end the script. Stopping twice is harmless.
