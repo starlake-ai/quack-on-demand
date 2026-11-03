@@ -673,25 +673,57 @@ final class BranchService(
         )
 
   /** Why the open proposal must not be replaced, if so. A new proposal has a new commit message, so
-    * it could not find a commit of the old one, and with no key its inserted rows would land twice.
-    * The look covers a commit that landed and never settled; the prefix covers a send that timed
-    * out and can still land. The next merge's first look settles either.
+    * it could not settle a commit of the old one. The prefix covers a send that timed out and can
+    * still land, which only this proposal's next merge can settle. The look covers a commit that
+    * landed: the open proposal's, which the next merge's first look settles, or an older one's,
+    * which only a discard ends.
     */
   private def unsettled(tenant: String, parent: TenantDb, b: Branch): Option[BranchFailure] =
-    val mayHaveLanded = store
+    def mergeAgain = BranchFailure.conflict(
+      "proposal_unsettled",
+      s"the last merge of branch '${b.name}' may have landed on main; merge again, or discard it"
+    )
+    val timedOut = store
       .listBranchMerges(b.id)
       .filter(_.status == BranchMergeStatus.Proposed)
-      .exists(m =>
-        m.error.exists(_.startsWith(MergeExecutor.TimedOut)) ||
-          resolveReader(tenant, parent.name)
-            .snapshotByCommitMessage(BranchMergeSql.commitMessage(b.name, m.id, m.proposer))
-            .nonEmpty
+      .exists(_.error.exists(_.startsWith(MergeExecutor.TimedOut)))
+    if timedOut then Some(mergeAgain)
+    else
+      landedCommit(tenant, parent, b).map {
+        case (m, _) if m.status == BranchMergeStatus.Proposed => mergeAgain
+        case (m, snapshot)                                    => landedElsewhere(m, snapshot)
+      }
+
+  /** A branch's commit lands once. A batch can land long after its merge stopped waiting, on a node
+    * that outlived its stop or a dead manager, and its proposal may have closed or been replaced by
+    * then. So every look reads the message of every proposal of the branch, whatever its status,
+    * the open one first: its commit settles whatever else is on main. One catalog read per
+    * proposal. Blocks.
+    */
+  private def landedCommit(
+      tenant: String,
+      parent: TenantDb,
+      b: Branch
+  ): Option[(BranchMerge, Long)] =
+    lazy val reader = resolveReader(tenant, parent.name)
+    store
+      .listBranchMerges(b.id)
+      .sortBy(_.status != BranchMergeStatus.Proposed)
+      .iterator
+      .flatMap(m =>
+        reader
+          .snapshotByCommitMessage(BranchMergeSql.commitMessage(b.name, m.id, m.proposer))
+          .map((m, _))
       )
-    Option.when(mayHaveLanded)(
-      BranchFailure.conflict(
-        "proposal_unsettled",
-        s"the last merge of branch '${b.name}' may have landed on main; merge again, or discard it"
-      )
+      .nextOption()
+
+  /** The refusal when the commit on main is not the one of the proposal at hand: nothing can settle
+    * it, and merging the branch again would apply it twice.
+    */
+  private def landedElsewhere(m: BranchMerge, snapshot: Long): BranchFailure =
+    BranchFailure.conflict(
+      "proposal_unsettled",
+      s"merge ${m.id} landed as snapshot $snapshot; discard this branch"
     )
 
   /** The tables of `cs` that merge by rows, or why they cannot be read. */
@@ -899,7 +931,13 @@ final class BranchService(
           store.updateBranch(b.copy(status = BranchStatus.Open))
         else if attempts > 0 then
           store.updateBranchMerge(
-            merge.copy(error = Some(f.message), holdWriters = holdWriters, attempts = attempts)
+            merge.copy(
+              // An earlier send that timed out can still land: this refusal says nothing about it.
+              error =
+                merge.error.filter(_.startsWith(MergeExecutor.TimedOut)).orElse(Some(f.message)),
+              holdWriters = holdWriters,
+              attempts = attempts
+            )
           )
         audit.rest(
           apiKey,
@@ -954,9 +992,8 @@ final class BranchService(
     // A commit that landed and never settled (the manager died between them) is finished, never
     // applied again: with no key, a row merge would insert the branch's new rows a second time, and
     // nothing would notice.
-    val message = BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer)
-    IO.blocking(resolveReader(tenant, parent.name).snapshotByCommitMessage(message)).flatMap {
-      case Some(snapshot) =>
+    IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+      case Some((landed, snapshot)) if landed.id == merge.id =>
         computeChanges(tenant, parent, b, countsAs = None).flatMap(cs =>
           finishMerge(
             tenant,
@@ -971,7 +1008,8 @@ final class BranchService(
             apiKey
           )
         )
-      case None => validateAndRun
+      case Some((landed, snapshot)) => refuse(landedElsewhere(landed, snapshot), false, 0)
+      case None                     => validateAndRun
     }
 
   /** Why `cs` cannot be merged, if it cannot, and whether that closes the proposal. */
@@ -1123,7 +1161,13 @@ final class BranchService(
 
     // A batch that timed out may still be running, where a stop returned with the node alive, and a
     // commit with no fence row passes the trigger. So the row stays after a timed-out run and after
-    // a retry of one, holding that batch to S: it matches only its own message. A retry's hold still
+    // a retry of one: it matches only its own message, which both batches share. Until a retry
+    // arms, it holds the late batch to the S of the batch's own run. From the retry's arm on, it
+    // holds that batch to the retry's S: the batch is refused once a merged table moved after that
+    // S, the retry's own commit included, and passes the fence if nothing committed since. Main's
+    // commits from before that S are then left to DuckLake's own check, which starts at the batch's
+    // first catalog read: a commit between the batch's S and that read has no check at all, and the
+    // batch's stale UPDATE can overwrite it. A known residual, in the design. A retry's hold still
     // ends with the merge: arming with no hold clears it and keeps the fence. A timed-out run's own
     // hold has expired by then.
     val earlierTimeout    = merge.error.exists(_.startsWith(MergeExecutor.TimedOut))
@@ -1146,6 +1190,23 @@ final class BranchService(
 
     def planRefusal(f: BranchFailure): AttemptEnd =
       AttemptEnd.Refused(f, closes = f.code == "history_gap")
+
+    /** The look after `reason`, what a stage or a send answered. A send that timed out can still
+      * land, and a stalled catalog is a likely cause of both, so after one a look that fails reads
+      * as not found: `Failed` then keeps the fence row and `failed` stores the prefix, the only
+      * record that a batch can still land. After any other answer a failed look raises.
+      */
+    def lookAfter(reason: Option[String]): IO[Option[(BranchMerge, Long)]] =
+      IO.blocking(landedCommit(tenant, parent, b)).handleErrorWith {
+        case NonFatal(e) if reason.exists(_.startsWith(MergeExecutor.TimedOut)) =>
+          IO.blocking(
+            logger.error(
+              s"branch merge: cannot look for the commits of ${parent.name}@${b.name} after a " +
+                s"send that timed out, taking them as not landed: ${e.getMessage}"
+            )
+          ).as(None)
+        case e => IO.raiseError(e)
+      }
 
     def decideAndApply(
         node: MergeNode,
@@ -1183,11 +1244,22 @@ final class BranchService(
                 author = author,
                 message = message
               )
-              node.exec(batch).flatMap { sent =>
-                IO.blocking(resolveReader(tenant, parent.name).snapshotByCommitMessage(message))
-                  .map {
-                    case Some(snapshot) => AttemptEnd.Committed(snapshot, cs)
-                    case None           =>
+              // A manager that dies in this send leaves what a send that timed out leaves: its
+              // batch can still land. Whatever the send answers replaces this mark, since `refuse`
+              // and `finishMerge` copy from the row read at the start of the run.
+              IO.blocking(
+                store.updateBranchMerge(merge.copy(error = Some(BranchService.ApplySent)))
+              ) >>
+                node.exec(batch).flatMap { sent =>
+                  lookAfter(sent.left.toOption).map {
+                    case Some((landed, snapshot)) if landed.id == merge.id =>
+                      AttemptEnd.Committed(snapshot, cs)
+                    // This send's own batch can still land when it timed out: `Failed` keeps its
+                    // fence row and its prefix, and the next look refuses.
+                    case Some((landed, snapshot))
+                        if !sent.left.exists(_.startsWith(MergeExecutor.TimedOut)) =>
+                      AttemptEnd.Refused(landedElsewhere(landed, snapshot), closes = false)
+                    case _ =>
                       sent match
                         case Right(_) => AttemptEnd.Failed("committed snapshot not found")
                         case Left(err) if MergeDecision.mainMoved(err) =>
@@ -1196,68 +1268,89 @@ final class BranchService(
                           AttemptEnd.Retry(ranged = true, err)
                         case Left(err) => AttemptEnd.Failed(err)
                   }
-              }
+                }
       }
 
     def attempt(node: MergeNode, n: Int, ranged: Boolean): IO[(AttemptEnd, Int)] =
       computeChanges(tenant, parent, b, countsAs = None).flatMap { cs =>
-        refusalOf(b, merge, cs, if n == 1 then expectedMainSnapshot else None) match
-          case Some((f, closes)) => IO.pure((AttemptEnd.Refused(f, closes), n))
-          case None              =>
-            IO.blocking(rowTables(tenant, parent, b, cs, keys)).flatMap {
-              case Left(f)       => IO.pure((planRefusal(f), n))
-              case Right(tables) =>
-                IO.blocking(
-                  mergeFence.arm(
-                    parentMeta,
-                    message,
-                    cs.mainSnapshot,
-                    BranchService.fencedIds(cs.tables),
-                    holdSec
-                  )
-                ).flatMap {
-                  case Left(err) =>
-                    IO.pure(
-                      (
-                        AttemptEnd.Refused(
-                          BranchFailure.upstream("merge_failed", err),
-                          closes = false
-                        ),
-                        n
-                      )
-                    )
-                  case Right(_) =>
-                    // A send that timed out can still commit, so nothing disarms here: the guarantee
-                    // around withNode decides, once the node's stop has returned.
-                    decideAndApply(node, cs, tables, ranged)
-                      .flatMap {
-                        case AttemptEnd.Retry(next, _) if n < cfg.mergeMaxAttempts =>
-                          // Under the hold, no release between attempts: at most one stale commit
-                          // can land once the hold is up, and each release lets in another.
-                          val pause =
-                            if holdWriters then IO.unit else release *> IO.sleep(attemptWait)
-                          pause *> attempt(node, n + 1, next)
-                        case AttemptEnd.Retry(_, reason) if MergeDecision.outOfMemory(reason) =>
-                          IO.pure((AttemptEnd.Failed(reason), n))
-                        case AttemptEnd.Retry(_, _) =>
-                          IO.pure(
-                            (
-                              AttemptEnd.Refused(
-                                BranchFailure.conflict(
-                                  "concurrent_write",
-                                  s"main kept moving across $n attempts; merge again, or merge " +
-                                    "with --hold-writers if the writers are on the merged tables"
-                                ),
-                                closes = false
-                              ),
-                              n
-                            )
-                          )
-                        case end => IO.pure((end, n))
-                      }
-                }
-            }
+        // Past the first look, node start and Prepare are a long window for a late batch to land
+        // in, below the S this attempt's fence starts at, where neither the fence nor DuckLake's
+        // own check sees it. Reading S first makes this look complete: a landing it misses is above
+        // S, so the fence refuses the send and the look after the send finds it.
+        IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+          case Some((landed, snapshot)) if landed.id == merge.id =>
+            IO.pure((AttemptEnd.Committed(snapshot, cs), n))
+          case Some((landed, snapshot)) =>
+            IO.pure((AttemptEnd.Refused(landedElsewhere(landed, snapshot), closes = false), n))
+          case None => decideAtHead(node, cs, n, ranged)
+        }
       }
+
+    /** The rest of an attempt, with main's head S read in `cs` and no commit of the branch at or
+      * below it.
+      */
+    def decideAtHead(
+        node: MergeNode,
+        cs: BranchChangeSet,
+        n: Int,
+        ranged: Boolean
+    ): IO[(AttemptEnd, Int)] =
+      refusalOf(b, merge, cs, if n == 1 then expectedMainSnapshot else None) match
+        case Some((f, closes)) => IO.pure((AttemptEnd.Refused(f, closes), n))
+        case None              =>
+          IO.blocking(rowTables(tenant, parent, b, cs, keys)).flatMap {
+            case Left(f)       => IO.pure((planRefusal(f), n))
+            case Right(tables) =>
+              IO.blocking(
+                mergeFence.arm(
+                  parentMeta,
+                  message,
+                  cs.mainSnapshot,
+                  BranchService.fencedIds(cs.tables),
+                  holdSec
+                )
+              ).flatMap {
+                case Left(err) =>
+                  IO.pure(
+                    (
+                      AttemptEnd.Refused(
+                        BranchFailure.upstream("merge_failed", err),
+                        closes = false
+                      ),
+                      n
+                    )
+                  )
+                case Right(_) =>
+                  // A send that timed out can still commit, so nothing disarms here: the guarantee
+                  // around withNode decides, once the node's stop has returned.
+                  decideAndApply(node, cs, tables, ranged)
+                    .flatMap {
+                      case AttemptEnd.Retry(next, _) if n < cfg.mergeMaxAttempts =>
+                        // Under the hold, no release between attempts: at most one stale commit
+                        // can land once the hold is up, and each release lets in another.
+                        val pause =
+                          if holdWriters then IO.unit else release *> IO.sleep(attemptWait)
+                        pause *> attempt(node, n + 1, next)
+                      case AttemptEnd.Retry(_, reason) if MergeDecision.outOfMemory(reason) =>
+                        IO.pure((AttemptEnd.Failed(reason), n))
+                      case AttemptEnd.Retry(_, _) =>
+                        IO.pure(
+                          (
+                            AttemptEnd.Refused(
+                              BranchFailure.conflict(
+                                "concurrent_write",
+                                s"main kept moving across $n attempts; merge again, or merge " +
+                                  "with --hold-writers if the writers are on the merged tables"
+                              ),
+                              closes = false
+                            ),
+                            n
+                          )
+                        )
+                      case end => IO.pure((end, n))
+                    }
+              }
+          }
 
     /** Holds writers before main's head is read. A commit between that read and the arm is not
       * held, and the fence refuses the attempt: on a hot table, every attempt. `holdSettle` lets
@@ -1277,8 +1370,8 @@ final class BranchService(
         ).flatMap(armed => if armed.isRight then IO.sleep(holdSettle).as(armed) else IO.pure(armed))
 
     /** A stage that timed out leaves the proposal open: its send can still land, where a stop
-      * returned with the node alive, as Kubernetes and fleet can. Only this proposal's message
-      * finds that commit on the next merge; a new proposal would apply it again.
+      * returned with the node alive, as Kubernetes and fleet can, and the next merge settles that
+      * commit under this proposal. Closed, it could only be refused, and the branch discarded.
       */
     def failed(reason: String, attempts: Int): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
       val closes = !reason.startsWith(MergeExecutor.TimedOut)
@@ -1336,33 +1429,34 @@ final class BranchService(
           .flatMap { ended =>
             // The node's stop has returned, so on most runtimes nothing more can land. A send that
             // timed out can have committed after the attempt's own look: look once more.
-            def unlessLanded(
-                attempts: Int
-            )(otherwise: IO[Res[(Branch, BranchMerge, BranchChangeSet)]]) =
-              IO.blocking(resolveReader(tenant, parent.name).snapshotByCommitMessage(message))
-                .flatMap {
-                  case Some(snapshot) =>
-                    finishMerge(
-                      tenant,
-                      parent,
-                      b,
-                      merge,
-                      first,
-                      snapshot,
-                      holdWriters,
-                      attempts,
-                      actor,
-                      apiKey
-                    )
-                  case None => otherwise
-                }
+            def unlessLanded(reason: String, attempts: Int) =
+              lookAfter(Some(reason)).flatMap {
+                case Some((landed, snapshot)) if landed.id == merge.id =>
+                  finishMerge(
+                    tenant,
+                    parent,
+                    b,
+                    merge,
+                    first,
+                    snapshot,
+                    holdWriters,
+                    attempts,
+                    actor,
+                    apiKey
+                  )
+                // This send's own batch can still land when it timed out: `failed` keeps its
+                // prefix, and the next look refuses.
+                case Some((landed, snapshot)) if !reason.startsWith(MergeExecutor.TimedOut) =>
+                  refuse(landedElsewhere(landed, snapshot), false, attempts)
+                case _ => failed(reason, attempts)
+              }
             ended match
-              case Left(reason) => unlessLanded(0)(failed(reason, 0))
+              case Left(reason)                                   => unlessLanded(reason, 0)
               case Right((AttemptEnd.Committed(snapshot, cs), n)) =>
                 finishMerge(tenant, parent, b, merge, cs, snapshot, holdWriters, n, actor, apiKey)
               case Right((AttemptEnd.Refused(f, closes), n)) => refuse(f, closes, n)
-              case Right((AttemptEnd.Failed(reason), n))     => unlessLanded(n)(failed(reason, n))
-              case Right((AttemptEnd.Retry(_, reason), n))   => unlessLanded(n)(failed(reason, n))
+              case Right((AttemptEnd.Failed(reason), n))     => unlessLanded(reason, n)
+              case Right((AttemptEnd.Retry(_, reason), n))   => unlessLanded(reason, n)
           }
 
   private def finishMerge(
@@ -1392,6 +1486,16 @@ final class BranchService(
       ) match
         case Left(err) => logger.warn(s"branch merge: tag '$tagName' not created: $err")
         case Right(_)  => ()
+      // A settle on a branch thawed after an earlier run: what users wrote on it since the proposal
+      // never reached main, and the teardown below removes it. Only snapshot ids, no row of it.
+      val branchMoved = !merge.headSnapshotAtPropose.contains(cs.headSnapshot)
+      val atProposal  = merge.headSnapshotAtPropose.fold("unknown")(_.toString)
+      if branchMoved then
+        logger.warn(
+          s"branch merge: settling $tenant/${parent.name}@${b.name} at main snapshot $snapshot " +
+            s"with the branch at snapshot ${cs.headSnapshot}, proposed at $atProposal: the " +
+            "teardown removes what was written on it since"
+        )
       val doneMerge = store
         .updateBranchMerge(
           merge.copy(
@@ -1424,6 +1528,13 @@ final class BranchService(
           "holdWriters" -> holdWriters.toString,
           "attempts"    -> attempts.toString,
           "onConflict"  -> merge.onConflict.getOrElse("none")
+        ) ++ (
+          if branchMoved then
+            Map(
+              "branchHeadAtProposal" -> atProposal,
+              "branchHeadAtSettle"   -> cs.headSnapshot.toString
+            )
+          else Map.empty
         )
       )
       events.emit(
@@ -1566,6 +1677,13 @@ final class BranchService(
       }
 
 object BranchService:
+
+  /** A proposal's `error` while an Apply is on its way. With the prefix of a send that timed out,
+    * so that a manager dying in the send reads like one: the next run keeps the fence row, and
+    * propose refuses.
+    */
+  private[branch] val ApplySent: String =
+    s"${MergeExecutor.TimedOut}an Apply was sent and has not answered"
 
   /** The tables a merge's fence watches. Only a table the branch created has no id; any other with
     * none would stay outside the fence with no error.
