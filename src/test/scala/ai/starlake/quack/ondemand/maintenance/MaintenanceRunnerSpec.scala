@@ -23,7 +23,10 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       // parent's files by absolute path, so merge and cleanup must not run under it (audit F25).
       liveBranch: List[Boolean] = List(false),
       // Snapshots protected while the run goes on: pinned as soon as the flush step ran.
-      pinnedDuringRun: Set[Long] = Set.empty
+      pinnedDuringRun: Set[Long] = Set.empty,
+      // The oldest live branch's fork: nothing at or after it may expire, because a merge reads
+      // main's changes over (fork, head] and a gap in that range cannot be read.
+      floor: Option[Long] = None
   ):
     val store    = new InMemoryControlPlaneStore()
     var executed = List.empty[String]
@@ -58,6 +61,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
         },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L), // 4 candidates
       pinnedSnapshotsOf = (_, _) => pinsNow,
+      expiryFloorOf = (_, _) => floor,
       hasLiveBranchOf = {
         val answers = liveBranch.iterator
         var last    = false
@@ -103,6 +107,23 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     fin.counters.snapshotsSkippedPinned shouldBe 2
   }
 
+  it should "keep every snapshot at or after the oldest live branch's fork" in {
+    val f   = new Fixture(floor = Some(3L))
+    val fin = f.enqueueAndRun()
+    f.executed.find(_.contains("expire_snapshots")).get should include("[1, 2]")
+    fin.counters.snapshotsSkippedPinned shouldBe 2
+    fin.counters.snapshotsExpired shouldBe 2
+  }
+
+  it should "apply the floor and the pins together, expiring nothing when nothing is left" in {
+    val kept = new Fixture(pinnedSnaps = Set(1L), floor = Some(3L))
+    kept.enqueueAndRun()
+    kept.executed.find(_.contains("expire_snapshots")).get should include("[2]")
+    val none = new Fixture(floor = Some(1L))
+    none.enqueueAndRun()
+    none.executed.exists(_.contains("expire_snapshots")) shouldBe false
+  }
+
   it should "never expire a snapshot protected while the run was under way" in {
     val f      = new Fixture(pinnedDuringRun = Set(2L))
     val fin    = f.enqueueAndRun()
@@ -135,6 +156,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
         },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L),
       pinnedSnapshotsOf = (_, _) => Set.empty,
+      expiryFloorOf = (_, _) => None,
       hasLiveBranchOf = (_, _) => false,
       totalBytesOf = (_, _) => 0L,
       effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
@@ -235,6 +257,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       exec = (_, _) => IO.pure(Right(0L)),
       snapshotsOlderThan = (_, _, _) => Nil,
       pinnedSnapshotsOf = (_, _) => Set.empty,
+      expiryFloorOf = (_, _) => None,
       hasLiveBranchOf = (_, _) => false,
       totalBytesOf = (_, _) => 0L,
       effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
@@ -300,6 +323,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       exec = (_, sql) => IO { executed = executed :+ sql; Right(0L) },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
       pinnedSnapshotsOf = (_, _) => Set.empty,
+      expiryFloorOf = (_, _) => None,
       hasLiveBranchOf = (_, _) => false,
       totalBytesOf = (_, _) => 100L,
       effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),

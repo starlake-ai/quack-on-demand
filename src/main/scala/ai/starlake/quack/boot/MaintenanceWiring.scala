@@ -122,6 +122,7 @@ final class MaintenanceWiring(
           },
       snapshotsOlderThan = (t, td, cutoff) => catalogReader(t, td).snapshotsOlderThan(cutoff),
       pinnedSnapshotsOf = pinnedSetResolver.pinnedSnapshots,
+      expiryFloorOf = pinnedSetResolver.expiryFloor,
       hasLiveBranchOf = pinnedSetResolver.hasLiveBranch,
       totalBytesOf = (t, td) => catalogReader(t, td).totalDataFileBytes(),
       effectivePolicyOf = (t, td, s, tb) =>
