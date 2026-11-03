@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine, Scheduler}
 import com.typesafe.scalalogging.LazyLogging
 
 import java.io.ByteArrayOutputStream
@@ -9,6 +10,7 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.time.Duration
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{
   CompletableFuture,
@@ -33,34 +35,40 @@ import scala.util.control.NonFatal
   * The cap covers the body. The response headers are bounded by the JDK's `jdk.http.maxHeaderSize`
   * (384 kB on 21.0.11, measured); on 17.0.4.1 endless headers ran the heap out.
   *
-  * Every exchange has a client of its own, shut down when the exchange ends. The JDK's `HttpClient`
-  * keeps a connection whose response headers it refuses (an invalid status line, a bad
-  * `Content-Length`, a header too big, an HTTP/2 preface, and more): its descriptor and its buffers
-  * stay reachable from the client for as long as the client lives, and a caller of `sendAsync` has
-  * no handle on the connection to close. With one client for the life of the process, each such
-  * answer was a descriptor and its buffers for good, and anyone could make the manager read one
-  * (measured: a 380 KB status line, 151 anonymous callbacks, the JVM dead at -Xmx256m; a
-  * 40-character one costs a descriptor a callback, so the file limit stops the manager). A client
-  * that is shut down closes everything it holds. The price is a selector thread of the client's for
-  * as long as the exchange runs, and no connection reuse.
+  * HTTP/1.1 only. The JDK's HTTP/2 reader queues the frames it receives with no bound that the body
+  * cap, `jdk.http.maxHeaderSize` or the deadline limit, and the JDK offers `Upgrade: h2c` on every
+  * `http://` request (and ALPN `h2` on `https://`). A server that answers 101 and floods PING
+  * frames (or SETTINGS, zero-length DATA, WINDOW_UPDATE) halted the manager at -Xmx1024m in 6.2 s,
+  * from one anonymous request to a tenant's issuer. HTTP/1.1 has no such frame (six floods of it
+  * peaked at 20 to 42 MiB). So every client here speaks HTTP/1.1 only, and so does every other
+  * client the manager builds to a URL that someone else chose.
+  *
+  * The JDK's `HttpClient` keeps a connection whose response headers it refuses (an invalid status
+  * line, a bad `Content-Length`, a header too big, an HTTP/2 preface, and more): its descriptor and
+  * its buffers stay reachable from the client for as long as the client lives, and a caller of
+  * `sendAsync` has no handle on the connection to close. With one client for the life of the
+  * process, each such answer was a descriptor and its buffers for good, and anyone could make the
+  * manager read one (measured: a 380 KB status line, 151 anonymous callbacks, the JVM dead at
+  * -Xmx256m; a 40-character one costs a descriptor a callback, so the file limit stops the
+  * manager). A client that is shut down closes everything it holds. So [[Exchanges]] keeps a client
+  * for each origin only while its exchanges end in a clean answer, and shuts it down after any
+  * other ending. Reuse is what spares this host a TIME_WAIT for each exchange (see [[Exchanges]]).
   *
   * The shutdown is `HttpClient.shutdownNow`, which the JDK has from 21, the floor of the manager. A
   * build can still compile on 17, which has no such method: there a client goes only at a GC, its
-  * selector thread with it. Measured: on Temurin 17.0.20 (Linux) the connection of a refused answer
-  * goes then too, but on Zulu 17.0.4.1 (macOS) nothing ever closes it, and its descriptor leaks as
-  * it did before this change.
+  * selector thread with it ([[canShutdownNow]] says which, and the boot says so on stderr).
+  * Measured: on Temurin 17.0.20 (Linux) the connection of a refused answer goes then too, but on
+  * Zulu 17.0.4.1 (macOS) nothing ever closes it, and its descriptor leaks as it did before this was
+  * done.
   *
-  * A selector thread beside the blocking thread of the caller is the price of that, so the number
-  * of exchanges in flight is bounded: `send` takes the `Semaphore` its caller names,
+  * A client costs a selector thread beside the blocking thread of the caller, so the number of
+  * exchanges in flight is bounded: `send` takes the [[Exchanges]] its caller names,
   * [[idpExchanges]] for the identity providers (a tenant admin picks the issuer, and anyone can
   * make the manager ask it) and OpaClient's own for OPA, so that a flood of one cannot refuse the
   * other. Measured: 1000 simultaneous starts against an issuer that never answers took the manager
-  * to 2132 threads with no bound, against 1142 with a client for the life of the process, and only
-  * the REST connection budget of 1024 stopped them there. A failed thread start is an
-  * `OutOfMemoryError`, which is fatal, and some Kubernetes clusters set `pids.max` to 1024 or 4096.
-  * A permit is taken with `tryAcquire` and given back when the exchange ends, however it ended;
-  * with none free `send` answers [[Busy]] at once and starts nothing. It never waits: a queue would
-  * hold the very blocking threads the bound is meant to save.
+  * to 2132 threads with a client for each exchange and no bound, and only the REST connection
+  * budget of 1024 stopped them there. A failed thread start is an `OutOfMemoryError`, which is
+  * fatal, and some Kubernetes clusters set `pids.max` to 1024 or 4096.
   */
 object BoundedHttp extends LazyLogging:
 
@@ -94,19 +102,237 @@ object BoundedHttp extends LazyLogging:
 
   /** The exchanges with identity providers that may run at once, all issuers together. One lasts
     * about the latency of a login at its provider, so 128 is hundreds of logins a second, and a
-    * flood against one issuer that never answers holds them for [[IdpTimeoutMs]] at most.
+    * flood against one issuer that never answers holds them for [[IdpTimeoutMs]] at most. One
+    * origin may take half of them (see [[Exchanges]]).
     */
   val IdpExchangeLimit: Int = 128
 
+  /** Whether the JDK has `HttpClient.shutdownNow` (21 and later), which closes everything a client
+    * holds. Found by name: see [[shutdownNow]].
+    */
+  val canShutdownNow: Boolean =
+    try
+      classOf[HttpClient].getMethod("shutdownNow")
+      true
+    catch case _: NoSuchMethodException => false
+
+  /** `HttpClient.shutdownNow`, which closes the client's connections at once. The JDK keeps a
+    * connection whose response headers it refuses for as long as the client lives, so a client is
+    * shut down after any exchange that did not end in a clean answer. Found by name because the JDK
+    * added it in 21 and a build can compile on 17; on 17 this does nothing, and what that leaves is
+    * described with the object.
+    */
+  private val shutdownNow: HttpClient => Unit =
+    if canShutdownNow then
+      val method = classOf[HttpClient].getMethod("shutdownNow")
+      (client: HttpClient) =>
+        try
+          method.invoke(client)
+          ()
+        catch case NonFatal(_) => ()
+    else (_: HttpClient) => ()
+
+  /** Shared by every client: a client's selector thread is its own, but its other work needs no
+    * more threads however many clients there are. A daemon cached pool, as the JDK's default is for
+    * each client.
+    */
+  private val exchangeThreads: ExecutorService =
+    val ids = new AtomicInteger
+    Executors.newCachedThreadPool { task =>
+      val thread = new Thread(task, s"bounded-http-${ids.incrementAndGet()}")
+      thread.setDaemon(true)
+      thread
+    }
+
+  /** Where a request goes, as far as a client is concerned: its scheme, its host and port (the
+    * authority without the user info the JDK never sends), and the redirect policy of the client
+    * that serves it. Two requests of one origin go through one client.
+    */
+  private[edge] final case class Origin(
+      scheme: String,
+      host: String,
+      port: Int,
+      redirects: HttpClient.Redirect
+  )
+
+  private[edge] object Origin:
+    def of(uri: URI, redirects: HttpClient.Redirect): Origin =
+      val scheme = uri.getScheme.toLowerCase(Locale.ROOT)
+      val port   = if uri.getPort >= 0 then uri.getPort else if scheme == "https" then 443 else 80
+      Origin(scheme, uri.getHost.toLowerCase(Locale.ROOT), port, redirects)
+
+  /** A client and the permits of its origin. Compared by identity: [[Exchanges.discard]] removes a
+    * client only if it is still the one an origin has.
+    */
+  private[edge] final class Client(val http: HttpClient, val permits: Semaphore)
+
+  /** How many exchanges run at once, and through which clients. One limit for all, and half of it
+    * for any one origin, so a hanging origin cannot refuse every other one. Past either limit an
+    * exchange fails at once: a queue would hold the blocking threads this saves.
+    *
+    * A client is reused while its exchanges end in a clean answer (a complete response under the
+    * cap, whatever its status): a client per exchange left a TIME_WAIT per exchange on this host,
+    * about 470 a second per destination on Linux (measured), after which a connect failed with
+    * "Cannot assign requested address" for up to 60 s, and anyone could reach that with callbacks
+    * against a shared identity provider. After any other ending the client is shut down at once,
+    * since the JDK keeps a connection whose response headers it refuses for as long as the client
+    * lives (151 anonymous callbacks halted the manager, reproduced). That also ends the other
+    * exchanges of that origin, which are failing too or get a retryable error.
+    *
+    * An origin that has used its share is refused before it touches the permits of all: a flood
+    * against a hanging origin is a flood of refusals, and a refusal that held a permit of all for
+    * the moment it took would starve the other origins all the same (measured: 138 of 200 calls to
+    * another origin refused while 8 threads asked the spent one).
+    *
+    * At most [[Exchanges.MaxOrigins]] clients are kept, and one left idle for `idleTtl` is shut
+    * down, with no exchange needed to prompt it (a scheduler of the cache runs the expiry), since a
+    * tenant admin chooses the origins and each client costs a selector thread.
+    */
+  final class Exchanges(limit: Int, idleTtl: Duration = Exchanges.IdleTtl):
+    private[edge] val all = new Semaphore(limit)
+
+    // At least 1: with a limit of 1 an origin may still have its one.
+    private val perOrigin = math.max(1, limit / 2)
+
+    private val origins: Cache[Origin, Client] = Caffeine
+      .newBuilder()
+      .maximumSize(Exchanges.MaxOrigins.toLong)
+      .expireAfterAccess(idleTtl)
+      .scheduler(Scheduler.systemScheduler())
+      // On the thread that removes the entry, so that a client is shut down before the exchange
+      // that ended badly returns.
+      .executor(task => task.run())
+      .removalListener[Origin, Client]((_, client, _) =>
+        if client != null then shutdownNow(client.http)
+      )
+      .build[Origin, Client]()
+
+    /** The exchange of `request` through the client of its origin: a permit of all, then one of the
+      * origin; none free is [[Ended.Refused]], with nothing started. The permits go back when the
+      * exchange ended, however it ended.
+      */
+    private[BoundedHttp] def run(
+        request: HttpRequest,
+        capBytes: Int,
+        timeoutMs: Long,
+        what: String,
+        redirects: HttpClient.Redirect
+    ): Ended =
+      try
+        val origin = Origin.of(request.uri, redirects)
+        // An origin that has used its share is refused before it touches the permits of all. A
+        // refusal that took one for the moment it needed to refuse would still starve the others
+        // under a flood against that origin (measured: with 8 threads asking an origin that held
+        // its share, 138 of 200 calls to another origin were refused for lack of a permit of all).
+        if spent(origin) then Ended.Refused
+        else underAll(origin, request, capBytes, timeoutMs, what)
+      catch case NonFatal(e) => Ended.Raised(e)
+
+    /** True when `origin` has a client whose permits are all taken. Advisory (the permit is taken
+      * after, and may be refused all the same); it only spares the permits of all a refusal.
+      */
+    private def spent(origin: Origin): Boolean =
+      Option(origins.getIfPresent(origin)).exists(_.permits.availablePermits <= 0)
+
+    private def underAll(
+        origin: Origin,
+        request: HttpRequest,
+        capBytes: Int,
+        timeoutMs: Long,
+        what: String
+    ): Ended =
+      if !all.tryAcquire() then Ended.Refused
+      else
+        try
+          val client = clientFor(origin)
+          if !client.permits.tryAcquire() then Ended.Refused
+          else
+            try
+              val ended = BoundedHttp.exchange(client.http, request, capBytes, timeoutMs, what)
+              ended match
+                case _: Ended.Answered => ()
+                case _                 => discard(origin, client)
+              ended
+            finally client.permits.release()
+        finally all.release()
+
+    /** The client of `origin`, made if it has none. */
+    private[edge] def clientFor(origin: Origin): Client =
+      origins.get(origin, _ => newClient(origin.redirects))
+
+    private def newClient(redirects: HttpClient.Redirect): Client =
+      new Client(
+        HttpClient
+          .newBuilder()
+          .version(HttpClient.Version.HTTP_1_1)
+          .connectTimeout(Exchanges.ConnectTimeout)
+          .followRedirects(redirects)
+          .executor(exchangeThreads)
+          .build(),
+        new Semaphore(perOrigin)
+      )
+
+    /** Takes `client` out of the cache, which shuts it down, unless the origin has another client
+      * by now: the failure of an exchange that began on an older client must not shut down the one
+      * that replaced it.
+      */
+    private[edge] def discard(origin: Origin, client: Client): Unit =
+      origins.asMap().remove(origin, client)
+      ()
+
+    // ----- what a spec looks at -----
+
+    /** The permits of all that are free. */
+    private[edge] def available: Int = all.availablePermits
+
+    /** Takes every free permit of all, and says how many: for a case that needs none free. */
+    private[edge] def drain(): Int = all.drainPermits()
+
+    /** Gives `n` permits of all back. */
+    private[edge] def give(n: Int): Unit = all.release(n)
+
+    /** The client `origin` has now, if any. */
+    private[edge] def clientOf(origin: Origin): Option[Client] =
+      Option(origins.getIfPresent(origin))
+
+    /** The permits of `origin`'s client that are free, if it has one. */
+    private[edge] def originFree(origin: Origin): Option[Int] =
+      clientOf(origin).map(_.permits.availablePermits)
+
+    /** How many clients are kept, once the bound and the idle time have been applied. */
+    private[edge] def clients: Long =
+      origins.cleanUp()
+      origins.estimatedSize()
+
+    /** Shuts down every client kept. The ones in use end with a failure. */
+    private[edge] def close(): Unit =
+      origins.invalidateAll()
+      origins.cleanUp()
+
+  object Exchanges:
+
+    /** How many clients are kept, whatever the number of origins asked. */
+    val MaxOrigins: Int = 128
+
+    /** How long a client may stay unused before it is shut down. */
+    val IdleTtl: Duration = Duration.ofMinutes(1)
+
+    /** The longest a connect may take, a backstop only: the deadline of the exchange, which is no
+      * longer than this for an identity provider, ends it first, and a client whose exchange timed
+      * out is shut down.
+      */
+    val ConnectTimeout: Duration = Duration.ofSeconds(15)
+
   /** The permits of the exchanges with identity providers: discovery, token exchange, key sets. */
-  val idpExchanges: Semaphore = new Semaphore(IdpExchangeLimit)
+  val idpExchanges: Exchanges = new Exchanges(IdpExchangeLimit)
 
   /** `request` sent and its answer read under `capBytes` and `timeoutMs` over the whole exchange:
     * `HttpRequest.timeout` alone bounds only the headers. The body is read by a subscriber that
     * never holds more than `capBytes`, and a read that passes either limit is cancelled, which
-    * closes the connection, so the rest of a refused answer is never read. The exchange runs on a
-    * client of its own that follows `redirects` (never, unless the caller asks), and the client is
-    * shut down before this returns, however the exchange ended.
+    * closes the connection, so the rest of a refused answer is never read. The exchange runs on the
+    * client `exchanges` has for the origin of the request, built for the redirect policy
+    * `redirects` (never follow, unless the caller asks), and a client whose exchange did not end in
+    * a complete answer is shut down before this returns.
     *
     * A non-200 status is not a failure here: it comes back as `Right((status, body))`, for the
     * caller to judge. A `Left` says why the exchange gave nothing: an answer over the cap or a
@@ -118,14 +344,17 @@ object BoundedHttp extends LazyLogging:
     * the readers of a key set and of a discovery document, which answer one fixed text and log this
     * one). `what` names the exchange in this object's own texts ("OPA", "discovery").
     *
-    * `permits` bounds the exchanges in flight, all callers that pass it together: see the object.
-    * With none free the answer is `Left(Busy)`, at once, with no client built and no thread
-    * started; the permit is back when this returns, however the exchange ended.
+    * `exchanges` bounds the exchanges in flight, all callers that pass it together, and any one
+    * origin to half. With no permit free the answer is `Left(Busy)`, at once, with nothing started;
+    * the permits are back when this returns, however the exchange ended. An exchange through a
+    * client that another exchange of the origin shut down meanwhile fails with the JDK's text
+    * ("closed", "shutdownNow") and may be asked again.
     *
-    * `secret` is a credential the request carries in a header (a bearer token): the JDK's text can
-    * hold it (a server may echo it into a status line, and the JDK quotes the line), so it is
-    * masked in that text BEFORE the text is cut, since a cut through the middle of a long secret
-    * would leave a part of it that no later masking could find. A request whose body holds a secret
+    * `secret` is a credential the request carries in a header (a bearer token), or None: the JDK's
+    * text can hold it (a server may echo it into a status line, and the JDK quotes the line), so it
+    * is masked in that text BEFORE the text is cut, since a cut through the middle of a long secret
+    * would leave a part of it that no later masking could find. It has no default: a caller that
+    * leaves it out by mistake would send a credential unmasked. A request whose body holds a secret
     * (a token request's form) cannot be masked this way and passes no text on at all: see
     * [[tokenExchange]].
     */
@@ -134,11 +363,11 @@ object BoundedHttp extends LazyLogging:
       capBytes: Int,
       timeoutMs: Long,
       what: String,
-      permits: Semaphore,
+      exchanges: Exchanges,
       redirects: HttpClient.Redirect = HttpClient.Redirect.NEVER,
-      secret: Option[String] = None
+      secret: Option[String]
   ): Either[String, (Int, String)] =
-    exchange(request, capBytes, timeoutMs, what, permits, redirects) match
+    exchanges.run(request, capBytes, timeoutMs, what, redirects) match
       case Ended.Answered(status, body) => Right((status, body))
       case Ended.Limited(text)          => Left(text)
       case Ended.Raised(error)          => Left(describe(error, secret))
@@ -160,7 +389,7 @@ object BoundedHttp extends LazyLogging:
       url: String,
       form: String,
       refused: Int => String,
-      permits: Semaphore = idpExchanges
+      exchanges: Exchanges = idpExchanges
   ): Either[String, String] =
     val ended =
       try
@@ -171,12 +400,11 @@ object BoundedHttp extends LazyLogging:
           .POST(HttpRequest.BodyPublishers.ofString(form))
           .timeout(Duration.ofMillis(IdpTimeoutMs))
           .build()
-        exchange(
+        exchanges.run(
           request,
           MaxIdpAnswerBytes,
           IdpTimeoutMs,
           "token endpoint",
-          permits,
           HttpClient.Redirect.NEVER
         )
       catch case NonFatal(e) => Ended.Raised(e)
@@ -225,45 +453,21 @@ object BoundedHttp extends LazyLogging:
     /** No permit was free: nothing was started. */
     case Refused
 
-  /** The exchange itself, once a permit is taken. `tryAcquire`, never `acquire`: a caller that
-    * waited would hold its blocking thread, which is what the bound is meant to save. The permit
-    * goes back when the exchange ended however it ended, the client shut down first.
-    */
+  /** The exchange itself, on `client`: the request sent and the answer awaited. */
   private def exchange(
+      client: HttpClient,
       request: HttpRequest,
       capBytes: Int,
       timeoutMs: Long,
-      what: String,
-      permits: Semaphore,
-      redirects: HttpClient.Redirect
-  ): Ended =
-    if !permits.tryAcquire() then Ended.Refused
-    else
-      try inOwnClient(request, capBytes, timeoutMs, what, redirects)
-      finally permits.release()
-
-  private def inOwnClient(
-      request: HttpRequest,
-      capBytes: Int,
-      timeoutMs: Long,
-      what: String,
-      redirects: HttpClient.Redirect
+      what: String
   ): Ended =
     try
-      val client = HttpClient
-        .newBuilder()
-        .connectTimeout(Duration.ofMillis(timeoutMs))
-        .followRedirects(redirects)
-        .executor(exchangeThreads)
-        .build()
-      try
-        val future =
-          client.sendAsync(
-            request,
-            boundedBodyHandler(capBytes, s"$what response exceeds ${size(capBytes)}")
-          )
-        awaited(future, timeoutMs, what)
-      finally shutdownNow(client)
+      val future =
+        client.sendAsync(
+          request,
+          boundedBodyHandler(capBytes, s"$what response exceeds ${size(capBytes)}")
+        )
+      awaited(future, timeoutMs, what)
     catch case e: Exception => Ended.Raised(e)
 
   private def awaited(
@@ -286,33 +490,6 @@ object BoundedHttp extends LazyLogging:
         future.cancel(true)
         Thread.currentThread().interrupt()
         Ended.Raised(e)
-
-  /** Shared by every exchange: a client's selector thread is its own, but its other work needs no
-    * more threads however many exchanges run. A daemon cached pool, as the JDK's default is for
-    * each client.
-    */
-  private val exchangeThreads: ExecutorService =
-    val ids = new AtomicInteger
-    Executors.newCachedThreadPool { task =>
-      val thread = new Thread(task, s"bounded-http-${ids.incrementAndGet()}")
-      thread.setDaemon(true)
-      thread
-    }
-
-  /** `HttpClient.shutdownNow`, which closes the client's connections at once. The JDK keeps a
-    * connection whose response headers it refuses for as long as the client lives, so a client is
-    * good for one exchange. Found by name because the JDK added it in 21 and a build can compile on
-    * 17; on 17 this does nothing, and what that leaves is described with the object.
-    */
-  private val shutdownNow: HttpClient => Unit =
-    try
-      val method = classOf[HttpClient].getMethod("shutdownNow")
-      client =>
-        try
-          method.invoke(client)
-          ()
-        catch case NonFatal(_) => ()
-    catch case _: NoSuchMethodException => _ => ()
 
   /** A cap as a person reads it: "1 MiB", "256 KiB", "1000 bytes". */
   private def size(bytes: Int): String =

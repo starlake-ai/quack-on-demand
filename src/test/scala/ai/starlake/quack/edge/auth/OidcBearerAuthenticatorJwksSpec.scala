@@ -15,7 +15,7 @@ import java.net.http.HttpClient
 import java.net.{InetAddress, InetSocketAddress, ServerSocket}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.util.concurrent.{CountDownLatch, Executors, Semaphore, TimeUnit}
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
 /** How [[OidcBearerAuthenticator]] reads the key set it verifies tokens against. The URL can come
@@ -289,11 +289,11 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
   // the retriever can be given.
   it should "ask for a key set under 50 KiB and 5 s, following redirects as NORMAL does" in {
     val seen = new java.util.concurrent.ConcurrentLinkedQueue[
-      (String, Int, Long, String, Semaphore, HttpClient.Redirect)
+      (String, Int, Long, String, BoundedHttp.Exchanges, HttpClient.Redirect)
     ]
     val retriever = OidcBearerAuthenticator.retrieverOver {
-      (request, cap, timeoutMs, what, permits, redirects) =>
-        seen.add((request.uri.toString, cap, timeoutMs, what, permits, redirects))
+      (request, cap, timeoutMs, what, exchanges, redirects) =>
+        seen.add((request.uri.toString, cap, timeoutMs, what, exchanges, redirects))
         Right((200, keySet.noSpaces))
     }
 
@@ -317,7 +317,7 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
   // once. With none free it answers the same fixed text as for any other failure, and asks nobody.
   it should "answer the fixed text, asking nobody, while every identity provider exchange is taken" in {
     val before = jwksGets
-    val held   = BoundedHttp.idpExchanges.drainPermits()
+    val held   = BoundedHttp.idpExchanges.drain()
     val events =
       try
         // AtOnce: a read that waited for a permit would park here for good, and hold every permit.
@@ -328,7 +328,7 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
           case Left(why) => why should include("JWKS unavailable")
           case Right(p)  => fail(s"a token was accepted as '${p.username}' with no exchange free")
         logged
-      finally BoundedHttp.idpExchanges.release(held)
+      finally BoundedHttp.idpExchanges.give(held)
 
     (jwksGets - before) shouldBe 0
     // Below WARN: a refusal is the cheapest thing an anonymous caller can ask for, so a WARN for
@@ -350,4 +350,18 @@ class OidcBearerAuthenticatorJwksSpec extends AnyFlatSpec with Matchers with Bef
       .filter(_.getLevel == Level.WARN)
       .map(_.getFormattedMessage)
       .exists(_.contains("500")) shouldBe true
+  }
+
+  // Nimbus' source rate-limits the refresh of a key set (one attempt every 30 s, so a flood of
+  // failed reads cannot become a flood of requests to the issuer). The exception it throws then has
+  // no message, and the answer read "token validation failed: null".
+  it should "name the exception when it has no message, as the rate limit of a refresh does" in {
+    val authenticator = authenticatorFor(s"${idp.base}/jwks-500")
+
+    val answers = (1 to 5).toList.map(_ => authenticator.authenticate(token))
+
+    val texts = answers.collect { case Left(why) => why }
+    texts.size shouldBe 5
+    texts.foreach(_ should not endWith ": null")
+    texts.exists(_.contains("RateLimitReachedException")) shouldBe true
   }

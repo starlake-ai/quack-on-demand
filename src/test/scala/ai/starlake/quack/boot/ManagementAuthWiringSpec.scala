@@ -34,7 +34,6 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import pureconfig.ConfigSource
 
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.Semaphore
 import scala.jdk.CollectionConverters.*
 
 /** Pins what [[ManagementAuthWiring.build]] wires per `identitySource`. The source governs only the
@@ -290,7 +289,7 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
         AtOnce(
           ManagementAuthWiring.discoveryGet(
             s"${idp.base}/.well-known/openid-configuration",
-            new Semaphore(0)
+            new BoundedHttp.Exchanges(0)
           )
         )
       )
@@ -306,13 +305,14 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
     withIdp { idp =>
       val issuer = s"${idp.base}/healthy"
       idp.serve("/healthy/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))
-      val permits   = new Semaphore(0)
-      val discovery = new OidcDiscovery(url => ManagementAuthWiring.discoveryGet(url, permits))
+      // First no exchange is free, then one is: the same discovery, asked again.
+      @volatile var exchanges = new BoundedHttp.Exchanges(0)
+      val discovery = new OidcDiscovery(url => ManagementAuthWiring.discoveryGet(url, exchanges))
 
       AtOnce(discovery.resolve(issuer)) shouldBe Left(BoundedHttp.Busy)
       idp.requests.size shouldBe 0
 
-      permits.release()
+      exchanges = new BoundedHttp.Exchanges(1)
       discovery.resolve(issuer).map(_.issuer) shouldBe Right(issuer)
       idp.requests.size shouldBe 1
     }
@@ -339,9 +339,9 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers with Eventually
     finally server.close()
   }
 
-  // ----- the flows still work on real answers, with no connection kept for the next exchange -----
+  // ----- the flows still work on real answers, over the client each origin keeps -----
 
-  "ManagementAuthWiring SSO" should "still sign a user in on real answers, each exchange on a client of its own" in
+  "ManagementAuthWiring SSO" should "still sign a user in on real answers, through the clients its issuer's origin keeps" in
     withIdp { idp =>
       val issuer = s"${idp.base}/sys"
       idp.serve("/sys/.well-known/openid-configuration", 200, LocalIdp.discoveryDoc(issuer))

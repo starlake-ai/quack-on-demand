@@ -14,12 +14,12 @@ import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.*
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import org.scalatest.BeforeAndAfterAll
+import org.scalatest.concurrent.Eventually
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.time.{Seconds, Span}
 
-import java.util.concurrent.Semaphore
-
-class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
+class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll with Eventually:
 
   private val wm                 = new WireMockServer(options().dynamicPort())
   override def beforeAll(): Unit = wm.start()
@@ -352,7 +352,11 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     wm.resetAll()
     // AtOnce: a call that waited for a permit would park here for good, with nobody to give one.
     AtOnce(
-      OpaClient.jdkPost(500, new Semaphore(0))(s"$base/v1/data/qod/authz/connect", "{}", None)
+      OpaClient.jdkPost(500, new BoundedHttp.Exchanges(0))(
+        s"$base/v1/data/qod/authz/connect",
+        "{}",
+        None
+      )
     ) shouldBe Left(BoundedHttp.Busy)
     wm.verify(0, postRequestedFor(anyUrl()))
 
@@ -361,16 +365,22 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
   it should "have permits of its own, which a flood of identity provider exchanges does not take" in:
     OpaClient.ExchangeLimit shouldBe 256
     OpaClient.exchanges should not be theSameInstanceAs(BoundedHttp.idpExchanges)
-    OpaClient.exchanges.availablePermits shouldBe 256
+    // eventually: an exchange another spec of this JVM left in flight gives its permit back by its
+    // own deadline.
+    eventually(timeout(Span(20, Seconds)))(OpaClient.exchanges.available shouldBe 256)
     wm.resetAll()
     wm.stubFor(post(anyUrl()).willReturn(okJson("""{"result":{"allow":true}}""")))
-    val held = BoundedHttp.idpExchanges.drainPermits()
+    val held = BoundedHttp.idpExchanges.drain()
     try
-      AtOnce(OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", None)) match
+      // A bound wide enough for a decision made on a loaded machine: it is only here so that a
+      // call that waited for a permit fails the case instead of parking the suite.
+      AtOnce.within(15000L)(
+        OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", None)
+      ) match
         case Right((200, _)) => succeed
         case other           =>
           fail(s"an OPA decision was refused while identity providers were busy: $other")
-    finally BoundedHttp.idpExchanges.release(held)
+    finally BoundedHttp.idpExchanges.give(held)
 
   "decide" should "key the decision cache on kinds, columns, via and locations" in:
     var calls = 0

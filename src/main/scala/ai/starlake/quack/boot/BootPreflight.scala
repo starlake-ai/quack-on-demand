@@ -175,6 +175,28 @@ object BootPreflight extends LazyLogging:
       case Some(refusal) => Left(refusal)
       case None          => Right(verdicts.collect { case Right(Some(warning)) => warning })
 
+  /** Printed (stderr) when the JDK has no `HttpClient.shutdownNow`: see
+    * [[checkHttpClientShutdown]].
+    */
+  val NoHttpClientShutdownWarning: String =
+    "WARNING: this JDK has no HttpClient.shutdownNow (JDK 21 and later have it). The manager " +
+      "shuts down the HTTP client of an identity provider's or an OPA server's exchange when the " +
+      "server answered something the JDK refuses to read, because the JDK keeps the connection " +
+      "(a descriptor and its buffers) for as long as the client lives. On this JDK the client goes " +
+      "only at a garbage collection, and on some updates the connection never does, so anyone " +
+      "able to make the manager read such an answer can run it out of descriptors or memory. " +
+      "Run the manager on JDK 21 or later."
+
+  /** Pure gate: a JDK below 21 cannot close what a client holds (`BoundedHttp.canShutdownNow`), and
+    * the build can still compile on 17, so `scripts/run-jar.sh` does not refuse such a JDK. The
+    * manager boots all the same, with this warning for `Main.bootManager` to print on stderr: the
+    * default log level is ERROR, so the logger would swallow it.
+    */
+  def checkHttpClientShutdown(
+      available: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow
+  ): Option[String] =
+    Option.when(!available)(NoHttpClientShutdownWarning)
+
   /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
   val NoEdgeAuthMessage: String =
     "the FlightSQL edge and the Quack front door have no authenticator: QOD_AUTH_DB_ENABLED=false " +

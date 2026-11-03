@@ -276,7 +276,9 @@ object Main extends IOApp with LazyLogging:
         * environment and the raw configuration. Tests pass their own.
         */
       env: String => Option[String] = sys.env.get,
-      rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
+      rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load(),
+      /** Whether this JDK has `HttpClient.shutdownNow` (21 and later); tests pass their own. */
+      shutdownNowAvailable: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow
   ): IO[ExitCode] =
     // The retired settings first, at the top of bootManager, before it opens any socket: they read
     // the configuration alone. One asking for what the manager cannot do (QOD_ACL_ENABLED or
@@ -286,6 +288,9 @@ object Main extends IOApp with LazyLogging:
     BootPreflight.checkRetiredSettings(env, rawConfig) match
       case Left(refusal)   => sys.error(refusal)
       case Right(warnings) => warnings.foreach(w => System.err.println(w))
+    // A JDK below 21 cannot shut an HTTP client down, which the manager relies on to close what a
+    // refused answer leaves open: said on stderr, since the launcher does not refuse such a JDK.
+    BootPreflight.checkHttpClientShutdown(shutdownNowAvailable).foreach(w => System.err.println(w))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
@@ -1217,9 +1222,9 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
       val classifier = EdgeRewriters.statementClassifier()
-      // ONE OPA authorizer per manager (one decision cache; each call to OPA has a client of its
-      // own, see BoundedHttp), shared by the decision pipeline below, the handshake and the admin
-      // dry-run.
+      // ONE OPA authorizer per manager (one decision cache; its calls go through one client per OPA
+      // server, see BoundedHttp), shared by the decision pipeline below, the handshake and the
+      // admin dry-run.
       val opaDecisions = new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec)
       // Every bounded authorization cache reports its size, hits, misses, evictions and capacity
       // (cache_*{cache=...}, qod_cache_capacity{cache=...}), on every replica: each is this
@@ -1579,8 +1584,15 @@ object Main extends IOApp with LazyLogging:
             sessionTtlSec = edgeCfg.sessionTtlSec,
             maxHeartbeatSec = quackCfgResolved.maxHeartbeatTimeoutSec
           )
+          // HTTP/1.1 only, like every client of ours: the JDK offers `Upgrade: h2c` on every
+          // http:// request, and its HTTP/2 reader queues inbound frames with no bound (see
+          // BoundedHttp). A node is ours, but the client costs nothing to keep to what the node
+          // speaks.
           val transport = new ai.starlake.quack.edge.adapter.QuackProtocol.JdkHttpTransport(
-            java.net.http.HttpClient.newHttpClient()
+            java.net.http.HttpClient
+              .newBuilder()
+              .version(java.net.http.HttpClient.Version.HTTP_1_1)
+              .build()
           )
           val door = new ai.starlake.quack.edge.quack.QuackFrontDoor(
             fsRouter,

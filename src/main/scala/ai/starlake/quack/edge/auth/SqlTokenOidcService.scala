@@ -7,6 +7,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import scala.util.control.NonFatal
 
 object SqlTokenOidcService extends LazyLogging:
 
@@ -75,6 +76,18 @@ class SqlTokenOidcService(
         .map(doc => (doc.authorizationEndpoint, doc.tokenEndpoint, clientId, clientSecret))
     }
 
+  /** The code-to-token exchange, which the callback is anonymous to: an exchange that throws is a
+    * failed exchange with the fixed text of any other, and not an exception out of the callback.
+    * The form holds the client secret, so the log gets the class of what was thrown and nothing of
+    * its message.
+    */
+  private def exchanged(tokenEndpoint: String, form: String): Either[String, String] =
+    try httpExchange(tokenEndpoint, form)
+    catch
+      case NonFatal(e) =>
+        logger.warn(s"SQL token exchange failed: ${e.getClass.getSimpleName}")
+        Left(BoundedHttp.TokenEndpointFailed)
+
   private def sign(value: String): String =
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(new SecretKeySpec(stateSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
@@ -121,7 +134,7 @@ class SqlTokenOidcService(
         val form = s"grant_type=authorization_code&code=${enc(code)}" +
           s"&redirect_uri=${enc(redirectUri)}" +
           s"&client_id=${enc(clientId)}&client_secret=${enc(clientSecret)}"
-        httpExchange(tokenEndpoint, form).flatMap { body =>
+        exchanged(tokenEndpoint, form).flatMap { body =>
           // Prefer id_token: the edge presents the pasted token as a Bearer, and
           // OidcBearerAuthenticator requires aud == clientId, which the id_token
           // carries by OIDC spec. The access_token's aud is the provider's resource

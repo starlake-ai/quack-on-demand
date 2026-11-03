@@ -68,6 +68,13 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
     val Right((_, state: String)) = s.startUrl(): @unchecked
     s.completeAuth("code", state, state) shouldBe Left("HTTP 401")
 
+  // The callback is anonymous and its page shows the Left: an exchange that throws is a failed
+  // exchange, with the same fixed text as any other, and nothing of the exception in it.
+  it should "answer a failed exchange, and throw nothing, when the exchange throws" in:
+    val s = svc((_, _) => throw new IllegalStateException("boom marker-7f3a"))
+    val Right((_, state: String)) = s.startUrl(): @unchecked
+    s.completeAuth("code", state, state) shouldBe Left(BoundedHttp.TokenEndpointFailed)
+
   // The default code-to-token exchange reads the provider's answer under the same size limit as
   // discovery, and a transport failure is a Left like any other (it used to be an exception that
   // no caller caught).

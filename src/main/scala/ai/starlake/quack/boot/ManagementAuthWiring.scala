@@ -3,7 +3,6 @@ package ai.starlake.quack.boot
 import java.net.URI
 import java.net.http.HttpRequest
 import java.time.Duration
-import java.util.concurrent.Semaphore
 import java.util.Locale
 import ai.starlake.quack.{ManagementOidcConfig, ManagerConfig}
 import ai.starlake.quack.edge.BoundedHttp
@@ -60,7 +59,7 @@ object ManagementAuthWiring extends LazyLogging:
     */
   private[boot] def discoveryGet(
       url: String,
-      permits: Semaphore = BoundedHttp.idpExchanges
+      exchanges: BoundedHttp.Exchanges = BoundedHttp.idpExchanges
   ): Either[String, String] =
     val answer =
       try
@@ -75,7 +74,8 @@ object ManagementAuthWiring extends LazyLogging:
           BoundedHttp.MaxIdpAnswerBytes,
           BoundedHttp.IdpTimeoutMs,
           "discovery",
-          permits
+          exchanges,
+          secret = None
         )
       catch case e: Exception => Left(BoundedHttp.describe(e))
     answer match
@@ -149,10 +149,10 @@ object ManagementAuthWiring extends LazyLogging:
     * `QOD_MGMT_OIDC_CLIENT_ID` are set. Nothing is fetched here: discovery runs on the first login
     * of each issuer.
     *
-    * Discovery and the token exchange go through [[BoundedHttp]], each exchange on a client of its
-    * own; id_token validation reuses OidcBearerAuthenticator against the discovered jwks_uri.
-    * redirect_uri is built from the public base URL (must match the IdP client's registered
-    * redirect URI).
+    * Discovery and the token exchange go through [[BoundedHttp]] (HTTP/1.1, one client for each
+    * origin, a bound on the exchanges in flight); id_token validation reuses
+    * OidcBearerAuthenticator against the discovered jwks_uri. redirect_uri is built from the public
+    * base URL (must match the IdP client's registered redirect URI).
     */
   private def buildOidcSso(
       mgrCfg: ManagerConfig,

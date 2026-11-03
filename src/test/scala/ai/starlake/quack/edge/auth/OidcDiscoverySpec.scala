@@ -221,7 +221,9 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
       "jwks_uri"               -> s"$IssuerA/jwks",
       "end_session_endpoint"   -> s"$IssuerA/logout"
     ) ++ overrides
-    fields.map((name, value) => s"\"$name\":\"$value\"").mkString("{", ",", "}")
+    fields
+      .map((name, value) => s"\"$name\":${io.circe.Json.fromString(value).noSpaces}")
+      .mkString("{", ",", "}")
 
   it should "refuse a document with a field over 2048 characters, naming the field and never its value" in
     FieldNames.foreach { field =>
@@ -275,4 +277,82 @@ class OidcDiscoverySpec extends AnyFlatSpec with Matchers:
     exact.length shouldBe 2048
     discovery.resolve(exact).map(_.issuer) shouldBe Right(IssuerA)
     gets.asked.get shouldBe 1
+  }
+
+  // ----- the URLs of a document are the manager's to act on -----
+  //
+  // A tenant admin picks the issuer and so its document, and anyone can then make the manager act on
+  // the URLs in it: the key set is read (the SSO callback), the token endpoint is called, and the
+  // browser is sent to the authorization endpoint (the SSO start). A jwks_uri that was no URI threw
+  // out of completeAuth: 200 anonymous callbacks were 200 500s and 200 ERROR entries with their
+  // stacks, 4.3 KB each, quoting the issuer's text and the code and state of the query. So a
+  // document whose URL is not an absolute http(s) URL is refused here, naming the field and never
+  // the value. The end session endpoint is not one of them: only the manager-wide issuer's (the
+  // operator's, never a tenant's) is ever used.
+
+  private val UrlFields = List(
+    "authorization_endpoint",
+    "token_endpoint",
+    "jwks_uri"
+  )
+
+  private val NotUrls = List(
+    "not a uri ^ marker-7f3a"                  -> "no URI at all",
+    "/relative/jwks"                           -> "not absolute",
+    "//idp.example/jwks"                       -> "a network-path reference",
+    "file:/dev/ptmx"                           -> "another scheme",
+    "ftp://idp.example/jwks"                   -> "another scheme",
+    "javascript:alert(1)"                      -> "another scheme",
+    "http:///jwks"                             -> "no host",
+    "https://idp.example/a\r\nSet-Cookie: x=y" -> "a line break",
+    "http://[bad"                              -> "a broken host"
+  )
+
+  it should "refuse a document whose URL is no absolute http(s) URL, naming the field and never its value" in {
+    for
+      field          <- UrlFields
+      (value, shape) <- NotUrls
+    do
+      withClue(s"[$field is $shape: ${value.replace("\r\n", " ")}] ") {
+        val gets      = new Gets(_ => Right(docWith(Map(field -> value))))
+        val discovery = new OidcDiscovery(gets)
+        val refused   = discovery.resolve(IssuerA)
+
+        refused shouldBe Left(
+          s"field '$field' in discovery document is not an absolute http(s) URL"
+        )
+        // Remembered like any other failure: no second GET.
+        discovery.resolve(IssuerA) shouldBe refused
+        gets.asked.get shouldBe 1
+      }
+  }
+
+  it should "accept http and https URLs of any case, with a port, a query and a fragment" in
+    List(
+      "https://idp.example/a",
+      "http://idp.example/a",
+      "HTTPS://IDP.EXAMPLE/a",
+      "http://127.0.0.1:8080/realms/r/protocol/openid-connect/certs",
+      "https://idp.example:8443/a?b=c#d",
+      "http://[::1]:8080/jwks"
+    ).foreach { value =>
+      withClue(s"[$value] ") {
+        UrlFields.foreach { field =>
+          val discovery = new OidcDiscovery(new Gets(_ => Right(docWith(Map(field -> value)))))
+          discovery.resolve(IssuerA).map(_.productIterator.toList.contains(value)) shouldBe
+            Right(true)
+        }
+      }
+    }
+
+  it should "take an end session endpoint that is absent or empty, as the OIDC spec allows" in {
+    val without =
+      """{"issuer":"https://idp.example/a","authorization_endpoint":"https://idp.example/a/auth",""" +
+        """"token_endpoint":"https://idp.example/a/token","jwks_uri":"https://idp.example/a/jwks"}"""
+    new OidcDiscovery(new Gets(_ => Right(without)))
+      .resolve(IssuerA)
+      .map(_.endSessionEndpoint) shouldBe Right("")
+    new OidcDiscovery(new Gets(_ => Right(docWith(Map("end_session_endpoint" -> "")))))
+      .resolve(IssuerA)
+      .map(_.endSessionEndpoint) shouldBe Right("")
   }

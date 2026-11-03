@@ -148,3 +148,31 @@ class ResourceOwnerPasswordAuthenticatorSpec
       Left(AuthFailure.InvalidCredentials("keycloak-ropc: token is nested too deeply"))
     )
   }
+
+  // The JDK's HTTP/2 reader queues inbound frames with no bound, and the JDK offers `Upgrade: h2c`
+  // on every http:// request. The token endpoint is the operator's URL, not a tenant's, but the
+  // client costs nothing to keep to HTTP/1.1 and there is no reason to offer what it cannot bound.
+  it should "speak HTTP/1.1 only: its request offers no upgrade to HTTP/2" in {
+    val server = new MalformedServer(
+      "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\n{}"
+        .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1)
+    )
+    try
+      val authenticator = new ResourceOwnerPasswordAuthenticator(
+        "keycloak",
+        s"${server.base}/token",
+        "qod-console",
+        "qod-console-secret",
+        "role"
+      )
+
+      authenticator.authenticate(AuthScope.System, "typed-name", "pw").isLeft shouldBe true
+
+      val head = server.heads.headOption
+        .getOrElse(fail("the token endpoint was never asked"))
+        .toLowerCase(java.util.Locale.ROOT)
+      head should startWith("post /token http/1.1")
+      head should not include "upgrade"
+      head should not include "http2-settings"
+    finally server.close()
+  }

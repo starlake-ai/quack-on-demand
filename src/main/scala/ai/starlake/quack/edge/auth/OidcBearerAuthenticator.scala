@@ -14,7 +14,6 @@ import java.io.IOException
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest}
 import java.util.Date
-import java.util.concurrent.Semaphore
 
 /** Validates Bearer tokens from OIDC providers (Keycloak, Google, Azure AD, AWS Cognito) by
   * verifying signatures against the provider's JWKS endpoint.
@@ -83,7 +82,12 @@ class OidcBearerAuthenticator(
       yield profileOf(claims, username)
     catch
       case e: Exception =>
-        Left(s"$providerName token validation failed: ${e.getMessage}")
+        // Some exceptions have no message: Nimbus' rate limit on refreshing a key set is one, and
+        // the answer read "token validation failed: null". Their class says what happened.
+        Left(
+          s"$providerName token validation failed: " +
+            Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
+        )
 
   private def checkIssuer(claims: JWTClaimsSet): Either[String, Unit] =
     val iss = Option(claims.getIssuer).getOrElse("")
@@ -171,7 +175,7 @@ object OidcBearerAuthenticator extends LazyLogging:
 
   /** The shape of [[BoundedHttp.send]], so that a spec can see what the retriever asks of it. */
   private[auth] type Send =
-    (HttpRequest, Int, Long, String, Semaphore, HttpClient.Redirect) => Either[
+    (HttpRequest, Int, Long, String, BoundedHttp.Exchanges, HttpClient.Redirect) => Either[
       String,
       (Int, String)
     ]
@@ -214,6 +218,6 @@ object OidcBearerAuthenticator extends LazyLogging:
         throw new IOException(JwksUnavailable)
 
   private[auth] val jwksRetriever: ResourceRetriever =
-    retrieverOver((request, cap, timeoutMs, what, permits, redirects) =>
-      BoundedHttp.send(request, cap, timeoutMs, what, permits, redirects)
+    retrieverOver((request, cap, timeoutMs, what, exchanges, redirects) =>
+      BoundedHttp.send(request, cap, timeoutMs, what, exchanges, redirects, secret = None)
     )

@@ -50,9 +50,19 @@ final case class OidcDiscoveryDoc(
   * issuer into 10 s of failed discovery for another tenant's healthy one. The next call asks.
   *
   * A failure is remembered once its GET has returned, not before: calls that arrive while a GET is
-  * still waiting on an issuer that never answers each make their own (the REST connection budget
-  * bounds how many), so the memo ends the traffic to an issuer that fails, and only shortens it for
-  * one that hangs.
+  * still waiting on an issuer that never answers each make their own, so the memo ends the traffic
+  * to an issuer that fails, and only shortens it for one that hangs. How many of those run at once
+  * is bounded by the GET behind `httpGet` (the production one goes through
+  * [[BoundedHttp.idpExchanges]]: 128 at once, half of them for any one issuer, and a call past that
+  * is refused at once as [[BoundedHttp.Busy]], which is not remembered).
+  *
+  * The URLs of a document are the manager's to act on, and a tenant admin picks the document: the
+  * key set is read from `jwks_uri`, the code is exchanged at `token_endpoint`, and a browser is
+  * sent to `authorization_endpoint`. A `jwks_uri` that was no URI threw out of the SSO callback (a
+  * 500 and an ERROR entry with its stack, 4.3 KB, for each of 200 anonymous callbacks). So a
+  * document whose `jwks_uri`, `token_endpoint` or `authorization_endpoint` is not an absolute
+  * http(s) URL ([[OidcDiscovery.isHttpUrl]]) is refused here, as a failure that names the field and
+  * never its value.
   */
 class OidcDiscovery(
     httpGet: String => Either[String, String],
@@ -109,6 +119,10 @@ class OidcDiscovery(
         failures.put(issuerUrl, kept)
         Left(kept)
 
+  private def checkedUrl(field: String, value: String): Either[String, String] =
+    if OidcDiscovery.isHttpUrl(value) then Right(value)
+    else Left(s"field '$field' in discovery document is not an absolute http(s) URL")
+
   private def parseDoc(body: String): Either[String, OidcDiscoveryDoc] =
     parse(body).left.map(_.getMessage).flatMap { json =>
       val c = json.hcursor
@@ -125,12 +139,19 @@ class OidcDiscovery(
           .left
           .map(_ => s"missing field '$field' in discovery document")
           .flatMap(bounded(field, _))
+      // A URL the manager acts on: read (the key set), called (the token endpoint) or sent to (the
+      // authorization endpoint, the end session endpoint). The Left names the field, never the
+      // value, for the same reason.
+      def url(field: String): Either[String, String] =
+        str(field).flatMap(checkedUrl(field, _))
       for
         issuer    <- str("issuer")
-        authorize <- str("authorization_endpoint")
-        token     <- str("token_endpoint")
-        jwks      <- str("jwks_uri")
-        // end_session_endpoint is OPTIONAL in the OIDC spec; default to empty when absent.
+        authorize <- url("authorization_endpoint")
+        token     <- url("token_endpoint")
+        jwks      <- url("jwks_uri")
+        // end_session_endpoint is OPTIONAL in the OIDC spec; default to empty when absent. It is not
+        // checked as a URL: only the manager-wide issuer's (the operator's, never a tenant's) is
+        // ever used, in the Location of the logout.
         endSession <- c
           .get[String]("end_session_endpoint")
           .fold(_ => Right(""), bounded("end_session_endpoint", _))
@@ -156,3 +177,15 @@ object OidcDiscovery:
 
   /** The most characters of an issuer URL, the key of both tables: a longer one is refused. */
   val MaxIssuerUrlChars: Int = 2048
+
+  /** True for an absolute `http` or `https` URL with a host (the scheme in any case), the only kind
+    * the JDK client reads and the only kind a browser is sent to. `file:`, `ftp:`, `javascript:`, a
+    * relative reference, a URL with no host and anything `java.net.URI` refuses (a space, a line
+    * break, a broken host) are not.
+    */
+  private[auth] def isHttpUrl(value: String): Boolean =
+    try
+      val uri = new java.net.URI(value)
+      uri.isAbsolute && uri.getHost != null &&
+      Option(uri.getScheme).exists(s => s.equalsIgnoreCase("http") || s.equalsIgnoreCase("https"))
+    catch case _: java.net.URISyntaxException => false

@@ -7,16 +7,16 @@ import io.circe.Json
 import java.net.URI
 import java.net.http.HttpRequest
 import java.time.Duration
-import java.util.concurrent.Semaphore
 
 /** HTTP transport to an OPA server. `post` is injectable for tests; the default (`jdkPost`) is a
   * JDK `HttpClient` call whose WHOLE exchange (connect, response headers AND response body) is
   * bounded by `timeoutMs` and whose body never buffers past the 1 MiB cap: both limits are
-  * [[BoundedHttp.send]]'s. Each call has a client of its own, which [[BoundedHttp.send]] shuts down
-  * (the JDK keeps a connection whose answer it refuses): no connection is reused, which the
-  * decisions of a tenant's OPA can bear, since a decision is cached for `QOD_OPA_CACHE_TTL_SEC`
-  * seconds. At most [[OpaClient.ExchangeLimit]] calls run at once, a selector thread each; one past
-  * that is an error at once (fail closed, and an error is never cached) and asks nobody.
+  * [[BoundedHttp.send]]'s. A tenant admin picks the OPA URL, so the calls go through
+  * [[OpaClient.exchanges]]: one client for each OPA server, kept while its exchanges end in a clean
+  * answer (a client for each call left a TIME_WAIT for each, and OPA failed closed past about 470
+  * uncached decisions a second) and shut down after any other ending, and at most
+  * [[OpaClient.ExchangeLimit]] calls in flight, half of them for any one server. A call past that
+  * is an error at once (fail closed, and an error is never cached) and asks nobody.
   */
 final class OpaClient(timeoutMs: Int, post: OpaClient.Post):
 
@@ -37,10 +37,11 @@ object OpaClient:
   /** The OPA exchanges that may run at once. */
   val ExchangeLimit: Int = 256
 
-  /** The permits of the OPA exchanges: its own, so that a flood of exchanges with identity
-    * providers cannot refuse OPA decisions.
+  /** The clients and permits of the OPA exchanges: its own, so that a flood of exchanges with
+    * identity providers cannot refuse OPA decisions, and a hanging OPA server of one tenant cannot
+    * refuse the decisions of another's (half of the limit for any one server).
     */
-  val exchanges: Semaphore = new Semaphore(ExchangeLimit)
+  val exchanges: BoundedHttp.Exchanges = new BoundedHttp.Exchanges(ExchangeLimit)
 
   def endpoint(base: String, policyPath: String, rule: String): String =
     s"${base.stripSuffix("/")}/v1/data/$policyPath/$rule"
@@ -51,12 +52,12 @@ object OpaClient:
     * the token into a malformed status line, which the JDK quotes. [[BoundedHttp]] masks it in the
     * text before it cuts the text.
     */
-  def jdkPost(timeoutMs: Int, permits: Semaphore = exchanges): Post =
-    (url, body, token) => send(timeoutMs, permits, url, body, token)
+  def jdkPost(timeoutMs: Int, through: BoundedHttp.Exchanges = exchanges): Post =
+    (url, body, token) => send(timeoutMs, through, url, body, token)
 
   private def send(
       timeoutMs: Int,
-      permits: Semaphore,
+      through: BoundedHttp.Exchanges,
       url: String,
       body: String,
       token: Option[String]
@@ -73,7 +74,7 @@ object OpaClient:
         MaxResponseBytes,
         timeoutMs.toLong,
         "OPA",
-        permits,
+        through,
         secret = token
       )
     catch
