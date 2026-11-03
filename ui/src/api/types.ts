@@ -1468,8 +1468,15 @@ export interface BranchOpRequest {
   branch: string;
 }
 
+export interface BranchProposeRequest extends BranchOpRequest {
+  onConflict?: 'main' | 'branch';  // absent: any conflict refuses the merge
+  keys?: Record<string, string[]>; // schema.table to the columns that catch double inserts
+}
+
 export interface BranchMergeRequest extends BranchOpRequest {
+  proposalId: string;      // the open proposal the approver read
   expectedMainSnapshot?: number;
+  holdWriters?: boolean;
 }
 
 export interface BranchEntry {
@@ -1491,6 +1498,25 @@ export interface BranchListResponse {
   branches: BranchEntry[];
 }
 
+// What a merge would do to one table's rows, as its proposal saw it. A viewer who may not count the
+// table gets hasConflicts and countsUnavailable, nothing else. Never a cell value.
+export interface BranchRowConflicts {
+  schema: string;
+  table: string;
+  hasConflicts: boolean;
+  countsUnavailable?: boolean;
+  toUpdate?: number;
+  toDelete?: number;
+  toInsert?: number;
+  cellConflicts?: number;
+  updateDeleteConflicts?: number;
+  deleteUpdateConflicts?: number;
+  keyMatches?: number;
+  mainRowsByKey?: number;
+  columnConflicts?: Record<string, number>;
+  samples?: Record<string, number[]>;
+}
+
 export interface BranchMergeEntry {
   id: string;
   status: string;          // proposed | merged | failed | abandoned
@@ -1504,6 +1530,11 @@ export interface BranchMergeEntry {
   conflicts: unknown;
   createdAt?: string | null;
   decidedAt?: string | null;
+  onConflict?: string | null;
+  keys?: Record<string, string[]>;
+  holdWriters?: boolean;
+  attempts?: number;
+  rowConflicts?: BranchRowConflicts[];
 }
 
 export interface BranchDetailResponse {
@@ -1523,6 +1554,8 @@ export interface BranchTableChange {
   // The counts were asked for and refused to the viewer (no read grant) or failed: the zeros are
   // no counts.
   countsUnavailable?: boolean;
+  threeWay?: boolean;              // main changed this table's rows too: it merges cell by cell
+  rowConflicts?: BranchRowConflicts | null;
 }
 
 export interface BranchConflictEntry {

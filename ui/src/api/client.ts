@@ -74,6 +74,7 @@ import type {
   BranchListResponse,
   BranchDetailResponse,
   BranchChangesResponse,
+  BranchProposeRequest,
   BranchProposeResponse,
   BranchMergeResponse,
   // Managed maintenance
@@ -712,7 +713,7 @@ export const api = {
     );
   },
   createBranch: (req: BranchCreateRequest) => post<BranchEntry>('/branch/create', req),
-  proposeBranch: (req: BranchOpRequest) => post<BranchProposeResponse>('/branch/propose', req),
+  proposeBranch: (req: BranchProposeRequest) => post<BranchProposeResponse>('/branch/propose', req),
   mergeBranch: (req: BranchMergeRequest) => post<BranchMergeResponse>('/branch/merge', req),
   discardBranch: (req: BranchOpRequest) => post<BranchEntry>('/branch/discard', req),
 };

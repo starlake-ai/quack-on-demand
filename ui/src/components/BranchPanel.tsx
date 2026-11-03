@@ -1,10 +1,12 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import { branchCount } from '../api/branchCounts';
+import { branchCount, rowConflictsHint, rowConflictsText } from '../api/branchCounts';
+import { parseBranchKeys } from '../api/branchKeys';
 import type {
   BranchChangesResponse,
   BranchDetailResponse,
   BranchEntry,
+  BranchMergeEntry,
   BranchTableChange,
   DataDiffResponse,
 } from '../api/types';
@@ -177,8 +179,8 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
   );
 }
 
-/** The change set of one branch: touched tables with counts and the merge verdict, plus the
-  * merge history. Expanded inline under the branch row. */
+/** The change set of one branch: touched tables with counts, plus the merge history. Expanded
+  * inline under the branch row. */
 function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
   tenant: string; tenantDb: string; branch: BranchEntry;
   onDiff: (schema: string, table: string) => void;
@@ -202,7 +204,11 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
         .catch(e => { if (!cancelled) setError(errText(e)); });
     }
     return () => { cancelled = true; };
-  }, [tenant, tenantDb, branch.name, branch.status, live]);
+  }, [tenant, tenantDb, branch.name, branch.status, branch.updatedAt, live]);
+
+  const hint = changes
+    ? rowConflictsHint(changes.tables, detail?.merges.find(m => m.status === 'proposed')?.onConflict)
+    : null;
 
   return (
     <div style={{ padding: '0.5rem 0 0.75rem 1.5rem' }}>
@@ -220,7 +226,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
               branch head {changes.headSnapshot}, main at {changes.mainSnapshot}
             </span>
             {changes.mergeable
-              ? <span style={{ color: 'var(--good)', fontWeight: 600 }}>fast-forward possible</span>
+              ? <span style={{ color: 'var(--good)', fontWeight: 600 }}>no table conflict</span>
               : <span style={{ color: '#b91c1c', fontWeight: 600 }}>not mergeable as is</span>}
           </div>
           {changes.tables.length === 0
@@ -247,7 +253,11 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                         const c = branchCount(t, f);
                         return <td key={f} align="right" title={c.title}>{c.text}</td>;
                       })}
-                      <td>{t.mergeable ? 'ok' : <span style={{ color: '#b91c1c' }}>{t.reason ?? 'refused'}</span>}</td>
+                      <td>
+                        {!t.mergeable
+                          ? <span style={{ color: '#b91c1c' }}>{t.reason ?? 'refused'}</span>
+                          : t.threeWay ? 'cell by cell, main changed it too' : 'ok'}
+                      </td>
                       <td>
                         {(t.kind === 'modified' || t.kind === 'created' || t.kind === 'recreated') && (
                           <button type="button" style={chipBtn} onClick={() => onDiff(t.schema, t.table)}>rows</button>
@@ -258,9 +268,22 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                 </tbody>
               </table>
             )}
+          {changes.tables.some(t => t.rowConflicts) && (
+            <div style={{ marginTop: 8 }}>
+              <strong>Row merge, as proposed</strong>
+              <ul style={{ margin: '4px 0' }}>
+                {changes.tables.filter(t => t.rowConflicts).map(t => (
+                  <li key={`${t.schema}.${t.table}`}>
+                    <code>{t.schema}.{t.table}</code>: {rowConflictsText(t.rowConflicts!)}
+                  </li>
+                ))}
+              </ul>
+              {hint && <p className="subtle" style={{ margin: '4px 0' }}>{hint}</p>}
+            </div>
+          )}
           {changes.conflicts.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <strong style={{ color: '#b91c1c' }}>Conflicts with main</strong>
+              <strong style={{ color: '#b91c1c' }}>Table conflicts with main</strong>
               <ul style={{ margin: '4px 0' }}>
                 {changes.conflicts.map(c => (
                   <li key={`${c.schema}.${c.table}`}><code>{c.schema}.{c.table}</code>: {c.reason}</li>
@@ -270,7 +293,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
           )}
           {changes.unsupported.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <strong style={{ color: '#b91c1c' }}>Not mergeable in v1</strong>
+              <strong style={{ color: '#b91c1c' }}>Cannot be merged</strong>
               <ul style={{ margin: '4px 0' }}>
                 {changes.unsupported.map(u => <li key={u}><code>{u}</code></li>)}
               </ul>
@@ -297,7 +320,16 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
             <tbody>
               {detail.merges.map(m => (
                 <tr key={m.id} style={{ borderTop: '1px solid var(--border)' }}>
-                  <td>{statusChip(m.status)}{m.error && <span className="subtle" title={m.error}> (error)</span>}</td>
+                  <td>
+                    {statusChip(m.status)}
+                    {m.error && (
+                      <span className="subtle" title={m.error}>
+                        {m.status === 'proposed' && m.error.startsWith('timeout: ')
+                          ? ' (a merge is running, or may have landed: merge again, or discard)'
+                          : ' (error)'}
+                      </span>
+                    )}
+                  </td>
                   <td><code>{m.proposer}</code></td>
                   <td>{m.approver ? <code>{m.approver}</code> : '-'}</td>
                   <td align="right">{m.mainSnapshotAtPropose}</td>
@@ -332,6 +364,13 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
   const [formOpen, setFormOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [proposeFor, setProposeFor] = useState<BranchEntry | null>(null);
+  const [pOnConflict, setPOnConflict] = useState<'' | 'main' | 'branch'>('');
+  const [pKeys, setPKeys] = useState('');
+  const [pError, setPError] = useState<string | null>(null);
+  const [mergeFor, setMergeFor] = useState<BranchEntry | null>(null);
+  const [mProposal, setMProposal] = useState<BranchMergeEntry | null>(null);
+  const [mHold, setMHold] = useState(false);
 
   function openForm() {
     setFName('');
@@ -378,20 +417,63 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
       .finally(() => setBusy(null));
   }
 
-  const propose = (b: BranchEntry) =>
-    act('propose', b, () => api.proposeBranch({ tenant, tenantDb, branch: b.name }), r => {
-      const res = r as { changes: BranchChangesResponse };
-      return `branch '${b.name}' proposed: ${res.changes.tables.length} table(s), ` +
-        `${res.changes.conflicts.length} conflict(s), ${res.changes.mergeable ? 'mergeable' : 'not mergeable'}`;
-    });
+  const openPropose = (b: BranchEntry) => {
+    setPOnConflict('');
+    setPKeys('');
+    setPError(null);
+    setProposeFor(b);
+  };
 
-  const merge = (b: BranchEntry) => {
-    if (!window.confirm(
-      `Fast-forward merge branch '${b.name}' into ${tenantDb}? Main gains one snapshot with the ` +
-      'branch changes, the merge is tagged, and the branch is torn down. The server refuses the ' +
-      "proposer's own identity."
-    )) return;
-    act('merge', b, () => api.mergeBranch({ tenant, tenantDb, branch: b.name }), r => {
+  const submitPropose = (ev: FormEvent) => {
+    ev.preventDefault();
+    if (!proposeFor) return;
+    const parsed = parseBranchKeys(pKeys);
+    if ('error' in parsed) { setPError(parsed.error); return; }
+    const b = proposeFor;
+    setProposeFor(null);
+    act('propose', b, () => api.proposeBranch({
+      tenant,
+      tenantDb,
+      branch: b.name,
+      ...(pOnConflict === '' ? {} : { onConflict: pOnConflict }),
+      ...(Object.keys(parsed.keys).length === 0 ? {} : { keys: parsed.keys }),
+    }), r => {
+      const res = r as { changes: BranchChangesResponse };
+      const conflicted = res.changes.tables.filter(t => t.rowConflicts?.hasConflicts).length;
+      return `branch '${b.name}' proposed: ${res.changes.tables.length} table(s), ` +
+        `${res.changes.conflicts.length} table conflict(s), ${conflicted} with row conflicts` +
+        (res.changes.mergeable ? '' : ', not mergeable as is');
+    });
+  };
+
+  // Read here and submitted by its id: a proposal replaced after this is refused, not merged unread.
+  const openMerge = (b: BranchEntry) => {
+    setError(null);
+    setMHold(false);
+    reload(); // the expanded panel's numbers follow the listed row
+    api.getBranch(tenant, tenantDb, b.name)
+      .then(d => {
+        const open = d.merges.find(m => m.status === 'proposed');
+        if (!open) { setError(`merge '${b.name}': it has no open proposal`); return; }
+        setMProposal(open);
+        setMergeFor(b);
+      })
+      .catch(e => setError(`merge '${b.name}': ${errText(e)}`));
+  };
+
+  const submitMerge = (ev: FormEvent) => {
+    ev.preventDefault();
+    if (!mergeFor || !mProposal) return;
+    const b = mergeFor;
+    const proposalId = mProposal.id;
+    setMergeFor(null);
+    act('merge', b, () => api.mergeBranch({
+      tenant,
+      tenantDb,
+      branch: b.name,
+      proposalId,
+      ...(mHold ? { holdWriters: true } : {}),
+    }), r => {
       const res = r as { merge: { mainSnapshotAfter?: number | null; tagName?: string | null } };
       return `branch '${b.name}' merged: main snapshot ${res.merge.mainSnapshotAfter ?? '?'}, tag ${res.merge.tagName ?? '?'}`;
     });
@@ -454,11 +536,13 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                     <td>{fmtTs(b.createdAt)}</td>
                     <td>{live ? (b.expiresAt ? fmtTs(b.expiresAt) : 'never') : '-'}</td>
                     <td style={{ display: 'flex', gap: 10 }}>
-                      {b.status === 'open' && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => propose(b)}>propose</button>
+                      {(b.status === 'open' || b.status === 'proposed') && (
+                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => openPropose(b)}>
+                          {b.status === 'open' ? 'propose' : 'propose again'}
+                        </button>
                       )}
                       {b.status === 'proposed' && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => merge(b)}>merge</button>
+                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => openMerge(b)}>merge</button>
                       )}
                       {live && (
                         <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => discard(b)}>discard</button>
@@ -502,6 +586,57 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           <div className="cred-form-actions">
             <button type="submit" disabled={creating || fName.trim() === ''}>{creating ? 'Creating...' : 'Create branch'}</button>
             <button type="button" className="secondary" onClick={() => setFormOpen(false)} disabled={creating}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {proposeFor && (
+        <form onSubmit={submitPropose} className="cred-form">
+          <div className="cred-form-title">Propose branch {proposeFor.name}</div>
+          <div className="cred-grid">
+            <label>
+              When a cell conflicts
+              <select value={pOnConflict} onChange={ev => setPOnConflict(ev.target.value as '' | 'main' | 'branch')}>
+                <option value="">refuse the merge</option>
+                <option value="main">main wins</option>
+                <option value="branch">branch wins</option>
+              </select>
+            </label>
+            <label>
+              Keys that catch rows both sides inserted (optional)
+              <textarea value={pKeys} onChange={ev => setPKeys(ev.target.value)} rows={3}
+                placeholder="schema.table=column[,column...], one per line" />
+            </label>
+          </div>
+          {pError && <div className="login-err" style={{ marginTop: '.75rem' }}>{pError}</div>}
+          <div className="cred-form-actions">
+            <button type="submit">Propose</button>
+            <button type="button" className="secondary" onClick={() => setProposeFor(null)}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {mergeFor && mProposal && (
+        <form onSubmit={submitMerge} className="cred-form">
+          <div className="cred-form-title">Merge branch {mergeFor.name} into {tenantDb}</div>
+          <p className="subtle">
+            Main gains one snapshot with the branch's changes, the merge is tagged, and the branch is
+            torn down. The server refuses the proposer's own identity.
+          </p>
+          <p className="subtle">
+            Proposal {mProposal.id} by {mProposal.proposer}.{' '}
+            {mProposal.onConflict
+              ? `A conflicting cell takes ${mProposal.onConflict}'s value.`
+              : 'Any conflict refuses the merge.'}
+            {Object.keys(mProposal.keys ?? {}).length > 0 && ' Keys: ' +
+              Object.entries(mProposal.keys ?? {}).map(([t, cols]) => `${t}=${cols.join(',')}`).join('; ') + '.'}
+          </p>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={mHold} onChange={ev => setMHold(ev.target.checked)} />
+            {' '}Hold writers on the merged tables until the merge ends. They retry for about 9
+            seconds, then fail. Use it when these tables commit too often for a quiet moment.
+          </label>
+          <div className="cred-form-actions">
+            <button type="submit">Merge</button>
+            <button type="button" className="secondary" onClick={() => setMergeFor(null)}>Cancel</button>
           </div>
         </form>
       )}
