@@ -13,7 +13,8 @@ import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
   *
   *   - [[ai.starlake.quack.edge.PrepareStrategy.SkipExecute SkipExecute]] - the statement has no
   *     result rows of its own (DML / DDL / transaction control, answered with DuckDB's `Count`).
-  *     The producer advertises that schema without touching a Quack node.
+  *     The producer advertises that schema at GetFlightInfo and GetSchema without touching a Quack
+  *     node; the Prepare answer itself has zero fields (see `createPreparedStatement`).
   *   - [[ai.starlake.quack.edge.PrepareStrategy.ProbeWrap ProbeWrap]] - the statement is a
   *     subquery-safe SELECT. Send `SELECT * FROM (<sql>) AS x LIMIT 0` instead; DuckDB plans the
   *     inner query but the executor short-circuits on LIMIT 0, so the Arrow stream comes back with

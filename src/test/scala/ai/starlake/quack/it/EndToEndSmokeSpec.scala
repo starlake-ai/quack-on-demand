@@ -14,6 +14,9 @@ class EndToEndSmokeSpec extends AnyFlatSpec with Matchers:
   //   - The `quack-on-demand` jar built (via `sbt assembly`) or `sbt run` running on port 20900
   //   - python3 on PATH (for the fake quack stub)
   //   - bash and curl on PATH
+  // Opt-in: `QOD_E2E_SMOKE=1`. test-api.sh creates, scales and force-stops a `smoke` pool on the
+  // manager it finds, so a plain `sbt test` must not reach one the developer is using.
+  //
   // This spec never spawns its own manager -- it only probes whatever is
   // already bound to :20900. `checkManager()` distinguishes three cases so a
   // stale/foreign process on that port fails loudly and clearly instead of
@@ -23,6 +26,11 @@ class EndToEndSmokeSpec extends AnyFlatSpec with Matchers:
   //   - a quack-on-demand manager (health shape) -> proceed
 
   "test-api.sh" should "complete end-to-end against a running manager" in:
+    assume(
+      sys.env.get("QOD_E2E_SMOKE").contains("1"),
+      "changes pools on whatever manager listens on 20900, a live one included: opt in with " +
+        "QOD_E2E_SMOKE=1"
+    )
     checkManager() match
       case ManagerCheck.NotListening =>
         cancel(
