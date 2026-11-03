@@ -243,10 +243,33 @@ final class BranchService(
 
   // ---------- create ----------
 
-  private def validTtl(ttlHours: Option[Int]): Res[Unit] =
-    if ttlHours.exists(_ < 0) then
-      Left(BranchFailure.badRequest("invalid_ttl", "ttlHours must be >= 0"))
-    else Right(())
+  /** A non-admin asks for a TTL of at least an hour and at most the server's default, when it has
+    * one: a branch with no TTL stops snapshot expiry above its fork for the whole database until
+    * someone discards it, and keeps a node up. Asking for nothing takes the default, the operator's
+    * own choice, even when it is no TTL.
+    */
+  private def validTtl(ttlHours: Option[Int], actor: BranchActor): Res[Unit] =
+    val limit = cfg.defaultTtlHours
+    ttlHours match
+      case Some(h) if !actor.isAdmin && (h < 1 || (limit > 0 && h > limit)) =>
+        val allowed =
+          if limit > 0 then s"between 1 and $limit, the server's default" else "at least 1"
+        Left(BranchFailure.badRequest("invalid_ttl", s"ttlHours must be $allowed"))
+      case Some(h) if h < 0 =>
+        Left(BranchFailure.badRequest("invalid_ttl", "ttlHours must be >= 0"))
+      case _ => Right(())
+
+  /** Only the branch's owner or an admin acts on it, `what` saying how. */
+  private def ownerOrAdmin(b: Branch, actor: BranchActor, what: String): Res[Unit] =
+    if actor.isAdmin || b.ownerUser == actor.identity then Right(())
+    else
+      Left(
+        BranchFailure.forbidden(
+          "not_owner",
+          s"branch '${b.name}' belongs to '${b.ownerUser}'; only the owner or a tenant admin may " +
+            s"$what it"
+        )
+      )
 
   private def noDuplicate(parent: TenantDb, name: String): Res[Unit] =
     store.findBranch(parent.id, name) match
@@ -285,7 +308,7 @@ final class BranchService(
           .validateName(rawName)
           .left
           .map(BranchFailure.badRequest("invalid_name", _))
-        _ <- validTtl(ttlHours)
+        _ <- validTtl(ttlHours, actor)
         _ <- noDuplicate(parent, name)
         _ <- underLimit(parent)
       yield
@@ -619,7 +642,10 @@ final class BranchService(
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
       _      <- mayUse(tenant, parent, actor)
-      _      <- proposable(parent)
+      // Before anything else: a proposal starts a node and replaces the open one.
+      b <- liveBranch(parent, name)
+      _ <- ownerOrAdmin(b, actor, "propose")
+      _ <- proposable(parent)
     yield parent
     pre match
       case Left(f)       => denied(f)
@@ -1704,15 +1730,7 @@ final class BranchService(
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
       b      <- liveBranch(parent, name)
-      _      <-
-        if actor.isAdmin || b.ownerUser == actor.identity then Right(())
-        else
-          Left(
-            BranchFailure.forbidden(
-              "not_owner",
-              s"branch '$name' belongs to '${b.ownerUser}'; only the owner or a tenant admin may discard it"
-            )
-          )
+      _      <- ownerOrAdmin(b, actor, "discard")
     yield (parent, b)
     pre match
       case Left(f) =>

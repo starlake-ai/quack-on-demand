@@ -857,6 +857,81 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       List((first.id, BranchMergeStatus.Proposed))
   }
 
+  "a non-admin" should "propose only a branch they own, and start nothing on anyone else's" in {
+    val f = new Fixture
+    f.grantConnect("alice")
+    f.grantConnect("bob")
+    val bob = BranchActor.plain("bob", sees = (_, _) => true)
+    f.create("x", actor = f.alice).isRight shouldBe true
+    f.touchBranch()
+    val refused = f.propose(actor = bob).left.toOption.get
+    (refused.status, refused.code) shouldBe (403, "not_owner")
+    refused.message should include("alice")
+    f.nodesStarted shouldBe 0
+    f.openProposal() shouldBe "none"
+    f.status shouldBe BranchStatus.Open
+    f.propose(actor = f.alice).isRight shouldBe true
+    // An admin may propose anyone's, and that replaces it.
+    f.propose(actor = f.admin1).map(_._2.proposer) shouldBe Right("root")
+  }
+
+  /** The TTL refusal of a non-admin's create, with the words it says it in. */
+  private def ttlRefusal(f: Fixture, name: String, ttl: Option[Int]) =
+    f.create(name, actor = f.alice, ttl = ttl).left.map(e => (e.status, e.code, e.message))
+
+  it should "ask for no forever: from one hour to the server's default, named in the refusal" in {
+    val f = new Fixture(BranchingConfig(defaultTtlHours = 48))
+    f.grantConnect("alice")
+    List(Some(0), Some(-1), Some(49), Some(Int.MaxValue)).foreach { ttl =>
+      withClue(s"ttlHours $ttl: ") {
+        val refused = ttlRefusal(f, "x", ttl).left.toOption.get
+        (refused._1, refused._2) shouldBe (400, "invalid_ttl")
+        refused._3 should include("48")
+      }
+    }
+    f.store.listBranches(f.parent.id) shouldBe Nil
+    f.cloneCalls shouldBe empty
+    val in1h = f.create("low", actor = f.alice, ttl = Some(1)).toOption.get
+    in1h.expiresAt shouldBe Some(Instant.parse("2026-09-20T13:00:00Z"))
+    val at = f.create("high", actor = f.alice, ttl = Some(48)).toOption.get
+    at.expiresAt shouldBe Some(Instant.parse("2026-09-22T12:00:00Z"))
+    // Asking for nothing takes the server's default, as for anyone.
+    val byDefault = f.create("plain", actor = f.alice, ttl = None).toOption.get
+    byDefault.expiresAt shouldBe Some(Instant.parse("2026-09-22T12:00:00Z"))
+  }
+
+  it should "take the operator's default of no TTL when asking for nothing, and still ask for no forever" in {
+    val f = new Fixture(BranchingConfig(defaultTtlHours = 0))
+    f.grantConnect("alice")
+    // The operator's own choice: nothing asked, nothing set.
+    f.create("plain", actor = f.alice, ttl = None).toOption.get.expiresAt shouldBe None
+    val refused = ttlRefusal(f, "x", Some(0)).left.toOption.get
+    (refused._1, refused._2) shouldBe (400, "invalid_ttl")
+    refused._3 should include("at least 1")
+    // With no default there is no upper limit to name.
+    f.create("long", actor = f.alice, ttl = Some(100000)).isRight shouldBe true
+  }
+
+  it should "find fromSnapshot still reserved" in {
+    val f = new Fixture
+    f.grantConnect("alice")
+    f.service
+      .create("acme", f.parent.name, "x", Some(24), Some(9L), f.alice, None)
+      .unsafeRunSync()
+      .left
+      .map(e => (e.status, e.code)) shouldBe Left((409, "fork_snapshot_unsupported"))
+    f.store.listBranches(f.parent.id) shouldBe Nil
+    f.dropped shouldBe List(f.created.last)
+  }
+
+  "an admin's create" should "ask for any TTL, none included, as before" in {
+    val f = new Fixture(BranchingConfig(defaultTtlHours = 48))
+    f.create("never", ttl = Some(0)).toOption.get.expiresAt shouldBe None
+    f.create("long", ttl = Some(100000)).isRight shouldBe true
+    f.create("bad", ttl = Some(-1)).left.map(e => (e.code, e.message)) shouldBe
+      Left(("invalid_ttl", "ttlHours must be >= 0"))
+  }
+
   "a table a non-admin does not see" should "never be counted as them, in changes or in a proposal's reply" in {
     val f = new Fixture
     f.grantConnect("alice")
