@@ -191,35 +191,51 @@ open class QuackHttpClient(
     * holding several statements gets one handle's life for all of them; here each binds right after
     * its own. A transaction can span the list: an entry may be `BEGIN`.
     *
-    * The first failure ends the list, a refused handle included. A cancel does too, seen once the
-    * statement in flight has answered, since the JDK send is uninterruptible: the next statement is
-    * never sent, so no COMMIT can follow a caller's timeout. Whatever ends the list closes the
-    * connection, and DISCONNECT rolls back a transaction still open. A client that dies mid-list
-    * sends no DISCONNECT: the statement in flight runs to its end, nothing follows it, and its
-    * transaction stays open on the node, uncommitted, until the node goes.
+    * The first failure ends the list, a refused handle included, and answers which entry it was at:
+    * a caller can tell a statement the node answered from one whose answer was lost, which may have
+    * run. A cancel ends the list too, seen once the statement in flight has answered, since the JDK
+    * send is uninterruptible: the statement after it is never sent, so a caller's timeout is
+    * followed by a COMMIT only when the client had already begun to send it. Whatever ends the list
+    * closes the connection, and DISCONNECT rolls back a transaction still open. A client that dies
+    * mid-list sends no DISCONNECT: the statement in flight runs to its end, nothing follows it, and
+    * its transaction stays open on the node, uncommitted, until the node goes.
     */
   def queryAll(
       endpoint: String,
       token: String,
       authorize: () => String,
       statements: List[String]
-  ): IO[Either[QuackError, Unit]] =
+  ): IO[Either[ListFailure, Unit]] =
     IO.uncancelable { poll =>
       given IORuntime = IORuntime.global
-      // Set right before the first statement goes out, as in queryNative.
+      // What a failure names: the entry the list is at, and whether its statement has gone out, set
+      // right before it does, as in queryNative.
+      val at   = new java.util.concurrent.atomic.AtomicReference(Option.empty[Int])
       val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
       nativeProtocol
         .open(endpoint, token)
         .flatMap { conn =>
-          val all = statements.foldLeft(checkpoint(poll, conn.close())) { (done, sql) =>
-            done *> install(poll, conn, Some(authorize)) *> IO(sent.set(true)) *>
-              conn.executeDiscard(sql) *> checkpoint(poll, conn.close())
+          val all = statements.zipWithIndex.foldLeft(checkpoint(poll, conn.close())) {
+            case (done, (sql, entry)) =>
+              done *> IO { at.set(Some(entry)); sent.set(false) } *>
+                install(poll, conn, Some(authorize)) *> IO(sent.set(true)) *>
+                conn.executeDiscard(sql) *> checkpoint(poll, conn.close())
           }
-          all.handleErrorWith(t => conn.close() *> IO.raiseError(t)) *> conn.close()
+          // A failed DISCONNECT must not take the place of what ended the list.
+          all.attempt.flatTap(_ => conn.close().attempt).rethrow
         }
         .attempt
-        .map(_.left.map(errorOf(_, sent.get())))
+        .map(_.left.map(t => ListFailure(at.get(), listError(t, sent.get()))))
     }
+
+  /** [[errorOf]], but the JDK client's own failure (a lost connection, no response) is Transient:
+    * no answer came, whatever the node did with the statement. It is the case a list's caller must
+    * not read as the node's refusal.
+    */
+  private def listError(t: Throwable, sent: Boolean): QuackError = t match
+    case e: java.io.IOException =>
+      QuackError.Transient(Option(e.getMessage).getOrElse(e.toString), notSent = !sent)
+    case other => errorOf(other, sent)
 
   /** Stamped-write bracket (EPIC P1). Runs `prelude` (BEGIN + ducklake_set_commit_message), then
     * `sql`, as separate PREPAREs on ONE wire connection (= one server-side DuckDB session), so

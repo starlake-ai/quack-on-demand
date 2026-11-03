@@ -1357,6 +1357,33 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.mergeBatches shouldBe empty
   }
 
+  it should "keep the proposal open and the fence up when the answer to COMMIT was lost" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(
+      s"${MergeExecutor.TimedOut}the answer to COMMIT was lost, so it may have landed: connection reset"
+    )
+    val refused = f.merge().left.toOption.get
+    refused.code shouldBe "merge_failed"
+    refused.message should include("the answer to COMMIT was lost")
+    f.row(id).status shouldBe BranchMergeStatus.Proposed
+    f.row(id).error.get should startWith(MergeExecutor.TimedOut)
+    f.status shouldBe BranchStatus.Proposed
+    f.fenceDisarms shouldBe empty
+    // A new proposal could not settle this commit, which may yet land.
+    f.propose().left.map(_.code) shouldBe Left("proposal_unsettled")
+    // It lands: the next merge settles it, and applies nothing.
+    f.mergeFails = None
+    f.mergeBatches.clear()
+    f.land(id)
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    f.row(id).status shouldBe BranchMergeStatus.Merged
+    f.mergeBatches shouldBe empty
+  }
+
   it should "close the proposal on a node failure that is not a timeout" in {
     val f = new Fixture
     f.create("x")

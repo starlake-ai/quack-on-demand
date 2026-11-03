@@ -2,6 +2,7 @@ package ai.starlake.quack.boot
 
 import ai.starlake.quack.BranchingConfig
 import ai.starlake.quack.edge.adapter.{
+  ListFailure,
   MessageType,
   NodeLoadTracker,
   QuackError,
@@ -12,11 +13,12 @@ import ai.starlake.quack.edge.adapter.{
   QuackResponse,
   QuackTestFixtures,
   QuackTransport,
+  QuackWireError,
   TestArrow
 }
 import ai.starlake.quack.edge.authz.NodeKeys
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RunningNode}
-import ai.starlake.quack.ondemand.branch.MergeExecutor
+import ai.starlake.quack.ondemand.branch.{MergeDecision, MergeExecutor}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import cats.data.EitherT
 import cats.effect.IO
@@ -123,16 +125,17 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
         token: String,
         authorize: () => String,
         statements: List[String]
-    ): IO[Either[QuackError, Unit]] =
-      statements.foldLeft(IO.pure[Either[QuackError, Unit]](Right(()))) { (done, sql) =>
-        done.flatMap {
-          case Left(err) => IO.pure(Left(err))
-          case Right(_)  =>
-            IO { sent.synchronized(sent += sql); authorize() } *> answer(sql).flatMap {
-              case QuackResponse.Ok(_, _, close) => IO(close()).as(Right(()))
-              case QuackResponse.Failed(err, _)  => IO.pure(Left(err))
-            }
-        }
+    ): IO[Either[ListFailure, Unit]] =
+      statements.zipWithIndex.foldLeft(IO.pure[Either[ListFailure, Unit]](Right(()))) {
+        case (done, (sql, entry)) =>
+          done.flatMap {
+            case Left(failure) => IO.pure(Left(failure))
+            case Right(_)      =>
+              IO { sent.synchronized(sent += sql); authorize() } *> answer(sql).flatMap {
+                case QuackResponse.Ok(_, _, close) => IO(close()).as(Right(()))
+                case QuackResponse.Failed(err, _)  => IO.pure(Left(ListFailure(Some(entry), err)))
+              }
+          }
       }
 
   /** A node's side of the wire as the real protocol sees it: every message is answered at once
@@ -153,9 +156,14 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
     def count(m: MessageType): Int = seen.asScala.count(_ == m.wireOrdinal)
 
   /** A wire whose answer to a statement's PREPARE depends on the statement: the node's side of a
-    * list. Keeps every statement that arrived and counts what else did, in order.
+    * list. Keeps every statement that arrived and counts what else did, in order. `handle` answers
+    * the nth session handle.
     */
-  private final class ListWire(answer: String => IO[Array[Byte]]) extends QuackTransport:
+  private final class ListWire(
+      answer: String => IO[Array[Byte]],
+      handle: Int => IO[Array[Byte]] = _ => IO(preludeOk)
+  ) extends QuackTransport:
+    private val handles                                    = new AtomicInteger(0)
     private val seen                                       = new ConcurrentLinkedQueue[Int]()
     val statements                                         = new ConcurrentLinkedQueue[String]()
     val steps                                              = new ConcurrentLinkedQueue[String]()
@@ -165,7 +173,7 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       if t == MessageType.PrepareRequest.wireOrdinal then
         if isHandle(body) then
           steps.add("handle")
-          IO(preludeOk)
+          handle(handles.incrementAndGet())
         else
           val text = new String(body, StandardCharsets.ISO_8859_1)
           statements.add(text)
@@ -611,6 +619,91 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       gate.countDown()
       eventually(10.seconds)(allocator.getAllocatedMemory == 0L)
       allocator.close()
+  }
+
+  /** An Apply's shape over the real client on `wire`: what `exec` answers. */
+  private def applyOver(wire: ListWire): Either[String, Unit] =
+    val allocator = new RootAllocator()
+    try
+      listening { port =>
+        executorOver(new FakeBackend(port), realClient(allocator, wire))
+          .withNode(spec)(_.exec(List("BEGIN", "UPDATE x SET i = 1", "COMMIT")))
+          .unsafeRunSync()
+      }
+    finally allocator.close()
+
+  private def isCommit(text: String) = text.contains("COMMIT")
+
+  it should "read a lost answer to COMMIT as an unknown outcome, as it reads a send that timed out" in
+    // A 5xx, and the JDK client's own failure: neither says what the node did with the COMMIT.
+    List(
+      QuackWireError.Transient("HTTP 503 from Quack node\nthe second line"),
+      new java.io.IOException("HTTP/1.1 header parser received no bytes\nthe second line")
+    ).foreach { lost =>
+      val wire = new ListWire(text => if isCommit(text) then IO.raiseError(lost) else IO(preludeOk))
+      val first = lost.getMessage.linesIterator.next()
+      applyOver(wire) shouldBe Left(
+        s"${MergeExecutor.TimedOut}the answer to COMMIT was lost, so it may have landed: $first"
+      )
+      wire.steps.asScala.toList.takeRight(3) shouldBe List("handle", "statement", "disconnect")
+    }
+
+  it should "keep a transport failure before COMMIT definite: no COMMIT went out" in
+    List(
+      QuackWireError.Transient("HTTP 503 from Quack node"),
+      new java.io.IOException("HTTP/1.1 header parser received no bytes")
+    ).foreach { lost =>
+      val wire =
+        new ListWire(text => if text.contains("UPDATE") then IO.raiseError(lost) else IO(preludeOk))
+      applyOver(wire) shouldBe Left(lost.getMessage)
+      wire.statements.asScala.exists(isCommit) shouldBe false
+      wire.steps.asScala.toList.last shouldBe "disconnect"
+    }
+
+  it should "keep a failed handle before COMMIT definite: COMMIT itself never went out" in {
+    val refused =
+      QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")
+    // Entries 0 and 1 went out; the third handle is COMMIT's.
+    List[Int => IO[Array[Byte]]](
+      {
+        case 3 => IO(refused)
+        case _ => IO(preludeOk)
+      },
+      {
+        case 3 => IO.raiseError(new java.io.IOException("connection reset"))
+        case _ => IO(preludeOk)
+      }
+    ).foreach { third =>
+      val wire = new ListWire(_ => IO(preludeOk), third)
+      val out  = applyOver(wire)
+      out.left.toOption.exists(_.startsWith(MergeExecutor.TimedOut)) shouldBe false
+      out.isLeft shouldBe true
+      wire.statements.asScala.exists(isCommit) shouldBe false
+      wire.steps.asScala.toList.last shouldBe "disconnect"
+    }
+  }
+
+  it should "keep the node's own answer on COMMIT definite: a fence refusal stays retryable" in {
+    def answered(text: String) =
+      val wire = new ListWire(sql =>
+        IO(
+          if isCommit(sql) then QuackTestFixtures.serializeSampleErrorResponse(text) else preludeOk
+        )
+      )
+      applyOver(wire).left.toOption.get
+    val refused = answered("qod merge fence: a merged table moved past snapshot 3")
+    refused should not startWith MergeExecutor.TimedOut
+    refused should include("qod merge fence: a merged table moved past snapshot 3")
+    MergeDecision.mainMoved(refused) shouldBe true
+    val conflict = answered("Transaction conflict: attempting to delete from a deleted file")
+    conflict should not startWith MergeExecutor.TimedOut
+    conflict should include("Transaction conflict")
+    // An HTTP answer from the node refuses the request: nothing ran.
+    val http = new ListWire(sql =>
+      if isCommit(sql) then IO.raiseError(QuackWireError.Permanent("HTTP 401 from Quack node"))
+      else IO(preludeOk)
+    )
+    applyOver(http) shouldBe Left("HTTP 401 from Quack node")
   }
 
   it should "hold the whole list to the bound, not each statement" in {

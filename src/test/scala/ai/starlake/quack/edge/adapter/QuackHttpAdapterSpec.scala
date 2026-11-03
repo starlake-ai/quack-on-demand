@@ -110,7 +110,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
           token: String,
           authorize: () => String,
           statements: List[String]
-      ): IO[Either[QuackError, Unit]] = IO {
+      ): IO[Either[ListFailure, Unit]] = IO {
         seen = Some((endpoint, token, statements))
         statements.foreach(_ => handles += authorize())
         Right(())

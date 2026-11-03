@@ -67,7 +67,9 @@ trait MergeExecutor:
 
 object MergeExecutor:
 
-  /** How the reason of a node call that did not answer within its bound starts. */
+  /** How the reason of a node call with an unknown outcome starts: it did not answer within its
+    * bound, or the answer to a COMMIT was lost. Either way a commit can still land.
+    */
   val TimedOut = "timeout: "
 
 /** Change-feed counts of one modified table on the branch pool: `(inserted, deleted, updated)`.

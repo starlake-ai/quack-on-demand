@@ -1,7 +1,7 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.{BranchingConfig, ManagedObjectStoreConfig}
-import ai.starlake.quack.edge.adapter.{QuackError, QuackHttpAdapter, QuackResponse}
+import ai.starlake.quack.edge.adapter.{ListFailure, QuackError, QuackHttpAdapter, QuackResponse}
 import ai.starlake.quack.model.{Branch, NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.api.{
   ArrowRowsDecoder,
@@ -10,6 +10,7 @@ import ai.starlake.quack.ondemand.api.{
   ExecCaller
 }
 import ai.starlake.quack.ondemand.branch.{
+  BranchMergeSql,
   BranchService,
   ChangeCounter,
   MergeExecutor,
@@ -105,7 +106,8 @@ object BranchWiring extends LazyLogging:
       * waiting for it to end, as `timeoutTo` does, would hold the answer for as long as the node
       * hangs. The send is abandoned instead, and ends when `backend.stop` kills the node. The
       * cancel still reaches it: once the statement in flight answers, a list closes its connection
-      * and sends no other, so only a COMMIT already in flight can land after a timeout.
+      * and sends no other, so only a COMMIT the client had already begun to send can land after a
+      * timeout.
       */
     private def bounded[A](call: IO[Either[String, A]]): IO[Either[String, A]] =
       call
@@ -133,7 +135,7 @@ object BranchWiring extends LazyLogging:
         bounded(
           adapter
             .sendAll(node, statements, ai.starlake.quack.edge.authz.NodePrincipal.System)
-            .map(_.left.map(textOf))
+            .map(_.left.map(reasonOf(statements, _)))
         )
 
       def rows(sql: String): IO[Either[String, List[List[Json]]]] =
@@ -150,6 +152,20 @@ object BranchWiring extends LazyLogging:
                 case Right((_, rows, false)) => Right(rows)
               }
         })
+
+    /** What a list's failure tells the merge. A COMMIT that went out and got no answer has an
+      * unknown outcome: it can still be running, and land after any look. So it reads as a send
+      * that timed out, which keeps the proposal open and the fence row up, and the next merge
+      * settles it. Everything else is definite. Before COMMIT nothing can land: no COMMIT was sent,
+      * and the connection's end rolls back. An answer from the node to COMMIT says what became of
+      * it: a fence refusal stays a retryable refusal, a commit conflict what it is.
+      */
+    private def reasonOf(statements: List[String], failure: ListFailure): String = failure match
+      case ListFailure(Some(entry), QuackError.Transient(message, false))
+          if statements.lift(entry).contains(BranchMergeSql.Commit) =>
+        val firstLine = message.linesIterator.nextOption().getOrElse("")
+        s"${MergeExecutor.TimedOut}the answer to COMMIT was lost, so it may have landed: $firstLine"
+      case ListFailure(_, err) => textOf(err)
 
     private def textOf(err: QuackError): String = err match
       case QuackError.Transient(message, _) => message

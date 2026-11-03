@@ -12,6 +12,9 @@ object BranchMergeSql:
 
   val BranchAlias: String = "qod_branch"
 
+  /** What ends an Apply: the one statement of the stage that can make it land. */
+  val Commit: String = "COMMIT"
+
   private def q(ident: String): String = SqlLiterals.duckdbIdent(ident)
   private def lit(v: String): String   = SqlLiterals.duckdbLiteral(v)
 
@@ -108,7 +111,7 @@ object BranchMergeSql:
       "SET ducklake_max_retry_count = 200",
       "SET ducklake_retry_wait_ms = 10",
       "SET ducklake_retry_backoff = 1"
-    ) ++ others ++ rows ++ List("COMMIT")
+    ) ++ others ++ rows ++ List(Commit)
 
   /** Locates the merge snapshot on the parent by its unique commit message. */
   def findSnapshotSql(parentAlias: String, message: String): String =

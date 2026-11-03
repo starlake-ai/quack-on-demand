@@ -55,8 +55,8 @@ final class QuackHttpAdapter(
     )(NodeOutcome.fromQuackResponse)
 
   /** `statements` in order on one connection of `node`, for `principal`, each PREPARE after a fresh
-    * session handle, and nothing more once one fails or the caller cancels
-    * ([[QuackHttpClient.queryAll]]). For the manager's own work on a node of its own, whose
+    * session handle, and nothing more once one fails or the caller cancels: a failure names its
+    * entry ([[QuackHttpClient.queryAll]]). For the manager's own work on a node of its own, whose
     * statements can run past what one handle lives: it skips all the tracker's bookkeeping, as
     * `send(recordLoad = false)` does.
     */
@@ -64,7 +64,7 @@ final class QuackHttpAdapter(
       node: RunningNode,
       statements: List[String],
       principal: NodePrincipal
-  ): IO[Either[QuackError, Unit]] =
+  ): IO[Either[ListFailure, Unit]] =
     client.queryAll(
       s"quack:${node.host}:${node.port}",
       node.token,

@@ -16,7 +16,10 @@ final class PortAllocator(min: Int, max: Int):
     * merge node has no row for the next manager to learn it from: a node started on that port
     * cannot bind, while the next manager's calls reach the leftover and fail "Authentication
     * failed". A connect, not a bind: on macOS a JVM's bind succeeds beside an IPv4 listener on the
-    * same port. A leftover bound to one other address (`QOD_NODE_BIND`) goes unseen.
+    * same port. A leftover bound to one other address (`QOD_NODE_BIND`) goes unseen. The probe runs
+    * under the allocator's monitor, at most 200 ms per unanswered port. A node killed a moment
+    * earlier may still be seen as listening, and its replacement gets the next port, which is
+    * benign.
     */
   private def free(port: Int): Boolean =
     val s = new java.net.Socket()

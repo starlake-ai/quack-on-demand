@@ -783,7 +783,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
         transport: QuackTransport,
         allocator: RootAllocator,
         statements: List[String] = List("BEGIN", "UPDATE t SET i = 1", "COMMIT")
-    ): IO[Either[QuackError, Unit]] =
+    ): IO[Either[ListFailure, Unit]] =
       clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
         .queryAll(endpoint, token, minting(), statements)
 
@@ -817,7 +817,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       finally allocator.close()
     }
 
-    it("stops at the first failure, with its text, and closes the connection") {
+    it("stops at the first failure, naming its entry, with its text, and closes the connection") {
       val transport = ScriptedTransport {
         case 2 => IO(QuackTestFixtures.serializeSampleErrorResponse("Transaction conflict: no"))
         case _ => IO(empty)
@@ -825,14 +825,16 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         all(transport, allocator).unsafeRunSync() match
-          case Left(QuackError.Permanent(msg)) => msg should include("Transaction conflict: no")
-          case other                           => fail(s"expected Permanent, got $other")
+          case Left(ListFailure(entry, QuackError.Permanent(msg))) =>
+            entry shouldBe Some(1)
+            msg should include("Transaction conflict: no")
+          case other => fail(s"expected Permanent, got $other")
         transport.steps shouldBe
           List("connect", "handle", "prepare", "handle", "prepare", "disconnect")
       finally allocator.close()
     }
 
-    it("stops at a refused handle: Transient, and notSent only before any statement went out") {
+    it("stops at a refused handle: Transient, naming the entry that never went out") {
       val refused =
         QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")
       val first = ScriptedTransport(_ => IO(empty), onPrelude = _ => IO(refused))
@@ -846,19 +848,23 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         all(first, allocator).unsafeRunSync() match
-          case Left(QuackError.Transient(msg, notSent)) =>
+          case Left(ListFailure(entry, QuackError.Transient(msg, notSent))) =>
+            entry shouldBe Some(0)
             msg should include("refused the statement's session handle")
             notSent shouldBe true
           case other => fail(s"expected Transient, got $other")
         first.steps shouldBe List("connect", "handle", "disconnect")
+        // An earlier statement went out, this one did not: `notSent` speaks of the entry it names.
         all(later, allocator).unsafeRunSync() match
-          case Left(QuackError.Transient(_, notSent)) => notSent shouldBe false
-          case other                                  => fail(s"expected Transient, got $other")
+          case Left(ListFailure(entry, QuackError.Transient(_, notSent))) =>
+            entry shouldBe Some(1)
+            notSent shouldBe true
+          case other => fail(s"expected Transient, got $other")
         later.steps shouldBe List("connect", "handle", "prepare", "handle", "disconnect")
       finally allocator.close()
     }
 
-    it("answers a transport failure as sent once a statement went out, and closes") {
+    it("answers a 5xx on a statement as Transient and sent, naming its entry, and closes") {
       val transport = ScriptedTransport {
         case 2 => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
         case _ => IO(empty)
@@ -866,8 +872,59 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       val allocator = new RootAllocator()
       try
         all(transport, allocator).unsafeRunSync() shouldBe
-          Left(QuackError.Transient("HTTP 503 from Quack node", notSent = false))
+          Left(ListFailure(Some(1), QuackError.Transient("HTTP 503 from Quack node")))
         transport.steps.last shouldBe "disconnect"
+      finally allocator.close()
+    }
+
+    it("answers the JDK client's own failure on a statement the same: no answer came") {
+      def lost(e: Throwable) = ScriptedTransport {
+        case 3 => IO.raiseError(e)
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        val transport = lost(new java.io.IOException("HTTP/1.1 header parser received no bytes"))
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(
+            ListFailure(
+              Some(2),
+              QuackError.Transient("HTTP/1.1 header parser received no bytes")
+            )
+          )
+        transport.steps.last shouldBe "disconnect"
+        // ConnectException and its kin carry no message at all.
+        all(lost(new java.net.ConnectException()), allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(Some(2), QuackError.Transient("java.net.ConnectException")))
+      finally allocator.close()
+    }
+
+    it("answers a transport failure on a handle as not sent: its statement never went out") {
+      val transport = ScriptedTransport(
+        _ => IO(empty),
+        onPrelude = {
+          case 2 => IO.raiseError(new java.io.IOException("connection reset"))
+          case _ => IO(preludeOk)
+        }
+      )
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(Some(1), QuackError.Transient("connection reset", notSent = true)))
+        transport.steps shouldBe List("connect", "handle", "prepare", "handle", "disconnect")
+      finally allocator.close()
+    }
+
+    it("names no entry when no connection opened") {
+      val transport = ScriptedTransport(
+        _ => IO(empty),
+        onConnect = IO.raiseError(new java.net.ConnectException("connection refused"))
+      )
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(None, QuackError.Transient("connection refused", notSent = true)))
+        transport.steps shouldBe List("connect")
       finally allocator.close()
     }
 

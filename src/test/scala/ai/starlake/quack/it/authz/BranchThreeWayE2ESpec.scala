@@ -19,7 +19,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration.*
-import scala.util.{Try, Using}
+import scala.util.{Failure, Success, Try, Using}
 
 /** The three-way merge on a real manager and real qod-node processes: proposal, conflicts, policy,
   * hold, encryption, a stage past one session handle's life, and no cell value left behind in the
@@ -106,16 +106,27 @@ class BranchThreeWayE2ESpec
   override def afterEach(): Unit =
     try
       opened.foreach { (td, pool) =>
-        Try(stack.postStatus("/api/branch/discard", proposeBody(td, "feature")))
-        Try(
-          stack.postStatus(
-            "/api/pool/delete",
-            obj("tenant" -> s(Acme), "tenantDb" -> s(td), "pool" -> s(pool), "force" -> Json.True)
-          )
+        // A merged or never-made branch is gone already: 404.
+        cleanUp(td, "/api/branch/discard", proposeBody(td, "feature"), Set(200, 404))
+        cleanUp(
+          td,
+          "/api/pool/delete",
+          obj("tenant" -> s(Acme), "tenantDb" -> s(td), "pool" -> s(pool), "force" -> Json.True),
+          Set(200)
         )
       }
       opened.clear()
     finally super.afterEach()
+
+  /** One step of [[afterEach]]. A step that fails is printed: dropped, it would show only as `no
+    * free port` in a later case. It fails no case of its own.
+    */
+  private def cleanUp(td: String, path: String, body: String, fine: Set[Int]): Unit =
+    Try(stack.postStatus(path, body)) match
+      case Success((code, _)) if fine(code) => ()
+      case Success((code, answer))          =>
+        println(s"cleanup of $td: $path answered $code: ${answer.take(300)}")
+      case Failure(e) => println(s"cleanup of $td: $path failed: ${e.getMessage}")
 
   private def ready(): Unit = assume(missing.isEmpty, missing.getOrElse(""))
 

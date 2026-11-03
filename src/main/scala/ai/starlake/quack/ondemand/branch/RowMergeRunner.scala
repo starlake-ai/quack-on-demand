@@ -14,7 +14,9 @@ trait MergeNode:
   /** `statements` in order on the call's one connection, so a transaction and session settings span
     * them. Every entry is exactly one statement: the node binds each under a session handle of its
     * own, and a statement sharing an entry with another could bind after that handle has expired.
-    * The first failure ends the call and its connection, which rolls an open transaction back.
+    * The first failure ends the call and its connection, which rolls an open transaction back. A
+    * COMMIT whose answer was lost may have landed: its reason starts with
+    * [[MergeExecutor.TimedOut]], as for a call that timed out.
     */
   def exec(statements: List[String]): IO[Either[String, Unit]]
 
