@@ -208,7 +208,7 @@ def propose(
     on_conflict: str = typer.Option(
         None,
         "--on-conflict",
-        help="Which side wins every conflict (a cell, a row one side deleted and the other updated, rows matching a --key): main or branch. Without it, any conflict refuses the merge.",
+        help="Which side wins every row conflict (a cell, a row one side deleted and the other updated, rows matching a --key): main or branch. Without it, any conflict refuses the merge.",
     ),
     key: list[str] = typer.Option(
         None,

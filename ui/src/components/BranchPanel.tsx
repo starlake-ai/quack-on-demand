@@ -375,8 +375,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
   const [mergeFor, setMergeFor] = useState<BranchEntry | null>(null);
   const [mProposal, setMProposal] = useState<BranchMergeEntry | null>(null);
   const [mHold, setMHold] = useState(false);
-  // Bumped to make an expanded panel read again, by Refresh and by a refused action. Not by a plain
-  // `reload`: each re-run of the panel's effect counts the change set again.
+  // Bumped by `reload(true)` to make an expanded panel read again, in the same render as the new
+  // rows, so the two make one run of its effect. A plain `reload` never does: each run counts the
+  // change set again.
   const [refresh, setRefresh] = useState(0);
 
   function openForm() {
@@ -387,10 +388,13 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
     setFormOpen(true);
   }
 
-  function reload() {
+  function reload(readAgain = false) {
     setError(null);
     api.listBranches(tenant, tenantDb, showAll)
-      .then(r => setRows(r.branches))
+      .then(r => {
+        setRows(r.branches);
+        if (readAgain) setRefresh(n => n + 1);
+      })
       .catch(e => { setRows([]); setError(errText(e)); });
   }
 
@@ -422,9 +426,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
       .then(r => { setNote(onOk(r)); reload(); })
       .catch(e => {
         // A refusal can leave the list and the panel stale (a replaced proposal, a proposal the
-        // refusal closed). `reload` clears the error, so it goes first.
-        reload();
-        setRefresh(n => n + 1);
+        // refusal closed, a merge that timed out and wrote only its merge row). The panel is read
+        // again only if it is this branch's. `reload` clears the error, so it goes first.
+        reload(expanded === b.name);
         setError(`${label} '${b.name}': ${errText(e)}`);
       })
       .finally(() => setBusy(null));
@@ -465,7 +469,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         setProposeFor(null);
         reload();
       })
-      .catch(e => setPError(errText(e)))
+      // A refusal reloads too: a long propose can still land after its answer is lost, and the
+      // branch may have been ended by someone else. `reload` leaves `pError` alone.
+      .catch(e => { setPError(errText(e)); reload(); })
       .finally(() => setBusy(null));
   };
 
@@ -506,7 +512,12 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
 
   const discard = (b: BranchEntry) => {
     if (!window.confirm(`Discard branch '${b.name}'? Its pool, catalog and files are freed; this cannot be undone.`)) return;
-    act('discard', b, () => api.discardBranch({ tenant, tenantDb, branch: b.name }), () => `branch '${b.name}' discarded`);
+    act('discard', b, () => api.discardBranch({ tenant, tenantDb, branch: b.name }), () => {
+      // The branch is gone: a form still open for it would describe nothing. Other branches' stay.
+      setProposeFor(cur => (cur?.name === b.name ? null : cur));
+      setMergeFor(cur => (cur?.name === b.name ? null : cur));
+      return `branch '${b.name}' discarded`;
+    });
   };
 
   return (
@@ -517,12 +528,13 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
             <input type="checkbox" checked={showAll} onChange={ev => setShowAll(ev.target.checked)} />
             {' '}<span className="subtle">Include merged, discarded and expired</span>
           </label>
-          <button type="button" className="link-button" onClick={() => { reload(); setRefresh(n => n + 1); }}>Refresh</button>
+          <button type="button" className="link-button" onClick={() => reload(true)}>Refresh</button>
         </div>
         {!formOpen && <button type="button" className="link-button" onClick={openForm}>Create branch</button>}
       </div>
       {error && <div className="login-err">Error: {error}</div>}
       {note && <div className="login-notice" role="status">{note}</div>}
+      {busy && <p className="subtle">Working on branch {busy}...</p>}
 
       {!rows && <p className="subtle">Loading branches...</p>}
       {rows && rows.length === 0 && (

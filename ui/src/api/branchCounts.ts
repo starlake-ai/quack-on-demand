@@ -66,12 +66,12 @@ export function rowConflictsHint(
   * console does not know (a policy the server gained later) is named, never read as one. */
 export function conflictPolicyText(onConflict?: string | null): string {
   if (onConflict === 'main') {
-    return 'Main wins every conflict: a conflicting cell keeps its value, a row it deleted stays ' +
+    return 'Main wins every row conflict: a conflicting cell keeps its value, a row it deleted stays ' +
       'deleted, a row it updated stays even if the branch deleted it, and a branch row matching a ' +
       'key is dropped.';
   }
   if (onConflict === 'branch') {
-    return 'The branch wins every conflict: a conflicting cell takes its value, a row it deleted is ' +
+    return 'The branch wins every row conflict: a conflicting cell takes its value, a row it deleted is ' +
       'deleted from main even if main updated it, a row it updated returns even if main deleted ' +
       "it, and main's rows matching a key are deleted.";
   }

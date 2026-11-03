@@ -125,7 +125,7 @@ describe('rowConflictsHint', () => {
 describe('conflictPolicyText', () => {
   it('says what main winning does to every kind of conflict', () => {
     expect(conflictPolicyText('main')).toBe(
-      'Main wins every conflict: a conflicting cell keeps its value, a row it deleted stays ' +
+      'Main wins every row conflict: a conflicting cell keeps its value, a row it deleted stays ' +
         'deleted, a row it updated stays even if the branch deleted it, and a branch row matching a ' +
         'key is dropped.',
     );
@@ -133,7 +133,7 @@ describe('conflictPolicyText', () => {
 
   it('says what the branch winning does to every kind of conflict', () => {
     expect(conflictPolicyText('branch')).toBe(
-      'The branch wins every conflict: a conflicting cell takes its value, a row it deleted is ' +
+      'The branch wins every row conflict: a conflicting cell takes its value, a row it deleted is ' +
         'deleted from main even if main updated it, a row it updated returns even if main deleted ' +
         "it, and main's rows matching a key are deleted.",
     );
