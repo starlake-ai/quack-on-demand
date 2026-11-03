@@ -28,10 +28,11 @@ import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
 /** The world-touching collaborators of the branch service (Epic 1), extracted from Main like the
-  * maintenance wiring: the ephemeral merge node runner (same spawn / await-ready / stop bracket as
-  * maintenance), the change-feed counter (one `ducklake_table_changes` aggregate per modified table
-  * on the branch pool through the routed executor), the branch-prefix purge (local filesystem or
-  * S3-compatible store with the tenant-db's own credentials), and the leader-gated TTL sweep.
+  * maintenance wiring: the ephemeral merge node runner (spawn, await-ready, run a body that may
+  * send several stages, stop), the change-feed counter (one `ducklake_table_changes` aggregate per
+  * modified table on the branch pool through the routed executor), the branch-prefix purge (local
+  * filesystem or S3-compatible store with the tenant-db's own credentials), and the leader-gated
+  * TTL sweep.
   */
 object BranchWiring extends LazyLogging:
 
@@ -43,8 +44,9 @@ object BranchWiring extends LazyLogging:
   /** Spawns `spec`, waits for it to accept connections, runs the body, stops the node. Each send is
     * bounded by `mergeTimeoutSec`: one that does not answer in time is abandoned (it ends when the
     * node is stopped) and reported as a `Left` starting with [[MergeExecutor.TimedOut]], and the
-    * caller settles the outcome by locating the commit message on the parent. A node that cannot be
-    * stopped is logged at ERROR.
+    * caller settles the outcome by locating the commit message on the parent. A stop that raises is
+    * logged at ERROR; Kubernetes' timeout and fleet's deadline return normally (each logs a WARN of
+    * its own), so a node can outlive its stop.
     */
   def mergeExecutor(
       cfg: BranchingConfig,
@@ -83,9 +85,9 @@ object BranchWiring extends LazyLogging:
           case Right(node) => stopped(node)
         }
 
-    /** Stops `node`. One that cannot be stopped is logged, not swallowed: it may still be running,
-      * and a caller that counts on the node being gone (the merge's last look at main) needs the
-      * trace.
+    /** Stops `node`. A stop that raises is logged at ERROR, not swallowed: the node may still be
+      * running, and a caller that counts on it being gone needs the trace. A stop that returns is
+      * taken as done, though Kubernetes' timeout and fleet's deadline return without confirming.
       */
     private def stopped(node: RunningNode): IO[Unit] =
       backend.stop(node.poolKey, node.nodeId).handleErrorWith { e =>
@@ -107,8 +109,10 @@ object BranchWiring extends LazyLogging:
       call
         .timeoutAndForget(cfg.mergeTimeoutSec.seconds)
         .recover { case _: TimeoutException =>
+          val sec = cfg.mergeTimeoutSec
           Left(
-            s"${MergeExecutor.TimedOut}the merge node did not answer within ${cfg.mergeTimeoutSec}s"
+            s"${MergeExecutor.TimedOut}the merge node did not answer within ${sec}s; " +
+              "raise QOD_BRANCH_MERGE_TIMEOUT_SEC if the stage needs longer"
           )
         }
 

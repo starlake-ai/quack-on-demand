@@ -50,7 +50,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** The merge node bracket, `BranchWiring.mergeExecutor`: what the merge and the proposal analysis
-  * (Tasks 7 and 8) rely on when they send several stages to one ephemeral node.
+  * rely on when they send several stages to one ephemeral node.
   *
   * Most cases run it over a fake backend (nodes that start and stop on command) and a fake native
   * client. The bound and the happy path run it over the real client on a scripted wire
@@ -62,8 +62,11 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
   private val cfg  = BranchingConfig(mergeTimeoutSec = 1, nodeReadyTimeoutSec = 1)
   private val spec = NodeSpec(PoolKey("t", "d", "p"), "merge-1", Role.Dual, Map.empty, Map.empty)
 
-  /** How long the hung node holds a statement's PREPARE: well past the 1 s bound. */
-  private val HungMs = 4000L
+  /** The longest a held statement waits for its gate. Only a safety net: each case releases the
+    * gate itself, so a wire still held after this long belongs to a failed run, and ends instead of
+    * hanging it.
+    */
+  private val GateSafetyNet = 10.seconds
 
   /** What `BranchWiring` decodes a result up to (its private `MergeNodeMaxRows`). */
   private val RowCap = 1000
@@ -199,6 +202,29 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       stopScheduler()
       compute.shutdown()
       blocking.shutdown()
+
+  /** Runs `body` over the real client on a wire whose statement PREPARE is held, uninterruptibly as
+    * a JDK send to a hung node is, until `body` releases the gate. Whatever `body` does, the gate
+    * is released at the end and the abandoned send is waited for before the allocator is closed, so
+    * a failed case reports its own failure and not a leak.
+    */
+  private def overHungWire(
+      body: (RootAllocator, ScriptedWire, QuackHttpClient, CountDownLatch) => Unit
+  ): Unit =
+    val allocator = new RootAllocator()
+    val gate      = new CountDownLatch(1)
+    try
+      val wire = new ScriptedWire(
+        IO.blocking {
+          gate.await(GateSafetyNet.toSeconds, TimeUnit.SECONDS)
+          prepareOk
+        }
+      )
+      body(allocator, wire, realClient(allocator, wire), gate)
+    finally
+      gate.countDown()
+      eventually(10.seconds)(allocator.getAllocatedMemory == 0L)
+      allocator.close()
 
   "withNode" should "run several stages on one node, then stop it once" in
     listening { port =>
@@ -428,46 +454,44 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       List("probe-blocking", "probe-blocking")
   }
 
-  "a node that hangs" should "be answered with Left at the bound, with its send still running" in {
-    val allocator = new RootAllocator()
-    try
-      val wire   = new ScriptedWire(IO.blocking { Thread.sleep(HungMs); prepareOk })
-      val client = realClient(allocator, wire)
+  "a node that hangs" should "be answered with Left at the bound, with its send still running" in
+    overHungWire { (allocator, wire, client, gate) =>
       listening { port =>
         val backend = new FakeBackend(port)
         val began   = System.nanoTime()
         val out     = executorOver(backend, client).withNode(spec)(_.exec("S")).unsafeRunSync()
         val elapsed = (System.nanoTime() - began).nanos.toMillis
-        withClue(s"after $elapsed ms: ") {
-          out.left.toOption.exists(_.startsWith(MergeExecutor.TimedOut)) shouldBe true
-          // The answer came while the POST was still blocked: the bound did not wait for the send.
-          wire.statementReturned.get shouldBe false
-          elapsed should (be >= 900L and be < 3000L)
-        }
+        val reason  = out.left.toOption.getOrElse(fail(s"expected a Left, got $out"))
+        reason should startWith(MergeExecutor.TimedOut)
+        // The reason tells the operator the way out, with the bound that was hit.
+        reason should include("within 1s")
+        reason should include("QOD_BRANCH_MERGE_TIMEOUT_SEC")
+        // The answer came while the POST was still held: the bound did not wait for the send. The
+        // gate is the test's to release, so this holds on any machine, however slow.
+        wire.statementReturned.get shouldBe false
+        // And it did not come before the bound.
+        elapsed should be >= 900L
         backend.stops.get shouldBe 1
-        // The abandoned send ends once its POST returns, and closes its connection and its result.
+        // Released, the abandoned send ends, and closes its connection and its result.
+        gate.countDown()
         eventually(10.seconds)(wire.count(MessageType.DisconnectMessage) == 1) shouldBe true
         eventually(5.seconds)(allocator.getAllocatedMemory == 0L) shouldBe true
       }
-    finally allocator.close()
-  }
+    }
 
-  it should "bound rows the same way" in {
-    val allocator = new RootAllocator()
-    try
-      val wire   = new ScriptedWire(IO.blocking { Thread.sleep(HungMs); prepareOk })
-      val client = realClient(allocator, wire)
+  it should "bound rows the same way" in
+    overHungWire { (allocator, wire, client, gate) =>
       listening { port =>
         val out = executorOver(new FakeBackend(port), client)
           .withNode(spec)(_.rows("SELECT 1"))
           .unsafeRunSync()
         out.left.toOption.exists(_.startsWith(MergeExecutor.TimedOut)) shouldBe true
         wire.statementReturned.get shouldBe false
+        gate.countDown()
         eventually(10.seconds)(wire.count(MessageType.DisconnectMessage) == 1) shouldBe true
         eventually(5.seconds)(allocator.getAllocatedMemory == 0L) shouldBe true
       }
-    finally allocator.close()
-  }
+    }
 
   "over the real client" should "close the connection after exec, and read rows off the wire" in {
     val allocator = new RootAllocator()
