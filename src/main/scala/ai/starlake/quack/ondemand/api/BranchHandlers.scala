@@ -281,7 +281,16 @@ final class BranchHandlers(
       case Left(e)                 => IO.pure(Left(e))
       case Right((tid, db, actor)) =>
         service
-          .merge(tid, db, req.branch, req.expectedMainSnapshot, actor, apiKey)
+          .merge(
+            tid,
+            db,
+            req.branch,
+            req.proposalId,
+            req.expectedMainSnapshot,
+            holdWriters = false,
+            actor,
+            apiKey
+          )
           .map(_.left.map(toErr).map { case (b, m, cs) =>
             BranchMergeResponse(
               entry(b),

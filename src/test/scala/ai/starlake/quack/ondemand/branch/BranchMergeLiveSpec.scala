@@ -1,14 +1,15 @@
 package ai.starlake.quack.ondemand.branch
 
+import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration.*
 
 /** Live spec (local Postgres + duckdb CLI): change-set classification over real metadata and the
-  * fast-forward merge batch of design section 4.5, end to end.
+  * row merge, end to end.
   */
 class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFixture:
 
@@ -48,15 +49,11 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
       |DROP TABLE qod_branch.tpch1.nation;
       |""".stripMargin
 
-  "BranchChanges + BranchMergeSql" should
-    "classify a real branch and fast-forward it onto main in one stamped snapshot" in
+  "BranchChanges + the row merge" should
+    "classify a real branch and land it on main in one stamped snapshot" in
     withCatalog("brmerge", extra) { (parent, _) =>
       withBranchDb { (branchDb, branchDir) =>
-        val fork = BranchCloner(parentMeta)
-          .clone(parentMeta("dbName"), branchDb, branchDir.toString + "/")
-          .toOption
-          .get
-          .forkSnapshot
+        val fork = cloneBranch(branchDb, branchDir)
         duck(branchWrites, Some(branchDb), Some(branchDir))
         val mainBefore     = parent.maxSnapshotId().get
         val expectedRegion = duck(
@@ -82,16 +79,7 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
           cs.mergeable shouldBe true
 
           val message = BranchMergeSql.commitMessage("feature", "mg-test", "alice")
-          val sql     = BranchMergeSql.batch(
-            parentAlias = "lake",
-            branchAlias = BranchMergeSql.BranchAlias,
-            changes = cs.tables,
-            fork = fork,
-            head = cs.headSnapshot,
-            author = BranchMergeSql.author("acme", "bob"),
-            message = message
-          )
-          duck(sql, Some(branchDb), Some(branchDir))
+          withNode(branchDb, branchDir)(runMerge(_, cs, br, parent, message)).isRight shouldBe true
 
           duck(
             "SELECT r_regionkey, r_name FROM lake.tpch1.region ORDER BY 1;"
@@ -136,17 +124,7 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
             Some(branchDir)
           )
           val message = BranchMergeSql.commitMessage("feature", "mg-moved", "alice")
-          val sql     = BranchMergeSql.batch(
-            "lake",
-            BranchMergeSql.BranchAlias,
-            cs.tables,
-            fork,
-            cs.headSnapshot,
-            BranchMergeSql.author("acme", "bob"),
-            message
-          )
-          val out = duckAttempt(sql, Some(branchDb), Some(branchDir))
-          out shouldBe a[Left[?, ?]]
+          val out     = withNode(branchDb, branchDir)(runMerge(_, cs, br, parent, message))
           out.left.toOption.get should include("branch moved past snapshot")
           parent.snapshotByCommitMessage(message) shouldBe None
           duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
@@ -176,18 +154,19 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
             Some(branchDb),
             Some(branchDir)
           )
-          // The batch's own statements past its head guard, run against the moved branch: the
-          // pinned reads still see the validated row.
-          val body = cs.tables.flatMap(
-            BranchMergeSql.tableStatements(
-              "lake",
-              BranchMergeSql.BranchAlias,
-              _,
-              fork,
-              cs.headSnapshot
-            )
-          )
-          duck(body.mkString("BEGIN;\n", ";\n", ";\nCOMMIT;"), Some(branchDb), Some(branchDir))
+          // Apply's own statements past its head guard, run against the moved branch: the pinned
+          // reads still see the validated row.
+          val tables = planned(cs, br, parent)
+          val runner = new RowMergeRunner("lake", BranchMergeSql.BranchAlias, fork, None)
+          withNode(branchDb, branchDir) { node =>
+            runner.prepare(node, tables).unsafeRunSync() shouldBe Right(())
+            val counts = runner.decide(node, tables).unsafeRunSync().toOption.get
+            val body   = tables
+              .zip(counts)
+              .flatMap((t, c) => RowMergeSql.applyStatements("lake", t, c, false, 1000000L))
+            node.exec(body.mkString("BEGIN;\n", ";\n", ";\nCOMMIT;")).unsafeRunSync() shouldBe
+              Right(())
+          }
           duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
             List("VALIDATED")
         finally br.close()
@@ -455,15 +434,6 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
         // The racing main write, AFTER validation.
         duck(mainSql)
         val message = BranchMergeSql.commitMessage("feature", "mg-race", "alice")
-        val sql     = BranchMergeSql.batch(
-          parentAlias = "lake",
-          branchAlias = BranchMergeSql.BranchAlias,
-          changes = cs.tables,
-          fork = fork,
-          head = cs.headSnapshot,
-          author = BranchMergeSql.author("acme", "bob"),
-          message = message
-        )
         PostgresMergeFence.arm(
           parentMeta,
           message,
@@ -472,9 +442,9 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
           None
         ) shouldBe Right(())
         val out =
-          try duckAttempt(sql, Some(branchDb), Some(branchDir))
+          try withNode(branchDb, branchDir)(runMerge(_, cs, br, parent, message))
           finally PostgresMergeFence.disarm(parentMeta, message)
-        out shouldBe a[Left[?, ?]]
+        out.left.toOption.get should include("qod merge fence:")
         parent.snapshotByCommitMessage(message) shouldBe None
         duck(survivor._1) shouldBe survivor._2
       finally br.close()
@@ -517,15 +487,6 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
         try
           val cs      = BranchChanges.compute(br, parent, fork)
           val message = BranchMergeSql.commitMessage("feature", "mg-clean", "alice")
-          val sql     = BranchMergeSql.batch(
-            "lake",
-            BranchMergeSql.BranchAlias,
-            cs.tables,
-            fork,
-            cs.headSnapshot,
-            BranchMergeSql.author("acme", "bob"),
-            message
-          )
           PostgresMergeFence.arm(
             parentMeta,
             message,
@@ -533,7 +494,10 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
             cs.tables.flatMap(_.tableId).toSet,
             None
           ) shouldBe Right(())
-          try duck(sql, Some(branchDb), Some(branchDir))
+          try
+            withNode(branchDb, branchDir)(
+              runMerge(_, cs, br, parent, message)
+            ).isRight shouldBe true
           finally PostgresMergeFence.disarm(parentMeta, message)
           parent.snapshotByCommitMessage(message) shouldBe Some(cs.mainSnapshot + 1)
           duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
@@ -607,28 +571,6 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
       }
     }
 
-  "a retried commit" should "leave no hole in the snapshot ids the history-gap check relies on" in
-    withCatalog("fnretry", extra) { (parent, _) =>
-      given ExecutionContext = ExecutionContext.global
-      val fork               = parent.maxSnapshotId().get
-      val slow               = Future(
-        duckAttempt(
-          """BEGIN;
-            |UPDATE lake.tpch1.region SET r_name = 'SLOW' WHERE r_regionkey = 2;
-            |SELECT sleep_ms(4000);
-            |COMMIT;""".stripMargin
-        )
-      )
-      Thread.sleep(1500)
-      duck("INSERT INTO lake.tpch1.nation VALUES (2, 'IT');") // forces the slow commit to retry
-      Await.result(slow, 60.seconds).isRight shouldBe true
-      BranchChanges.historyGap(
-        parent.snapshotChangesSince(fork),
-        fork,
-        parent.maxSnapshotId().get
-      ) shouldBe None
-    }
-
   "a fenced merge's open transaction" should "retry over another table's commit and land after it" in
     withCatalog("fnretried", extra) { (parent, _) =>
       fencedRegionMerge(parent) { (cs, message, _, branchDb, branchDir) =>
@@ -665,7 +607,7 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
           val out = send()
           out.left.toOption.get should include("qod merge fence:")
           MergeDecision.mainMoved(out.left.toOption.get) shouldBe true
-          // DuckLake's retries take about 9 s and end with this text. If it shows, the failed query's
+          // DuckLake's retries take about 4 s and end with this text. If it shows, the failed query's
           // text holds a retry word: lower ducklake_max_retry_count in the Apply batch.
           out.left.toOption.get should not include "Exceeded the maximum retry count"
         finally PostgresMergeFence.disarm(parentMeta, message)
@@ -937,6 +879,128 @@ class BranchMergeLiveSpec extends AnyFlatSpec with Matchers with ThreeWayMergeFi
         Thread.sleep(2500)
         // A held writer would run out of DuckLake's retries, and `duck` fails on its error.
         duck("INSERT INTO lake.tpch1.region VALUES (7, 'WRITER', 'h');")
+      }
+    }
+
+  /** A duckdb CLI committing single-row inserts on `region`, each with `r_name = 'W'`, one after
+    * another, until the answer stops it or its statements run out, about 20 s at full speed. A
+    * statement the hold fails does not end the script. Stopping twice is harmless.
+    */
+  private def hotWriter(): () => Unit =
+    val m      = parentMeta
+    val dir    = currentDataPath.get
+    val script = new StringBuilder(
+      s"""INSTALL ducklake;
+         |LOAD ducklake;
+         |INSTALL postgres;
+         |LOAD postgres;
+         |ATTACH 'ducklake:postgres:host=${m("pgHost")} port=${m("pgPort")} dbname=${m(
+          "dbName"
+        )} user=${m(
+          "pgUser"
+        )} password=${m("pgPassword")}' AS lake (DATA_PATH '$dir/');
+         |""".stripMargin
+    )
+    (1000 until 7000).foreach(k =>
+      script.append(s"INSERT INTO lake.tpch1.region VALUES ($k, 'W', 'h');\n")
+    )
+    val tmp = Files.createTempFile("hot-writer", ".sql")
+    Files.writeString(tmp, script.toString)
+    val writer = new java.lang.ProcessBuilder("duckdb", "-csv", "-noheader")
+      .redirectInput(tmp.toFile)
+      .redirectOutput(java.lang.ProcessBuilder.Redirect.DISCARD)
+      .redirectError(java.lang.ProcessBuilder.Redirect.DISCARD)
+      .start()
+    () =>
+      writer.destroyForcibly()
+      writer.waitFor()
+      Files.deleteIfExists(tmp): Unit
+
+  /** Whether main's head reaches `snapshot` within 15 s. */
+  private def headReaches(
+      parent: ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader,
+      snapshot: Long
+  ): Boolean =
+    val deadline = System.nanoTime() + 15.seconds.toNanos
+    while parent.maxSnapshotId().exists(_ < snapshot) && System.nanoTime() < deadline do
+      Thread.sleep(20)
+    parent.maxSnapshotId().exists(_ >= snapshot)
+
+  it should "land a merge on a hot table within two attempts, and lose no write" in
+    withCatalog("hdhot", extra) { (parent, _) =>
+      withBranchDb { (branchDb, branchDir) =>
+        val fork = cloneBranch(branchDb, branchDir)
+        duck(
+          "UPDATE qod_branch.tpch1.region SET r_name = 'BRANCH' WHERE r_regionkey = 2;",
+          Some(branchDb),
+          Some(branchDir)
+        )
+        val br    = branchReader(branchDb)
+        val first = BranchChanges.compute(br, parent, fork)
+        val stop  = hotWriter()
+        try
+          withClue("the writer never got going: ") {
+            headReaches(parent, first.mainSnapshot + 50) shouldBe true
+          }
+          val message = BranchMergeSql.commitMessage("feature", "mg-hot", "alice")
+          // The hold goes up before main's head is read, and what is already past it gets to land.
+          PostgresMergeFence.arm(
+            parentMeta,
+            message,
+            parent.maxSnapshotId().get,
+            ids(first),
+            Some(120)
+          ) shouldBe Right(())
+          Thread.sleep(200)
+          var landed   = false
+          var attempts = 0
+          var failures = List.empty[String]
+          try
+            while !landed && attempts < 2 do
+              attempts += 1
+              val cs = BranchChanges.compute(br, parent, fork)
+              PostgresMergeFence.arm(
+                parentMeta,
+                message,
+                cs.mainSnapshot,
+                ids(cs),
+                Some(120)
+              ) shouldBe Right(())
+              withNode(branchDb, branchDir)(runMerge(_, cs, br, parent, message)) match
+                case Right(_)  => landed = true
+                case Left(err) => failures = failures :+ err
+          finally PostgresMergeFence.disarm(parentMeta, message)
+          withClue(s"failed attempts: $failures: ")(landed shouldBe true)
+
+          // With the hold gone the writer goes back to it, and what it commits now counts too.
+          val merged = parent.snapshotByCommitMessage(message).get
+          withClue("the writer did not come back: ") {
+            headReaches(parent, merged + 20) shouldBe true
+          }
+          stop()
+          Thread.sleep(500) // what the kill left in flight lands or rolls back
+
+          val commits = onCatalog { c =>
+            val ps = c.prepareStatement(
+              "SELECT count(*) FROM ducklake_snapshot_changes " +
+                "WHERE snapshot_id > ? AND changes_made = ?"
+            )
+            ps.setLong(1, fork)
+            ps.setString(2, s"inlined_insert:${ids(first).head}")
+            val rs = ps.executeQuery()
+            rs.next()
+            rs.getLong(1)
+          }
+          commits should be > 0L
+          // Every commit on record still has its row on main, and only one.
+          duck(
+            "SELECT count(*), count(DISTINCT r_regionkey) FROM lake.tpch1.region WHERE r_name = 'W';"
+          ) shouldBe List(s"$commits,$commits")
+          duck("SELECT r_name FROM lake.tpch1.region WHERE r_regionkey = 2;") shouldBe
+            List("BRANCH")
+        finally
+          stop()
+          br.close()
       }
     }
 

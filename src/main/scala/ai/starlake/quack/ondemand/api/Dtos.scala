@@ -1688,6 +1688,7 @@ final case class BranchMergeRequest(
     tenant: String,
     tenantDb: String,
     branch: String,
+    proposalId: String,
     expectedMainSnapshot: Option[Long] = None
 )
 

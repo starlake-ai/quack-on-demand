@@ -113,7 +113,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
 
     def merge(key: Option[String]) =
       handlers
-        .merge(BranchMergeRequest("acme", parent.name, "feature"), key)(SuperuserScope)
+        .merge(BranchMergeRequest("acme", parent.name, "feature", "mg-any"), key)(SuperuserScope)
         .unsafeRunSync()
 
   private def unauthorized[A](r: Either[(StatusCode, ErrorResponse), A]) =

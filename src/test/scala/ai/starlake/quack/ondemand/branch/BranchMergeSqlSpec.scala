@@ -5,95 +5,38 @@ import org.scalatest.matchers.should.Matchers
 
 class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
 
-  "BranchMergeSql.batch" should "render one transaction with the stamp first and COMMIT last" in {
-    val sql = BranchMergeSql.batch(
-      parentAlias = "acme_tpch",
-      branchAlias = "qod_branch",
-      changes = List(
-        TableChange("tpch1", "region", ChangeKind.Modified),
-        TableChange("tpch1", "extra", ChangeKind.Created),
-        TableChange("tpch1", "nation", ChangeKind.Dropped),
-        TableChange("tpch1", "again", ChangeKind.Recreated)
-      ),
-      fork = 10L,
-      head = 15L,
-      author = "tenant:acme/user:bob",
-      message = "merge branch f [mg-1] proposed by alice"
-    )
-    val lines = sql.linesIterator.toList
-    lines.head shouldBe "BEGIN;"
-    lines(1) shouldBe
-      "CALL ducklake_set_commit_message('acme_tpch', 'tenant:acme/user:bob', 'merge branch f [mg-1] proposed by alice');"
-    // Inside the transaction and before any write: the branch must still be at the validated head.
-    lines(2) shouldBe
-      """SELECT CASE WHEN (SELECT max(snapshot_id) FROM "qod_branch".snapshots()) <> 15 THEN error('branch moved past snapshot 15 after validation; propose it again') END AS head_guard;"""
-    lines.last shouldBe "COMMIT;"
-    sql should include(
-      "ducklake_table_changes('qod_branch', 'tpch1', 'region', 11, 15) WHERE change_type IN ('delete', 'update_preimage')"
-    )
-    sql should include(
-      """INSERT INTO "acme_tpch"."tpch1"."region" BY NAME SELECT * FROM "qod_branch"."tpch1"."region" AT (VERSION => 15) WHERE rowid IN"""
-    )
-    sql should include("""CREATE SCHEMA IF NOT EXISTS "acme_tpch"."tpch1";""")
-    sql should include(
-      """CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT * FROM "qod_branch"."tpch1"."extra" AT (VERSION => 15);"""
-    )
-    sql should include("""DROP TABLE "acme_tpch"."tpch1"."nation";""")
-    // Recreated: drop first, then create.
-    val dropAgain = sql.indexOf("""DROP TABLE "acme_tpch"."tpch1"."again";""")
-    val makeAgain = sql.indexOf(
-      """CREATE TABLE "acme_tpch"."tpch1"."again" AS SELECT * FROM "qod_branch"."tpch1"."again" AT (VERSION => 15);"""
-    )
-    dropAgain should be > 0
-    makeAgain should be > dropAgain
-    // No branch read at its current state: every one is pinned to the validated head.
-    sql.linesIterator.filter(_.contains("FROM \"qod_branch\".\"tpch1\"")).foreach { l =>
-      l should include("AT (VERSION => 15)")
-    }
-  }
-
-  it should "quote identifiers and escape literals" in {
-    val sql = BranchMergeSql.batch(
-      "p\"q",
+  private def stmts(kind: ChangeKind, table: String = "t") =
+    BranchMergeSql.tableStatements(
+      "acme_tpch",
       "qod_branch",
-      List(TableChange("s", "o'reilly", ChangeKind.Modified)),
-      1L,
-      2L,
-      "a",
-      "it's"
+      TableChange("tpch1", table, kind),
+      10L,
+      15L
     )
-    sql should include("""DELETE FROM "p""q"."s"."o'reilly" WHERE rowid IN""")
-    sql should include("ducklake_table_changes('qod_branch', 's', 'o''reilly', 2, 2)")
-    sql should include("'it''s'")
-  }
 
-  it should "refuse an altered table" in {
-    an[IllegalArgumentException] should be thrownBy BranchMergeSql.batch(
-      "p",
-      "b",
-      List(TableChange("s", "t", ChangeKind.Altered)),
-      1L,
-      2L,
-      "a",
-      "m"
+  "tableStatements" should "create a table at the validated head" in {
+    stmts(ChangeKind.Created) shouldBe List(
+      """CREATE SCHEMA IF NOT EXISTS "acme_tpch"."tpch1"""",
+      """CREATE TABLE "acme_tpch"."tpch1"."t" AS SELECT * FROM "qod_branch"."tpch1"."t" AT (VERSION => 15)"""
     )
   }
 
-  it should "refuse a table whose own rowid column hides the row identifier" in {
-    an[IllegalArgumentException] should be thrownBy BranchMergeSql.batch(
-      "p",
-      "b",
-      List(TableChange("s", "t", ChangeKind.Modified, reservedColumn = Some("rowid"))),
-      1L,
-      2L,
-      "a",
-      "m"
-    )
+  it should "drop first when a table was recreated" in {
+    stmts(ChangeKind.Recreated).head shouldBe """DROP TABLE "acme_tpch"."tpch1"."t""""
+    stmts(ChangeKind.Recreated)(1) should include("AT (VERSION => 15)")
   }
 
-  "findSnapshotSql" should "look the merge snapshot up by its message" in {
-    BranchMergeSql.findSnapshotSql("acme_tpch", "m [x]") shouldBe
-      """SELECT max(snapshot_id) AS snapshot_id FROM "acme_tpch".snapshots() WHERE commit_message = 'm [x]'"""
+  it should "drop a dropped table" in {
+    stmts(ChangeKind.Dropped) shouldBe List("""DROP TABLE "acme_tpch"."tpch1"."t"""")
+  }
+
+  it should "refuse an altered table and a table that merges by rows" in {
+    an[IllegalArgumentException] should be thrownBy stmts(ChangeKind.Altered)
+    an[IllegalArgumentException] should be thrownBy stmts(ChangeKind.Modified)
+  }
+
+  it should "quote identifiers" in {
+    stmts(ChangeKind.Dropped, "o\"r") shouldBe List("""DROP TABLE "acme_tpch"."tpch1"."o""r"""")
   }
 
   "BranchMergeSql.applyBatch" should "stamp first, guard the head, write other tables, then rows" in {
@@ -111,17 +54,21 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
       fork = 10L,
       head = 15L,
       author = "tenant:acme/user:bob",
-      message = "merge branch f [mg-1] proposed by alice"
+      message = "it's [mg-1]"
     )
     val lines = sql.linesIterator.toList
     lines.head shouldBe "BEGIN;"
-    lines(1) should startWith("CALL ducklake_set_commit_message('acme_tpch',")
+    lines(1) shouldBe
+      "CALL ducklake_set_commit_message('acme_tpch', 'tenant:acme/user:bob', 'it''s [mg-1]');"
     lines(2) should include("branch moved past snapshot 15")
     lines(3) shouldBe "SET dynamic_or_filter_threshold = 10000;"
     lines.last shouldBe "COMMIT;"
     sql should include("""CREATE TABLE "acme_tpch"."tpch1"."extra" AS SELECT""")
     sql.indexOf("CREATE TABLE") should be < sql.indexOf("DELETE FROM")
     sql.indexOf("DELETE FROM") should be < sql.indexOf("UPDATE ")
+    sql should include("SET ducklake_max_retry_count = 200;")
+    sql should include("SET ducklake_retry_wait_ms = 10;")
+    sql should include("SET ducklake_retry_backoff = 1;")
   }
 
   private def rowMerge(schema: String, table: String) =
@@ -170,4 +117,9 @@ class BranchMergeSqlSpec extends AnyFlatSpec with Matchers:
       List(rowMerge("s", "a"), rowMerge("s", "b"))
     ) should include("""DELETE FROM "p"."s"."b"""")
     applied(List(TableChange("s", "x", ChangeKind.Created)), Nil) should include("CREATE TABLE")
+  }
+
+  "findSnapshotSql" should "look the merge snapshot up by its message" in {
+    BranchMergeSql.findSnapshotSql("acme_tpch", "m [x]") shouldBe
+      """SELECT max(snapshot_id) AS snapshot_id FROM "acme_tpch".snapshots() WHERE commit_message = 'm [x]'"""
   }

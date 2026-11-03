@@ -2,33 +2,17 @@ package ai.starlake.quack.ondemand.branch
 
 import ai.starlake.quack.model.SqlLiterals
 
-/** Renders the fast-forward merge batch (design section 4.5): one DuckDB transaction on a node that
-  * has the parent catalog attached under `parentAlias` and the branch catalog attached under
-  * `branchAlias`. Pure string building; identifiers are double-quoted, literals escaped.
-  *
-  * Row arithmetic for a `Modified` table over the branch change feed `(fork, head]`:
-  *   - delete on main every rowid the branch deleted or updated (pre-images);
-  *   - insert on main the CURRENT branch row of every rowid the branch inserted or updated
-  *     (post-images). A row inserted then deleted on the branch is absent at head, so the second
-  *     step inserts nothing for it; a pre-existing row updated then deleted is deleted by the first
-  *     step and not re-inserted. `rowid` is stable across the clone (verified live) and DuckLake
-  *     keeps it on UPDATE, which is why the feed, not an anti-join, drives the merge.
-  *
-  * Every read of the branch is pinned to `head` (`AT (VERSION => head)`), the snapshot the change
-  * set was validated at: the feed is bounded by it, so a current-state read would pair the feed's
-  * rowids with values written after validation. The batch also refuses to commit when the branch
-  * moved past `head` ([[headGuard]]); the caller freezes the branch's writes for the whole merge.
-  *
-  * A table with a column of its own named `rowid` shadows DuckDB's row identifier, so the rowid
-  * arithmetic would compare that column against the feed's identifiers; [[BranchChanges]] marks
-  * such a table not mergeable. [[tableStatements]] refuses it here, and [[RowMergeTable.plan]] on
-  * the row merge's path.
+/** Renders a merge's table statements and its Apply batch: pure string building; identifiers are
+  * double-quoted, literals escaped. Tables whose rows merge go through [[RowMergeSql]]. Every read
+  * of the branch is pinned to `head`, the snapshot the change set was validated at. The batch also
+  * refuses to commit when the branch moved past `head` ([[headGuard]]); the caller freezes the
+  * branch's writes for the whole merge.
   */
 object BranchMergeSql:
 
   val BranchAlias: String = "qod_branch"
 
-  private def q(ident: String): String = "\"" + ident.replace("\"", "\"\"") + "\""
+  private def q(ident: String): String = SqlLiterals.duckdbIdent(ident)
   private def lit(v: String): String   = SqlLiterals.duckdbLiteral(v)
 
   def author(tenant: String, approver: String): String = s"tenant:$tenant/user:$approver"
@@ -36,15 +20,6 @@ object BranchMergeSql:
   /** The commit message carries the merge id so the resulting snapshot can be located exactly. */
   def commitMessage(branchName: String, mergeId: String, proposer: String): String =
     s"merge branch $branchName [$mergeId] proposed by $proposer"
-
-  def changesFn(
-      branchAlias: String,
-      schema: String,
-      table: String,
-      fork: Long,
-      head: Long
-  ): String =
-    s"ducklake_table_changes(${lit(branchAlias)}, ${lit(schema)}, ${lit(table)}, ${fork + 1}, $head)"
 
   /** Fails the batch (inside its transaction, before any write) unless the branch's latest snapshot
     * is still `head`: a branch write that landed after validation would otherwise be dropped by the
@@ -55,6 +30,7 @@ object BranchMergeSql:
     s"SELECT CASE WHEN (SELECT max(snapshot_id) FROM ${q(branchAlias)}.snapshots()) <> $head " +
       s"THEN error($moved) END AS head_guard"
 
+  /** Statements of a table that is created, dropped or recreated whole. */
   def tableStatements(
       parentAlias: String,
       branchAlias: String,
@@ -62,11 +38,6 @@ object BranchMergeSql:
       fork: Long,
       head: Long
   ): List[String] =
-    if change.reservedColumn.nonEmpty then
-      throw new IllegalArgumentException(
-        s"table ${change.schema}.${change.table} has a column named " +
-          s"${change.reservedColumn.get} and is not mergeable"
-      )
     val target = s"${q(parentAlias)}.${q(change.schema)}.${q(change.table)}"
     val source =
       s"${q(branchAlias)}.${q(change.schema)}.${q(change.table)} AT (VERSION => $head)"
@@ -84,39 +55,13 @@ object BranchMergeSql:
       case ChangeKind.Dropped =>
         List(s"DROP TABLE $target")
       case ChangeKind.Modified =>
-        val fn = changesFn(branchAlias, change.schema, change.table, fork, head)
-        List(
-          s"DELETE FROM $target WHERE rowid IN (SELECT rowid FROM $fn " +
-            "WHERE change_type IN ('delete', 'update_preimage'))",
-          s"INSERT INTO $target BY NAME SELECT * FROM $source WHERE rowid IN (SELECT rowid FROM $fn " +
-            "WHERE change_type IN ('insert', 'update_postimage'))"
+        throw new IllegalArgumentException(
+          s"modified table ${change.schema}.${change.table} merges by rows"
         )
       case ChangeKind.Altered =>
         throw new IllegalArgumentException(
           s"altered table ${change.schema}.${change.table} is not mergeable"
         )
-
-  /** The whole batch. `changes` must contain no `Altered` entry (the caller refuses those first).
-    * Only safe under an armed [[MergeFence]]: nothing in the batch itself ties the commit to the
-    * main snapshot the change set was validated against.
-    */
-  def batch(
-      parentAlias: String,
-      branchAlias: String,
-      changes: List[TableChange],
-      fork: Long,
-      head: Long,
-      author: String,
-      message: String
-  ): String =
-    val body = changes
-      .sortBy(c => (c.kind.ordinal, c.schema, c.table))
-      .flatMap(c => tableStatements(parentAlias, branchAlias, c, fork, head))
-    (List(
-      "BEGIN",
-      s"CALL ducklake_set_commit_message(${lit(parentAlias)}, ${lit(author)}, ${lit(message)})",
-      headGuard(branchAlias, head)
-    ) ++ body ++ List("COMMIT")).mkString("", ";\n", ";")
 
   /** The Apply stage: one transaction. Tables merged by rows come last, each with its statements in
     * the order [[RowMergeSql.applyStatements]] gives. Only safe under an armed [[MergeFence]].
@@ -156,7 +101,12 @@ object BranchMergeSql:
       "BEGIN",
       s"CALL ducklake_set_commit_message(${lit(parentAlias)}, ${lit(author)}, ${lit(message)})",
       headGuard(branchAlias, head),
-      RowMergeSql.Settings
+      RowMergeSql.Settings,
+      // Each commit on another table costs this one a retry: DuckLake's default budget gave up in
+      // about 8.5 s beside a writer at about 45 commits/s. A fence refusal is not retried.
+      "SET ducklake_max_retry_count = 200",
+      "SET ducklake_retry_wait_ms = 10",
+      "SET ducklake_retry_backoff = 1"
     ) ++ others ++ rows ++ List("COMMIT")).mkString("", ";\n", ";")
 
   /** Locates the merge snapshot on the parent by its unique commit message. */
