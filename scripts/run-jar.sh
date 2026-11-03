@@ -801,10 +801,13 @@ echo ""
 # wipes Postgres state but not OS processes - so a "fresh" NUKE boot
 # is exactly when this trap snaps shut.
 #
-# Three port classes are checked:
+# Four port classes are checked:
 #   1. REST/UI port (manager would crash at bind, but we'd rather say so up-front)
 #   2. FlightSQL edge port (same)
-#   3. Node port range [minPort, maxPort] (only WARN; the manager can
+#   3. Node verdict listener port (same: QOD_INTERNAL_PORT when it is set above 0, else the
+#      REST port + 1). It binds after reconcile has spawned the nodes, so a taken port would
+#      fail the boot with those nodes left running.
+#   4. Node port range [minPort, maxPort] (only WARN; the manager can
 #      route around in-use entries, but orphans there are the silent-
 #      auth-failure source we want to call out)
 preflight_ports() {
@@ -812,6 +815,12 @@ preflight_ports() {
   local flight_port="${PROXY_PORT:-31338}"
   local min_port="${QOD_MIN_PORT:-21900}"
   local max_port="${QOD_MAX_PORT:-22500}"
+  local internal_port=""
+  if [[ "${QOD_INTERNAL_PORT:-0}" =~ ^[0-9]+$ ]] && (( 10#${QOD_INTERNAL_PORT:-0} > 0 )); then
+    internal_port=$((10#$QOD_INTERNAL_PORT))
+  elif [[ "$rest_port" =~ ^[0-9]+$ ]]; then
+    internal_port=$((10#$rest_port + 1))
+  fi
   if ! command -v lsof >/dev/null 2>&1; then
     echo "WARN: lsof not on PATH; skipping port preflight." >&2
     return 0
@@ -823,11 +832,14 @@ preflight_ports() {
   # treats as a fatal script error. The `|| true` tail neutralises that
   # without changing what `busy=` ends up with.
   local busy
-  for p in "$rest_port" "$flight_port"; do
+  for p in "$rest_port" "$flight_port" ${internal_port:+"$internal_port"}; do
     busy=$(lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2 " " $1}' | sort -u | head -3 || true)
     if [[ -n "$busy" ]]; then
       echo "ERROR: port $p already in use:" >&2
       echo "$busy" | sed 's/^/  /' >&2
+      if [[ "$p" == "$internal_port" ]]; then
+        echo "  Port $p is the node verdict listener's (QOD_INTERNAL_PORT, by default the REST port + 1)." >&2
+      fi
       echo "  Stop the holder (./scripts/stop-jar.sh, or kill -TERM <pid>) and retry." >&2
       exit 1
     fi
@@ -857,10 +869,11 @@ preflight_ports() {
 preflight_ports
 
 # ---- Run (supervised) ----
-# The assembly jar carries `Add-Opens` in its manifest (JEP 261) so Arrow's
-# unsafe allocator works on Java 17+ without extra flags. The system
-# property pins Arrow's allocator - without it Arrow picks netty and
-# crashes with NoSuchFieldError: chunkSize.
+# The assembly jar carries `Add-Opens` in its manifest (JEP 261), so Arrow's
+# unsafe allocator, which reflects into java.nio, needs no extra flags (Java
+# 17 and later block that reflection unless it is opened). The manager itself
+# needs JDK 21 or later. The system property pins Arrow's allocator - without
+# it Arrow picks netty and crashes with NoSuchFieldError: chunkSize.
 #
 # Ctrl-C acts as stop-jar.sh. The JVM runs as a plain background job in
 # THIS script's process group - deliberately NOT its own (a `set -m` /

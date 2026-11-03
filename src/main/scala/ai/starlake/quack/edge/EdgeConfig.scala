@@ -11,5 +11,11 @@ final case class EdgeConfig(
     // the Basic credentials or the external Bearer token. Bounds the
     // "revoked credential still works" window without paying a JWKS
     // round-trip on every Flight call.
-    sessionTtlSec: Long = 3600
+    sessionTtlSec: Long = 3600,
+    // Largest gRPC message read, whatever the method and whoever sends it: gRPC refuses a larger one
+    // with RESOURCE_EXHAUSTED as soon as its length prefix arrives. No bulk ingest exists and
+    // DoPut batches are never read, so only SQL text needs room.
+    maxInboundMessageBytes: Int = 16777216,
+    // Largest header list read. gRPC buffers headers before any authentication runs.
+    maxHeaderBytes: Int = 65536
 )

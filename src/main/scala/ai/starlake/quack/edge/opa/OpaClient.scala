@@ -1,29 +1,22 @@
 package ai.starlake.quack.edge.opa
 
 import ai.starlake.acl.parser.TableAccess
+import ai.starlake.quack.edge.BoundedHttp
 import io.circe.Json
 
-import java.io.ByteArrayOutputStream
 import java.net.URI
-import java.net.http.HttpResponse.{BodyHandler, BodySubscriber, ResponseInfo}
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.nio.ByteBuffer
-import java.nio.charset.StandardCharsets
+import java.net.http.HttpRequest
 import java.time.Duration
-import java.util.concurrent.{
-  CompletableFuture,
-  CompletionStage,
-  ExecutionException,
-  Flow,
-  TimeUnit,
-  TimeoutException
-}
 
 /** HTTP transport to an OPA server. `post` is injectable for tests; the default (`jdkPost`) is a
   * JDK `HttpClient` call whose WHOLE exchange (connect, response headers AND response body) is
-  * bounded by `timeoutMs`: `HttpRequest.timeout` alone only bounds the headers, so the body read is
-  * driven through `sendAsync` and a hard `Future.get(timeoutMs, ...)` deadline, with the body
-  * itself read by a bounded `BodySubscriber` that never buffers past the 1 MiB cap.
+  * bounded by `timeoutMs` and whose body never buffers past the 1 MiB cap: both limits are
+  * [[BoundedHttp.send]]'s. A tenant admin picks the OPA URL, so the calls go through
+  * [[OpaClient.exchanges]]: each in a client of its own, shut down when the call ends (the price is
+  * a TIME_WAIT for each call on Linux, so OPA fails closed past about 470 uncached decisions a
+  * second to one server unless `net.ipv4.tcp_tw_reuse=1`), and at most [[OpaClient.ExchangeLimit]]
+  * calls in flight, half of them for any one server. A call past that is an error at once (fail
+  * closed, and an error is never cached) and asks nobody.
   */
 final class OpaClient(timeoutMs: Int, post: OpaClient.Post):
 
@@ -41,29 +34,34 @@ object OpaClient:
     */
   val MaxResponseBytes: Int = 1024 * 1024
 
+  /** The OPA exchanges that may run at once. */
+  val ExchangeLimit: Int = 256
+
+  /** The permits of the OPA exchanges: its own, so that a flood of exchanges with identity
+    * providers cannot refuse OPA decisions, and a hanging OPA server of one tenant cannot refuse
+    * the decisions of another's (half of the limit for any one server).
+    */
+  val exchanges: BoundedHttp.Exchanges = new BoundedHttp.Exchanges(ExchangeLimit)
+
   def endpoint(base: String, policyPath: String, rule: String): String =
     s"${base.stripSuffix("/")}/v1/data/$policyPath/$rule"
 
-  /** `message` with every occurrence of the bearer token masked. The JDK echoes an invalid header
-    * value in its IllegalArgumentException, so a token carrying a control character would otherwise
-    * reach the manager log and a superuser's dry-run answer.
+  /** The default transport. A failure's text never carries the bearer token: the JDK echoes an
+    * invalid header value in its IllegalArgumentException, so a token holding a control character
+    * would otherwise reach the manager log and a superuser's dry-run answer, and a server can echo
+    * the token into a malformed status line, which the JDK quotes. [[BoundedHttp]] masks it in the
+    * text before it cuts the text.
     */
-  private def redactToken(message: String, token: Option[String]): String =
-    token.filter(_.nonEmpty).fold(message)(t => message.replace(t, "<redacted>"))
-
-  def jdkPost(timeoutMs: Int): Post =
-    val client =
-      HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs.toLong)).build()
-    (url, body, token) => send(client, timeoutMs, url, body, token).left.map(redactToken(_, token))
+  def jdkPost(timeoutMs: Int, through: BoundedHttp.Exchanges = exchanges): Post =
+    (url, body, token) => send(timeoutMs, through, url, body, token)
 
   private def send(
-      client: HttpClient,
       timeoutMs: Int,
+      through: BoundedHttp.Exchanges,
       url: String,
       body: String,
       token: Option[String]
   ): Either[String, (Int, String)] =
-    var pending: Option[CompletableFuture[HttpResponse[Either[String, String]]]] = None
     try
       val b = HttpRequest
         .newBuilder(URI.create(url))
@@ -71,60 +69,14 @@ object OpaClient:
         .header("Content-Type", "application/json")
         .POST(HttpRequest.BodyPublishers.ofString(body))
       token.foreach(t => b.header("Authorization", s"Bearer $t"))
-      val future = client.sendAsync(b.build(), boundedBodyHandler(MaxResponseBytes))
-      pending = Some(future)
-      val resp = future.get(timeoutMs.toLong, TimeUnit.MILLISECONDS)
-      resp.body() match
-        case Left(err)       => Left(err)
-        case Right(bodyText) => Right((resp.statusCode(), bodyText))
+      BoundedHttp.send(
+        b.build(),
+        MaxResponseBytes,
+        timeoutMs.toLong,
+        "OPA",
+        through,
+        secret = token
+      )
     catch
-      case _: TimeoutException =>
-        pending.foreach(_.cancel(true))
-        Left(s"OPA request timed out after $timeoutMs ms")
-      case e: ExecutionException =>
-        val cause = Option(e.getCause).getOrElse(e)
-        Left(s"${cause.getClass.getSimpleName}: ${Option(cause.getMessage).getOrElse("")}")
-      case e: InterruptedException =>
-        Thread.currentThread().interrupt()
-        Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
-      case e: Exception =>
-        Left(s"${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("")}")
-
-  private def boundedBodyHandler(cap: Int): BodyHandler[Either[String, String]] =
-    (_: ResponseInfo) => new BoundedBodySubscriber(cap)
-
-  /** Accumulates the response body up to `cap` bytes; beyond that it cancels the upstream
-    * subscription and completes with a `Left` instead of buffering further, so a misbehaving OPA
-    * cannot force unbounded heap growth even though the body is read through the async API.
-    */
-  private final class BoundedBodySubscriber(cap: Int)
-      extends BodySubscriber[Either[String, String]]:
-    private val result                          = new CompletableFuture[Either[String, String]]()
-    private val buffer                          = new ByteArrayOutputStream()
-    private var subscription: Flow.Subscription = null
-    private var exceeded                        = false
-
-    override def onSubscribe(s: Flow.Subscription): Unit =
-      subscription = s
-      s.request(Long.MaxValue)
-
-    override def onNext(items: java.util.List[ByteBuffer]): Unit =
-      if !exceeded then
-        items.forEach { bb =>
-          val bytes = new Array[Byte](bb.remaining())
-          bb.get(bytes)
-          buffer.write(bytes)
-        }
-        if buffer.size() > cap then
-          exceeded = true
-          subscription.cancel()
-          result.complete(Left("OPA response exceeds 1 MiB"))
-
-    override def onError(t: Throwable): Unit =
-      if !exceeded then result.completeExceptionally(t)
-
-    override def onComplete(): Unit =
-      if !exceeded then
-        result.complete(Right(new String(buffer.toByteArray, StandardCharsets.UTF_8)))
-
-    override def getBody: CompletionStage[Either[String, String]] = result
+      // The request cannot be built: a bad URL, or a header value the JDK refuses (and echoes).
+      case e: Exception => Left(BoundedHttp.describe(e, token))

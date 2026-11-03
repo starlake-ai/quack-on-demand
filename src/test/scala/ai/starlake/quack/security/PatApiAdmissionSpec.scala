@@ -7,12 +7,15 @@ import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ExecCaller}
 import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, AuditRecorder}
 import cats.effect.IO
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 /** End-to-end contract of a PAT presented as the `/api` bearer credential (`X-API-Key` header): the
@@ -280,3 +283,74 @@ class PatApiAdmissionSpec
         }
       finally h.shutdown()
     }
+
+  // ------------------------------------------------------------------
+  // (g) the guard looks a PAT up off the compute threads
+  //
+  // A PAT lookup is a database round trip: on a compute thread it stalls the pool that serves
+  // every request, so an unauthenticated flood of unknown PATs could starve the manager.
+  //
+  // The request is a POST to a route that only answers GET: the guard admits it and then nothing
+  // handles it, so the guard's lookup is the only one. A handler resolves the token again, on a
+  // compute thread of its own, and would hide the guard's thread name.
+  // ------------------------------------------------------------------
+
+  "The REST guard" should "resolve a PAT off the compute threads" in {
+    assume(TestPostgres.reachable, "local Postgres is required")
+    val thread   = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val lookups  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val recorded = new PatAuthenticator(
+      pats,
+      id => {
+        lookups.incrementAndGet()
+        thread.set(Thread.currentThread().getName)
+        users.userById(id)
+      },
+      u => List(UserGrant(u.tenant, u.kind))
+    )
+    val (_, raw) = mintFor(None, SecurityFixtures.RootUsername)
+    val fix      = SecurityFixtures.freshStore()
+    val h        = ManagerServerHarness.boot(fix.store, patAuth = Some(recorded))
+    try
+      post(h.httpClient, s"${h.baseUrl}/api/tenant/list", "{}", apiKey = Some(raw))
+        .statusCode() should not be 401
+      thread.get should not be empty
+      thread.get should not fullyMatch regex("io-compute-\\d+")
+      // The guard resolves the credential once and every later check reads that one answer.
+      lookups.get shouldBe 1
+    finally h.shutdown()
+  }
+
+  // The guard's two denial rows are written synchronously, so the write must not run on a
+  // compute thread either: a flood of anonymous requests is exactly what writes them.
+  it should "write its denial audit rows off the compute threads" in {
+    val writes = new java.util.concurrent.ConcurrentLinkedQueue[(String, String)]()
+    val store  = new RecordingTelemetryStore:
+      override def appendAudit(es: List[AuditEvent]): Unit =
+        es.foreach(e => writes.add((e.action, Thread.currentThread().getName)))
+        super.appendAudit(es)
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, audit = new AuditRecorder(store, _ => None))
+    try
+      // No credential: the anonymous refusal.
+      get(h.httpClient, s"${h.baseUrl}/api/tenant/list").statusCode() shouldBe 401
+      // A real session without an admin grant: the demotion.
+      val bob = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      get(h.httpClient, s"${h.baseUrl}/api/pool/list", apiKey = Some(bob)).statusCode() shouldBe 403
+      // The login above writes audit rows of its own: look at the guard's two only.
+      val guardWrites = writes.asScala.toList.filter((action, _) =>
+        action == AuditActions.AuthApiKeyFailure || action == AuditActions.AuthAdminRequired
+      )
+      guardWrites.map(_._1) should contain theSameElementsAs
+        List(AuditActions.AuthApiKeyFailure, AuditActions.AuthAdminRequired)
+      guardWrites.foreach { (action, thread) =>
+        withClue(s"$action was written on $thread: ") {
+          thread should not fullyMatch regex("io-compute-\\d+")
+        }
+      }
+    finally h.shutdown()
+  }

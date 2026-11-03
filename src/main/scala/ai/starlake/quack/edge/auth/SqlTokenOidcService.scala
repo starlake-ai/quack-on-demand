@@ -1,30 +1,30 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import com.typesafe.scalalogging.LazyLogging
-import java.net.{URI, URLEncoder}
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import scala.util.control.NonFatal
 
 object SqlTokenOidcService extends LazyLogging:
-  private val sharedClient = HttpClient.newHttpClient()
 
   /** Default code->token exchange: POST grant_type=authorization_code to the token endpoint and
-    * return the raw JSON body, or Left(reason).
+    * return the raw JSON body, or Left(reason). The answer is read under
+    * [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over the whole exchange.
+    * The callback page shows the reason, and the form holds the client secret, so no failure text
+    * carries any of the exchange: a refused status is named by its code alone, and any other
+    * failure by one fixed text ([[BoundedHttp.tokenExchange]]), never by the provider's answer or
+    * the JDK's exception, which may quote what the provider was sent.
     */
   def defaultExchange(tokenEndpoint: String, form: String): Either[String, String] =
-    val req = HttpRequest
-      .newBuilder()
-      .uri(URI.create(tokenEndpoint))
-      .header("Content-Type", "application/x-www-form-urlencoded")
-      .POST(HttpRequest.BodyPublishers.ofString(form))
-      .timeout(java.time.Duration.ofSeconds(15))
-      .build()
-    val resp = sharedClient.send(req, HttpResponse.BodyHandlers.ofString())
-    if resp.statusCode() != 200 then Left(s"Token exchange failed (HTTP ${resp.statusCode()})")
-    else Right(resp.body())
+    BoundedHttp.tokenExchange(
+      tokenEndpoint,
+      form,
+      code => s"Token exchange failed (HTTP $code)"
+    )
 
 class SqlTokenOidcService(
     config: AuthenticationConfig,
@@ -76,6 +76,18 @@ class SqlTokenOidcService(
         .map(doc => (doc.authorizationEndpoint, doc.tokenEndpoint, clientId, clientSecret))
     }
 
+  /** The code-to-token exchange, which the callback is anonymous to: an exchange that throws is a
+    * failed exchange with the fixed text of any other, and not an exception out of the callback.
+    * The form holds the client secret, so the log gets the class of what was thrown and nothing of
+    * its message.
+    */
+  private def exchanged(tokenEndpoint: String, form: String): Either[String, String] =
+    try httpExchange(tokenEndpoint, form)
+    catch
+      case NonFatal(e) =>
+        logger.warn(s"SQL token exchange failed: ${e.getClass.getSimpleName}")
+        Left(BoundedHttp.TokenEndpointFailed)
+
   private def sign(value: String): String =
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(new SecretKeySpec(stateSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
@@ -122,7 +134,7 @@ class SqlTokenOidcService(
         val form = s"grant_type=authorization_code&code=${enc(code)}" +
           s"&redirect_uri=${enc(redirectUri)}" +
           s"&client_id=${enc(clientId)}&client_secret=${enc(clientSecret)}"
-        httpExchange(tokenEndpoint, form).flatMap { body =>
+        exchanged(tokenEndpoint, form).flatMap { body =>
           // Prefer id_token: the edge presents the pasted token as a Bearer, and
           // OidcBearerAuthenticator requires aud == clientId, which the id_token
           // carries by OIDC spec. The access_token's aud is the provider's resource

@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.quack.edge.BoundedBody
 import cats.effect.IO
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
 import com.typesafe.scalalogging.Logger
@@ -7,11 +8,14 @@ import org.http4s.{Request, Response, Status}
 import org.typelevel.ci.CIString
 
 import java.util.concurrent.TimeUnit
+import scala.concurrent.duration.*
 
 /** What the node-to-manager routes (decide, credentials) share: how a call names its node and
   * signature, and the order they are checked in. Both headers are checked before the body is read,
-  * a declared `Content-Length` over the bound is refused before the body streams, and only then is
-  * the body read (at most one byte past the bound, so an undeclared length is caught too).
+  * and a request asking for chunked framing is refused unread. The body is then read whole by
+  * [[BoundedBody]]: a declared `Content-Length` over the bound is refused before the body streams,
+  * the read stops one byte past the bound (so an undeclared length is caught too), it must arrive
+  * within [[BodyDeadline]], and its JSON may nest only [[BoundedBody.MaxNesting]] levels deep.
   */
 object NodeCalls:
 
@@ -32,33 +36,55 @@ object NodeCalls:
 
   val BodyTooLarge: String = "request body too large"
 
+  val BodyTooSlow: String = "request body did not arrive in time"
+
+  val ChunkedRefused: String = "chunked framing is not accepted"
+
+  val BodyTooDeep: String = "request body nested too deeply"
+
+  /** How long a node has to send a body: qod-node holds a body in full and sends it at once. It is
+    * also how long a client with no key holds a connection slot of the listener with a stalled
+    * body.
+    */
+  val BodyDeadline: FiniteDuration = 5.seconds
+
   /** `req` answered by `answer(nodeId, signature, body)`, run blocking, once both headers are well
-    * formed and the body is within `maxBodyBytes`; else 401 ([[MissingHeaders]], through `refused`,
-    * with the body unread) or 413.
+    * formed and the body is read within `maxBodyBytes`; else 401 ([[MissingHeaders]], through
+    * `refused`, with the body unread), 411 for chunked framing (unread), 413, or 408 past
+    * [[BodyDeadline]], or 400 for JSON nested too deep. Every refusal that leaves part of the body
+    * unread closes the connection.
     */
   def serve(req: Request[IO], maxBodyBytes: Int)(
       refused: (String, String) => (Status, String)
   )(answer: (String, String, Array[Byte]) => (Status, String)): IO[Response[IO]] =
-    def respond(r: (Status, String)): Response[IO] = Response[IO](r._1).withEntity(r._2)
+    def respond(r: (Status, String)): Response[IO]     = Response[IO](r._1).withEntity(r._2)
+    def closing(r: (Status, String)): IO[Response[IO]] =
+      IO.pure(respond(r).putHeaders(org.http4s.headers.Connection.close))
     val node      = req.headers.get(CIString("X-QoD-Node")).map(_.head.value)
     val signature = req.headers.get(CIString("X-QoD-Signature")).map(_.head.value)
     (node.filter(NodeIdText.matches), signature.filter(MacText.matches)) match
+      // The key is checked only once the body is read, and qod-node always sends a Content-Length:
+      // see BoundedBody.asksChunked.
+      case (Some(_), Some(_)) if BoundedBody.asksChunked(req) =>
+        closing((Status.LengthRequired, ChunkedRefused))
       case (Some(nodeId), Some(sig)) =>
-        if req.contentLength.exists(_ > maxBodyBytes) then
-          IO.pure(respond((Status.PayloadTooLarge, BodyTooLarge)))
-        else
-          req.body.take(maxBodyBytes.toLong + 1).compile.to(Array).flatMap { body =>
-            if body.length > maxBodyBytes then
-              IO.pure(respond((Status.PayloadTooLarge, BodyTooLarge)))
-            else IO.blocking(answer(nodeId, sig, body)).map(respond)
-          }
+        BoundedBody.read(req, maxBodyBytes.toLong, BodyDeadline).flatMap {
+          case BoundedBody.Outcome.Read(body) => IO.blocking(answer(nodeId, sig, body)).map(respond)
+          case BoundedBody.Outcome.TooLarge   => closing((Status.PayloadTooLarge, BodyTooLarge))
+          case BoundedBody.Outcome.TooDeep    => closing((Status.BadRequest, BodyTooDeep))
+          case BoundedBody.Outcome.TimedOut   => closing((Status.RequestTimeout, BodyTooSlow))
+        }
       case _ =>
-        IO(respond(refused(node.filter(NodeIdText.matches).getOrElse("unknown"), MissingHeaders)))
+        // The body stays unread, so the connection must not be kept: see BoundedBody.
+        IO(
+          respond(refused(node.filter(NodeIdText.matches).getOrElse("unknown"), MissingHeaders))
+            .putHeaders(org.http4s.headers.Connection.close)
+        )
 
   /** Which refusals a route logs at WARN: the first per node id (kept [[RefusalLog.RememberMs]]),
-    * at most [[RefusalLog.MaxWarnsPerMinute]] a minute; every other one at DEBUG. These routes sit
-    * on the public REST port, so an unauthenticated flood must not flood the log. Memory is bounded
-    * by [[RefusalLog.MaxNodes]] node ids.
+    * at most [[RefusalLog.MaxWarnsPerMinute]] a minute; every other one at DEBUG. Anyone who can
+    * reach the node listener can call these routes, so an unauthenticated flood must not flood the
+    * log. Memory is bounded by [[RefusalLog.MaxNodes]] node ids.
     */
   final class RefusalLog(logger: Logger, clock: () => Long = () => System.currentTimeMillis()):
     import RefusalLog.*

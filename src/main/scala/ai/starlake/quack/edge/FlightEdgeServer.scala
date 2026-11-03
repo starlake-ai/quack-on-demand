@@ -92,9 +92,14 @@ final class FlightEdgeServer(
       if cfg.tlsEnabled then Location.forGrpcTls(cfg.host, cfg.port)
       else Location.forGrpcInsecure(cfg.host, cfg.port)
 
+    // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with
+    // RESOURCE_EXHAUSTED as soon as the length prefix arrives, before it holds any of it, and a
+    // header list over its limit before any authentication runs.
     val builder = FlightServer
       .builder(allocator, location, producer)
       .headerAuthenticator(headerAuth)
+      .maxInboundMessageSize(cfg.maxInboundMessageBytes)
+      .setMaxHeaderListSize(cfg.maxHeaderBytes)
 
     if cfg.tlsEnabled then
       CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)

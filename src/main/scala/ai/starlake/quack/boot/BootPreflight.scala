@@ -175,6 +175,28 @@ object BootPreflight extends LazyLogging:
       case Some(refusal) => Left(refusal)
       case None          => Right(verdicts.collect { case Right(Some(warning)) => warning })
 
+  /** Printed (stderr) when the JDK has no `HttpClient.shutdownNow`: see
+    * [[checkHttpClientShutdown]].
+    */
+  val NoHttpClientShutdownWarning: String =
+    "WARNING: this JDK has no HttpClient.shutdownNow (JDK 21 and later have it). The manager " +
+      "shuts down the HTTP client of each exchange with an identity provider or an OPA server " +
+      "when the exchange ends, because the JDK keeps the connection of an answer it refuses to " +
+      "read (a descriptor and its buffers) for as long as the client lives. On this JDK the " +
+      "client goes only at a garbage collection, and on some updates the connection never does, " +
+      "so anyone able to make the manager read such an answer can run it out of descriptors or " +
+      "memory. Run the manager on JDK 21 or later."
+
+  /** Pure gate: a JDK below 21 cannot close what a client holds (`BoundedHttp.canShutdownNow`), and
+    * the build can still compile on 17, so `scripts/run-jar.sh` does not refuse such a JDK. The
+    * manager boots all the same, with this warning for `Main.bootManager` to print on stderr: the
+    * default log level is ERROR, so the logger would swallow it.
+    */
+  def checkHttpClientShutdown(
+      available: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow
+  ): Option[String] =
+    Option.when(!available)(NoHttpClientShutdownWarning)
+
   /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
   val NoEdgeAuthMessage: String =
     "the FlightSQL edge and the Quack front door have no authenticator: QOD_AUTH_DB_ENABLED=false " +
@@ -381,14 +403,8 @@ object BootPreflight extends LazyLogging:
   val InternalUrlPodIpFormatMessage: String =
     "QOD_POD_IP (quack-on-demand.nodeAuthz.podIp) does not make a plain http:// URL with a host: " +
       "with QOD_INTERNAL_URL unset, nodes call this replica's decision endpoint on " +
-      "http://<pod IP>:<manager port>. Set QOD_POD_IP to this pod's IP (the downward API's " +
+      "http://<pod IP>:<internal port>. Set QOD_POD_IP to this pod's IP (the downward API's " +
       "status.podIP, as the Helm chart does), or set QOD_INTERNAL_URL"
-
-  /** The format refusal when neither is set and the URL came from the bind address. */
-  val InternalUrlBindHostFormatMessage: String =
-    "QOD_ON_DEMAND_HOST (quack-on-demand.host) does not make a plain http:// URL with a host: " +
-      "with QOD_INTERNAL_URL and QOD_POD_IP unset, nodes call this replica's decision endpoint " +
-      "on http://<bind address>:<manager port>. Set QOD_INTERNAL_URL"
 
   def internalUrlKubernetesMessage(url: String): String =
     s"the node decide URL is $url, a loopback address no node pod can reach on the kubernetes " +
@@ -397,42 +413,128 @@ object BootPreflight extends LazyLogging:
 
   val InternalUrlFleetMessage: String =
     "fleet mode requires QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl): this " +
-      "replica's own plain http:// address on the private network the fleet servers share, one " +
+      "replica's own plain http:// address on the private network the fleet servers share, on " +
+      "the internal listener's port (QOD_INTERNAL_PORT, by default the manager port + 1), one " +
       "per replica (never a load balancer or an address several replicas share, which would " +
       "send a node's verdict calls to a replica that did not mint its handle); every node calls " +
       "it for its statements' verdicts"
 
-  /** The boot line naming the URL nodes call (never a secret: user info and queries are refused).
+  /** The refusal of an explicit URL that names the REST port, which no longer answers nodes. */
+  def internalUrlRestPortMessage(restPort: Int, internalPort: Int): String =
+    s"QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl) names port $restPort, the manager's " +
+      "REST port: nodes call this replica's decision endpoint on the internal listener, port " +
+      s"$internalPort (QOD_INTERNAL_PORT). Name that port in the URL"
+
+  /** The boot line naming the URL nodes call and the address the listener binds (never a secret:
+    * user info and queries are refused).
     */
-  def decideUrlLine(url: String): String = s"node decide URL: $url"
+  def decideUrlLine(url: String, host: String, port: Int): String =
+    // An IPv6 address goes in brackets, as in a URL: `[fd00:0:0:0:0:0:0:7]:20901`.
+    val shown = if host.contains(':') && !host.startsWith("[") then s"[$host]" else host
+    s"node decide URL: $url (listening on $shown:$port)"
+
+  /** The port of the node verdict listener, clear of the manager's other listeners and of the ports
+    * its nodes lease.
+    */
+  def checkInternalPort(
+      nodeAuthz: NodeAuthzConfig,
+      restPort: Int,
+      flightPort: Int,
+      quackPort: Option[Int],
+      minNodePort: Int,
+      maxNodePort: Int
+  ): Either[String, Int] =
+    val port  = nodeAuthz.listenerPort(restPort)
+    val taken = List(
+      "the REST port"      -> Some(restPort),
+      "the FlightSQL port" -> Some(flightPort),
+      "the Quack port"     -> quackPort
+    ).collectFirst { case (name, Some(p)) if p == port => name }
+    // Named by what it is, with the settings that can change it: the port is usually nobody's
+    // choice (the REST port + 1), and a refusal must not read as if the operator had set it.
+    val listener = s"the node verdict listener's port $port (QOD_INTERNAL_PORT, " +
+      "quack-on-demand.nodeAuthz.internalPort; by default the REST port + 1)"
+    taken match
+      case Some(name)           => Left(s"$listener is $name")
+      case None if port > 65535 =>
+        Left(
+          s"the REST port $restPort leaves no port for the node verdict listener: set " +
+            "QOD_INTERNAL_PORT (quack-on-demand.nodeAuthz.internalPort)"
+        )
+      case None if port >= minNodePort && port <= maxNodePort =>
+        Left(
+          s"$listener is in the node port range $minNodePort-$maxNodePort " +
+            "(QOD_MIN_PORT, QOD_MAX_PORT)"
+        )
+      case None => Right(port)
+
+  /** Where the node verdict listener binds, so that as little as possible reaches it: loopback for
+    * a loopback decide URL (a literal binds its own address, `127.0.0.2` included, and a name binds
+    * `127.0.0.1`); the URL's address when that is a literal address of this host, since nodes call
+    * exactly that address (no name is ever looked up here); otherwise where REST binds.
+    */
+  def internalBindHost(
+      nodeAuthz: NodeAuthzConfig,
+      bindHost: String,
+      restPort: Int,
+      isLocalAddress: java.net.InetAddress => Boolean = a =>
+        java.net.NetworkInterface.getByInetAddress(a) != null
+  ): String =
+    nodeUrlHost(nodeAuthz.replicaUrl(restPort)) match
+      case Some(host) if loopbackHost(host) =>
+        // A loopback literal binds its own address: all of 127.0.0.0/8 is loopback on Linux, and a
+        // listener on 127.0.0.1 answers a node that calls 127.0.0.2 nobody. A name is not a
+        // literal, and qod-node resolves it to the first loopback address.
+        literalAddress(host) match
+          case Some(_: java.net.Inet6Address) => "::1"
+          case Some(address)                  => address.getHostAddress
+          case None                           => "127.0.0.1"
+      case Some(host) =>
+        literalAddress(host).filter(isLocalAddress).map(_.getHostAddress).getOrElse(bindHost)
+      case None => bindHost
+
+  /** The address a URL's host names literally: a bracketed IPv6 address, or an IPv4 one in any form
+    * [[inetAton]] reads. Never a lookup.
+    */
+  private def literalAddress(host: String): Option[java.net.InetAddress] =
+    if host.startsWith("[") then ipv6Literal(host)
+    else
+      inetAton(host.stripSuffix(".").toLowerCase(Locale.ROOT)).map(a =>
+        java.net.InetAddress.getByAddress(
+          Array((a >>> 24).toByte, (a >>> 16).toByte, (a >>> 8).toByte, a.toByte)
+        )
+      )
 
   /** Pure gate on the decide URL (`NodeAuthzConfig.replicaUrl`): every node calls it for its
     * statements' verdicts, so a boot whose nodes could not reach it would answer every user
     * statement "authorization unavailable". In fleet mode set explicitly (a loopback one is fine on
     * a single-host fleet); on every runtime a URL qod-node accepts ([[nodeUrlHost]]); on Kubernetes
-    * never a loopback or unspecified host (the default included: the chart sets QOD_POD_IP). Right
-    * carries the URL; a format refusal never echoes it, since it could carry credentials, and names
-    * the setting it came from. Reads configuration only: no name is ever looked up.
+    * never a loopback or unspecified host (the default included: the chart sets QOD_POD_IP); an
+    * explicit one never the REST port, which no longer answers nodes. Right carries the URL; a
+    * format refusal never echoes it, since it could carry credentials, and names the setting it
+    * came from. Reads configuration only: no name is ever looked up.
     */
   def checkInternalUrl(
       runtimeType: String,
       nodeAuthz: NodeAuthzConfig,
-      bindHost: String,
       restPort: Int
   ): Either[String, String] =
-    val url = nodeAuthz.replicaUrl(bindHost, restPort)
+    val url = nodeAuthz.replicaUrl(restPort)
     if RuntimeType.isFleet(runtimeType) && nodeAuthz.internalUrl.trim.isEmpty then
       Left(InternalUrlFleetMessage)
     else
       nodeUrlHost(url) match
         case None =>
+          // With no explicit URL the default is loopback or the pod IP, and only the latter can fail.
           Left(
             if nodeAuthz.internalUrl.trim.nonEmpty then InternalUrlFormatMessage
-            else if nodeAuthz.podIp.trim.nonEmpty then InternalUrlPodIpFormatMessage
-            else InternalUrlBindHostFormatMessage
+            else InternalUrlPodIpFormatMessage
           )
         case Some(host) if RuntimeType.isKubernetes(runtimeType) && unreachableHost(host) =>
           Left(internalUrlKubernetesMessage(url))
+        case Some(_)
+            if nodeAuthz.internalUrl.trim.nonEmpty && nodeUrlPort(url).contains(restPort) =>
+          Left(internalUrlRestPortMessage(restPort, nodeAuthz.listenerPort(restPort)))
         case Some(_) => Right(url)
 
   private val HttpScheme = "http://"
@@ -453,6 +555,13 @@ object BootPreflight extends LazyLogging:
         splitAuthority(authority)
           .filter((host, port) => validHost(host) && port.forall(validPort))
           .map(_._1)
+    }
+
+  /** The port an http URL names (80 when it names none), when qod-node's parser takes it. */
+  private def nodeUrlPort(url: String): Option[Int] =
+    Option.when(url.startsWith(HttpScheme))(url.substring(HttpScheme.length)).flatMap { rest =>
+      splitAuthority(rest.takeWhile(_ != '/'))
+        .map(_._2.filter(validPort).map(_.toInt).getOrElse(80))
     }
 
   /** host (brackets kept for IPv6) and the port text after its colon, as qod-node splits them. */
@@ -500,12 +609,16 @@ object BootPreflight extends LazyLogging:
     * `127.0.0.1`, `127.1`, `2130706433`, `0x7f.1`, `0177.0.0.1`, `0`, `[::1]`, `[::]`.
     */
   private def unreachableHost(host: String): Boolean =
-    if host.startsWith("[") then
-      ipv6Literal(host).forall(a => a.isLoopbackAddress || a.isAnyLocalAddress)
+    loopbackHost(host) ||
+      (if host.startsWith("[") then ipv6Literal(host).forall(_.isAnyLocalAddress)
+       else inetAton(host.stripSuffix(".").toLowerCase(Locale.ROOT)).contains(0L))
+
+  /** A `localhost` name or a loopback address, in the forms [[unreachableHost]] reads. */
+  private def loopbackHost(host: String): Boolean =
+    if host.startsWith("[") then ipv6Literal(host).exists(_.isLoopbackAddress)
     else
       val h = host.stripSuffix(".").toLowerCase(Locale.ROOT)
-      h == "localhost" || h.endsWith(".localhost") ||
-      inetAton(h).exists(a => (a >>> 24) == 127L || a == 0L)
+      h == "localhost" || h.endsWith(".localhost") || inetAton(h).exists(a => (a >>> 24) == 127L)
 
   /** inet_aton's reading of an IPv4 address: one to four parts, each decimal, octal (leading `0`)
     * or hex (`0x`); the last part fills the bits the others leave. None when `host` is not one.

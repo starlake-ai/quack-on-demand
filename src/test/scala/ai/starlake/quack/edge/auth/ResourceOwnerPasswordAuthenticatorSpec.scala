@@ -114,3 +114,65 @@ class ResourceOwnerPasswordAuthenticatorSpec
       case Right(profile) =>
         fail(s"a token naming no user must be refused, got the name ${profile.username}")
   }
+
+  it should "refuse a token whose email_verified nests 30000 levels deep, and let its thread go on" in {
+    // The claim is printed with toString, which recurses once per level: the StackOverflowError is
+    // fatal to cats-effect. The case runs on a plain thread with a small stack, never a cats-effect
+    // one, so a regression fails the case and not the test JVM.
+    val token = NestedClaims.rs256(
+      JwtTestSigner.keyPair,
+      NestedClaims.claims(
+        "https://idp.example.test",
+        "qod-console",
+        "email_verified",
+        NestedClaims.Depth
+      )
+    )
+    idp.resetAll()
+    idp.stubFor(
+      WireMock
+        .post(WireMock.urlPathEqualTo("/token"))
+        .willReturn(WireMock.okJson(s"""{"access_token":"$token","token_type":"Bearer"}"""))
+    )
+    val authenticator = new ResourceOwnerPasswordAuthenticator(
+      "keycloak",
+      s"http://localhost:${idp.port()}/token",
+      "qod-console",
+      "qod-console-secret",
+      "role"
+    )
+
+    PlainThread.run()(
+      authenticator.authenticate(AuthScope.System, "typed-name", "pw")
+    ) shouldBe Right(
+      Left(AuthFailure.InvalidCredentials("keycloak-ropc: token is nested too deeply"))
+    )
+  }
+
+  // The JDK's HTTP/2 reader queues inbound frames with no bound, and the JDK offers `Upgrade: h2c`
+  // on every http:// request. The token endpoint is the operator's URL, not a tenant's, but the
+  // client costs nothing to keep to HTTP/1.1 and there is no reason to offer what it cannot bound.
+  it should "speak HTTP/1.1 only: its request offers no upgrade to HTTP/2" in {
+    val server = new MalformedServer(
+      "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\n{}"
+        .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1)
+    )
+    try
+      val authenticator = new ResourceOwnerPasswordAuthenticator(
+        "keycloak",
+        s"${server.base}/token",
+        "qod-console",
+        "qod-console-secret",
+        "role"
+      )
+
+      authenticator.authenticate(AuthScope.System, "typed-name", "pw").isLeft shouldBe true
+
+      val head = server.heads.headOption
+        .getOrElse(fail("the token endpoint was never asked"))
+        .toLowerCase(java.util.Locale.ROOT)
+      head should startWith("post /token http/1.1")
+      head should not include "upgrade"
+      head should not include "http2-settings"
+    finally server.close()
+  }

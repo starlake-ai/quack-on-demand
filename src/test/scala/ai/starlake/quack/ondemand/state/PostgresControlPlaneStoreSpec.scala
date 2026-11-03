@@ -13,8 +13,11 @@ import ai.starlake.quack.model.{
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.io.IOException
+import java.net.{InetAddress, ServerSocket, Socket}
 import java.sql.{Connection, DriverManager}
 import java.time.Instant
+import java.util.concurrent.{ConcurrentHashMap, FutureTask, TimeUnit, TimeoutException}
 import scala.sys.process._
 import scala.util.Try
 
@@ -686,6 +689,90 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
 
   it should "report ping=true on a live database" in withStore { store =>
     store.ping() shouldBe true
+  }
+
+  /** A TCP proxy in front of the local Postgres that can stop forwarding while it keeps its sockets
+    * open: a frozen database, or a network that drops packets, as the client sees it.
+    */
+  private final class StallProxy(targetHost: String, targetPort: Int) extends AutoCloseable:
+    private val server            = new ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+    private val open              = ConcurrentHashMap.newKeySet[Socket]()
+    @volatile private var stalled = false
+    val port: Int                 = server.getLocalPort
+
+    def stall(): Unit = stalled = true
+
+    private def daemon(name: String)(body: => Unit): Unit =
+      val t = new Thread(() => body, name)
+      t.setDaemon(true)
+      t.start()
+
+    private def closeQuietly(s: Socket): Unit =
+      try s.close()
+      catch case _: IOException => ()
+
+    // Copies `from` to `to`; once stalled it holds what it has read, and reads no more.
+    private def pump(from: Socket, to: Socket): Unit =
+      daemon("stall-proxy-pump") {
+        val buf = new Array[Byte](8192)
+        try
+          var n = from.getInputStream.read(buf)
+          while n >= 0 do
+            while stalled && !server.isClosed do Thread.sleep(5)
+            to.getOutputStream.write(buf, 0, n)
+            n = from.getInputStream.read(buf)
+        catch case _: IOException => ()
+        finally
+          closeQuietly(from)
+          closeQuietly(to)
+      }
+
+    daemon("stall-proxy-accept") {
+      try
+        while true do
+          val client   = server.accept()
+          val upstream = new Socket(targetHost, targetPort)
+          open.add(client)
+          open.add(upstream)
+          pump(client, upstream)
+          pump(upstream, client)
+      catch case _: IOException => ()
+    }
+
+    override def close(): Unit =
+      server.close()
+      open.forEach(s => closeQuietly(s))
+
+  it should "answer ping=false within seconds when the database stops answering" in {
+    if !pgReachable then
+      cancel(s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping")
+    val proxy = new StallProxy(pgHost, pgPort)
+    try
+      // One pooled connection: the second ping borrows the one the first just used, and Hikari
+      // validates a connection only after it has sat idle for 500 ms, so it validates nothing here.
+      val store = new PostgresControlPlaneStore(
+        s"jdbc:postgresql://127.0.0.1:${proxy.port}/postgres",
+        pgUser,
+        pgPass,
+        poolSize = 1
+      )
+      try
+        store.ping() shouldBe true
+        proxy.stall()
+        // The URL sets no socket timeout, so a plain query waits for ever here. The 10 s bound is
+        // the test's own: a regression fails this case instead of hanging the suite.
+        val ping   = new FutureTask[Boolean](() => store.ping())
+        val runner = new Thread(ping, "ping-on-a-stalled-database")
+        runner.setDaemon(true)
+        runner.start()
+        val answer =
+          try ping.get(10, TimeUnit.SECONDS)
+          catch
+            case _: TimeoutException =>
+              fail("ping() was still waiting 10 s after the database stopped answering")
+        answer shouldBe false
+      finally store.close()
+    finally proxy.close()
   }
 
   "HA: notifications" should "deliver pg_notify to a listening connection" in withStoreAndUrl {

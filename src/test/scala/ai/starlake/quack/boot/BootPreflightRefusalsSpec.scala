@@ -7,6 +7,7 @@ import ai.starlake.quack.{
   ManagementOidcConfig,
   ManagerConfig
 }
+import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{AuthenticationConfig, AzureAuthConfig, OpaConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
@@ -61,14 +62,23 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
     * past the retired-setting gate stops there, before it opens any socket or reaches Postgres (no
     * probe, no Liquibase).
     */
-  private def bootUntilHaRefusal(env: String => Option[String], authOverlay: String = ""): Unit =
+  private def bootUntilHaRefusal(
+      env: String => Option[String],
+      authOverlay: String = "",
+      shutdownNowAvailable: Boolean = BoundedHttp.canShutdownNow
+  ): Unit =
     boot(
       env,
       "quack-on-demand { ha.enabled = true, runtimeType = local, embeddedPostgres.enabled = false }" +
-        "\n" + authOverlay
+        "\n" + authOverlay,
+      shutdownNowAvailable
     )
 
-  private def boot(env: String => Option[String], overlay: String): Unit =
+  private def boot(
+      env: String => Option[String],
+      overlay: String,
+      shutdownNowAvailable: Boolean = BoundedHttp.canShutdownNow
+  ): Unit =
     val source = ConfigSource
       .string(overlay)
       .withFallback(ConfigSource.default)
@@ -82,7 +92,8 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
       opa,
       env = env,
-      rawConfig = ConfigFactory.empty()
+      rawConfig = ConfigFactory.empty(),
+      shutdownNowAvailable = shutdownNowAvailable
     )
     ()
 
@@ -507,4 +518,59 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       withClue(name)(
         err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
       )
+  }
+
+  // A JDK below 21 has no HttpClient.shutdownNow, which BoundedHttp finds by name because the build
+  // can still compile on 17. There a client the manager is done with goes at a GC (a refused answer's
+  // connection never, on some updates), so the exposure the shutdown closes is back. The launcher
+  // (scripts/run-jar.sh) does not refuse such a JDK, so the boot says so, on stderr, which the
+  // default ERROR log level cannot swallow.
+  "checkHttpClientShutdown" should "say nothing on a JDK that can shut an HTTP client down" in {
+    BootPreflight.checkHttpClientShutdown(available = true) shouldBe None
+  }
+
+  it should "warn, naming the JDK to run on, on one that cannot" in {
+    val warning = BootPreflight
+      .checkHttpClientShutdown(available = false)
+      .getOrElse(fail("no warning for a JDK without HttpClient.shutdownNow"))
+
+    warning should startWith("WARNING:")
+    warning should include("HttpClient.shutdownNow")
+    warning should include("JDK 21")
+  }
+
+  it should "follow the JDK that runs the manager when it is not told" in {
+    BootPreflight.checkHttpClientShutdown().isEmpty shouldBe BoundedHttp.canShutdownNow
+  }
+
+  /** What `body` printed on stderr. */
+  private def stderrOf(body: => Unit): String =
+    val captured = new java.io.ByteArrayOutputStream()
+    val original = System.err
+    System.setErr(new java.io.PrintStream(captured, true))
+    try body
+    finally System.setErr(original)
+    captured.toString
+
+  "Main.bootManager" should "print the warning on stderr when the JDK cannot shut an HTTP client down, and go on" in {
+    val printed = stderrOf {
+      val err = intercept[RuntimeException](
+        bootUntilHaRefusal(noEnv, shutdownNowAvailable = false)
+      )
+      // A warning, not a refusal: the boot gets as far as HA validation.
+      err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
+    }
+
+    printed should include(
+      BootPreflight.checkHttpClientShutdown(available = false).getOrElse(fail("no warning"))
+    )
+  }
+
+  it should "print nothing about it on a JDK that can" in {
+    val printed = stderrOf {
+      intercept[RuntimeException](bootUntilHaRefusal(noEnv, shutdownNowAvailable = true))
+      ()
+    }
+
+    printed should not include "HttpClient.shutdownNow"
   }

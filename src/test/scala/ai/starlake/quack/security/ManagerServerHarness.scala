@@ -366,9 +366,15 @@ object ManagerServerHarness:
       // The authentication service behind POST /api/auth/login. None keeps the in-memory one (the
       // database authenticator's stand-in over `store`); a spec that drives a real chain, such as
       // the manager-wide password grant behind the database check, passes its own.
-      authService: Option[AuthenticationService] = None
+      authService: Option[AuthenticationService] = None,
+      // Request limits of the REST listener. Specs that exercise them pass small ones.
+      restLimits: RestLimitsConfig = RestLimitsConfig(),
+      // GET /metrics. The default mounts nothing (no Prometheus child, as with the sink off); a spec
+      // that drives the route through the real server passes an endpoint over its own registry.
+      metricsEndpoint: MetricsEndpoint =
+        new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
   ): Harness =
-    val mgrCfg  = minimalManagerConfig(port = 0)
+    val mgrCfg  = minimalManagerConfig(port = 0).copy(restLimits = restLimits)
     val edgeCfg = minimalFlightConfig
     val tracker = new NodeLoadTracker
     val backend = stubBackend
@@ -472,7 +478,7 @@ object ManagerServerHarness:
     )
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
-    val health = new HealthHandler(sup)
+    val health = new HealthHandler(sup, () => true)
 
     val tagHandlers = new TagHandlers(
       sup,
@@ -611,8 +617,6 @@ object ManagerServerHarness:
       requireEncryption = false
     )
 
-    val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
-
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
     // Main's wiring (total scopeOf; PAT resolution via patAuth).
     val tenantLocationHandlers                       = new TenantLocationHandlers(sup, None)
@@ -692,7 +696,8 @@ object ManagerServerHarness:
             dataTools.tools ++ adminTools.tools ++ identityTools.tools ++
               accessTools.tools ++ platformTools.tools ++
               new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
-            serverVersion = "test-harness"
+            serverVersion = "test-harness",
+            limits = mgrCfg.restLimits
           ).routes
 
     val mgr = new ManagerServer(

@@ -44,8 +44,12 @@ class GoogleGroupsLookup(
       .maximumSize(10_000L)
       .build[String, Set[String]]()
 
+  // HTTP/1.1 only, as every client of ours to a URL that is not ours: the JDK offers `Upgrade: h2c`
+  // on every http:// request, and its HTTP/2 reader queues inbound frames with no bound (see
+  // BoundedHttp).
   private val httpClient = HttpClient
     .newBuilder()
+    .version(HttpClient.Version.HTTP_1_1)
     .connectTimeout(java.time.Duration.ofSeconds(10))
     .build()
 

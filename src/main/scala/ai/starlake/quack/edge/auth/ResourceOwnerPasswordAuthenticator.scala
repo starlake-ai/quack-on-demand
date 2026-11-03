@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.sql.TooDeep
 import com.nimbusds.jwt.SignedJWT
 import com.typesafe.scalalogging.LazyLogging
 
@@ -22,12 +23,30 @@ class ResourceOwnerPasswordAuthenticator(
 
   val name: String = s"$providerName-ropc"
 
+  // HTTP/1.1 only, as every client of ours to a URL that is not ours: the JDK offers `Upgrade: h2c`
+  // on every http:// request, and its HTTP/2 reader queues inbound frames with no bound (see
+  // BoundedHttp).
   private val httpClient: HttpClient = HttpClient
     .newBuilder()
+    .version(HttpClient.Version.HTTP_1_1)
     .connectTimeout(java.time.Duration.ofSeconds(10))
     .build()
 
   override def authenticate(
+      scope: AuthScope,
+      username: String,
+      password: String
+  ): Either[AuthFailure, AuthenticatedProfile] =
+    // The token is the identity provider's, and the email_verified claim is printed with toString,
+    // which recurses once per level of a nested value: a StackOverflowError is fatal to
+    // cats-effect, so one escaping here halted the whole manager under IOApp. TooDeep.orElse
+    // catches it on the thread that overflowed, and the login is refused (see
+    // OidcBearerAuthenticator.authenticate).
+    TooDeep.orElse[Either[AuthFailure, AuthenticatedProfile]](
+      Left(AuthFailure.InvalidCredentials(s"$name: token is nested too deeply"))
+    )(passwordGrant(scope, username, password))
+
+  private def passwordGrant(
       scope: AuthScope,
       username: String,
       password: String

@@ -217,6 +217,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     server = new QuackFrontDoorServer(
       QuackNativeConfig(true, "127.0.0.1", doorPort, false, "", "", 3600, 1L << 28),
       door.handle,
+      door.isLive,
       door.sweep,
       door.closeAll()
     )

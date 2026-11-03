@@ -151,8 +151,10 @@ Refusals checked on every render (deployment.yaml includes this first):
   nobody can log in without one.
 - env.QOD_POD_IP is the chart's own (downward API): a user value would win
   over it and name another address for the nodes' verdict calls.
-- env.QOD_INTERNAL_URL is refused with more than one replica: each replica
-  names itself through its pod IP, and one shared URL would not.
+- env.QOD_INTERNAL_PORT is the chart's own: the NetworkPolicies and the container port use 20901.
+- env.QOD_INTERNAL_URL is refused at any replica count: each replica names
+  itself through its pod IP, the chart's Service has no verdict port, and one
+  shared URL would send every node's verdict calls to a single replica.
 */}}
 {{- define "qod.validateValues" -}}
 {{- with .Values.apiKey }}
@@ -168,7 +170,10 @@ Refusals checked on every render (deployment.yaml includes this first):
 {{- if hasKey (.Values.env | default dict) "QOD_POD_IP" }}
 {{- fail "env.QOD_POD_IP must stay unset: the chart sets it from the downward API (status.podIP), and nodes call the address it names for their verdicts" }}
 {{- end }}
-{{- if and (gt (.Values.replicaCount | int) 1) (hasKey (.Values.env | default dict) "QOD_INTERNAL_URL") }}
-{{- fail "env.QOD_INTERNAL_URL must stay unset when replicaCount > 1: each replica's decide URL comes from its own pod IP (QOD_POD_IP), and one shared URL would send every node's verdict calls to a single replica" }}
+{{- if hasKey (.Values.env | default dict) "QOD_INTERNAL_PORT" }}
+{{- fail "env.QOD_INTERNAL_PORT must stay unset: the chart's NetworkPolicies and container port use 20901" }}
+{{- end }}
+{{- if hasKey (.Values.env | default dict) "QOD_INTERNAL_URL" }}
+{{- fail "env.QOD_INTERNAL_URL must stay unset: each replica's decide URL comes from its own pod IP (QOD_POD_IP), the chart's Service has no verdict port, and one shared URL would send every node's verdict calls to a single replica" }}
 {{- end }}
 {{- end -}}

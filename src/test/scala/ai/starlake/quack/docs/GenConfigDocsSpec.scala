@@ -81,8 +81,8 @@ class GenConfigDocsSpec extends AnyFunSuite:
   test("renders the placeholder URL examples as code spans, and no URL in prose") {
     val md = GenConfigDocs.render
     List(
-      "`http://<QOD_POD_IP>:<manager port>`",
-      "`http://<pod IP>:<manager port>`",
+      "`http://<QOD_POD_IP>:<internal port>`",
+      "`http://<pod IP>:<internal port>`",
       "`http://host[:port]`"
     ).foreach { span =>
       val present = md.contains(span)

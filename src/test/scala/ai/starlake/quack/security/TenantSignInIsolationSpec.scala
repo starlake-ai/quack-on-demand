@@ -979,14 +979,16 @@ class TenantSignInIsolationSpec
           message should (include(s"/ui/?tenant=$Acme") and include("personal access token"))
         }
       }
-      // Every refusal is audited as a denied login under the tenant id the login resolved, with
-      // the reason; none is a password failure (no password was checked).
+      // The refusals are audited as a denied login under the tenant id the login resolved, with
+      // the reason; none is a password failure (no password was checked). A refusal needs no
+      // credential and is answered before any password check, so nothing bounds how many a sender
+      // makes: all of them name one tenant, however it is typed, and share one row (at most one a
+      // minute per tenant is written; AuthHandlersSpec moves the clock past the minute).
       val refusals = w.auditRows.filter(e =>
         e.action == AuditActions.AuthLoginFailure && e.detail.get("reason").contains("sso_required")
       )
-      refusals.map(e => (e.outcome, e.tenant)) shouldBe
-        List.fill(attempts.size)(("denied", Some(Acme)))
-      w.auditRows.count(_.action == AuditActions.AuthLoginFailure) shouldBe attempts.size
+      refusals.map(e => (e.outcome, e.tenant)) shouldBe List(("denied", Some(Acme)))
+      w.auditRows.count(_.action == AuditActions.AuthLoginFailure) shouldBe 1
       // The page the message points to asks the public mode endpoint, which answers oidc for the
       // tenant however its name is typed (trimmed, any letter case).
       List(Acme, "%20ACME%20").foreach { typed =>

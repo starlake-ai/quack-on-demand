@@ -35,12 +35,16 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.UserGrant
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import ai.starlake.quack.secrets.SecretRefResolver
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
+
+import scala.concurrent.duration.DurationInt
 
 /** Unit tests for the OIDC methods on [[AuthHandlers]]: `oidcStart`, `oidcCallback`, `oidcLogout`.
   */
@@ -235,7 +239,9 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       svc: Option[OidcSsoService],
       tokens: SessionTokenStore = new SessionTokenStore,
       events: ManagerEventSink = ManagerEventSink.noop,
-      loadTenant: String => Option[Tenant] = oidcTenant
+      loadTenant: String => Option[Tenant] = oidcTenant,
+      audit: AuditRecorder = AuditRecorder.noop,
+      starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier
   ): AuthHandlers =
     new AuthHandlers(
       authService = dummyAuthService,
@@ -244,7 +250,9 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity = directory,
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
       oidc = svc,
+      audit = audit,
       events = events,
+      starlakeNotifier = starlakeNotifier,
       patSessionOf = _ => None
     )
 
@@ -663,6 +671,98 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     cookie.value shouldBe ""
     cookie.maxAge shouldBe Some(0L)
     tokens.revokedJtiCount shouldBe (before + 1)
+  }
+
+  // ================================================================
+  // 12b. oidcLogout is public: any cookie can be sent, so only a LIVE session earns an audit row
+  // and a call to Starlake. Measured before: 5000 requests, 5000 rows; with SL_ENABLED=true a
+  // detached blocking call per request, which holds no connection slot.
+  // ================================================================
+
+  /** What Starlake would have received: the hash of each revoked token it was told about. */
+  private final class CountingNotifier extends StarlakeNotifier:
+    val calls = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    def notifyLogout(tokenSha256: String): Either[String, Unit] =
+      calls.add(tokenSha256)
+      Right(())
+
+  /** Handlers over a session store whose clock the case moves, an audit recorder that resolves
+    * actors through that store, and a notifier that counts. The Starlake call is detached, so a
+    * case that expects none calls [[settle]] before it looks.
+    */
+  private final class LogoutRig:
+    @volatile var now = java.time.Instant.parse("2026-11-03T08:00:00Z")
+    val tokens        = new SessionTokenStore(maxLifetime = 1.hour, clock = () => now)
+    val telemetry     = new RecordingTelemetryStore
+    val notifier      = new CountingNotifier
+    val handlers      = makeHandlersWith(
+      (_, _, _) => Nil,
+      Some(buildSvc("s12b")),
+      tokens,
+      audit = new AuditRecorder(telemetry, tokens.get),
+      starlakeNotifier = notifier
+    )
+
+    def session(user: String = "alice"): String =
+      tokens.mintWithScope(
+        AuthenticatedProfile(user, "admin", Set("admin"), Map.empty, "oidc"),
+        SessionScope(superuser = true, Set.empty)
+      )
+
+    def logout(cookie: Option[String]) = handlers.oidcLogout(cookie, None).unsafeRunSync()
+
+    /** Long enough for a detached call that was going to happen to have happened. */
+    def settle(): Unit = Thread.sleep(300)
+
+  private def eventually(what: String)(condition: => Boolean): Unit =
+    val deadline = System.nanoTime() + 5_000_000_000L
+    while !condition && System.nanoTime() < deadline do Thread.sleep(10)
+    withClue(s"timed out waiting for $what: ")(condition shouldBe true)
+
+  it should "answer the same redirect for a garbage, a forged, an expired and no cookie, writing no row and calling nobody" in {
+    val rig     = new LogoutRig
+    val expired = rig.session()
+    rig.now = rig.now.plusSeconds(2 * 3600)
+    val forged = new SessionTokenStore(secret = "another-secret-of-more-than-32-bytes!!")
+      .mintWithScope(
+        AuthenticatedProfile("mallory", "admin", Set.empty, Map.empty, "oidc"),
+        SessionScope(superuser = true, Set.empty)
+      )
+
+    val cookies = List(None, Some(""), Some("not-a-jwt"), Some("x" * 4000), Some(forged)) ++
+      List(Some(expired)) ++ (1 to 500).map(i => Some(s"garbage-$i"))
+    cookies.foreach { cookie =>
+      val (status, location, cleared) = rig.logout(cookie)
+      status shouldBe StatusCode.Found
+      location should startWith("https://idp.example.com/logout?")
+      cleared.value shouldBe ""
+      cleared.maxAge shouldBe Some(0L)
+    }
+
+    rig.settle()
+    rig.telemetry.events shouldBe empty
+    rig.notifier.calls.size shouldBe 0
+  }
+
+  it should "revoke a live session, write one row and make one call, then write none and call nobody for the same cookie" in {
+    val rig = new LogoutRig
+    val tok = rig.session()
+
+    val first = rig.logout(Some(tok))
+    first._1 shouldBe StatusCode.Found
+    first._2 should startWith("https://idp.example.com/logout?")
+    first._3.value shouldBe ""
+    first._3.maxAge shouldBe Some(0L)
+    rig.tokens.get(tok) shouldBe None
+    rig.telemetry.events.map(e => (e.action, e.actor, e.outcome)) shouldBe
+      List(("auth.revoke", "alice", "ok"))
+    eventually("the Starlake call")(rig.notifier.calls.size == 1)
+    rig.notifier.calls.peek() shouldBe StarlakeNotifier.sha256Hex(tok)
+
+    rig.logout(Some(tok)) shouldBe first
+    rig.settle()
+    rig.telemetry.events should have size 1
+    rig.notifier.calls.size shouldBe 1
   }
 
   // ================================================================

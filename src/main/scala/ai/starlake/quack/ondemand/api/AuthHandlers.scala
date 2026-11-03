@@ -21,7 +21,7 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.{UserGrant, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRateLimiter, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -138,7 +138,13 @@ final class AuthHandlers(
       * silently drop it; a caller that wires no PAT store passes `_ => None` and answers whoami for
       * session JWTs only.
       */
-    patSessionOf: String => Option[SessionTokenStore.Session]
+    patSessionOf: String => Option[SessionTokenStore.Session],
+    /** One audit row per key per interval for a refusal any caller can make without a credential: a
+      * denied SSO redeem ([[ssoRedeem]]) and a password login into a tenant that signs in through
+      * its identity provider ([[login]]). Each is keyed on something the manager knows (one fixed
+      * key, a tenant id), never on text the sender chooses.
+      */
+    publicDenialAudit: AuditRateLimiter = new AuditRateLimiter()
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -321,23 +327,30 @@ final class AuthHandlers(
                 (StatusCode.Found, result.returnTo, cookie, clearStateCookie(forwardedProto))
   }
 
+  /** Public logout of the browser's SSO session: always the same redirect, with the cookie cleared.
+    * Only a session that is live earns a revoke, an audit row and a call to Starlake, so a cookie
+    * that is garbage, forged, expired or already revoked costs a signature check and nothing else.
+    */
   def oidcLogout(
       sessionCookie: Option[String],
       forwardedProto: Option[String]
   ): IO[(StatusCode, String, CookieValueWithMeta)] =
     IO.blocking {
-      sessionCookie match
-        case Some(tok) =>
-          val (actor, realm) = audit.actorOf(Some(tok))
-          tokens.revoke(tok)
-          audit.restAs(actor, realm, "auth", AuditActions.AuthRevoke, "ok")
-        case None => ()
+      // Anyone can send any cookie here, so only a session that is live earns an audit row and a
+      // call to Starlake. A row per request would be kept for the audit retention, and the call is
+      // detached, so it holds no connection slot.
+      val live = sessionCookie.filter(tok => tokens.get(tok).isDefined)
+      live.foreach { tok =>
+        val (actor, realm) = audit.actorOf(Some(tok))
+        tokens.revoke(tok)
+        audit.restAs(actor, realm, "auth", AuditActions.AuthRevoke, "ok")
+      }
       // id_token_hint is not persisted in this iteration; RP-initiated logout still
       // clears the local cookie and (when configured) hits the IdP end-session endpoint.
       // Logout uses the system end-session endpoint; per-tenant end-session is a follow-up.
       val location = oidc.flatMap(_.endSessionUrl(OidcScope.System, None)).getOrElse("/ui/")
-      (StatusCode.Found, location, clearCookie(forwardedProto))
-    }.flatTap(_ => dispatchStarlakeLogout(sessionCookie))
+      ((StatusCode.Found, location, clearCookie(forwardedProto)), live)
+    }.flatMap((answer, live) => dispatchStarlakeLogout(live).as(answer))
 
   // ---- Browser SQL-token flow (/api/auth/sql-token) ----
 
@@ -459,21 +472,27 @@ final class AuthHandlers(
     * the login resolved (not the typed text). The message names the tenant as the caller typed it
     * (`typed`, trimmed), but its link carries `id`, URL-encoded: the id is the one spelling the
     * tenant-scoped endpoints (`GET /api/auth/mode`, the SSO start) are sure to take.
+    *
+    * The refusal is answered before any password check and asks for no credential, so nothing
+    * bounds how many a sender makes, and a row each would be kept for the audit retention: at most
+    * one row an interval per tenant is written. The key is the tenant id, never the user name,
+    * which the sender chooses; every refusal still gets its answer.
     */
   private def ssoRequired(
       req: LoginRequest,
       typed: String,
       id: String
   ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
-    audit.restAs(
-      req.username,
-      "tenant",
-      "auth",
-      AuditActions.AuthLoginFailure,
-      "denied",
-      tenant = Some(id),
-      detail = Map("username" -> req.username, "reason" -> "sso_required")
-    )
+    if publicDenialAudit.allow("sso-required:" + id) then
+      audit.restAs(
+        req.username,
+        "tenant",
+        "auth",
+        AuditActions.AuthLoginFailure,
+        "denied",
+        tenant = Some(id),
+        detail = Map("username" -> req.username, "reason" -> "sso_required")
+      )
     val link = java.net.URLEncoder.encode(id, java.nio.charset.StandardCharsets.UTF_8)
     Left(
       (
@@ -892,7 +911,7 @@ final class AuthHandlers(
     * since the caller here is Starlake's redirect target, not a UI that needs to distinguish
     * failure reasons.
     */
-  def ssoTicket(token: Option[String]): Out[SsoTicketResponse] = IO {
+  def ssoTicket(token: Option[String]): Out[SsoTicketResponse] = IO.blocking {
     val t = token.getOrElse("")
     tokens.lookupResult(t) match
       case SessionTokenStore.LookupResult.Ok(session) =>
@@ -926,55 +945,54 @@ final class AuthHandlers(
     * input, the ticket itself is the (single-use, 128-bit random, short-TTL) credential.
     * `401 invalid_ticket` on unknown / expired / already-redeemed.
     *
-    * No rate limiting here on purpose: this endpoint is public and unauthenticated, so any limiter
-    * keyed on caller-supplied input (the ticket string) would itself be an unbounded,
-    * attacker-controlled memory-retention vector while providing no real protection -- a 128-bit
-    * single-use ticket with a 60s TTL is already infeasible to brute force.
+    * Attempts are not limited: a limiter keyed on caller-supplied input (the ticket string) would
+    * itself be an unbounded, attacker-controlled memory-retention vector while providing no real
+    * protection, as a 128-bit single-use ticket with a 60s TTL is already infeasible to brute
+    * force. The audit row of a denied attempt is limited, on one fixed key: it is the detection
+    * signal for ticket-guessing, so the first row per interval says what the rest would, and the
+    * rest would be the sender's volume, kept for the audit retention. The ticket value itself is
+    * never logged. Rows are written off the compute threads, as they block on the database.
     */
-  def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] = IO {
-    ssoTickets.redeem(request.ticket) match
+  def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] =
+    IO(ssoTickets.redeem(request.ticket)).flatMap {
       case Some(grant) =>
         // Identity comes from the redeemed grant, not a caller credential -- redeem
         // is public/unauthenticated. realm mirrors mintSessionFor: an empty tenant
         // means the grant was minted from a system-scope session.
         val realm = if grant.tenant.isEmpty then "system" else "tenant"
-        audit.restAs(
-          grant.username,
-          realm,
-          "auth",
-          AuditActions.AuthSsoTicketRedeem,
-          "ok",
-          tenant = grant.tenant
-        )
-        Right(
-          SsoRedeemResponse(
-            grant.sessionToken,
+        IO.blocking(
+          audit.restAs(
             grant.username,
-            grant.tenant,
-            grant.admin,
-            grant.superuser
+            realm,
+            "auth",
+            AuditActions.AuthSsoTicketRedeem,
+            "ok",
+            tenant = grant.tenant
+          )
+        ).as(
+          Right(
+            SsoRedeemResponse(
+              grant.sessionToken,
+              grant.username,
+              grant.tenant,
+              grant.admin,
+              grant.superuser
+            )
           )
         )
       case None =>
-        // No identity is recoverable from an unknown/expired/already-used ticket, so
-        // this is audited anonymously -- deliberately unconditional (no rate limit):
-        // redeem is intentionally un-rate-limited (see ssoRedeem's doc), so this row
-        // is the only detection signal for ticket-guessing. The ticket value itself
-        // is never logged.
-        audit.restAs(
-          "anonymous",
-          "system",
-          "auth",
-          AuditActions.AuthSsoTicketRedeem,
-          "denied"
-        )
-        Left(
+        val denied: Either[(StatusCode, ErrorResponse), SsoRedeemResponse] = Left(
           (
             StatusCode.Unauthorized,
             ErrorResponse("invalid_ticket", "ticket unknown, expired, or already used")
           )
         )
-  }
+        if publicDenialAudit.allow("sso-redeem") then
+          IO.blocking(
+            audit.restAs("anonymous", "system", "auth", AuditActions.AuthSsoTicketRedeem, "denied")
+          ).as(denied)
+        else IO.pure(denied)
+    }
 
   /** Resolve the admin-UI login mode for a scope. Unauthenticated: the SPA calls this before login
     * with the tenant from the URL (absent for the system scope) to decide whether to render the

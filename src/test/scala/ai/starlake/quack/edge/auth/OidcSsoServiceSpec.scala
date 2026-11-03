@@ -2,7 +2,9 @@ package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.ManagementOidcConfig
 import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.secrets.SecretRefResolver
+import ch.qos.logback.classic.Level
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -151,6 +153,52 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
       started.stateCookieValue,
       now = 1_000_500L
     ) shouldBe Left(OidcSsoError.IdpError)
+  }
+
+  // The validator is built (and runs) on an anonymous request, from what an issuer served. A throw
+  // there was a 500 and an ERROR entry with its stack, 4.3 KB, for each request: 200 callbacks were
+  // 1.5 MB a second of log from one client. It ends the callback as the IdP's error instead, and
+  // the log gets the class of what was thrown, at WARN, and nothing the issuer chose.
+  private val SsoLogger = classOf[OidcSsoService].getName
+
+  private def callbackWith(
+      buildValidator: OidcEndpoints => OidcBearerAuthenticator
+  ): Either[OidcSsoError, OidcCallbackResult] =
+    val service = new OidcSsoService(
+      resolver = resolver,
+      mgmt = mgmt,
+      codec = codec,
+      roleClaim = "role",
+      publicBaseUrlOf = () => "https://qod.example.com",
+      httpExchange = (_, _) => Right("""{"id_token":"x"}"""),
+      buildValidator = buildValidator,
+      nowMillis = () => 1_000_000L
+    )
+    val started = service.startAuth(OidcScope.System, "/ui/", "s6").toOption.get
+    service.completeAuth("c", started.stateParam, started.stateCookieValue, now = 1_000_500L)
+
+  it should "answer an IdP error, and throw nothing, when the validator cannot be built" in {
+    val (out, events) = LogCapture.logged(SsoLogger)(
+      callbackWith(_ => throw new IllegalArgumentException("Illegal character marker-7f3a at 3"))
+    )
+
+    out shouldBe Left(OidcSsoError.IdpError)
+    events.map(_.getLevel).distinct shouldBe List(Level.WARN)
+    events.map(_.getFormattedMessage).foreach { line =>
+      line should include("IllegalArgumentException")
+      line should not include "marker-7f3a"
+    }
+    events.foreach(_.getThrowableProxy shouldBe null)
+  }
+
+  it should "answer an IdP error, and throw nothing, when the validator throws as it runs" in {
+    val out = callbackWith(_ =>
+      new OidcBearerAuthenticator("oidc", "https://idp.example.com/jwks", "", "", "role"):
+        override def authenticate(token: String): Either[String, AuthenticatedProfile] =
+          throw new IllegalStateException("boom")
+    )
+
+    out shouldBe Left(OidcSsoError.IdpError)
   }
 
   it should "build an RP-initiated end-session URL with post_logout_redirect_uri" in {

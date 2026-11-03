@@ -228,3 +228,21 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
     QuackNativeBridge.parseMessageType(encodeFetchRequest("C", 1L, Hugeint(0L, 7L), 1L)) shouldBe
       Type.FetchRequest
     QuackNativeBridge.parseMessageType(encodeDisconnect("C")) shouldBe Type.Disconnect
+
+  "peekHeader" should "find a complete header" in:
+    QuackWire.peekHeader(QuackWire.encodeDisconnect("abc")) shouldBe
+      QuackWire.HeaderPeek.Complete(
+        QuackWire.Header(QuackWire.Type.Disconnect, "abc", QuackWire.InvalidIndex)
+      )
+
+  it should "ask for more when the bytes stop inside the header" in:
+    val full = QuackWire.encodeDisconnect("abc")
+    (0 to 3).foreach(n => QuackWire.peekHeader(full.take(n)) shouldBe QuackWire.HeaderPeek.NeedMore)
+
+  it should "ask for more when a string runs past the bytes it has" in:
+    // Field 2 (connection id) announcing 200 bytes, with none of them here.
+    val truncated = Array[Byte](2, 0, 0xc8.toByte, 1)
+    QuackWire.peekHeader(truncated) shouldBe QuackWire.HeaderPeek.NeedMore
+
+  it should "call a field it does not know malformed" in:
+    QuackWire.peekHeader(Array.fill[Byte](8)(1)) shouldBe QuackWire.HeaderPeek.Malformed

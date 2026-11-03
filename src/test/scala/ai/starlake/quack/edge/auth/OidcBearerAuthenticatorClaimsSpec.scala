@@ -9,6 +9,8 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import scala.jdk.CollectionConverters.*
+
 /** What the OIDC bearer authenticator puts in the profile of a verified token. The SSO login reads
   * these claims to decide whether the profile's user name may name a `qodstate_user` row
   * (`AuthHandlers`: a name that fell back to the email claim counts only when `email_verified` is
@@ -20,12 +22,27 @@ class OidcBearerAuthenticatorClaimsSpec extends AnyFlatSpec with Matchers with B
 
   private val idp = MockOidcServer.boot()
 
-  override def afterAll(): Unit = idp.shutdown()
+  // The key set of the nested-claim cases, on loopback: the very key their tokens are signed with.
+  private val keySetIdp = new LocalIdp
+  keySetIdp.serve("/jwks", 200, JwtTestSigner.jwksJson().noSpaces)
+
+  override def afterAll(): Unit =
+    idp.shutdown()
+    keySetIdp.close()
 
   private val authenticator = new OidcBearerAuthenticator(
     providerName = "keycloak",
     jwksUrl = s"${idp.baseUrl}/jwks",
     expectedIssuer = idp.issuer,
+    expectedAudience = "qod-console",
+    roleClaim = "role"
+  )
+
+  private val NestedIssuer        = "https://issuer.example"
+  private val nestedAuthenticator = new OidcBearerAuthenticator(
+    providerName = "keycloak",
+    jwksUrl = s"${keySetIdp.base}/jwks",
+    expectedIssuer = NestedIssuer,
     expectedAudience = "qod-console",
     roleClaim = "role"
   )
@@ -71,6 +88,39 @@ class OidcBearerAuthenticatorClaimsSpec extends AnyFlatSpec with Matchers with B
       case Right(p)    => fail(s"a nameless token was accepted as '${p.username}'")
   }
 
+  // ----- a signed token whose claims nest too deep -----
+  //
+  // A tenant admin picks the issuer, so the tokens that issuer signs are as hostile as the admin
+  // cares to make them, and anyone can then make the manager read one (the SSO callback, a bearer
+  // on the data plane). A claim nested thousands of levels deep passes the signature check, and the
+  // claims were printed with toString, which recurses once per level: the StackOverflowError that
+  // came out is fatal to cats-effect and halted the manager. Each case below runs on a plain thread
+  // with a small stack, never a cats-effect one, so a regression fails the case and not the test
+  // JVM.
+
+  it should "refuse a validly signed token whose claim nests 30000 levels deep, and let its thread go on" in {
+    val token = NestedClaims.rs256(
+      JwtTestSigner.keyPair,
+      NestedClaims.claims(NestedIssuer, "qod-console", "a", NestedClaims.Depth)
+    )
+    token.length should be > 70000
+
+    PlainThread.run()(nestedAuthenticator.authenticate(token)) shouldBe
+      Right(Left("keycloak token is nested too deeply"))
+    // It got as far as the key set: the signature was checked before the claims were read.
+    keySetIdp.requests.asScala.map(_._1).toList should contain("/jwks")
+  }
+
+  it should "still accept a validly signed token whose claim nests as deep as a real one could" in {
+    val token = NestedClaims.rs256(
+      JwtTestSigner.keyPair,
+      NestedClaims.claims(NestedIssuer, "qod-console", "a", 50)
+    )
+
+    PlainThread.run()(nestedAuthenticator.authenticate(token).map(_.username)) shouldBe
+      Right(Right("nested-user"))
+  }
+
   "JwtBearerAuthenticator" should "refuse a token with no preferred_username, email or sub instead of naming it unknown" in {
     val secret = "supersecret123supersecret123abcd"
     val jwt    = new JwtBearerAuthenticator(
@@ -85,4 +135,19 @@ class OidcBearerAuthenticatorClaimsSpec extends AnyFlatSpec with Matchers with B
     jwt.authenticate(signed.serialize()) match
       case Left(error) => error should include("names no user")
       case Right(p)    => fail(s"a nameless token was accepted as '${p.username}'")
+  }
+
+  it should "refuse a token whose claim nests 30000 levels deep, and let its thread go on" in {
+    val secret = "supersecret123supersecret123abcd"
+    val jwt    = new JwtBearerAuthenticator(
+      JwtAuthConfig(secretKey = secret, publicKeyPath = "", issuer = "", audience = ""),
+      "role"
+    )
+    val token = NestedClaims.hs256(
+      secret,
+      NestedClaims.claims("https://issuer.example", "qod", "a", NestedClaims.Depth)
+    )
+
+    PlainThread.run()(jwt.authenticate(token)) shouldBe
+      Right(Left("JWT token is nested too deeply"))
   }

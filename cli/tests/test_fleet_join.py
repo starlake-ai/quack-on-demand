@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import pathlib
 import re
@@ -987,3 +988,29 @@ def test_failed_node_reports_and_prints_its_suggested_action(tmp_path, capsys):
     assert node["action"] == ("another process holds port 21900 on this server: stop it, or re-run "
                               "qod fleet join with --node-port <free-port>")
     assert "to fix: another process holds port 21900" in capsys.readouterr().err
+
+
+def test_a_failed_nodes_error_is_cut_to_its_last_8192_characters(tmp_path):
+    # The heartbeat is read by the manager under 64 KiB before anything else: a node whose stderr has
+    # long lines must still be reported (and restarted), not answered with a 413 that ends the server's
+    # contact. The cause is usually the last thing a node wrote, so the end of the text is kept.
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(pid=400 + len(procs), alive=False)
+        p.stderr = io.BytesIO(b"IO Error: Could not bind: Address already in use " + b"x" * 70000
+                              + b"\nthe last line a node wrote\n")
+        procs.append(p); return p
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)}) for _ in range(2)])
+    member = make_member(http, popen, tmp_path, port_open=lambda p: False)
+    member.run_once()   # start, dies at once
+    member.run_once()   # reports failed
+    body = http.requests[1][1]
+    node = body["node"]
+    assert node["state"] == "failed"
+    assert len(node["error"]) == 8192
+    assert node["error"].endswith("\nthe last line a node wrote")
+    assert len(json.dumps(body).encode()) < 65536
+    # The fix is chosen from the whole error, not from the part that is sent.
+    assert "another process holds port 21900" in node["action"]
+    # What this process knows of the failure is not cut.
+    assert len(member.node.error) > 70000

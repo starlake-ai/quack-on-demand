@@ -71,8 +71,8 @@ Set `QOD_TPCH_SCHEMA` to target a different schema. The queries live in
 Every statement runs on a node connection of its own, in the pool's default
 schema. A lone `USE` or `SET VARIABLE` succeeds but does not carry over to the
 next statement, so qualify the names you read and write instead. A `SET` of a
-global setting such as `threads` is different: it stays on the node that ran it,
-for every later statement there.
+global setting such as `threads` (superusers only) is different: it stays on the node
+that ran it, for every later statement there.
 
 The driver returns no rows for a statement QoD cannot describe without running
 it (`CALL`, `EXPLAIN ANALYZE`, a batch of statements). The statement still runs

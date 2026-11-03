@@ -72,6 +72,10 @@ spec:
             - name: rest-ui
               containerPort: 20900
               protocol: TCP
+            # Nodes' verdict and credential calls: they reach this pod directly, so no Service.
+            - name: internal
+              containerPort: 20901
+              protocol: TCP
             - name: flightsql
               containerPort: 31338
               protocol: TCP
@@ -100,12 +104,18 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             # This replica's own address: with QOD_INTERNAL_URL unset the manager tells its nodes to
-            # call http://<pod IP>:20900 for verdicts (IPv6 in brackets), so the replica that minted
+            # call http://<pod IP>:20901 for verdicts (IPv6 in brackets), so the replica that minted
             # a handle, not the Service, answers.
             - name: QOD_POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: QOD_INTERNAL_PORT
+              value: "20901"
+            {{- if not (hasKey (.Values.env | default dict) "JAVA_OPTS") }}
+            - name: JAVA_OPTS
+              value: {{ .Values.javaOpts | quote }}
+            {{- end }}
             {{- if and .Values.auth.keycloak.enabled .Values.auth.keycloak.existingSecret }}
             - name: QOD_AUTH_KEYCLOAK_CLIENT_SECRET
               valueFrom:
