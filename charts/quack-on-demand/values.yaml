@@ -61,8 +61,11 @@ resources:
     memory: 4Gi
 
 # JVM options for the manager, passed as JAVA_OPTS. The manager pod holds only the manager (nodes
-# are pods of their own), so the heap may take most of the container's memory limit.
-javaOpts: "-XX:MaxRAMPercentage=70"
+# are pods of their own), so the heap may take half of the container's memory limit. Direct memory
+# follows the heap unless capped, and the two must stay under the limit with room for metaspace, thread
+# stacks, the native libraries, Arrow and socket buffers: past it the kernel kills the pod, with no drain.
+# Below a memory limit of 3Gi, set your own.
+javaOpts: "-XX:MaxRAMPercentage=50 -XX:MaxDirectMemorySize=512m"
 
 nodeSelector: {}
 tolerations: []

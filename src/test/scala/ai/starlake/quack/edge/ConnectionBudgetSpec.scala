@@ -16,7 +16,7 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
   private val listener    = ConnectionBudget.heldBytes(4096, 1048576L, tls = false)
   private val oneGiB      = 1L << 30
   private val fourGiB     = 4L << 30
-  private val chartHeap   = fourGiB * 70 / 100 // -XX:MaxRAMPercentage=70 under a 4 GiB limit
+  private val chartHeap   = fourGiB / 2 // -XX:MaxRAMPercentage=50 under a 4 GiB limit
   private val fiveMiB     = 5L << 20
   private val noMemoryFor = 1L << 20
 
@@ -63,8 +63,8 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
       withClue(s"heap $heap, held $held: ")(taken.toLong * held should be <= heap / 5)
 
   it should "take what is configured on the chart's heap" in:
-    ConnectionBudget.fit(1024, rest, chartHeap) shouldBe 728
-    ConnectionBudget.fit(1024, quack, chartHeap) shouldBe 1024
+    ConnectionBudget.fit(1024, rest, chartHeap) shouldBe 520
+    ConnectionBudget.fit(1024, quack, chartHeap) shouldBe 863
     ConnectionBudget.fit(256, listener, chartHeap) shouldBe 256
 
   it should "take what is configured on a heap of 4 GiB" in:
