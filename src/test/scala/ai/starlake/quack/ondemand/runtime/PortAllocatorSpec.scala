@@ -18,3 +18,12 @@ class PortAllocatorSpec extends AnyFlatSpec with Matchers:
     val a = new PortAllocator(22000, 22001)
     noException should be thrownBy a.release(99999)
     noException should be thrownBy a.release(22000)
+
+  it should "skip a port something listens on, as a node a dead manager left behind does" in:
+    val a        = new PortAllocator(23291, 23292)
+    val leftover = new java.net.ServerSocket(23291)
+    try
+      a.lease() shouldBe Some(23292)
+      a.lease() shouldBe None
+    finally leftover.close()
+    a.lease() shouldBe Some(23291)
