@@ -178,7 +178,13 @@ def _parse_keys(values: list[str] | None) -> dict[str, list[str]]:
             raise typer.BadParameter(
                 f"{value!r} must read schema.table=column[,column...]", param_hint="--key"
             )
-        keys[table.strip()] = names
+        table = table.strip()
+        if table in keys:
+            raise typer.BadParameter(
+                f"{table!r} is named twice; give all its columns in one --key, comma separated",
+                param_hint="--key",
+            )
+        keys[table] = names
     return keys
 
 

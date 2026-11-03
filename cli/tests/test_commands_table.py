@@ -864,6 +864,23 @@ def test_branch_propose_refuses_a_malformed_key_before_calling_the_server(runner
 
 
 @respx.mock
+def test_branch_propose_refuses_a_table_named_by_two_keys(runner):
+    # The second would silently replace the first, and a key with a column fewer matches more rows
+    # of main. Refused whatever the spacing around the name.
+    route = respx.post(f"{BASE}/api/branch/propose").mock(return_value=httpx.Response(200, json={}))
+    base = ["branch", "propose", "--tenant", "acme", "--db", "tpch1", "--branch", "x"]
+    for first, second in (
+        ("sales.orders=a", "sales.orders=b"),
+        (" sales.orders=a", "sales.orders=b"),
+        ("sales.orders=a", "sales.orders =b"),
+    ):
+        result = runner.invoke(app, [*base, "--key", first, "--key", second])
+        assert result.exit_code == 2
+        assert "twice" in result.output
+    assert not route.called
+
+
+@respx.mock
 def test_branch_propose_and_merge_wait_for_the_server(runner):
     # The server bounds each stage. A fixed read limit gives up on a call the server then completes.
     propose = respx.post(f"{BASE}/api/branch/propose").mock(return_value=httpx.Response(200, json={}))
