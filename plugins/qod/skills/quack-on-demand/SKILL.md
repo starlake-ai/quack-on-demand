@@ -2100,7 +2100,11 @@ An open proposal's `error` starting `timeout:` means a merge is running or may h
 
 After a manager restart mid-merge, merge again. If that does not settle it, the branch's pool is still frozen (disabled and suspended): `qod branch show` gives its `catalogDb` and `pool`, then `qod pool set-disabled --tenant acme --db <catalogDb> --pool <pool> --enabled` and `qod pool resume --tenant acme --db <catalogDb> --pool <pool>` (the pool belongs to the branch's own database, not the parent).
 
-A crash can also leave the merge node running. It has no node row, so nothing reaps it: it keeps its port, its memory (many GB at scale) and a transaction open on the parent's catalog, which holds back VACUUM there and can make a catalog migration's DDL time out. Sweep it. On the local runtime: `qod stop`, then `qod start` (this stops the serving nodes too). On Kubernetes: delete the `merge-*` pod and Service and the `qod-token-merge-*` and `qod-store-merge-*` Secrets. On a fleet: find the server holding the `merge-*` node in `qod fleet servers`, then `qod fleet drain <name>` and `qod fleet undrain <name>`.
+A crash can also leave the merge node running. It has no node row, so nothing reaps it: it keeps its port, its memory (many GB at scale) and a transaction open on the parent's catalog, which holds back VACUUM there and can make a catalog migration's DDL time out. Sweep it:
+
+- Local runtime: `qod stop`, then `qod start` (`qod serve <target>` for a `qod serve` manager). This stops the serving nodes too. On Windows `qod stop` exits 1 and names the way to stop.
+- Kubernetes: delete the `merge-*` pod and Service and the `qod-token-merge-*` and `qod-store-merge-*` Secrets. Two per-pool Secrets, which hold the catalog password and cloud keys, outlive them until a later merge or proposal on that database stops its node with none left. When no merge of that database is running, delete `qod-nodeenv-<tenant>-<db>---merge` and `qod-fedsql-<tenant>-<db>---merge` too (their names write `_` as `-`, so the pool `__merge` reads `--merge`).
+- Fleet: find the server holding the `merge-*` node in `qod fleet servers`, then `qod fleet drain <name>` and `qod fleet undrain <name>`. With `QOD_FLEET_EPHEMERAL=local` the node runs on the manager host, `qod fleet servers` lists no such server, and the local sweep applies.
 
 `qod branch propose` and `merge` have no read limit: they wait for the server, which bounds each stage. If a NAT or load balancer drops the connection during a long merge, the CLI waits until Ctrl-C; merging again is safe.
 
@@ -2112,7 +2116,7 @@ What refuses a merge, and what to do:
 | `409 conflicts_changed` | Main moved: a conflict, or a delete from main, the proposal did not show | Propose again |
 | `409 proposal_stale` | The branch changed since the proposal | Propose again |
 | `409 proposal_replaced` | Another proposal replaced the one you read | Read the new one, then merge it by its id |
-| `409 not_proposed` | The branch has no open proposal: a refusal that closes one (`merge_conflict`, `conflicts_changed`, `proposal_stale`, `history_gap`) leaves none | Propose again, unless the closing refusal's row says otherwise |
+| `409 not_proposed` | The branch has no open proposal: a refusal that closes one (`merge_conflict`, `conflicts_changed`, `proposal_stale`, `history_gap`, and `merge_failed` when the node failed) leaves none | Propose again, unless the closing refusal's row says otherwise |
 | `409 proposal_unsettled` | On propose or merge: a merge may have landed on main | Merge again, which settles it, or, when it says another proposal landed, discard the branch |
 | `502 merge_failed` | The merge node failed, or a stage timed out | After a timeout or a manager restart mid-merge, merge again and never propose first; raise `QOD_BRANCH_MERGE_TIMEOUT_SEC` if a stage needs longer. Otherwise fix the cause and propose again; for "the merge node needs more memory" that is the node's memory limit (see Size below) |
 | `409 concurrent_write` | Main kept moving across `QOD_BRANCH_MERGE_MAX_ATTEMPTS` attempts, or is not at the snapshot `--expect-main` names | Merge again, with a current `--expect-main` or none, or `--hold-writers` if the writers are on the merged tables |
@@ -2140,10 +2144,15 @@ rows both sides changed, at about 4MB per such row, up to one read of the table.
 1M changes per side: 10 s and 32GB read on local disk, 3 s of it writing. At 100M changes per side, 187 s.
 The merge node's memory runs well above its limit (33GB at a 16GB limit) and it spills up to 37GB at
 that size, so bound its memory and check scratch disk before merging at that scale. QoD sets no CPU or
-memory limit on a merge node, a Kubernetes merge pod included, and a pool's `--memory` does not reach it:
-its only bound is a `memory_limit` in the database's init SQL (or in the init SQL of one of the
-database's pools). For example, this replaces the database's init SQL and restarts its nodes:
+memory limit on a merge node, a Kubernetes merge pod included, and a pool's `--memory` does not reach it.
+With no `memory_limit` set it runs at DuckDB's default, about 80% of the host's RAM (85% of a cgroup
+limit when its container has one). It takes the init SQL of the database and of one of the database's
+pools (the manager picks which), the pool's after the database's, so a `memory_limit` in either bounds it
+and the pool's own wins; with no pool on the database, no init SQL reaches it. For example, this replaces
+the database's init SQL and restarts its nodes:
 `qod database update --tenant acme --name acme_tpch1 --init-sql "SET memory_limit = '16GB';"`.
+It applies to every node of the database and wins over each pool's `--memory`: keep it within the
+smallest pool's, or restore the text after the merge (that restarts them again).
 Compact a table in very many small files before creating the branch, because maintenance skips
 compaction while the database has a live branch: on object storage those reads and writes are the cost.
 
