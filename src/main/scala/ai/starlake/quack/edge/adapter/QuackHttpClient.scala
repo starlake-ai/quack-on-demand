@@ -230,7 +230,9 @@ open class QuackHttpClient(
 
   /** [[errorOf]], but the JDK client's own failure (a lost connection, no response) is Transient:
     * no answer came, whatever the node did with the statement. It is the case a list's caller must
-    * not read as the node's refusal.
+    * not read as the node's refusal. A 200 whose body cannot be read lands here too, since Arrow's
+    * reader throws an `IOException` on a malformed stream: for a COMMIT that is the safe side,
+    * since such an answer does not say what became of it.
     */
   private def listError(t: Throwable, sent: Boolean): QuackError = t match
     case e: java.io.IOException =>

@@ -932,7 +932,20 @@ final class BranchService(
     // This proposal's commit, found on main: tagged and torn down, never applied again.
     def settle(snapshot: Long, attempts: Int): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
       computeChanges(tenant, parent, b, countsAs = None).flatMap(cs =>
-        finishMerge(tenant, parent, b, merge, cs, snapshot, holdWriters, attempts, actor, apiKey)
+        finishMerge(
+          tenant,
+          parent,
+          b,
+          merge,
+          cs,
+          snapshot,
+          holdWriters,
+          attempts,
+          actor,
+          apiKey,
+          afterRecord =
+            letGo(tenant, parent, BranchMergeSql.commitMessage(b.name, merge.id, merge.proposer))
+        )
       )
 
     // What a refusal does to the proposal (design section 8.4): one that no longer reflects reality
@@ -1182,8 +1195,7 @@ final class BranchService(
     val author  = BranchMergeSql.author(tenant, actor.identity)
     val policy  = merge.onConflict.flatMap(ConflictPolicy.fromWire)
 
-    val meta       = sup.effectiveMetastoreFor(tenant, parent.name)
-    val parentMeta = meta.updated("dbName", meta.getOrElse("dbName", parent.name))
+    val parentMeta = parentMetaOf(tenant, parent)
     val holdSec    = Option.when(holdWriters)(cfg.mergeTimeoutSec)
     val runner     =
       new RowMergeRunner(alias, BranchMergeSql.BranchAlias, first.forkSnapshot, policy)
@@ -1198,7 +1210,8 @@ final class BranchService(
     // DuckLake's own check, which starts at the run's first catalog read: a commit between the run's
     // S and that read has no check at all, and its stale UPDATE can overwrite it. A known residual,
     // in the design. A retry's hold still ends with the merge: arming with no hold clears it and
-    // keeps the fence. A timed-out run's own hold has expired by then.
+    // keeps the fence. A timed-out run's own hold has expired by then, unless a look finds the
+    // commit first: the settle takes the row down ([[letGo]]).
     val earlierTimeout    = merge.error.exists(_.startsWith(MergeExecutor.TimedOut))
     def release: IO[Unit] =
       if !earlierTimeout then IO.blocking(mergeFence.disarm(parentMeta, message))
@@ -1473,7 +1486,8 @@ final class BranchService(
                     holdWriters,
                     attempts,
                     actor,
-                    apiKey
+                    apiKey,
+                    afterRecord = letGo(tenant, parent, message)
                   )
                 // This send's own commit can still land when it timed out: `failed` keeps its
                 // prefix, and the next look refuses.
@@ -1484,12 +1498,46 @@ final class BranchService(
             ended match
               case Left(reason)                                   => unlessLanded(reason, 0)
               case Right((AttemptEnd.Committed(snapshot, cs), n)) =>
-                finishMerge(tenant, parent, b, merge, cs, snapshot, holdWriters, n, actor, apiKey)
+                // The guarantee above has dealt with the fence.
+                finishMerge(
+                  tenant,
+                  parent,
+                  b,
+                  merge,
+                  cs,
+                  snapshot,
+                  holdWriters,
+                  n,
+                  actor,
+                  apiKey,
+                  afterRecord = IO.unit
+                )
               case Right((AttemptEnd.Refused(f, closes), n)) => refuse(f, closes, n)
               case Right((AttemptEnd.Failed(reason), n))     => unlessLanded(reason, n)
               case Right((AttemptEnd.Retry(_, reason), n))   => unlessLanded(reason, n)
           }
 
+  private def parentMetaOf(tenant: String, parent: TenantDb): Map[String, String] =
+    val meta = sup.effectiveMetastoreFor(tenant, parent.name)
+    meta.updated("dbName", meta.getOrElse("dbName", parent.name))
+
+  /** Takes down the fence row of a proposal that a look found landed: the outcome a timed-out send
+    * or a lost answer left unknown is known now, so writers must not stay refused until the hold
+    * expires. Best effort, like every disarm: a row left behind matches only this message and its
+    * hold expires, so a failure is logged and changes no answer. A second send of this proposal
+    * with its COMMIT still in flight would then pass the fence and meet only DuckLake's own check.
+    * That takes two sends with no answer, on nodes that outlived their stops, both stalled.
+    */
+  private def letGo(tenant: String, parent: TenantDb, message: String): IO[Unit] =
+    IO.blocking(mergeFence.disarm(parentMetaOf(tenant, parent), message)).handleErrorWith { e =>
+      IO.blocking(
+        logger.error(s"branch merge: fence row not removed, its hold expires: ${e.getMessage}")
+      )
+    }
+
+  /** `afterRecord` runs once the merge is on record and before the teardown, whose purge can take
+    * its time: required, since each caller knows what is left of the fence.
+    */
   private def finishMerge(
       tenant: String,
       parent: TenantDb,
@@ -1500,7 +1548,8 @@ final class BranchService(
       holdWriters: Boolean,
       attempts: Int,
       actor: BranchActor,
-      apiKey: Option[String]
+      apiKey: Option[String],
+      afterRecord: IO[Unit]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
     IO.blocking {
       val tagName = s"merge-${b.name}-${merge.id.stripPrefix("mg-").take(8)}"
@@ -1577,7 +1626,7 @@ final class BranchService(
       )
       (doneBranch, doneMerge)
     }.flatMap { case (doneBranch, doneMerge) =>
-      teardown(doneBranch, "merged").as(Right((doneBranch, doneMerge, cs)))
+      afterRecord *> teardown(doneBranch, "merged").as(Right((doneBranch, doneMerge, cs)))
     }
 
   // ---------- discard / expiry / teardown ----------
