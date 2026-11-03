@@ -33,5 +33,8 @@ object RestoreEndpoints:
           "dryRun returns the change summary that would be undone and performs no write. " +
           "Requires an ALL grant, or DDL plus RO/RW, on the table. 409 concurrent_write when " +
           "expectedCurrentSnapshot no longer matches the table's latest snapshot; 410 " +
-          "snapshot_expired; 422 invalid_snapshot when the table does not resolve at the target."
+          "snapshot_expired; 422 invalid_snapshot when the table does not resolve at the target; " +
+          "502 restore_outcome_unknown when it cannot be told whether the replace committed (its " +
+          "COMMIT failed or the call timed out, and the catalog could not be read to settle it): " +
+          "the table may or may not have been replaced, so check it before retrying."
       )
