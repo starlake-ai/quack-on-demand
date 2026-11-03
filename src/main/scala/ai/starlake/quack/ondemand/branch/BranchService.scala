@@ -909,9 +909,32 @@ final class BranchService(
       actor: BranchActor,
       apiKey: Option[String]
   ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+    // This proposal's commit, found on main: tagged and torn down, never applied again.
+    def settle(snapshot: Long, attempts: Int): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+      computeChanges(tenant, parent, b, countsAs = None).flatMap(cs =>
+        finishMerge(tenant, parent, b, merge, cs, snapshot, holdWriters, attempts, actor, apiKey)
+      )
+
     // What a refusal does to the proposal (design section 8.4): one that no longer reflects reality
-    // closes, and the branch reopens for a new one; otherwise it stays open for a retry.
+    // closes, and the branch reopens for a new one; otherwise it stays open for a retry. A proposal
+    // closes only after a look. A late batch can land at any point of a run, and its own commit can
+    // be what fails the check, on a table it created ("also created on main"): that merge landed,
+    // so it settles, with its tag and its event. A failed look raises, which leaves the row open.
     def refuse(
+        f: BranchFailure,
+        closes: Boolean,
+        attempts: Int
+    ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
+      if closes then
+        IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+          case Some((landed, snapshot)) if landed.id == merge.id =>
+            // Before any attempt of this run, the count is the one of the run that sent it.
+            settle(snapshot, if attempts > 0 then attempts else merge.attempts)
+          case _ => recordRefusal(f, closes, attempts)
+        }
+      else recordRefusal(f, closes, attempts)
+
+    def recordRefusal(
         f: BranchFailure,
         closes: Boolean,
         attempts: Int
@@ -993,21 +1016,7 @@ final class BranchService(
     // applied again: with no key, a row merge would insert the branch's new rows a second time, and
     // nothing would notice.
     IO.blocking(landedCommit(tenant, parent, b)).flatMap {
-      case Some((landed, snapshot)) if landed.id == merge.id =>
-        computeChanges(tenant, parent, b, countsAs = None).flatMap(cs =>
-          finishMerge(
-            tenant,
-            parent,
-            b,
-            merge,
-            cs,
-            snapshot,
-            holdWriters,
-            merge.attempts,
-            actor,
-            apiKey
-          )
-        )
+      case Some((landed, snapshot)) if landed.id == merge.id => settle(snapshot, merge.attempts)
       case Some((landed, snapshot)) => refuse(landedElsewhere(landed, snapshot), false, 0)
       case None                     => validateAndRun
     }
@@ -1491,7 +1500,7 @@ final class BranchService(
       val branchMoved = !merge.headSnapshotAtPropose.contains(cs.headSnapshot)
       val atProposal  = merge.headSnapshotAtPropose.fold("unknown")(_.toString)
       if branchMoved then
-        logger.warn(
+        logger.error(
           s"branch merge: settling $tenant/${parent.name}@${b.name} at main snapshot $snapshot " +
             s"with the branch at snapshot ${cs.headSnapshot}, proposed at $atProposal: the " +
             "teardown removes what was written on it since"

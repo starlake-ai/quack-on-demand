@@ -284,6 +284,35 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       if !mainReader.changes.exists(_._1 == snapshot) then
         mainReader.changes = mainReader.changes :+ ((snapshot, "inlined_insert:2"))
 
+    /** The branch also creates a table, which a merge's commit creates on main too. */
+    def createdOnBranch(): Unit =
+      branchReader.head = 13L
+      branchReader.versions = branchReader.versions :+ TableVersion(3L, "tpch1", "extra", 13L, None)
+      branchReader.changes = branchReader.changes :+ ((13L, """created_table:"tpch1"."extra""""))
+
+    /** Main holds that table now: a merge's own commit did it, or main did. To the table checks
+      * they read the same: "also created on main", which closes the proposal.
+      */
+    def createdOnMain(): Unit =
+      mainReader.head = 11L
+      mainReader.versions = mainReader.versions :+ TableVersion(3L, "tpch1", "extra", 11L, None)
+      mainReader.changes = List((11L, """created_table:"tpch1"."extra""""))
+
+    /** Runs `hook` when the merge reads the branch's head for the `nth` time, just before it reads
+      * main's: 1 is the validation before the freeze, 2 the one on the frozen branch. Both come
+      * after the merge's first look.
+      */
+    def onHeadRead(nth: Int)(hook: () => Unit): Unit =
+      var reads = 0
+      readers.put(
+        store.findBranch(parent.id, "x").get.tenantDbName,
+        new FakeReader(branchReader.head, branchReader.versions, branchReader.changes):
+          override def maxSnapshotId(): Option[Long] =
+            reads += 1
+            if reads == nth then hook()
+            Some(head)
+      ): Unit
+
     /** The row of the proposal `id`, as stored. */
     def row(id: String): BranchMerge = store.getBranchMerge(id).get
 
@@ -1901,8 +1930,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.branchReader.changes = f.branchReader.changes :+ ((13L, "inlined_insert:2"))
     val (res, logs) = LogCapture.logged(ServiceLog)(f.merge())
     res.map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    // ERROR: the default level, and a settle that drops a user's writes must show.
     logs.count(e =>
-      e.getLevel == Level.WARN && e.getFormattedMessage.contains("removes what was written")
+      e.getLevel == Level.ERROR && e.getFormattedMessage.contains("removes what was written")
     ) shouldBe 1
     val done = f.auditStore.events
       .filter(e => e.action == AuditActions.BranchMerge && e.outcome == "ok")
@@ -1965,6 +1995,189 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     g.merge().isRight shouldBe true
     g.fenceArms.size shouldBe armed
     g.fenceDisarms shouldBe empty
+  }
+
+  // ---- a proposal closes only after a look -----------------------------------------------------
+
+  it should "settle a commit that lands ahead of a closing refusal: merged and tagged, not a conflict" in
+    List(2, 1).foreach { nth =>
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.createdOnBranch()
+      f.propose().isRight shouldBe true
+      val id      = f.openProposal()
+      val started = f.nodesStarted
+      f.mergeBatches.clear()
+      f.onHeadRead(nth) { () =>
+        f.land(id)
+        f.createdOnMain()
+      }
+      withClue(s"at the head read $nth: ") {
+        f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+        val m = f.row(id)
+        m.status shouldBe BranchMergeStatus.Merged
+        m.error shouldBe None
+        f.store.findSnapshotTag("acme", f.parent.name, m.tagName.get).map(_.snapshotId) shouldBe
+          Some(11L)
+        f.store.findBranch(f.parent.id, "x") shouldBe None
+        f.nodesStarted shouldBe started
+        f.mergeBatches shouldBe empty
+        // A merge, not a denial that also merged.
+        f.auditStore.events
+          .filter(_.action == AuditActions.BranchMerge)
+          .map(_.outcome)
+          .toList shouldBe
+          List("ok")
+      }
+    }
+
+  it should "settle a commit that lands during Decide, ahead of Decide's refusal" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeBatches.clear()
+    f.nodeBatches.clear()
+    // Past the attempt's look: only Decide's own batch writes the merged rows.
+    f.duringAnalysis = () => if f.nodeBatches.exists(_.contains("t0_merged")) then f.land(id)
+    // Row conflicts with no policy: Decide refuses, and that closes the proposal.
+    f.countsRow = List(1L, 0L, 0L, 3L, 0L, 0L, 0L, 1L, 1L, 0L, 3L)
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    f.row(id).status shouldBe BranchMergeStatus.Merged
+    f.row(id).attempts shouldBe 1
+    f.mergeBatches shouldBe empty
+  }
+
+  it should "keep the attempts of the run that sent it, when a refusal before any attempt settles" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.createdOnBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(TimedOutSend)
+    f.merge().left.map(_.code) shouldBe Left("merge_failed")
+    f.row(id).attempts shouldBe 1
+    f.mergeFails = None
+    f.onHeadRead(1) { () =>
+      f.land(id)
+      f.createdOnMain()
+    }
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    f.row(id).attempts shouldBe 1
+    // That run's fence row stays, as on a settle at the first look: another batch can be alive.
+    f.fenceDisarms shouldBe empty
+  }
+
+  it should "settle ahead of proposal_stale too, saying that the branch moved" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mergeFails = Some(TimedOutSend)
+    f.merge().left.map(_.code) shouldBe Left("merge_failed")
+    f.mergeFails = None
+    // The thaw let a user write on the branch, and that batch lands past the next first look.
+    f.branchReader.head = 13L
+    f.branchReader.changes = f.branchReader.changes :+ ((13L, "inlined_insert:2"))
+    f.onHeadRead(1)(() => f.land(id))
+    val (res, logs) = LogCapture.logged(ServiceLog)(f.merge())
+    res.map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    logs.count(e =>
+      e.getLevel == Level.ERROR && e.getFormattedMessage.contains("removes what was written")
+    ) shouldBe 1
+  }
+
+  it should "settle ahead of the other closing refusals: a history gap, a proposal it cannot read" in {
+    val gap = new Fixture
+    gap.create("x")
+    gap.touchBranch()
+    gap.propose().isRight shouldBe true
+    val gapped = gap.openProposal()
+    gap.onHeadRead(2) { () =>
+      gap.land(gapped, 13L)
+      gap.mainReader.changes = List((11L, ""), (13L, ""))
+    }
+    gap.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(13L))
+    gap.row(gapped).status shouldBe BranchMergeStatus.Merged
+
+    val unreadable = new Fixture
+    unreadable.create("x")
+    unreadable.touchBranch()
+    unreadable.propose().isRight shouldBe true
+    val row = unreadable.row(unreadable.openProposal())
+    unreadable.store.createBranchMerge(row.copy(id = "mg-unreadable", mergeKeysJson = "not json"))
+    unreadable.store.updateBranchMerge(row.copy(status = BranchMergeStatus.Abandoned))
+    unreadable.onHeadRead(2)(() => unreadable.land("mg-unreadable"))
+    unreadable.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
+    unreadable.row("mg-unreadable").status shouldBe BranchMergeStatus.Merged
+  }
+
+  it should "still close on a closing refusal with no commit on main" in
+    List(1, 2).foreach { nth =>
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.createdOnBranch()
+      f.propose().isRight shouldBe true
+      val id = f.openProposal()
+      f.onHeadRead(nth)(() => f.createdOnMain())
+      withClue(s"at the head read $nth: ") {
+        f.merge().left.map(_.code) shouldBe Left("merge_conflict")
+        f.row(id).status shouldBe BranchMergeStatus.Failed
+        f.row(id).tagName shouldBe None
+        f.status shouldBe BranchStatus.Open
+      }
+    }
+
+  it should "still close when the commit on main is another proposal's: only a discard exits then" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.createdOnBranch()
+    f.propose().isRight shouldBe true
+    val replaced = f.openProposal()
+    f.propose().isRight shouldBe true
+    val open = f.openProposal()
+    f.onHeadRead(1) { () =>
+      f.land(replaced)
+      f.createdOnMain()
+    }
+    f.merge().left.map(_.code) shouldBe Left("merge_conflict")
+    f.row(open).status shouldBe BranchMergeStatus.Failed
+    f.status shouldBe BranchStatus.Open
+    f.propose().left.map(_.code) shouldBe Left("proposal_unsettled")
+  }
+
+  it should "raise and leave the proposal open when the look before closing fails" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.createdOnBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.onHeadRead(1) { () =>
+      f.createdOnMain()
+      f.mainReader.lookFails = true
+    }
+    an[java.sql.SQLException] should be thrownBy f.merge()
+    f.row(id).status shouldBe BranchMergeStatus.Proposed
+    f.status shouldBe BranchStatus.Proposed
+  }
+
+  it should "not look on a refusal that leaves the proposal open: the next first look settles" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.onHeadRead(1)(() => f.land(id))
+    f.merge(expected = Some(10L)).left.map(_.code) shouldBe Left("concurrent_write")
+    f.row(id).status shouldBe BranchMergeStatus.Proposed
+    f.merge().map(_._2.mainSnapshotAfter) shouldBe Right(Some(11L))
   }
 
   "fencedIds" should "take the tables' ids, and refuse a changed table with no id" in {
