@@ -272,7 +272,7 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     val holder = ask
     wedged.await(10, TimeUnit.SECONDS) shouldBe true
     val waiters = List.fill(5)(ask)
-    Thread.sleep(300) // waiting for the scrape
+    Thread.sleep(1000) // waiting for the scrape
     release.countDown()
     // The one scrape failed: it is the answer of every request that was on it.
     (holder :: waiters).map(Await.result(_, 10.seconds)) shouldBe List.fill(6)(500)

@@ -151,7 +151,7 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
       .map(_.description)
       .get
     // 4 KiB of headers and a 1 MiB body, before the signature is checked: 1316864 bytes.
-    description should include("about 1.3 MiB per connection")
+    description should include("about 1.4 MiB per connection")
     description should include(
       "Fewer when a fifth of the heap cannot hold that many: boot says so."
     )

@@ -775,7 +775,7 @@ final case class NodeAuthzConfig(
       description =
         "How many connections the node verdict listener serves at once. A node opens one per " +
           "call. A call's body, up to 1 MiB, is read before its signature can be checked, so " +
-          "this bounds the heap a client reaching the port can hold, at about 1.3 MiB per " +
+          "this bounds the heap a client reaching the port can hold, at about 1.4 MiB per " +
           "connection: keep clients off the port. Fewer when a fifth of the heap cannot hold " +
           "that many: boot says so."
     )

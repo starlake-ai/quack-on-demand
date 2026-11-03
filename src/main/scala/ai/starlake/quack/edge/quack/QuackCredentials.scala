@@ -28,8 +28,8 @@ object QuackCredentials:
 
   private val Known = Set("tenant", "pool", "user", "password", "token", "superuser", "pat")
 
-  /** A token names at most 7 keys. The token comes from an unauthenticated client: past this many
-    * pairs it is refused before any is decoded.
+  /** A token names at most 7 distinct keys, so no client needs more pairs than this. The token comes
+    * from an unauthenticated client: past this many pairs it is refused before any is decoded.
     */
   private val MaxPairs = 32
 

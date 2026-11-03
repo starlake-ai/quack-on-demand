@@ -15,7 +15,7 @@ import scala.concurrent.duration.*
   * REST port so that clients filling that port's connection slots cannot stop authorization for
   * every tenant. Every route authenticates each call with the node's key, but only after reading
   * its body, which the signature covers, so a client that reaches this port can hold
-  * `maxConnections` slots and about 1.3 MiB of heap in each (the 1 MiB body, and the parsed header
+  * `maxConnections` slots and about 1.4 MiB of heap in each (the 1 MiB body, and the parsed header
   * block, read buffer and state Ember holds for the request: `ConnectionBudget.heldBytes`), and the
   * listener takes no more connections than a fifth of the heap holds. A node opens one connection
   * per call, sends its body at once and leaves, so the idle timeout is short.
