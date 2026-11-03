@@ -1427,8 +1427,26 @@ final case class FlightConfig(
       envVar = "PROXY_RESUME_HOLD_TIMEOUT_SEC",
       description = "Max seconds the edge holds a statement while a suspended pool cold-starts."
     )
-    resumeHoldTimeoutSec: Long
-)
+    resumeHoldTimeoutSec: Long,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_INBOUND_MESSAGE_BYTES",
+      description =
+        "Largest gRPC message the FlightSQL edge reads, in bytes, whatever the method and " +
+          "whether or not the caller has credentials: a larger one is refused with " +
+          "RESOURCE_EXHAUSTED. Bound parameters are never read, so only SQL text needs room."
+    )
+    maxInboundMessageBytes: Int = 16777216,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_HEADER_BYTES",
+      description = "Largest gRPC header list the FlightSQL edge reads, in bytes."
+    )
+    maxHeaderBytes: Int = 65536
+):
+  require(
+    maxInboundMessageBytes > 0 && maxHeaderBytes > 0,
+    "PROXY_MAX_INBOUND_MESSAGE_BYTES and PROXY_MAX_HEADER_BYTES must be positive " +
+      s"(got $maxInboundMessageBytes and $maxHeaderBytes)"
+  )
 
 /** The native Quack protocol front door (`quack-native` block): the listener DuckDB clients
   * `ATTACH 'quack:host:port'` to. Identity, routing, policies and audit are the FlightSQL edge's;

@@ -88,10 +88,11 @@ After upgrading:
 ### Limits on unauthenticated work
 
 A client with no credentials can no longer halt the manager through the REST port, the Quack front
-door or the node verdict listener, and one that reaches only the REST port can no longer stop
-authorization. A flood of connections can still fill the REST port's and the front door's slots,
-which in fleet mode also stops the servers' heartbeats (their nodes are unroutable after 30 s):
-limit connections in a proxy or firewall in front. FlightSQL and password checks are unchanged.
+door, the node verdict listener or FlightSQL's direct memory, and one that reaches only the REST
+port can no longer stop authorization. A flood of connections can still fill the REST port's and
+the front door's slots, which in fleet mode also stops the servers' heartbeats (their nodes are
+unroutable after 30 s): limit connections in a proxy or firewall in front. FlightSQL still admits
+calls with no credentials and still reads DoPut streams, and password checks are unchanged.
 
 - **Node verdicts have their own listener**, on the REST port + 1 (`QOD_INTERNAL_PORT`, the chart's
   20901): slow clients on the REST port cannot stop authorization. `POST
@@ -126,6 +127,13 @@ limit connections in a proxy or firewall in front. FlightSQL and password checks
   REST and the front door): a listener takes fewer when a fifth of the heap cannot hold them (at a
   1 GiB heap 260, 431 (322 with TLS) and 145), and boot prints a line saying so. Raise the heap
   (for example `JAVA_OPTS=-Xmx2g`) to take more.
+- **FlightSQL:** messages over 16 MiB (`PROXY_MAX_INBOUND_MESSAGE_BYTES`) and header lists over 64 KiB
+  (`PROXY_MAX_HEADER_BYTES`) are refused, with or without credentials (a message is answered
+  `RESOURCE_EXHAUSTED`). Netty counts its direct memory apart from the JDK's, so a flood of FlightSQL
+  calls fails its own streams and leaves the other listeners' reads alone. Direct memory can now
+  reach twice `-XX:MaxDirectMemorySize`, Netty's and the JDK's each (`-Dio.netty.maxDirectMemory`
+  sets Netty's alone). A launch with `-cp` must pass `--add-opens=java.base/java.nio=ALL-UNNAMED`,
+  and boot warns otherwise.
 - **`GET /metrics` shares one scrape for 4 s**, writes it in chunks of at most 8 KiB, and gives a
   response 30 s to finish. It used to build a copy of the scrape for every request and hold it until
   the client read it, at the cost of a refresh and a serialization each. A request that waits 10 s for

@@ -20,7 +20,8 @@ import ai.starlake.quack.boot.{
   CatalogReaders,
   EdgeRewriters,
   LeaderDuties,
-  ManagementAuthWiring
+  ManagementAuthWiring,
+  NettyMemory
 }
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
 import ai.starlake.quack.model.{RunningNode, TenantDb}
@@ -76,6 +77,10 @@ import pureconfig.generic.ProductHint
 import pureconfig.generic.semiauto.deriveReader
 
 object Main extends IOApp with LazyLogging:
+
+  // First, before anything that can load a Netty class: Netty decides whether to count its direct
+  // buffers apart from the JDK's when PlatformDependent initializes, and never again.
+  NettyMemory.configure()
 
   // Match application.conf's camelCase keys instead of pureconfig's kebab-case
   // default; also shadows the `derives ConfigReader` defaults of the edge auth types.
@@ -291,6 +296,9 @@ object Main extends IOApp with LazyLogging:
     // A JDK below 21 cannot shut an HTTP client down, which the manager relies on to close what a
     // refused answer leaves open: said on stderr, since the launcher does not refuse such a JDK.
     BootPreflight.checkHttpClientShutdown(shutdownNowAvailable).foreach(w => System.err.println(w))
+    // Netty counting its direct buffers in the JDK's budget lets a flood of FlightSQL calls starve a
+    // socket read on another listener, which halts the manager: said on stderr as well.
+    NettyMemory.warning().foreach(w => System.err.println(w))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
@@ -1549,7 +1557,9 @@ object Main extends IOApp with LazyLogging:
               edgeCfg.tlsEnabled,
               edgeCfg.tlsCertChain,
               edgeCfg.tlsPrivateKey,
-              edgeCfg.sessionTtlSec
+              edgeCfg.sessionTtlSec,
+              edgeCfg.maxInboundMessageBytes,
+              edgeCfg.maxHeaderBytes
             ),
             fsRouter,
             authService,
