@@ -21,10 +21,10 @@ import sttp.tapir.server.http4s.{Http4sServerInterpreter, Http4sServerOptions}
 
 import java.io.{IOException, InputStream}
 import java.lang.management.ManagementFactory
-import java.net.Socket
+import java.net.{InetSocketAddress, Socket}
 import java.nio.charset.StandardCharsets.UTF_8
-import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{CountDownLatch, ThreadLocalRandom, TimeUnit}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import scala.annotation.tailrec
 import scala.concurrent.Await
 import scala.concurrent.duration.*
@@ -174,12 +174,9 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     refreshes.get() shouldBe 2
 
   it should "share a scrape that took longer than its ttl with the requests that waited for it" in:
-    // A scrape is as old as the moment it ended: counted from the moment it began, a slow one
-    // would be stale for every request queued behind it, and each of them would scrape again.
-    // The margins are wide on purpose. The requests that waited take the gate one after another
-    // and each compares its own clock with the moment the scrape ended, so a pause of the JVM
-    // between two of those hand-offs must not read as a stale scrape: with a ttl of 1 s it takes
-    // a pause of over a second, where a ttl of 100 ms needed a pause of tens of milliseconds.
+    // The requests that come while a scrape runs wait for it and all get its result, though it
+    // takes longer than the ttl: ten requests make one scrape. How old a finished scrape is, is
+    // the next case's.
     val refreshes              = new AtomicInteger(0)
     val slowScrape: () => Unit = () =>
       refreshes.incrementAndGet()
@@ -189,6 +186,20 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     (1 to 10).toList
       .parTraverse(_ => handler.run(scrapeRequest).flatMap(_.body.compile.drain))
       .unsafeRunSync()
+    refreshes.get() shouldBe 1
+
+  it should "serve a request that comes just after a scrape that outlasted the ttl from that scrape" in:
+    // A scrape is as old as the moment it ended. Counted from the moment it began, one slower than
+    // the ttl would be stale as it ended, and the next request would scrape again. The requests
+    // that wait for a running scrape are answered with its result and compare no clock, so only a
+    // request that comes after it ended tells.
+    val refreshes              = new AtomicInteger(0)
+    val slowScrape: () => Unit = () =>
+      refreshes.incrementAndGet()
+      Thread.sleep(1500)
+    val handler = app(new MetricsEndpoint(Some(populated(1)), slowScrape, ttl = 1.second))
+    handler.run(scrapeRequest).flatMap(_.body.compile.drain).unsafeRunSync()
+    handler.run(scrapeRequest).flatMap(_.body.compile.drain).unsafeRunSync()
     refreshes.get() shouldBe 1
 
   it should "keep the requests waiting for a scrape off the threads" in:
@@ -238,16 +249,41 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     )
     val handler = quietApp(endpoint)
     handler.run(scrapeRequest).unsafeRunSync().status.code shouldBe 500
-    // A hang here would mean the failed scrape kept the gate.
+    // A wait here would mean the failed scrape stayed marked as running.
     val next = handler.run(scrapeRequest).timeout(5.seconds).unsafeRunSync()
     next.status.code shouldBe 200
     next.bodyText.compile.string.unsafeRunSync() should include("statement_duration_seconds")
     calls.get() shouldBe 2
 
-  // The bound is on the wait for the gate behind a scrape in progress, never on the scrape: the
-  // request that holds the gate has no timeout, and what it scraped is kept whenever it ends. A
-  // request that waits `scrapeWait` answers 503, as a status of the endpoint and not as an
-  // exception reaching Tapir's handler, which logs an ERROR with a stack trace for every one.
+  it should "answer the requests waiting for a scrape that fails with its failure, and scrape again for the next" in:
+    val wedged             = new CountDownLatch(1)
+    val release            = new CountDownLatch(1)
+    val calls              = new AtomicInteger(0)
+    val scrape: () => Unit = () =>
+      if calls.incrementAndGet() == 1 then
+        wedged.countDown()
+        release.await(60, TimeUnit.SECONDS)
+        throw new IllegalStateException("scrape failed")
+    // A wait of 30 s: it is the failure, not the bound, that ends these waits.
+    val handler = quietApp(
+      new MetricsEndpoint(Some(populated(1)), scrape, scrapeWait = 30.seconds)
+    )
+    def ask    = handler.run(scrapeRequest).map(_.status.code).unsafeToFuture()
+    val holder = ask
+    wedged.await(10, TimeUnit.SECONDS) shouldBe true
+    val waiters = List.fill(5)(ask)
+    Thread.sleep(300) // waiting for the scrape
+    release.countDown()
+    // The one scrape failed: it is the answer of every request that was on it.
+    (holder :: waiters).map(Await.result(_, 10.seconds)) shouldBe List.fill(6)(500)
+    // And nothing stays marked as running: the next request scrapes.
+    handler.run(scrapeRequest).timeout(5.seconds).unsafeRunSync().status.code shouldBe 200
+    calls.get() shouldBe 2
+
+  // The bound is on the wait for a scrape in progress, never on the scrape: the request that took
+  // it has no timeout, and what it scraped is kept whenever it ends. A request that waits
+  // `scrapeWait` answers 503, as a status of the endpoint and not as an exception reaching Tapir's
+  // handler, which logs an ERROR with a stack trace for every one.
 
   /** The lines Tapir's server log writes while `f` runs, as (level, message), with its logger at
     * DEBUG so that a handled request shows too, and no hand-off to the root appender: the test's
@@ -293,10 +329,10 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     calls.get() shouldBe 1
 
   it should "answer 503 and log no error to a request that waited past its bound, and serve the one that took the scrape" in:
-    // A scrape that takes long (a hung bean, a lock) keeps the gate. Each request after it would
-    // wait there holding a connection slot of the listener for as long as the scrape lasts: a
+    // A scrape that takes long (a hung bean, a lock) stays the running one. Each request after it
+    // would wait for it holding a connection slot of the listener for as long as it lasts: a
     // Prometheus scraping every 15 s would fill 260 slots in about 65 minutes. So a request waits at
-    // most `scrapeWait` for the gate; only the one that took the scrape stays until it returns.
+    // most `scrapeWait` for the running scrape; only the one that took it stays until it returns.
     val wedged             = new CountDownLatch(1)
     val release            = new CountDownLatch(1)
     val calls              = new AtomicInteger(0)
@@ -335,13 +371,13 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     val (status, body) = Await.result(holder, 10.seconds)
     status shouldBe 200
     body shouldBe expected
-    // The gate is free, and the next request is served from that scrape with no second one.
+    // Nothing is running, and the next request is served from that scrape with no second one.
     val next = handler.run(scrapeRequest).timeout(5.seconds).unsafeRunSync()
     next.status.code shouldBe 200
     next.body.compile.to(Array).unsafeRunSync() shouldBe expected
     calls.get() shouldBe 1
 
-  it should "keep the scrape of a request that is cancelled while it takes it, and free the gate" in:
+  it should "keep the scrape of a request that is cancelled while it takes it, and leave nothing running" in:
     // The blocking call cannot be interrupted: the cancel waits for it, and what it took is stamped.
     val started                = new CountDownLatch(1)
     val calls                  = new AtomicInteger(0)
@@ -359,7 +395,7 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     next.status.code shouldBe 200
     calls.get() shouldBe 1
 
-  it should "let a request that is cancelled while it waits go at once, and lose no permit to it" in:
+  it should "let a request that is cancelled while it waits go at once, and leave the state as it was" in:
     val wedged             = new CountDownLatch(1)
     val release            = new CountDownLatch(1)
     val calls              = new AtomicInteger(0)
@@ -370,29 +406,86 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
     // A wait of 30 s: it is the cancel, not the bound, that ends these waits.
     val handler = app(new MetricsEndpoint(Some(populated(1)), scrape, scrapeWait = 30.seconds))
     val holder  = handler.run(scrapeRequest).flatMap(_.body.compile.drain).unsafeToFuture()
-    try
-      wedged.await(10, TimeUnit.SECONDS) shouldBe true
-      (for
-        waiters <- List.fill(20)(handler.run(scrapeRequest).start).sequence
-        _       <- IO.sleep(300.millis) // queued on the gate
-        _       <- waiters.traverse_(_.cancel).timeout(5.seconds)
-      yield ()).unsafeRunSync()
-    finally release.countDown()
+    val late    =
+      try
+        wedged.await(10, TimeUnit.SECONDS) shouldBe true
+        (for
+          waiters <- List.fill(20)(handler.run(scrapeRequest).start).sequence
+          _       <- IO.sleep(300.millis) // waiting for the scrape
+          _       <- waiters.traverse_(_.cancel).timeout(5.seconds)
+        yield ()).unsafeRunSync()
+        // The scrape is still running, and a request that comes now waits for it. Had the cancelled
+        // waiters cleared its mark, it would scrape on its own, and the end of the first scrape
+        // would then hide that by writing the state again.
+        val request = handler.run(scrapeRequest).map(_.status.code).unsafeToFuture()
+        Thread.sleep(300)
+        calls.get() shouldBe 1
+        request
+      finally release.countDown()
     Await.ready(holder, 10.seconds)
-    // Nothing is left of the cancelled waiters: the gate serves the requests that follow.
+    Await.result(late, 10.seconds) shouldBe 200
+    // Nothing is left of the cancelled waiters: the requests that follow are served.
     (1 to 5).toList
       .parTraverse(_ => handler.run(scrapeRequest).timeout(5.seconds).map(_.status.code))
       .unsafeRunSync() shouldBe List.fill(5)(200)
     calls.get() shouldBe 1
 
-  it should "let a request that gave up release nothing, so that no two scrapes ever run at once" in:
-    val running                = new AtomicInteger(0)
-    val peak                   = new AtomicInteger(0)
+  it should "serve the next request after a waiter is cancelled as the scrape it waits for ends, round after round" in:
+    // The end of a scrape and the cancel of a request waiting for it fall a few microseconds apart,
+    // in either order. When a waiter was handed a permit as the scrape ended (the design that
+    // queued the requests on a semaphore), a cancel just after the hand-over dropped the permit
+    // for good, and every later request then waited out its bound and answered 503 until a
+    // restart, with nothing in the log. Rounds put the cancel on every side of the end of the
+    // scrape, and after each one a fresh request must be served. Against that design this case
+    // lost the permit within 30 rounds in each of 11 runs (about one round in 20), so 200 rounds
+    // leave a wide margin. It reads nothing private: only what a client sees.
+    val began              = new AtomicReference(new CountDownLatch(1))
+    val go                 = new AtomicReference(new CountDownLatch(0))
+    val scrape: () => Unit = () =>
+      began.get.countDown()
+      go.get.await()
+    // A ttl of zero: a request that finds no scrape running takes one. A wait of 30 s: here only a
+    // cancel ends a wait.
+    val handler = app(
+      new MetricsEndpoint(Some(populated(1)), scrape, ttl = 0.seconds, scrapeWait = 30.seconds)
+    )
+    val ask: IO[Int]          = handler.run(scrapeRequest).map(_.status.code)
+    val holderBegan: IO[Unit] =
+      IO.blocking(began.get.await(10, TimeUnit.SECONDS)).flatMap(b => IO(b shouldBe true)).void
+    // A holder wedged on a latch, a waiter behind it, the latch let go and the waiter cancelled 0
+    // to 150 us apart; then whether a fresh request is answered 200 within the bound.
+    val round: IO[Boolean] =
+      for
+        _      <- IO { began.set(new CountDownLatch(1)); go.set(new CountDownLatch(1)) }
+        holder <- ask.start
+        _      <- holderBegan
+        waiter <- ask.start
+        _      <- IO.sleep(300.micros)
+        _      <- IO(go.get.countDown())
+        _      <- IO.sleep(ThreadLocalRandom.current().nextLong(150).micros)
+        _      <- waiter.cancel
+        _      <- holder.joinWithNever
+        _      <- IO(go.set(new CountDownLatch(0)))
+        fresh  <- ask.timeout(5.seconds).attempt
+      yield fresh == Right(200)
+    // The first round after which a fresh request was not served, None if all of them were.
+    def firstLost(i: Int): IO[Option[Int]] =
+      if i > 200 then IO.pure(None)
+      else round.ifM(firstLost(i + 1), IO.pure(Some(i)))
+    withClue("the round after which a fresh request was not answered 200 within 5 s: ")(
+      firstLost(1).unsafeRunSync() shouldBe None
+    )
+
+  it should "let a request that gave up start nothing, so that no two scrapes ever run at once" in:
+    val running = new AtomicInteger(0)
+    val peak    = new AtomicInteger(0)
+    // A scrape of 1500 ms against a wait of 100 ms: the waiters give up long before it ends, and
+    // a pause of the JVM has to outlast 1400 ms to make one of them read its result.
     val slowScrape: () => Unit = () =>
       peak.accumulateAndGet(running.incrementAndGet(), math.max(_, _))
-      Thread.sleep(400)
+      Thread.sleep(1500)
       running.decrementAndGet()
-    // A ttl of zero: every request that gets the gate scrapes.
+    // A ttl of zero: every request that finds no scrape running takes one.
     val handler = app(
       new MetricsEndpoint(Some(populated(1)), slowScrape, ttl = 0.seconds, scrapeWait = 100.millis)
     )
@@ -400,20 +493,26 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
       (1 to 6).toList
         .parTraverse(_ => handler.run(scrapeRequest).map(_.status.code))
         .unsafeRunSync()
-    // One request takes the gate, and the five that wait for it give up.
+    // One request takes the scrape, and the five that wait for it give up.
     burst.sorted shouldBe List(200, 503, 503, 503, 503, 503)
     peak.set(0)
-    // Had they each put a permit back, the gate would let several of these through at once.
+    // Had each of them started a scrape of its own, several would run at once.
     burst.sorted shouldBe List(200, 503, 503, 503, 503, 503)
     peak.get() shouldBe 1
 
-  it should "give a Prometheus scraping every 5 s a fresh scrape each time" in:
+  it should "keep the ttl a second under the 5 s interval at which this repository's Prometheus configurations scrape" in:
     // observability/prometheus.yml, observability/prometheus-compose.yml and
     // charts/quack-on-demand/local-stack-k8s/prometheus.yaml scrape every 5 s. A scrape is stamped
     // when it ended, so the next scrape finds it (the interval minus the time the last one took)
     // old: a ttl of 5 s repeated half the samples (measured: 4 of 7 were new), and a ttl of 4 s
     // leaves a second for the scrape.
     (5.seconds - MetricsEndpoint.Ttl) should be >= 1.second
+
+  it should "make a request wait for a scrape in progress as long as Prometheus' own default scrape timeout" in:
+    // A Prometheus gives up on a request after its scrape timeout, 10 s by default, so a longer
+    // wait holds a connection slot for nothing; a shorter one answers 503 where the scrape in
+    // progress would still have come in time.
+    MetricsEndpoint.ScrapeWait shouldBe 10.seconds
 
   it should "fail a response read past its deadline, and never end it as if it were whole" in:
     val prom     = populated(60)
@@ -478,16 +577,21 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
       readLine(in)
       readChunks(in, data :: read)
 
-  /** A chunked body is read as such, so that a response framed any other way than by its length
-    * fails the assertions on its headers and chunks instead of hanging the read.
-    */
-  private def readResponse(in: InputStream): Wire =
+  /** The status line and the lower-cased headers of the response on `in`. */
+  private def readHead(in: InputStream): (String, Map[String, String]) =
     val status  = readLine(in)
     val headers = Iterator
       .continually(readLine(in))
       .takeWhile(_.nonEmpty)
       .map(h => h.substring(0, h.indexOf(':')).toLowerCase -> h.substring(h.indexOf(':') + 1).trim)
       .toMap
+    (status, headers)
+
+  /** A chunked body is read as such, so that a response framed any other way than by its length
+    * fails the assertions on its headers and chunks instead of hanging the read.
+    */
+  private def readResponse(in: InputStream): Wire =
+    val (status, headers) = readHead(in)
     if headers.get("transfer-encoding").contains("chunked") then
       val chunks = readChunks(in)
       Wire(status, headers, Array.concat(chunks*), chunks.map(_.length))
@@ -550,5 +654,53 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
         head should include(s"content-length: ${expected.length}")
         head should not include "transfer-encoding"
         all.drop(head.length + 4) shouldBe expected
+      }
+    }
+
+  it should "cut a response that outlives its deadline: fewer bytes than the length it declared, then the connection closes" in:
+    // The interpreter's stream failing is not yet what a client sees. With a length there is no
+    // chunk terminator to miss: the client knows the response was cut because it read fewer bytes
+    // than the length, and then the connection ends. The scrape has to be more than a connection
+    // can take in before the client reads, or the server is done writing when the deadline passes
+    // and keeps the connection: a receive buffer of 4 KiB at the client, Ember's write buffer of
+    // 32 KiB and the socket's send buffer, which Linux sizes to about 2.6 MB on the loopback (4 MiB
+    // at most by default). 1400 timers make about 10 MB.
+    val prom     = populated(1400)
+    val expected = prom.scrape().getBytes(UTF_8)
+    expected.length should be > 8 * 1024 * 1024
+    onEmber(new MetricsEndpoint(Some(prom), () => (), responseDeadline = 1.second)) { port =>
+      scala.util.Using.resource(new Socket()) { socket =>
+        // Before connecting, for the window to be this small.
+        socket.setReceiveBufferSize(4096)
+        socket.connect(new InetSocketAddress("127.0.0.1", port), 5000)
+        socket.setSoTimeout(15000)
+        socket.getOutputStream.write(
+          "GET /metrics HTTP/1.1\r\nHost: l\r\nAccept: text/plain\r\n\r\n".getBytes(UTF_8)
+        )
+        socket.getOutputStream.flush()
+        val in                = new java.io.BufferedInputStream(socket.getInputStream)
+        val (status, headers) = readHead(in)
+        status shouldBe "HTTP/1.1 200 OK"
+        headers.get("content-length") shouldBe Some(expected.length.toString)
+        headers.get("transfer-encoding") shouldBe None
+        val first = in.readNBytes(1024)
+        // The client stops reading until the deadline of 1 s has passed.
+        Thread.sleep(1500)
+        // Then everything that follows, to the end of the connection.
+        val rest =
+          try in.readAllBytes()
+          catch
+            case e: java.net.SocketTimeoutException =>
+              fail(
+                "the connection stayed open for 15 s after the client resumed reading: the " +
+                  "response was written whole before its deadline, or the cut one did not close it",
+                e
+              )
+        val body = first ++ rest
+        withClue(s"of ${expected.length} bytes declared, the client read: ")(
+          body.length should be < expected.length
+        )
+        // What it read is the start of the scrape, never a different or a padded one.
+        body.toSeq shouldBe expected.take(body.length).toSeq
       }
     }

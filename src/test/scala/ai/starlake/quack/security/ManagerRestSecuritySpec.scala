@@ -41,8 +41,10 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       (text.takeWhile(_ != '\r'), text.takeWhile(_ != '{').toLowerCase)
     finally sock.close()
 
-  /** [[rawStatus]], with the response's headers (names lowercased). */
-  private def rawResponse(in: java.io.InputStream): (Int, Map[String, String]) =
+  /** [[rawStatus]], with the response's headers (names lowercased) and its body, whole (empty when
+    * it has no Content-Length and is not chunked).
+    */
+  private def rawResponse(in: java.io.InputStream): (Int, Map[String, String], Array[Byte]) =
     def line(): Option[String] =
       val sb = new StringBuilder
       var c  = in.read()
@@ -51,7 +53,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         c = in.read()
       if c == -1 && sb.isEmpty then None else Some(sb.toString)
     line() match
-      case None         => (-1, Map.empty)
+      case None         => (-1, Map.empty, Array.emptyByteArray)
       case Some(status) =>
         val headers = Iterator
           .continually(line().getOrElse(""))
@@ -61,19 +63,23 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
             h.take(i).trim.toLowerCase -> h.drop(i + 1).trim
           }
           .toMap
-        headers.get("content-length") match
+        val body = headers.get("content-length") match
           case Some(n) => in.readNBytes(n.toInt)
           case None    =>
             if headers.get("transfer-encoding").exists(_.equalsIgnoreCase("chunked")) then
-              Iterator
+              val chunks = Iterator
                 .continually(Integer.parseInt(line().getOrElse("0").takeWhile(_ != ';').trim, 16))
-                .takeWhile { size =>
-                  in.readNBytes(size)
+                .map { size =>
+                  val data = in.readNBytes(size)
                   line()
-                  size > 0
+                  (size, data)
                 }
-                .foreach(_ => ())
-        (status.split(' ')(1).toInt, headers)
+                .takeWhile((size, _) => size > 0)
+                .map((_, data) => data)
+                .toList
+              Array.concat(chunks*)
+            else Array.emptyByteArray
+        (status.split(' ')(1).toInt, headers, body)
 
   // ------------------------------------------------------------------
   // A. apiKeyGuard: sessions and PATs only
@@ -361,8 +367,8 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
             sock.getOutputStream.write(r.getBytes(UTF_8))
             sock.getOutputStream.flush()
           send(request)
-          val (status, headers) = rawResponse(in)
-          val reused            =
+          val (status, headers, _) = rawResponse(in)
+          val reused               =
             try
               send(next)
               rawResponse(in)._1 > 0
@@ -1143,23 +1149,6 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  /** [[rawResponse]] with the body of a response framed by its Content-Length. */
-  private def rawResponseBody(in: java.io.InputStream): (Int, Map[String, String], Array[Byte]) =
-    def line(): String =
-      val sb = new StringBuilder
-      var c  = in.read()
-      while c != -1 && c != '\n' do
-        if c != '\r' then sb.append(c.toChar)
-        c = in.read()
-      sb.toString
-    val status  = line().split(' ')(1).toInt
-    val headers = Iterator
-      .continually(line())
-      .takeWhile(_.nonEmpty)
-      .map(h => h.take(h.indexOf(':')).trim.toLowerCase -> h.drop(h.indexOf(':') + 1).trim)
-      .toMap
-    (status, headers, in.readNBytes(headers("content-length").toInt))
-
   // /metrics is public (a scraper holds no credential) and is mounted from the harness's own
   // endpoint, so these cases pin the mount outside the guard, the interpreter's options, and the
   // Accept answer through the real server: none of them is visible to a spec of the endpoint alone.
@@ -1186,7 +1175,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
             "GET /metrics HTTP/1.1\r\nHost: l\r\nAccept: text/plain\r\n\r\n".getBytes(UTF_8)
           )
           sock.getOutputStream.flush()
-          rawResponseBody(in)
+          rawResponse(in)
         }
         answers.foreach { (status, headers, body) =>
           status shouldBe 200
