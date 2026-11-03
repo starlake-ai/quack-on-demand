@@ -17,5 +17,7 @@ final case class EdgeConfig(
     // DoPut batches are never read, so only SQL text needs room.
     maxInboundMessageBytes: Int = 16777216,
     // Largest header list read. gRPC buffers headers before any authentication runs.
-    maxHeaderBytes: Int = 65536
+    maxHeaderBytes: Int = 65536,
+    // Calls with no credentials at once (GetFlightInfo and DoGet: AnonymousCallGuard).
+    maxAnonymousCalls: Int = 256
 )

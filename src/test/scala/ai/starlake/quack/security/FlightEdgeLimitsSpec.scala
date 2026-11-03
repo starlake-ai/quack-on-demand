@@ -1,18 +1,25 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.{FlightConfig, Main}
-import ai.starlake.quack.edge.EdgeConfig
+import ai.starlake.quack.edge.{EdgeConfig, FlightProducerImpl}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import com.google.protobuf.{Any => ProtoAny}
 import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import org.apache.arrow.flight.{
+  Action,
+  AsyncPutListener,
+  CallOptions,
+  Criteria,
   FlightCallHeaders,
   FlightDescriptor,
   FlightRuntimeException,
   FlightStatusCode,
-  HeaderCallOption
+  HeaderCallOption,
+  Ticket
 }
 import org.apache.arrow.flight.sql.impl.FlightSql
+import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.types.pojo.Schema
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -23,11 +30,14 @@ import java.net.{Socket, SocketTimeoutException}
 import java.util.Base64
 import java.util.logging.{Level, Logger}
 import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 /** What a client can make the Flight edge hold: gRPC messages and header lists. A message over the
   * limit is refused with `RESOURCE_EXHAUSTED` as soon as its length prefix arrives, with or without
   * credentials, and a header list over the limit is refused by a client that ignores what the
-  * server advertises, as a hostile one does.
+  * server advertises, as a hostile one does. A call with no credentials gets only server metadata,
+  * and only a limited number of them run at once.
   */
 class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   import Main.given
@@ -53,15 +63,15 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       edgeConfig = edgeConfig
     )
 
+  private def basicAuthorization: String =
+    val creds = s"${SecurityFixtures.AliceUsername}:${SecurityFixtures.AlicePassword}"
+    s"Basic ${Base64.getEncoder.encodeToString(creds.getBytes("UTF-8"))}"
+
   private def basic: HeaderCallOption =
     val hdrs = new FlightCallHeaders()
     hdrs.insert("tenant", SecurityFixtures.TenantName)
     hdrs.insert("pool", SecurityFixtures.PoolName)
-    val creds = s"${SecurityFixtures.AliceUsername}:${SecurityFixtures.AlicePassword}"
-    hdrs.insert(
-      "authorization",
-      s"Basic ${Base64.getEncoder.encodeToString(creds.getBytes("UTF-8"))}"
-    )
+    hdrs.insert("authorization", basicAuthorization)
     new HeaderCallOption(hdrs)
 
   private val sqlInfo =
@@ -148,6 +158,153 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       h.shutdown()
   }
 
+  // ---- calls with no credentials -------------------------------------------------------------
+
+  private val timed = CallOptions.timeout(10, java.util.concurrent.TimeUnit.SECONDS)
+
+  private def unauthenticated(body: => Any): org.scalatest.Assertion =
+    val ex = intercept[FlightRuntimeException](body)
+    ex.status().code() shouldBe FlightStatusCode.UNAUTHENTICATED
+
+  private def soon[A](body: => A): A =
+    org.scalatest.concurrent.Eventually.eventually(
+      org.scalatest.concurrent.Eventually.timeout(10.seconds),
+      org.scalatest.concurrent.Eventually.interval(100.millis)
+    )(body)
+
+  "a call with no credentials" should "be refused on every method but GetFlightInfo and DoGet" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      unauthenticated(client.listFlights(Criteria.ALL).iterator().hasNext)
+      unauthenticated(client.listActions().iterator().hasNext)
+      unauthenticated(client.doAction(new Action("x")).hasNext)
+      unauthenticated(client.getSchema(sqlInfo))
+      val root = VectorSchemaRoot.create(new Schema(java.util.List.of()), h.allocator)
+      try
+        val update = FlightSql.CommandStatementUpdate.newBuilder().setQuery("SELECT 1").build()
+        val put    = client.startPut(
+          FlightDescriptor.command(ProtoAny.pack(update).toByteArray),
+          root,
+          new AsyncPutListener()
+        )
+        unauthenticated(put.getResult())
+      finally root.close()
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "get server metadata through GetSqlInfo and GetXdbcTypeInfo" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      val typeInfo = FlightDescriptor.command(
+        ProtoAny.pack(FlightSql.CommandGetXdbcTypeInfo.getDefaultInstance).toByteArray
+      )
+      List(sqlInfo, typeInfo).foreach { descriptor =>
+        val info   = client.getInfo(descriptor)
+        val stream = client.getStream(info.getEndpoints.get(0).getTicket)
+        try stream.next() // reads without an UNAUTHENTICATED
+        finally stream.close()
+      }
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "be refused any other command, at GetFlightInfo and at DoGet" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      val tableTypes = ProtoAny.pack(FlightSql.CommandGetTableTypes.getDefaultInstance).toByteArray
+      unauthenticated(client.getInfo(FlightDescriptor.command(tableTypes)))
+      val stream = client.getStream(new Ticket(tableTypes))
+      try unauthenticated(stream.next())
+      finally stream.close()
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "be refused a command longer than server metadata needs" in {
+    // GetSqlInfo answers a row per id listed, repeats included: 16 million ids in a 16 MiB message
+    // cost 2 GiB of memory no limit covers.
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      val long = FlightSql.CommandGetSqlInfo.newBuilder()
+      (1 to FlightProducerImpl.MaxAnonymousCommandBytes).foreach(_ => long.addInfo(0))
+      val command = ProtoAny.pack(long.build()).toByteArray
+      unauthenticated(client.getInfo(FlightDescriptor.command(command)))
+      val stream = client.getStream(new Ticket(command))
+      try unauthenticated(stream.next())
+      finally stream.close()
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "be able to ask for every id GetSqlInfo defines" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      val all = FlightSql.CommandGetSqlInfo.newBuilder()
+      FlightSql.SqlInfo.values
+        .filter(_ != FlightSql.SqlInfo.UNRECOGNIZED)
+        .foreach(id => all.addInfo(id.getNumber))
+      val command = ProtoAny.pack(all.build()).toByteArray
+      client.getInfo(FlightDescriptor.command(command)) should not be null
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "still let a credentialed client read other metadata" in {
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      val tableTypes = ProtoAny.pack(FlightSql.CommandGetTableTypes.getDefaultInstance).toByteArray
+      client.getInfo(FlightDescriptor.command(tableTypes), basic) should not be null
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "hold no thread for a DoPut that sends nothing" in {
+    def parked = Thread.getAllStackTraces.asScala.count((_, stack) =>
+      stack.exists(_.getMethodName == "getDescriptor")
+    )
+    val h      = boot(identity)
+    val before = parked
+    val socket = silentCalls(h.port, "DoPut", 32)
+    try
+      Thread.sleep(1000L)
+      parked should be <= before
+    finally
+      socket.close()
+      h.shutdown()
+  }
+
+  "calls with no credentials" should "be limited, leave others alone, and give their place back" in {
+    val h      = boot(_.copy(maxAnonymousCalls = 8))
+    val client = h.newClient()
+    val socket = silentCalls(h.port, "GetFlightInfo", 8)
+    try
+      soon {
+        val ex = intercept[FlightRuntimeException](client.getInfo(sqlInfo, timed))
+        ex.status().code() shouldBe FlightStatusCode.UNAVAILABLE
+      }
+      client.getInfo(sqlInfo, basic, timed) should not be null
+      socket.close()
+      // The client left without a word: its calls must give their places back.
+      soon(client.getInfo(sqlInfo, timed) should not be null)
+    finally
+      socket.close()
+      client.close()
+      h.shutdown()
+  }
+
   // ---- configuration -------------------------------------------------------------------------
 
   /** The bundled application.conf, the real environment left out and `env` standing in for it. */
@@ -180,6 +337,22 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       Map("PROXY_MAX_HEADER_BYTES"          -> "-65536"),
       Map("PROXY_MAX_HEADER_BYTES"          -> "lots")
     ).foreach(env => withClue(env)(an[Exception] should be thrownBy load(env)))
+
+  "the limit on calls with no credentials" should "default to 256, in the edge and in the shipped configuration" in {
+    EdgeConfig("127.0.0.1", 31338, tlsEnabled = false, "", "").maxAnonymousCalls shouldBe 256
+    load().maxAnonymousCalls shouldBe 256
+  }
+
+  it should "come from PROXY_MAX_ANONYMOUS_CALLS" in {
+    load(Map("PROXY_MAX_ANONYMOUS_CALLS" -> "16")).maxAnonymousCalls shouldBe 16
+  }
+
+  it should "be refused at boot unless positive" in
+    List("0", "-1", "lots").foreach(value =>
+      withClue(value)(
+        an[Exception] should be thrownBy load(Map("PROXY_MAX_ANONYMOUS_CALLS" -> value))
+      )
+    )
 
   // ---- a client that speaks HTTP/2 by hand ---------------------------------------------------
 
@@ -216,6 +389,40 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       ((stream >> 8) & 0xff).toByte,
       (stream & 0xff).toByte
     ) ++ payload
+
+  /** Opens `count` calls of `method` on one plain HTTP/2 connection to the edge, each its HEADERS
+    * and nothing after them, as a client that stalls does, with the credentials of `basic` when
+    * `credentials` is set. Returns the open socket, which the caller closes.
+    */
+  private def silentCalls(
+      port: Int,
+      method: String,
+      count: Int,
+      credentials: Boolean = false
+  ): Socket =
+    val socket = new Socket("127.0.0.1", port)
+    val out    = socket.getOutputStream
+    out.write(Preface)
+    out.write(frame(4, 0, 0, Array.empty))
+    val identityHeaders =
+      if credentials then
+        Array(
+          literal("tenant", SecurityFixtures.TenantName),
+          literal("pool", SecurityFixtures.PoolName),
+          literal("authorization", basicAuthorization)
+        )
+      else Array.empty[Array[Byte]]
+    val block = (Array(
+      literal(":method", "POST"),
+      literal(":scheme", "http"),
+      literal(":path", s"/arrow.flight.protocol.FlightService/$method"),
+      literal(":authority", s"127.0.0.1:$port"),
+      literal("content-type", "application/grpc"),
+      literal("te", "trailers")
+    ) ++ identityHeaders).flatten
+    (0 until count).foreach(i => out.write(frame(1, 0x4, 2 * i + 1, block)))
+    out.flush()
+    socket
 
   /** Opens an anonymous GetFlightInfo call on a plain HTTP/2 connection to the edge, with one
     * header of `valueBytes`, never sends its message, and returns the types of the frames the

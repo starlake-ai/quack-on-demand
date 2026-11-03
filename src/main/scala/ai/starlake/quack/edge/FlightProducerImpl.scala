@@ -217,14 +217,47 @@ final class FlightProducerImpl(
       -1L
     )
 
-  /** Diagnostic-only override: logs the DoGet peer + ticket shape before forwarding to the
-    * FlightSqlProducer dispatcher.
+  /** An anonymous peer ([[AnonymousCallGuard]]) gets server metadata only: GetSqlInfo and
+    * GetXdbcTypeInfo, what ODBC asks before it replays its bearer, in a command of at most
+    * [[FlightProducerImpl.MaxAnonymousCommandBytes]]. Anything else, static metadata included,
+    * needs a credential.
+    */
+  private def refuseAnonymous(
+      context: FlightProducer.CallContext,
+      command: => Array[Byte]
+  ): Unit =
+    val peer = Option(context.peerIdentity()).getOrElse("")
+    if peer.startsWith(FlightEdgeServer.AnonymousPeerPrefix) then
+      val bytes   = command
+      val allowed = bytes.length <= FlightProducerImpl.MaxAnonymousCommandBytes &&
+        scala.util
+          .Try(ProtoAny.parseFrom(bytes))
+          .toOption
+          .exists(any =>
+            any.is(classOf[FlightSql.CommandGetSqlInfo]) ||
+              any.is(classOf[FlightSql.CommandGetXdbcTypeInfo])
+          )
+      if !allowed then throw noContext(peer, _ => "no pool bound to session; authenticate first")
+
+  override def getFlightInfo(
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): FlightInfo =
+    refuseAnonymous(
+      context,
+      if descriptor.isCommand then descriptor.getCommand else Array.emptyByteArray
+    )
+    super.getFlightInfo(context, descriptor)
+
+  /** Logs the DoGet peer and ticket shape at DEBUG, and refuses an anonymous peer, before
+    * forwarding to the FlightSqlProducer dispatcher.
     */
   override def getStream(
       context: FlightProducer.CallContext,
       ticket: Ticket,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
+    refuseAnonymous(context, ticket.getBytes)
     if logger.underlying.isDebugEnabled then
       val peer        = Option(context.peerIdentity()).getOrElse("(null)")
       val ticketBytes = ticket.getBytes
@@ -1622,3 +1655,14 @@ final class FlightProducerImpl(
           listener.completed()
         finally out.close()
     finally batches.foreach(_.close())
+
+object FlightProducerImpl:
+
+  /** The largest command an anonymous peer may send: several times what every id GetSqlInfo defines
+    * takes. GetSqlInfo answers a row per id listed, repeats included, in Arrow memory that no limit
+    * covers, and goes on after its client left, which gives its place back: one anonymous call
+    * listing 16 million ids, a 16 MiB message, took the JVM from 373 to 2295 MiB and held its
+    * thread for 4 s after the client left, so a few of them would have had the container killed
+    * whatever the limit on calls at once.
+    */
+  val MaxAnonymousCommandBytes: Int = 4096

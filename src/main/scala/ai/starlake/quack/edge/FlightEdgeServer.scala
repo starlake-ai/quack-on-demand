@@ -95,11 +95,17 @@ final class FlightEdgeServer(
     // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with
     // RESOURCE_EXHAUSTED as soon as the length prefix arrives, before it holds any of it, and a
     // header list over its limit before any authentication runs.
+    //
+    // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
+    // headerAuth runs before the guard: for a call with no header it only mints a peer id.
+    val installGuard: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
+      nettyBuilder => nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls))
     val builder = FlightServer
       .builder(allocator, location, producer)
       .headerAuthenticator(headerAuth)
       .maxInboundMessageSize(cfg.maxInboundMessageBytes)
       .setMaxHeaderListSize(cfg.maxHeaderBytes)
+      .transportHint("grpc.builderConsumer", installGuard)
 
     if cfg.tlsEnabled then
       CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
@@ -129,16 +135,7 @@ final class FlightEdgeServer(
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
-        // Read `Authorization` first; fall back to `x-qod-authorization` for
-        // clients whose driver / proxy strips the standard header but passes
-        // arbitrary `x-*` headers through. Confirmed needed by the Apache
-        // Arrow Flight SQL ODBC build that the current Power BI connector
-        // wraps: it forwards `tenant` / `pool` (which are arbitrary
-        // passthrough keys) but discards `Authorization`. The two header
-        // names are accepted identically; the value format is unchanged
-        // (`Basic <base64>` or `Bearer <token>`).
-        val authHeader = Option(headers.get("Authorization"))
-          .orElse(Option(headers.get("x-qod-authorization")))
+        val authHeader    = FlightEdgeServer.authHeaderOf(headers)
         val bearer        = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
         val basicPair     = FlightEdgeServer.basicPairOf(authHeader)
         val basicUsername = basicPair.map(_._1)
@@ -214,18 +211,17 @@ final class FlightEdgeServer(
             // identification metadata is not tenant data, so admitting an
             // anonymous peer here lets the SQLGetInfo cache load.
             //
-            // Producer methods that need tenant context look up
-            // `ConnectionContext.poolFor(peer)` and reject the anonymous
-            // peer downstream with UNAUTHENTICATED (see
-            // FlightProducerImpl.runStatement etc.). Only the static
-            // GetSqlInfo / GetXdbcTypeInfo paths are reachable anonymously.
+            // Only `GetFlightInfo` and `DoGet` get past AnonymousCallGuard
+            // without a header, and the producer serves such a peer only
+            // GetSqlInfo and GetXdbcTypeInfo (FlightProducerImpl.refuseAnonymous).
             //
             // A malformed Authorization header (e.g. `Bearer <stale id>`,
             // or `Basic <unparseable>`) is NOT silently anonymized: it
             // falls through to handshake so the client gets a precise
             // credential error instead of a downstream "no pool bound"
             // surprise.
-            if authHeader.isEmpty then authResult(s"anonymous-${UUID.randomUUID()}")
+            if authHeader.isEmpty then
+              authResult(s"${FlightEdgeServer.AnonymousPeerPrefix}${UUID.randomUUID()}")
             else
               handshake.authenticate(bearer, basicPair, poolHdr, tenantHdr, superuserHdr) match
                 case Left(HandshakeFailure.Unauthenticated(msg)) =>
@@ -290,6 +286,18 @@ object FlightEdgeServer:
 
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
+
+  /** The peer id prefix of a call with no credentials. */
+  val AnonymousPeerPrefix: String = "anonymous-"
+
+  /** The credential header of a call: `Authorization`, else `x-qod-authorization` for clients whose
+    * driver or proxy strips the standard one but passes arbitrary `x-*` headers. Confirmed needed
+    * by the Apache Arrow Flight SQL ODBC build that the current Power BI connector wraps. The two
+    * are accepted identically, and the value format is unchanged (`Basic <base64>` or `Bearer
+    * <token>`).
+    */
+  def authHeaderOf(headers: CallHeaders): Option[String] =
+    Option(headers.get("Authorization")).orElse(Option(headers.get("x-qod-authorization")))
 
   /** The `(user, password)` of a `Basic <base64>` authorization value, or None when it is not one.
     * The value comes from an unauthenticated client: one that is not base64 gives no pair (the

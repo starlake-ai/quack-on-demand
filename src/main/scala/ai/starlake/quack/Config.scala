@@ -1440,12 +1440,20 @@ final case class FlightConfig(
       envVar = "PROXY_MAX_HEADER_BYTES",
       description = "Largest gRPC header list the FlightSQL edge reads, in bytes."
     )
-    maxHeaderBytes: Int = 65536
+    maxHeaderBytes: Int = 65536,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_ANONYMOUS_CALLS",
+      description =
+        "FlightSQL calls with no credentials at once. Only GetSqlInfo and GetXdbcTypeInfo answer " +
+          "them, for clients that ask before they present their credentials; past this they are " +
+          "refused with UNAVAILABLE."
+    )
+    maxAnonymousCalls: Int = 256
 ):
   require(
-    maxInboundMessageBytes > 0 && maxHeaderBytes > 0,
-    "PROXY_MAX_INBOUND_MESSAGE_BYTES and PROXY_MAX_HEADER_BYTES must be positive " +
-      s"(got $maxInboundMessageBytes and $maxHeaderBytes)"
+    maxInboundMessageBytes > 0 && maxHeaderBytes > 0 && maxAnonymousCalls > 0,
+    "PROXY_MAX_INBOUND_MESSAGE_BYTES, PROXY_MAX_HEADER_BYTES and PROXY_MAX_ANONYMOUS_CALLS must " +
+      s"be positive (got $maxInboundMessageBytes, $maxHeaderBytes and $maxAnonymousCalls)"
   )
 
 /** The native Quack protocol front door (`quack-native` block): the listener DuckDB clients
