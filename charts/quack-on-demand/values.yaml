@@ -60,6 +60,10 @@ resources:
     cpu: 2
     memory: 4Gi
 
+# JVM options for the manager, passed as JAVA_OPTS. The manager pod holds only the manager (nodes
+# are pods of their own), so the heap may take most of the container's memory limit.
+javaOpts: "-XX:MaxRAMPercentage=70"
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
@@ -161,7 +165,7 @@ networkPolicy:
   # Peers allowed to reach the manager's REST/UI (20900) and FlightSQL
   # (31338) ports. Empty = allow from anywhere (e.g. behind an Ingress /
   # LoadBalancer already restricting access upstream). Node pods always reach
-  # 20900 for their verdict calls, whatever this says.
+  # 20901, the verdict listener, for their verdict calls, whatever this says.
   ingressFrom: []
   # Outbound SMTP for the hosted signup/notification flow. Off by default.
   smtp:
