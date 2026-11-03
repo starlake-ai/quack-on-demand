@@ -183,8 +183,9 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
         java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(schemaBytes))
       )
     )
-    schema.getFields.size() shouldBe 1
-    schema.getFields.get(0).getName shouldBe "Count"
+    // Zero fields: the Arrow JDBC driver reads this as an update and goes through DoPut, where it
+    // gets the count. GetFlightInfo and GetSchema keep advertising Count (below).
+    schema.getFields.size() shouldBe 0
 
   it should "advertise the (status, detail) schema for a claimed admin mutation, not Count" in:
     // Regression for the release blocker: CREATE ROLE classifies as DDL (SkipExecute), same as
@@ -213,13 +214,12 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     val fieldNames = (0 until schema.getFields.size()).map(schema.getFields.get(_).getName).toList
     fieldNames shouldBe ai.starlake.quack.edge.admin.AdminResults.MutationColumns
 
-  it should "still advertise Count for an ordinary (non-admin) DDL statement" in:
+  it should "answer an ordinary (non-admin) DDL statement with zero fields, present on the wire" in:
     val (producer, _, _, peer) = setupProducer()
     val listener               = runPrepare(producer, peer, "CREATE TABLE t (a INT)")
     val result                 = decodePrepareResult(listener.onNextValue.get())
-    val schema                 = parseSchema(result.getDatasetSchema.toByteArray)
-    schema.getFields.size() shouldBe 1
-    schema.getFields.get(0).getName shouldBe "Count"
+    result.getDatasetSchema.size() should be > 0
+    parseSchema(result.getDatasetSchema.toByteArray).getFields.size() shouldBe 0
 
   /** Deserialize a serialized IPC Arrow schema from raw bytes. */
   private def parseSchema(bytes: Array[Byte]): org.apache.arrow.vector.types.pojo.Schema =
