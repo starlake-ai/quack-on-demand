@@ -849,6 +849,20 @@ def test_branch_merge_needs_the_proposal_it_approves(runner):
     assert not route.called
 
 
+@pytest.mark.parametrize(
+    "key", ["orders=id", "sales.orders", "sales.orders=", "sales.orders=,", "=id"]
+)
+@respx.mock
+def test_branch_propose_refuses_a_malformed_key_before_calling_the_server(runner, key):
+    route = respx.post(f"{BASE}/api/branch/propose").mock(return_value=httpx.Response(200, json={}))
+    result = runner.invoke(
+        app, ["branch", "propose", "--tenant", "acme", "--db", "tpch1", "--branch", "x", "--key", key]
+    )
+    assert result.exit_code == 2
+    assert "schema.table=column" in result.output
+    assert not route.called
+
+
 @respx.mock
 def test_branch_propose_and_merge_wait_for_the_server(runner):
     # The server bounds each stage. A fixed read limit gives up on a call the server then completes.

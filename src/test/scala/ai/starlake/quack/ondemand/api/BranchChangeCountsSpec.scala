@@ -6,10 +6,24 @@ import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.authz.NodePrincipal
 import ai.starlake.quack.mcp.{McpBranchTools, McpPrincipal}
-import ai.starlake.quack.model.{Branch, PoolKey, RoleDistribution, Tenant, TenantDbKind}
+import ai.starlake.quack.model.{
+  Branch,
+  BranchMerge,
+  BranchMergeStatus,
+  PoolKey,
+  RoleDistribution,
+  Tenant,
+  TenantDbKind
+}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.branch.{BranchActor, BranchService, CloneResult, MergeFence}
+import ai.starlake.quack.ondemand.branch.{
+  BranchActor,
+  BranchMergeSql,
+  BranchService,
+  CloneResult,
+  MergeFence
+}
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, TableVersion}
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore, RbacUser}
@@ -48,10 +62,14 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   private val AliceScope: SessionScope.Resolver = _ => SessionScope(false, Set("acme"))
   private val RootScope: SessionScope.Resolver  = _ => SessionScope.Superuser
 
-  private class FakeReader(head: Long, changes: List[(Long, String)])
+  private class FakeReader(var head: Long, var changes: List[(Long, String)])
       extends DuckLakeCatalogReader(null):
-    override def maxSnapshotId(): Option[Long]       = Some(head)
-    override def tableVersions(): List[TableVersion] = List(
+    /** The commit messages found on this catalog, each with its snapshot: what a merge looks for.
+      */
+    val committed = mutable.Map.empty[String, Long]
+    override def snapshotByCommitMessage(msg: String): Option[Long] = committed.get(msg)
+    override def maxSnapshotId(): Option[Long]                      = Some(head)
+    override def tableVersions(): List[TableVersion]                = List(
       TableVersion(2L, "main", "region", 1L, None),
       TableVersion(3L, "main", "nation", 1L, None)
     )
@@ -134,6 +152,18 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     /** What each count statement reached the node as: (table, principal, executor caller). */
     val counted = mutable.ListBuffer.empty[(String, NodePrincipal, ExecCaller)]
 
+    /** Tables whose count fails for everyone, as on a node that does not answer. */
+    val downTables = mutable.Set.empty[String]
+
+    /** Main changed region's rows too, after the branch forked: a table both sides changed. */
+    def mainTouchesRegion(): Unit =
+      mainReader.head = 11L
+      mainReader.changes = List((11L, "inlined_insert:2"))
+
+    /** The commit of a proposal is on main, as if its batch had landed: a merge then settles it. */
+    def land(m: BranchMerge): Unit =
+      mainReader.committed.put(BranchMergeSql.commitMessage("feature", m.id, m.proposer), 11L): Unit
+
     private val route: RoutedExecutor.Run = (caller, _, sql, eff, _) =>
       IO {
         val table     = if sql.contains("'region'") then "region" else "nation"
@@ -142,7 +172,8 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
         val allowed =
           principal == NodePrincipal.System || principal.superuser ||
             (principal.name == "alice" && table == "region")
-        if allowed then
+        if downTables(table) then Left(RouterFailure.Unavailable(s"no node answers for $table"))
+        else if allowed then
           Right(QueryResult(summary(if table == "region" then 7L else 5L), () => (), "n1", 1L))
         else Left(RouterFailure.AccessDenied(s"QoD: access denied: no grant on $table"))
       }
@@ -590,4 +621,204 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
       .isLeft shouldBe true
+  }
+
+  /** A node whose Decide finds a different number for every count and a sample of every kind, so
+    * that a field filled from the wrong count, or left out, shows.
+    */
+  private object DistinctNode extends ai.starlake.quack.ondemand.branch.MergeNode:
+    def exec(batch: String) = IO.pure(Right(()))
+    def rows(sql: String)   = IO.pure(
+      Right(
+        if sql.contains("_need") then List(List(Json.fromLong(0L), Json.fromLong(0L)))
+        else if sql.contains("AS kind") then
+          List("cell" -> 70L, "update_delete" -> 71L, "delete_update" -> 72L, "key" -> 73L)
+            .map((kind, id) => List(Json.fromString(kind), Json.fromLong(id)))
+        else List(List(1L, 2L, 3L, 4L, 5L, 6L, 7L, 1L, 1L, 8L, 9L).map(Json.fromLong))
+      )
+    )
+
+  "row numbers" should "each reach their own field: all of a table the requester may count, none of one they may not" in {
+    val f     = new Fixture(DistinctNode)
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    val byTable        = reply.changes.tables.map(t => t.table -> t.rowConflicts.get).toMap
+    val expectedRegion = BranchRowConflicts(
+      "main",
+      "region",
+      hasConflicts = true,
+      toUpdate = 1L,
+      toDelete = 2L,
+      toInsert = 3L,
+      cellConflicts = 4L,
+      updateDeleteConflicts = 5L,
+      deleteUpdateConflicts = 6L,
+      keyMatches = 7L,
+      mainRowsByKey = 8L,
+      columnConflicts = Map("x" -> 9L),
+      samples = Map(
+        "cell"          -> List(70L),
+        "update_delete" -> List(71L),
+        "delete_update" -> List(72L),
+        "key"           -> List(73L)
+      )
+    )
+    val expectedNation =
+      BranchRowConflicts("main", "nation", hasConflicts = true, countsUnavailable = true)
+    (byTable("region"), byTable("nation")) shouldBe ((expectedRegion, expectedNation))
+  }
+
+  it should "say a table has no conflicts when it has none" in {
+    val f     = new Fixture
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    reply.changes.tables
+      .flatMap(_.rowConflicts)
+      .map(c => (c.table, c.hasConflicts, c.countsUnavailable))
+      .toSet shouldBe Set(("region", false, false), ("nation", false, true))
+  }
+
+  "propose_merge" should "advertise the policy and keys it reads" in {
+    val f    = new Fixture
+    val tool = new McpBranchTools(f.handlers, AliceScope).tools.find(_.name == "propose_merge").get
+    val advertised = tool.inputSchema.hcursor.downField("properties").keys.toList.flatten
+    advertised should contain allOf ("onConflict", "keys")
+  }
+
+  /** `proposerTok` proposes `feature`, its commit is on main already, `approverTok` merges it: the
+    * merge reply, with no node run.
+    */
+  private def mergeReply(
+      proposerTok: String,
+      proposerScope: SessionScope.Resolver,
+      approverTok: String,
+      approverScope: SessionScope.Resolver
+  ): BranchMergeResponse =
+    val f        = new Fixture(ConflictingNode)
+    val proposed = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(proposerTok))(
+        proposerScope
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    f.land(f.store.getBranchMerge(proposed.merge.id).get)
+    f.handlers
+      .merge(
+        BranchMergeRequest("acme", f.parent.name, "feature", proposed.merge.id, holdWriters = true),
+        Some(approverTok)
+      )(approverScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"merge: $e"), identity)
+
+  "a merge's reply" should "show row numbers the way a proposal's does: all to a superuser, a flag to a tenant admin" in {
+    def numbers(r: BranchMergeResponse) =
+      (
+        r.merge.rowConflicts.map(c => (c.table, c.cellConflicts, c.countsUnavailable)).toSet,
+        r.changes.tables
+          .flatMap(_.rowConflicts)
+          .map(c => (c.table, c.cellConflicts, c.countsUnavailable))
+          .toSet
+      )
+    val flagged = Set(("region", 0L, true), ("nation", 0L, true))
+    val shown   = Set(("region", 2L, false), ("nation", 2L, false))
+    val byAlice = mergeReply(RootSessionTok, RootScope, SessionTok, AliceScope)
+    byAlice.merge.status shouldBe "merged"
+    numbers(byAlice) shouldBe (flagged, flagged)
+    nationIn(tablesOf(byAlice.merge.summary)) shouldBe (0L, true)
+    val byRoot = mergeReply(SessionTok, AliceScope, RootSessionTok, RootScope)
+    byRoot.merge.status shouldBe "merged"
+    numbers(byRoot) shouldBe (shown, shown)
+    nationIn(tablesOf(byRoot.merge.summary)) shouldBe (5L, false)
+  }
+
+  it should "carry the hold the approver asked for" in {
+    mergeReply(RootSessionTok, RootScope, SessionTok, AliceScope).merge.holdWriters shouldBe true
+  }
+
+  "a merge row" should "show what it records, and an earlier timeout beside unreadable counts" in {
+    val f     = new Fixture(ConflictingNode)
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    val timedOut = "timeout: an Apply was sent and has not answered"
+    f.store.createBranchMerge(
+      f.store
+        .getBranchMerge(reply.merge.id)
+        .get
+        .copy(
+          onConflict = Some("branch"),
+          mergeKeysJson = """{"main.region":["x"]}""",
+          holdWriters = true,
+          attempts = 3,
+          error = Some(timedOut),
+          rowConflictsJson = "not json"
+        )
+    )
+    val entry = f.handlers
+      .get("acme", f.parent.name, "feature", Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"get: $e"), identity)
+      .merges
+      .find(_.id == reply.merge.id)
+      .get
+    // The counts' own error must not hide the recorded one: it says a send has no answer.
+    (entry.onConflict, entry.keys, entry.holdWriters, entry.attempts, entry.error) shouldBe
+      (Some("branch"), Map("main.region" -> List("x")), true, 3, Some(timedOut))
+  }
+
+  "a superuser" should "see every row number, even where their own count of a table failed" in {
+    val f = new Fixture(ConflictingNode)
+    f.downTables += "nation"
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    reply.changes.tables.map(t => t.table -> t.countsUnavailable).toMap shouldBe
+      Map("region" -> false, "nation" -> true)
+    reply.changes.tables
+      .flatMap(_.rowConflicts)
+      .map(c => (c.table, c.cellConflicts, c.countsUnavailable))
+      .toSet shouldBe Set(("region", 2L, false), ("nation", 2L, false))
+  }
+
+  "a change set" should "flag a table main changed too, and only that one" in {
+    val f = new Fixture
+    f.mainTouchesRegion()
+    f.restTables(SessionTok, AliceScope).map(t => t.table -> t.threeWay).toMap shouldBe
+      Map("region" -> true, "nation" -> false)
+  }
+
+  it should "take its row numbers from an open proposal only" in {
+    val f     = new Fixture(ConflictingNode)
+    val reply = f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), identity)
+    f.restTables(RootSessionTok, RootScope).flatMap(_.rowConflicts).map(_.cellConflicts) shouldBe
+      List(2L, 2L)
+    // Closed, as a refused merge does: nothing is open any more, and the numbers are as stale as it.
+    f.store.updateBranchMerge(
+      f.store.getBranchMerge(reply.merge.id).get.copy(status = BranchMergeStatus.Failed)
+    )
+    f.restTables(RootSessionTok, RootScope).flatMap(_.rowConflicts) shouldBe empty
+  }
+
+  it should "be refused for a branch that does not exist" in {
+    val f = new Fixture
+    f.handlers
+      .changes("acme", f.parent.name, "nope", Some(false), Some(SessionTok))(AliceScope)
+      .unsafeRunSync()
+      .left
+      .map(_._2.error) shouldBe Left("not_found")
   }
