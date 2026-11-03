@@ -222,7 +222,8 @@ def propose(
         help="schema.table=column[,column...]: rows both sides inserted with this key become conflicts. Repeatable.",
     ),
 ):
-    """Propose the branch for merge (records the change set and what a merge would do to its rows)."""
+    """Propose the branch for merge: its owner or an admin (records the change set and what a merge
+    would do to its rows)."""
     body = {"tenant": tenant, "tenantDb": db, "branch": branch}
     if on_conflict is not None:
         body["onConflict"] = on_conflict
@@ -264,7 +265,7 @@ def merge(
         help="Refuse other commits on the merged tables until the merge ends. They retry for about 9 seconds.",
     ),
 ):
-    """Merge a proposed branch onto main (approver must differ from the proposer)."""
+    """Merge a proposed branch onto main: an admin only (approver must differ from the proposer)."""
     body = {"tenant": tenant, "tenantDb": db, "branch": branch, "proposalId": proposal}
     if expect_main is not None:
         body["expectedMainSnapshot"] = expect_main
@@ -276,5 +277,6 @@ def merge(
 @app.command()
 @covers("POST", "/api/branch/discard", {"tenant": "--tenant", "tenantDb": "--db", "branch": "--branch"})
 def discard(ctx: typer.Context, tenant: str = TENANT, db: str = DB, branch: str = BRANCH):
-    """Discard a live branch: its pool, catalog and branch-only files are freed."""
+    """Discard a live branch, its owner or an admin: its pool, catalog and branch-only files are
+    freed."""
     call(ctx, "POST", "/api/branch/discard", body={"tenant": tenant, "tenantDb": db, "branch": branch})

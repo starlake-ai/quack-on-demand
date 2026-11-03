@@ -1167,7 +1167,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     val f                 = new Fixture
     def asked(db: String) =
       f.handlers.list("acme", db, None, Some(DaveSession))(f.scopes).unsafeRunSync()
-    val absent = asked("no_such_db").left.map(_._2.copy(message = "")).left.map(_.error)
+    val absent = asked("no_such_db").left.map(_._2.error)
     absent shouldBe asked(f.parent.name).left.map(_._2.error)
     absent shouldBe Left("no_pool_access")
     // Bob, who may connect to the parent, is told the same of a database that does not exist.
@@ -1194,11 +1194,18 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     everyEndpoint(f, NoTenantSession) shouldBe EveryEndpoint.map(_ -> refused)
     everyEndpoint(f, RootDroppedPat) shouldBe EveryEndpoint.map(_ -> refused)
     f.store.listBranches(f.parent.id, Set.empty).map(_.name) shouldBe List("feature")
-    // A tenant is told apart by its id or its display name alike, for a member.
+    // Their own tenant, by the same token: this is the rule, not a refusal of everyone.
     f.handlers
       .list("acme", f.parent.name, None, Some(BobSession))(f.scopes)
       .unsafeRunSync()
       .isRight shouldBe true
+  }
+
+  it should "take their own tenant in the spelling tenant ids resolve in" in {
+    val f = new Fixture
+    verdict(
+      f.handlers.list("ACME", f.parent.name, None, Some(BobSession))(f.scopes).unsafeRunSync()
+    ) shouldBe Right("admitted")
   }
 
   "admins" should "pass as before: no pool grant needed, every table named" in {

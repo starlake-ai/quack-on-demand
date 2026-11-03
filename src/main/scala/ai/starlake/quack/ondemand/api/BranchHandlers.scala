@@ -91,12 +91,12 @@ final class BranchHandlers(
         case _ => Left(TenantScopeCheck.forbidden(rawTenant))
     }
 
-  /** The tenant a credential belongs to, the one a plain member may branch in. */
-  private def ownTenant(principal: RestCaller.Principal): Option[String] =
-    (principal match
-      case RestCaller.Principal.Session(s) => s.profile.tenant
-      case RestCaller.Principal.Pat(p)     => p.user.tenant
-    ).flatMap(TenantDbGate.resolveTenantId(sup, _))
+  /** The tenant a credential belongs to, the one a plain member may branch in, as
+    * `ProfileHandlers.pools` binds it.
+    */
+  private def ownTenant(principal: RestCaller.Principal): Option[String] = principal match
+    case RestCaller.Principal.Session(s) => s.profile.tenant
+    case RestCaller.Principal.Pat(p)     => p.user.tenant
 
   private def admittedAsAdmin(
       tid: String,

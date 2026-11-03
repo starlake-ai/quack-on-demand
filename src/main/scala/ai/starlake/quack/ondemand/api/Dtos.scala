@@ -1729,7 +1729,8 @@ final case class BranchEntry(
 final case class BranchListResponse(branches: List[BranchEntry])
 
 /** One merge request of a branch. On an open proposal, an `error` starting `timeout: ` means a send
-  * has no answer: a merge is running, or its batch can still land.
+  * has no answer: a merge is running, or its batch can still land. To a non-admin, `summary`,
+  * `conflicts` and `keys` name only the tables they hold a grant on, and `rowConflicts` is empty.
   */
 final case class BranchMergeEntry(
     id: String,

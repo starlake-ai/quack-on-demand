@@ -2091,7 +2091,9 @@ create, list (live or all), expand a branch for its change set, per-table row
 diffs and merge history, then propose, merge or discard. Plain users work from
 the CLI and MCP.
 
-What a plain user reads follows their grants. `branch changes`, `branch show`
+A plain user who may connect to no pool of the database gets `403
+no_pool_access` from every branch command, and `403 tenant_forbidden` on any
+tenant but their own. What they read follows their grants. `branch changes`, `branch show`
 and a proposal's reply name only the tables they hold a grant on, and
 `otherTables` counts the rest; a diff of any other table answers as for no such
 table, and a key on one as for a table not in the change set. They see a table's
