@@ -535,9 +535,9 @@ Write-Host "Runtime:    $(Get-EnvOr 'QOD_RUNTIME_TYPE' 'local')"
 Write-Host ""
 
 # ---- Port preflight ----
-# Abort if the REST/Flight ports are held; WARN on orphan listeners inside the
-# node port range (stale Quack nodes there cause silent 'Authentication failed'
-# at query time because the port allocator does not probe the OS).
+# Abort if the REST/Flight ports are held or an orphan listener sits inside the
+# node port range (the port allocator skips a port something listens on, but a
+# stale Quack node there keeps its memory until you kill it).
 function Get-PortListeners([int]$Port) {
   try { return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop) }
   catch { return @() }
@@ -564,10 +564,9 @@ if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
     Write-Error @"
 orphan listener(s) inside the configured node port range [$minPort, $maxPort]:
 $desc
-These are almost certainly stale Quack node processes from a prior run. The
-manager's port allocator does not probe the OS - re-leasing one of these ports
-leads to silent 'Authentication failed' errors at query time. Kill them and
-retry (.\scripts\stop-jar.ps1).
+These are almost certainly stale Quack node processes from a prior run. They
+keep their memory and ports until killed. Kill them and retry
+(.\scripts\stop-jar.ps1).
 "@
     exit 1
   }

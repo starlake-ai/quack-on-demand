@@ -788,6 +788,14 @@ In-engine authorization, Phase D: the node decides every statement alone.
   system caller, for a module's own provisioning statements, never SQL a user supplied; each is
   labelled `module:<name>` in statement history and audited as `module.sql`, both shown to the
   tenant's admins with the statement's values masked (as the stdout audit sink masks them).
+- **Branches merge three ways.** Tables both sides changed merge cell by cell, by `rowid`; a conflict
+  refuses the merge unless the proposal names a winner (`--on-conflict main|branch`), `--key` catches
+  rows both sides inserted, `--hold-writers` holds other commits on the merged tables. BREAKING:
+  `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires `--proposal`: the
+  approver names the proposal they read, and another one in its place is `409 proposal_replaced`. A
+  merge that may have landed refuses propose with `409 proposal_unsettled`: merge again, or discard.
+  BREAKING: a merge now refuses `proposal_stale` when the branch moved since the proposal, where it
+  used to take the newer head.
 
 ### Fixed
 

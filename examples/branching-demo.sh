@@ -41,8 +41,11 @@ step "6. The reviewer inspects the change set and the row-level diff"
 qod branch changes --tenant "$TENANT" --db "$DB" --branch "$BRANCH"
 qod branch diff --tenant "$TENANT" --db "$DB" --branch "$BRANCH" --schema tpch1 --table nation
 
-step "7. The reviewer merges (fast-forward, one stamped snapshot, tagged)"
-qod branch merge --tenant "$TENANT" --db "$DB" --branch "$BRANCH"
+step "7. The reviewer reads the open proposal, then merges it by its id (one stamped snapshot, tagged)"
+qod branch show --tenant "$TENANT" --db "$DB" --branch "$BRANCH"
+PROPOSAL="$(qod --json branch show --tenant "$TENANT" --db "$DB" --branch "$BRANCH" \
+  | python3 -c 'import json, sys; print(next(m["id"] for m in json.load(sys.stdin)["merges"] if m["status"] == "proposed"))')"
+qod branch merge --tenant "$TENANT" --db "$DB" --branch "$BRANCH" --proposal "$PROPOSAL"
 
 step "8. Main now carries the change; the branch is gone"
 qod sql --tenant "$TENANT" --pool "$POOL" \

@@ -2046,7 +2046,7 @@ Branch names: lowercase letter first, then letters, digits, `_` or `-`, at most
 
 ```bash
 # 1. Create a branch of acme's tpch1 database (expires after 24h; omit for the server default,
-#    0 = never). Anyone who can connect to a pool of the database may branch it.
+#    0 = never). A tenant admin or a superuser may branch a database.
 qod branch create --tenant acme --db acme_tpch1 --name feature-x --ttl-hours 24
 
 # 2. Work on the branch. The FlightSQL `branch` connection header (or `qod sql --branch`)
@@ -2055,18 +2055,27 @@ qod sql --tenant acme --pool bi --branch feature-x \
   "UPDATE tpch1.nation SET n_comment = 'reviewed' WHERE n_nationkey = 3"
 
 # 3. Review: touched tables (created / dropped / recreated / modified / altered), row counts,
-#    conflicts against main, and the merge verdict; then the row-level diff of one table.
+#    table conflicts against main; then the row-level diff of one table. Row conflicts come with the
+#    proposal: `mergeable` here does not read them.
 qod branch changes --tenant acme --db acme_tpch1 --branch feature-x
 qod branch diff --tenant acme --db acme_tpch1 --branch feature-x --schema tpch1 --table nation
 
-# 4. Propose. Records a merge request with the change set as of now.
+# 4. Propose. Records the change set and what a merge would do to its rows now: rows to update,
+#    delete and insert, conflicts per column, sample rowids. Never a cell value: query the branch and
+#    main by rowid to see them. Proposing again replaces an open proposal. `merge.id` in the reply is
+#    the proposal's id; in `qod branch show` it is the `id` of the entry with status `proposed` under
+#    `merges`. The approver merges by it.
+#    --on-conflict main|branch: who wins every row conflict: a cell, a row one side deleted and the
+#    other updated, rows matching a --key (under branch, main's matching rows are deleted). Without
+#    it, a conflict refuses the merge.
+#    --key schema.table=col[,col...]: rows both sides inserted with this key become conflicts.
 qod branch propose --tenant acme --db acme_tpch1 --branch feature-x
 
 # 5. Merge, as a DIFFERENT principal than the proposer (403 self_merge_forbidden otherwise).
-#    Fast-forward only: 409 merge_conflict lists the tables main changed since the fork.
-#    On success main gains ONE snapshot stamped with proposer and approver, a tag
-#    `merge-<branch>-<id8>`, and the branch is torn down.
-qod --profile reviewer branch merge --tenant acme --db acme_tpch1 --branch feature-x
+#    Tables both sides changed merge cell by cell. On success main gains ONE snapshot stamped with
+#    proposer and approver, a tag `merge-<branch>-<id8>`, and the branch is torn down.
+qod --profile reviewer branch show --tenant acme --db acme_tpch1 --branch feature-x
+qod --profile reviewer branch merge --tenant acme --db acme_tpch1 --branch feature-x --proposal <id>
 
 # Or discard (owner or a tenant admin). Expired branches are discarded by the manager.
 qod branch discard --tenant acme --db acme_tpch1 --branch feature-x
@@ -2077,7 +2086,7 @@ The admin console has the same lifecycle on the tenant page, "Branches" tab:
 create, list (live or all), expand a branch for its change set, per-table row
 diffs and merge history, then propose, merge or discard.
 
-Agents over MCP get the same lifecycle as data-tier tools: `create_branch`,
+Agents over MCP get the same lifecycle with a tenant admin's token (a plain user's token, or one minted with `--drop-admin`, gets 403 `tenant_forbidden`): `create_branch`,
 `list_branches`, `branch_changes`, `diff`, `propose_merge`, `discard`, and a
 `branch` argument on `run_sql`, `list_tables` and `describe_table`. There is
 deliberately no merge tool. To make "agents never write main" a hard rule,
@@ -2086,19 +2095,52 @@ INSERT / UPDATE / DELETE / DDL on the live database are then refused with
 `write_requires_branch`, reads are unchanged, and every child token inherits
 the flag.
 
-Merge limits in v1: column changes (add / drop / retype), views, macros and
-schema-level DDL on the branch are refused with `422 merge_unsupported`; use a
-fresh branch for data changes and apply DDL on main. A merge that loses a
-DuckLake commit race answers `409 concurrent_write` and reopens the branch:
-re-propose and retry. `qod branch create --from-snapshot` is reserved (v1 forks
-at head only).
+An open proposal's `error` starting `timeout:` means a merge is running or may have landed. Merging again settles it; if it landed on a branch that has moved since, that removes what was written on the branch since. After a manager restart mid-merge, enable and resume the branch's pool if the merge does not settle: a crash leaves it frozen.
 
-Safety rules the manager enforces: the fork snapshot of every live branch is
-pinned against maintenance expiry on the parent, branch catalogs are never
-maintained, and `database delete` refuses a database with live branches
-(`409`). Knobs: `QOD_BRANCH_ENABLED`, `QOD_BRANCH_DEFAULT_TTL_HOURS` (168),
-`QOD_BRANCH_MAX_PER_DATABASE` (20), `QOD_BRANCH_SWEEP_SEC` (300),
-`QOD_BRANCH_MERGE_TIMEOUT_SEC` (600).
+`qod branch propose` and `merge` have no read limit: they wait for the server, which bounds each stage. If a NAT or load balancer drops the connection during a long merge, the CLI waits until Ctrl-C; merging again is safe.
+
+What refuses a merge, and what to do:
+
+| Refusal | Meaning | Next |
+|---|---|---|
+| `409 merge_conflict` | A table conflict, or row conflicts with no `--on-conflict` | Propose again, with `--on-conflict` for row conflicts |
+| `409 conflicts_changed` | Main moved: a conflict, or a delete from main, the proposal did not show | Propose again |
+| `409 proposal_stale` | The branch changed since the proposal | Propose again |
+| `409 proposal_replaced` | Another proposal replaced the one you read | Read the new one, then merge it by its id |
+| `409 proposal_unsettled` | On propose or merge: a merge may have landed on main | Merge again, which settles it, or, when it says another proposal landed, discard the branch |
+| `502 merge_failed` | The merge node failed, or a stage timed out | After a timeout or a manager restart mid-merge, merge again and never propose first; raise `QOD_BRANCH_MERGE_TIMEOUT_SEC` if a stage needs longer. Otherwise fix the cause and propose again |
+| `409 concurrent_write` | Main kept moving across 5 attempts | Merge again, or `--hold-writers` if the writers are on the merged tables |
+| `409 history_gap` | A snapshot from the fork on was expired by hand, on main or on the branch | Discard the branch and create it again |
+| `422 merge_unsupported` | A schema change on a merged table, views, macros, or a column named `rowid` or `snapshot_id` | Use a fresh branch for data changes; apply DDL on main |
+| `422 nothing_to_merge` | No changes, or all of them already on main | Discard the branch |
+
+A merge needs a quiet moment on each table it changes: DuckLake refuses a commit if another commit
+touched that table since the merge's transaction began, whichever rows it touched. Commits on other
+tables are fine. The merge retries by itself. On a table that commits too often, `qod branch merge
+--hold-writers` refuses other commits on the merged tables until the merge ends. Writers retry for
+about 9 seconds (`ducklake_max_retry_count` on the writer extends it), then fail with "table is being
+merged". A writer whose transaction was open when the merge committed fails once and must redo its
+transaction. The hold ends by itself after `QOD_BRANCH_MERGE_TIMEOUT_SEC`, even if the manager dies.
+
+Rows are matched by DuckDB's `rowid`, so no primary key is needed. Rowids survive updates, compaction
+and moves between partitions. A pipeline that rewrites rows by delete and re-insert gives them new
+rowids: a branch's edit of such a row shows up as a conflict, never as wrong data. Rows both sides
+insert both land unless `--key` says what makes them the same row.
+
+Size: a merge reads about 15MB plus the changed rows, and original values only for rows both sides
+changed, at about 4MB per such row, up to one read of the table. Measured at 1B rows and 1M changes per
+side: 10 s and 32GB read on local disk, 3 s of it writing. At 100M changes per side, 187 s. The merge
+node's memory runs well above its limit (33GB at a 16GB limit) and it spills up to 37GB at that size,
+so check pod limits and scratch disk before merging at that scale. Compact a table in very many small
+files first: on object storage those reads and writes are the cost.
+
+Safety rules the manager enforces: every snapshot since the oldest live branch's fork is kept on the
+parent, branch catalogs are never maintained, and `database delete` refuses a database with live
+branches (`409`). A large "Pinned skips" figure in a maintenance run usually means an old branch: a
+branch with no TTL stops expiry above its fork until it is merged or discarded. Knobs: `QOD_BRANCH_ENABLED`, `QOD_BRANCH_DEFAULT_TTL_HOURS` (168),
+`QOD_BRANCH_MAX_PER_DATABASE` (20), `QOD_BRANCH_SWEEP_SEC` (300), `QOD_BRANCH_MERGE_TIMEOUT_SEC` (600,
+per stage), `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5), `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (20000000).
+`qod branch create --from-snapshot` is reserved (forks at head only).
 
 ## Ad-hoc queries (qod sql)
 
