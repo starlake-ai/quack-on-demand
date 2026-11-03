@@ -46,6 +46,9 @@ final case class TableChange(
 ):
   def mergeable: Boolean = kind != ChangeKind.Altered && reservedColumn.isEmpty
 
+  /** Only modified tables are counted: a count of this table ran, and did not fail. */
+  def counted: Boolean = kind == ChangeKind.Modified && !countsUnavailable
+
   def reason: Option[String] =
     if kind == ChangeKind.Altered then
       Some("schema change (column add/drop/retype or rename) cannot be merged")

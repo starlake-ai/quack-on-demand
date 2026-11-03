@@ -67,12 +67,15 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     /** The commit messages found on this catalog, each with its snapshot: what a merge looks for.
       */
     val committed = mutable.Map.empty[String, Long]
-    override def snapshotByCommitMessage(msg: String): Option[Long] = committed.get(msg)
-    override def maxSnapshotId(): Option[Long]                      = Some(head)
-    override def tableVersions(): List[TableVersion]                = List(
+
+    /** The tables, each with the snapshot it began at and the one it ended at. */
+    var versions = List(
       TableVersion(2L, "main", "region", 1L, None),
       TableVersion(3L, "main", "nation", 1L, None)
     )
+    override def snapshotByCommitMessage(msg: String): Option[Long]     = committed.get(msg)
+    override def maxSnapshotId(): Option[Long]                          = Some(head)
+    override def tableVersions(): List[TableVersion]                    = versions
     override def snapshotChangesSince(fork: Long): List[(Long, String)] =
       changes.filter(_._1 > fork)
     override def columnsOfTableAt(id: Long, n: Long): List[CatalogColumnEntry] =
@@ -159,6 +162,13 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     def mainTouchesRegion(): Unit =
       mainReader.head = 11L
       mainReader.changes = List((11L, "inlined_insert:2"))
+
+    /** The branch drops nation after the proposal: nothing freezes a proposed branch. */
+    def branchDropsNation(): Unit =
+      branchReader.versions =
+        branchReader.versions.map(v => if v.name == "nation" then v.copy(end = Some(13L)) else v)
+      branchReader.head = 13L
+      branchReader.changes = branchReader.changes :+ ((13L, "dropped_table:3"))
 
     /** The commit of a proposal is on main, as if its batch had landed: a merge then settles it. */
     def land(m: BranchMerge): Unit =
@@ -593,14 +603,15 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       .run(
         new McpPrincipal.Pat(pat, PatTok),
         JsonObject(
-          "database"   -> Json.fromString(f.parent.name),
-          "branch"     -> Json.fromString("feature"),
-          "onConflict" -> Json.fromString("main"),
-          "keys"       -> Json.obj("main.region" -> Json.arr(Json.fromString("x")))
+          "database"    -> Json.fromString(f.parent.name),
+          "branch"      -> Json.fromString("feature"),
+          "on_conflict" -> Json.fromString("main"),
+          "keys"        -> Json.obj("main.region" -> Json.arr(Json.fromString("x")))
         )
       )
       .unsafeRunSync()
       .fold(e => fail(s"propose_merge: $e"), identity)
+    // The argument is snake_case like its siblings'; the reply is the REST entry, which says onConflict.
     out.hcursor.downField("merge").get[String]("onConflict") shouldBe Right("main")
     out.hcursor.downField("merge").downField("keys").get[List[String]]("main.region") shouldBe
       Right(List("x"))
@@ -686,7 +697,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     val f    = new Fixture
     val tool = new McpBranchTools(f.handlers, AliceScope).tools.find(_.name == "propose_merge").get
     val advertised = tool.inputSchema.hcursor.downField("properties").keys.toList.flatten
-    advertised should contain allOf ("onConflict", "keys")
+    advertised should contain allOf ("on_conflict", "keys")
   }
 
   /** `proposerTok` proposes `feature`, its commit is on main already, `approverTok` merges it: the
@@ -821,4 +832,78 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .left
       .map(_._2.error) shouldBe Left("not_found")
+  }
+
+  "a table the branch dropped after the proposal" should "show a viewer who never counted it a flag, not the stored numbers" in {
+    val f = new Fixture(ConflictingNode)
+    // The numbers stored with the proposal are the system's. Nothing freezes a proposed branch.
+    f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.branchDropsNation()
+    val asAlice = f.restTables(SessionTok, AliceScope).map(t => t.table -> t).toMap
+    // Only a modified table is counted. For the dropped one the counts were asked for and none
+    // failed, which must not read as a count that succeeded: nothing says alice may read it.
+    (asAlice("nation").kind, asAlice("nation").countsUnavailable) shouldBe ("dropped", false)
+    asAlice("nation").rowConflicts shouldBe
+      Some(BranchRowConflicts("main", "nation", hasConflicts = true, countsUnavailable = true))
+    asAlice("region").rowConflicts.map(_.cellConflicts) shouldBe Some(2L)
+    // A superuser still gets the numbers.
+    f.restTables(RootSessionTok, RootScope)
+      .find(_.table == "nation")
+      .flatMap(_.rowConflicts)
+      .map(c => (c.cellConflicts, c.countsUnavailable)) shouldBe Some((2L, false))
+  }
+
+  "a caller with no admin grant on the tenant" should "be refused by the branch endpoints before anything is read, counted or recorded" in {
+    // Only admins reach these endpoints, and that is what keeps `hasConflicts` safe: for a user who
+    // can write a branch under a mask or row policy, a key on a masked column would make it an
+    // equality oracle on that column (design 8.2). If this ever changes, close that first.
+    val plain: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set.empty)
+    val f = new Fixture(ConflictingNode)
+    f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val countedBefore = f.counted.size
+    val tok           = Some(SessionTok)
+    def verdict[A](
+        out: Either[(sttp.model.StatusCode, ErrorResponse), A]
+    ): Either[(sttp.model.StatusCode, String), String] =
+      out.map(_ => "admitted").left.map(e => (e._1, e._2.error))
+    val refused = Left((sttp.model.StatusCode.Forbidden, "tenant_forbidden"))
+    withClue(
+      "a caller with no admin grant got through: `hasConflicts` is an equality oracle for them " +
+        "(design 8.2), so close that first: "
+    ) {
+      List(
+        "propose" -> verdict(
+          f.handlers
+            .propose(BranchProposeRequest("acme", f.parent.name, "feature"), tok)(plain)
+            .unsafeRunSync()
+        ),
+        "changes" -> verdict(
+          f.handlers
+            .changes("acme", f.parent.name, "feature", Some(true), tok)(plain)
+            .unsafeRunSync()
+        ),
+        "get" -> verdict(
+          f.handlers.get("acme", f.parent.name, "feature", tok)(plain).unsafeRunSync()
+        ),
+        "create" -> verdict(
+          f.handlers
+            .create(BranchCreateRequest("acme", f.parent.name, "other"), tok)(plain)
+            .unsafeRunSync()
+        )
+      ) shouldBe List("propose", "changes", "get", "create").map(_ -> refused)
+    }
+    f.counted.size shouldBe countedBefore
+    f.store.listBranches(f.parent.id, Set.empty).map(_.name) shouldBe List("feature")
+    f.store.listBranchMerges(f.feature.id).size shouldBe 1
   }

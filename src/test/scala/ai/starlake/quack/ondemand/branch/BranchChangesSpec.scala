@@ -483,3 +483,10 @@ class BranchChangesSpec extends AnyFlatSpec with Matchers:
     (cs.forkSnapshot, cs.headSnapshot, cs.mainSnapshot) shouldBe (10L, 12L, 15L)
     cs.mergeable shouldBe true
   }
+
+  "TableChange.counted" should "hold for a modified table whose count did not fail, and for no other" in {
+    def of(kind: ChangeKind, unavailable: Boolean = false) =
+      TableChange("tpch1", "region", kind, countsUnavailable = unavailable)
+    ChangeKind.values.filter(k => of(k).counted).toList shouldBe List(ChangeKind.Modified)
+    of(ChangeKind.Modified, unavailable = true).counted shouldBe false
+  }

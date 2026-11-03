@@ -93,7 +93,9 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     description =
       "The branch's change set since its fork: touched tables (created, dropped, recreated, " +
         "modified with insert/delete/update counts, or altered), conflicts against the live " +
-        "database, and anything v1 cannot merge. `mergeable` is the merge verdict.",
+        "database, and anything v1 cannot merge. `mergeable` means no table conflict and " +
+        "nothing unsupported: row conflicts are the merge's to decide, and the proposal shows " +
+        "them.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -167,8 +169,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
-      "branch"     -> strProp("Branch name."),
-      "onConflict" -> strProp(
+      "branch"      -> strProp("Branch name."),
+      "on_conflict" -> strProp(
         "Which side wins a conflicting cell: main or branch. Absent, any conflict refuses the merge."
       ),
       "keys" -> objProp(
@@ -188,7 +190,7 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
         case Right((tenant, database, branch, keys)) =>
           branches
             .propose(
-              BranchProposeRequest(tenant, database, branch, str(args, "onConflict"), keys),
+              BranchProposeRequest(tenant, database, branch, str(args, "on_conflict"), keys),
               principal.rawToken
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))

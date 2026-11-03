@@ -240,7 +240,7 @@ final class BranchHandlers(
                     b,
                     cs,
                     proposal,
-                    t => superuser || (countsAsked && !t.countsUnavailable)
+                    t => superuser || (countsAsked && t.counted)
                   )
                 )
               }
@@ -329,7 +329,7 @@ final class BranchHandlers(
             BranchProposeResponse(
               entry(b),
               mergeEntry(m, systemCounts),
-              changesResponse(b, cs, Some(m), t => systemCounts || !t.countsUnavailable)
+              changesResponse(b, cs, Some(m), t => systemCounts || t.counted)
             )
           })
 

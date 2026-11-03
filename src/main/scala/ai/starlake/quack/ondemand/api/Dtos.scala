@@ -1789,7 +1789,7 @@ final case class BranchTableChange(
     countsUnavailable: Boolean = false,
     /** Main changed this table's rows too: it merges cell by cell. */
     threeWay: Boolean = false,
-    /** From the open proposal, when there is one. */
+    /** From the proposal: the open one, or, on a merge's reply, the one merged. */
     rowConflicts: Option[BranchRowConflicts] = None
 )
 

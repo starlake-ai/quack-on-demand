@@ -82,8 +82,9 @@ object BranchEndpoints:
       .description(
         "The branch's change set since its fork: touched tables classified as created, dropped, " +
           "recreated, modified or altered (with insert/delete/update counts unless counts=false), " +
-          "the conflicts against main, and the changes v1 cannot merge. `mergeable` is the " +
-          "merge verdict."
+          "the conflicts against main, and the changes v1 cannot merge. `mergeable` means no " +
+          "table conflict and nothing unsupported: row conflicts are the merge's to decide, and " +
+          "the proposal shows them."
       )
 
   val diffEndpoint: PublicEndpoint[
@@ -179,7 +180,9 @@ object BranchEndpoints:
           "when main kept moving keeps it open (merge again, or with holdWriters); 422 " +
           "merge_unsupported for schema changes, views and macros; 422 nothing_to_merge; 502 " +
           "merge_failed closes it when the node failed, and keeps it open after a timeout or when " +
-          "the fence could not be armed: merge again."
+          "the fence could not be armed: merge again. The reply's changes carries no row counts " +
+          "(inserted, deleted and updated read 0) and, when a merge settled, reads main after the " +
+          "landing; merge.summary and merge.rowConflicts hold the numbers."
       )
 
   val discardEndpoint: PublicEndpoint[
