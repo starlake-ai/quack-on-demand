@@ -653,7 +653,9 @@ it (`None`), never the flagged row an admin gets (an admin can lift their own ma
 a non-admin no row numbers at all. A non-admin who may count sees the numbers: a policy holder's count is
 refused on every table (`CatalogReachingCalls`), so such a viewer holds no policy. Names follow filtered
 metadata: `BranchActor.sees` covers a table when the handshake's effective set, narrowed by the token,
-covers it with any verb, the parent's catalog alias being the session catalog (`BranchHandlers.seenBy`).
+covers it for reading (`RO`, `RW` or `ALL`, exactly what `SHOW TABLES` lists), the parent's catalog alias
+being the session catalog (`BranchHandlers.seenBy`), so a DDL-only holder who alters a table on their own
+branch reads it only through `otherTables`, as their `SHOW TABLES` hides it.
 `changes`, a merge row's summary, conflicts and keys list what they see, with no raw `unsupported` verb;
 `BranchChangesResponse.otherTables` counts the rest; `mergeable` is the whole branch's. Tables they do not
 see are not counted as them. `diff` and `schema-diff` of such a table answer exactly as for no such table,
@@ -661,8 +663,10 @@ at the point where that is decided (the `hidden` argument of `CatalogPreviewHand
 `schemaDiff`, which has no default: the catalog's own endpoints pass `NoneHidden`), and a key on one as for
 a table not in the change set, so its columns cannot be probed. An OPA tenant's users see
 nothing listed, as with their `SHOW TABLES`. Residuals, not holes to report: refusal text and a merge row's
-`error` can name a table of the change set; `list` shows every branch's owner and name; and a proposer sees
-whether an admin's merge of their proposal was refused for row conflicts, one bit per merge an admin runs.
+`error` can name a table of the change set; `list` shows every branch's owner and name; a proposer sees
+whether an admin's merge of their proposal was refused for row conflicts, one bit per merge an admin runs;
+and `threeWay` and a visible table's conflict reason tell a policy holder that main touched a table they
+cannot fully read, one bit per table, not testable per guess.
 
 ### Pool suspend/resume (scale-to-zero)
 

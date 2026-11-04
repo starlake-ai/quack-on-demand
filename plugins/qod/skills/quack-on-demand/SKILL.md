@@ -2094,7 +2094,9 @@ the CLI and MCP.
 A plain user who may connect to no pool of the database gets `403
 no_pool_access` from every branch command, and `403 tenant_forbidden` on any
 tenant but their own. What they read follows their grants. `branch changes`, `branch show`
-and a proposal's reply name only the tables they hold a grant on, and
+and a proposal's reply name only the tables they hold a read grant on (`RO`,
+`RW` or `ALL`, the tables their `SHOW TABLES` lists; a `DDL` grant alone shows
+nothing, even of a table they altered on their own branch), and
 `otherTables` counts the rest; a diff of any other table answers as for no such
 table, and a key on one as for a table not in the change set. They see a table's
 row numbers only when their own count of it succeeds, and the count of a user

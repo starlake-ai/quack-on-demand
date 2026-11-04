@@ -997,8 +997,8 @@ paths:
   /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}:
     get:
       description: One branch (live or terminal) with its merge history. Unless the
-        caller is an admin, a merge row names only the tables they hold a grant on,
-        and carries no rowConflicts.
+        caller is an admin, a merge row names only the tables they hold a read grant
+        on (RO, RW or ALL), and carries no rowConflicts.
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranch
       parameters:
       - name: tenant
@@ -1054,8 +1054,9 @@ paths:
         cannot merge. `mergeable` means no table conflict and nothing unsupported:
         row conflicts are the merge''s to decide, and the proposal shows them. Unless
         the caller is an admin, tables and conflicts name only the tables they hold
-        a grant on, unsupported is empty, otherTables counts the rest, and a table
-        they may not count has no rowConflicts; `mergeable` stays the whole branch''s.'
+        a read grant on (RO, RW or ALL), as their SHOW TABLES does, unsupported is
+        empty, otherTables counts the rest, and a table they may not count has no
+        rowConflicts; `mergeable` stays the whole branch''s.'
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchChanges
       parameters:
       - name: tenant
@@ -1112,8 +1113,8 @@ paths:
     get:
       description: 'Row-level diff of one table between the branch''s fork snapshot
         and its head: the same paginated change feed as the catalog data-diff (keyset
-        cursor, changeType filter). A table the caller holds no grant on answers as
-        one that does not exist, unless they are an admin.'
+        cursor, changeType filter). A table the caller holds no read grant on answers
+        as one that does not exist, unless they are an admin.'
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchDiff
       parameters:
       - name: tenant
@@ -1193,8 +1194,8 @@ paths:
   /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}/schema-diff:
     get:
       description: Column-level diff of one table between the branch's fork snapshot
-        and its head. A table the caller holds no grant on answers as one that does
-        not exist, unless they are an admin.
+        and its head. A table the caller holds no read grant on answers as one that
+        does not exist, unless they are an admin.
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchSchema-diff
       parameters:
       - name: tenant
@@ -4738,8 +4739,8 @@ paths:
         again replaces an open proposal, unless its last merge may have landed (409
         proposal_unsettled: merge again, or discard; only a discard when another proposal''s
         commit is on main). 400 invalid_on_conflict, invalid_key (a key on a table
-        the caller holds no grant on, unless they are an admin, reads as one not in
-        the change set); 409 history_gap.'
+        the caller holds no read grant on, unless they are an admin, reads as one
+        not in the change set); 409 history_gap.'
       operationId: postApiBranchPropose
       parameters:
       - name: X-API-Key

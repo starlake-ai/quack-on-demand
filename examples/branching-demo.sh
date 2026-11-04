@@ -44,7 +44,9 @@ agent_sql --branch "$BRANCH" \
 step "3. Main is untouched"
 reviewer_sql "$READ_BACK"
 
-step "4. The agent reads its change set and proposes the merge. It sees the tables it holds a grant on; otherTables counts the rest"
+# bob also holds DDL on all of tpch1 (role dba), but a table shows only on a read grant: lineitem and
+# orders (role etl), the tables bob's SHOW TABLES lists.
+step "4. The agent reads its change set and proposes the merge. It sees the tables it may read; otherTables counts the rest"
 agent branch changes --tenant "$TENANT" --db "$DB" --branch "$BRANCH"
 PROPOSED="$(agent --json branch propose --tenant "$TENANT" --db "$DB" --branch "$BRANCH")"
 printf '%s\n' "$PROPOSED"

@@ -661,6 +661,14 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       withClue(s"ghost body: ${ghost.body()}") {
         ghost.statusCode() shouldBe 403
         errorCode(ghost.body()) should contain("tenant_forbidden")
+        // The very body another tenant gets, in words that say nothing of an admin grant.
+        val other = get(h.httpClient, s"${h.baseUrl}$globex", apiKey = Some(bob))
+        ghost.body().replace("ghost", "<t>") shouldBe
+          other.body().replace(SecurityFixtures.GlobexTenantId, "<t>")
+        ghost.body() should include("this credential cannot act on tenant 'ghost'")
+        // An admin of acme is refused in the words that are true of them.
+        val asAlice = get(h.httpClient, s"${h.baseUrl}$globex", apiKey = Some(alice))
+        asAlice.body() should include("no admin grant")
       }
     }
 

@@ -60,7 +60,8 @@ import scala.concurrent.duration.*
   * may not, any superuser and the system principal everything.
   *
   * It holds the rules of who gets in too, with plain principals on real credentials: bob and carol
-  * may connect and hold a grant on region alone, dave holds no pool grant.
+  * may connect and hold a grant on region alone, dave holds no pool grant, gina also holds DDL
+  * alone on nation, and hank holds ALL on nation and nothing on region.
   */
 class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
 
@@ -121,6 +122,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
 
   // Plain principals: no admin grant anywhere, unless the name says so.
   private val BobSession        = "bob-session"
+  private val DdlOnlySession    = "gina-session" // reads region, and holds DDL alone on nation
   private val BobPat            = "qod_pat_bob"
   private val CarolSession      = "carol-session"
   private val DaveSession       = "dave-session"
@@ -202,6 +204,20 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     private val carolRow = member("carol")
     private val daveRow  = member("dave", connects = false)
     private val erinRow  = member("erin")
+    private val ginaRow  = member("gina")
+    private val ddlRole  = sup
+      .createRole("acme", "nation_ddl")
+      .unsafeRunSync()
+      .fold(e => fail(s"role: $e"), identity)
+    sup.grantRolePermission(ddlRole.id, alias, "main", "nation", "DDL").unsafeRunSync()
+    sup.addUserRole(ginaRow.id, ddlRole.id).unsafeRunSync()
+    private val hankRow = member("hank", granted = false)
+    private val allRole = sup
+      .createRole("acme", "nation_all")
+      .unsafeRunSync()
+      .fold(e => fail(s"role: $e"), identity)
+    sup.grantRolePermission(allRole.id, alias, "main", "nation", "ALL").unsafeRunSync()
+    sup.addUserRole(hankRow.id, allRole.id).unsafeRunSync()
 
     private def session(name: String, tenant: Option[String], scope: SessionScope) =
       val role = if scope.superuser || scope.manageableTenants.nonEmpty then "admin" else "user"
@@ -221,6 +237,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
 
     private val sessions = Map(
       BobSession        -> session("bob", Some("acme"), SessionScope.NoAccess),
+      DdlOnlySession    -> session("gina", Some("acme"), SessionScope.NoAccess),
       CarolSession      -> session("carol", Some("acme"), SessionScope.NoAccess),
       DaveSession       -> session("dave", Some("acme"), SessionScope.NoAccess),
       AdminElsewhere    -> session("erin", Some("acme"), SessionScope(false, Set("globex"))),
@@ -236,6 +253,12 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     def bobToken(r: TokenRestriction): String =
       val name = s"qod_pat_bob_${extraPats.size}"
       extraPats.put(name, plainPat(bobRow, name, r)): Unit
+      name
+
+    /** The token under `r` of hank, who holds ALL on nation and nothing on region. */
+    def hankToken(r: TokenRestriction): String =
+      val name = s"qod_pat_hank_${extraPats.size}"
+      extraPats.put(name, plainPat(hankRow, name, r)): Unit
       name
 
     private val pats = Map(
@@ -301,7 +324,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
         counted += ((table, principal, caller))
         val allowed =
           principal == NodePrincipal.System || principal.superuser ||
-            (Set("alice", "bob", "erin")(principal.name) && table == "region")
+            (Set("alice", "bob", "erin", "gina")(principal.name) && table == "region")
         if downTables(table) then Left(RouterFailure.Unavailable(s"no node answers for $table"))
         else if allowed then
           Right(QueryResult(summary(if table == "region" then 7L else 5L), () => (), "n1", 1L))
@@ -672,7 +695,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     (region.cellConflicts, region.hasConflicts, region.countsUnavailable) shouldBe (2L, true, false)
     region.samples shouldBe Map("cell" -> List(70L))
     region.mainRowsByKey shouldBe 5L
-    // alice holds no grant on nation: she learns it has conflicts, not how many.
+    // alice holds no grant on nation: they learn it has conflicts, not how many.
     val nation = byTable("nation").get
     (nation.cellConflicts, nation.hasConflicts, nation.countsUnavailable) shouldBe (0L, true, true)
     nation.samples shouldBe Map.empty
@@ -1180,6 +1203,44 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     asked(f.parent.name).left.toOption.get._2.message should not include "grant"
   }
 
+  "a member's spelling of the database" should "not matter: the gate and everything after it read one" in {
+    val f     = new Fixture
+    val db    = f.parent.name
+    val upper = db.toUpperCase(java.util.Locale.ROOT)
+    upper should not be db
+    def list(name: String, tok: String) =
+      verdict(f.handlers.list("acme", name, None, Some(tok))(f.scopes).unsafeRunSync())
+    // As an admin is admitted.
+    list(upper, SessionTok) shouldBe Right("admitted")
+    list(upper, BobSession) shouldBe Right("admitted")
+    list(upper, BobPat) shouldBe Right("admitted")
+    f.handlers
+      .changes("acme", upper, "feature", Some(true), Some(BobSession))(f.scopes)
+      .unsafeRunSync()
+      .map(_.tables.map(_.table)) shouldBe Right(List("region"))
+    // Their names show as they do under the stored spelling, so the catalog alias was found.
+    f.handlers
+      .schemaDiff("acme", upper, "feature", "main", "region", Some(BobSession))(f.scopes)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    // The databases axis reads the same name.
+    val onParent = f.bobToken(TokenRestriction.Unrestricted.copy(databases = Some(Set(db))))
+    list(upper, onParent) shouldBe Right("admitted")
+    val elsewhere = f.bobToken(TokenRestriction.Unrestricted.copy(databases = Some(Set("other"))))
+    list(upper, elsewhere) shouldBe Left((Forbidden, "token_scope"))
+    // A refusal says the same of a database that exists and one that does not, in any spelling:
+    // were one lowercased and not the other, the case of the answer would tell them apart.
+    def refusal(name: String) = f.handlers
+      .list("acme", name, None, Some(DaveSession))(f.scopes)
+      .unsafeRunSync()
+      .left
+      .map((code, e) => (code, e.error, e.message))
+    refusal(upper) shouldBe
+      Left((Forbidden, "no_pool_access", s"you may connect to no pool of database '$db'"))
+    refusal("NO_SUCH_DB") shouldBe
+      Left((Forbidden, "no_pool_access", "you may connect to no pool of database 'no_such_db'"))
+  }
+
   "a credential with no tenant of its own, or another" should "be refused every tenant it does not belong to" in {
     val f       = new Fixture
     val refused = Left((Forbidden, "tenant_forbidden"))
@@ -1199,6 +1260,29 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
       .list("acme", f.parent.name, None, Some(BobSession))(f.scopes)
       .unsafeRunSync()
       .isRight shouldBe true
+  }
+
+  it should "be told so in words that say nothing of an admin grant, the same for a tenant that does not exist" in {
+    val f                                    = new Fixture
+    def refusal(tenant: String, tok: String) = f.handlers
+      .list(tenant, f.parent.name, None, Some(tok))(f.scopes)
+      .unsafeRunSync()
+      .left
+      .toOption
+      .get
+    def bare(r: (sttp.model.StatusCode, ErrorResponse), tenant: String) =
+      (r._1, r._2.copy(message = r._2.message.replace(tenant, "<t>")))
+    List(BobSession, BobPat, NoTenantSession, RootDroppedPat).foreach { tok =>
+      withClue(s"$tok: ") {
+        val exists = refusal("globex", tok)
+        exists._1 shouldBe Forbidden
+        exists._2.error shouldBe "tenant_forbidden"
+        exists._2.message shouldBe "this credential cannot act on tenant 'globex'"
+        bare(refusal("nosuchtenant", tok), "nosuchtenant") shouldBe bare(exists, "globex")
+      }
+    }
+    // Someone who does manage a tenant: what that message said stays true for them.
+    refusal("globex", SessionTok)._2.message should include("no admin grant")
   }
 
   it should "take their own tenant in the spelling tenant ids resolve in" in {
@@ -1270,7 +1354,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
             .create(BranchCreateRequest("acme", db, "forever", ttlHours = Some(0)), key)(f.scopes)
             .unsafeRunSync()
         ) shouldBe Left((sttp.model.StatusCode.BadRequest, "invalid_ttl"))
-        // And a member's replies: the table they hold a grant on, no row of the merge row's numbers.
+        // And a member's replies: the table they may read, no row of the merge row's numbers.
         val changes = f.handlers
           .changes("acme", db, "feature", Some(true), key)(f.scopes)
           .unsafeRunSync()
@@ -1298,7 +1382,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   "a --drop-admin token" should "reach these endpoints as the plain user it is" in {
     val f  = new Fixture(ConflictingNode)
     val db = f.parent.name
-    // alice's, a tenant admin's: she holds a pool grant and no table grant.
+    // alice's, a tenant admin's: they hold a pool grant and no table grant.
     val changes = f.handlers
       .changes("acme", db, "feature", Some(true), Some(DroppedAdminPat))(f.scopes)
       .unsafeRunSync()
@@ -1373,9 +1457,62 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     val noRoles = f.bobToken(TokenRestriction.Unrestricted.copy(roles = Some(Set.empty)))
     val narrow  = tablesAs(noRoles)
     (narrow.tables, narrow.otherTables) shouldBe (Nil, 2)
-    // A verb ceiling leaves the grant standing: any verb shows the name.
+    // A read-only ceiling leaves a read grant standing; a DDL one leaves it no read to cover.
     val readOnly = f.bobToken(TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO")))
     tablesAs(readOnly).tables.map(_.table) shouldBe List("region")
+    val ddlOnly = f.bobToken(TokenRestriction.Unrestricted.copy(verbCeiling = Some("DDL")))
+    tablesAs(ddlOnly).tables shouldBe Nil
+    // And over an ALL grant it leaves DDL alone, which shows nothing, as no grant of DDL would.
+    val whole = f.hankToken(TokenRestriction.Unrestricted)
+    tablesAs(whole).tables.map(_.table) shouldBe List("nation")
+    val clipped = f.hankToken(TokenRestriction.Unrestricted.copy(verbCeiling = Some("DDL")))
+    val hidden  = tablesAs(clipped)
+    (hidden.tables, hidden.otherTables) shouldBe (Nil, 2)
+  }
+
+  it should "not show a table a DDL grant alone covers, as their SHOW TABLES hides it" in {
+    val f   = new Fixture
+    val key = Some(DdlOnlySession)
+    val db  = f.parent.name
+    val own = f.handlers
+      .create(BranchCreateRequest("acme", db, "mine", ttlHours = Some(24)), key)(f.scopes)
+      .unsafeRunSync()
+      .fold(e => fail(s"create: $e"), identity)
+    own.owner shouldBe "gina"
+    val changes = f.handlers
+      .changes("acme", db, "mine", Some(true), key)(f.scopes)
+      .unsafeRunSync()
+      .fold(e => fail(s"changes: $e"), identity)
+    changes.tables.map(_.table) shouldBe List("region")
+    changes.otherTables shouldBe 1
+    // Nothing asked of the node about it, either.
+    f.counted.map(_._1).toList shouldBe List("region")
+    def bare[A](out: Either[(sttp.model.StatusCode, ErrorResponse), A], table: String) =
+      out.left.map((code, e) => (code, e.copy(message = e.message.replace(table, "<t>"))))
+    def schemaDiff(t: String) =
+      f.handlers.schemaDiff("acme", db, "mine", "main", t, key)(f.scopes).unsafeRunSync()
+    def dataDiff(t: String) = f.handlers
+      .diff("acme", db, "mine", "main", t, None, None, None, key)(f.scopes)
+      .unsafeRunSync()
+    schemaDiff("nation").left.map(_._2.error) shouldBe Left("not_found")
+    bare(schemaDiff("nation"), "nation") shouldBe bare(schemaDiff("ghost"), "ghost")
+    bare(dataDiff("nation"), "nation") shouldBe bare(dataDiff("ghost"), "ghost")
+    def keyed(table: String) = f.handlers
+      .propose(BranchProposeRequest("acme", db, "mine", keys = Map(table -> List("x"))), key)(
+        f.scopes
+      )
+      .unsafeRunSync()
+      .left
+      .map((code, e) => (code, e.error, e.message.replace(table, "<t>")))
+    keyed("main.other").left.map(_._2) shouldBe Left("invalid_key")
+    keyed("main.nation") shouldBe keyed("main.other")
+    // The control: the same branch, the same table, as a tenant admin.
+    val asAdmin = f.handlers
+      .changes("acme", db, "mine", Some(true), Some(SessionTok))(f.scopes)
+      .unsafeRunSync()
+      .fold(e => fail(s"changes: $e"), identity)
+    asAdmin.tables.map(_.table).toSet shouldBe Set("region", "nation")
+    asAdmin.otherTables shouldBe 0
   }
 
   it should "read no count of a table they do not see" in {
@@ -1440,8 +1577,8 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   }
 
   "a viewer who may not count a table" should "learn nothing of it from a proposal: no row, no number, no flag" in {
-    // carol may connect and holds a grant on region; the node refuses all her counts, as it does a
-    // policy holder's. Whatever Decide found, she reads the same: this is the oracle's case.
+    // carol may connect and holds a grant on region; the node refuses all their counts, as it does a
+    // policy holder's. Whatever Decide found, they read the same: this is the oracle's case.
     def repliesOver(node: ai.starlake.quack.ondemand.branch.MergeNode) =
       val f   = new Fixture(node)
       val key = Some(CarolSession)

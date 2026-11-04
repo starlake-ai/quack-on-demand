@@ -20,6 +20,8 @@ import cats.effect.IO
 import io.circe.Json
 import sttp.model.StatusCode
 
+import java.util.Locale
+
 /** REST handlers for branches (Epic 1). Any principal who may connect to one of the parent's pools
   * may branch it, in its own tenant; every endpoint passes [[gate]], the one place that says so,
   * and everything after it is the service's business rules. Who gets in:
@@ -33,11 +35,11 @@ import sttp.model.StatusCode
   *     the pools the token's `databases` and `pools` axes allow, as `ProfileHandlers.pools` does.
   *     An unavailable decision (the tenant's OPA down) is a 503, never a refusal.
   *
-  * A non-admin's replies then name only the tables they hold a grant on ([[BranchActor.sees]]), and
-  * carry no row numbers of a table they may not count (`BranchHandlers.changesResponse`). Merge is
-  * the service's to refuse them: `admin_required`. No credential, or any other token, is a 401
-  * before anything else. The data diffs delegate to [[CatalogPreviewHandlers]], whose
-  * [[RestCaller]] resolves the executor identity.
+  * A non-admin's replies then name only the tables they hold a read grant on
+  * ([[BranchActor.sees]]), and carry no row numbers of a table they may not count
+  * (`BranchHandlers.changesResponse`). Merge is the service's to refuse them: `admin_required`. No
+  * credential, or any other token, is a 401 before anything else. The data diffs delegate to
+  * [[CatalogPreviewHandlers]], whose [[RestCaller]] resolves the executor identity.
   */
 final class BranchHandlers(
     sup: PoolSupervisor,
@@ -87,8 +89,21 @@ final class BranchHandlers(
               ErrorResponse("not_found", s"tenant '$rawTenant' is not registered")
             )
           )
-        // Anyone else gets one answer for a tenant that exists and for one that does not.
-        case _ => Left(TenantScopeCheck.forbidden(rawTenant))
+        // Someone who manages another tenant: what every tenant-db surface tells them, and true.
+        case Some(_) if scope.manageableTenants.nonEmpty =>
+          Left(TenantScopeCheck.forbidden(rawTenant))
+        // Anyone else gets one answer for a tenant that exists and for one that does not. An admin
+        // grant is not what they lack: a plain member branches in their own tenant, as a member.
+        case _ =>
+          Left(
+            (
+              StatusCode.Forbidden,
+              ErrorResponse(
+                "tenant_forbidden",
+                s"this credential cannot act on tenant '$rawTenant'"
+              )
+            )
+          )
     }
 
   /** The tenant a credential belongs to, the one a plain member may branch in, as
@@ -125,11 +140,14 @@ final class BranchHandlers(
       principal: RestCaller.Principal
   ): Either[Err, Admitted] =
     val caller = RestCaller.callerOf("branch-gate", principal)
+    // The one spelling, the one `findTenantDb` reads and pool keys and a token's axis hold. Taken
+    // whether or not the database exists, so a refusal's text cannot tell the two apart.
+    val named = tenantDb.toLowerCase(Locale.ROOT)
     for
-      _   <- TokenScope.databaseRefusal(sup, tid, caller.restriction, tenantDb).toLeft(())
-      eff <- mayConnect(caller, tid, tenantDb)
+      _   <- TokenScope.databaseRefusal(sup, tid, caller.restriction, named).toLeft(())
+      eff <- mayConnect(caller, tid, named)
       // The member may reach this database, so its kind is theirs to read.
-      (_, db) <- TenantDbGate(sup, tid, tenantDb, apiKey, DuckLakeOnly)(BranchHandlers.decided(tid))
+      (_, db) <- TenantDbGate(sup, tid, named, apiKey, DuckLakeOnly)(BranchHandlers.decided(tid))
     yield
       val alias = TenantDb.catalogAlias(sup.effectiveMetastoreFor(tid, db), db)
       Admitted(
@@ -613,17 +631,17 @@ object BranchHandlers:
   def adminOf(scope: SessionScope, tid: String): Boolean =
     scope.superuser || scope.manageableTenants.contains(tid)
 
-  /** What a non-admin's replies may name: a table `eff` covers with any verb, as filtered metadata
-    * narrows their listings. `alias`, the parent's catalog, is the only session catalog, so a
+  /** What a non-admin's replies may name: a table `eff` covers for reading, which is a grant of RO,
+    * RW or ALL, exactly what filtered metadata lists. A DDL grant alone shows nothing: the holder's
+    * `SHOW TABLES` and `DESCRIBE` hide the table, and a reply naming it, or a `schema-diff` read as
+    * the system, would undo that. `alias`, the parent's catalog, is the only session catalog, so a
     * wildcard catalog covers it and nothing else. An empty set (nothing could be resolved) shows
     * nothing. An OPA tenant's users hold no QoD grants to go by, so they see nothing listed, as
     * with their `SHOW TABLES`.
     */
   def seenBy(eff: EffectiveSet, alias: String): (String, String) => Boolean =
     (schema, table) =>
-      List(Verb.Read, Verb.Write, Verb.Ddl).exists(
-        GrantMatch.covers(eff.permissions, Set(alias), alias, schema, table, _)
-      )
+      GrantMatch.covers(eff.permissions, Set(alias), alias, schema, table, Verb.Read)
 
   /** What [[gate]] hands [[CatalogPreviewHandlers]] for its own gate, and its own for the kind
     * check: this tenant, admitted. The branch gate has decided who may come this far, and the

@@ -97,8 +97,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
         "modified with insert/delete/update counts, or altered), conflicts against the live " +
         "database, and anything v1 cannot merge. `mergeable` means no table conflict and " +
         "nothing unsupported: row conflicts are the merge's to decide, and the proposal shows " +
-        "them. Unless you are an admin, only the tables you hold a grant on are named, and " +
-        "`otherTables` counts the rest.",
+        "them. Unless you are an admin, only the tables you hold a read grant on (RO, RW or " +
+        "ALL) are named, and `otherTables` counts the rest.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),

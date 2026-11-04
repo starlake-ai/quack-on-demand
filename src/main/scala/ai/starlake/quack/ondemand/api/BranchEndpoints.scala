@@ -73,7 +73,8 @@ object BranchEndpoints:
       .out(jsonBody[BranchDetailResponse])
       .description(
         "One branch (live or terminal) with its merge history. Unless the caller is an admin, a " +
-          "merge row names only the tables they hold a grant on, and carries no rowConflicts."
+          "merge row names only the tables they hold a read grant on (RO, RW or ALL), and " +
+          "carries no rowConflicts."
       )
 
   val changesEndpoint: PublicEndpoint[
@@ -93,7 +94,8 @@ object BranchEndpoints:
           "the conflicts against main, and the changes v1 cannot merge. `mergeable` means no " +
           "table conflict and nothing unsupported: row conflicts are the merge's to decide, and " +
           "the proposal shows them. Unless the caller is an admin, tables and conflicts name only " +
-          "the tables they hold a grant on, unsupported is empty, otherTables counts the rest, " +
+          "the tables they hold a read grant on (RO, RW or ALL), as their SHOW TABLES does, " +
+          "unsupported is empty, otherTables counts the rest, " +
           "and a table they may not count has no rowConflicts; `mergeable` stays the whole " +
           "branch's."
       )
@@ -126,7 +128,7 @@ object BranchEndpoints:
       .description(
         "Row-level diff of one table between the branch's fork snapshot and its head: the same " +
           "paginated change feed as the catalog data-diff (keyset cursor, changeType filter). A " +
-          "table the caller holds no grant on answers as one that does not exist, unless they " +
+          "table the caller holds no read grant on answers as one that does not exist, unless they " +
           "are an admin."
       )
 
@@ -144,7 +146,7 @@ object BranchEndpoints:
       .out(jsonBody[SchemaDiffResponse])
       .description(
         "Column-level diff of one table between the branch's fork snapshot and its head. A table " +
-          "the caller holds no grant on answers as one that does not exist, unless they are an " +
+          "the caller holds no read grant on answers as one that does not exist, unless they are an " +
           "admin."
       )
 
@@ -169,7 +171,7 @@ object BranchEndpoints:
           "again replaces an open proposal, unless its last merge may have landed (409 " +
           "proposal_unsettled: merge again, or discard; only a discard when another proposal's " +
           "commit is on main). 400 invalid_on_conflict, invalid_key (a key on a table the " +
-          "caller holds no grant on, unless they are an admin, reads as one not in the change " +
+          "caller holds no read grant on, unless they are an admin, reads as one not in the change " +
           "set); 409 history_gap."
       )
 

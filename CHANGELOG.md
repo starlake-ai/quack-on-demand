@@ -810,10 +810,11 @@ In-engine authorization, Phase D: the node decides every statement alone.
   they may connect to one of the parent's pools (else `403 no_pool_access`; another tenant is `403
   tenant_forbidden`; `acl_denied` is gone from `branch create`). They propose and discard only their own
   branches (`403 not_owner`) and ask for a TTL from 1 up to the server's default (`400 invalid_ttl`).
-  Merge stays admin only. Their replies follow filtered metadata: only the tables they hold a grant on
-  are named, `otherTables` counts the rest (new on `BranchChangesResponse`), and row numbers show only
-  where their own count succeeded, never to a holder of a column or row policy. `BranchActor.isAdmin` is
-  now decided for the tenant in hand: an admin of another tenant is a plain member here.
+  Merge stays admin only. Their replies follow filtered metadata: only the tables they hold a read grant
+  on (`RO`, `RW` or `ALL`, never `DDL` alone) are named, `otherTables` counts the rest (new on
+  `BranchChangesResponse`), and row numbers show only where their own count succeeded, never to a holder
+  of a column or row policy. `BranchActor.isAdmin` is now decided for the tenant in hand: an admin of
+  another tenant is a plain member here.
 
 ### Fixed
 

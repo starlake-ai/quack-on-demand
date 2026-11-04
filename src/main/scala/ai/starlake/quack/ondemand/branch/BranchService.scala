@@ -34,9 +34,9 @@ import scala.util.control.NonFatal
   * of THIS tenant, or a superuser; every other principal is a plain data-plane user, who proposes
   * and discards only their own branches, asks for no branch with no TTL, and never merges. `sees`:
   * whether a reply may name a table (schema, table): an admin sees them all, anyone else the tables
-  * they hold a grant on, as filtered metadata does. `branchOnly` = the credential is a PAT
-  * restricted to branch writes: it may create and write branches, but a merge writes main, so merge
-  * refuses it (`branch_only_token`).
+  * they hold a read grant on, exactly what filtered metadata lists. `branchOnly` = the credential
+  * is a PAT restricted to branch writes: it may create and write branches, but a merge writes main,
+  * so merge refuses it (`branch_only_token`).
   */
 final case class BranchActor private (
     identity: String,
@@ -478,8 +478,8 @@ final class BranchService(
     * `countsAs` names a caller: each count is one statement on the branch pool run as that caller
     * (the requester, never the system caller: the node decides which tables they may count). A
     * failed or refused count degrades to zeroes flagged `countsUnavailable`, with a WARN, so the
-    * listing never fails on a hibernated pool or a table the requester holds no grant on. `None`:
-    * no counts.
+    * listing never fails on a hibernated pool or a table the requester may not read. `None`: no
+    * counts.
     */
   def changes(
       tenant: String,

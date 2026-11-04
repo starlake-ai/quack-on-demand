@@ -131,7 +131,7 @@ object MergeDecision:
         (c.mainRowsByKey > shown.mainRowsByKey || c.toDelete > shown.toDelete))
 
   /** Whether an attempt goes on to Apply. `proposed`: the counts the approver saw. Messages name
-    * tables, never numbers: the caller may hold no grant on them (design section 8.2).
+    * tables, never numbers: the caller may hold no read grant on them (design section 8.2).
     */
   def decide(
       now: List[RowCounts],

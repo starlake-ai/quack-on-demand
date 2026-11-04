@@ -187,16 +187,23 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
     BranchHandlers.adminOf(SessionScope.NoAccess, "acme") shouldBe false
   }
 
-  "BranchHandlers.seenBy" should "see a table any verb of a grant covers, and nothing without one" in {
+  "BranchHandlers.seenBy" should "see a table on a read-covering grant alone, as filtered metadata lists it" in {
     def set(grants: RolePermission*) =
       EffectiveSet(RbacUser("u", Some("acme"), "bob", "user"), Nil, Nil, grants.toList, Nil)
     def perm(catalog: String, schema: String, table: String, verb: String) =
       RolePermission("p", "r", catalog, schema, table, verb)
     def sees(grants: RolePermission*) = BranchHandlers.seenBy(set(grants*), "cat")("main", "fact")
-    List("RO", "RW", "DDL", "ALL").foreach(v =>
-      withClue(v)(sees(perm("cat", "main", "fact", v)) shouldBe true)
-    )
+    // Every verb a grant can hold: a new one has to take a side here.
+    val seen = Map("RO" -> true, "RW" -> true, "ALL" -> true, "DDL" -> false)
+    seen.keySet shouldBe RolePermission.ValidVerbs
+    seen.foreach { (verb, expected) =>
+      withClue(verb)(sees(perm("cat", "main", "fact", verb)) shouldBe expected)
+      withClue(s"$verb on the whole schema")(sees(perm("cat", "main", "*", verb)) shouldBe expected)
+    }
+    // A DDL grant takes nothing away from a read grant beside it.
+    sees(perm("cat", "main", "*", "DDL"), perm("cat", "main", "fact", "RO")) shouldBe true
     sees(perm("*", "*", "*", "RO")) shouldBe true
+    sees(perm("*", "*", "*", "DDL")) shouldBe false
     sees(perm("CAT", "MAIN", "FACT", "RO")) shouldBe true
     sees(perm("cat", "main", "*", "RO")) shouldBe true
     sees(perm("cat", "main", "other", "ALL")) shouldBe false

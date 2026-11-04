@@ -57,6 +57,7 @@ class BranchThreeWayE2ESpec
   private val Other   = s"other_br3_$run"
   private val BobPw   = "Bob-Pw-3391"
   private val CarolPw = "Carol-Pw-3391"
+  private val ErinPw  = "Erin-Pw-3391"
   private val DavePw  = "Dave-Pw-3391"
 
   /** bob's and carol's role ids. */
@@ -100,7 +101,7 @@ class BranchThreeWayE2ESpec
       )
       tessToken = stack.login(Some(Acme), "tess", "Tess-Pw-3391")
       // Plain members, each with a role of their own: what it grants is each case's own.
-      List("bob" -> BobPw, "carol" -> CarolPw).foreach { (user, password) =>
+      List("bob" -> BobPw, "carol" -> CarolPw, "erin" -> ErinPw).foreach { (user, password) =>
         val role = s"${user}_role"
         roleIds(user) = stack
           .post("/api/role/create", obj("tenant" -> s(Acme), "name" -> s(role)))
@@ -1033,13 +1034,13 @@ class BranchThreeWayE2ESpec
     val asBob    = as("bob", BobPw, "bobs", onBranch)
     asBob(s"UPDATE $td.main.fact SET note = 'b' WHERE id < 100")
     asBob(s"INSERT INTO $td.main.fact VALUES (20000, 'bi', 1)")
-    // Written by the superuser, on bob's branch: he holds no grant on it, and it merges with it.
+    // Written by the superuser, on bob's branch: they hold no grant on it, and it merges with it.
     sql("bobs", s"UPDATE $td.main.secret SET code = 'z' WHERE id = 1", onBranch)
     // Main moves too: rows of both sides, in other columns.
     sql("bobs", s"UPDATE $td.main.fact SET qty = 9 WHERE id BETWEEN 50 AND 149")
     val base = branchesOf(td)
 
-    // The list and the branch itself read to him, owner included.
+    // The list and the branch itself read to them, owner included.
     read(base, bob).hcursor.downField("branches").downN(0).get[String]("owner") shouldBe Right(
       "bob"
     )
@@ -1047,7 +1048,7 @@ class BranchThreeWayE2ESpec
     detailCode shouldBe 200
     detailBody should not include "secret"
 
-    // His numbers, by the node's own verdict on him; secret is not named, only counted.
+    // Their numbers, by the node's own verdict on them; secret is not named, only counted.
     val (changesCode, changesBody) = stack.getStatus(s"$base/feature/changes", bob)
     withClue(changesBody)(changesCode shouldBe 200)
     changesBody should not include "secret"
@@ -1060,7 +1061,7 @@ class BranchThreeWayE2ESpec
     changes.hcursor.get[Int]("otherTables") shouldBe Right(1)
     changes.hcursor.get[List[String]]("unsupported") shouldBe Right(Nil)
 
-    // The diffs of a table he may read, and of one he may not, which reads as no such table.
+    // The diffs of a table they may read, and of one they may not, which reads as no such table.
     read(s"$base/feature/schema-diff?schema=main&table=fact", bob)
     read(s"$base/feature/diff?schema=main&table=fact&limit=5", bob).hcursor
       .downField("summary")
@@ -1083,7 +1084,7 @@ class BranchThreeWayE2ESpec
       stack.getStatus(s"$base/feature/diff?schema=main&table=ghost&changeType=nope", bob)
     (badCode, bad) shouldBe (ghostCode, ghost)
 
-    // A key on a table he does not see reads as one not in the change set, whatever its columns.
+    // A key on a table they do not see reads as one not in the change set, whatever its columns.
     def keyedOn(table: String, column: String) = stack.postStatus(
       "/api/branch/propose",
       proposeBody(td, "feature", "keys" -> Json.obj(s"main.$table" -> Json.arr(s(column)))),
@@ -1095,7 +1096,7 @@ class BranchThreeWayE2ESpec
       (code, body.replace("secret", "ghost")) shouldBe noSuchTable
     }
 
-    // His proposal: the numbers of the table he may count, none on the merge row.
+    // Their proposal: the numbers of the table they may count, none on the merge row.
     val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), bob)
     proposed.noSpaces should not include "secret"
     val shown = proposed.hcursor.downField("changes").downField("tables").downN(0)
@@ -1152,22 +1153,22 @@ class BranchThreeWayE2ESpec
     List("cell-right", "cell-wrong", "key-right", "key-wrong").foreach(
       branchAs("carol", CarolPw, carol, td, "masked", _)
     )
-    // What main wrote since the fork, and she must not learn: the mask holds on a plain read.
+    // What main wrote since the fork, and they must not learn: the mask holds on a plain read.
     sql("masked", s"UPDATE $td.main.fact SET note = 'top-secret' WHERE id = 5")
     sql("masked", s"INSERT INTO $td.main.fact VALUES (50000, 'also-secret', 1)")
     as("carol", CarolPw, "masked", None)(s"SELECT note FROM $td.main.fact WHERE id = 5") shouldBe
       List("***")
     def on(branch: String) = as("carol", CarolPw, "masked", Some(branch))
-    // On her own branches: an UPDATE of the masked cell, and a row keyed on the masked column.
+    // On their own branches: an UPDATE of the masked cell, and a row keyed on the masked column.
     List("cell-right" -> "top-secret", "cell-wrong" -> "not-it").foreach { (branch, guess) =>
       on(branch)(s"UPDATE $td.main.fact SET note = '$guess' WHERE id = 5")
       on(branch)(s"UPDATE $td.main.beside SET qty = 1 WHERE id = 5")
     }
-    // The change feed is no relation a mask applies to: no diff for her, no value by that way.
+    // The change feed is no relation a mask applies to: no diff for them, no value by that way.
     List("fact", "beside").foreach { table =>
       val (code, body) =
         stack.getStatus(s"$base/cell-right/diff?schema=main&table=$table", carol)
-      withClue(s"her diff of $table answered $body: ") {
+      withClue(s"their diff of $table answered $body: ") {
         code shouldBe 403
         body should not include "not-it"
       }
@@ -1192,7 +1193,7 @@ class BranchThreeWayE2ESpec
           .mapValues(bare)
       ).mapArray(_.map(bare))
 
-    /** Her propose reply, then her read of the branch, then its row in the history, as she sees
+    /** Their propose reply, then their read of the branch, then its row in the history, as they see
       * them.
       */
     def replies(branch: String, keys: Map[String, List[String]]): List[Json] =
@@ -1236,10 +1237,10 @@ class BranchThreeWayE2ESpec
         // The oracle's bit is there to read: the two proposals differ, to a superuser.
         found(s"$kind-right") shouldBe onRight
         found(s"$kind-wrong") shouldBe onWrong
-        // And not to her: the same replies, whichever she guessed.
+        // And not to them: the same replies, whichever they guessed.
         right.map(bare) shouldBe wrong.map(bare)
         right.foreach(_.noSpaces should not include "secret")
-        // A table she can see, with no entry, and no number; beside, under no policy, the same.
+        // A table they can see, with no entry, and no number; beside, under no policy, the same.
         val (reply, changes) = (right.head.hcursor.downField("changes").focus.get, right(1))
         List(reply, changes).foreach { c =>
           tableNames(c).toSet shouldBe Set("fact", "beside")
@@ -1256,6 +1257,99 @@ class BranchThreeWayE2ESpec
           Right(Nil)
       }
     }
+  }
+
+  it should "read a table a DDL grant alone covers only through otherTables, as their SHOW TABLES hides it" in {
+    ready()
+    val td = database("ddlgrant")
+    plainTable(td, "ddlgrant", "shown")
+    plainTable(td, "ddlgrant", "rows_changed")
+    plainTable(td, "ddlgrant", "altered")
+    grant("erin", td, "shown", "RW")
+    grant("erin", td, "rows_changed", "DDL")
+    grant("erin", td, "altered", "DDL")
+    val erin = stack.login(Some(Acme), "erin", ErinPw)
+    branchAs("erin", ErinPw, erin, td, "ddlgrant", "feature")
+    val onBranch = Some("feature")
+    val asErin   = as("erin", ErinPw, "ddlgrant", onBranch)
+    asErin(s"UPDATE $td.main.shown SET note = 'e' WHERE id = 1")
+    // Their DDL grant is real: they alter the table themselves, on their own branch.
+    asErin(s"ALTER TABLE $td.main.altered ADD COLUMN extra INTEGER")
+    // Rows they may not read, changed on their branch by the superuser.
+    sql("ddlgrant", s"UPDATE $td.main.rows_changed SET note = 'z' WHERE id = 1", onBranch)
+    val base = branchesOf(td)
+
+    // What filtered metadata shows them, on main and on the branch.
+    List(None, onBranch).foreach { branch =>
+      val listed = as("erin", ErinPw, "ddlgrant", branch)("SHOW TABLES").mkString(" ")
+      withClue(s"SHOW TABLES on ${branch.getOrElse("main")}: $listed: ") {
+        listed should include("shown")
+        listed should not include "rows_changed"
+        listed should not include "altered"
+      }
+    }
+
+    // The branch's replies do not undo it.
+    val (changesCode, changesBody) = stack.getStatus(s"$base/feature/changes", erin)
+    withClue(changesBody)(changesCode shouldBe 200)
+    changesBody should not include "rows_changed"
+    changesBody should not include "altered"
+    val changes = parsed(changesBody)
+    tableNames(changes) shouldBe List("shown")
+    changes.hcursor.get[Int]("otherTables") shouldBe Right(2)
+
+    // The control: the same change set, as a tenant admin.
+    val asTess = read(s"$base/feature/changes", tessToken)
+    tableNames(asTess).toSet shouldBe Set("shown", "rows_changed", "altered")
+    asTess.hcursor.get[Int]("otherTables") shouldBe Right(0)
+
+    // Neither table's diff, as for no such table, when an admin gets the real one.
+    List("rows_changed", "altered").foreach { table =>
+      read(s"$base/feature/schema-diff?schema=main&table=$table", tessToken)
+      List("schema-diff", "diff").foreach { diff =>
+        val (hiddenCode, hidden) =
+          stack.getStatus(s"$base/feature/$diff?schema=main&table=$table", erin)
+        val (absentCode, absent) =
+          stack.getStatus(s"$base/feature/$diff?schema=main&table=ghost", erin)
+        withClue(s"$diff of $table: $hidden: ") {
+          hiddenCode shouldBe 404
+          (hiddenCode, hidden.replace(table, "<t>")) shouldBe
+            (absentCode, absent.replace("ghost", "<t>"))
+        }
+      }
+    }
+    read(s"$base/feature/schema-diff?schema=main&table=shown", erin)
+
+    // Nor a key on either, whatever its columns, as a table not in the change set.
+    def keyedOn(table: String, column: String) = stack.postStatus(
+      "/api/branch/propose",
+      proposeBody(td, "feature", "keys" -> Json.obj(s"main.$table" -> Json.arr(s(column)))),
+      erin
+    )
+    val noSuchTable = keyedOn("ghost", "id")
+    refused(400, "invalid_key")(noSuchTable)
+    List("rows_changed", "altered").foreach { table =>
+      List("id", "no_such_column").foreach { column =>
+        val (code, body) = keyedOn(table, column)
+        (code, body.replace(table, "ghost")) shouldBe noSuchTable
+      }
+    }
+
+    // Their proposal and their merge row name the one table, and the admin reads all three.
+    val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), erin)
+    proposed.noSpaces should not include "rows_changed"
+    proposed.noSpaces should not include "altered"
+    proposed.hcursor.downField("changes").get[Int]("otherTables") shouldBe Right(2)
+    tableNames(proposed.hcursor.downField("merge").downField("summary").focus.get) shouldBe
+      List("shown")
+    tableNames(
+      read(s"$base/feature", tessToken).hcursor
+        .downField("merges")
+        .downN(0)
+        .downField("summary")
+        .focus
+        .get
+    ).toSet shouldBe Set("shown", "rows_changed", "altered")
   }
 
   it should "propose only what they own, and ask for no forever" in {
@@ -1288,7 +1382,7 @@ class BranchThreeWayE2ESpec
     refused(400, "invalid_ttl")(asked(100000))
     asked(0)._2 should include("168")
     read(branchesOf(td), bob).hcursor.downField("branches").values.toList.flatten.size shouldBe 1
-    // The owner discards her own.
+    // The owner discards their own.
     stack.post("/api/branch/discard", proposeBody(td, "carols"), carol)
     read(branchesOf(td), bob).hcursor.downField("branches").values.toList.flatten shouldBe Nil
   }
@@ -1428,7 +1522,9 @@ class BranchThreeWayE2ESpec
     shown should include("fact")
     shown should not include "secret"
     // No merge tool, and no forever.
-    tool("merge", "branch" -> s("feature")).isLeft shouldBe true
+    tool("merge", "branch" -> s("feature")) match
+      case Left(err) => err should include("unknown tool: 'merge'")
+      case Right(t)  => fail(s"a merge tool answered: $t")
     tool("create_branch", "name" -> s("forever"), "ttl_hours" -> Json.fromInt(0)) match
       case Left(err) => err should include("invalid_ttl")
       case Right(t)  => fail(s"a plain token asked for no TTL: $t")
@@ -1440,7 +1536,7 @@ class BranchThreeWayE2ESpec
       case Right(t)  => fail(s"a token scoped elsewhere listed: $t")
 
     // A tenant admin's --drop-admin token reaches these endpoints as the plain user it is: tess is
-    // an admin, whose token may not merge, nor ask for no TTL, nor read her numbers as an admin's.
+    // an admin, whose token may not merge, nor ask for no TTL, nor read their numbers as an admin's.
     val dropped = stack
       .post(
         "/api/auth/pat/create",
@@ -1464,7 +1560,7 @@ class BranchThreeWayE2ESpec
         dropped
       )
     )
-    // tess herself merges what the agent proposed.
+    // tess, the admin, merges what the agent proposed.
     val done =
       stack.post("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)), tessToken)
     done.hcursor.downField("merge").get[String]("status") shouldBe Right("merged")
