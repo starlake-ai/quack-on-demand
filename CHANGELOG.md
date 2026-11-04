@@ -31,10 +31,9 @@ What a client can now see, most of it only when it sends no working credential:
     SETTINGS, can lose that connection.
 - **New connections can be refused.** At most `PROXY_MAX_UNAUTHENTICATED_CONNECTIONS` (1024)
   connections can be in that state at once, and no more than fit a tenth of the heap: 76 with TLS and
-  44 without at a 2 GiB heap, 38 and 22 at 1 GiB (computed, not measured). The next one is closed at
-  once, before TLS, and the client reads `UNAVAILABLE` (JDBC's `getConnection` throws): retry. A
-  connection that has shown a credential does not count. Boot prints a line only when the variable
-  was set above what fits.
+  44 without at a 2 GiB heap, 38 and 22 at 1 GiB. The next one is closed at once, before TLS, and the
+  client reads a connection error (JDBC's `getConnection` throws): retry. A connection that has shown
+  a credential does not count. Boot prints a line only when the variable was set above what fits.
 - **The edge runs on a fixed pool,** `PROXY_FLIGHT_THREADS` (512, at least 16), where it started a
   thread per call with no limit. A call holds a thread while it streams its results, and past that
   number calls wait. While more tasks wait for a thread than the pool has threads, or than fit a
@@ -48,11 +47,14 @@ What a client can now see, most of it only when it sends no working credential:
 
 Known limits. A flood of wrong passwords, or of bearer tokens naming a tenant whose identity provider
 hangs, holds the edge's threads, so FlightSQL calls wait and new connections are refused for every
-tenant while it lasts. About 1.3 silent connections a second keep new connections out at a 2 GiB heap
-with TLS; connections that have shown a credential go on working, though a flood can slow them. A
-client with a valid login is not held to any of these limits and can still fill the heap. Behind an
-HTTP/2 proxy the connection limits apply per upstream connection. None of these refusals is logged or
-counted. Keep the port behind your network where that matters.
+tenant while it lasts. Clients retrying a wrong password can also make a correct login fail after 5 s
+with `UNAUTHENTICATED`, "Authentication failed: database: Database error", as on 0.11.0: retry, and
+look for the client sending the wrong password. A few silent connections a second keep new connections
+out; connections that have shown a credential go on working, though a flood can slow them. A client
+with a valid login is not held to any of these limits and can still fill the heap. Behind an HTTP/2
+proxy the connection limits apply per upstream connection. None of these refusals is logged or counted.
+Keep the port behind your network where that matters. On a network you do not trust, put a gRPC-aware
+proxy with stream and per-address connection limits in front of it.
 
 ## 0.11.0
 
