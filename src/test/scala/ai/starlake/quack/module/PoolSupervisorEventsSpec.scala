@@ -66,7 +66,14 @@ class PoolSupervisorEventsSpec extends AnyFlatSpec with Matchers:
 
     // 2. createTenantDb -> received contains TenantDbCreated(tenant, tenantDbName)
     val td = sup
-      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+      .createTenantDb(
+        "acme",
+        "default",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
       .toOption
       .get
@@ -115,7 +122,14 @@ class PoolSupervisorEventsSpec extends AnyFlatSpec with Matchers:
 
     val tenant = sup.createTenant(Tenant("cascade")).unsafeRunSync().toOption.get
     val td     = sup
-      .createTenantDb("cascade", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+      .createTenantDb(
+        "cascade",
+        "default",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
       .toOption
       .get
@@ -140,7 +154,14 @@ class PoolSupervisorEventsSpec extends AnyFlatSpec with Matchers:
 
     val tenant = sup.createTenant(Tenant("scaleup")).unsafeRunSync().toOption.get
     val td     = sup
-      .createTenantDb("scaleup", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+      .createTenantDb(
+        "scaleup",
+        "default",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
       .toOption
       .get

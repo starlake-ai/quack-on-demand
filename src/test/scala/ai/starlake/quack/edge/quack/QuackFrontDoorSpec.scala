@@ -295,7 +295,14 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       if stamping then (TenantDbKind.DuckLake, LakeMetastore, "/data/acme_default")
       else (TenantDbKind.InMemory, Map.empty[String, String], "")
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, kind, metastore, dataPath, writerTrusted = true)
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        kind,
+        metastore,
+        dataPath,
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup
       .createPool(poolKey, RoleDistribution(0, 0, 2), maxConcurrentPerNode = maxConcurrent)

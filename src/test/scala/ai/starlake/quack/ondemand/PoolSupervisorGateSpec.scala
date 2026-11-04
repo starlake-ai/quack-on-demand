@@ -31,7 +31,9 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup
 
   private def dbName(sup: PoolSupervisor) =

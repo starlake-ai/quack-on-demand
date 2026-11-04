@@ -28,7 +28,9 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(new StubQuackBackend(), tracker, store, events = sink)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     (sup, store, sink)
 
@@ -96,7 +98,9 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
     val sup     =
       new PoolSupervisor(backend, new NodeLoadTracker, store, events = new RecordingSink)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     val row = store.listPools(store.listTenantDbs("acme").head.id).head
     store.upsertPool(row.copy(suspended = true)) // crash window: flag persisted, drain never ran
@@ -139,7 +143,9 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
         locks = locker
       )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     sup.suspendPool(key, "idle").unsafeRunSync().isRight shouldBe true
 
@@ -186,7 +192,9 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(new StubQuackBackend(), tracker, store, events = sink)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     val nodes =
       sup.createPool(key, RoleDistribution(0, 1, 1), startSuspended = true).unsafeRunSync()
     nodes shouldBe empty

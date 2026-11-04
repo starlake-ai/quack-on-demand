@@ -88,7 +88,14 @@ class ReconcileStartupWindowSpec extends AnyFlatSpec with Matchers:
     try
       sup.createTenant(Tenant("acme")).unsafeRunSync()
       sup
-        .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+        .createTenantDb(
+          "acme",
+          "default",
+          TenantDbKind.InMemory,
+          Map.empty,
+          dataPath = "",
+          writerTrusted = true
+        )
         .unsafeRunSync()
       sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
       body(sup, backend, store)

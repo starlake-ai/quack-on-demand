@@ -123,7 +123,14 @@ class TenantNameRuleSpec extends AnyFlatSpec with Matchers:
     val sup = new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store)
     sup.restore()
     val out = sup
-      .createTenantDb("acme_corp", "mem", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        "acme_corp",
+        "mem",
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     out.map(_.name) shouldBe Right("acme_corp_mem")
   }

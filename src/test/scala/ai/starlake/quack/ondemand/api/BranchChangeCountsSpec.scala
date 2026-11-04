@@ -142,8 +142,8 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   ):
     val store = new InMemoryControlPlaneStore()
     val admin = new DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val sup =
       new PoolSupervisor(

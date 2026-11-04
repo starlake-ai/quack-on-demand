@@ -115,8 +115,8 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
         def discoverExisting()             = IO.pure(n.values.toList)
         def cleanup()                      = IO(n.clear())
       val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
-        def createDatabase(name: String): Either[String, Unit] = Right(())
-        def dropDatabase(name: String): Either[String, Unit]   = Right(())
+        def createDatabase(name: String): Either[String, Unit]   = Right(())
+        def dropDatabase(name: String): Either[String, Unit]     = Right(())
         def holdsAnything(name: String): Either[String, Boolean] = Right(false)
       sup = new PoolSupervisor(backend, tracker, store, dbAdmin = admin)
       sup.createTenant(Tenant("acme")).unsafeRunSync()

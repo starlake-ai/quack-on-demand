@@ -135,7 +135,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val tracker = new ai.starlake.quack.edge.adapter.NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, store)
     sup.createTenant(ai.starlake.quack.model.Tenant(Tenant)).unsafeRunSync()
-    sup.createTenantDb(Tenant, TenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb(Tenant, TenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup
       .createPool(
         PoolKey(Tenant, TenantDb, "sales"),
@@ -314,7 +316,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, store)
     sup.createTenant(ai.starlake.quack.model.Tenant(Tenant)).unsafeRunSync()
-    sup.createTenantDb(Tenant, TenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb(Tenant, TenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup
       .createPool(
         PoolKey(Tenant, TenantDb, "sales"),

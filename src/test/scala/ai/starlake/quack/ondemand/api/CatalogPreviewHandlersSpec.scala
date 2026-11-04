@@ -410,7 +410,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         writerTrusted = true
       )
       .unsafeRunSync()
-    sup.createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     sup
       .createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0))
       .unsafeRunSync()

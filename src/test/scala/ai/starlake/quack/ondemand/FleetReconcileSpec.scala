@@ -77,7 +77,14 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
     val sup = new PoolSupervisor(b, new NodeLoadTracker, st)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
-      .createTenantDb("acme", "db", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+      .createTenantDb(
+        "acme",
+        "db",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     (b, sup, st, PoolKey("acme", "acme_db", "bi"))
 
@@ -322,7 +329,14 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     val agents = TrieMap.empty[String, Agent]
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
-      .createTenantDb("acme", "db", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+      .createTenantDb(
+        "acme",
+        "db",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
 
     /** Joins a server (one immediate beat, one second apart, so join order is deterministic). */

@@ -57,8 +57,8 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
   private final class Fixture:
     val store = new InMemoryControlPlaneStore()
     val admin = new DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val sup =
       new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store, dbAdmin = admin)

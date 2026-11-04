@@ -265,7 +265,14 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     val g = new Fixture
     g.sup.createTenant(Tenant("acme")).unsafeRunSync()
     g.sup
-      .createTenantDb("acme", "shop", TenantDbKind.InMemory, Map.empty, "/data/old", writerTrusted = true)
+      .createTenantDb(
+        "acme",
+        "shop",
+        TenantDbKind.InMemory,
+        Map.empty,
+        "/data/old",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     g.write(Database.copy(dataPath = s"/data/$Marker"))
     val (result, logs) = LogCapture.logged(HookLogger)(g.run())
@@ -284,7 +291,9 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
   it should "refuse a pool name that already serves another database of the tenant" in {
     val f = new Fixture
     f.sup.createTenant(Tenant("acme")).unsafeRunSync()
-    f.sup.createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
+    f.sup
+      .createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
     f.sup
       .createPool(PoolKey("acme", "acme_other", "main"), RoleDistribution(0, 0, 1))
       .unsafeRunSync()

@@ -27,7 +27,14 @@ class StateChangePublisherSpec extends AnyFlatSpec with Matchers:
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
-      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
+      .createTenantDb(
+        "acme",
+        "default",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     (sup, rec)
 

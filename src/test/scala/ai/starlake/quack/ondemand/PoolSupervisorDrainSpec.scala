@@ -202,8 +202,15 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
         drainTimeout = drainTimeout,
         locks = locks
       )
-      _     <- sup.createTenant(Tenant("acme"))
-      _     <- sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      _ <- sup.createTenant(Tenant("acme"))
+      _ <- sup.createTenantDb(
+        "acme",
+        "default",
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       nodes <- sup.createPool(key, RoleDistribution(0, 0, size))
     yield Pool(sup, tracker, nodes.map(_.nodeId), stops)
 

@@ -18,8 +18,8 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
   private def setup(): (TagHandlers, InMemoryControlPlaneStore) =
     val store = new InMemoryControlPlaneStore()
     val admin = new DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val backend = new StubQuackBackend()
     val sup     = new PoolSupervisor(

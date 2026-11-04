@@ -112,8 +112,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val created = mutable.ListBuffer.empty[String]
     val dropped = mutable.ListBuffer.empty[String]
     val admin   = new DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = { created += name; Right(()) }
-      def dropDatabase(name: String): Either[String, Unit]   = { dropped += name; Right(()) }
+      def createDatabase(name: String): Either[String, Unit]   = { created += name; Right(()) }
+      def dropDatabase(name: String): Either[String, Unit]     = { dropped += name; Right(()) }
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val backend = new StubQuackBackend()
 
@@ -479,7 +479,12 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         "acme",
         "byo",
         TenantDbKind.DuckLake,
-        Map("pgHost" -> "pg.other", "pgUser" -> "me", "pgPassword" -> "mine", "schemaName" -> "main"),
+        Map(
+          "pgHost"     -> "pg.other",
+          "pgUser"     -> "me",
+          "pgPassword" -> "mine",
+          "schemaName" -> "main"
+        ),
         "/tmp/qod-branch-spec/acme_byo/",
         writerTrusted = true
       )

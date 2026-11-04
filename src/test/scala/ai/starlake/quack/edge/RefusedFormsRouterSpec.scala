@@ -74,7 +74,14 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, nodes)).unsafeRunSync()
     val sent   = scala.collection.mutable.ListBuffer.empty[String]
