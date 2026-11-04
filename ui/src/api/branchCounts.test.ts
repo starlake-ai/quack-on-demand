@@ -3,6 +3,7 @@ import {
   branchCount,
   conflictPolicyText,
   CountsUnavailableTitle,
+  diffChangeType,
   proposalErrorNote,
   rowConflictsHint,
   rowConflictsText,
@@ -171,5 +172,20 @@ describe('proposalErrorNote', () => {
     for (const status of ['failed', 'abandoned', 'merged']) {
       expect(proposalErrorNote(status, 'timeout: no answer from the merge node')).toBe('(error)');
     }
+  });
+});
+
+describe('diffChangeType', () => {
+  it('asks for what the read names, whatever the filter on screen still says', () => {
+    expect(diffChangeType('delete', 'insert')).toBe('delete');
+  });
+
+  it('takes an empty name as every change type, not as no name', () => {
+    expect(diffChangeType('', 'insert')).toBeUndefined();
+  });
+
+  it('follows the filter on screen when the read names none, as Load more does', () => {
+    expect(diffChangeType(undefined, 'insert')).toBe('insert');
+    expect(diffChangeType(undefined, '')).toBeUndefined();
   });
 });

@@ -1,7 +1,7 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import {
-  branchCount, conflictPolicyText, proposalErrorNote, rowConflictsHint, rowConflictsText,
+  branchCount, conflictPolicyText, diffChangeType, proposalErrorNote, rowConflictsHint, rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import { BranchNamePattern } from '../api/branchName';
@@ -81,7 +81,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
     api.branchDiff(tenant, tenantDb, branch, schema, table, {
       limit: 100,
       cursor: opts?.cursor,
-      changeType: opts?.changeType ?? (filter || undefined),
+      changeType: diffChangeType(opts?.changeType, filter),
     })
       .then(page => {
         setDiff(prev => (opts?.cursor && prev)
@@ -111,7 +111,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
       <div className="row" style={{ gap: 12, alignItems: 'center', margin: '0.5rem 0' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span className="subtle">Change type</span>
-          <select value={filter} onChange={ev => { setFilter(ev.target.value); load({ changeType: ev.target.value || undefined }); }}>
+          <select value={filter} onChange={ev => { setFilter(ev.target.value); load({ changeType: ev.target.value }); }}>
             <option value="">all</option>
             <option value="insert">insert</option>
             <option value="delete">delete</option>

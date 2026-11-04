@@ -79,6 +79,13 @@ export function conflictPolicyText(onConflict?: string | null): string {
   return `Conflicts follow the policy '${onConflict}'.`;
 }
 
+/** The change type a diff read asks for. A change of the filter names its choice, since the state
+  * it sets reaches `onScreen` only on the next render, and `''` is its choice of every type. A read
+  * that names none (Load more) follows the filter on screen. */
+export function diffChangeType(named: string | undefined, onScreen: string): string | undefined {
+  return (named ?? onScreen) || undefined;
+}
+
 /** The note after a merge request's status chip, for a request that carries an error. On an open
   * proposal an error starting `timeout: ` is no failure: a send was made and has not answered, so a
   * merge is running or may have landed. The server tests the prefix and never the word, since an
