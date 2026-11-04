@@ -777,6 +777,195 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       finally allocator.close()
     }
 
+  describe("queryAll (a list of statements on one connection)"):
+    /** `statements` through `transport`, their handles minted `h1`, `h2`, ... in order. */
+    def all(
+        transport: QuackTransport,
+        allocator: RootAllocator,
+        statements: List[String] = List("BEGIN", "UPDATE t SET i = 1", "COMMIT")
+    ): IO[Either[ListFailure, Unit]] =
+      clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        .queryAll(endpoint, token, minting(), statements)
+
+    val empty = QuackTestFixtures.serializeSamplePrepareResponse(BigInt(1).bigInteger, false, false)
+
+    it("runs each statement after a fresh handle of its own, then disconnects") {
+      val transport = ScriptedTransport(_ => IO(empty))
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe Right(())
+        transport.steps shouldBe List(
+          "connect",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "disconnect"
+        )
+        transport.handles shouldBe List("h1", "h2", "h3")
+      finally allocator.close()
+    }
+
+    it("reads and drops a statement's rows, leaving nothing allocated") {
+      val transport = ScriptedTransport(_ => IO(prepareOk))
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe Right(())
+        allocator.getAllocatedMemory shouldBe 0L
+      finally allocator.close()
+    }
+
+    it("stops at the first failure, naming its entry, with its text, and closes the connection") {
+      val transport = ScriptedTransport {
+        case 2 => IO(QuackTestFixtures.serializeSampleErrorResponse("Transaction conflict: no"))
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() match
+          case Left(ListFailure(entry, QuackError.Permanent(msg))) =>
+            entry shouldBe Some(1)
+            msg should include("Transaction conflict: no")
+          case other => fail(s"expected Permanent, got $other")
+        transport.steps shouldBe
+          List("connect", "handle", "prepare", "handle", "prepare", "disconnect")
+      finally allocator.close()
+    }
+
+    it("stops at a refused handle: Transient, naming the entry that never went out") {
+      val refused =
+        QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")
+      val first = ScriptedTransport(_ => IO(empty), onPrelude = _ => IO(refused))
+      val later = ScriptedTransport(
+        _ => IO(empty),
+        onPrelude = {
+          case 2 => IO(refused)
+          case _ => IO(preludeOk)
+        }
+      )
+      val allocator = new RootAllocator()
+      try
+        all(first, allocator).unsafeRunSync() match
+          case Left(ListFailure(entry, QuackError.Transient(msg, notSent))) =>
+            entry shouldBe Some(0)
+            msg should include("refused the statement's session handle")
+            notSent shouldBe true
+          case other => fail(s"expected Transient, got $other")
+        first.steps shouldBe List("connect", "handle", "disconnect")
+        // An earlier statement went out, this one did not: `notSent` speaks of the entry it names.
+        all(later, allocator).unsafeRunSync() match
+          case Left(ListFailure(entry, QuackError.Transient(_, notSent))) =>
+            entry shouldBe Some(1)
+            notSent shouldBe true
+          case other => fail(s"expected Transient, got $other")
+        later.steps shouldBe List("connect", "handle", "prepare", "handle", "disconnect")
+      finally allocator.close()
+    }
+
+    it("answers a 5xx on a statement as Transient and sent, naming its entry, and closes") {
+      val transport = ScriptedTransport {
+        case 2 => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(Some(1), QuackError.Transient("HTTP 503 from Quack node")))
+        transport.steps.last shouldBe "disconnect"
+      finally allocator.close()
+    }
+
+    it("answers the JDK client's own failure on a statement the same: no answer came") {
+      def lost(e: Throwable) = ScriptedTransport {
+        case 3 => IO.raiseError(e)
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        val transport = lost(new java.io.IOException("HTTP/1.1 header parser received no bytes"))
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(
+            ListFailure(
+              Some(2),
+              QuackError.Transient("HTTP/1.1 header parser received no bytes")
+            )
+          )
+        transport.steps.last shouldBe "disconnect"
+        // ConnectException and its kin carry no message at all.
+        all(lost(new java.net.ConnectException()), allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(Some(2), QuackError.Transient("java.net.ConnectException")))
+      finally allocator.close()
+    }
+
+    it("answers a transport failure on a handle as not sent: its statement never went out") {
+      val transport = ScriptedTransport(
+        _ => IO(empty),
+        onPrelude = {
+          case 2 => IO.raiseError(new java.io.IOException("connection reset"))
+          case _ => IO(preludeOk)
+        }
+      )
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(Some(1), QuackError.Transient("connection reset", notSent = true)))
+        transport.steps shouldBe List("connect", "handle", "prepare", "handle", "disconnect")
+      finally allocator.close()
+    }
+
+    it("names no entry when no connection opened") {
+      val transport = ScriptedTransport(
+        _ => IO(empty),
+        onConnect = IO.raiseError(new java.net.ConnectException("connection refused"))
+      )
+      val allocator = new RootAllocator()
+      try
+        all(transport, allocator).unsafeRunSync() shouldBe
+          Left(ListFailure(None, QuackError.Transient("connection refused", notSent = true)))
+        transport.steps shouldBe List("connect")
+      finally allocator.close()
+    }
+
+    it(
+      "sends nothing after a cancel: the statement in flight ends the list, and DISCONNECT rolls back"
+    ) {
+      val transport = ScriptedTransport {
+        case 2 => IO.blocking { Thread.sleep(800); empty }
+        case _ => IO(empty)
+      }
+      val allocator = new RootAllocator()
+      try
+        val got = all(transport, allocator).timeoutAndForget(200.millis).attempt.unsafeRunSync()
+        got.left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+        eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        Thread.sleep(200)
+        transport.steps shouldBe
+          List("connect", "handle", "prepare", "handle", "prepare", "disconnect")
+      finally allocator.close()
+    }
+
+    it("closes the connection when cancelled before the first statement") {
+      val gate      = new java.util.concurrent.CountDownLatch(1)
+      val transport = ScriptedTransport(
+        _ => IO(empty),
+        onPrelude = _ =>
+          IO.blocking {
+            gate.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            preludeOk
+          }
+      )
+      val allocator = new RootAllocator()
+      try
+        val got = all(transport, allocator).timeoutAndForget(100.millis).attempt.unsafeRunSync()
+        got.left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+        gate.countDown()
+        eventually(5.seconds)(transport.count(MessageType.DisconnectMessage) == 1) shouldBe true
+        transport.steps shouldBe List("connect", "handle", "disconnect")
+      finally allocator.close()
+    }
+
   describe("session handles of a stamped write"):
     val refusal =
       QuackTestFixtures.serializeSampleErrorResponse("qod-node: session handle refused: expired")
@@ -875,5 +1064,94 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
           "handle",
           "disconnect"
         )
+      finally allocator.close()
+    }
+
+  describe("a stamp that must land (queryStampedRequired)"):
+    /** A write with a required stamp through `transport`, its handles minted `h1`, `h2`, ... */
+    def required(transport: ScriptedTransport, allocator: RootAllocator): QuackResponse =
+      clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        .queryStampedRequired(
+          endpoint,
+          token,
+          minting(),
+          "BEGIN; CALL stamp()",
+          "INSERT INTO t VALUES (1)"
+        )
+        .unsafeRunSync()
+
+    it("sends the stamp, the write and the COMMIT behind a handle each, as queryStamped does") {
+      val transport = ScriptedTransport(_ => IO(prepareOk))
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case ok: QuackResponse.Ok =>
+            try while ok.rows.loadNextBatch() do ()
+            finally ok.close()
+          case other => unexpected(other, "Ok")
+        transport.steps shouldBe List(
+          "connect",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "handle",
+          "prepare",
+          "disconnect"
+        )
+        transport.handles shouldBe List("h1", "h2", "h3")
+      finally allocator.close()
+    }
+
+    it("never sends the write when the stamp fails: no retry on a fresh connection") {
+      val transport = ScriptedTransport {
+        case 1 => IO(QuackTestFixtures.serializeSampleErrorResponse("no stamp function"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Permanent(msg), _) =>
+            msg should include("no stamp function")
+          case other => unexpected(other, "Failed(Permanent)")
+        // queryStamped would now send the write bare on a fresh connection. Here the stamp's
+        // failure is the end: the DISCONNECT rolls its BEGIN back, and not one more PREPARE goes
+        // out, the write's included.
+        transport.steps shouldBe List("connect", "handle", "prepare", "disconnect")
+        transport.handles shouldBe List("h1")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("answers a stamp lost in transport as Transient and not sent, so another node may take it") {
+      val transport = ScriptedTransport {
+        case 1 => IO.raiseError(new java.io.IOException("connection reset"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Transient(msg, notSent), _) =>
+            msg should include("connection reset")
+            notSent shouldBe true
+          case other => unexpected(other, "Failed(Transient)")
+        transport.steps shouldBe List("connect", "handle", "prepare", "disconnect")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
+      finally allocator.close()
+    }
+
+    it("answers a 5xx on the stamp as Transient and not sent") {
+      val transport = ScriptedTransport {
+        case 1 => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
+        case _ => IO(prepareOk)
+      }
+      val allocator = new RootAllocator()
+      try
+        required(transport, allocator) match
+          case QuackResponse.Failed(QuackError.Transient(msg, notSent), _) =>
+            msg should include("503")
+            notSent shouldBe true
+          case other => unexpected(other, "Failed(Transient)")
+        transport.count(MessageType.PrepareRequest) shouldBe 1
       finally allocator.close()
     }

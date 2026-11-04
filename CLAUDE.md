@@ -167,6 +167,40 @@ refuses every handle of another version, the probe's included (and a protocol 6 
 Restart every node after upgrading. What a principal may do is decided on
 the node (below).
 
+A handle lives 60 s and the node checks it at each bind, so a write that may run long sends one PREPARE
+per statement, each after a handle of its own: a stamped write (`QuackHttpClient.queryStamped`: the
+stamp, the statement, the COMMIT, which fires when the result is read) and the merge
+(`QuackHttpAdapter.sendAll`). A table restore and an undrop are stamped writes: one statement under
+its own commit message (`ExecCaller.commitMessage`), so the replace may run as long as
+`restoreTimeoutSec` (`undropTimeoutSec`). A write that names its commit message is stamped whatever
+`QOD_STAMP_WRITES` says (the knob governs the `flightsql <verb>` stamp of client writes) and its stamp
+is never best-effort: a restore's commit fence matches that message and both settle a lost answer by
+it. `QuackHttpClient.queryStampedRequired` sends nothing when the stamp fails (a transient failure is
+`notSent`, so the router may try another node; a node's own refusal is not retried), and the router
+refuses a named write no stamp applies to (`QuackHttpAdapter.NoStamp`). A client write's stamp stays
+best-effort (`queryStamped`). A replace that outlives the bound is cancelled and rolls back when its
+statement answers, so no COMMIT can land after a timeout. A restore's COMMIT fires when its result is
+read (`WriteResults.drain`, whose failure says by its type whether the node itself refused,
+`nodeRefused`). A statement that failed before the COMMIT is a refusal (409 `concurrent_write` or 502
+`restore_failed`) and the fence row comes off. Every end of the COMMIT (a clean answer, a lost one (a
+broken connection, a 5xx), the node's own error, a timeout) is settled by the catalog first, by the
+restore's own commit message, which also names `newSnapshot`: a node's error says what the node saw, not
+what the catalog's Postgres did, and a connection to the catalog lost during the metadata COMMIT can
+leave that commit durable. Found is landed; a catalog that cannot be read is `restore_outcome_unknown`
+(check the table before retrying); absent is a refusal only when nothing can land (the node itself
+refused the COMMIT, or a timeout cancelled the call before any COMMIT went out) and
+`restore_outcome_unknown` otherwise, never a refusal, since a COMMIT may be in flight (a kill leaves one
+on another thread) or in DuckLake's retries and a read can beat it. The fence row stays armed on every
+unknown outcome: a late COMMIT is still held to the table state the restore validated and cannot erase a
+write committed meanwhile, and a leftover row matches only that restore's own message. An undrop's
+`undrop_outcome_unknown` is the same idea without a fence: a timeout or a failure reading its result's end
+is settled from the catalog too. Found is success. A catalog that cannot be read is
+`undrop_outcome_unknown`, and so is an absent commit with a table now holding the target name, since
+another writer may have created it. An absent commit with no such table is `undrop_failed`, though after a
+lost answer a COMMIT still in flight can land; it says `retryable` and "nothing was committed" only when the
+node itself refused the COMMIT because DuckLake gave up on its retries. A restore answers that refusal `409
+concurrent_write`, like the fence's (`MergeDecision.retriesExhausted`).
+
 **Node-side authorization (node protocol 6).** A non-superuser statement is decided on what
 DuckDB resolved for it, on the node, before it runs, and nowhere else. The parse screen re-parses every PREPARE with
 DuckDB's own parser and refuses what binding would already do outside the node (IMPORT, CONNECT,
@@ -444,8 +478,9 @@ plain view or stored expression (generated column, default, CHECK, trigger) that
 unclassified or (outside a secure view) superuser-class function, the `histogram(<table>, <column>)`
 table macro, or a `query()` that is not a literal query, or views nested past 16, makes its view or
 table unreadable or unwritable; secure views follow the definition and session rules above; DESCRIBE
-`key` / table_info `pk` are NULL; an OPA tenant's DESCRIBE and SHOW TABLES are empty and SUMMARIZE is
-refused; `*.*.*` never covers a federated catalog (grant it by its alias). It does cover DuckDB's
+`key` / table_info `pk` are NULL; for an OPA tenant's user with no read-covering QoD grant, DESCRIBE and
+SHOW TABLES are empty and SUMMARIZE is refused (the listings follow QoD grants, which OPA does not narrow);
+`*.*.*` never covers a federated catalog (grant it by its alias). It does cover DuckDB's
 `memory` catalog on the memory database's own pool (never on another pool, where `memory` is
 instance-wide) and a custom `catalogAlias` (CONTRACT item 34's gap closed with the gateway screens;
 pinned by `AuthzEndToEndCases` "a memory database" and "a database with a custom catalog alias"), so a
@@ -473,7 +508,11 @@ binding still does (the parse screen's checks, a user's S3 credential fetch). A 
 take every permit of the versions lock within 5 s (`PoolSupervisor.RestoreLockWaitMs`) is skipped with
 a WARN and owed to the next local mutation, NOTIFY or snapshot refresh; a slow `createTenantDb`
 (database creation and DuckLake init run inside the mutation) skips restores that way, and the owed
-restore's latency lands on the next request thread.
+restore's latency lands on the next request thread. A multi-statement submission binds each statement
+as it reaches it, under the one handle sent before its PREPARE, so a statement that binds more than
+60 s after the send is refused `qod-node: this connection has no verified principal`, COMMIT included,
+for superusers too (a single statement may run longer). The merge is not affected: it sends one PREPARE
+per statement.
 
 Which binary: `QodNodeBinary` (`ondemand/runtime/`) resolves it once at boot for every manager that
 starts nodes on its host (runtime local, or fleet with `QOD_FLEET_EPHEMERAL=local`) and refuses to
@@ -575,22 +614,96 @@ grants, policies and user SQL apply unchanged (`TenantDb.catalogAlias` is the on
 helper every alias-derivation site goes through; the spawn scripts honour
 `catalogAlias`). Rows live in `qodstate_branch` / `qodstate_branch_merge`
 (Liquibase `0037`). `BranchService` owns the lifecycle: create -> propose ->
-merge (fast-forward only, approver != proposer, one `BEGIN ... COMMIT` batch on an
-ephemeral `__merge` node with the branch attached as `qod_branch`, located
-afterwards by its unique commit message, tagged `merge-<branch>-<id8>`, then torn
-down; `MergeFence` holds that commit to the validated main snapshot through a
-trigger on `ducklake_snapshot_changes` in the parent catalog DB, schema
-`qod_merge_fence`, because DuckLake's own conflict check misses main writes that
-land before the merge's first read or into a table the merge drops) / discard / TTL expiry (`BranchWiring` sweep, leader-gated). Change sets
-come from `BranchChanges` (pure, over `ducklake_snapshot_changes` verbs; flush
-artifacts are not touches). `PinnedSetResolver` pins every live branch's fork
-snapshot; the maintenance scheduler skips branch rows; `deleteTenantDb` refuses a
-parent with live branches. Targeting: FlightSQL header `branch=<name>` (authorized
-against the named parent pool), MCP `branch` argument, `qod sql --branch`.
+merge / discard / TTL expiry (`BranchWiring` sweep, leader-gated); the merge is described after this
+paragraph. Change sets come from `BranchChanges` (pure, over `ducklake_snapshot_changes` verbs; flush
+artifacts and compaction are not touches). `PinnedSetResolver` pins every live branch's fork
+snapshot, and maintenance expires nothing at or after the oldest one (`expiryFloor`), since reading
+main's changes needs consecutive snapshots; the maintenance scheduler skips branch rows;
+`deleteTenantDb` refuses a parent with live branches. Targeting: FlightSQL header `branch=<name>`
+(authorized against the named parent pool), MCP `branch` argument, `qod sql --branch`.
 `TokenRestriction.branchOnly` (PAT `--branch-only`, column `branch_only`) refuses
 WRITE/DDL on a non-branch pool in `routedExecutor`. Merge is REST/CLI only (no
 MCP tool, `McpCoverageSpec` exclusion). See
-docs/superpowers/specs/2026-09-20-branching-v1-design.md.
+docs/superpowers/specs/2026-09-20-branching-v1-design.md and 2026-11-01-branch-three-way-merge-design.md.
+
+**Merge:** approver != proposer, on an ephemeral `__merge` node with the branch attached as `qod_branch`;
+every table the branch modified merges cell by cell, matched by `rowid` (main's side is empty when only
+the branch changed it), in three stages: Prepare once, then
+Decide and Apply per attempt, `RowMergeRunner` and `RowMergeSql`, working tables in the node's
+in-memory database; a statement with an empty rowid set is never sent, because a semi-join on an empty
+table reads the whole table; Apply is DELETE, UPDATE, INSERT in that order, because an UPDATE costs the
+table its statistics for the rest of the transaction. A conflict refuses the merge unless the proposal
+names a winner, `--on-conflict main|branch`; `--key` catches rows both sides inserted; `--hold-writers`
+on the merge holds other commits on the merged tables. A merge names the proposal it approves,
+`proposalId` / `--proposal`, because proposing again replaces the open row: another one in its place is
+`409 proposal_replaced`, and one that has merged is `409 already_merged`, naming the main snapshot and the
+tag, which is what a retry after a lost answer reads, ahead of the live-branch lookup that would call the
+branch gone or a new branch's. A branch's commit lands once: every look reads the message of every proposal of
+the branch; the open one's settles, another's refuses propose and merge, `409 proposal_unsettled`. An
+Apply is marked on the row before it goes, `error` with the timeout prefix, so a crash reads like a
+timed-out send: the proposal stays open and the fence row stays. A stage that writes is a list of single
+statements on one connection, `QuackHttpAdapter.sendAll`, each after a session handle of its own, because
+a handle lives 60 s and the node checks it at each bind: a PREPARE holding several statements is refused
+past 60 s, COMMIT included. A timed-out list sends nothing more and closes, rolling back; a dead
+manager's node runs the statement in flight and stops, so only a COMMIT already in flight can land, and
+its connection keeps its transaction open on the parent's catalog until the node goes. Known residual,
+not a hole to report: once a retry arms, a COMMIT still in flight is held to the retry's snapshot, so a
+main commit between the first run's snapshot and its first catalog read has no check. The commit is located by its unique message,
+tagged `merge-<branch>-<id8>`, then the branch is torn down; `MergeFence` holds that commit to the
+validated main snapshot through a trigger on `ducklake_snapshot_changes` in the parent catalog DB,
+schema `qod_merge_fence`, refusing unless every later snapshot is row data or maintenance on other
+tables, because DuckLake's own conflict check misses main writes that land before the merge's first read
+or into a table the merge drops.
+
+**Discard and expiry** never run under a run of that branch: a propose or a merge holds the branch's own
+lock (`BranchService.runLock`, inside the parent's `__merge`) from start to end, and `retire`, the only
+path to `Discarded` or `Expired`, tries it around a fresh read of the row and the status writes, then tears
+down with it released. Busy, a discard answers `409 branch_busy` and a sweep skips the branch. An open
+proposal whose own commit is on main is never abandoned: a discard answers `409 proposal_unsettled` and a
+sweep skips the branch with an ERROR, so it stays, holding back expiry on the parent, until a merge records
+it; a look that cannot be read is `502 catalog_unavailable`, or a WARN and the next sweep. A propose past
+the branch's TTL is `409 branch_expired`, for every principal, before any node and again under the locks,
+leaving an open proposal as it is: since a sweep skips a branch a run holds, a loop of proposals would
+otherwise keep it, and the expiry floor, past the TTL. A merge past the TTL stays allowed: it is an admin's,
+it cannot loop, and it is how an unsettled proposal gets recorded.
+
+**Who may branch:** any principal who may connect to one of the parent's pools, over REST and MCP, in the
+tenant it belongs to (`BranchHandlers.gate`, the one gate of every endpoint; design 8.2). Own tenant only:
+`s.profile.tenant` for a session, `p.user.tenant` for a PAT, because the handshake resolves a user name
+per tenant; anything else is `403 tenant_forbidden`, a tenant that does not exist included. Then the
+routed executor's own decision (`caller.authzRequest`, on the pools the token's `databases` and `pools`
+axes allow): `403 no_pool_access` with no reason, also for a database that does not exist; `503
+authz_unavailable` when it cannot be decided. A superuser or an admin of THE TENANT IN HAND passes without
+a pool grant (`BranchHandlers.adminOf`); an admin of another tenant who is a plain member here is a plain
+member here. So a `--drop-admin` PAT reaches these endpoints as the plain user it is. Merge is admin only
+(`admin_required`), with no MCP tool. A non-admin proposes and discards only a branch they own (`403
+not_owner`) and asks for a TTL from 1 up to the server's default when it has one (`400 invalid_ttl`, naming
+it; absent takes the default even when that is no TTL, the operator's own choice): a branch with no TTL
+stops snapshot expiry above its fork for the whole database. The owner's rule on who gets in, the numbers
+and the names below go together: open one without the others and it leaks.
+
+**What a non-admin is shown.** Decide compares as the system principal, so with a write grant and a mask
+or a row policy, `hasConflicts` is an equality oracle on what main wrote since the fork, through a key or
+an UPDATE of a cell main also changed. So a non-admin who may not count a table gets no `rowConflicts` for
+it (`None`), never the flagged row an admin gets (an admin can lift their own mask), and a merge row shows
+a non-admin no row numbers at all. A non-admin who may count sees the numbers: a policy holder's count is
+refused on every table (`CatalogReachingCalls`), so such a viewer holds no policy. Names follow filtered
+metadata: `BranchActor.sees` covers a table when the handshake's effective set, narrowed by the token,
+covers it for reading (`RO`, `RW` or `ALL`, exactly what `SHOW TABLES` lists), the parent's catalog alias
+being the session catalog (`BranchHandlers.seenBy`), so a DDL-only holder who alters a table on their own
+branch reads it only through `otherTables`, as their `SHOW TABLES` hides it.
+`changes`, a merge row's summary, conflicts and keys list what they see, with no raw `unsupported` verb;
+`BranchChangesResponse.otherTables` counts the rest; `mergeable` is the whole branch's. Tables they do not
+see are not counted as them. `diff` and `schema-diff` of such a table answer exactly as for no such table,
+at the point where that is decided (the `hidden` argument of `CatalogPreviewHandlers.dataDiff` /
+`schemaDiff`, which has no default: the catalog's own endpoints pass `NoneHidden`), and a key on one as for
+a table not in the change set, so its columns cannot be probed. An OPA tenant's users see what their QoD
+grants cover for reading, as with their `SHOW TABLES`, since OPA does not narrow the handshake's effective
+set: nothing with no such grant, and every name on the default built-ins. Residuals, not holes to report: refusal text and a merge row's
+`error` can name a table of the change set; `list` shows every branch's owner and name; a proposer sees
+whether an admin's merge of their proposal was refused for row conflicts, one bit per merge an admin runs;
+and `threeWay` and a visible table's conflict reason tell a policy holder that main touched a table they
+cannot fully read, one bit per table, not testable per guess.
 
 ### Pool suspend/resume (scale-to-zero)
 
@@ -703,7 +816,7 @@ The `EffectiveSet` is cached in `PoolSupervisor` (`qod_effective_sets`, at most 
 
 `qodstate_tenant.acl_mode` (Liquibase `0044`, null = `QOD_ACL_MODE`, default `qod`) hands a tenant's data-access decisions to its own OPA server: pool access at handshake (gate 4 through `OpaPoolAccess`) and table and file access per statement, asked by the node decider (`AuthzDecider`, `OpaAuthorizer.decide`) on the objects DuckDB resolved, after the rules QoD always enforces: each access carries `kind`, `columns` and `via` (the outermost secure view it is read through), and `locations` lists the files already admitted, with the scope that admitted each (`OpaInput.decide`, `client.edge` `node`, never `statement.text`). The gateway sends OPA nothing per statement. QoD grant tables are ignored for that tenant; memberships are still sent as identity. Any mode other than exactly `qod` is OPA.
 Fail closed: only a literal `result.allow == true` allows; `row_filter` / `masks` are rejected; an outage, timeout or >1 MiB body is `UNAVAILABLE`, never a permission error, and the client sees only `"OPA unreachable or returned an error (see the manager log)"` (`OpaAuthorizer.UnavailableMessage`, also the dry run's text for a non-superuser): the tenant admin picks the OPA URL, so the transport cause (host, port, status) goes to the manager's WARN log only, and `OpaClient.jdkPost` masks the bearer token in it. Superusers never reach OPA. Decisions cache for `QOD_OPA_CACHE_TTL_SEC` keyed on every input field; Rego changes never kill live sessions.
-Config block `quack-flightsql.opa` (`QOD_ACL_MODE`, `QOD_OPA_URL`, `QOD_OPA_TIMEOUT_MS`, `QOD_OPA_CACHE_TTL_SEC`); per tenant via `POST /api/tenant/setAcl` / `qod tenant set-acl` (token write-only, redacted in manifests). Dry run `qod tenant opa-test` (`POST /api/tenant/opaTest`, `OpaDryRun`): the handshake form asks the `connect` rule from the manager; the statement form (`--sql`, decision 25) runs one statement through `FlightSqlRouter.dryRun` on a node of the pool, as the named tenant user, under a `DecidePurpose.DryRun` context (`"purpose":"dryRun"` in the signed context, so it never shares a cached verdict), records the decider's outcome and the exact OPA input by nonce (`DryRunResults`, 5 min) and refuses the plan, so it never executes; it reports that input. It never wakes a pool: no routable node is `409 pool_not_running`. Other answers: `400 opa_mode_required` (tenant on QoD grants), `400 single_statement_required`, `400 refused_before_opa` (the gateway's or the node's refusal, or a superuser / system principal: a dry run runs only for a tenant user), `400 nothing_to_authorize`, `503 authz_unavailable`. Known limitation: filtered metadata still narrows listings by QoD grants, so an OPA tenant's users get empty DESCRIBE and SHOW TABLES answers and a refused SUMMARIZE (the gateway's rewrites read those listings). The starter policy in examples/opa covers `columns`, `via` and `locations`.
+Config block `quack-flightsql.opa` (`QOD_ACL_MODE`, `QOD_OPA_URL`, `QOD_OPA_TIMEOUT_MS`, `QOD_OPA_CACHE_TTL_SEC`); per tenant via `POST /api/tenant/setAcl` / `qod tenant set-acl` (token write-only, redacted in manifests). Dry run `qod tenant opa-test` (`POST /api/tenant/opaTest`, `OpaDryRun`): the handshake form asks the `connect` rule from the manager; the statement form (`--sql`, decision 25) runs one statement through `FlightSqlRouter.dryRun` on a node of the pool, as the named tenant user, under a `DecidePurpose.DryRun` context (`"purpose":"dryRun"` in the signed context, so it never shares a cached verdict), records the decider's outcome and the exact OPA input by nonce (`DryRunResults`, 5 min) and refuses the plan, so it never executes; it reports that input. It never wakes a pool: no routable node is `409 pool_not_running`. Other answers: `400 opa_mode_required` (tenant on QoD grants), `400 single_statement_required`, `400 refused_before_opa` (the gateway's or the node's refusal, or a superuser / system principal: a dry run runs only for a tenant user), `400 nothing_to_authorize`, `503 authz_unavailable`. Known limitation: filtered metadata still follows QoD grants, which OPA does not narrow, so an OPA tenant's user with no read-covering QoD grant gets empty DESCRIBE and SHOW TABLES answers and a refused SUMMARIZE (the gateway's rewrites read those listings), while one on the default built-ins sees every name. The starter policy in examples/opa covers `columns`, `via` and `locations`.
 Starter policy and operator guide: [examples/opa/](examples/opa/README.md). Design: docs/superpowers/specs/2026-10-01-opa-authorization-design.md.
 
 ### REST authZ - tenant scope on every RBAC endpoint
@@ -761,7 +874,10 @@ a non-admin's PATs) to a fixed allowlist (`isProfileApi`: `/api/auth/whoami`,
 `/api/auth/logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools`, the
 caller's own `/api/auth/pat/{create,list,revoke,delete}`, their own S3 credentials
 `/api/profile/s3/{list,add,remove}`, and `/api/auth/sso/ticket` when the
-Starlake integration is on) and answers `403 admin_required` on everything else; the UI mounts
+Starlake integration is on; `isBranchApi`: `POST /api/branch/{create,propose,discard}` and the `GET`s
+`/api/branch/tenant/<t>/database/<d>/branches[/<b>[/changes|/diff|/schema-diff]]`, matched on method and
+whole segments, never a prefix, which also skip the guard's URL-tenant check since `BranchHandlers.gate`
+decides) and answers `403 admin_required` on everything else; the UI mounts
 only the `/profile` route (own password change; own usage/statements; own S3 credentials) for them.
 `GET /api/profile/pools` (`qod profile pools`) answers
 `{"pools":[{"tenant":...,"tenantDb":...,"pool":...,"status":...}]}` (the field names and
@@ -794,6 +910,8 @@ When the username itself is in email format, `email` is auto-set to it and immut
 - **Per-pool federation Secret** `qod-fedsql-${tenant}-${tenantDb}-${pool}` (tenantDb hyphenized for RFC-1123). Holds the resolved federation SQL (`spec.extraSetupSql`) and the tenant-db's and the pool's initSql, each under the file name its trust gives it and only when non-empty; a pod projects only the keys of its own spec, so a pod started for a trusted text never reads a later untrusted one as trusted. GC'd when the last pod of the pool stops; rotation = update the Secret once, restart pods.
 - **Per-pod object-store Secret** `qod-store-${nodeId}` when `spec.objectStoreSql` is non-empty.
 - **Per-pool node-env Secret** `qod-nodeenv-${tenant}-${tenantDb}-${pool}` (all three segments hyphenized for RFC-1123: a slug may carry `_`). Holds the sensitive metastore values, `TenantDb.NodeSecretEnvKeys` = `pgPassword` + `encryptionKey`, plus the manager's own object-store credentials (`NodeSecretFiles.CloudCredKeys`, formerly forwarded as plain env). The Secret keeps a key's spelling (`PgPassword`); the volume item maps it to the canonical file name. The volume items and the Secret's contents derive from ONE filtered map. GC'd with the last pod of the pool.
+
+The labels `quack-tenant`, `quack-tenant-db` and `quack-pool` hold the name as it is, or `qod.<name>.qod` when a label value could not hold it (`PoolLabelValue`: `__merge`, `__maint`, `__br_<id8>`, any slug with `_` at either end, which an API server answers with a 422), everywhere they are written, selected on and read back. A per-pool Secret of a pool ending in `_` ends in `0.qod`, for the same reason. A node id is a Service name and the `quack-node-id` label, both at most 63 characters, and `PoolSupervisor.nodeId` has no bound: past 63 the API answers 422, and a branch pool's id is 36 + tenant + parent database characters long, so `branch create` answers `502 branch_create_failed` on such a name. A merge node's id holds neither name and stays within 35; a maintenance node's cuts the database's name to stay within 63.
 
 All referenced Secrets must exist BEFORE pod create (kubelet will not start a pod whose volume references a missing Secret), so `start(spec)` runs `ensureTokenSecret`, `ensureFederationSecret`, `ensureNodeEnvSecret` and `ensureObjectStoreSecret` first, then creates the pod. The node image entrypoint passes only the port. The mounted files stay readable inside the pod by a node user with unrestricted SQL (a superuser; tenant users' file reads are decided on the node), and nothing bounds what that credential reaches yet: a database without its own metastore credentials inherits `QOD_PG_USER` / `QOD_PG_PASSWORD`, the control plane's login, so one read opens the `qod` database and every tenant's catalog (and the Postgres server itself when that login is a superuser). The per-database least-privilege Postgres role (docs/superpowers/specs/2026-10-11-node-least-privilege-pg-role-design.md) would bound it, but is design only. Interim mitigation: tenant users cannot read the mounted files (the node refuses every file outside a tenant's authorized folders and the user's own S3 scopes to non-superusers, on every pool; per-pool lockdown and `QOD_NODE_LOCKDOWN` are gone, and a set `QOD_NODE_LOCKDOWN` refuses boot), and in the Helm chart `postgres.user` has no default (the chart `required`s it and documents a non-superuser `CREATEDB` role). The chart also `required`s `admin.password` or `admin.existingSecret` (nobody could log in otherwise: the manager has no static API key) and `fail`s on a non-empty `apiKey` value (an all-empty block left in an older values file passes).
 
@@ -917,4 +1035,4 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
 - **Refresh the bundled copies whenever you touch `scripts/` or the operator skill.** The CLI wheel ships its own copies at `cli/src/qod_cli/scripts/spawn-quack-node.{sh,ps1}` and `cli/src/qod_cli/skills/quack-on-demand/SKILL.md`. Nothing generates them: a plain `cp` is the mechanism, and `cli/tests/test_demo.py` / `test_skill_freshness.py` are the only enforcement. Editing a canonical script without refreshing its copy fails those tests in a way that reads like an unrelated pre-existing failure.
 - **Never put two statements on one line of SQL fed to the DuckDB CLI** (the demo seeder, the loaders). When a statement fails, the CLI skips the rest of that line, so a failing `INSTALL` would silently skip the `LOAD` after it. A single statement may span several lines. (qod-node splits a node's init SQL on DuckDB's own tokenizer, so this does not bite there.)
 - **Don't edit the bundled `application.conf` for local tweaks** - set the `QOD_*` env var instead, or the change vanishes on the next `sbt assembly`.
-- **Always tear the manager down with `scripts/stop-jar.sh`, never an IDE/JVM kill** (or a bare `kill` of the java PID). Each node's qod-node lives exactly as long as its `spawn-quack-node.sh` wrapper (it watches the wrapper's process), so an unclean manager exit leaves the wrappers, reparented to PID 1, and their nodes running and holding node ports `21900+`. The next manager then spawns onto an occupied port, its node never passes the `SELECT 1` health probe, and it shows `healthy=false` / `served=0`. Recovery: kill the orphans with `scripts/kill-quack-nodes.sh --port <that manager's REST port>` (`--all` is the explicit blunt reset that sweeps every node on the host, every manager's, and the only mode that matches the orphans of a released manager from before the per-manager marker, whose wrappers carry the node token where the marker now goes; `--unmarked` matches only wrappers whose argv ends at the port, which at HEAD means a `qod fleet join` node on this host), then `POST /api/node/restart` (or scale the pool) so the node re-binds a free port. `stop-jar.sh` does SIGTERM -> wait -> SIGKILL and reaps its own manager's children, so it never leaves its own orphans; other managers' nodes it deliberately leaves alone (it counts only port-only `--unmarked` wrappers in its note, so an earlier release's orphans go unreported). Stops are per-manager: the wrapper argv and node directory carry the manager's marker `<rest-port>-<boot id>`, and `stop-jar.sh` / `stop-jar.ps1` / `qod stop` / `kill-quack-nodes.sh` only touch the nodes of the manager on their `QOD_ON_DEMAND_PORT`, so stopping an isolated test stack never takes down the nodes of the manager on :20900. Ctrl-C on a foreground `run-jar.sh` (or `qod start`) is safe: both supervise the JVM in its own process group and turn the interrupt into that same teardown.
+- **Always tear the manager down with `scripts/stop-jar.sh`, never an IDE/JVM kill** (or a bare `kill` of the java PID). Each node's qod-node lives exactly as long as its `spawn-quack-node.sh` wrapper (it watches the wrapper's process), so an unclean manager exit leaves the wrappers, reparented to PID 1, and their nodes running and holding node ports `21900+`. The next manager adopts a live leftover it has a row for, or stops it before replacing it (`LocalQuackBackend.stopStray`), and skips any other port something listens on (`PortAllocator`), so its own nodes come up; a leftover with no row (a merge or maintenance node, or any node after a NUKE) keeps its memory and port until swept, and a merge node left this way can hold many GB; one bound to another address (`QOD_NODE_BIND`) goes unseen. Recovery: kill the orphans with `scripts/kill-quack-nodes.sh --port <that manager's REST port>` (`--all` is the explicit blunt reset that sweeps every node on the host, every manager's, and the only mode that matches the orphans of a released manager from before the per-manager marker, whose wrappers carry the node token where the marker now goes; `--unmarked` matches only wrappers whose argv ends at the port, which at HEAD means a `qod fleet join` node on this host). `stop-jar.sh` does SIGTERM -> wait -> SIGKILL and reaps its own manager's children, so it never leaves its own orphans; other managers' nodes it deliberately leaves alone (it counts only port-only `--unmarked` wrappers in its note, so an earlier release's orphans go unreported). Stops are per-manager: the wrapper argv and node directory carry the manager's marker `<rest-port>-<boot id>`, and `stop-jar.sh` / `stop-jar.ps1` / `qod stop` / `kill-quack-nodes.sh` only touch the nodes of the manager on their `QOD_ON_DEMAND_PORT`, so stopping an isolated test stack never takes down the nodes of the manager on :20900. Ctrl-C on a foreground `run-jar.sh` (or `qod start`) is safe: both supervise the JVM in its own process group and turn the interrupt into that same teardown.

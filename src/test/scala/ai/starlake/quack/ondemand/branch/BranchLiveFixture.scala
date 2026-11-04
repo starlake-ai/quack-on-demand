@@ -37,11 +37,14 @@ trait BranchLiveFixture extends PostgresFixture:
     finally c.close()
 
   /** Runs `body` with a fresh empty branch database and a sibling data prefix, dropping both. */
-  protected def withBranchDb[A](test: (String, Path) => A): A =
+  protected def withBranchDb[A](test: (String, Path) => A): A = withNamedBranchDb("__br")(test)
+
+  /** As [[withBranchDb]], with a prefix suffix of its own: for more than one branch at a time. */
+  protected def withNamedBranchDb[A](suffix: String)(test: (String, Path) => A): A =
     val parentDb  = currentDbName.getOrElse(Assertions.fail("outside withCatalog"))
     val branchDb  = s"${parentDb}__br_${System.nanoTime().toHexString.takeRight(8)}"
     val parentDir = currentDataPath.getOrElse(Assertions.fail("outside withCatalog"))
-    val branchDir = parentDir.resolveSibling(parentDir.getFileName.toString + "__br")
+    val branchDir = parentDir.resolveSibling(parentDir.getFileName.toString + suffix)
     adminSql(s"""CREATE DATABASE "$branchDb"""")
     try
       Files.createDirectories(branchDir)

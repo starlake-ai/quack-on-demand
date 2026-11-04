@@ -104,7 +104,7 @@ trait PostgresFixture:
     runPsql("postgres", s"""CREATE DATABASE "$dbName"""")
 
   private def dropDatabase(dbName: String): Unit =
-    runPsql("postgres", s"""DROP DATABASE IF EXISTS "$dbName"""")
+    runPsql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)""")
 
   private def seedCatalog(dbName: String, dataPath: Path, extraSql: String): Unit =
     val sql =

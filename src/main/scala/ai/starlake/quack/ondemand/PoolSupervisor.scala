@@ -26,6 +26,7 @@ import ai.starlake.quack.model.{
 import ai.starlake.quack.ondemand.rbac.{RbacResolver, UserMemberships}
 import ai.starlake.quack.ondemand.fleet.MissingSlots
 import ai.starlake.quack.ondemand.runtime.{
+  InitSql,
   NoFreeServer,
   NodePaths,
   NodeProcess,
@@ -1384,8 +1385,9 @@ final class PoolSupervisor(
     */
   def maintenanceNodeSpec(tenantName: String, tenantDbName: String): Option[NodeSpec] =
     findTenantDb(tenantName, tenantDbName).map { td =>
-      val key    = PoolKey(tenantName, td.name, "__maint")
-      val nodeId = s"maint-${td.name}-${System.nanoTime()}"
+      val key = PoolKey(tenantName, td.name, "__maint")
+      // A pod and Service name on Kubernetes, as nodeId below: no underscore, 63 characters at most.
+      val nodeId = s"maint-${td.name.replace('_', '-').take(36)}-${System.nanoTime()}"
       // Borrow a serving pool's resolved config when one exists (s3 creds, kindWire, initSql).
       val donor = pools.values.find(s => s.key.tenant == key.tenant && s.key.tenantDb == td.name)
       val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
@@ -4914,18 +4916,14 @@ object PoolSupervisor:
   val SecretBearingOps: Set[String] = Set("putUserS3Credential", "removeUserS3Credential")
 
   /** Two fragments of the manager's own SQL as one `extraSetupSql` (a merge node's federation blob
-    * and its branch attach), `first` FIRST, with a forced newline between two non-empty fragments.
-    * Empty fragments are dropped. Never for a tenant's initSql, which travels on its own
+    * and its branch attach), `first` FIRST, closed by a `;` on a line of its own between two
+    * non-empty fragments ([[InitSql.join]]: a blob ending in a `sql` source's text with no final
+    * `;` would otherwise swallow the attach's first statement). Fragments are trimmed and empty
+    * ones dropped. Never for a tenant's initSql, which travels on its own
     * ([[ai.starlake.quack.model.NodeSpec.tenantPoolInitSql]]) so qod-node can tell it apart.
     */
   def joinInitAndBlob(first: String, second: String): String =
-    val a = Option(first).getOrElse("").trim
-    val b = Option(second).getOrElse("").trim
-    (a, b) match
-      case ("", "") => ""
-      case (i, "")  => i
-      case ("", f)  => f
-      case (i, f)   => s"$i\n$f"
+    InitSql.join(List(first, second).map(f => Option(f).getOrElse("").trim))
 
   /** Compose a node id safe as a Kubernetes pod + service name. `key.tenantDb` is the composed
     * Postgres name `${tenant}_${tenantDb}` and carries an underscore, valid in Postgres but illegal
@@ -4934,7 +4932,8 @@ object PoolSupervisor:
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
     // RFC-1123 forbids '_'; slugs may contain it. Map '_' -> '-' on every component. Collision-free
-    // since a valid slug never contains '-'. Labels keep the raw slug.
+    // since a valid slug never contains '-'. Labels keep the slug, wrapped only where the label rule
+    // refuses it (`PoolLabelValue`).
     val safeTenant = key.tenant.replace('_', '-')
     val safeDb     = key.tenantDb.replace('_', '-')
     val safePool   = key.pool.replace('_', '-')

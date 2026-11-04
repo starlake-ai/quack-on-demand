@@ -309,12 +309,11 @@ final class FlightProducerImpl(
     * error" for what is, underneath, an ordinary concurrent-write conflict.
     *
     * The matcher below recognizes ONLY DuckLake's known-transient
-    * write-write/concurrent-modification signature -- reusing the exact heuristic already pinned
-    * against a live DuckLake probe by
-    * [[ai.starlake.quack.ondemand.api.CatalogRestoreHandlers.isConflict]] (`docs/superpowers/plans/
-    * 2026-07-17-restore-rollback.md`, `docs/duckdb-pin-bump-checklist.md` #7): DuckLake's
-    * optimistic-concurrency loser message contains the word "conflict". It does NOT match
-    * DuckLake's generic commit-failure wrapper (`Failed to commit: Failed to commit DuckLake
+    * write-write/concurrent-modification signature -- reusing the word check already pinned against
+    * a live DuckLake probe by [[ai.starlake.quack.ondemand.api.CatalogRestoreHandlers.isConflict]]
+    * (`docs/superpowers/plans/2026-07-17-restore-rollback.md`, `docs/duckdb-pin-bump-checklist.md`
+    * #7): DuckLake's optimistic-concurrency loser message contains the word "conflict". It does NOT
+    * match DuckLake's generic commit-failure wrapper (`Failed to commit: Failed to commit DuckLake
     * transaction. <cause>`), which DuckLake emits for EVERY failure during commit regardless of
     * cause. The exemplar reproduced empirically 2026-09-18 by hammering concurrent
     * `CREATE OR REPLACE TABLE` DDL against one ducklake-backed node -- `Invalid Input Error: Failed

@@ -1,10 +1,17 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import { branchCount } from '../api/branchCounts';
+import {
+  actionErrorText, alreadyMergedNote, branchCount, branchMergeCell, conflictPolicyText, diffChangeType,
+  noOpenProposal, proposalErrorNote, rowConflictsHint, rowConflictsText,
+} from '../api/branchCounts';
+import { parseBranchKeys } from '../api/branchKeys';
+import { BranchNamePattern } from '../api/branchName';
 import type {
   BranchChangesResponse,
+  BranchConflictEntry,
   BranchDetailResponse,
   BranchEntry,
+  BranchMergeEntry,
   BranchTableChange,
   DataDiffResponse,
 } from '../api/types';
@@ -49,15 +56,26 @@ function kindChip(t: BranchTableChange) {
   );
 }
 
+function mergeCell(t: BranchTableChange, conflicts: BranchConflictEntry[]) {
+  const cell = branchMergeCell(t, conflicts);
+  return cell.refused ? <span style={{ color: '#b91c1c' }}>{cell.text}</span> : cell.text;
+}
+
 function fmtTs(s?: string | null): string {
   if (!s) return '-';
   return s.replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 
-/** Error text from the API client: the handlers' `code: message` envelope when present. */
+/** Error text of a read: the server's message, or the browser's. An action reads through
+  * `actionErrorText`. */
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
+
+/** A ref for what appears away from the click: a form below the list, which an expanded branch can
+  * push off the screen, and the lines above it that say what became of an action. Without it a click
+  * can seem to do nothing. Stable, so React calls it only when the element comes and goes. */
+const intoView = (el: HTMLElement | null) => { el?.scrollIntoView({ block: 'nearest' }); };
 
 /** Row-level diff of one table between the branch's fork and its head, in a modal.
   * Same rendering as the catalog compare tab (Spec 02), paginated by keyset cursor. */
@@ -76,7 +94,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
     api.branchDiff(tenant, tenantDb, branch, schema, table, {
       limit: 100,
       cursor: opts?.cursor,
-      changeType: opts?.changeType ?? (filter || undefined),
+      changeType: diffChangeType(opts?.changeType, filter),
     })
       .then(page => {
         setDiff(prev => (opts?.cursor && prev)
@@ -106,7 +124,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
       <div className="row" style={{ gap: 12, alignItems: 'center', margin: '0.5rem 0' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span className="subtle">Change type</span>
-          <select value={filter} onChange={ev => { setFilter(ev.target.value); load({ changeType: ev.target.value || undefined }); }}>
+          <select value={filter} onChange={ev => { setFilter(ev.target.value); load({ changeType: ev.target.value }); }}>
             <option value="">all</option>
             <option value="insert">insert</option>
             <option value="delete">delete</option>
@@ -177,10 +195,13 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
   );
 }
 
-/** The change set of one branch: touched tables with counts and the merge verdict, plus the
-  * merge history. Expanded inline under the branch row. */
-function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
+/** The change set of one branch: touched tables with counts, plus the merge history. Expanded
+  * inline under the branch row. */
+function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
   tenant: string; tenantDb: string; branch: BranchEntry;
+  // Bumped by the panel to read again when the branch row itself did not change: a merge that timed
+  // out writes only its merge row, so `updatedAt` stays.
+  refresh: number;
   onDiff: (schema: string, table: string) => void;
 }) {
   const live = branch.status === 'open' || branch.status === 'proposed';
@@ -202,7 +223,12 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
         .catch(e => { if (!cancelled) setError(errText(e)); });
     }
     return () => { cancelled = true; };
-  }, [tenant, tenantDb, branch.name, branch.status, live]);
+  }, [tenant, tenantDb, branch.name, branch.status, branch.updatedAt, live, refresh]);
+
+  // The open proposal's policy comes from `detail`: until it has loaded, a hint would guess it.
+  const hint = changes && detail
+    ? rowConflictsHint(changes.tables, detail.merges.find(m => m.status === 'proposed')?.onConflict)
+    : null;
 
   return (
     <div style={{ padding: '0.5rem 0 0.75rem 1.5rem' }}>
@@ -220,7 +246,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
               branch head {changes.headSnapshot}, main at {changes.mainSnapshot}
             </span>
             {changes.mergeable
-              ? <span style={{ color: 'var(--good)', fontWeight: 600 }}>fast-forward possible</span>
+              ? <span style={{ color: 'var(--good)', fontWeight: 600 }}>no table conflict</span>
               : <span style={{ color: '#b91c1c', fontWeight: 600 }}>not mergeable as is</span>}
           </div>
           {changes.tables.length === 0
@@ -247,7 +273,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                         const c = branchCount(t, f);
                         return <td key={f} align="right" title={c.title}>{c.text}</td>;
                       })}
-                      <td>{t.mergeable ? 'ok' : <span style={{ color: '#b91c1c' }}>{t.reason ?? 'refused'}</span>}</td>
+                      <td>{mergeCell(t, changes.conflicts)}</td>
                       <td>
                         {(t.kind === 'modified' || t.kind === 'created' || t.kind === 'recreated') && (
                           <button type="button" style={chipBtn} onClick={() => onDiff(t.schema, t.table)}>rows</button>
@@ -258,9 +284,22 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
                 </tbody>
               </table>
             )}
+          {changes.tables.some(t => t.rowConflicts) && (
+            <div style={{ marginTop: 8 }}>
+              <strong>Row merge, as proposed</strong>
+              <ul style={{ margin: '4px 0' }}>
+                {changes.tables.filter(t => t.rowConflicts).map(t => (
+                  <li key={`${t.schema}.${t.table}`}>
+                    <code>{t.schema}.{t.table}</code>: {rowConflictsText(t.rowConflicts!)}
+                  </li>
+                ))}
+              </ul>
+              {hint && <p className="subtle" style={{ margin: '4px 0' }}>{hint}</p>}
+            </div>
+          )}
           {changes.conflicts.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <strong style={{ color: '#b91c1c' }}>Conflicts with main</strong>
+              <strong style={{ color: '#b91c1c' }}>Table conflicts with main</strong>
               <ul style={{ margin: '4px 0' }}>
                 {changes.conflicts.map(c => (
                   <li key={`${c.schema}.${c.table}`}><code>{c.schema}.{c.table}</code>: {c.reason}</li>
@@ -270,7 +309,7 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
           )}
           {changes.unsupported.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <strong style={{ color: '#b91c1c' }}>Not mergeable in v1</strong>
+              <strong style={{ color: '#b91c1c' }}>Cannot be merged</strong>
               <ul style={{ margin: '4px 0' }}>
                 {changes.unsupported.map(u => <li key={u}><code>{u}</code></li>)}
               </ul>
@@ -297,7 +336,14 @@ function BranchDetail({ tenant, tenantDb, branch, onDiff }: {
             <tbody>
               {detail.merges.map(m => (
                 <tr key={m.id} style={{ borderTop: '1px solid var(--border)' }}>
-                  <td>{statusChip(m.status)}{m.error && <span className="subtle" title={m.error}> (error)</span>}</td>
+                  <td>
+                    {statusChip(m.status)}
+                    {m.error && (
+                      <span className="subtle" title={m.error}>
+                        {' '}{proposalErrorNote(m.status, m.error)}
+                      </span>
+                    )}
+                  </td>
                   <td><code>{m.proposer}</code></td>
                   <td>{m.approver ? <code>{m.approver}</code> : '-'}</td>
                   <td align="right">{m.mainSnapshotAtPropose}</td>
@@ -332,6 +378,17 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
   const [formOpen, setFormOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [proposeFor, setProposeFor] = useState<BranchEntry | null>(null);
+  const [pOnConflict, setPOnConflict] = useState<'' | 'main' | 'branch'>('');
+  const [pKeys, setPKeys] = useState('');
+  const [pError, setPError] = useState<string | null>(null);
+  const [mergeFor, setMergeFor] = useState<BranchEntry | null>(null);
+  const [mProposal, setMProposal] = useState<BranchMergeEntry | null>(null);
+  const [mHold, setMHold] = useState(false);
+  // Bumped by `reload(true)` to make an expanded panel read again, in the same render as the new
+  // rows, so the two make one run of its effect. A plain `reload` never does: each run counts the
+  // change set again.
+  const [refresh, setRefresh] = useState(0);
 
   function openForm() {
     setFName('');
@@ -341,11 +398,16 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
     setFormOpen(true);
   }
 
-  function reload() {
+  function reload(readAgain = false) {
     setError(null);
     api.listBranches(tenant, tenantDb, showAll)
-      .then(r => setRows(r.branches))
-      .catch(e => { setRows([]); setError(errText(e)); });
+      .then(r => {
+        setRows(r.branches);
+        if (readAgain) setRefresh(n => n + 1);
+      })
+      // A failed read says nothing about the list: the last one stays rather than read as no branch
+      // at all, and what an action just said of itself is not replaced.
+      .catch(e => setError(cur => cur ?? errText(e)));
   }
 
   useEffect(() => { setRows(null); setExpanded(null); reload(); /* eslint-disable-next-line */ }, [tenant, tenantDb, showAll]);
@@ -364,7 +426,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         setFormOpen(false);
         reload();
       })
-      .catch(e => setCreateError(errText(e)))
+      .catch(e => setCreateError(actionErrorText(e)))
       .finally(() => setCreating(false));
   }
 
@@ -374,24 +436,97 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
     setBusy(b.name);
     run()
       .then(r => { setNote(onOk(r)); reload(); })
-      .catch(e => setError(`${label} '${b.name}': ${errText(e)}`))
+      .catch(e => {
+        // A refusal can leave the list and the panel stale (a replaced proposal, a proposal the
+        // refusal closed, a merge that timed out and wrote only its merge row). The panel is read
+        // again only if it is this branch's. `reload` clears the error, so it goes first.
+        reload(expanded === b.name);
+        const done = alreadyMergedNote(e);
+        if (done !== null) setNote(done);
+        else setError(`${label} '${b.name}': ${actionErrorText(e)}`);
+      })
       .finally(() => setBusy(null));
   }
 
-  const propose = (b: BranchEntry) =>
-    act('propose', b, () => api.proposeBranch({ tenant, tenantDb, branch: b.name }), r => {
-      const res = r as { changes: BranchChangesResponse };
-      return `branch '${b.name}' proposed: ${res.changes.tables.length} table(s), ` +
-        `${res.changes.conflicts.length} conflict(s), ${res.changes.mergeable ? 'mergeable' : 'not mergeable'}`;
-    });
+  const openPropose = (b: BranchEntry) => {
+    setMergeFor(null);
+    setPOnConflict('');
+    setPKeys('');
+    setPError(null);
+    setProposeFor(b);
+  };
 
-  const merge = (b: BranchEntry) => {
-    if (!window.confirm(
-      `Fast-forward merge branch '${b.name}' into ${tenantDb}? Main gains one snapshot with the ` +
-      'branch changes, the merge is tagged, and the branch is torn down. The server refuses the ' +
-      "proposer's own identity."
-    )) return;
-    act('merge', b, () => api.mergeBranch({ tenant, tenantDb, branch: b.name }), r => {
+  const submitPropose = (ev: FormEvent) => {
+    ev.preventDefault();
+    if (!proposeFor) return;
+    const parsed = parseBranchKeys(pKeys);
+    if ('error' in parsed) { setPError(parsed.error); return; }
+    const b = proposeFor;
+    // Stays open until the server answers: only the server catches a wrong column or table, so a
+    // refusal must not cost the typed keys.
+    setPError(null);
+    setError(null);
+    setNote(null);
+    setBusy(b.name);
+    api.proposeBranch({
+      tenant,
+      tenantDb,
+      branch: b.name,
+      ...(pOnConflict === '' ? {} : { onConflict: pOnConflict }),
+      ...(Object.keys(parsed.keys).length === 0 ? {} : { keys: parsed.keys }),
+    })
+      .then(res => {
+        const conflicted = res.changes.tables.filter(t => t.rowConflicts?.hasConflicts).length;
+        setNote(`branch '${b.name}' proposed: ${res.changes.tables.length} table(s), ` +
+          `${res.changes.conflicts.length} table conflict(s), ${conflicted} with row conflicts` +
+          (res.changes.mergeable ? '' : ', not mergeable as is'));
+        setProposeFor(null);
+        reload();
+      })
+      // A refusal reloads too: a long propose can still land after its answer is lost, and the
+      // branch may have been ended by someone else. `reload` leaves `pError` alone.
+      .catch(e => { setPError(actionErrorText(e)); reload(); })
+      .finally(() => setBusy(null));
+  };
+
+  // Read here and submitted by its id: a proposal replaced after this is refused, not merged unread.
+  const openMerge = (b: BranchEntry) => {
+    setProposeFor(null);
+    setMergeFor(null);
+    setError(null);
+    setNote(null);
+    setMHold(false);
+    reload(); // the expanded panel's numbers follow the listed row
+    api.getBranch(tenant, tenantDb, b.name)
+      .then(d => {
+        const open = d.merges.find(m => m.status === 'proposed');
+        if (!open) {
+          const found = noOpenProposal(b.name, d.merges);
+          if ('note' in found) {
+            setNote(found.note);
+            reload(expanded === b.name); // the branch has left the live list
+          } else setError(found.error);
+          return;
+        }
+        setMProposal(open);
+        setMergeFor(b);
+      })
+      .catch(e => setError(`merge '${b.name}': ${errText(e)}`));
+  };
+
+  const submitMerge = (ev: FormEvent) => {
+    ev.preventDefault();
+    if (!mergeFor || !mProposal) return;
+    const b = mergeFor;
+    const proposalId = mProposal.id;
+    setMergeFor(null);
+    act('merge', b, () => api.mergeBranch({
+      tenant,
+      tenantDb,
+      branch: b.name,
+      proposalId,
+      ...(mHold ? { holdWriters: true } : {}),
+    }), r => {
       const res = r as { merge: { mainSnapshotAfter?: number | null; tagName?: string | null } };
       return `branch '${b.name}' merged: main snapshot ${res.merge.mainSnapshotAfter ?? '?'}, tag ${res.merge.tagName ?? '?'}`;
     });
@@ -399,7 +534,12 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
 
   const discard = (b: BranchEntry) => {
     if (!window.confirm(`Discard branch '${b.name}'? Its pool, catalog and files are freed; this cannot be undone.`)) return;
-    act('discard', b, () => api.discardBranch({ tenant, tenantDb, branch: b.name }), () => `branch '${b.name}' discarded`);
+    act('discard', b, () => api.discardBranch({ tenant, tenantDb, branch: b.name }), () => {
+      // The branch is gone: a form still open for it would describe nothing. Other branches' stay.
+      setProposeFor(cur => (cur?.name === b.name ? null : cur));
+      setMergeFor(cur => (cur?.name === b.name ? null : cur));
+      return `branch '${b.name}' discarded`;
+    });
   };
 
   return (
@@ -410,14 +550,15 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
             <input type="checkbox" checked={showAll} onChange={ev => setShowAll(ev.target.checked)} />
             {' '}<span className="subtle">Include merged, discarded and expired</span>
           </label>
-          <button type="button" className="link-button" onClick={reload}>Refresh</button>
+          <button type="button" className="link-button" onClick={() => reload(true)}>Refresh</button>
         </div>
         {!formOpen && <button type="button" className="link-button" onClick={openForm}>Create branch</button>}
       </div>
-      {error && <div className="login-err">Error: {error}</div>}
-      {note && <div className="login-notice" role="status">{note}</div>}
+      {error && <div ref={intoView} className="login-err">Error: {error}</div>}
+      {note && <div ref={intoView} className="login-notice" role="status">{note}</div>}
+      {busy && <p ref={intoView} className="subtle">Working on branch {busy}...</p>}
 
-      {!rows && <p className="subtle">Loading branches...</p>}
+      {!rows && !error && <p className="subtle">Loading branches...</p>}
       {rows && rows.length === 0 && (
         <em style={{ color: '#888' }}>
           {showAll ? 'no branches' : 'no live branches; agents create them with create_branch or `qod branch create`'}
@@ -454,14 +595,16 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                     <td>{fmtTs(b.createdAt)}</td>
                     <td>{live ? (b.expiresAt ? fmtTs(b.expiresAt) : 'never') : '-'}</td>
                     <td style={{ display: 'flex', gap: 10 }}>
-                      {b.status === 'open' && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => propose(b)}>propose</button>
+                      {(b.status === 'open' || b.status === 'proposed') && (
+                        <button type="button" style={chipBtn} disabled={busy !== null} onClick={() => openPropose(b)}>
+                          {b.status === 'open' ? 'propose' : 'propose again'}
+                        </button>
                       )}
                       {b.status === 'proposed' && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => merge(b)}>merge</button>
+                        <button type="button" style={chipBtn} disabled={busy !== null} onClick={() => openMerge(b)}>merge</button>
                       )}
                       {live && (
-                        <button type="button" style={chipBtn} disabled={busy === b.name} onClick={() => discard(b)}>discard</button>
+                        <button type="button" style={chipBtn} disabled={busy !== null} onClick={() => discard(b)}>discard</button>
                       )}
                     </td>
                   </tr>
@@ -472,6 +615,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                           tenant={tenant}
                           tenantDb={tenantDb}
                           branch={b}
+                          refresh={refresh}
                           onDiff={(schema, table) => setDiffTarget({ branch: b.name, schema, table })}
                         />
                       </td>
@@ -484,13 +628,13 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         </table>
       )}
       {formOpen && (
-        <form onSubmit={create} className="cred-form">
+        <form ref={intoView} onSubmit={create} className="cred-form">
           <div className="cred-form-title">New branch</div>
           <div className="cred-grid">
             <label>
               Name
               <input value={fName} onChange={ev => setFName(ev.target.value)} placeholder="feature-x"
-                pattern="[a-z][a-z0-9_-]{0,47}" title="Lowercase letter first, then letters, digits, _ or -" required autoFocus />
+                pattern={BranchNamePattern} title="Lowercase letter first, then letters, digits, _ or -" required autoFocus />
             </label>
             <label>
               Time to live, hours (optional)
@@ -502,6 +646,56 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
           <div className="cred-form-actions">
             <button type="submit" disabled={creating || fName.trim() === ''}>{creating ? 'Creating...' : 'Create branch'}</button>
             <button type="button" className="secondary" onClick={() => setFormOpen(false)} disabled={creating}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {proposeFor && (
+        <form ref={intoView} onSubmit={submitPropose} className="cred-form">
+          <div className="cred-form-title">Propose branch {proposeFor.name}</div>
+          <div className="cred-grid">
+            <label>
+              On a conflict
+              <select value={pOnConflict} onChange={ev => setPOnConflict(ev.target.value as '' | 'main' | 'branch')}>
+                <option value="">refuse the merge</option>
+                <option value="main">main wins</option>
+                <option value="branch">branch wins</option>
+              </select>
+            </label>
+            <label>
+              Keys that catch rows both sides inserted (optional)
+              <textarea value={pKeys} onChange={ev => setPKeys(ev.target.value)} rows={3}
+                placeholder="schema.table=column[,column...], one per line" />
+            </label>
+          </div>
+          {pError && <div ref={intoView} className="login-err" style={{ marginTop: '.75rem' }}>{pError}</div>}
+          <div className="cred-form-actions">
+            <button type="submit" disabled={busy !== null}>Propose</button>
+            <button type="button" className="secondary" onClick={() => setProposeFor(null)}
+              disabled={busy === proposeFor.name}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {mergeFor && mProposal && (
+        <form ref={intoView} onSubmit={submitMerge} className="cred-form">
+          <div className="cred-form-title">Merge branch {mergeFor.name} into {tenantDb}</div>
+          <p className="subtle">
+            Main gains one snapshot with the branch's changes, the merge is tagged, and the branch is
+            torn down. The server refuses the proposer's own identity.
+          </p>
+          <p className="subtle">
+            Proposal {mProposal.id} by {mProposal.proposer}.{' '}
+            {conflictPolicyText(mProposal.onConflict)}
+            {Object.keys(mProposal.keys ?? {}).length > 0 && ' Keys: ' +
+              Object.entries(mProposal.keys ?? {}).map(([t, cols]) => `${t}=${cols.join(',')}`).join('; ') + '.'}
+          </p>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={mHold} onChange={ev => setMHold(ev.target.checked)} />
+            {' '}Hold writers on the merged tables until the merge ends. They retry for about 9
+            seconds, then fail. Use it when these tables commit too often for a quiet moment.
+          </label>
+          <div className="cred-form-actions">
+            <button type="submit" disabled={busy !== null}>Merge</button>
+            <button type="button" className="secondary" onClick={() => setMergeFor(null)}>Cancel</button>
           </div>
         </form>
       )}

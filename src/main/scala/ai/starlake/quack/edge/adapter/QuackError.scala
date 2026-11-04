@@ -13,3 +13,10 @@ enum QuackError:
     */
   case Transient(message: String, notSent: Boolean = false)
   case Permanent(message: String) // not retryable (4xx, auth, parse error)
+
+/** Where a list of statements stopped ([[QuackHttpClient.queryAll]]) and why. `entry`: the index of
+  * the statement it was at, None when it stopped before its first (no connection). A
+  * [[QuackError.Transient]]'s `notSent` speaks of that entry: true when its statement never went
+  * out, the failure being its session handle's, whatever earlier entries did.
+  */
+final case class ListFailure(entry: Option[Int], error: QuackError)

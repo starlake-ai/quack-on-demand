@@ -17,7 +17,7 @@ enum ChangeKind(val wire: String):
   /** Same `table_id`, same columns, rows changed. */
   case Modified extends ChangeKind("modified")
 
-  /** Same `table_id`, columns (names, types, nullability) or name differ: not fast-forwardable. */
+  /** Same `table_id`, columns (names, types, nullability) or name differ: not mergeable. */
   case Altered extends ChangeKind("altered")
 
 /** One touched table with its classification and, when the counts were computed, the change-feed
@@ -34,23 +34,33 @@ final case class TableChange(
       * the count failed): the zeros are no counts.
       */
     countsUnavailable: Boolean = false,
-    /** A `Modified` table with a column of its own named `rowid` (any case): it shadows DuckDB's
-      * row identifier, which the merge's change-feed arithmetic matches on, so the merge would
-      * compare the user's values against row identifiers and silently skip or misapply rows.
+    /** A `Modified` table with a column of its own named after one the merge reads (any case):
+      * `rowid` hides DuckDB's row identifier, and the change functions rename a user `snapshot_id`,
+      * so the merge would match or copy the wrong values.
       */
-    shadowsRowid: Boolean = false
+    reservedColumn: Option[String] = None,
+    /** The table's id on main: its id at the fork. None for a table the branch created. */
+    tableId: Option[Long] = None,
+    /** Main changed this table's rows too: merged cell by cell. */
+    threeWay: Boolean = false
 ):
-  def mergeable: Boolean = kind != ChangeKind.Altered && !shadowsRowid
+  def mergeable: Boolean = kind != ChangeKind.Altered && reservedColumn.isEmpty
+
+  /** True unless this table's count failed or was never due: only modified tables are counted. With
+    * no counts asked for it is still true, so a caller must know that too.
+    */
+  def counted: Boolean = kind == ChangeKind.Modified && !countsUnavailable
 
   def reason: Option[String] =
     if kind == ChangeKind.Altered then
-      Some("schema change (column add/drop/retype or rename) is not fast-forwardable in v1")
-    else if shadowsRowid then
-      Some(
-        "a column named rowid hides the row identifier the merge matches rows on; " +
-          "rename the column to merge this table"
+      Some("schema change (column add/drop/retype or rename) cannot be merged")
+    else
+      reservedColumn.map(c =>
+        s"a column named $c hides a column the merge reads; rename the column to merge this table"
       )
-    else None
+
+/** Snapshots from `from` to `to`, both inclusive: one read of a table's changes. */
+final case class SnapshotRange(from: Long, to: Long)
 
 final case class BranchConflict(schema: String, table: String, reason: String)
 
@@ -72,8 +82,19 @@ final case class BranchChangeSet(
 trait ChangeSource:
   def maxSnapshotId(): Option[Long]
   def tableVersions(): List[TableVersion]
+
+  /** `(snapshot id, changes_made)` of every snapshot with an id strictly above `fork`, ascending.
+    * `fork - 1` reads from the fork itself.
+    */
   def snapshotChangesSince(fork: Long): List[(Long, String)]
   def columnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry]
+
+  /** The table's own columns: `columnsOfTableAt` also lists fields nested in a STRUCT, LIST or MAP.
+    */
+  def topLevelColumnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry]
+
+  /** Names of the schemas dropped after `fork`. */
+  def droppedSchemasSince(fork: Long): Set[String]
 
 /** Pure classification of `ducklake_snapshot_changes` verbs into table change sets (Epic 1).
   *
@@ -82,8 +103,10 @@ trait ChangeSource:
   * `HistoryIgnoredVerbs`, and every verb here is drawn from that union plus the schema/view forms):
   *   - data verbs: `inserted_into_table`, `deleted_from_table`, `inlined_insert`, `inlined_delete`
   *   - table DDL verbs: `created_table`, `dropped_table`, `altered_table`
-  *   - maintenance verbs, never a touch: `inline_flush`, `merge_adjacent`, `compacted_table`
-  *   - schema-level: `created_schema` (harmless), `dropped_schema` (a main-side conflict)
+  *   - maintenance verbs, never a touch: `inline_flush`, `merge_adjacent`, `compacted_table`,
+  *     `rewrite_delete`
+  *   - schema-level, never a table touch: `created_schema`, and `dropped_schema`, whose payload is
+  *     a schema id (the schemas main dropped come from `ChangeSource.droppedSchemasSince`)
   *   - anything else with a numeric payload: treated as a touch of that table (fail closed);
   *     anything else with a non-numeric payload: reported in `unsupported` (views, macros).
   *
@@ -95,10 +118,13 @@ object BranchChanges:
 
   val DataVerbs: Set[String] =
     Set("inserted_into_table", "deleted_from_table", "inlined_insert", "inlined_delete")
-  val TableDdlVerbs: Set[String]      = Set("created_table", "dropped_table", "altered_table")
-  val MaintenanceVerbs: Set[String]   = Set("inline_flush", "merge_adjacent", "compacted_table")
-  val IgnoredSchemaVerbs: Set[String] = Set("created_schema")
-  val DroppedSchemaVerb: String       = "dropped_schema"
+  val TableDdlVerbs: Set[String]    = Set("created_table", "dropped_table", "altered_table")
+  val MaintenanceVerbs: Set[String] =
+    Set("inline_flush", "merge_adjacent", "compacted_table", "rewrite_delete")
+  val IgnoredSchemaVerbs: Set[String] = Set("created_schema", "dropped_schema")
+
+  /** Column names the merge's reads use for their own purposes (compared case-insensitively). */
+  val ReservedColumns: List[String] = List("rowid", "snapshot_id")
 
   final case class Ref(schema: String, table: String)
 
@@ -152,13 +178,11 @@ object BranchChanges:
     }
 
   /** Touched tables of one catalog since `fork`, keyed by name at the time of the touch, plus the
-    * unsupported (non-table) entries and the schemas dropped. `dataTouched` is the subset with a
-    * data verb.
+    * unsupported (non-table) entries. `dataTouched` is the subset with a data verb.
     */
   final case class Touches(
       tables: Set[Ref],
       dataTouched: Set[Ref],
-      droppedSchemas: Set[String],
       unsupported: List[String]
   )
 
@@ -166,7 +190,6 @@ object BranchChanges:
     val bySnapshot  = entries.groupBy(_.snapshotId)
     var tables      = Set.empty[Ref]
     var data        = Set.empty[Ref]
-    var schemas     = Set.empty[String]
     val unsupported = List.newBuilder[String]
 
     def resolve(e: Entry): Option[Ref] =
@@ -187,7 +210,6 @@ object BranchChanges:
         val flushArtifact = e.tableId.exists(flushedIds.contains)
         if MaintenanceVerbs.contains(e.verb) || flushArtifact then ()
         else if IgnoredSchemaVerbs.contains(e.verb) then ()
-        else if e.verb == DroppedSchemaVerb then schemas += e.schemaName.getOrElse(e.raw)
         else if DataVerbs.contains(e.verb) then
           resolve(e) match
             case Some(r) => tables += r; data += r
@@ -204,64 +226,125 @@ object BranchChanges:
         else unsupported += e.raw
       }
     }
-    Touches(tables, data, schemas, unsupported.result())
+    Touches(tables, data, unsupported.result())
 
+  /** Whether two column listings are the same columns. The order number is the column's identity: a
+    * column dropped and added again under the same name and type takes the next one, and has lost
+    * its values.
+    */
   private def sameShape(a: List[CatalogColumnEntry], b: List[CatalogColumnEntry]): Boolean =
-    a.map(c => (c.name, c.typeName, c.nullable)) == b.map(c => (c.name, c.typeName, c.nullable))
+    def shape(cs: List[CatalogColumnEntry]) =
+      cs.map(c => (c.ordinal, c.name, c.typeName, c.nullable))
+    shape(a) == shape(b)
 
-  /** Classify every table the branch touched since `fork`, against the branch's own metadata. */
-  def classify(branch: ChangeSource, fork: Long, head: Long): (List[TableChange], List[String]) =
-    val versions = branch.tableVersions()
-    val t        = touches(parseEntries(branch.snapshotChangesSince(fork)), versions)
-    val changes  = t.tables.toList.sortBy(r => (r.schema, r.table)).flatMap { ref =>
+  /** Classify the tables `source` touched since `fork`, against its own metadata. `only` narrows
+    * which of them to look at, which saves their column reads.
+    */
+  def classify(
+      source: ChangeSource,
+      fork: Long,
+      head: Long,
+      only: Ref => Boolean = _ => true
+  ): (List[TableChange], List[String]) =
+    val versions = source.tableVersions()
+    val t        = touches(parseEntries(source.snapshotChangesSince(fork)), versions)
+    val changes  = t.tables.toList.filter(only).sortBy(r => (r.schema, r.table)).flatMap { ref =>
       def idAt(n: Long): Option[Long] =
         versions
           .find(v => v.schema == ref.schema && v.name == ref.table && v.visibleAt(n))
           .map(_.tableId)
+      // A rename commits rows written meanwhile under the name the table has at that moment, so a
+      // data touch counts under any name the table's id has held.
+      def rowsTouched(id: Long): Boolean =
+        versions.exists(v => v.tableId == id && t.dataTouched.contains(Ref(v.schema, v.name)))
       val atFork = idAt(fork)
       val atHead = idAt(head)
       (atFork, atHead) match
-        case (None, Some(_)) => Some(TableChange(ref.schema, ref.table, ChangeKind.Created))
-        case (Some(_), None) => Some(TableChange(ref.schema, ref.table, ChangeKind.Dropped))
+        case (None, Some(h)) =>
+          // A table that existed at the fork under another name was renamed, not created.
+          if versions.exists(v => v.tableId == h && v.visibleAt(fork)) then
+            Some(TableChange(ref.schema, ref.table, ChangeKind.Altered, tableId = Some(h)))
+          else Some(TableChange(ref.schema, ref.table, ChangeKind.Created))
+        case (Some(f), None) =>
+          Some(TableChange(ref.schema, ref.table, ChangeKind.Dropped, tableId = Some(f)))
         case (Some(f), Some(h)) if f != h =>
-          Some(TableChange(ref.schema, ref.table, ChangeKind.Recreated))
+          Some(TableChange(ref.schema, ref.table, ChangeKind.Recreated, tableId = Some(f)))
         case (Some(f), Some(_)) =>
-          val atHeadColumns = branch.columnsOfTableAt(f, head)
-          val altered       = !sameShape(branch.columnsOfTableAt(f, fork), atHeadColumns)
-          if altered then Some(TableChange(ref.schema, ref.table, ChangeKind.Altered))
-          else if t.dataTouched.contains(ref) then
+          val altered =
+            !sameShape(source.columnsOfTableAt(f, fork), source.columnsOfTableAt(f, head))
+          if altered then
+            Some(TableChange(ref.schema, ref.table, ChangeKind.Altered, tableId = Some(f)))
+          else if rowsTouched(f) then
+            val own = source.topLevelColumnsOfTableAt(f, head)
             Some(
               TableChange(
                 ref.schema,
                 ref.table,
                 ChangeKind.Modified,
-                shadowsRowid = atHeadColumns.exists(_.name.equalsIgnoreCase("rowid"))
+                reservedColumn = ReservedColumns.find(r => own.exists(_.name.equalsIgnoreCase(r))),
+                tableId = Some(f)
               )
             )
           else None
         case (None, None) =>
-          // Created and dropped again within the branch: nothing to merge.
+          // Created and dropped again: nothing to merge.
           None
     }
     (changes, t.unsupported)
 
-  /** Conflicts: a table the branch touched that main also touched since the fork, or a schema main
-    * dropped that holds a branch-touched table.
-    */
+  /** What main did to the named tables since the fork, and the schemas it dropped. */
+  private final case class MainView(kinds: Map[Ref, ChangeKind], droppedSchemas: Set[String])
+
+  private def mainView(names: Set[Ref], main: ChangeSource, fork: Long): MainView =
+    val head     = main.maxSnapshotId().getOrElse(fork)
+    val versions = main.tableVersions()
+    // `touches` reports a rename under the new name only, so the name at the fork goes by its id.
+    val renamed = names.filter { ref =>
+      versions
+        .find(v => v.schema == ref.schema && v.name == ref.table && v.visibleAt(fork))
+        .exists(atFork =>
+          versions.exists(v =>
+            v.tableId == atFork.tableId && v.visibleAt(head) &&
+              (v.schema != ref.schema || v.name != ref.table)
+          )
+        )
+    }
+    MainView(
+      classify(main, fork, head, names.contains)._1
+        .map(t => Ref(t.schema, t.table) -> t.kind)
+        .toMap ++ renamed.map(_ -> ChangeKind.Altered),
+      main.droppedSchemasSince(fork)
+    )
+
+  /** Table conflicts: what no row merge can settle. Rows changed on both sides are not one. */
+  private def conflictsIn(tables: List[TableChange], view: MainView): List[BranchConflict] =
+    tables.flatMap { c =>
+      (c.kind, view.kinds.get(Ref(c.schema, c.table))) match
+        case (_, None) =>
+          Option.when(view.droppedSchemas.contains(c.schema))(
+            BranchConflict(c.schema, c.table, s"schema '${c.schema}' was dropped on main")
+          )
+        case (ChangeKind.Modified, Some(ChangeKind.Modified)) => None
+        case (_, Some(onMain))                                =>
+          val what = onMain match
+            case ChangeKind.Altered   => "schema changed"
+            case ChangeKind.Dropped   => "dropped"
+            case ChangeKind.Recreated => "recreated"
+            case ChangeKind.Created   => "also created"
+            case ChangeKind.Modified  => "changed"
+          Some(BranchConflict(c.schema, c.table, s"$what on main since the fork"))
+    }
+
+  /** Table conflicts of `branchTables` against main since `fork`. */
   def conflicts(
       branchTables: List[TableChange],
       main: ChangeSource,
       fork: Long
   ): List[BranchConflict] =
-    val mt = touches(parseEntries(main.snapshotChangesSince(fork)), main.tableVersions())
-    branchTables.flatMap { c =>
-      val ref = Ref(c.schema, c.table)
-      if mt.tables.contains(ref) then
-        Some(BranchConflict(c.schema, c.table, "changed on main since the fork"))
-      else if mt.droppedSchemas.contains(c.schema) then
-        Some(BranchConflict(c.schema, c.table, s"schema '${c.schema}' was dropped on main"))
-      else None
-    }
+    conflictsIn(
+      branchTables,
+      mainView(branchTables.map(c => Ref(c.schema, c.table)).toSet, main, fork)
+    )
 
   /** The whole change set without change-feed counts (the caller fills counts through the branch
     * pool when it wants them).
@@ -270,11 +353,63 @@ object BranchChanges:
     val head                  = branch.maxSnapshotId().getOrElse(fork)
     val mainHead              = main.maxSnapshotId().getOrElse(fork)
     val (tables, unsupported) = classify(branch, fork, head)
+    val view                  = mainView(tables.map(c => Ref(c.schema, c.table)).toSet, main, fork)
     BranchChangeSet(
       forkSnapshot = fork,
       headSnapshot = head,
       mainSnapshot = mainHead,
-      tables = tables,
-      conflicts = conflicts(tables, main, fork),
+      tables = tables.map(t =>
+        t.copy(threeWay =
+          t.kind == ChangeKind.Modified &&
+            view.kinds.get(Ref(t.schema, t.table)).contains(ChangeKind.Modified)
+        )
+      ),
+      conflicts = conflictsIn(tables, view),
       unsupported = unsupported
     )
+
+  /** The snapshots to read one table's changes over: every one in `(fork, head]` except that
+    * table's maintenance, which would report surviving rows as changes (a rewrite) or nothing (a
+    * flush). Left: snapshots that cannot be read correctly, those mixing maintenance and data on
+    * the table and those holding a verb on the table that this code does not know (it fails closed,
+    * as `touches` does). A flush's `deleted_from_table` on the flushed table is the known artifact,
+    * not a mix.
+    */
+  def readRanges(
+      entries: List[Entry],
+      tableId: Long,
+      fork: Long,
+      head: Long
+  ): Either[List[Long], List[SnapshotRange]] =
+    val ofTable = entries
+      .filter(e => e.tableId.contains(tableId) && e.snapshotId > fork && e.snapshotId <= head)
+      .groupBy(_.snapshotId)
+    val known                             = DataVerbs ++ MaintenanceVerbs ++ TableDdlVerbs
+    def isMaintenance(verbs: Set[String]) = verbs.exists(MaintenanceVerbs.contains)
+    def isMixed(verbs: Set[String])       =
+      val data     = verbs -- MaintenanceVerbs
+      val artifact = if verbs.contains("inline_flush") then Set("deleted_from_table") else Set.empty
+      isMaintenance(verbs) && (data -- artifact).nonEmpty
+    def isUnreadable(verbs: Set[String]) = isMixed(verbs) || (verbs -- known).nonEmpty
+    val verbsBySnapshot                  = ofTable.view.mapValues(_.map(_.verb).toSet).toMap
+    val unreadable = verbsBySnapshot.collect { case (sid, vs) if isUnreadable(vs) => sid }.toList
+    if unreadable.nonEmpty then Left(unreadable.sorted)
+    else
+      val skipped = verbsBySnapshot.collect { case (sid, vs) if isMaintenance(vs) => sid }.toSet
+      val ranges  =
+        (fork + 1 to head).filterNot(skipped.contains).foldLeft(List.empty[SnapshotRange]) {
+          case (SnapshotRange(from, to) :: rest, id) if to + 1 == id =>
+            SnapshotRange(from, id) :: rest
+          case (acc, id) => SnapshotRange(id, id) :: acc
+        }
+      Right(ranges.reverse)
+
+  /** The first snapshot id missing from `[fork, head]`: a manual expiry, or a branch older than the
+    * maintenance rule that keeps them. The fork's own row counts, because the merge reads the
+    * tables AT the fork; and a snapshot gone from a catalog hides its table touches from
+    * [[classify]], so a table touched only there would leave the change set. `changes` is what
+    * `snapshotChangesSince(fork - 1)` returned: the rows from the fork on.
+    */
+  def historyGap(changes: List[(Long, String)], fork: Long, head: Long): Option[Long] =
+    val present = changes.iterator.map(_._1).toSet
+    (fork to head).find(id => !present.contains(id))

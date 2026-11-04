@@ -207,13 +207,31 @@ int main() {
 	           "SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, " + head + ")",
 	           "{\"control\":[],\"functions\":[],\"objects\":[" + t_read + "," + t_rowids +
 	               "],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}");
-	// DataDiffSql.summarySql's shape
-	expect_one("the data diff summary of lake.main.t",
+	// A count over the whole feed. The macro selects every column of the table (`i.*`, `d.*`), so the bound
+	// plan names them even though the executed plan prunes them. This is no longer the statement the data
+	// diff sends: its summary reads the two functions directly (below).
+	expect_one("a count over the change feed of lake.main.t",
 	           "SELECT change_type, count(*) AS n FROM ducklake_table_changes('lake', 'main', 't', 2, " + head +
 	               ") GROUP BY change_type",
 	           "{\"control\":[],\"functions\":[{\"args\":[],\"catalog\":\"system\",\"name\":\"count_star\","
 	           "\"schema\":\"main\",\"type\":\"aggregate\",\"via\":null}],\"objects\":[" +
 	               t_read + "," + t_rowids + "],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}");
+	// DataDiffSql.summarySql's statement, as the data diff, the restore dry run and the branch counts send
+	// it: the rowids and snapshots of the two functions the feed joins, paired per (snapshot_id, rowid).
+	// Neither subquery names a column of the table, so both scans are the one read of it with `columns`
+	// empty. The same text is in screen_rules_test.cpp and in CatalogPreviewHandlersSpec: change them
+	// together.
+	const std::string range = "2, " + head;
+	const std::string summary_sql =
+	    "SELECT CASE WHEN d.rowid IS NULL THEN 'insert' WHEN i.rowid IS NULL THEN 'delete' "
+	    "ELSE 'update_postimage' END AS change_type, count(*) AS n "
+	    "FROM (SELECT snapshot_id, rowid FROM ducklake_table_deletions('lake', 'main', 't', " + range + ")) d "
+	    "FULL JOIN (SELECT snapshot_id, rowid FROM ducklake_table_insertions('lake', 'main', 't', " + range + ")) i "
+	    "ON d.snapshot_id = i.snapshot_id AND d.rowid = i.rowid GROUP BY change_type";
+	expect_one("the data diff summary of lake.main.t", summary_sql,
+	           "{\"control\":[],\"functions\":[{\"args\":[],\"catalog\":\"system\",\"name\":\"count_star\","
+	           "\"schema\":\"main\",\"type\":\"aggregate\",\"via\":null}],\"objects\":[" +
+	               t_rowids + "],\"settings\":[],\"statement\":\"PROJECTION\",\"v\":1}");
 	expect_one("the insertions of lake.main.t",
 	           "SELECT * FROM ducklake_table_insertions('lake', 'main', 't', 1, " + head + ")",
 	           "{\"control\":[],\"functions\":[],\"objects\":[" + t_read +

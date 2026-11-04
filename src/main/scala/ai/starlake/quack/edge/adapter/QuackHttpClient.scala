@@ -158,29 +158,86 @@ open class QuackHttpClient(
   ): IO[QuackResponse] =
     poll(IO.pure[QuackResponse](ok)).onCancel(release)
 
-  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. `sent`: the
-    * statement went out before `t` (required: a default would either repeat a write that may have
-    * run or never retry one that never left), so a Transient is `notSent` only when it is false.
-    */
+  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. */
   private def mapNativeFailure(
       t: Throwable,
       startNanos: FiniteDuration,
       sent: Boolean
   ): IO[QuackResponse] =
     IO.monotonic.map { endNanos =>
-      val err = t match
-        case e: QuackWireError.Transient      => QuackError.Transient(e.msg, notSent = !sent)
-        case e: QuackWireError.Permanent      => QuackError.Permanent(e.msg)
-        case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage, notSent = true)
-        case other                            =>
-          QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
-      // Without DuckDB's statement excerpt: a failed statement can carry credentials (a node's
-      // own CREATE SECRET), and the excerpt would put them in the log.
-      logger.debug(
-        s"native query failed: ${ai.starlake.quack.edge.authz.NodeHandles.refusalText(String.valueOf(t.getMessage))}"
-      )
-      QuackResponse.Failed(err, (endNanos - startNanos).toMillis)
+      QuackResponse.Failed(errorOf(t, sent), (endNanos - startNanos).toMillis)
     }
+
+  /** A native-path failure as a [[QuackError]]. `sent`: a statement went out before `t` (required:
+    * a default would either repeat a write that may have run or never retry one that never left),
+    * so a Transient is `notSent` only when it is false.
+    */
+  private def errorOf(t: Throwable, sent: Boolean): QuackError =
+    // Without DuckDB's statement excerpt: a failed statement can carry credentials (a node's
+    // own CREATE SECRET), and the excerpt would put them in the log.
+    logger.debug(
+      s"native query failed: ${ai.starlake.quack.edge.authz.NodeHandles.refusalText(String.valueOf(t.getMessage))}"
+    )
+    t match
+      case e: QuackWireError.Transient      => QuackError.Transient(e.msg, notSent = !sent)
+      case e: QuackWireError.Permanent      => QuackError.Permanent(e.msg)
+      case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage, notSent = !sent)
+      case other                            =>
+        QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
+
+  /** `statements` in order as separate PREPAREs on ONE wire connection (= one server-side DuckDB
+    * session), each after a fresh session handle from `authorize`, each result read and dropped. A
+    * node refuses a statement that binds once its connection's handle has expired, so one PREPARE
+    * holding several statements gets one handle's life for all of them; here each binds right after
+    * its own. A transaction can span the list: an entry may be `BEGIN`.
+    *
+    * The first failure ends the list, a refused handle included, and answers which entry it was at:
+    * a caller can tell a statement the node answered from one whose answer was lost, which may have
+    * run. A cancel ends the list too, seen once the statement in flight has answered, since the JDK
+    * send is uninterruptible: the statement after it is never sent, so a caller's timeout is
+    * followed by a COMMIT only when the client had already begun to send it. Whatever ends the list
+    * closes the connection, and DISCONNECT rolls back a transaction still open. A client that dies
+    * mid-list sends no DISCONNECT: the statement in flight runs to its end, nothing follows it, and
+    * its transaction stays open on the node, uncommitted, until the node goes.
+    */
+  def queryAll(
+      endpoint: String,
+      token: String,
+      authorize: () => String,
+      statements: List[String]
+  ): IO[Either[ListFailure, Unit]] =
+    IO.uncancelable { poll =>
+      given IORuntime = IORuntime.global
+      // What a failure names: the entry the list is at, and whether its statement has gone out, set
+      // right before it does, as in queryNative.
+      val at   = new java.util.concurrent.atomic.AtomicReference(Option.empty[Int])
+      val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
+      nativeProtocol
+        .open(endpoint, token)
+        .flatMap { conn =>
+          val all = statements.zipWithIndex.foldLeft(checkpoint(poll, conn.close())) {
+            case (done, (sql, entry)) =>
+              done *> IO { at.set(Some(entry)); sent.set(false) } *>
+                install(poll, conn, Some(authorize)) *> IO(sent.set(true)) *>
+                conn.executeDiscard(sql) *> checkpoint(poll, conn.close())
+          }
+          // A failed DISCONNECT must not take the place of what ended the list.
+          all.attempt.flatTap(_ => conn.close().attempt).rethrow
+        }
+        .attempt
+        .map(_.left.map(t => ListFailure(at.get(), listError(t, sent.get()))))
+    }
+
+  /** [[errorOf]], but the JDK client's own failure (a lost connection, no response) is Transient:
+    * no answer came, whatever the node did with the statement. It is the case a list's caller must
+    * not read as the node's refusal. A 200 whose body cannot be read lands here too, since Arrow's
+    * reader throws an `IOException` on a malformed stream: for a COMMIT that is the safe side,
+    * since such an answer does not say what became of it.
+    */
+  private def listError(t: Throwable, sent: Boolean): QuackError = t match
+    case e: java.io.IOException =>
+      QuackError.Transient(Option(e.getMessage).getOrElse(e.toString), notSent = !sent)
+    case other => errorOf(other, sent)
 
   /** Stamped-write bracket (EPIC P1). Runs `prelude` (BEGIN + ducklake_set_commit_message), then
     * `sql`, as separate PREPAREs on ONE wire connection (= one server-side DuckDB session), so
@@ -196,7 +253,7 @@ open class QuackHttpClient(
     * Fail-open: a failure of the stamp prelude itself never blocks the write. The bracket
     * connection is dropped (server-side session teardown rolls the BEGIN back) and the statement is
     * re-sent unstamped on a fresh plain connection, after a session handle of its own, with a
-    * warning.
+    * warning. A write that cannot do without its stamp uses [[queryStampedRequired]].
     */
   def queryStamped(
       endpoint: String,
@@ -204,6 +261,38 @@ open class QuackHttpClient(
       authorize: () => String,
       prelude: String,
       sql: String
+  ): IO[QuackResponse] =
+    stamped(endpoint, token, authorize, prelude, sql, failOpen = true)
+
+  /** [[queryStamped]] for a write whose commit message must land on its commit: a table restore,
+    * whose commit fence matches that message and whose lost answers are settled by it, and an
+    * undrop, settled the same way. The stamp is never best-effort here: when the prelude fails, the
+    * connection is dropped (the open BEGIN rolls back with it) and `sql` is never sent, so the
+    * write cannot land unfenced and unfindable. The failure says `notSent`, so a caller may try
+    * another node: the JDK client's own failure (no answer came) is Transient, as in a list.
+    */
+  def queryStampedRequired(
+      endpoint: String,
+      token: String,
+      authorize: () => String,
+      prelude: String,
+      sql: String
+  ): IO[QuackResponse] =
+    stamped(endpoint, token, authorize, prelude, sql, failOpen = false)
+
+  /** The failure of a stamp that is required ([[queryStampedRequired]]): `sql` never went out. */
+  private def stampFailed(t: Throwable, startNanos: FiniteDuration): IO[QuackResponse] =
+    IO.monotonic.map { endNanos =>
+      QuackResponse.Failed(listError(t, sent = false), (endNanos - startNanos).toMillis)
+    }
+
+  private def stamped(
+      endpoint: String,
+      token: String,
+      authorize: () => String,
+      prelude: String,
+      sql: String,
+      failOpen: Boolean
   ): IO[QuackResponse] =
     IO.uncancelable { poll =>
       IO.monotonic.flatMap { startNanos =>
@@ -217,12 +306,17 @@ open class QuackHttpClient(
                 case Left(t)   => conn.close() *> mapNativeFailure(t, startNanos, sent = false)
                 case Right(()) =>
                   conn.executeDiscard(prelude).attempt.flatMap {
-                    case Left(t) =>
+                    case Left(t) if failOpen =>
                       logger.warn(
                         s"stamping prelude failed on $endpoint; write proceeds unstamped: ${t.getMessage}"
                       )
                       // Nothing is held once conn is closed, so the fallback may be cancelled whole.
                       conn.close() *> poll(queryNative(endpoint, token, sql, Some(authorize)))
+                    case Left(t) =>
+                      logger.warn(
+                        s"stamping prelude failed on $endpoint; the write is not sent: ${t.getMessage}"
+                      )
+                      conn.close() *> stampFailed(t, startNanos)
                     case Right(()) =>
                       val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
                       (checkpoint(poll, conn.close()) *> install(poll, conn, Some(authorize)) *>

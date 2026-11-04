@@ -110,6 +110,21 @@ class SecretPlaceholderScanSpec extends AnyFlatSpec with Matchers with OptionVal
     lines.exists(_.contains("AKIAQODSCANMARKER")) shouldBe false
   }
 
+  it should "leave one separator between the blocks around a block it leaves out, none at either end" in {
+    val first = Sibling.copy(id = "src-aaa", alias = "aaa")
+    val blob  =
+      builder(List(Legacy, Sibling, first), Map("PORT" -> "5432--")).build("td-1").unsafeRunSync()
+    blob.value should not include "legacy"
+    // Sorted by alias: aaa, legacy (left out), ok. One separator, between the two that remain.
+    blob.value.linesIterator.toList.filter(l => l == ";" || l.startsWith("-- ")) shouldBe List(
+      "-- BEGIN federation: aaa",
+      "-- END federation: aaa",
+      ";",
+      "-- BEGIN federation: ok",
+      "-- END federation: ok"
+    )
+  }
+
   // ---- item 29c: what a plain token may still do around an unquoted placeholder
   import SecretPlaceholderScan.{plainValue, refusedAtRender}
 

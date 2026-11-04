@@ -55,6 +55,8 @@ export function MaintenancePage() {
 /** Branches (Epic 1): writable zero-copy clones an agent works on, reviewed and merged here. */
 export function BranchesPage() {
   const tenant = useScopedTenant();
+  // The panel is keyed on the database: its propose and merge forms hold what was typed for one
+  // database, which must never survive the Database select and act on another one.
   return (
     <>
       <TenantHeader title="Branches" />
@@ -62,7 +64,7 @@ export function BranchesPage() {
         tenant={tenant}
         title="Branches"
         emptyHint="Branching applies only to ducklake catalogs."
-        panel={db => <BranchPanel tenant={tenant} tenantDb={db} />}
+        panel={db => <BranchPanel key={db} tenant={tenant} tenantDb={db} />}
       />
     </>
   );

@@ -54,3 +54,32 @@ class PinnedSetResolverSpec extends AnyFlatSpec with Matchers:
     resolver.hasLiveBranch("acme", "acme_other") shouldBe false
     resolver.hasLiveBranch("acme", "acme_missing") shouldBe false
   }
+
+  "expiryFloor" should "be the oldest live branch's fork, and none without a live branch" in {
+    val store  = new InMemoryControlPlaneStore()
+    val parent = TenantDb("tdb-1", "acme", "acme_db", TenantDbKind.DuckLake, Map.empty, "/d")
+    store.upsertTenantDb(parent)
+    def branch(name: String, fork: Long, status: BranchStatus) =
+      Branch(
+        Names.newSurrogateId("br"),
+        "acme",
+        parent.id,
+        parent.name,
+        name,
+        s"td-$name",
+        s"acme_db__br_$name",
+        s"__br_$name",
+        s"/d__br_$name/",
+        fork,
+        "alice",
+        status,
+        None
+      )
+    val resolver = new PinnedSetResolver(store)
+    resolver.expiryFloor("acme", "acme_db") shouldBe None
+    store.createBranch(branch("gone", 1L, BranchStatus.Merged)).isRight shouldBe true
+    resolver.expiryFloor("acme", "acme_db") shouldBe None
+    store.createBranch(branch("newer", 9L, BranchStatus.Open)).isRight shouldBe true
+    store.createBranch(branch("older", 5L, BranchStatus.Proposed)).isRight shouldBe true
+    resolver.expiryFloor("acme", "acme_db") shouldBe Some(5L)
+  }

@@ -1,8 +1,12 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.BuildVersions
-import ai.starlake.quack.ondemand.DuckDbExtensionSource
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.ondemand.{DuckDbExtensionSource, PoolSupervisor}
+import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, PostgresSecretResolver}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -33,6 +37,9 @@ class SpawnScriptLiveNodeSpec
   private val keys      = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
   private val allocator = new org.apache.arrow.memory.RootAllocator()
   private val client    = new ai.starlake.quack.edge.adapter.QuackHttpClient(allocator)
+
+  // A DuckLake case's catalog database a killed run left behind (withLakeNode drops its own).
+  override def beforeAll(): Unit = TestPostgres.dropStrayTestDatabases("qod_initsql")
 
   override def afterAll(): Unit = allocator.close()
 
@@ -206,6 +213,253 @@ class SpawnScriptLiveNodeSpec
       onNode(port, "SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_hosts'") shouldBe
         List("1")
     finally hardStop(p)
+  }
+
+  // Task 18: qod-node splits the whole init stream on DuckDB's own tokenizer, so an initSql whose
+  // last statement has no `;` ran into the statement the script put after it (`SET threads = 3`
+  // then `INSTALL ducklake;` read as one statement that does not parse) and both were lost: the
+  // node came up without the setting, and without whatever followed. The script now closes every
+  // text it splices in with a `;` on a line of its own. The node is a DuckLake one on a catalog
+  // database of its own, so the statements after a database's text are the script's own.
+
+  /** `sql` on the test Postgres server's maintenance database (through JDBC, which prints nothing).
+    */
+  private def onPostgres(sql: String): Unit =
+    val c = java.sql.DriverManager
+      .getConnection(TestPostgres.adminUrl, TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      val st = c.createStatement()
+      try st.execute(sql)
+      finally st.close()
+    finally c.close()
+
+  /** A DuckLake node on a Postgres catalog database of its own (dropped afterwards), spawned with
+    * `secrets`, `env` and `extraSetupSql`; `body` gets its port and the catalog's name.
+    */
+  private def withLakeNode[A](
+      secrets: Map[String, String] = Map.empty,
+      env: Seq[(String, String)] = Nil,
+      extraSetupSql: String = ""
+  )(body: (Int, String) => A): A =
+    TestPostgres.ensureReachable()
+    val db = s"qod_initsql_test_${System.nanoTime().toHexString}"
+    onPostgres(s"""CREATE DATABASE "$db"""")
+    try
+      val (p, port) = startNode(
+        extraSetupSql,
+        Seq(
+          "kind"     -> "ducklake",
+          "dbName"   -> db,
+          "pgHost"   -> TestPostgres.pgHost,
+          "pgPort"   -> TestPostgres.pgPort.toString,
+          "pgUser"   -> TestPostgres.pgUser,
+          "dataPath" -> Files.createDirectories(tempDir.resolve("lake")).toString
+        ) ++ env,
+        secrets + ("pgPassword" -> TestPostgres.pgPass)
+      )
+      try
+        parseErrors shouldBe Nil
+        body(port, db)
+      finally hardStop(p)
+    finally onPostgres(s"""DROP DATABASE IF EXISTS "$db" WITH (FORCE)""")
+
+  /** What qod-node reported for a statement of its init SQL it could not parse, as `init: statement
+    * 4 of 17 failed: Parser Error: syntax error at or near "INSTALL"`. Asserted first, so a failure
+    * names the cause.
+    */
+  private def parseErrors: List[String] =
+    Files
+      .readString(tempDir.resolve("node.log"))
+      .linesIterator
+      .filter(_.contains("syntax error"))
+      .toList
+
+  /** The node attached its DuckLake catalog `db`. */
+  private def lakeUp(port: Int, db: String): Unit =
+    onNode(port, s"SELECT type FROM duckdb_databases() WHERE database_name = '$db'") shouldBe
+      List("ducklake")
+
+  private def threads(port: Int): List[String] = onNode(port, "SELECT current_setting('threads')")
+
+  private val Fed = "CREATE TABLE memory.main.fed AS SELECT 'fed-served' AS v"
+
+  "a database's initSql with no final semicolon" should
+    "apply, and not swallow the DuckLake setup after it" in
+    withLakeNode(Map(NodeSecretFiles.TenantDbInitTrustedKey -> "SET threads = 3")) { (port, db) =>
+      threads(port) shouldBe List("3")
+      lakeUp(port, db)
+    }
+
+  it should "apply when it ends in a comment with no newline" in
+    withLakeNode(
+      Map(NodeSecretFiles.TenantDbInitTrustedKey -> "SET threads = 3 -- three threads")
+    ) { (port, db) =>
+      threads(port) shouldBe List("3")
+      lakeUp(port, db)
+    }
+
+  "a pool's initSql with no final semicolon" should
+    "apply, and not swallow the federation SQL after it" in
+    withLakeNode(
+      Map(NodeSecretFiles.TenantPoolInitTrustedKey -> "SET threads = 3"),
+      extraSetupSql = Fed
+    ) { (port, db) =>
+      threads(port) shouldBe List("3")
+      lakeUp(port, db)
+      onNode(port, "SELECT v FROM memory.main.fed") shouldBe List("fed-served")
+    }
+
+  it should "apply when it ends in a comment with no newline" in
+    withLakeNode(
+      Map(NodeSecretFiles.TenantPoolInitTrustedKey -> "SET threads = 3 -- three threads"),
+      extraSetupSql = Fed
+    ) { (port, db) =>
+      threads(port) shouldBe List("3")
+      lakeUp(port, db)
+      onNode(port, "SELECT v FROM memory.main.fed") shouldBe List("fed-served")
+    }
+
+  // A tenant admin's text sits between marker lines, which qod-node cuts the stream at before it
+  // tokenizes anything: the statement after it starts a section of its own, so it needs no `;`.
+  // This arm never had the defect (it passed before the fix too); the case keeps it that way.
+  "a tenant admin's initSql with no final semicolon" should
+    "apply without help, its end marker closing it" in
+    withLakeNode(
+      Map(
+        NodeSecretFiles.TenantDbInitKey   -> "SET threads = 3",
+        NodeSecretFiles.TenantPoolInitKey -> "SET memory_limit = '2GB' -- two gigabytes"
+      ),
+      extraSetupSql = Fed
+    ) { (port, db) =>
+      threads(port) shouldBe List("3")
+      onNode(port, "SELECT current_setting('memory_limit')") shouldBe List("1.8 GiB")
+      lakeUp(port, db)
+      onNode(port, "SELECT v FROM memory.main.fed") shouldBe List("fed-served")
+    }
+
+  // The manager writes these two with their own `;`, but the script does not rely on it: the
+  // statement after each is the script's own (the HTTP and Avro extensions, then DuckLake). Each
+  // ends in a comment with no newline here, which is no `;` and swallows one written after it.
+  "the manager's resource SQL with no final semicolon" should "not swallow the INSTALL after it" in
+    withLakeNode(env = Seq("resourceSql" -> "SET threads = 3 -- three threads")) { (port, db) =>
+      threads(port) shouldBe List("3")
+      lakeUp(port, db)
+    }
+
+  "the manager's object-store SQL with no final semicolon" should
+    "not swallow the DuckLake setup after it" in {
+      val store = ObjectStoreSecret
+        .sql(
+          Map("s3_access_key_id" -> "own-id", "s3_secret_access_key" -> "own-secret"),
+          "s3://lake/acme_lake",
+          "ducklake"
+        )
+        .stripSuffix(";") + " -- the database's own keys"
+      withLakeNode(Map("objectStoreSql" -> store)) { (port, db) =>
+        onNode(
+          port,
+          "SELECT count(*) FROM duckdb_secrets() WHERE name = 'qod_db_store'"
+        ) shouldBe List("1")
+        lakeUp(port, db)
+      }
+    }
+
+  // The same defect one layer up. A `sql` federated source's setupSql is the operator's own text,
+  // and the manager puts each source's block into the node's init SQL as stored: one with no final
+  // `;` ran into the next block's first statement, and both were lost. FederationBlobBuilder now
+  // ends every block that another follows with a `;` line of its own, and
+  // PoolSupervisor.joinInitAndBlob does the same between a merge node's blob and its branch attach.
+  // The nodes below get the blob the real builder makes from stored sources, through the script.
+
+  private def sqlSource(alias: String, setupSql: String) =
+    FederatedSource(s"src-$alias", "td-live", alias, setupSql)
+
+  /** The federation blob the manager ships for `sources`, from the real builder. */
+  private def blobOf(sources: List[FederatedSource], secrets: List[FederatedSecret] = Nil) =
+    new FederationBlobBuilder(
+      loadEnabled = _ => IO.pure(sources),
+      loadSecrets = id => IO.pure(secrets.filter(_.federatedSourceId == id)),
+      resolver = new PostgresSecretResolver(),
+      catalogAliasOf = _ => IO.pure(None)
+    ).build("td-live").unsafeRunSync().getOrElse("")
+
+  "a sql federated source with no final semicolon" should
+    "run, and not swallow the next source's block" in {
+      val blob = blobOf(
+        List(
+          sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT 1 AS v"),
+          sqlSource("fed_b", "CREATE TABLE memory.main.fed_b AS SELECT 2 AS v;")
+        )
+      )
+      withNode(blob) { port =>
+        parseErrors shouldBe Nil
+        onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("1")
+        onNode(port, "SELECT v FROM memory.main.fed_b") shouldBe List("2")
+      }
+    }
+
+  it should "run when its text ends in a comment with no newline" in {
+    val blob = blobOf(
+      List(
+        sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT 1 AS v -- the first source"),
+        sqlSource("fed_b", "CREATE TABLE memory.main.fed_b AS SELECT 2 AS v")
+      )
+    )
+    withNode(blob) { port =>
+      parseErrors shouldBe Nil
+      onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("1")
+      onNode(port, "SELECT v FROM memory.main.fed_b") shouldBe List("2")
+    }
+  }
+
+  // Stored sources are resolved as before: a placeholder inside a literal takes its secret (quote
+  // doubled), and the block of a source with an unquoted placeholder holding anything but a plain
+  // token is left out, with no stray separator and without costing its siblings theirs.
+  it should "keep its secrets substituted, and a block left out costs its siblings nothing" in {
+    // Sorted by alias, the left-out block is the middle one.
+    val a      = sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT '{{secret.V}}' AS v")
+    val legacy =
+      sqlSource("fed_b", "CREATE TABLE memory.main.fed_legacy AS SELECT {{secret.P}} AS v")
+    val c       = sqlSource("fed_c", "CREATE TABLE memory.main.fed_c AS SELECT 3 AS v")
+    val secrets = List(
+      FederatedSecret("sec-a-v", a.id, "V", Some("O'Brien"), None),
+      FederatedSecret("sec-legacy-p", legacy.id, "P", Some("1 UNION SELECT 2"), None)
+    )
+    withNode(blobOf(List(a, legacy, c), secrets)) { port =>
+      parseErrors shouldBe Nil
+      onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("O'Brien")
+      onNode(port, "SELECT v FROM memory.main.fed_c") shouldBe List("3")
+      onNode(
+        port,
+        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'fed_legacy'"
+      ) shouldBe List("0")
+    }
+  }
+
+  "a merge node's federation blob with no final semicolon" should
+    "not swallow the branch attach joined after it" in {
+      val blob = blobOf(List(sqlSource("fed_a", "CREATE TABLE memory.main.fed_a AS SELECT 1 AS v")))
+      val attach = "CREATE TABLE memory.main.attached AS SELECT 'attached' AS v;"
+      withNode(PoolSupervisor.joinInitAndBlob(blob, attach)) { port =>
+        parseErrors shouldBe Nil
+        onNode(port, "SELECT v FROM memory.main.fed_a") shouldBe List("1")
+        onNode(port, "SELECT v FROM memory.main.attached") shouldBe List("attached")
+      }
+    }
+
+  // The terminator is a statement the init log must not count: qod-node's splitter drops an empty
+  // one, so a `;` line after a text that already ends in one changes nothing, and after a bare text
+  // it ends the text and counts as nothing either.
+  "qod-node's statement splitter" should "report no statement for a terminator" in {
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    def statements(sql: String): Int =
+      val out = (Process(Seq(QodNodeTestBinary.path.get.toString, "--check-init")) #<
+        new java.io.ByteArrayInputStream(sql.getBytes("UTF-8"))).!!
+      "\"statements\":(\\d+)".r.findFirstMatchIn(out).map(_.group(1).toInt).getOrElse(fail(out))
+    statements("SET threads = 2;") shouldBe 1
+    statements("SET threads = 2;\n;\n") shouldBe 1
+    statements("SET threads = 2\n;\n") shouldBe 1
+    statements("SET threads = 2 -- two threads\n;\n") shouldBe 1
   }
 
   // Task 20 review M5 (CONTRACT Addendum 4 item 28 keeps errors_as_json on the allowlist): a tenant

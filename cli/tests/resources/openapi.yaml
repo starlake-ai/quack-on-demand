@@ -996,7 +996,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}:
     get:
-      description: One branch (live or terminal) with its merge history.
+      description: One branch (live or terminal) with its merge history. Unless the
+        caller is an admin, a merge row names only the tables they hold a read grant
+        on (RO, RW or ALL), and carries no rowConflicts.
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranch
       parameters:
       - name: tenant
@@ -1049,7 +1051,12 @@ paths:
       description: 'The branch''s change set since its fork: touched tables classified
         as created, dropped, recreated, modified or altered (with insert/delete/update
         counts unless counts=false), the conflicts against main, and the changes v1
-        cannot merge. `mergeable` is the fast-forward verdict.'
+        cannot merge. `mergeable` means no table conflict and nothing unsupported:
+        row conflicts are the merge''s to decide, and the proposal shows them. Unless
+        the caller is an admin, tables and conflicts name only the tables they hold
+        a read grant on (RO, RW or ALL), as their SHOW TABLES does, unsupported is
+        empty, otherTables counts the rest, and a table they may not count has no
+        rowConflicts; `mergeable` stays the whole branch''s.'
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchChanges
       parameters:
       - name: tenant
@@ -1106,7 +1113,8 @@ paths:
     get:
       description: 'Row-level diff of one table between the branch''s fork snapshot
         and its head: the same paginated change feed as the catalog data-diff (keyset
-        cursor, changeType filter).'
+        cursor, changeType filter). A table the caller holds no read grant on answers
+        as one that does not exist, unless they are an admin.'
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchDiff
       parameters:
       - name: tenant
@@ -1186,7 +1194,8 @@ paths:
   /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}/schema-diff:
     get:
       description: Column-level diff of one table between the branch's fork snapshot
-        and its head.
+        and its head. A table the caller holds no read grant on answers as one that
+        does not exist, unless they are an admin.
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchSchema-diff
       parameters:
       - name: tenant
@@ -1248,7 +1257,8 @@ paths:
   /api/branch/tenant/{tenant}/database/{tenantDb}/branches:
     get:
       description: List the live branches of a tenant-db (open or proposed); includeTerminal=true
-        also returns merged, discarded and expired history rows.
+        also returns merged, discarded and expired history rows. Open to any principal
+        who may connect to one of its pools, in its own tenant.
       operationId: getApiBranchTenantTenantDatabaseTenantdbBranches
       parameters:
       - name: tenant
@@ -4572,9 +4582,14 @@ paths:
       description: 'Create a writable branch of a DuckLake tenant-db: a zero-copy
         clone of the catalog at the current head, served by its own pool. Target it
         with the FlightSQL `branch` connection header or the MCP `branch` argument.
-        409 duplicate / branch_limit / fork_snapshot_unsupported (v1 forks at head
-        only); 400 invalid_name / branch_of_branch_unsupported; 403 acl_denied when
-        the caller cannot connect to the parent.'
+        Any principal who may connect to one of the parent''s pools may branch it,
+        in its own tenant. 409 duplicate / branch_limit / fork_snapshot_unsupported
+        (v1 forks at head only); 400 invalid_name / branch_of_branch_unsupported;
+        400 invalid_ttl: an admin may ask for ttlHours 0 (no TTL), anyone else from
+        1 up to the server''s default; absent ttlHours takes the default for everyone;
+        403 no_pool_access when the caller cannot connect to the parent, tenant_forbidden
+        on a tenant that is not theirs; 503 authz_unavailable when that cannot be
+        decided.'
       operationId: postApiBranchCreate
       parameters:
       - name: X-API-Key
@@ -4616,7 +4631,11 @@ paths:
   /api/branch/discard:
     post:
       description: 'Discard a live branch (owner or tenant admin): its pool, catalog
-        and branch-only files are freed; the row stays as history.'
+        and branch-only files are freed; the row stays as history. 409 branch_busy
+        while a propose or a merge of it runs: try again when it ends. 409 proposal_unsettled
+        when a merge of it landed on main and is not on record: merging it again records
+        it, which needs an admin. 502 catalog_unavailable when main''s catalog cannot
+        be read to look for one. Each changes nothing.'
       operationId: postApiBranchDiscard
       parameters:
       - name: X-API-Key
@@ -4657,12 +4676,26 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/branch/merge:
     post:
-      description: 'Fast-forward merge a proposed branch onto main in one stamped
-        snapshot, tag it, and tear the branch down. Human-gated: the approver must
-        differ from the proposer (403 self_merge_forbidden) and no MCP tool exposes
-        it. 409 merge_conflict lists the tables main changed since the fork; 409 concurrent_write
-        on an expectedMainSnapshot mismatch or a lost commit race (retry); 422 merge_unsupported
-        for schema changes, views and macros; 502 merge_failed.'
+      description: 'Merge a proposed branch onto main in one stamped snapshot, tag
+        it, and tear the branch down. Tables both sides changed merge cell by cell.
+        Admins only (403 admin_required). Human-gated: the approver must differ from
+        the proposer (403 self_merge_forbidden) and no MCP tool exposes it. proposalId
+        names the open proposal the approver read: another one in its place is 409
+        proposal_replaced, and nothing changes. 409 already_merged when that proposal
+        has merged, naming the main snapshot and the tag: what a retry reads when
+        the first run landed, and what a second approver reads; nothing changes. 409
+        proposal_unsettled: another proposal of this branch landed; discard the branch.
+        holdWriters refuses other commits on the merged tables until the merge ends;
+        DuckLake retries them for about 9 seconds. 409 merge_conflict names the tables
+        in conflict and closes the proposal; 409 conflicts_changed, proposal_stale
+        and history_gap close it too; 409 concurrent_write on an expectedMainSnapshot
+        mismatch or when main kept moving keeps it open (merge again, or with holdWriters);
+        422 merge_unsupported for schema changes, views and macros; 422 nothing_to_merge;
+        502 merge_failed closes it when the node failed, and keeps it open after a
+        timeout or when the fence could not be armed: merge again. The reply''s changes
+        carries no row counts (inserted, deleted and updated read 0) and, when a merge
+        settled, reads main after the landing; merge.summary and merge.rowConflicts
+        hold the numbers, for a superuser. A tenant admin gets those flagged countsUnavailable.'
       operationId: postApiBranchMerge
       parameters:
       - name: X-API-Key
@@ -4703,9 +4736,20 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/branch/propose:
     post:
-      description: 'Propose the branch for merge: records a merge request with the
-        change set and the conflicts computed now. A branch with conflicts can be
-        proposed; merge refuses it. 409 already_proposed.'
+      description: 'Propose the branch for merge (its owner or an admin: 403 not_owner):
+        records a merge request with the change set and what a merge would do to its
+        rows now, read on a merge node. A branch with conflicts can be proposed; merge
+        refuses it. onConflict (main or branch) names the side that wins every row
+        conflict: a cell, a row one side deleted and the other updated, rows matching
+        a key; keys names the columns that catch rows both sides inserted. Proposing
+        again replaces an open proposal, unless its last merge may have landed (409
+        proposal_unsettled: merge again, which settles it; a discard is refused once
+        that commit is on main, and is the only way out when another proposal''s commit
+        is). 409 branch_expired once the branch passed its TTL, for every principal:
+        an open proposal stays as it is, and an admin can still merge it until the
+        sweep discards the branch. 400 invalid_on_conflict, invalid_key (a key on
+        a table the caller holds no read grant on, unless they are an admin, reads
+        as one not in the change set); 409 history_gap.'
       operationId: postApiBranchPropose
       parameters:
       - name: X-API-Key
@@ -4722,7 +4766,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/BranchOpRequest'
+              $ref: '#/components/schemas/BranchProposeRequest'
         required: true
       responses:
         '200':
@@ -4752,8 +4796,16 @@ paths:
         at the restore). dryRun returns the change summary that would be undone and
         performs no write. Requires an ALL grant, or DDL plus RO/RW, on the table.
         409 concurrent_write when expectedCurrentSnapshot no longer matches the table''s
-        latest snapshot; 410 snapshot_expired; 422 invalid_snapshot when the table
-        does not resolve at the target.'
+        latest snapshot, or when other writers beat its commit (the commit fence refused
+        it, or DuckLake gave up on its retries); 410 snapshot_expired; 422 invalid_snapshot
+        when the table does not resolve at the target; 502 restore_outcome_unknown
+        when it cannot be told whether the replace committed (its COMMIT''s answer
+        was lost, or it answered and no commit of this restore is in the catalog yet,
+        or the catalog could not be read to settle it): the replace may still land,
+        so check the table before retrying. restore_failed or concurrent_write means
+        nothing landed: the statement failed before its COMMIT, or the node itself
+        refused the COMMIT (or the call timed out) and the catalog holds no commit
+        of this restore.'
       operationId: postApiCatalogRestore
       parameters:
       - name: X-API-Key
@@ -7610,6 +7662,7 @@ components:
       - headSnapshot
       - mainSnapshot
       - mergeable
+      - otherTables
       properties:
         branch:
           type: string
@@ -7636,6 +7689,9 @@ components:
             type: string
         mergeable:
           type: boolean
+        otherTables:
+          type: integer
+          format: int32
     BranchConflictEntry:
       title: BranchConflictEntry
       type: object
@@ -7742,6 +7798,9 @@ components:
       - mainSnapshotAtPropose
       - summary
       - conflicts
+      - keys
+      - holdWriters
+      - attempts
       properties:
         id:
           type: string
@@ -7769,6 +7828,19 @@ components:
         decidedAt:
           type: string
           format: date-time
+        onConflict:
+          type: string
+        keys:
+          $ref: '#/components/schemas/Map_List_String'
+        holdWriters:
+          type: boolean
+        attempts:
+          type: integer
+          format: int32
+        rowConflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/BranchRowConflicts'
     BranchMergeRequest:
       title: BranchMergeRequest
       type: object
@@ -7776,6 +7848,8 @@ components:
       - tenant
       - tenantDb
       - branch
+      - proposalId
+      - holdWriters
       properties:
         tenant:
           type: string
@@ -7783,9 +7857,13 @@ components:
           type: string
         branch:
           type: string
+        proposalId:
+          type: string
         expectedMainSnapshot:
           type: integer
           format: int64
+        holdWriters:
+          type: boolean
     BranchMergeResponse:
       title: BranchMergeResponse
       type: object
@@ -7814,6 +7892,25 @@ components:
           type: string
         branch:
           type: string
+    BranchProposeRequest:
+      title: BranchProposeRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - branch
+      - keys
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        branch:
+          type: string
+        onConflict:
+          type: string
+        keys:
+          $ref: '#/components/schemas/Map_List_String'
     BranchProposeResponse:
       title: BranchProposeResponse
       type: object
@@ -7828,6 +7925,61 @@ components:
           $ref: '#/components/schemas/BranchMergeEntry'
         changes:
           $ref: '#/components/schemas/BranchChangesResponse'
+    BranchRowConflicts:
+      title: BranchRowConflicts
+      type: object
+      required:
+      - schema
+      - table
+      - hasConflicts
+      - countsUnavailable
+      - toUpdate
+      - toDelete
+      - toInsert
+      - cellConflicts
+      - updateDeleteConflicts
+      - deleteUpdateConflicts
+      - keyMatches
+      - mainRowsByKey
+      - columnConflicts
+      - samples
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        hasConflicts:
+          type: boolean
+        countsUnavailable:
+          type: boolean
+        toUpdate:
+          type: integer
+          format: int64
+        toDelete:
+          type: integer
+          format: int64
+        toInsert:
+          type: integer
+          format: int64
+        cellConflicts:
+          type: integer
+          format: int64
+        updateDeleteConflicts:
+          type: integer
+          format: int64
+        deleteUpdateConflicts:
+          type: integer
+          format: int64
+        keyMatches:
+          type: integer
+          format: int64
+        mainRowsByKey:
+          type: integer
+          format: int64
+        columnConflicts:
+          $ref: '#/components/schemas/Map_Long'
+        samples:
+          $ref: '#/components/schemas/Map_List_Long'
     BranchTableChange:
       title: BranchTableChange
       type: object
@@ -7840,6 +7992,7 @@ components:
       - updated
       - mergeable
       - countsUnavailable
+      - threeWay
       properties:
         schema:
           type: string
@@ -7862,6 +8015,10 @@ components:
           type: string
         countsUnavailable:
           type: boolean
+        threeWay:
+          type: boolean
+        rowConflicts:
+          $ref: '#/components/schemas/BranchRowConflicts'
     CatalogAttachFailureDto:
       title: CatalogAttachFailureDto
       type: object
@@ -9493,6 +9650,27 @@ components:
         users:
           type: integer
           format: int32
+    Map_List_Long:
+      title: Map_List_Long
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: integer
+          format: int64
+    Map_List_String:
+      title: Map_List_String
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: string
+    Map_Long:
+      title: Map_Long
+      type: object
+      additionalProperties:
+        type: integer
+        format: int64
     Map_String:
       title: Map_String
       type: object

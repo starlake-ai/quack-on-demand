@@ -10,6 +10,9 @@ import ai.starlake.quack.ondemand.state.ControlPlaneStore
   * every LIVE branch of the tenant-db (a branch reads the parent's files as of its fork, so that
   * snapshot must outlive the branch). Spec 08 sharing is the remaining planned source.
   *
+  * Beyond the pins, [[expiryFloor]] bounds a range: nothing at or after the oldest live branch's
+  * fork may expire, since a merge reads the parent's changes over `(fork, head]`.
+  *
   * There are no file pins. A per-file pin set derived from the parent cannot protect a branch:
   * merge_adjacent_files deletes the rows of the files it merges away, so the files visible at the
   * fork resolve to the merged file only (audit F25). Maintenance keeps a branch's files by skipping
@@ -34,6 +37,16 @@ final class PinnedSetResolver(store: ControlPlaneStore):
     */
   def hasLiveBranch(tenant: String, tenantDb: String): Boolean =
     liveBranches(tenant, tenantDb).nonEmpty
+
+  /** Every snapshot at or after this must outlive the live branches: a three-way merge reads main's
+    * changes over `(fork, head]` and the tables at the fork, and a snapshot gone from
+    * `[fork, head]` hides its table touches from the merge, which refuses `history_gap` (design
+    * section 9.1). None without a live branch. Cheap: merge and cleanup are already skipped while a
+    * branch is live, so this keeps catalog rows, and a branch's TTL, when it has one, bounds how
+    * long: with no TTL, expiry above that fork stops until a merge or a discard.
+    */
+  def expiryFloor(tenant: String, tenantDb: String): Option[Long] =
+    liveBranches(tenant, tenantDb).map(_.forkSnapshot).minOption
 
   private def liveBranches(tenant: String, tenantDb: String): List[ai.starlake.quack.model.Branch] =
     store

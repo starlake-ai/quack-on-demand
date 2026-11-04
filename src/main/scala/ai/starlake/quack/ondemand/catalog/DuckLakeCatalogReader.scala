@@ -661,10 +661,25 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     )(rs => Option(rs.getObject("m")).map(_ => rs.getLong("m"))).headOption.flatten
 
   /** Public alias of the rename-proof column listing keyed by `table_id` (see
-    * `columnsAtByTableId`), for callers that already hold a table id.
+    * `columnsAtByTableId`), for callers that already hold a table id. It also lists fields nested
+    * in a STRUCT, LIST or MAP.
     */
   def columnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry] =
-    columnsAtByTableId(tableId, snapshotId)
+    columnsAtByTableId(tableId, snapshotId, topLevelOnly = false)
+
+  /** The table's own columns: [[columnsOfTableAt]] also lists fields nested in a STRUCT, LIST or
+    * MAP.
+    */
+  def topLevelColumnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry] =
+    columnsAtByTableId(tableId, snapshotId, topLevelOnly = true)
+
+  /** Names of the schemas dropped after `fork` (a schema row end-dated past it). A schema dropped
+    * and created again under the same name is listed too: its tables went with the first one.
+    */
+  def droppedSchemasSince(fork: Long): Set[String] =
+    query("SELECT schema_name FROM ducklake_schema WHERE end_snapshot > ?", fork)(
+      _.getString("schema_name")
+    ).toSet
 
   /** Verbs in changes_made whose payload references a table. */
   private val TableChangeVerbs = Set(
@@ -1001,14 +1016,21 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     )(_ => 1).nonEmpty
 
   /** Columns visible at snapshot `n` for a table pinned by `table_id` (not name) - the rename-proof
-    * counterpart to `listColumns`/`columnsAt`, used internally by `schemaDiff`.
+    * counterpart to `listColumns`/`columnsAt`, used internally by `schemaDiff`. A field nested in a
+    * STRUCT, LIST or MAP is a `ducklake_column` row of its own, with a `parent_column`:
+    * `topLevelOnly` leaves those out.
     */
-  private def columnsAtByTableId(tableId: Long, n: Long): List[CatalogColumnEntry] =
+  private def columnsAtByTableId(
+      tableId: Long,
+      n: Long,
+      topLevelOnly: Boolean
+  ): List[CatalogColumnEntry] =
     val (cPred, cArgs) = visible("c", Some(n))
+    val levelPred      = if topLevelOnly then " AND c.parent_column IS NULL" else ""
     query(
       s"""SELECT c.column_order, c.column_name, c.column_type, c.nulls_allowed
          |  FROM ducklake_column c
-         | WHERE c.table_id = ? AND $cPred
+         | WHERE c.table_id = ? AND $cPred$levelPred
          | ORDER BY c.column_order""".stripMargin,
       (List[Any](tableId) ++ cArgs)*
     ) { rs =>
@@ -1060,8 +1082,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
                 s"($schema.$table) despite name resolution; using from=$from unclamped"
             )
             from
-        val colsFrom    = columnsAtByTableId(id, effectiveFrom)
-        val colsTo      = columnsAtByTableId(id, to)
+        val colsFrom    = columnsAtByTableId(id, effectiveFrom, topLevelOnly = false)
+        val colsTo      = columnsAtByTableId(id, to, topLevelOnly = false)
         val byNameFrom  = colsFrom.map(c => c.name -> c).toMap
         val byNameTo    = colsTo.map(c => c.name -> c).toMap
         val added       = colsTo.filterNot(c => byNameFrom.contains(c.name))
@@ -1120,9 +1142,10 @@ object DuckLakeCatalogReader:
   /** `changes_made` verbs that are real engine output but intentionally NOT table-history events:
     * `created_schema` is a schema-level event; `inline_flush` is the flush of inlined INSERTs
     * (maintenance noise - the flush of an inlined DELETE emits `deleted_from_table` instead, which
-    * IS classified). Verified identical on DuckDB 1.5.4 and 1.5.5.
+    * IS classified); `rewrite_delete` is a compaction that keeps every row. Verified identical on
+    * DuckDB 1.5.4 and 1.5.5; `rewrite_delete` seen on 2.0.0.
     */
-  val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush")
+  val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush", "rewrite_delete")
 
   /** Build a reader from a resolved metastore map (the same shape
     * `PoolSupervisor.metastoreFor(tenant)` produces).

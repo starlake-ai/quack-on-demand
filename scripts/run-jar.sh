@@ -792,14 +792,13 @@ echo ""
 
 # ---- Port preflight ----
 # Aborts before the JVM boots if any port the manager will need is held
-# by another process. The truly nasty failure mode is an orphan Quack
-# node from a prior run still listening inside the [minPort, maxPort]
-# range. The supervisor's port allocator does not probe the OS, so it
-# will happily hand that port to a fresh spawn; the JNI client then
-# connects to the orphan, mismatches tokens, and the node returns
-# "Authentication failed" until you kill the orphan by hand. NUKE=1
-# wipes Postgres state but not OS processes - so a "fresh" NUKE boot
-# is exactly when this trap snaps shut.
+# by another process. An orphan Quack node from a prior run, still
+# listening inside the [minPort, maxPort] range, is the case that
+# matters most. The supervisor's port allocator skips a port something
+# listens on, so a fresh spawn avoids it, but the orphan keeps its
+# memory until you kill it by hand. NUKE=1 wipes Postgres state but not
+# OS processes, which leaves every earlier node without a row: a
+# "fresh" NUKE boot is where such orphans pile up.
 #
 # Four port classes are checked:
 #   1. REST/UI port (manager would crash at bind, but we'd rather say so up-front)
@@ -807,9 +806,9 @@ echo ""
 #   3. Node verdict listener port (same: QOD_INTERNAL_PORT when it is set above 0, else the
 #      REST port + 1). It binds after reconcile has spawned the nodes, so a taken port would
 #      fail the boot with those nodes left running.
-#   4. Node port range [minPort, maxPort] (only WARN; the manager can
-#      route around in-use entries, but orphans there are the silent-
-#      auth-failure source we want to call out)
+#   4. Node port range [minPort, maxPort] (aborts too: the manager routes
+#      around in-use entries, but an orphan there keeps its memory until
+#      you kill it, which we want to call out)
 preflight_ports() {
   local rest_port="${QOD_ON_DEMAND_PORT:-20900}"
   local flight_port="${PROXY_PORT:-31338}"
@@ -860,8 +859,7 @@ preflight_ports() {
     echo "ERROR: orphan listener(s) inside the configured node port range [$min_port, $max_port]:" >&2
     echo "$in_range" | sed 's/^/  /' >&2
     echo "  These are almost certainly stale Quack node processes from a prior run." >&2
-    echo "  The manager's port allocator does not probe the OS - re-leasing one of" >&2
-    echo "  these ports leads to silent 'Authentication failed' errors at query time." >&2
+    echo "  They keep their memory and ports until killed." >&2
     echo "  Kill them and retry:    pkill -f 'quack_serve|spawn-quack-node'" >&2
     exit 1
   fi

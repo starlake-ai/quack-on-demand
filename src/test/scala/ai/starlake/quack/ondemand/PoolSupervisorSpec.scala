@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.ondemand.branch.BranchNames
 import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
@@ -29,6 +30,18 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "leave already-hyphenated tenant-db names alone" in {
     val k = PoolKey("acme", "acme-default", "sales")
     PoolSupervisor.nodeId(k, 7) shouldBe "quack-acme-acme-default-sales-7"
+  }
+
+  it should "take 36 characters plus the tenant's and the parent's names on a branch's node" in {
+    // The sum the skill gives for a branch create on Kubernetes, where a node id must fit a Service
+    // name and a label value: the branch's id8 is in its database and in its pool.
+    val branch = BranchNames.newId()
+    val names  = List("acme" -> "acme_tpch", "wayne_corp" -> "wayne_corp_sales_2026")
+    names.foreach { (tenant, parent) =>
+      val key =
+        PoolKey(tenant, BranchNames.tenantDbName(parent, branch), BranchNames.poolName(branch))
+      PoolSupervisor.nodeId(key, 1).length shouldBe 36 + tenant.length + parent.length
+    }
   }
 
   "PoolSupervisor.replaceLastSegment" should "derive sibling paths for filesystem roots" in {
@@ -1942,6 +1955,27 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     spec.objectStoreSql should include("SECRET 's'")
     spec.objectStoreSql should include("SCOPE ['s3://bucket/db']")
 
+  it should "name its node as a Kubernetes API server accepts, and so should a merge" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    // The API server's rule for a Service name, and the composed tenant-db at its longest.
+    val serviceName = "[a-z]([-a-z0-9]*[a-z0-9])?"
+    List("my_db", "n" * 58).foreach { suffix =>
+      sup.createTenantDb("acme", suffix, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+      val db = s"acme_$suffix"
+      val maint = sup.maintenanceNodeSpec("acme", db).get.nodeId
+      withClue(maint) {
+        maint should fullyMatch regex serviceName
+        maint.length should be <= 63
+      }
+      val merge = sup.mergeNodeSpec("acme", db, s"${db.take(50)}__br_ab12cd34", "/var/x/").get.nodeId
+      withClue(merge) {
+        merge should fullyMatch regex serviceName
+        // `merge-`, the id8, `-`, a Long: neither name, so a propose has no limit of a branch's.
+        merge.length should be <= 35
+      }
+    }
+
   // ---------- effectiveSetForUser: column policies ----------
 
   "effectiveSetForUser" should "include column policies attached to the user's roles" in:
@@ -2222,11 +2256,43 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   // which spawn-quack-node.sh runs after the catalog ATTACH. It rides its own
   // NodeSpec.tenantDbInitSql field (a secret file) with its trust flag instead.
 
-  "joinInitAndBlob" should "join two fragments of the manager's SQL, skipping blanks" in {
-    PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\nATTACH x;"
+  "joinInitAndBlob" should "join two fragments of the manager's SQL, the first closed, skipping blanks" in {
+    PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\n;\nATTACH x;"
     PoolSupervisor.joinInitAndBlob("SET b=2;", "") shouldBe "SET b=2;"
     PoolSupervisor.joinInitAndBlob("", "ATTACH x;") shouldBe "ATTACH x;"
     PoolSupervisor.joinInitAndBlob("  ", "") shouldBe ""
+  }
+
+  // A federation blob can end in a `sql` source's text with no final `;`, or in a comment: the
+  // statement after it (the merge node's branch attach) must start a statement of its own.
+  it should "close a first fragment with no final semicolon, or ending in a comment, on its own line" in {
+    PoolSupervisor.joinInitAndBlob("SET b=2", "ATTACH x;") shouldBe "SET b=2\n;\nATTACH x;"
+    PoolSupervisor.joinInitAndBlob("SET b=2 -- two", "ATTACH x;") shouldBe
+      "SET b=2 -- two\n;\nATTACH x;"
+    PoolSupervisor.joinInitAndBlob("SET b=2;\n", "\n ATTACH x;") shouldBe "SET b=2;\n;\nATTACH x;"
+  }
+
+  // The merge node's init SQL is the donor pool's blob and the branch attach, through that join.
+  "mergeNodeSpec" should "close the donor's federation blob before the branch attach" in {
+    val blob = "-- BEGIN federation: fedx\nCREATE TABLE t AS SELECT 1\n-- END federation: fedx"
+    val sup  = new PoolSupervisor(
+      new CapturingBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      federationBlobOf = _ => IO.pure(Some(blob))
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
+      metastore = Map.empty, dataPath = ""
+    ).unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val sql = sup
+      .mergeNodeSpec("acme", "acme_default", "acme_default__br_ab12cd34", "/var/lake__br_ab12cd34/")
+      .get
+      .extraSetupSql
+    sql should startWith(s"$blob\n;\nCREATE OR REPLACE TEMPORARY SECRET")
+    sql should include("ATTACH 'ducklake:postgres:")
   }
 
   "createPool" should "ship each initSql on its own NodeSpec field, never in extraSetupSql" in {

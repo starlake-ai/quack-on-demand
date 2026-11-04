@@ -3,15 +3,17 @@ package ai.starlake.quack.mcp
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
+import io.circe.JsonObject
 import io.circe.syntax._
 import Dtos.given
 
 /** The agent-facing branch tools (Epic 1): `create_branch`, `list_branches`, `branch_changes`,
-  * `diff`, `propose_merge`, `discard`. All data tier (`adminOnly = false`): any principal that may
-  * connect to the parent database may branch it, exactly the FlightSQL handshake gate. `merge` is
-  * deliberately absent: a human (a different principal than the proposer) approves through REST or
-  * the CLI. Each tool curries `principal.rawToken` into the REST handler's `apiKey` seam, so the
-  * handler resolves the same PAT principal this route did.
+  * `diff`, `propose_merge`, `discard`. Listed for every PAT (`adminOnly = false`): the handlers'
+  * one gate admits any principal who may connect to one of the parent's pools, in its own tenant, a
+  * plain user's token and a `--drop-admin` one included, which then read as the plain users they
+  * are. `merge` is deliberately absent: a human (a different principal than the proposer) approves
+  * through REST or the CLI, and only an admin. Each tool curries `principal.rawToken` into the REST
+  * handler's `apiKey` seam, so the handler resolves the same PAT principal this route did.
   */
 final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resolver):
 
@@ -47,7 +49,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
         "Branch name: lowercase letter first, then letters, digits, '_' or '-', at most 48 chars."
       ),
       "ttl_hours" -> intProp(
-        "Hours until the branch expires and is discarded; 0 = never; default = server setting."
+        "Hours until the branch expires and is discarded; default = server setting. An admin may " +
+          "pass 0 = never; anyone else asks for 1 up to the server's default."
       ),
       tenantProp
     ),
@@ -92,7 +95,10 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     description =
       "The branch's change set since its fork: touched tables (created, dropped, recreated, " +
         "modified with insert/delete/update counts, or altered), conflicts against the live " +
-        "database, and anything v1 cannot merge. `mergeable` is the fast-forward verdict.",
+        "database, and anything v1 cannot merge. `mergeable` means no table conflict and " +
+        "nothing unsupported: row conflicts are the merge's to decide, and the proposal shows " +
+        "them. Unless you are an admin, only the tables you hold a read grant on (RO, RW or " +
+        "ALL) are named, and `otherTables` counts the rest.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -158,13 +164,25 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
   private val proposeMergeTool = McpToolDef(
     name = "propose_merge",
     description =
-      "Propose the branch for merge: records a merge request carrying the change set and the " +
-        "conflicts as of now. A human with a different identity reviews and merges (there is no " +
-        "merge tool). Refused when the branch is already proposed.",
+      "Propose a branch you own (or any branch, as an admin) for merge: records a merge request " +
+        "carrying the change set and what a merge would do to its rows now. A human with a " +
+        "different identity, and an admin, reviews and merges " +
+        "(there is no merge tool). Proposing again replaces an open proposal, unless its last " +
+        "merge may have landed: that refuses with proposal_unsettled, and the human merges it " +
+        "again or discards the branch, as the refusal says. A branch past its TTL refuses with " +
+        "branch_expired: the next sweep discards it, so create a new one.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
-      "branch" -> strProp("Branch name."),
+      "branch"      -> strProp("Branch name."),
+      "on_conflict" -> strProp(
+        "Which side wins every row conflict (a cell, a row one side deleted and the other " +
+          "updated, rows matching a key): main or branch. Absent, any conflict refuses the merge."
+      ),
+      "keys" -> objProp(
+        "schema.table to an array of column names: rows both sides inserted with the same key " +
+          "become conflicts."
+      ),
       tenantProp
     ),
     adminOnly = false,
@@ -172,19 +190,37 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
       (for
         (tenant, database) <- tenantAndDb(principal, args)
         branch             <- str(args, "branch").toRight("the 'branch' argument is required")
-      yield (tenant, database, branch)) match
-        case Left(err)                         => IO.pure(Left(err))
-        case Right((tenant, database, branch)) =>
+        keys               <- keysArg(args)
+      yield (tenant, database, branch, keys)) match
+        case Left(err)                               => IO.pure(Left(err))
+        case Right((tenant, database, branch, keys)) =>
           branches
-            .propose(BranchOpRequest(tenant, database, branch), principal.rawToken)(scopeOf)
+            .propose(
+              BranchProposeRequest(tenant, database, branch, str(args, "on_conflict"), keys),
+              principal.rawToken
+            )(scopeOf)
             .map(res => bridge(res).map(_.asJson))
   )
+
+  /** `{"schema.table": ["column", ...]}`. Any other shape is an error, never "no key": a malformed
+    * key must not switch the check off.
+    */
+  private def keysArg(args: JsonObject): Either[String, Map[String, List[String]]] =
+    val err = "the 'keys' argument must be an object of schema.table to an array of column names"
+    args("keys") match
+      case None                => Right(Map.empty)
+      case Some(j) if j.isNull => Right(Map.empty)
+      case Some(j)             =>
+        j.as[Map[String, List[String]]].left.map(_ => err)
 
   private val discardTool = McpToolDef(
     name = "discard",
     description =
       "Discard a branch you own (or any branch, as an admin): its compute, catalog and " +
-        "branch-only files are freed. Irreversible; the live database is unaffected.",
+        "branch-only files are freed. Irreversible; the live database is unaffected. Refused " +
+        "with branch_busy while a propose or a merge of it runs, and with proposal_unsettled " +
+        "when a merge of it landed on main and is not on record: a human admin merges it again, " +
+        "which records it.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),

@@ -367,6 +367,11 @@ object ManagerServerHarness:
       // database authenticator's stand-in over `store`); a spec that drives a real chain, such as
       // the manager-wide password grant behind the database check, passes its own.
       authService: Option[AuthenticationService] = None,
+      // Builds the branch handlers from this harness's own supervisor, preview handlers and
+      // executor-identity resolver, the way Main does. None leaves the branch routes unmounted.
+      branchesOf: Option[
+        (PoolSupervisor, CatalogPreviewHandlers, RestCaller) => BranchHandlers
+      ] = None,
       // Request limits of the REST listener. Specs that exercise them pass small ones.
       restLimits: RestLimitsConfig = RestLimitsConfig(),
       // GET /metrics. The default mounts nothing (no Prometheus child, as with the sink off); a spec
@@ -742,6 +747,7 @@ object ManagerServerHarness:
       moduleStaticMounts = moduleStaticMounts,
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
+      branches = branchesOf.map(build => build(sup, previewHandlers, restCaller)),
       patAuth = patAuth,
       scim = Some(new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, audit)),
       // Mirrors Main: the fleet routes are always mounted; outside fleet mode the handler has no

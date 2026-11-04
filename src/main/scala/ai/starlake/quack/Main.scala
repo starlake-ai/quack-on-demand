@@ -1751,7 +1751,8 @@ object Main extends IOApp with LazyLogging:
               // each other, but metering and audit must not move just because OPA needs a tag.
               // Only the OPA input's client.edge is set to "mcp" here.
               edge = "mcp",
-              // A handler's own commit message for its write (undrop), else the verb's.
+              // A handler's own commit message for its write (a restore, an undrop), else the
+              // verb's.
               commitMessage = caller.commitMessage
             )
         )(recordExecution)
@@ -1934,12 +1935,9 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
-      // Branches (Epic 1): the lifecycle service and its REST handlers. The actor resolver
-      // accepts a session JWT (UI / CLI login) or a PAT (the MCP data tools curry the bearer as
-      // apiKey); no credential, or any other token, is refused with 401 instead of becoming the
-      // superuser admin actor.
-      val branchActorOf =
-        ai.starlake.quack.ondemand.api.BranchHandlers.actorResolver(restCaller)
+      // Branches (Epic 1): the lifecycle service and its REST handlers. Their gate accepts a session
+      // JWT (UI / CLI login) or a PAT (the MCP data tools curry the bearer as apiKey); no credential,
+      // or any other token, is refused with 401.
       lazy val branchService: ai.starlake.quack.ondemand.branch.BranchService =
         new ai.starlake.quack.ondemand.branch.BranchService(
           cfg = mgrCfg.branching,
@@ -1972,7 +1970,6 @@ object Main extends IOApp with LazyLogging:
             sup,
             branchService,
             ph,
-            branchActorOf,
             callerOf = restCaller,
             audit = auditRecorder
           )

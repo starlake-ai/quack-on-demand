@@ -2630,7 +2630,9 @@ final class PostgresControlPlaneStore(
 
   private val BranchMergeCols =
     "id, branch_id, proposer, approver, status, summary_json, conflicts_json, " +
-      "main_snapshot_at_propose, main_snapshot_after, tag_name, error, created_at, decided_at"
+      "main_snapshot_at_propose, main_snapshot_after, tag_name, error, created_at, decided_at, " +
+      "on_conflict, merge_keys_json, head_snapshot_at_propose, row_conflicts_json, hold_writers, " +
+      "attempts"
 
   private def readBranchMerge(rs: ResultSet): BranchMerge =
     BranchMerge(
@@ -2650,15 +2652,25 @@ final class PostgresControlPlaneStore(
       tagName = Option(rs.getString("tag_name")),
       error = Option(rs.getString("error")),
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
-      decidedAt = Option(rs.getTimestamp("decided_at")).map(_.toInstant)
+      decidedAt = Option(rs.getTimestamp("decided_at")).map(_.toInstant),
+      onConflict = Option(rs.getString("on_conflict")),
+      mergeKeysJson = rs.getString("merge_keys_json"),
+      headSnapshotAtPropose = {
+        val v = rs.getLong("head_snapshot_at_propose"); if rs.wasNull() then None else Some(v)
+      },
+      rowConflictsJson = rs.getString("row_conflicts_json"),
+      holdWriters = rs.getBoolean("hold_writers"),
+      attempts = rs.getInt("attempts")
     )
 
   def createBranchMerge(m: BranchMerge): BranchMerge = withConn { c =>
     val ps = c.prepareStatement(
       s"""INSERT INTO qodstate_branch_merge
          |  (id, branch_id, proposer, approver, status, summary_json, conflicts_json,
-         |   main_snapshot_at_propose, main_snapshot_after, tag_name, error, decided_at)
-         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         |   main_snapshot_at_propose, main_snapshot_after, tag_name, error, decided_at,
+         |   on_conflict, merge_keys_json, head_snapshot_at_propose, row_conflicts_json,
+         |   hold_writers, attempts)
+         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          |RETURNING $BranchMergeCols""".stripMargin
     )
     try
@@ -2674,6 +2686,12 @@ final class PostgresControlPlaneStore(
       setNullable(ps, 10, m.tagName)
       setNullable(ps, 11, m.error)
       setNullableInstant(ps, 12, m.decidedAt)
+      setNullable(ps, 13, m.onConflict)
+      ps.setString(14, m.mergeKeysJson)
+      setNullableLong(ps, 15, m.headSnapshotAtPropose)
+      ps.setString(16, m.rowConflictsJson)
+      ps.setBoolean(17, m.holdWriters)
+      ps.setInt(18, m.attempts)
       val rs = ps.executeQuery()
       try
         rs.next(); readBranchMerge(rs)
@@ -2708,7 +2726,7 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       s"""UPDATE qodstate_branch_merge
          |SET status = ?, approver = ?, main_snapshot_after = ?, tag_name = ?, error = ?,
-         |    decided_at = ?
+         |    decided_at = ?, hold_writers = ?, attempts = ?
          |WHERE id = ?
          |RETURNING $BranchMergeCols""".stripMargin
     )
@@ -2719,7 +2737,9 @@ final class PostgresControlPlaneStore(
       setNullable(ps, 4, m.tagName)
       setNullable(ps, 5, m.error)
       setNullableInstant(ps, 6, m.decidedAt)
-      ps.setString(7, m.id)
+      ps.setBoolean(7, m.holdWriters)
+      ps.setInt(8, m.attempts)
+      ps.setString(9, m.id)
       val rs = ps.executeQuery()
       try if rs.next() then Some(readBranchMerge(rs)) else None
       finally rs.close()

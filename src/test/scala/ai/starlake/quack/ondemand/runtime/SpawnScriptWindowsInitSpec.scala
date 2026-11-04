@@ -142,6 +142,48 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     pool should be < lines.indexOf("SELECT 'federation';")
   }
 
+  // Task 18, mirror of SpawnScriptTenantInitSpec: qod-node splits the whole stream on DuckDB's own
+  // tokenizer, so a text with no final `;` ran into the statement after it and both were lost. The
+  // script closes every text it splices in with a `;` on a line of its own, whatever the text ends
+  // in (a `-- comment` with no newline would swallow a `;` on its line), and never edits the text.
+  it should "close a text with no final semicolon with a semicolon line of its own, as stored" in {
+    val tmp     = Files.createDirectories(tempDir.resolve("t"))
+    val secrets = Map(
+      NodeSecretFiles.TenantDbInitTrustedKey   -> "SET threads = 2",
+      "objectStoreSql"                         -> "SELECT 'store'",
+      NodeSecretFiles.TenantPoolInitTrustedKey -> "SET memory_limit = '1GB' -- one gb",
+      "extraSetupSql"                          -> "SELECT 'federation'"
+    )
+    val ((rc, out, err), _) = dryRun(tmp, secrets = secrets)
+    withClue(err)(rc shouldBe 0)
+    val lines = out.linesIterator.map(_.stripSuffix("\r")).toVector
+    secrets.foreach { case (key, text) =>
+      val at = lines.indexOf(text)
+      withClue(s"$key: the text whole on a line of its own, in ${lines.mkString("\n")}")(
+        at should be >= 0
+      )
+      withClue(s"$key: the line after the text")(lines.lift(at + 1) shouldBe Some(";"))
+    }
+  }
+
+  it should "add no terminator for an empty text or a tenant admin's one" in {
+    val tmp                 = Files.createDirectories(tempDir.resolve("t"))
+    val ((rc, out, err), _) = dryRun(tmp)
+    withClue(err)(rc shouldBe 0)
+    out.linesIterator.map(_.stripSuffix("\r")).contains(";") shouldBe false
+    val ((rc2, out2, err2), _) = dryRun(
+      tmp,
+      secrets = Map(NodeSecretFiles.TenantDbInitKey -> "SET threads = 2 -- two")
+    )
+    withClue(err2)(rc2 shouldBe 0)
+    val lines = out2.linesIterator.map(_.stripSuffix("\r")).toVector
+    val db    = lines.indexOf(s"-- qod:untrusted-begin $Nonce database")
+    db should be >= 0
+    lines.slice(db + 1, db + 3) shouldBe
+      Vector("SET threads = 2 -- two", s"-- qod:untrusted-end $Nonce")
+    lines.contains(";") shouldBe false
+  }
+
   // A node whose script was killed leaves its read-only secret directory; the next spawn's sweep
   // gives it back to the current user before removing it (chmod 700 here, the ACL on Windows), and
   // says so on stderr when a node directory cannot be removed.
@@ -375,6 +417,54 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       do Thread.sleep(500)
       got shouldBe Right(List("fed-served"))
       // qod-node read the token and removed the secrets directory as it started.
+      Files.exists(secrets) shouldBe false
+    finally
+      Try(p.descendants().forEach(d => d.destroyForcibly()))
+      p.destroyForcibly()
+      p.waitFor(20, TimeUnit.SECONDS)
+      Try(allocator.close())
+  }
+
+  // Task 18, live: every text below has no final `;` and runs into the one after it without the
+  // script's terminator lines: the database's into the object-store SQL, which ends in a comment
+  // with no newline and runs into the pool's, which ends in one too and runs into the federation
+  // SQL.
+  it should "apply initSql texts with no final semicolon, and run the SQL after each" in {
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val store = ObjectStoreSecret
+      .sql(
+        Map("s3_access_key_id" -> "own-id", "s3_secret_access_key" -> "own-secret"),
+        "s3://lake/acme_lake",
+        "ducklake"
+      )
+      .stripSuffix(";") + " -- the database's own keys"
+    val port            = LiveQodNode.freePort()
+    val (p, _, secrets) = launch(
+      tempDir.resolve("start"),
+      QodNodeTestBinary.path.get,
+      port,
+      secrets = Map(
+        NodeSecretFiles.TenantDbInitTrustedKey   -> "SET threads = 3",
+        "objectStoreSql"                         -> store,
+        NodeSecretFiles.TenantPoolInitTrustedKey -> "SET memory_limit = '2GB' -- two gigabytes",
+        "extraSetupSql"                          -> "CREATE TABLE fed AS SELECT 'fed-served' AS v"
+      ),
+      extraEnv = Seq("QOD_NODE_BIND" -> "127.0.0.1")
+    )
+    val allocator = new org.apache.arrow.memory.RootAllocator()
+    val client    = new ai.starlake.quack.edge.adapter.QuackHttpClient(allocator)
+    val at        = new LiveQodNode.At(NodeId, port, Token, keys)
+    def ask(sql: String): Either[String, List[String]] =
+      Try(at.query(client, sql)).getOrElse(Left("the node never answered"))
+    try
+      val deadline = System.currentTimeMillis() + 60000
+      while ask("SELECT 1").isLeft && System.currentTimeMillis() < deadline do Thread.sleep(500)
+      ask("SELECT 1") shouldBe Right(List("1"))
+      ask("SELECT current_setting('threads')") shouldBe Right(List("3"))
+      ask("SELECT count(*) FROM duckdb_secrets() WHERE name = 'qod_db_store'") shouldBe
+        Right(List("1"))
+      ask("SELECT current_setting('memory_limit')") shouldBe Right(List("1.8 GiB"))
+      ask("SELECT v FROM memory.main.fed") shouldBe Right(List("fed-served"))
       Files.exists(secrets) shouldBe false
     finally
       Try(p.descendants().forEach(d => d.destroyForcibly()))

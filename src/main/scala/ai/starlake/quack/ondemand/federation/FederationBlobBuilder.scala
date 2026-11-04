@@ -8,6 +8,7 @@ import ai.starlake.quack.model.{
 }
 import ai.starlake.quack.ondemand.federation.iceberg.{IcebergRestConfig, IcebergSetupSql}
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind, RdbmsSetupSql}
+import ai.starlake.quack.ondemand.runtime.InitSql
 import cats.effect.IO
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
@@ -64,6 +65,13 @@ final case class ResolvedFederationBlock(
   *     the child node via `extraSetupSql`. NEVER log this output.
   *   - [[logSafePreview]] returns the same blob but with `{{secret.NAME}}` placeholders preserved
   *     (the alias placeholder IS expanded). Safe to log for diagnostics.
+  *
+  * **Blocks that follow one another.** A `sql` source's text is the operator's own, and may end
+  * with no `;` (or in a `-- comment`), which would run into the next block's first statement in the
+  * node's init stream and lose both. A block another follows is therefore closed by a `;` on a line
+  * of its own between the two ([[ai.starlake.quack.ondemand.runtime.InitSql.join]]), outside both
+  * blocks: no source's text is edited, and [[buildOne]]'s block is still the very text that
+  * [[build]] deploys. The last block is closed by whoever appends after it (the spawn script).
   *
   * **SQL-safety of substituted values.** Operator templates routinely wrap secret placeholders in a
   * single-quoted string literal -- the production tpch template literally writes
@@ -136,7 +144,7 @@ final class FederationBlobBuilder(
         }
     }
     blobs = rendered.flatten
-  } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
+  } yield if blobs.isEmpty then None else Some(InitSql.join(blobs))
 
   /** The tenant-db's own DuckDB catalog alias, if the caller can resolve it, folded once here so
     * every reserved entry is folded the same way. Reserved alongside the sibling aliases in

@@ -507,9 +507,38 @@ CASES = [
         {"tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x"},
     ),
     (
-        ["branch", "merge", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x", "--expect-main", "512"],
+        [
+            "branch", "propose", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x",
+            "--on-conflict", "branch", "--key", "sales.orders=order_id",
+            "--key", "sales.items=item_id,line",
+        ],
+        "POST", "/api/branch/propose", {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x", "onConflict": "branch",
+            "keys": {"sales.orders": ["order_id"], "sales.items": ["item_id", "line"]},
+        },
+    ),
+    (
+        [
+            "branch", "merge", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x",
+            "--proposal", "mg-1", "--expect-main", "512",
+        ],
         "POST", "/api/branch/merge", {},
-        {"tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x", "expectedMainSnapshot": 512},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x", "proposalId": "mg-1",
+            "expectedMainSnapshot": 512,
+        },
+    ),
+    (
+        [
+            "branch", "merge", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x",
+            "--proposal", "mg-1", "--hold-writers",
+        ],
+        "POST", "/api/branch/merge", {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x", "proposalId": "mg-1",
+            "holdWriters": True,
+        },
     ),
     (
         ["branch", "discard", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x"],
@@ -810,3 +839,91 @@ def test_pool_lockdown_is_gone(runner):
                               "bi", "--lockdown", "on"])
     assert cmd.exit_code == 2
     assert not create.called and not gone.called
+
+
+@respx.mock
+def test_branch_merge_needs_the_proposal_it_approves(runner):
+    route = respx.post(f"{BASE}/api/branch/merge").mock(return_value=httpx.Response(200, json={}))
+    result = runner.invoke(app, ["branch", "merge", "--tenant", "acme", "--db", "tpch1", "--branch", "x"])
+    assert result.exit_code != 0
+    assert not route.called
+
+
+@pytest.mark.parametrize(
+    "key", ["orders=id", "sales.orders", "sales.orders=", "sales.orders=,", "=id"]
+)
+@respx.mock
+def test_branch_propose_refuses_a_malformed_key_before_calling_the_server(runner, key):
+    route = respx.post(f"{BASE}/api/branch/propose").mock(return_value=httpx.Response(200, json={}))
+    result = runner.invoke(
+        app, ["branch", "propose", "--tenant", "acme", "--db", "tpch1", "--branch", "x", "--key", key]
+    )
+    assert result.exit_code == 2
+    assert "schema.table=column" in result.output
+    assert not route.called
+
+
+@respx.mock
+def test_branch_propose_refuses_a_table_named_by_two_keys(runner):
+    # The second would silently replace the first, and a key with a column fewer matches more rows
+    # of main. Refused whatever the spacing around the name.
+    route = respx.post(f"{BASE}/api/branch/propose").mock(return_value=httpx.Response(200, json={}))
+    base = ["branch", "propose", "--tenant", "acme", "--db", "tpch1", "--branch", "x"]
+    for first, second in (
+        ("sales.orders=a", "sales.orders=b"),
+        (" sales.orders=a", "sales.orders=b"),
+        ("sales.orders=a", "sales.orders =b"),
+    ):
+        result = runner.invoke(app, [*base, "--key", first, "--key", second])
+        assert result.exit_code == 2
+        assert "twice" in result.output
+    assert not route.called
+
+
+@respx.mock
+def test_branch_propose_and_merge_wait_for_the_server(runner):
+    # The server bounds each stage. A fixed read limit gives up on a call the server then completes.
+    propose = respx.post(f"{BASE}/api/branch/propose").mock(return_value=httpx.Response(200, json={}))
+    merge = respx.post(f"{BASE}/api/branch/merge").mock(return_value=httpx.Response(200, json={}))
+    listing = respx.get(f"{BASE}/api/tenant/list").mock(return_value=httpx.Response(200, json=[]))
+    base = ["--tenant", "acme", "--db", "tpch1", "--branch", "x"]
+    assert runner.invoke(app, ["branch", "propose", *base]).exit_code == 0
+    assert runner.invoke(app, ["branch", "merge", *base, "--proposal", "mg-1"]).exit_code == 0
+    assert runner.invoke(app, ["tenant", "list"]).exit_code == 0
+    for route in (propose, merge):
+        limits = route.calls.last.request.extensions["timeout"]
+        assert limits["read"] is None
+        assert limits["connect"] == 30.0
+    assert listing.calls.last.request.extensions["timeout"]["read"] == 30.0
+
+
+@respx.mock
+def test_catalog_restore_and_undrop_wait_for_the_server(runner):
+    # The server bounds a restore's replace and an undrop's CTAS (restoreTimeoutSec, undropTimeoutSec)
+    # and goes on past a client that gave up: a fixed read limit reports a failure for a write that
+    # then lands, and a retry meets concurrent_write or restores twice. The dry run is a bounded read
+    # and keeps the default limit.
+    restore = respx.post(f"{BASE}/api/catalog/restore").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={"schema": "main", "table": "orders", "toSnapshot": 39, "currentSnapshot": 42, "dryRun": True},
+            ),
+            httpx.Response(200, json={}),
+        ]
+    )
+    undrop = respx.post(f"{BASE}/api/catalog/undrop").mock(return_value=httpx.Response(200, json={}))
+    mine = respx.post(f"{BASE}/api/profile/undrop").mock(return_value=httpx.Response(200, json={}))
+    listing = respx.get(f"{BASE}/api/tenant/list").mock(return_value=httpx.Response(200, json=[]))
+    base = ["--db", "tpch1", "--schema", "main", "--table", "orders"]
+    assert runner.invoke(app, ["catalog", "restore", "--tenant", "acme", *base, "--to", "39", "--yes"]).exit_code == 0
+    assert runner.invoke(app, ["catalog", "undrop", "--tenant", "acme", *base]).exit_code == 0
+    assert runner.invoke(app, ["profile", "undrop", *base]).exit_code == 0
+    assert runner.invoke(app, ["tenant", "list"]).exit_code == 0
+    dry_run, replace = restore.calls[0], restore.calls[1]
+    assert dry_run.request.extensions["timeout"]["read"] == 30.0
+    for call in (replace, undrop.calls.last, mine.calls.last):
+        limits = call.request.extensions["timeout"]
+        assert limits["read"] is None
+        assert limits["connect"] == 30.0
+    assert listing.calls.last.request.extensions["timeout"]["read"] == 30.0

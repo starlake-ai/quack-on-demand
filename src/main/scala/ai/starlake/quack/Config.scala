@@ -581,7 +581,9 @@ final case class ManagerConfig(
       envVar = "QOD_STAMP_WRITES",
       description =
         "Stamp DuckLake snapshots created by FlightSQL DML/DDL with author and commit message " +
-          "(native wire bracket; fail-open). Off = writes are never bracketed."
+          "(native wire bracket; fail-open). Off = client writes are never bracketed. A manager " +
+          "handler's own write that names its commit message (a table restore, an undrop) is " +
+          "stamped whatever this says, and is not sent when its stamp fails."
     )
     stampWrites: Boolean,
     @field @ConfigField(
@@ -1222,7 +1224,7 @@ object FleetConfig:
     Cidr.parseList(raw).left.map(e => s"$env: $e")
 
 /** Writable branches of DuckLake tenant-dbs (Epic 1): a branch is a cloned catalog served by its
-  * own one-node pool; agents write there, a human reviews the change set and fast-forward merges.
+  * own one-node pool; agents write there, a human reviews the change set and merges.
   * `enabled = false` refuses every branch endpoint and tool and starts no expiry sweep.
   */
 final case class BranchingConfig(
@@ -1251,19 +1253,39 @@ final case class BranchingConfig(
     @field @ConfigField(
       envVar = "QOD_BRANCH_MERGE_TIMEOUT_SEC",
       description =
-        "Bounded wait for the merge transaction on the ephemeral merge node before the request " +
-          "fails; the commit is probed afterwards so a late commit is still recorded."
+        "Bounded wait for each send to the ephemeral merge node (a stage of a merge or of a " +
+          "proposal's analysis) before the request fails; the commit is probed afterwards so a " +
+          "late commit is still recorded."
     )
     mergeTimeoutSec: Int = 600,
     @field @ConfigField(
       envVar = "QOD_BRANCH_NODE_READY_TIMEOUT_SEC",
       description = "How long to wait for the ephemeral merge node to accept connections."
     )
-    nodeReadyTimeoutSec: Int = 120
+    nodeReadyTimeoutSec: Int = 120,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_MERGE_MAX_ATTEMPTS",
+      description =
+        "How many times a merge tries to commit when main keeps changing the merged tables, " +
+          "before it answers 409 concurrent_write and suggests --hold-writers."
+    )
+    mergeMaxAttempts: Int = 5,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS",
+      description =
+        "Rows one UPDATE may carry per table in a merge. Above it, or after an out-of-memory " +
+          "failure, the update splits into rowid ranges inside the same transaction, which read " +
+          "far more data: 26 times the bytes at 1B rows and 110M rows updated. Raising it is a " +
+          "bet: whether one UPDATE fits does not follow its size (at 16GB it passed at 69M and " +
+          "110M rows and ran out of memory at 92M), and a failure costs a retry with ranges."
+    )
+    mergeUpdateChunkRows: Long = 50000000L
 ):
   require(defaultTtlHours >= 0, "branching: defaultTtlHours must be >= 0")
   require(maxPerDatabase >= 1, "branching: maxPerDatabase must be >= 1")
   require(mergeTimeoutSec >= 1, "branching: mergeTimeoutSec must be >= 1")
+  require(mergeMaxAttempts >= 1, "branching: mergeMaxAttempts must be >= 1")
+  require(mergeUpdateChunkRows >= 1L, "branching: mergeUpdateChunkRows must be >= 1")
   def sweepInterval: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(math.max(60, sweepSec)).seconds
 

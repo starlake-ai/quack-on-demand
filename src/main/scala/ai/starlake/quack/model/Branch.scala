@@ -56,8 +56,13 @@ object BranchMergeStatus:
     values.find(_.wire == s).toRight(s"unknown BranchMergeStatus: '$s'")
 
 /** A merge request on a branch. `summaryJson` / `conflictsJson` are the serialized change set and
-  * conflict list computed at propose time (informational; merge recomputes both). `tagName` is the
-  * snapshot tag stamped on the parent's merge snapshot.
+  * table conflict list computed at propose time (informational; merge recomputes both). `tagName`
+  * is the snapshot tag stamped on the parent's merge snapshot.
+  *
+  * `onConflict` and `mergeKeysJson` are what the proposer asked for. `headSnapshotAtPropose` and
+  * `rowConflictsJson` (row counts and sample rowids, never a cell value) are what the proposal saw:
+  * the merge refuses a moved head or more conflicts than these. `holdWriters` and `attempts` are
+  * what the merge did.
   */
 final case class BranchMerge(
     id: String,
@@ -72,5 +77,11 @@ final case class BranchMerge(
     tagName: Option[String] = None,
     error: Option[String] = None,
     createdAt: Option[Instant] = None,
-    decidedAt: Option[Instant] = None
+    decidedAt: Option[Instant] = None,
+    onConflict: Option[String] = None,
+    mergeKeysJson: String = "{}",
+    headSnapshotAtPropose: Option[Long] = None,
+    rowConflictsJson: String = "[]",
+    holdWriters: Boolean = false,
+    attempts: Int = 0
 )

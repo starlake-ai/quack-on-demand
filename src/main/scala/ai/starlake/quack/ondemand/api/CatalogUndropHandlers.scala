@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.model.{PoolKey, TenantDb}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.branch.MergeDecision
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -429,6 +430,11 @@ final class CatalogUndropHandlers(
         )
       case _ if code == StatusCode.Gone =>
         RouterFailure.NotFound(s"$schema.$table is no longer recoverable: ${err.message}")
+      // A failure the catalog showed committed nothing and that a retry may get past (a stamp that
+      // failed, no node to take it): it keeps the class that says so, with its cause, where
+      // Internal is the class the router keeps for outcomes to be checked before a retry.
+      case "undrop_failed" if err.retryable.contains(true) =>
+        RouterFailure.Unavailable(err.message)
       case _ => RouterFailure.Internal(err.message)
 
   /** Audits one recovery: ok with its detail, or denied. */
@@ -547,18 +553,25 @@ final class CatalogUndropHandlers(
                       Right(UndropResponse(entry.schema, entry.table, target, fromSnapshot))
                     // Unique to this run: the router stamps the CTAS's commit with it in place of
                     // `flightsql create` (its own prelude, never client SQL, so no policy screen
-                    // sees a commit-message call). A failure that may hide a commit is settled by
-                    // this commit alone, never by whatever table holds the name now: another
-                    // writer's CREATE, or another undrop's, would hold it too.
+                    // sees a commit-message call). The stamp is required: sent whatever
+                    // QOD_STAMP_WRITES says, and a CTAS whose stamp fails is never sent, so a
+                    // commit of this run always carries the message. A failure that may hide a
+                    // commit is settled by this commit alone, never by whatever table holds the
+                    // name now: another writer's CREATE, or another undrop's, would hold it too.
                     val message =
                       s"undrop ${entry.schema}.${entry.table} as ${entry.schema}.$target " +
                         s"from snapshot $fromSnapshot [${java.util.UUID.randomUUID()}]"
                     // `lost`: the answer cannot tell whether the CTAS committed (a timeout, a
                     // broken stream). A definite failure keeps its own words unless the catalog
-                    // shows this commit after all.
+                    // shows this commit after all. `retryable`: the failure is one the router
+                    // calls Unavailable, a write that never went out (a stamp that failed, no node
+                    // to take it), or a COMMIT the node itself refused because DuckLake gave up on
+                    // its retries: once the catalog shows none of this run's commit, it says
+                    // nothing was committed and a retry is safe, with the cause.
                     def settled(
                         reason: String,
-                        lost: Boolean
+                        lost: Boolean,
+                        retryable: Boolean
                     ): Either[(StatusCode, ErrorResponse), UndropResponse] =
                       scala.util.Try(reader.snapshotByCommitMessage(message)) match
                         case scala.util.Success(Some(_)) => committed
@@ -575,8 +588,18 @@ final class CatalogUndropHandlers(
                             "undrop_outcome_unknown",
                             s"$reason; a table now holds ${entry.schema}.$target, but the " +
                               "catalog shows no commit by this undrop (another writer may have " +
-                              "created it, or writes are not stamped: QOD_STAMP_WRITES); check " +
-                              "it before retrying"
+                              "created it); check it before retrying"
+                          )
+                        case scala.util.Success(None) if retryable =>
+                          Left(
+                            (
+                              StatusCode.BadGateway,
+                              ErrorResponse(
+                                "undrop_failed",
+                                s"$reason; nothing was committed, so the undrop can be retried",
+                                retryable = Some(true)
+                              )
+                            )
                           )
                         case scala.util.Success(None) =>
                           err(StatusCode.BadGateway, "undrop_failed", reason)
@@ -594,18 +617,24 @@ final class CatalogUndropHandlers(
                       .attempt
                       .map {
                         case Left(e) =>
-                          // Cancellation of the blocking HTTP leg is best-effort, so a CTAS that
-                          // outlives the timeout may still have committed on the node.
+                          // A CTAS that outlives the bound is cancelled, which its statement sees
+                          // when it answers: the connection closes without the COMMIT and the
+                          // transaction rolls back. The catalog still decides, since a COMMIT
+                          // already in flight could land.
                           val reason = e match
                             case _: java.util.concurrent.TimeoutException =>
                               s"undrop timed out after ${cfg.undropTimeoutSec}s"
                             case other => s"undrop failed: ${other.getMessage}"
-                          settled(reason, lost = true)
+                          settled(reason, lost = true, retryable = false)
                         case Right(Left(RouterFailure.AccessDenied(reason))) =>
                           err(StatusCode.Forbidden, "acl_denied", reason)
                         case Right(Left(failure)) =>
                           // The router's own "outcome is unknown" included: its words say so.
-                          settled(failure.reason, lost = false)
+                          settled(
+                            failure.reason,
+                            lost = false,
+                            retryable = failure.isInstanceOf[RouterFailure.Unavailable]
+                          )
                         case Right(Right(result)) =>
                           // Read to its end before answering: a stamped CTAS commits when its
                           // stream is exhausted, and a refused COMMIT fails it there (closing an
@@ -613,7 +642,13 @@ final class CatalogUndropHandlers(
                           // went out is settled from the catalog, as a timeout is.
                           WriteResults.drain(result) match
                             case Right(_)  => committed
-                            case Left(why) => settled(s"undrop failed: $why", lost = true)
+                            case Left(why) =>
+                              settled(
+                                s"undrop failed: ${why.message}",
+                                lost = true,
+                                retryable =
+                                  why.nodeRefused && MergeDecision.retriesExhausted(why.message)
+                              )
                       }
 
 object CatalogUndropHandlers:

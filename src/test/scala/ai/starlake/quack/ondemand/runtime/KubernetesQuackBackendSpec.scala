@@ -979,3 +979,150 @@ class KubernetesQuackBackendSpec
     pod.getSpec.getServiceAccountName shouldBe null
     val svc = server.getClient.services.inNamespace("default").withName("quack-sa2").get()
     svc.getSpec.getType shouldBe "ClusterIP"
+
+  // ---------- pool labels a real API server accepts ----------
+
+  /** The rule a real API server names in its 422. The mock here does not validate labels, so this
+    * spec reads what was written against it.
+    */
+  private val LabelRule = "(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?".r
+
+  private val MergeKey     = PoolKey("acme", "acme_default", "__merge")
+  private val MergeFedName = "qod-fedsql-acme-acme-default---merge"
+  private val MergeEnvName = "qod-nodeenv-acme-acme-default---merge"
+
+  /** A node of `key` with both per-pool Secrets. */
+  private def nodeOf(key: PoolKey, nodeId: String) = NodeSpec(
+    key,
+    nodeId,
+    Role.Dual,
+    metastore = Map("pgPassword" -> "p"),
+    s3 = Map.empty,
+    extraSetupSql = FedSql
+  )
+
+  private def podLabelsOf(nodeId: String): Map[String, String] =
+    server.getClient.pods
+      .inNamespace("default")
+      .withName(nodeId)
+      .get()
+      .getMetadata
+      .getLabels
+      .asScala
+      .toMap
+
+  private def secretLabelsOf(name: String): Map[String, String] =
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName(name)
+      .get()
+      .getMetadata
+      .getLabels
+      .asScala
+      .toMap
+
+  "pool labels" should "be written as the rule accepts, on the pod and on each per-pool Secret" in:
+    fedBackend.start(nodeOf(MergeKey, "merge-n1")).unsafeRunSync()
+    val labels = podLabelsOf("merge-n1")
+    labels("quack-tenant") shouldBe "acme"
+    labels("quack-tenant-db") shouldBe "acme_default"
+    labels("quack-pool") shouldBe "qod.__merge.qod"
+    labels.values.foreach(v => withClue(v)(LabelRule.matches(v) shouldBe true))
+    List(MergeFedName, MergeEnvName).foreach { name =>
+      val onSecret = secretLabelsOf(name)
+      onSecret("quack-pool") shouldBe "qod.__merge.qod"
+      onSecret.values.foreach(v => withClue(v)(LabelRule.matches(v) shouldBe true))
+    }
+
+  it should "cover every name of the key, a user's too" in:
+    val key = PoolKey("_t", "_t_db_", "x_")
+    fedBackend.start(nodeOf(key, "odd-n1")).unsafeRunSync()
+    val labels = podLabelsOf("odd-n1")
+    (labels("quack-tenant"), labels("quack-tenant-db"), labels("quack-pool")) shouldBe
+      (("qod._t.qod", "qod._t_db_.qod", "qod.x_.qod"))
+
+  it should "leave a name the rule accepts as it is, so a running pod and its selector stay" in:
+    fedBackend.start(nodeOf(FedKey, "sales-n1")).unsafeRunSync()
+    val labels = podLabelsOf("sales-n1")
+    (labels("quack-tenant"), labels("quack-tenant-db"), labels("quack-pool")) shouldBe
+      (("acme", "acme_default", "sales"))
+    val selector = server.getClient.services
+      .inNamespace("default")
+      .withName("sales-n1")
+      .get()
+      .getSpec
+      .getSelector
+      .asScala
+      .toMap
+    (selector("quack-tenant"), selector("quack-tenant-db"), selector("quack-pool")) shouldBe
+      (("acme", "acme_default", "sales"))
+
+  it should "select on what is written: the Service, liveNodeIds and the per-pool Secrets' GC" in:
+    val backend = fedBackend
+    backend.start(nodeOf(MergeKey, "merge-n1")).unsafeRunSync()
+    backend.start(nodeOf(MergeKey, "merge-n2")).unsafeRunSync()
+    val labels   = podLabelsOf("merge-n1")
+    val selector = server.getClient.services
+      .inNamespace("default")
+      .withName("merge-n1")
+      .get()
+      .getSpec
+      .getSelector
+      .asScala
+      .toMap
+    selector.keySet should contain("quack-pool")
+    selector.foreach((k, v) => labels.get(k) shouldBe Some(v))
+    backend.liveNodeIds(MergeKey).unsafeRunSync() shouldBe Some(Set("merge-n1", "merge-n2"))
+    // A sibling keeps the pool's Secrets: the GC finds it by what it wrote.
+    backend.stop(MergeKey, "merge-n1").unsafeRunSync()
+    server.getClient.secrets.inNamespace("default").withName(MergeFedName).get() should not be null
+    server.getClient.secrets.inNamespace("default").withName(MergeEnvName).get() should not be null
+    backend.liveNodeIds(MergeKey).unsafeRunSync() shouldBe Some(Set("merge-n2"))
+    backend.stop(MergeKey, "merge-n2").unsafeRunSync()
+    server.getClient.secrets.inNamespace("default").withName(MergeFedName).get() shouldBe null
+    server.getClient.secrets.inNamespace("default").withName(MergeEnvName).get() shouldBe null
+
+  it should "name each per-pool Secret as the API accepts, for a pool ending in an underscore too" in:
+    // A real API server's rule for a Secret's name. No two pools share one: `x_` is not `x_0`.
+    val secretName = "[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
+    val backend    = fedBackend
+    val pools      = List("x_", "x_0", "x__", "_x_", "__merge", "sales")
+    pools.zipWithIndex.foreach { (pool, i) =>
+      backend.start(nodeOf(PoolKey("acme", "acme_default", pool), s"named-n$i")).unsafeRunSync()
+    }
+    val names = server.getClient.secrets
+      .inNamespace("default")
+      .list()
+      .getItems
+      .asScala
+      .toList
+      .map(_.getMetadata.getName)
+    names.foreach(name => withClue(name)(name should fullyMatch regex secretName))
+    names.count(_.startsWith("qod-fedsql-")) shouldBe pools.size
+    names.count(_.startsWith("qod-nodeenv-")) shouldBe pools.size
+    // A name that was valid stays what it was: a running pod reads its Secret by it.
+    names should contain("qod-fedsql-acme-acme-default-sales")
+    names should contain("qod-nodeenv-acme-acme-default---merge")
+    names should contain("qod-fedsql-acme-acme-default-x-0")
+    // The pod draws from the Secret written, and the last pod's stop removes it.
+    val pod   = server.getClient.pods.inNamespace("default").withName("named-n0").get()
+    val trail = SecretsVolumeView.files(pod)("extraSetupSql")._1
+    names should contain(trail)
+    trail shouldBe "qod-fedsql-acme-acme-default-x-0.qod"
+    backend.stop(PoolKey("acme", "acme_default", "x_"), "named-n0").unsafeRunSync()
+    server.getClient.secrets.inNamespace("default").withName(trail).get() shouldBe null
+
+  it should "read back from discovery the pool that was written" in:
+    val keys = List(
+      MergeKey,
+      PoolKey("acme", "acme_default", "__maint"),
+      PoolKey("acme", "acme_default__br_abcd1234", "__br_abcd1234"),
+      PoolKey("_t", "_t_db_", "x_"),
+      FedKey
+    )
+    val backend = fedBackend
+    keys.zipWithIndex.foreach { (key, i) =>
+      backend.start(nodeOf(key, s"disc-n$i")).unsafeRunSync()
+    }
+    backend.discoverExisting().unsafeRunSync().map(n => (n.nodeId, n.poolKey)).toSet shouldBe
+      keys.zipWithIndex.map((key, i) => (s"disc-n$i", key)).toSet

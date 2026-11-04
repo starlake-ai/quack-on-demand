@@ -1,82 +1,175 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.{BranchingConfig, ManagedObjectStoreConfig}
-import ai.starlake.quack.edge.adapter.{QuackHttpAdapter, QuackResponse}
-import ai.starlake.quack.model.{Branch, NodeSpec}
+import ai.starlake.quack.edge.adapter.{ListFailure, QuackError, QuackHttpAdapter, QuackResponse}
+import ai.starlake.quack.model.{Branch, NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.api.{
   ArrowRowsDecoder,
   CatalogPreviewHandlers,
   DataDiffSql,
   ExecCaller
 }
-import ai.starlake.quack.ondemand.branch.{BranchService, ChangeCounter, MergeExecutor, TableChange}
+import ai.starlake.quack.ondemand.branch.{
+  BranchMergeSql,
+  BranchService,
+  ChangeCounter,
+  MergeExecutor,
+  MergeNode,
+  TableChange
+}
 import ai.starlake.quack.ondemand.runtime.{NodeReadiness, QuackBackend}
 import ai.starlake.quack.ondemand.storage.S3ManagedStoreClient
 import cats.effect.{FiberIO, IO}
 import com.typesafe.scalalogging.LazyLogging
+import io.circe.Json
 
 import java.nio.file.{Files, Path}
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
 /** The world-touching collaborators of the branch service (Epic 1), extracted from Main like the
-  * maintenance wiring: the ephemeral merge node runner (same spawn / await-ready / stop bracket as
-  * maintenance), the change-feed counter (one `ducklake_table_changes` aggregate per modified table
-  * on the branch pool through the routed executor), the branch-prefix purge (local filesystem or
+  * maintenance wiring: the ephemeral merge node runner (spawn, await-ready, run a body that may
+  * send several stages, stop), the change-feed counter (one rowid-only count per modified table on
+  * the branch pool through the routed executor), the branch-prefix purge (local filesystem or
   * S3-compatible store with the tenant-db's own credentials), and the leader-gated TTL sweep.
   */
 object BranchWiring extends LazyLogging:
 
-  /** Spawns `spec`, waits for it to accept connections, sends the batch, stops the node. The wait
-    * is bounded by `mergeTimeoutSec`; a timeout is reported as `Left("timeout ...")` and the caller
-    * settles the outcome by locating the commit message on the parent.
+  /** Merge node reads are one row of counts or up to 80 sample rowids. A longer result is refused,
+    * never cut.
+    */
+  private val MergeNodeMaxRows = 1000
+
+  /** Spawns `spec`, waits for it to accept connections, runs the body, stops the node. Each call on
+    * the node is bounded by `mergeTimeoutSec`, a list of statements as a whole: one that does not
+    * answer in time is abandoned (the statement in flight ends when the node is stopped, and a list
+    * sends no other) and reported as a `Left` starting with [[MergeExecutor.TimedOut]], and the
+    * caller settles the outcome by locating the commit message on the parent. A stop that raises is
+    * logged at ERROR; Kubernetes' timeout and fleet's deadline return normally (each logs a WARN of
+    * its own), so a node can outlive its stop.
     */
   def mergeExecutor(
       cfg: BranchingConfig,
       backend: QuackBackend,
       adapter: QuackHttpAdapter
   ): MergeExecutor = new MergeExecutor:
-    def run(spec: NodeSpec, batch: String): IO[Either[String, Unit]] =
-      backend.start(spec).attempt.flatMap {
-        case Left(e)     => IO.pure(Left(s"merge node spawn failed: ${e.getMessage}"))
-        case Right(node) =>
-          val body = NodeReadiness
-            .awaitReachable(
-              node.host,
-              node.port,
-              timeout = cfg.nodeReadyTimeoutSec.seconds,
-              isAlive = () => backend.isAlive(node.nodeId)
-            )
-            .flatMap { ready =>
-              if !ready then
-                IO.pure(
-                  Left(
-                    s"merge node ${node.nodeId} did not accept connections within ${cfg.nodeReadyTimeoutSec}s"
-                  )
-                )
-              else
-                adapter
-                  .send(
-                    node,
-                    batch,
-                    ai.starlake.quack.edge.authz.NodePrincipal.System,
-                    session = None,
-                    recordLoad = false
-                  )
-                  .map {
-                    case QuackResponse.Ok(_, _, close) =>
-                      close(); Right(())
-                    case QuackResponse.Failed(err, _) => Left(err.toString)
-                  }
-                  .timeoutTo(
-                    cfg.mergeTimeoutSec.seconds,
-                    IO.pure(
-                      Left(s"timeout: merge batch did not answer within ${cfg.mergeTimeoutSec}s")
+
+    def withNode[A](
+        spec: NodeSpec
+    )(body: MergeNode => IO[Either[String, A]]): IO[Either[String, A]] =
+      // A bracket: the spawn runs masked, so a cancel pending when it returns still stops the node.
+      backend
+        .start(spec)
+        .attempt
+        .bracket {
+          case Left(e)     => IO.pure(Left(s"merge node spawn failed: ${e.getMessage}"))
+          case Right(node) =>
+            NodeReadiness
+              .awaitReachable(
+                node.host,
+                node.port,
+                timeout = cfg.nodeReadyTimeoutSec.seconds,
+                isAlive = () => backend.isAlive(node.nodeId)
+              )
+              .flatMap { ready =>
+                if ready then body(on(node))
+                else
+                  IO.pure(
+                    Left(
+                      s"merge node ${node.nodeId} did not accept connections within ${cfg.nodeReadyTimeoutSec}s"
                     )
                   )
-            }
-          body.guarantee(backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit))
+              }
+        } {
+          case Left(_)     => IO.unit
+          case Right(node) => stopped(node)
+        }
+
+    /** Stops `node`. A stop that raises is logged at ERROR, not swallowed: the node may still be
+      * running, and a caller that counts on it being gone needs the trace. A stop that returns is
+      * taken as done, though Kubernetes' timeout and fleet's deadline return without confirming.
+      */
+    private def stopped(node: RunningNode): IO[Unit] =
+      backend.stop(node.poolKey, node.nodeId).handleErrorWith { e =>
+        IO.delay(
+          logger.error(
+            s"merge node ${node.nodeId} could not be stopped and may still be running: " +
+              e.getMessage,
+            e
+          )
+        )
       }
+
+    /** `call` within `mergeTimeoutSec`. The bound holds even when the send is stuck: the production
+      * client's send is uncancelable (a blocking POST with no request timeout of its own), so
+      * waiting for it to end, as `timeoutTo` does, would hold the answer for as long as the node
+      * hangs. The send is abandoned instead, and ends when `backend.stop` kills the node. The
+      * cancel still reaches it: once the statement in flight answers, a list closes its connection
+      * and sends no other, so only a COMMIT the client had already begun to send can land after a
+      * timeout.
+      */
+    private def bounded[A](call: IO[Either[String, A]]): IO[Either[String, A]] =
+      call
+        .timeoutAndForget(cfg.mergeTimeoutSec.seconds)
+        .recover { case _: TimeoutException =>
+          val sec = cfg.mergeTimeoutSec
+          Left(
+            s"${MergeExecutor.TimedOut}the merge node did not answer within ${sec}s; " +
+              "raise QOD_BRANCH_MERGE_TIMEOUT_SEC if the stage needs longer"
+          )
+        }
+
+    private def send(node: RunningNode, sql: String) =
+      adapter.send(
+        node,
+        sql,
+        ai.starlake.quack.edge.authz.NodePrincipal.System,
+        session = None,
+        recordLoad = false
+      )
+
+    // A close is a blocking POST (the DISCONNECT), so it runs on the blocking pool.
+    private def on(node: RunningNode): MergeNode = new MergeNode:
+      def exec(statements: List[String]): IO[Either[String, Unit]] =
+        bounded(
+          adapter
+            .sendAll(node, statements, ai.starlake.quack.edge.authz.NodePrincipal.System)
+            .map(_.left.map(reasonOf(statements, _)))
+        )
+
+      def rows(sql: String): IO[Either[String, List[List[Json]]]] =
+        bounded(send(node, sql).flatMap {
+          case QuackResponse.Failed(err, _)       => IO.pure(Left(textOf(err)))
+          case QuackResponse.Ok(reader, _, close) =>
+            IO.blocking(ArrowRowsDecoder.decode(reader, MergeNodeMaxRows))
+              .guarantee(IO.blocking(close()))
+              .attempt
+              .map {
+                case Left(e)             => Left(s"reading the result: ${e.getMessage}")
+                case Right((_, _, true)) =>
+                  Left(s"the result holds more than $MergeNodeMaxRows rows")
+                case Right((_, rows, false)) => Right(rows)
+              }
+        })
+
+    /** What a list's failure tells the merge. A COMMIT that went out and got no answer has an
+      * unknown outcome: it can still be running, and land after any look. So it reads as a send
+      * that timed out, which keeps the proposal open and the fence row up, and the next merge
+      * settles it. Everything else is definite. Before COMMIT nothing can land: no COMMIT was sent,
+      * and the connection's end rolls back. An answer from the node to COMMIT says what became of
+      * it: a fence refusal stays a retryable refusal, a commit conflict what it is.
+      */
+    private def reasonOf(statements: List[String], failure: ListFailure): String = failure match
+      case ListFailure(Some(entry), QuackError.Transient(message, false))
+          if statements.lift(entry).contains(BranchMergeSql.Commit) =>
+        val firstLine = message.linesIterator.nextOption().getOrElse("")
+        s"${MergeExecutor.TimedOut}the answer to COMMIT was lost, so it may have landed: $firstLine"
+      case ListFailure(_, err) => textOf(err)
+
+    private def textOf(err: QuackError): String = err match
+      case QuackError.Transient(message, _) => message
+      case QuackError.Permanent(message)    => message
 
   /** Counts through the same executor the catalog data-diff uses, as the caller the service hands
     * it: the requester for counts asked over REST or MCP, the system caller only for propose's

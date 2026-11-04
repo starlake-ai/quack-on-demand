@@ -383,6 +383,15 @@ int main() {
 	for (auto feed : {"SELECT * FROM ducklake_table_changes('lake', 'main', 't', 1, 3)",
 	                  "SELECT change_type, count(*) AS n FROM ducklake_table_changes('lake', 'main', 't', 2, 3) "
 	                  "GROUP BY change_type",
+	                  // DataDiffSql.summarySql's statement, as the data diff, the restore dry run and the
+	                  // branch counts send it. The same text is in describer_extension_test.cpp and in
+	                  // CatalogPreviewHandlersSpec: change them together.
+	                  "SELECT CASE WHEN d.rowid IS NULL THEN 'insert' WHEN i.rowid IS NULL THEN 'delete' "
+	                  "ELSE 'update_postimage' END AS change_type, count(*) AS n "
+	                  "FROM (SELECT snapshot_id, rowid FROM ducklake_table_deletions('lake', 'main', 't', 2, 3)) d "
+	                  "FULL JOIN (SELECT snapshot_id, rowid "
+	                  "FROM ducklake_table_insertions('lake', 'main', 't', 2, 3)) i "
+	                  "ON d.snapshot_id = i.snapshot_id AND d.rowid = i.rowid GROUP BY change_type",
 	                  "SELECT * FROM ducklake_table_insertions('lake', 'main', 't', 1, 3)",
 	                  "FROM ducklake_table_deletions('lake', 'main', 't', 1, 3)",
 	                  "SELECT * FROM system.main.ducklake_table_changes('lake', 'main', 't', 1, 3)",

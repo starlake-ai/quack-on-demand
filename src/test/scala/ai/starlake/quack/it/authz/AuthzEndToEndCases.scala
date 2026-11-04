@@ -1966,9 +1966,9 @@ abstract class AuthzEndToEndCases(
 
   "DuckLake's change feed" should "give a user the data diff and change counts of a table they may read" in {
     ready()
-    // The superuser's answer, the reference: three inserts, one update (pre and post), one delete.
+    // The superuser's answer, the reference: three inserts, one update, one delete.
     val counts = admin("lake", feedSummary("feed_a")).sorted
-    counts shouldBe List("delete,1", "insert,3", "update_postimage,1", "update_preimage,1")
+    counts shouldBe List("delete,1", "insert,3", "update_postimage,1")
     doors.foreach { d =>
       withClue(s"[$d] fran: the counts of feed_a -> ") {
         as(d, "fran", "lake", feedSummary("feed_a")).map(_.sorted) shouldBe Right(counts)

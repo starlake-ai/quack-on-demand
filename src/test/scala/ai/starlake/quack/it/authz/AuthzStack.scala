@@ -60,7 +60,11 @@ final class AuthzStack(
       */
     stackPrefixes: List[String] = Nil,
     /** Manager modules booted with the stack, as `ModuleLoader.discover()` hands them to Main. */
-    modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
+    modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
+    /** How often the maintenance drain looks for a queued run, for a spec that waits on one. */
+    maintenanceTickSec: Option[Int] = None,
+    /** `quack-on-demand.stampWrites` (`QOD_STAMP_WRITES`), the manager's own default. */
+    stampWrites: Boolean = true
 ):
   import Main.given
 
@@ -101,6 +105,8 @@ final class AuthzStack(
          |  nodeAuthz.internalUrl = "http://127.0.0.1:$replicaPort"
          |  tenantFiles.root = "$filesRoot"
          |  userS3.allowedEndpoints = "$userS3Endpoints"
+         |  ${maintenanceTickSec.fold("")(sec => s"maintenance.tickSec = $sec")}
+         |  stampWrites = $stampWrites
          |  defaultMetastore {
          |    pgHost = "${TestPostgres.pgHost}"
          |    pgPort = "${TestPostgres.pgPort}"
@@ -211,11 +217,16 @@ final class AuthzStack(
     last.getOrElse(throw new IllegalStateException(s"timed out waiting for $what$lastErr"))
 
   /** A REST call as the seeded admin (or the session `token`): (status, body). */
-  def postStatus(path: String, json: String, token: String = session): (Int, String) =
+  def postStatus(
+      path: String,
+      json: String,
+      token: String = session,
+      timeoutSec: Int = 30
+  ): (Int, String) =
     val r = http.send(
       HttpRequest
         .newBuilder(URI.create(s"http://127.0.0.1:$restPort$path"))
-        .timeout(Duration.ofSeconds(30))
+        .timeout(Duration.ofSeconds(timeoutSec.toLong))
         .header("X-API-Key", token)
         .header("Content-Type", "application/json")
         .POST(HttpRequest.BodyPublishers.ofString(json))
@@ -224,8 +235,8 @@ final class AuthzStack(
     )
     (r.statusCode(), r.body())
 
-  def post(path: String, json: String, token: String = session): Json =
-    val (code, body) = postStatus(path, json, token)
+  def post(path: String, json: String, token: String = session, timeoutSec: Int = 30): Json =
+    val (code, body) = postStatus(path, json, token, timeoutSec)
     if code < 200 || code >= 300 then throw new IllegalStateException(s"POST $path -> $code $body")
     if body.isBlank then Json.Null else parse(body).fold(e => throw e, identity)
 
@@ -306,9 +317,10 @@ final class AuthzStack(
       password: String,
       tenant: String,
       pool: String,
-      superuser: Boolean = false
+      superuser: Boolean = false,
+      branch: Option[String] = None
   ): Either[String, List[String]] =
-    flightCall(sql, user, password, tenant, pool, superuser).left.map(_.getMessage)
+    flightCall(sql, user, password, tenant, pool, superuser, branch).left.map(_.getMessage)
 
   /** As [[flight]], the failure as the client got it: its Flight status code and description. */
   def flightCall(
@@ -317,7 +329,8 @@ final class AuthzStack(
       password: String,
       tenant: String,
       pool: String,
-      superuser: Boolean = false
+      superuser: Boolean = false,
+      branch: Option[String] = None
   ): Either[FlightRuntimeException, List[String]] =
     val allocator = new RootAllocator()
     val raw       =
@@ -327,6 +340,7 @@ final class AuthzStack(
       hdrs.insert("tenant", tenant)
       hdrs.insert("pool", pool)
       if superuser then hdrs.insert("superuser", "true")
+      branch.foreach(b => hdrs.insert("branch", b))
       hdrs.insert(
         "authorization",
         "Basic " + Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))

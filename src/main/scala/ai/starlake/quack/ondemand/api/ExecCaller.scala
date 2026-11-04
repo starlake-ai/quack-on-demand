@@ -37,8 +37,10 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   *
   * `commitMessage` is the DuckLake commit message the router stamps this caller's write with in
   * place of `flightsql <verb>` (the author stays the caller's). It grants and decides nothing: a
-  * handler sets it on its own write so it can find that commit afterwards by its unique message,
-  * when the answer was lost (undrop). No credential sets it, and it never travels in client SQL.
+  * handler sets it on its own write so it can find that commit afterwards by its unique message (a
+  * restore's commit fence matches it; a restore's and an undrop's lost answer is settled by it).
+  * The stamp is then required: it is sent whatever `QOD_STAMP_WRITES` says, and a write whose stamp
+  * fails is not sent. No credential sets it, and it never travels in client SQL.
   */
 final case class ExecCaller(
     connectionId: String,

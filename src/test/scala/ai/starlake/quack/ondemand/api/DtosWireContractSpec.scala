@@ -278,6 +278,43 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
     TagProtectRequest("a", "d", "v1", isProtected = true).asJson.hcursor
       .get[Boolean]("protected") shouldBe Right(true)
 
+  // ----- Branch requests: the CLI sends only what it was given --------------
+
+  "BranchProposeRequest" should "default the policy and the keys when absent from the wire" in:
+    decode[BranchProposeRequest]("""{"tenant":"acme","tenantDb":"db","branch":"b"}""") shouldBe
+      Right(BranchProposeRequest("acme", "db", "b"))
+
+  it should "read the policy and the keys from the wire" in:
+    val json =
+      """{"tenant":"acme","tenantDb":"db","branch":"b","onConflict":"branch",
+        |"keys":{"sales.orders":["id","line"]}}""".stripMargin
+    decode[BranchProposeRequest](json) shouldBe Right(
+      BranchProposeRequest(
+        "acme",
+        "db",
+        "b",
+        Some("branch"),
+        Map("sales.orders" -> List("id", "line"))
+      )
+    )
+
+  "BranchMergeRequest" should "default the snapshot and the hold when absent from the wire" in:
+    decode[BranchMergeRequest](
+      """{"tenant":"acme","tenantDb":"db","branch":"b","proposalId":"mg-1"}"""
+    ) shouldBe Right(BranchMergeRequest("acme", "db", "b", "mg-1"))
+
+  it should "read the snapshot and the hold from the wire" in:
+    val json =
+      """{"tenant":"acme","tenantDb":"db","branch":"b","proposalId":"mg-1",
+        |"expectedMainSnapshot":512,"holdWriters":true}""".stripMargin
+    decode[BranchMergeRequest](json) shouldBe Right(
+      BranchMergeRequest("acme", "db", "b", "mg-1", Some(512L), holdWriters = true)
+    )
+
+  it should "refuse a request that names no proposal" in:
+    decode[BranchMergeRequest]("""{"tenant":"acme","tenantDb":"db","branch":"b"}""").isLeft shouldBe
+      true
+
   // ----- ErrorResponse: optional fields never reach the wire as null ------
 
   "ErrorResponse" should "encode the two-field shape with no null keys" in:

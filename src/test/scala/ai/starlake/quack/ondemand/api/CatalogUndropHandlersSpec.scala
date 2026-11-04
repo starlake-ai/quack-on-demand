@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
-import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.adapter.{NodeLoadTracker, QuackWireError}
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
@@ -211,6 +211,35 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
       """CREATE TABLE "tpch1"."back" AS SELECT * FROM "tpch1"."doomed" AT (VERSION => 39)"""
     )
 
+  it should "keep the class of a transient failure on UNDROP TABLE: retryable, nothing committed, its cause" in new Stubs:
+    // A failed stamp is not committed: the router's Unavailable says retry, and so does this.
+    executorResult = IO.pure(
+      Left(RouterFailure.Unavailable("no fallback node available after: connection reset"))
+    )
+    val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-carol", Some("acme"), "carol", kind = "user"),
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    val out = handlers()
+      .undropStatement(
+        "conn-8",
+        "carol",
+        PoolKey("acme", "acme_tpch1", "bi"),
+        Some(eff),
+        Some("TPCH1"),
+        "DOOMED",
+        None
+      )
+      .unsafeRunSync()
+    out match
+      case Left(RouterFailure.Unavailable(reason)) =>
+        reason should include("connection reset")
+        reason should include("nothing was committed")
+      case other => fail(s"expected Unavailable, got $other")
+
   "recoverable" should "return the reader's dropped tables" in new Stubs:
     val out =
       handlers().recoverable("acme", "acme_tpch1", None, RootKey)(SuperuserScope).unsafeRunSync()
@@ -256,6 +285,77 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.message should include("COMMIT failed: boom")
     telemetryStore.events.last.outcome should not be "ok"
     shut shouldBe true
+
+  it should "say a transient failure committed nothing and can be retried, with its cause" in new Stubs:
+    // What a failed stamp comes to: the router's Unavailable, the write never sent.
+    executorResult = IO.pure(
+      Left(RouterFailure.Unavailable("no fallback node available after: connection reset"))
+    )
+    val out             = undrop(handlers())
+    val (status, error) = out.left.toOption.get
+    status shouldBe StatusCode.BadGateway
+    error.error shouldBe "undrop_failed"
+    error.retryable shouldBe Some(true)
+    error.message should include("connection reset")
+    error.message should include("nothing was committed")
+    telemetryStore.events.last.outcome should not be "ok"
+
+  /** A stamped COMMIT the node itself refused because DuckLake gave up on its retries. */
+  private val RetriesExhausted =
+    "Failed to commit DuckLake transaction.\n" +
+      "Exceeded the maximum retry count of 10 set by the ducklake_max_retry_count setting."
+
+  /** A result whose stream fails as the node's own answer to the COMMIT does. */
+  private def refusedReader(message: String): org.apache.arrow.vector.ipc.ArrowReader =
+    val under = emptyReader()
+    new org.apache.arrow.vector.ipc.ArrowReader(new RootAllocator()):
+      override def loadNextBatch(): Boolean          = throw QuackWireError.Permanent(message)
+      override def getVectorSchemaRoot               = under.getVectorSchemaRoot
+      override def bytesRead(): Long                 = 0L
+      override protected def readSchema(): Schema    = under.getVectorSchemaRoot.getSchema
+      override protected def closeReadSource(): Unit = under.close()
+
+  it should "say a COMMIT DuckLake gave up on committed nothing and can be retried" in new Stubs:
+    executorResult = IO.pure(
+      Right(QueryResult(refusedReader(RetriesExhausted), () => (), "node-1", 1L))
+    )
+    val (status, error) = undrop(handlers()).left.toOption.get
+    status shouldBe StatusCode.BadGateway
+    error.error shouldBe "undrop_failed"
+    error.retryable shouldBe Some(true)
+    error.message should include("Exceeded the maximum retry count")
+    error.message should include("nothing was committed")
+    telemetryStore.events.last.outcome should not be "ok"
+
+  it should "ask the catalog first on that answer too: this run's commit is a success" in new Stubs:
+    var ran    = false
+    val reader = stubReader(ownCommit = m => Option.when(ran && m.startsWith(DoomedMessage))(43L))
+    executorResult = IO {
+      ran = true
+      Right(QueryResult(refusedReader(RetriesExhausted), () => (), "node-1", 1L))
+    }
+    undrop(handlers(readerOverride = reader)).toOption.get shouldBe
+      UndropResponse("tpch1", "doomed", "doomed", 39L)
+
+  it should "not call that text retryable when it comes with an answer that was lost" in new Stubs:
+    executorResult = IO.pure(
+      Right(QueryResult(failingReader(RetriesExhausted), () => (), "node-1", 1L))
+    )
+    val error = undrop(handlers()).left.toOption.get._2
+    error.error shouldBe "undrop_failed"
+    error.retryable shouldBe None
+
+  it should "not mark any other failure retryable" in new Stubs:
+    executorResult = IO.pure(Left(RouterFailure.Internal("boom")))
+    val error = undrop(handlers()).left.toOption.get._2
+    error.error shouldBe "undrop_failed"
+    error.retryable shouldBe None
+
+  it should "settle a transient failure by the catalog first: this run's commit is a success" in new Stubs:
+    executorResult = IO.pure(Left(RouterFailure.Unavailable("retry failed (transient): reset")))
+    val reader = stubReader(ownCommit = m => Option.when(m.startsWith(DoomedMessage))(43L))
+    undrop(handlers(readerOverride = reader)).toOption.get shouldBe
+      UndropResponse("tpch1", "doomed", "doomed", 39L)
 
   it should "report success when the result broke after the CTAS committed" in new Stubs:
     // The catalog shows this run's own commit: it landed, whatever the stream said after.

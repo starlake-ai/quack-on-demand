@@ -151,6 +151,10 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         if schema == "tpch1" && table == "orders" then Some(40L) else None
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
         schema == "tpch1" && table == "orders"
+      // The recording write executor answers cleanly: a clean answer is confirmed by the restore's
+      // own commit, which the catalog here shows.
+      override def snapshotByCommitMessage(commitMessage: String): Option[Long] =
+        Option.when(commitMessage.startsWith("restore tpch1.orders to snapshot 39 ["))(43L)
 
   /** Stub reader for undrop: "doomed" was dropped at 40 (last-live 39); snapshots 12, 39 and 42
     * exist, 42 is max (verbatim from CatalogUndropHandlersSpec).

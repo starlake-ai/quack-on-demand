@@ -21,13 +21,14 @@ object TenantScopeCheck:
     */
   def forScope(scope: SessionScope, tenant: String): Option[(StatusCode, ErrorResponse)] =
     if scope.superuser || scope.manageableTenants.contains(tenant) then None
-    else
-      Some(
-        StatusCode.Forbidden -> ErrorResponse(
-          "tenant_forbidden",
-          s"session has no admin grant on tenant '$tenant'"
-        )
-      )
+    else Some(forbidden(tenant))
+
+  /** The refusal itself, for a gate with a rule of its own. */
+  def forbidden(tenant: String): (StatusCode, ErrorResponse) =
+    StatusCode.Forbidden -> ErrorResponse(
+      "tenant_forbidden",
+      s"session has no admin grant on tenant '$tenant'"
+    )
 
   /** [[forScope]] on the caller's credential, resolved by the total `scopeOf`. */
   def reject(apiKey: Option[String], tenant: String)(

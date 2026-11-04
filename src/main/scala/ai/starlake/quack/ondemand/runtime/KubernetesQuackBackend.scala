@@ -89,12 +89,20 @@ final class KubernetesQuackBackend(
 
   override val supportsPlacement: Boolean = true
 
+  /** The labels naming a pool, as written on a pod or a per-pool Secret and selected on: one place,
+    * so a selector always reads what was written. [[discoverExisting]] reads them back.
+    */
+  private def poolLabels(key: PoolKey): java.util.Map[String, String] =
+    val m = new java.util.HashMap[String, String]()
+    m.put("quack-tenant", PoolLabelValue.encode(key.tenant))
+    m.put("quack-tenant-db", PoolLabelValue.encode(key.tenantDb))
+    m.put("quack-pool", PoolLabelValue.encode(key.pool))
+    m
+
   private def buildLabels(spec: NodeSpec): java.util.Map[String, String] =
     val m = new java.util.HashMap[String, String]()
     m.put(labelKey, labelValue)
-    m.put("quack-tenant", spec.poolKey.tenant)
-    m.put("quack-tenant-db", spec.poolKey.tenantDb)
-    m.put("quack-pool", spec.poolKey.pool)
+    m.putAll(poolLabels(spec.poolKey))
     m.put("quack-role", spec.role.toString)
     m.put("quack-max-concurrent", spec.maxConcurrent.toString)
     // Per-node identity. Without this, the per-node Service's selector
@@ -412,9 +420,7 @@ final class KubernetesQuackBackend(
 
     val selector = new java.util.HashMap[String, String]()
     selector.put(labelKey, labelValue)
-    selector.put("quack-tenant", spec.poolKey.tenant)
-    selector.put("quack-tenant-db", spec.poolKey.tenantDb)
-    selector.put("quack-pool", spec.poolKey.pool)
+    selector.putAll(poolLabels(spec.poolKey))
     // Pin the Service to exactly one pod by its unique node id. Without
     // this the selector matches every pod in the pool, producing fan-out
     // routing across pods and intermittent auth-token mismatches at the
@@ -670,9 +676,7 @@ final class KubernetesQuackBackend(
       val remaining = client.pods
         .inNamespace(namespace)
         .withLabel(labelKey, labelValue)
-        .withLabel("quack-tenant", key.tenant)
-        .withLabel("quack-tenant-db", key.tenantDb)
-        .withLabel("quack-pool", key.pool)
+        .withLabels(poolLabels(key))
         .list()
         .getItems
         .asScala
@@ -717,26 +721,26 @@ final class KubernetesQuackBackend(
       .flatMap(k => readEnv(k).filter(_.nonEmpty).map(k -> _))
     fromMetastore ++ fromManager
 
-  /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
-    * pool attaches the same tenant-db with the same credentials. Same RFC-1123 hyphenization as
-    * [[secretNameFor]].
+  /** A per-pool Secret's name. Hyphenizes the underscore on every segment (tenant / tenantDb /
+    * pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does, so the result is
+    * RFC-1123 compatible. Slugs never contain '-', so '_' -> '-' is collision-free. A name must
+    * also end in an alphanumeric, and a pool `x_` reads `x-`: it ends in `0.qod`, whose dot no slug
+    * holds, so it is not the name of a pool `x_0`.
     */
-  private def nodeEnvSecretNameFor(key: PoolKey): String =
+  private def perPoolSecretName(prefix: String, key: PoolKey): String =
     val safeTenant = key.tenant.replace('_', '-')
     val safeDb     = key.tenantDb.replace('_', '-')
     val safePool   = key.pool.replace('_', '-')
-    s"qod-nodeenv-$safeTenant-$safeDb-$safePool"
+    val name       = s"$prefix-$safeTenant-$safeDb-$safePool"
+    if name.endsWith("-") then s"${name}0.qod" else name
 
-  /** K8s Secret name for a pool's federation SQL. Hyphenizes the underscore on every segment
-    * (tenant / tenantDb / pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]
-    * does, so the result is RFC-1123 compatible. Slugs never contain '-', so '_' -> '-' is
-    * collision-free.
+  /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
+    * pool attaches the same tenant-db with the same credentials.
     */
-  private def secretNameFor(key: PoolKey): String =
-    val safeTenant = key.tenant.replace('_', '-')
-    val safeDb     = key.tenantDb.replace('_', '-')
-    val safePool   = key.pool.replace('_', '-')
-    s"qod-fedsql-$safeTenant-$safeDb-$safePool"
+  private def nodeEnvSecretNameFor(key: PoolKey): String = perPoolSecretName("qod-nodeenv", key)
+
+  /** K8s Secret name for a pool's federation SQL. */
+  private def secretNameFor(key: PoolKey): String = perPoolSecretName("qod-fedsql", key)
 
   /** K8s Secret name for a node's bearer token. `nodeId` is already RFC-1123 safe (see
     * [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]), so the prefix is the only addition.
@@ -803,9 +807,7 @@ final class KubernetesQuackBackend(
     meta.setName(nodeEnvSecretNameFor(key))
     val labels = new java.util.HashMap[String, String]()
     labels.put(labelKey, labelValue)
-    labels.put("quack-tenant", key.tenant)
-    labels.put("quack-tenant-db", key.tenantDb)
-    labels.put("quack-pool", key.pool)
+    labels.putAll(poolLabels(key))
     meta.setLabels(labels)
     val secret = new Secret()
     secret.setMetadata(meta)
@@ -834,9 +836,7 @@ final class KubernetesQuackBackend(
     meta.setName(name)
     val labels = new java.util.HashMap[String, String]()
     labels.put(labelKey, labelValue)
-    labels.put("quack-tenant", key.tenant)
-    labels.put("quack-tenant-db", key.tenantDb)
-    labels.put("quack-pool", key.pool)
+    labels.putAll(poolLabels(key))
     meta.setLabels(labels)
     val secret = new Secret()
     secret.setMetadata(meta)
@@ -862,9 +862,7 @@ final class KubernetesQuackBackend(
       val items = client.pods
         .inNamespace(namespace)
         .withLabel(labelKey, labelValue)
-        .withLabel("quack-tenant", key.tenant)
-        .withLabel("quack-tenant-db", key.tenantDb)
-        .withLabel("quack-pool", key.pool)
+        .withLabels(poolLabels(key))
         .list()
         .getItems
         .asScala
@@ -945,7 +943,11 @@ final class KubernetesQuackBackend(
         role     <- Role.parse(roleS).toOption
       yield RunningNode(
         nodeId = nodeId,
-        poolKey = PoolKey(tenant, tenantDb, pool),
+        poolKey = PoolKey(
+          PoolLabelValue.decode(tenant),
+          PoolLabelValue.decode(tenantDb),
+          PoolLabelValue.decode(pool)
+        ),
         role = role,
         host = s"$nodeId.$namespace.svc.cluster.local",
         port = quackPort,

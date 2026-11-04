@@ -1,6 +1,7 @@
 import typer
 
 from ..registry import covers
+from ..rest import UNTIL_ANSWERED
 from ._run import call
 
 app = typer.Typer(help="DuckLake catalog browsing, time travel, and recovery.")
@@ -416,7 +417,9 @@ def undrop(
         body["fromSnapshot"] = from_snapshot
     if table_id is not None:
         body["tableId"] = table_id
-    call(ctx, "POST", "/api/catalog/undrop", body=body)
+    # The server decides the recovery at its bound (undropTimeoutSec), when the CTAS answers, and goes on
+    # past a client that gave up.
+    call(ctx, "POST", "/api/catalog/undrop", body=body, timeout=UNTIL_ANSWERED)
 
 
 @app.command()
@@ -467,9 +470,13 @@ def restore(
         f" (current {preview['currentSnapshot']})?"
     ):
         raise typer.Exit(1)
+    # The server decides the replace at its bound (restoreTimeoutSec), when the statement answers, and
+    # goes on past a client that gave up: a retry then meets concurrent_write, or restores twice. The
+    # dry run above is a bounded read.
     call(
         ctx,
         "POST",
         "/api/catalog/restore",
         body={**body, "expectedCurrentSnapshot": preview["currentSnapshot"]},
+        timeout=UNTIL_ANSWERED,
     )

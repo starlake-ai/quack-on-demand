@@ -22,7 +22,8 @@ final class MaintenanceRunner(
     exec: (RunningNode, String) => IO[Either[String, Long]], // Right(rows the statement returned)
     snapshotsOlderThan: (String, String, Instant) => List[Long],
     pinnedSnapshotsOf: (String, String) => Set[Long],
-    hasLiveBranchOf: (String, String) => Boolean, // merge + cleanup skipped while true (F25)
+    expiryFloorOf: (String, String) => Option[Long], // nothing at or after it may expire
+    hasLiveBranchOf: (String, String) => Boolean,    // merge + cleanup skipped while true (F25)
     totalBytesOf: (String, String) => Long,
     effectivePolicyOf: (String, String, Option[String], Option[String]) => EffectivePolicy,
     catalogAlias: (String, String) => String, // ATTACH alias on the node = dbName
@@ -189,17 +190,28 @@ final class MaintenanceRunner(
           else IO.pure(true)
         }
 
-        // The pins are read under the database's snapshot-pin lock, held through the expire call:
-        // a protected tag created while the run went on (the lock serializes it with this step)
-        // is seen here, never expired after the fact.
+        // The pins and the floor are read under the database's snapshot-pin lock, held through the
+        // expire call: a protected tag created while the run went on (the lock serializes it with
+        // this step) is seen here, never expired after the fact. The floor is the oldest live
+        // branch's fork: nothing at or after it expires, because a merge reads main's changes over
+        // (fork, head] and a snapshot gone from that range hides its table touches from the merge,
+        // which refuses history_gap. Both count as skipped. Branch creation does not take this
+        // lock: a run that read its floor before the branch's row landed can still expire the fork
+        // or a later snapshot, and the merge then refuses history_gap.
         expireIO = IO.defer {
           if tableScope.isDefined || candidates.isEmpty || !wants(run, "expire") then IO.pure(true)
           else
             cats.effect.Resource
               .fromAutoCloseable(IO.blocking(store.lockSnapshotPins(run.tenant, run.tenantDb)))
               .use { _ =>
-                IO.blocking(pinnedSnapshotsOf(run.tenant, run.tenantDb)).flatMap { pinned =>
-                  val (toExpire, skipped) = candidates.partition(v => !pinned.contains(v))
+                IO.blocking(
+                  (
+                    pinnedSnapshotsOf(run.tenant, run.tenantDb),
+                    expiryFloorOf(run.tenant, run.tenantDb)
+                  )
+                ).flatMap { (pinned, floor) =>
+                  val (toExpire, skipped) =
+                    candidates.partition(v => !pinned.contains(v) && floor.forall(v < _))
                   countersRef.update(_.copy(snapshotsSkippedPinned = skipped.size)) *>
                     (if toExpire.isEmpty then IO.pure(true)
                      else

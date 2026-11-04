@@ -266,6 +266,10 @@ final class FlightSqlRouter(
     * pools outside a client-opened transaction, dbName advertised). Runs as the first PREPARE of
     * the wire bracket; the statement itself follows unmodified. All values are escaped DuckDB
     * literals: the username is client-controlled input.
+    *
+    * `stampWrites` governs the stamp of client writes (`flightsql <verb>`). A write that names its
+    * commit message (`message`: a restore's, an undrop's) is stamped whatever it says, since its
+    * commit fence and its lost answers are settled by that message.
     */
   private[edge] def stampPrelude(
       kind: StatementKind,
@@ -279,7 +283,7 @@ final class FlightSqlRouter(
       message: Option[String]
   ): Option[String] =
     val isWrite = kind == StatementKind.Dml || kind == StatementKind.Ddl
-    if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
+    if (!stampWrites && message.isEmpty) || !isWrite || kindWire != "ducklake" || txOpen then None
     else
       Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty).map { db =>
         val author = s"tenant:$tenant/user:$user"
@@ -352,10 +356,14 @@ final class FlightSqlRouter(
         */
       edge: String = "",
       /** The DuckLake commit message a stamped write carries in place of `flightsql <verb>` (the
-        * author is unchanged): set by a manager handler that must find its own commit afterwards
-        * when the answer is lost (undrop's CTAS). The router's own stamp prelude carries it, so it
-        * is never client SQL. Applies only where a write is stamped at all (stampWrites, a ducklake
-        * pool, recordExecution, no open transaction).
+        * author is unchanged): set by a manager handler that must find its own commit afterwards (a
+        * restore's commit fence matches it, and a restore's or an undrop's lost answer is settled
+        * by it). The router's own stamp prelude carries it, so it is never client SQL. A write that
+        * names one is stamped whatever `stampWrites` says, and the stamp is required: a stamp that
+        * fails fails the write with nothing sent, and a write no stamp applies to (a pool that is
+        * not DuckLake, a transaction open, no recorded execution, no catalog alias) is refused
+        * ([[QuackHttpAdapter.sendStampRequired]]). A statement that is not a write leaves it
+        * unused.
         */
       commitMessage: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
@@ -398,7 +406,7 @@ final class FlightSqlRouter(
               poolKey,
               sql,
               effectiveSet,
-              adapterSend,
+              arrowSendFor(sql, commitMessage),
               source = source,
               edge = edge,
               preferredNode = preferredNode,
@@ -463,6 +471,32 @@ final class FlightSqlRouter(
           stampPrelude = prelude
         )
         .map(NodeOutcome.fromQuackResponse)
+
+  /** [[adapterSend]] for a write that names its commit message: the stamp is required
+    * ([[QuackHttpAdapter.sendStampRequired]]). A stamp that fails is `notSent`, so the retry on
+    * another node is as safe as for any statement that never left.
+    */
+  private val adapterSendStampRequired
+      : FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+    (node, wrappedSql, prelude, recordLoad, principal) =>
+      adapter
+        .sendStampRequired(node, wrappedSql, principal, prelude, recordLoad)
+        .map(NodeOutcome.fromQuackResponse)
+
+  /** The Arrow transport for `sql`: [[adapterSendStampRequired]] for a write that names its commit
+    * message, [[adapterSend]] for every other statement.
+    */
+  private def arrowSendFor(
+      sql: String,
+      commitMessage: Option[String]
+  ): FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+    // Classified only for a statement that names a message (the statement is classified again
+    // where it is stamped, by the same classifier on the same text).
+    val namesWrite = commitMessage.isDefined && {
+      val kind = classifier.classify(sql)
+      kind == StatementKind.Dml || kind == StatementKind.Ddl
+    }
+    if namesWrite then adapterSendStampRequired else adapterSend
 
   /** The Arrow transport reading a small result back for the manager ([[NodeRows]]): the statement
     * runs as [[adapterSend]] runs it, its rows are read and its reader closed inside the call.
@@ -1491,6 +1525,7 @@ final class FlightSqlRouter(
                                 finalSql,
                                 clientSql = activeSql,
                                 exclude = nodeId,
+                                cause = m,
                                 send = send,
                                 principal = principal,
                                 recordLoad = recordExecution,
@@ -1647,7 +1682,8 @@ final class FlightSqlRouter(
     * registry shows `clientSql` (the caller's text, a system statement's values masked), the entry
     * is registered before the send so a kill reaches the retry from its first wire byte, and the
     * manager's own reads (`internal`) are registered too, a kill while one runs stopping the
-    * statement that would use its value.
+    * statement that would use its value. `cause` is what failed the first try: with no other node
+    * to take it, the answer says so beside the fact, never the fact alone.
     */
   private def retryOnce[A](
       connectionId: String,
@@ -1657,6 +1693,7 @@ final class FlightSqlRouter(
       sql: String,
       clientSql: String,
       exclude: String,
+      cause: String,
       send: FlightSqlRouter.NodeSend[A],
       principal: ai.starlake.quack.edge.authz.NodePrincipal,
       recordLoad: Boolean,
@@ -1716,9 +1753,13 @@ final class FlightSqlRouter(
                       )
                   }
               case None =>
-                IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
+                IO.pure(Left(RouterFailure.Unavailable(noFallback(cause))))
           case _ =>
-            IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
+            IO.pure(Left(RouterFailure.Unavailable(noFallback(cause))))
+
+  /** Why a retry found nowhere to go: the transient failure of the first try is named. */
+  private def noFallback(cause: String): String =
+    s"no fallback node available after a transient failure: $cause"
 
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
     * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes

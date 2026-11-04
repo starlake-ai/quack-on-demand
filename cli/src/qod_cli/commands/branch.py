@@ -3,12 +3,14 @@
 import typer
 
 from ..registry import covers
+from ..rest import UNTIL_ANSWERED
 from ._run import call
 
 app = typer.Typer(
     help=(
         "Writable branches of a DuckLake database: agents write on a branch, a human reviews "
-        "the change set and fast-forward merges."
+        "the change set and merges. Anyone who may connect to one of the database's pools may "
+        "branch it, in their own tenant; merge needs an admin."
     )
 )
 
@@ -39,7 +41,12 @@ def create(
     db: str = DB,
     name: str = typer.Option(..., "--name", help="Branch name (lowercase, letters/digits/_/-)."),
     ttl_hours: int = typer.Option(
-        None, "--ttl-hours", help="Hours until the branch expires; 0 = never; default = server."
+        None,
+        "--ttl-hours",
+        help=(
+            "Hours until the branch expires; default = server. An admin may pass 0 = never; anyone "
+            "else asks for 1 up to the server's default."
+        ),
     ),
     from_snapshot: int = typer.Option(
         None,
@@ -100,7 +107,7 @@ def changes(
     branch: str = BRANCH,
     no_counts: bool = typer.Option(False, "--no-counts", help="Skip per-table row counts."),
 ):
-    """The branch's change set since its fork, its conflicts against main, and the merge verdict."""
+    """The branch's change set since its fork and its table conflicts against main."""
     call(
         ctx,
         "GET",
@@ -168,37 +175,110 @@ def schema_diff(
     call(ctx, "GET", f"{_base(tenant, db)}/{branch}/schema-diff", params={"schema": schema, "table": table})
 
 
+def _parse_keys(values: list[str] | None) -> dict[str, list[str]]:
+    keys: dict[str, list[str]] = {}
+    for value in values or []:
+        table, sep, columns = value.partition("=")
+        names = [c.strip() for c in columns.split(",") if c.strip()]
+        if not sep or "." not in table or not names:
+            raise typer.BadParameter(
+                f"{value!r} must read schema.table=column[,column...]", param_hint="--key"
+            )
+        table = table.strip()
+        if table in keys:
+            raise typer.BadParameter(
+                f"{table!r} is named twice; give all its columns in one --key, comma separated",
+                param_hint="--key",
+            )
+        keys[table] = names
+    return keys
+
+
 @app.command()
-@covers("POST", "/api/branch/propose", {"tenant": "--tenant", "tenantDb": "--db", "branch": "--branch"})
-def propose(ctx: typer.Context, tenant: str = TENANT, db: str = DB, branch: str = BRANCH):
-    """Propose the branch for merge (records the change set and conflicts as of now)."""
-    call(ctx, "POST", "/api/branch/propose", body={"tenant": tenant, "tenantDb": db, "branch": branch})
+@covers(
+    "POST",
+    "/api/branch/propose",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "branch": "--branch",
+        "onConflict": "--on-conflict",
+        "keys": "--key",
+    },
+)
+def propose(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    branch: str = BRANCH,
+    on_conflict: str = typer.Option(
+        None,
+        "--on-conflict",
+        help="Which side wins every row conflict (a cell, a row one side deleted and the other updated, rows matching a --key): main or branch. Without it, any conflict refuses the merge.",
+    ),
+    key: list[str] = typer.Option(
+        None,
+        "--key",
+        help="schema.table=column[,column...]: rows both sides inserted with this key become conflicts. Repeatable.",
+    ),
+):
+    """Propose the branch for merge: its owner or an admin (records the change set and what a merge
+    would do to its rows)."""
+    body = {"tenant": tenant, "tenantDb": db, "branch": branch}
+    if on_conflict is not None:
+        body["onConflict"] = on_conflict
+    keys = _parse_keys(key)
+    if keys:
+        body["keys"] = keys
+    call(ctx, "POST", "/api/branch/propose", body=body, timeout=UNTIL_ANSWERED)
 
 
 @app.command()
 @covers(
     "POST",
     "/api/branch/merge",
-    {"tenant": "--tenant", "tenantDb": "--db", "branch": "--branch", "expectedMainSnapshot": "--expect-main"},
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "branch": "--branch",
+        "proposalId": "--proposal",
+        "expectedMainSnapshot": "--expect-main",
+        "holdWriters": "--hold-writers",
+    },
 )
 def merge(
     ctx: typer.Context,
     tenant: str = TENANT,
     db: str = DB,
     branch: str = BRANCH,
+    proposal: str = typer.Option(
+        ...,
+        "--proposal",
+        help="The id of the open proposal you read: merge.id in the reply of 'branch propose', or the id of the entry with status proposed under merges in 'branch show'. Another one in its place is refused (409).",
+    ),
     expect_main: int = typer.Option(
         None, "--expect-main", help="Refuse when main is no longer at this snapshot (409)."
     ),
+    hold_writers: bool = typer.Option(
+        False,
+        "--hold-writers",
+        help="Refuse other commits on the merged tables until the merge ends. They retry for about 9 seconds.",
+    ),
 ):
-    """Fast-forward merge a proposed branch onto main (approver must differ from the proposer)."""
-    body = {"tenant": tenant, "tenantDb": db, "branch": branch}
+    """Merge a proposed branch onto main: an admin only (approver must differ from the proposer)."""
+    body = {"tenant": tenant, "tenantDb": db, "branch": branch, "proposalId": proposal}
     if expect_main is not None:
         body["expectedMainSnapshot"] = expect_main
-    call(ctx, "POST", "/api/branch/merge", body=body)
+    if hold_writers:
+        body["holdWriters"] = True
+    call(ctx, "POST", "/api/branch/merge", body=body, timeout=UNTIL_ANSWERED)
 
 
 @app.command()
 @covers("POST", "/api/branch/discard", {"tenant": "--tenant", "tenantDb": "--db", "branch": "--branch"})
 def discard(ctx: typer.Context, tenant: str = TENANT, db: str = DB, branch: str = BRANCH):
-    """Discard a live branch: its pool, catalog and branch-only files are freed."""
+    """Discard a live branch, its owner or an admin: its pool, catalog and branch-only files are
+    freed. Refused while a propose or a merge of it runs (branch_busy), and when a merge of it
+    landed on main and is not on record (proposal_unsettled): merging it again records it, which
+    needs an admin."""
     call(ctx, "POST", "/api/branch/discard", body={"tenant": tenant, "tenantDb": db, "branch": branch})

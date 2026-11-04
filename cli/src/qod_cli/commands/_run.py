@@ -17,9 +17,14 @@ def call(
     body: Any | None = None,
     text: bool = False,
     quiet: bool = False,
+    timeout: Any = None,
 ) -> Any:
+    # Passed on only when set: tests stub `request` with a fixed signature.
+    extra = {} if timeout is None else {"timeout": timeout}
     try:
-        data = RestClient(ctx.obj.settings).request(method, path, params=params, body=body, text=text)
+        data = RestClient(ctx.obj.settings).request(
+            method, path, params=params, body=body, text=text, **extra
+        )
     except ApiError as exc:
         typer.echo(f"error: {exc}", err=True)
         for line in action_lines(exc.actions, (exc.details or {}).get("server")):

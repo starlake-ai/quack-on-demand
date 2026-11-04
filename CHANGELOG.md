@@ -1,5 +1,137 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading from 0.11.0
+
+Back up the control-plane database: Liquibase `0056` runs at boot and adds the columns of a three-way
+merge to `qodstate_branch_merge`. A proposal from before the upgrade reads `head_snapshot_at_propose`
+NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, finish a rolling upgrade
+before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
+proposed.
+
+On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
+cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
+upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
+
+On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
+is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
+count. To keep counts from a user, refuse on the table.
+
+### Breaking
+
+- Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
+  `--proposal`: the approver names the proposal they read, and another one in its place is
+  `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and
+  the tag: what a retry reads after an answer that was lost, or a second approver.
+- Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
+  used to take the newer head. Proposing a branch that is already proposed replaces its open
+  proposal, and `409 already_proposed` is gone.
+- Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
+  rename the column), as one named `rowid` already did not.
+
+### Added
+
+- **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
+  (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
+  proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,
+  `--hold-writers` holds other commits on the merged tables. A merge that may have landed refuses
+  propose with `409 proposal_unsettled`: merge again, which settles it. Maintenance expires no
+  snapshot at or after the oldest live branch's fork (a merge reads main's changes over consecutive
+  snapshots), so with no TTL, expiry above that fork stops until the branch is merged or discarded.
+  New settings `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (50000000).
+  The API changes are under Breaking.
+- **One UPDATE per table up to 50M rows.** `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` defaults to 50000000, up
+  from the 20000000 this work first used, since rowid ranges cost far more: at 1B rows, 100M changes per
+  side and a 16GB limit, one UPDATE of 110M rows read 2GB in 4,253 reads and took 91 s of Apply, where 64
+  ranges read 52GB in 116,756 reads and took 156 s. It stops at 50M since whether one UPDATE fits does not
+  follow its size: at 1B rows, 8 threads and 16GB it passed at 44.0M rows (33.5 s of Apply, 9.3GiB spilled)
+  and 68.8M (50.6 s, 22GiB), ran out of memory in Apply at 91.7M, passed at 110M (90.7 s, 45GiB) and ran
+  out of memory at about 220M. An out-of-memory failure in Apply retries with ranges: on a real node at
+  91.7M that took 299 s against 199 s straight to ranges, read back right and left nothing behind.
+  So a higher value is a bet on that retry; set it to 20000000 to go back.
+- **Any principal who may connect may branch.** A plain user, or a `--drop-admin` token, may create,
+  list, read, diff, propose and discard branches over REST and MCP, in the tenant they belong to, when
+  they may connect to one of the parent's pools (else `403 no_pool_access`; another tenant is `403
+  tenant_forbidden`; `acl_denied` is gone from `branch create`). They propose and discard only their own
+  branches (`403 not_owner`) and ask for a TTL from 1 up to the server's default (`400 invalid_ttl`).
+  Merge stays admin only. Their replies follow filtered metadata: only the tables they hold a read grant
+  on (`RO`, `RW` or `ALL`, never `DDL` alone) are named, `otherTables` counts the rest (new on
+  `BranchChangesResponse`), and row numbers show only where their own count succeeded, never to a holder
+  of a column or row policy. `BranchActor.isAdmin` is now decided for the tenant in hand: an admin of
+  another tenant is a plain member here.
+
+### Fixed
+
+- An undrop (REST, MCP, `UNDROP TABLE`) stamps its commit with its own message whatever
+  `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
+  that failed, it used to land with no message, and an answer lost afterwards could not be settled
+  from the catalog. A table restore, whose commit fence matches its message, does the same.
+- A table restore that cannot tell whether its replace committed answers `502
+  restore_outcome_unknown`, audited, and its commit fence stays armed: its COMMIT's answer was lost (a
+  broken connection, a 5xx), or it answered and no commit of the restore is in the catalog yet (a kill
+  leaves a COMMIT in flight), or the catalog cannot be read to settle it. Check the table before
+  retrying: the replace may still land, and the fence keeps it from erasing a write committed
+  meanwhile. A node's own error on the COMMIT asks the catalog first too, since a connection to the
+  catalog lost during the metadata COMMIT can leave that commit durable: the commit found is success,
+  and only a catalog showing no commit of the restore makes the node's refusal `restore_failed` or
+  `409 concurrent_write` (which takes the fence off). Every clean answer is confirmed by the
+  restore's own commit, whose snapshot is `newSnapshot`. A restore that outlives
+  `restoreTimeoutSec` rolls back when its statement answers. An undrop whose stamp failed answers
+  `undrop_failed` with `retryable: true`, its
+  cause and "nothing was committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no
+  other node says what failed first. `qod catalog restore`, `qod catalog undrop` and `qod profile
+  undrop` wait for the server's answer instead of giving up at 30 s.
+- A database's or a pool's `initSql` whose last statement has no final `;`, even when the text ends
+  in a `-- comment`, no longer runs into the statement after it. Both were lost, so the node came up
+  without the setting and without whatever followed (DuckLake's own setup, at the database level).
+  The spawn scripts now close every trusted text they add to the node's init SQL with a `;` on a
+  line of its own; a tenant admin's untrusted text needs no terminator, since it is cut on its marker
+  lines. The stored text is not changed.
+- A `sql` federated source whose text has no final `;`, even when it ends in a `-- comment`, no
+  longer runs into the first statement of the next source's block, which lost both; and a merge
+  node's federation blob ending that way no longer swallows the branch attach. The manager now puts
+  a `;` on a line of its own between the blocks; the stored text is not changed.
+- A discard or a TTL expiry no longer runs under a propose or a merge of that branch, where it dropped
+  the catalog and files under the run, whose end could then bring back a branch with nothing left, which
+  counted toward `QOD_BRANCH_MAX_PER_DATABASE` and held back snapshot expiry on its parent. A discard
+  answers `409 branch_busy` while one runs and a sweep skips the branch until its next pass; a run of
+  another branch stops neither.
+- A discard or a TTL expiry no longer records as abandoned a merge that landed on main with nothing on
+  record, as when a manager dies between the COMMIT and its record. A discard answers `409
+  proposal_unsettled` and a sweep skips the branch with an ERROR in the log: merging it again records it,
+  which needs an admin other than its proposer, and until then it holds back snapshot expiry on its
+  parent. Another proposal's commit stops neither, since a discard is its only way out. When main's
+  catalog cannot be read to look, a discard answers `502 catalog_unavailable` and a sweep tries again at
+  its next pass.
+- A propose past the branch's TTL answers `409 branch_expired`, for every principal, leaving an open
+  proposal as it is: since a sweep skips a branch a run holds, a loop of proposals could otherwise keep a
+  branch past its TTL, and with it the snapshots of the whole database. A merge past the TTL stays allowed.
+- Kubernetes: a label an API server refuses is no longer written. `quack-tenant`, `quack-tenant-db` and
+  `quack-pool` hold a name as it is, so running pods and their selectors stay, or `qod.<name>.qod` when a
+  label value cannot hold it: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end.
+  Merge, maintenance and branch nodes could not start on a real cluster (`422`), and now every proposal
+  of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`:
+  until now every maintenance run on Kubernetes ended `failed` with `node spawn failed`, its cause at WARN
+  only. A pool ending in `_` gets Secret names the API accepts. A node id past 63 characters is still
+  refused (`422`): a branch pool's takes 36 characters plus its tenant and parent names, and `branch
+  create` answers `502 branch_create_failed`; a merge node's stays within 35.
+- A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
+  the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
+  answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight
+  `UNAVAILABLE`).
+- The console's Branches page. The create form checks a branch's name before sending it: its pattern
+  never compiled in a browser. In a row diff, choosing `all` after a filter lists every change type
+  again, where the list stayed on the filter. An action with no answer says it may still be running,
+  where a merge read `Failed to fetch` as it ran on and landed and a gateway's 504 showed its HTML. A
+  form, and what became of an action, now appear on screen, where a form could open below the fold and
+  a click seem to do nothing. A failed read of the list keeps the list and what the action said, where
+  it read as no branches. A merge answered `409 already_merged`, and the `merge` link of a stale row on
+  a branch that has merged, read as a note, since the merge is done, not as an error. A created,
+  dropped, recreated or altered table shows dashes, where it read `0 0 0` whatever it held, as rows
+  are counted only for a table the branch modified. The Merge column says `cannot be merged` of a
+  table listed under table conflicts, where it said `ok`.
+
 ## 0.11.1
 
 ### FlightSQL: limits before a credential

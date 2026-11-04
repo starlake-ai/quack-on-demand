@@ -100,6 +100,33 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     tracker.snapshot("n1").inFlight shouldBe 0
     tracker.snapshot("n1").ewmaMs should be > 0.0
 
+  it should "send a list for the principal, a fresh handle per statement, with no bookkeeping" in:
+    var seen: Option[(String, String, List[String])] = None
+    val handles    = scala.collection.mutable.ListBuffer.empty[String]
+    val statements = List("BEGIN", "SELECT 1", "COMMIT")
+    val client     = new QuackHttpClient(TestArrow.sharedAllocator):
+      override def queryAll(
+          endpoint: String,
+          token: String,
+          authorize: () => String,
+          statements: List[String]
+      ): IO[Either[ListFailure, Unit]] = IO {
+        seen = Some((endpoint, token, statements))
+        statements.foreach(_ => handles += authorize())
+        Right(())
+      }
+    val tracker = new NodeLoadTracker
+    val before  = tracker.snapshot("n1")
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+
+    adapter.sendAll(node("n1"), statements, NodePrincipal.System).unsafeRunSync() shouldBe Right(())
+    seen shouldBe Some(("quack:127.0.0.1:0", "tok-n1", statements))
+    handles.size shouldBe 3
+    handles.foreach(_ should startWith("CALL system.main.qod_session("))
+    handles.toSet.size shouldBe 3
+    tracker.snapshot("n1") shouldBe before
+
   it should "mark node unhealthy on transient failure" in:
     val client = new FakeClient(
       Map(
@@ -222,6 +249,98 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       "stamped:BEGIN; CALL stamp()|INSERT INTO t VALUES (1)",
       "plain:SELECT 1"
     )
+
+  "sendStampRequired" should "route a stamp to queryStampedRequired, and refuse a write with none" in:
+    val recorded = scala.collection.mutable.ListBuffer.empty[String]
+    val client   =
+      new QuackHttpClient(TestArrow.sharedAllocator):
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
+          IO { recorded += s"plain:$sql"; TestArrow.okResponse() }
+        override def queryStamped(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
+          IO { recorded += s"best-effort:$prelude|$sql"; TestArrow.okResponse() }
+        override def queryStampedRequired(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
+          IO { recorded += s"required:$prelude|$sql"; TestArrow.okResponse() }
+    val tracker = new NodeLoadTracker
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val testNode = node("sr1")
+    adapter
+      .sendStampRequired(
+        testNode,
+        "INSERT INTO t VALUES (1)",
+        NodePrincipal.System,
+        Some("BEGIN; CALL stamp()"),
+        recordLoad = false
+      )
+      .unsafeRunSync() match
+      case QuackResponse.Ok(_, _, close) => close()
+      case other                         => fail(s"expected Ok, got $other")
+    // No stamp to send: the write is refused here, nothing reaches the client, whatever the node,
+    // and nothing is booked against the node, which was never called.
+    adapter
+      .sendStampRequired(
+        testNode,
+        "INSERT INTO t VALUES (2)",
+        NodePrincipal.System,
+        None,
+        recordLoad = true
+      )
+      .unsafeRunSync() match
+      case QuackResponse.Failed(QuackError.Permanent(msg), _) =>
+        msg shouldBe QuackHttpAdapter.NoStamp
+      case other => fail(s"expected a refusal, got $other")
+    recorded.toList shouldBe List("required:BEGIN; CALL stamp()|INSERT INTO t VALUES (1)")
+    val snap = tracker.snapshot(testNode.nodeId)
+    (snap.inFlight, snap.totalServed, snap.ewmaMs) shouldBe ((0, 0L, 0.0))
+
+  it should "answer a draining node Transient, nothing sent" in:
+    val sent   = new java.util.concurrent.atomic.AtomicInteger(0)
+    val client =
+      new QuackHttpClient(TestArrow.sharedAllocator):
+        override def queryStampedRequired(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
+          IO { sent.incrementAndGet(); TestArrow.okResponse() }
+    val tracker = new NodeLoadTracker
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val draining = node("sr2")
+    tracker.setDraining(draining.nodeId, true)
+    adapter
+      .sendStampRequired(
+        draining,
+        "INSERT INTO t VALUES (1)",
+        NodePrincipal.System,
+        Some("BEGIN; CALL stamp()"),
+        recordLoad = true
+      )
+      .unsafeRunSync() shouldBe
+      QuackResponse.Failed(
+        QuackError.Transient(QuackHttpAdapter.draining(draining.nodeId), notSent = true)
+      )
+    sent.get() shouldBe 0
 
   "send with recordLoad=false" should "leave tracker counters and percentiles untouched" in:
     // FlightSQL Prepare-time LIMIT-0 probe contract: the probe must be invisible to the UI's

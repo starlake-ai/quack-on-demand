@@ -240,7 +240,16 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         to: String = "42",
         apiKey: Option[String] = RootKey
     ) =
-      h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(SuperuserScope)
+      h.schemaDiff(
+        tenant,
+        tenantDb,
+        schema,
+        table,
+        from,
+        to,
+        apiKey,
+        CatalogPreviewHandlers.NoneHidden
+      )(SuperuserScope)
         .unsafeRunSync()
 
     def dataDiff(
@@ -256,9 +265,20 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         changeType: Option[String] = None,
         apiKey: Option[String] = RootKey
     ) =
-      h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, apiKey)(
-        SuperuserScope
-      ).unsafeRunSync()
+      h.dataDiff(
+        tenant,
+        tenantDb,
+        schema,
+        table,
+        from,
+        to,
+        limit,
+        cursor,
+        changeType,
+        apiKey,
+        CatalogPreviewHandlers.NoneHidden
+      )(SuperuserScope)
+        .unsafeRunSync()
 
     def queueDiffResults(
         summary: List[(String, Long)],
@@ -268,6 +288,96 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         IO.pure(Right(QueryResult(summaryReader(summary), () => (), "node-1", 5L))),
         IO.pure(Right(QueryResult(changesReader(page), () => (), "node-1", 5L)))
       )
+
+  // A table the caller may not see answers exactly as one that does not exist, whatever else the
+  // request holds: only the known table `region` exists here, and `ghost` does not.
+  private val onlyRegion = stubReader(knownTables = Set(("tpch1", "region")))
+
+  /** Hides `region`: from here on it must read as `ghost` does. */
+  private val hidesRegion: (String, String) => Boolean = (_, t) => t == "region"
+
+  private def withTable(
+      out: Either[(StatusCode, ErrorResponse), ?],
+      table: String
+  ): Either[(StatusCode, ErrorResponse), ?] =
+    out.left.map((code, e) => (code, e.copy(message = e.message.replace(table, "<table>"))))
+
+  "a hidden table" should "answer a schema diff as a table that does not exist" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    def diff(table: String, from: String = "12", to: String = "42") = h
+      .schemaDiff("acme", "acme_tpch1", "tpch1", table, from, to, RootKey, hidesRegion)(
+        SuperuserScope
+      )
+      .unsafeRunSync()
+    val absent = diff("ghost")
+    absent.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.NotFound, "not_found"))
+    withTable(diff("region"), "region") shouldBe withTable(absent, "ghost")
+    // A selector error comes first for both: nothing tells them apart there either.
+    withTable(diff("region", from = "99"), "region") shouldBe
+      withTable(diff("ghost", from = "99"), "ghost")
+
+  it should "answer a data diff as a table that does not exist, filter and cursor errors included" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    def diff(
+        table: String,
+        from: String = "12",
+        to: String = "42",
+        cursor: Option[String] = None,
+        changeType: Option[String] = None
+    ) = h
+      .dataDiff(
+        "acme",
+        "acme_tpch1",
+        "tpch1",
+        table,
+        from,
+        to,
+        None,
+        cursor,
+        changeType,
+        RootKey,
+        hidesRegion
+      )(SuperuserScope)
+      .unsafeRunSync()
+    val absent = diff("ghost")
+    absent.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.NotFound, "not_found"))
+    withTable(diff("region"), "region") shouldBe withTable(absent, "ghost")
+    // from == to has its own arm.
+    withTable(diff("region", from = "42"), "region") shouldBe
+      withTable(diff("ghost", from = "42"), "ghost")
+    // A bad filter or cursor is refused before the table is looked at, for both.
+    val badFilter = diff("region", changeType = Some("nope"))
+    badFilter.left.toOption.map(_._2.error) shouldBe Some("invalid_filter")
+    withTable(badFilter, "region") shouldBe withTable(
+      diff("ghost", changeType = Some("nope")),
+      "ghost"
+    )
+    val badCursor = diff("region", cursor = Some("x"))
+    badCursor.left.toOption.map(_._2.error) shouldBe Some("invalid_cursor")
+    withTable(badCursor, "region") shouldBe withTable(diff("ghost", cursor = Some("x")), "ghost")
+    seenSqls shouldBe Nil
+    seenSql shouldBe None
+
+  it should "be for every caller of a diff to say: forgetting it does not compile" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    assertCompiles(
+      """h.schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", RootKey, CatalogPreviewHandlers.NoneHidden)(SuperuserScope)"""
+    )
+    assertTypeError(
+      """h.schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", RootKey)(SuperuserScope)"""
+    )
+    assertCompiles(
+      """h.dataDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", None, None, None, RootKey, CatalogPreviewHandlers.NoneHidden)(SuperuserScope)"""
+    )
+    assertTypeError(
+      """h.dataDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", None, None, None, RootKey)(SuperuserScope)"""
+    )
+
+  it should "still answer the plain diffs for a caller who hides nothing" in new Stubs:
+    val h = handlers(readerOverride = onlyRegion)
+    schemaDiff(h).isRight shouldBe true
 
   "preview" should "404 an unknown tenant" in new Stubs:
     val h   = handlers()
@@ -299,8 +409,12 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     sup.createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
-    sup.createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
-    sup.createPool(PoolKey("acme", "acme_mem1", "mem_bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0))
+      .unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_mem1", "mem_bi"), RoleDistribution(1, 0, 0))
+      .unsafeRunSync()
 
   it should "preview a duckdb-file table qualified with the node's catalog alias" in new Stubs:
     addNodeHeldDbs(sup)
@@ -450,7 +564,16 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val foreignScope: SessionScope.Resolver =
       _ => SessionScope(superuser = false, manageableTenants = Set("other"))
     val out = h
-      .schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", Some("tok"))(foreignScope)
+      .schemaDiff(
+        "acme",
+        "acme_tpch1",
+        "tpch1",
+        "region",
+        "12",
+        "42",
+        Some("tok"),
+        CatalogPreviewHandlers.NoneHidden
+      )(foreignScope)
       .unsafeRunSync()
     out.left.toOption.get._1 shouldBe StatusCode.Forbidden
 
@@ -584,12 +707,29 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val h = handlers(executorOverride = queuedExecutor)
     dataDiff(h)
     seenSqls should have size 2
-    seenSqls.head shouldBe
-      "SELECT change_type, count(*) AS n FROM ducklake_table_changes('acme_tpch1', 'tpch1', 'region', 13, 42) GROUP BY change_type"
+    seenSqls.head should include(
+      "SELECT snapshot_id, rowid FROM ducklake_table_deletions('acme_tpch1', 'tpch1', 'region', 13, 42)"
+    )
+    seenSqls.head should include(
+      "SELECT snapshot_id, rowid FROM ducklake_table_insertions('acme_tpch1', 'tpch1', 'region', 13, 42)"
+    )
+    seenSqls.head should include("GROUP BY change_type")
     seenSqls(1) should include(
       "FROM ducklake_table_changes('acme_tpch1', 'tpch1', 'region', 13, 42)"
     )
     seenSqls(1) should include("ORDER BY snapshot_id, rowid, change_type")
+
+  it should "render the summary statement that the node's own tests carry, text for text" in {
+    // The same text is in native/qod-node/tests/describer_extension_test.cpp and screen_rules_test.cpp,
+    // the only guard CI runs for the node's verdict on this statement: change them together.
+    DataDiffSql.summarySql("lake", "main", "t", 1, 3) shouldBe
+      "SELECT CASE WHEN d.rowid IS NULL THEN 'insert' WHEN i.rowid IS NULL THEN 'delete' " +
+      "ELSE 'update_postimage' END AS change_type, count(*) AS n " +
+      "FROM (SELECT snapshot_id, rowid FROM ducklake_table_deletions('lake', 'main', 't', 2, 3)) d " +
+      "FULL JOIN (SELECT snapshot_id, rowid " +
+      "FROM ducklake_table_insertions('lake', 'main', 't', 2, 3)) i " +
+      "ON d.snapshot_id = i.snapshot_id AND d.rowid = i.rowid GROUP BY change_type"
+  }
 
   it should "apply the changeType filter and cursor predicate in the page SQL" in new Stubs:
     queueDiffResults(summary = Nil, page = Nil)

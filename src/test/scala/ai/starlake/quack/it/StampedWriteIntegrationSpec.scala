@@ -1,6 +1,6 @@
 package ai.starlake.quack.it
 
-import ai.starlake.quack.edge.adapter.{QuackHttpClient, QuackResponse}
+import ai.starlake.quack.edge.adapter.{QuackError, QuackHttpClient, QuackResponse}
 import ai.starlake.quack.ondemand.runtime.LiveQodNode.rows
 import ai.starlake.quack.ondemand.runtime.{LiveQodNode, QodNodeTestBinary}
 import cats.effect.unsafe.implicits.global
@@ -122,6 +122,48 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
     r.head.head.toString shouldBe "1"
     val (author, _) = latestSnapshot(c)
     author shouldBe (null: Any)
+
+  it("required stamp: a broken prelude lands nothing, and says the write never left"):
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val c   = client()
+    val bad = "BEGIN; CALL ducklake_set_commit_message('no_such_catalog', 'a', 'm')"
+    c.queryStampedRequired(
+      endpoint,
+      token,
+      live.authorize(),
+      bad,
+      "USE lake.main; INSERT INTO lake.t VALUES (30)"
+    ).unsafeRunSync() match
+      case QuackResponse.Failed(QuackError.Permanent(msg), _) =>
+        msg should include("no_such_catalog")
+      case other => fail(s"expected the broken stamp to fail the write, got $other")
+    // Where queryStamped goes on without the stamp, this one never sent the write.
+    rows(
+      c.query(
+        endpoint,
+        token,
+        "SELECT count(*) FROM lake.t WHERE i = 30",
+        None,
+        live.authorize()
+      ).unsafeRunSync()
+    ).head.head.toString shouldBe "0"
+
+  it("required stamp: stamps the snapshot as queryStamped does when the prelude holds"):
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val c = client()
+    val r = rows(
+      c.queryStampedRequired(
+        endpoint,
+        token,
+        live.authorize(),
+        "BEGIN; CALL ducklake_set_commit_message('lake', 'tenant:acme/user:alice', 'restore main.t [r-1]')",
+        "USE lake.main; INSERT INTO lake.t VALUES (31)"
+      ).unsafeRunSync()
+    )
+    r.head.head.toString shouldBe "1" // exact Count
+    val (author, msg) = latestSnapshot(c)
+    author.toString shouldBe "tenant:acme/user:alice"
+    msg.toString shouldBe "restore main.t [r-1]"
 
   it("commits even when the caller closes without draining"):
     assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")

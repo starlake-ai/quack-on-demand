@@ -77,6 +77,50 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     out.indexOf("BEGIN federation: aaa") should be < out.indexOf("BEGIN federation: bbb")
   }
 
+  // ---------- blocks that follow one another ----------
+  // The blocks go into one init stream that qod-node splits on DuckDB's own tokenizer, and a `sql`
+  // source's text is the operator's own: one with no final `;` ran into the next block's first
+  // statement, and both were lost. A block that another follows ends with a `;` on a line of its own
+  // (never inside the block, so `buildOne`'s text is still the one deployed); every source's text
+  // stays as stored.
+
+  it should "end a block another follows with a semicolon line of its own, the texts as stored" in {
+    val a   = src("aaa", "CREATE TABLE a AS SELECT 1")
+    val b   = src("bbb", "CREATE TABLE b AS SELECT 2 -- no semicolon, a comment")
+    val c   = src("ccc", "CREATE TABLE c AS SELECT 3;")
+    val out = builderWith(List(c, b, a), Map.empty).build("td-1").unsafeRunSync().value
+    out shouldBe List(
+      "-- BEGIN federation: aaa",
+      "CREATE TABLE a AS SELECT 1",
+      "-- END federation: aaa",
+      ";",
+      "-- BEGIN federation: bbb",
+      "CREATE TABLE b AS SELECT 2 -- no semicolon, a comment",
+      "-- END federation: bbb",
+      ";",
+      "-- BEGIN federation: ccc",
+      "CREATE TABLE c AS SELECT 3;",
+      "-- END federation: ccc"
+    ).mkString("\n")
+  }
+
+  it should "add none for a lone block, which is the block buildOne re-issues" in {
+    val s   = src("aaa", "CREATE TABLE a AS SELECT 1")
+    val b   = builderWith(List(s), Map.empty)
+    val out = b.build("td-1").unsafeRunSync().value
+    out shouldBe b.buildOne(s).unsafeRunSync().sql
+    out.linesIterator.contains(";") shouldBe false
+  }
+
+  it should "keep a source's secrets substituted and its alias quoted across the separators" in {
+    val a    = src("aaa", "CREATE TABLE a AS SELECT '{{secret.V}}' AS v, '{{alias}}' AS al")
+    val b    = src("bbb", "CREATE TABLE b AS SELECT 2;")
+    val secs = Map(a.id -> List(secret(a.id, "V", "O'Brien")))
+    val out  = builderWith(List(a, b), secs).build("td-1").unsafeRunSync().value
+    out should include("SELECT 'O''Brien' AS v, 'aaa' AS al\n-- END federation: aaa\n;\n")
+    out should not include "{{"
+  }
+
   "FederationBlobBuilder.logSafePreview" should
     "keep {{secret.NAME}} placeholders while expanding {{alias}}" in {
       val s    = src("fedpg", "ATTACH '{{secret.PWD}}' AS {{alias}};")

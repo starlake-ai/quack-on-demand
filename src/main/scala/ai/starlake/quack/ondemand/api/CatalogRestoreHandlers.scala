@@ -3,9 +3,9 @@ package ai.starlake.quack.ondemand.api
 import java.util.Locale
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
-import ai.starlake.quack.model.SqlLiterals
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.branch.MergeDecision
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -17,20 +17,40 @@ import scala.concurrent.duration.DurationInt
 
 /** Restore (Spec 04): roll a live table back to a prior snapshot as a NEW forward snapshot.
   *
-  * Execution is a single `CREATE OR REPLACE TABLE s.t AS SELECT * FROM s.t AT (VERSION => n)`
-  * routed through the write executor (`recordExecution = true` in Main, so the replace snapshot
-  * carries the principal's author stamp and the statement is ACL-checked per table: the CTAS emits
-  * Ddl + Read on the table, so the caller needs ALL, or DDL plus RO/RW). The dry run is the Spec 02
-  * aggregate over `(toSnapshot, currentSnapshot]`, run on the read executor as the caller too: the
-  * node admits DuckLake's change feed on a table the caller may read and refuses it otherwise (403
-  * `acl_denied`), so the counts never come from the system caller. Verified-live engine facts (Spec
-  * 04 Task 1): the replace assigns a new table_id whose begin_snapshot is the replace snapshot (the
-  * basis of both the `newSnapshot` in the response and the committed-despite-timeout probe), and a
-  * failed replace leaves the current state intact.
+  * Execution is one `CREATE OR REPLACE TABLE s.t AS SELECT * FROM s.t AT (VERSION => n)` routed
+  * through the write executor as the caller (`recordExecution = true` in Main). The router stamps
+  * it: the caller's author, and this restore's own unique commit message, which the commit fence
+  * and the settling of an answer that cannot tell both go by. The statement is ACL-checked per
+  * table: the CTAS emits Ddl + Read on the table, so the caller needs ALL, or DDL plus RO/RW. The
+  * dry run is the Spec 02 aggregate over `(toSnapshot, currentSnapshot]`, run on the read executor
+  * as the caller too: the node admits DuckLake's change feed on a table the caller may read and
+  * refuses it otherwise (403 `acl_denied`), so the counts never come from the system caller.
+  * Verified-live engine fact (Spec 04 Task 1): a failed replace leaves the current state intact.
+  * `newSnapshot` is the snapshot of this restore's own commit, as the catalog names it by its
+  * message, never a guess from the table's record.
   *
-  * Restore is a mutation: audited unconditionally, dry-runs included (detail carries dryRun). Known
-  * race, by design (no auto-pin): a maintenance expiry between the probes and the CTAS fails the
-  * statement transactionally; the caller retries into a clean 410.
+  * What the write's end means (its COMMIT fires when the result is read to its end):
+  *   - A statement that failed before any COMMIT (a COMMIT only fires when a result is read): 409
+  *     `concurrent_write` or 502 `restore_failed`, and nothing can land.
+  *   - Every end of the COMMIT itself, and a timeout: the catalog is asked first, by the restore's
+  *     own commit. A node's error says what the node saw, not what the catalog's Postgres did (a
+  *     connection to it lost during the metadata COMMIT can leave that commit durable), so it is
+  *     asked too. Found: landed. The catalog unreadable: UNKNOWN, 502 `restore_outcome_unknown`.
+  *     Absent: a refusal, 409 or 502 `restore_failed`, when nothing can land (the node itself
+  *     refused the COMMIT, or a timeout cancelled the call before any COMMIT went out); UNKNOWN
+  *     when the answer was clean or was lost (a broken connection, a 5xx), since the COMMIT may be
+  *     in flight (a kill leaves one on another thread) or in DuckLake's retries, and a read can
+  *     beat it.
+  *
+  * The commit fence row comes off with every answer that settles the restore (landed, refused) and
+  * STAYS ARMED on every unknown one, and on a call that ends abnormally: the COMMIT that may yet
+  * land is then still held to the table state this restore validated, so it cannot erase a write
+  * committed meanwhile, and a leftover row matches only this restore's own unique message.
+  *
+  * Restore is a mutation: audited unconditionally, dry-runs included (detail carries dryRun, and
+  * the code of a refusal or an unknown outcome). Known race, by design (no auto-pin): a maintenance
+  * expiry between the probes and the CTAS fails the statement transactionally; the caller retries
+  * into a clean 410.
   */
 final class CatalogRestoreHandlers(
     sup: PoolSupervisor,
@@ -135,7 +155,8 @@ final class CatalogRestoreHandlers(
             AuditActions.CatalogRestore,
             "denied",
             tenant = Some(tid),
-            target = target
+            target = target,
+            detail = Map("code" -> code)
           )
           err(sc, code, msg)
         def okAudit(detail: Map[String, String]): Unit =
@@ -245,11 +266,16 @@ final class CatalogRestoreHandlers(
                               toSnapshot,
                               currentSnapshot,
                               preTableId,
-                              reader,
                               caller,
                               denied,
                               okAudit
                             )
+
+  /** An answer, and whether it leaves the commit fence row armed ([[runExecute]]). */
+  private final case class Answered(
+      result: Either[(StatusCode, ErrorResponse), RestoreResponse],
+      keepFence: Boolean
+  )
 
   private def runDryRun(
       tid: String,
@@ -282,7 +308,7 @@ final class CatalogRestoreHandlers(
         )
       )
     if toSnapshot >= currentSnapshot then
-      // Nothing to undo (also load-bearing: DataDiffSql.diffFn(to, current) would name snapshot
+      // Nothing to undo (also load-bearing: DataDiffSql.summarySql(to, current) would name snapshot
       // to + 1, an engine ERROR when it does not exist; same convention as dataDiff's from == to
       // short-circuit).
       IO.pure(ok(DataDiffSummary(0, 0, 0)))
@@ -332,7 +358,6 @@ final class CatalogRestoreHandlers(
       toSnapshot: Long,
       currentSnapshot: Long,
       preTableId: Long,
-      reader: DuckLakeCatalogReader,
       caller: ExecCaller,
       denied: (StatusCode, String, String) => Either[(StatusCode, ErrorResponse), RestoreResponse],
       okAudit: Map[String, String] => Unit
@@ -348,33 +373,32 @@ final class CatalogRestoreHandlers(
           )
         )
       case Some(poolKey) =>
-        // Its own transaction under a unique commit message, so that (1) the commit fence below
-        // can single out this commit, and (2) the COMMIT runs inside the request and a refused one
-        // comes back as the request's failure, never as a success.
+        // ONE statement, stamped under a unique commit message, so that (1) the commit fence
+        // below can single out this commit, and (2) the COMMIT, which the router sends when the
+        // result is read, still comes back as the restore's failure when refused, never as a
+        // success. Never a `BEGIN; ...; COMMIT` request: the node binds each statement of a
+        // request under the one session handle sent before it, so a replace running past 60 s
+        // would be refused at its COMMIT's bind, whatever `restoreTimeoutSec` says. Stamped, the
+        // router sends the stamp, the replace and the COMMIT each after a handle of its own, as the
+        // caller, with the author `tenant:<tenant>/user:<user>`.
         val message =
           s"restore ${req.schema}.${req.table} to snapshot $toSnapshot [${java.util.UUID.randomUUID()}]"
-        val author = s"tenant:$tid/user:${caller.identity}"
-        val sql    = List(
-          "BEGIN",
-          s"CALL ducklake_set_commit_message(${SqlLiterals.duckdbLiteral(catalogAlias(tid, db))}, " +
-            s"${SqlLiterals.duckdbLiteral(author)}, ${SqlLiterals.duckdbLiteral(message)})",
+        val sql =
           s"CREATE OR REPLACE TABLE ${quoteIdent(req.schema)}.${quoteIdent(req.table)} AS " +
             s"SELECT * FROM ${quoteIdent(req.schema)}.${quoteIdent(req.table)} " +
-            s"AT (VERSION => $toSnapshot)",
-          "COMMIT"
-        ).mkString(";\n")
+            s"AT (VERSION => $toSnapshot)"
+        val stamped = caller.copy(commitMessage = Some(message))
+        // `newSnapshot` is the snapshot of this restore's own commit, as the catalog names it.
         def committedResponse(
-            committedAt: Option[Long] = None
+            newSnapshot: Long
         ): Either[(StatusCode, ErrorResponse), RestoreResponse] =
-          val newSnapshot =
-            committedAt.orElse(reader.currentTableInfo(req.schema, req.table).map(_._2))
           okAudit(
             Map(
               "schema"      -> req.schema,
               "table"       -> req.table,
               "toSnapshot"  -> toSnapshot.toString,
               "dryRun"      -> "false",
-              "newSnapshot" -> newSnapshot.map(_.toString).getOrElse("unknown")
+              "newSnapshot" -> newSnapshot.toString
             )
           )
           Right(
@@ -384,23 +408,66 @@ final class CatalogRestoreHandlers(
               toSnapshot,
               currentSnapshot,
               summary = None,
-              newSnapshot = newSnapshot,
+              newSnapshot = Some(newSnapshot),
               dryRun = false
             )
           )
-        // DuckLake's optimistic-concurrency loser error and the commit fence's refusal both
-        // mention a conflict. A false negative surfaces as 502 instead of 409 (retry guidance is
-        // the same); a false positive requires "conflict" in an unrelated engine error.
+        // A commit that lost to other writers: DuckLake's optimistic-concurrency loser error and the
+        // commit fence's refusal both mention a conflict, and writers can tip the commit past
+        // DuckLake's retries before the fence refuses it. A permanent failure in these words
+        // answers 409 at each retry, with its text.
         def isConflict(reason: String): Boolean =
-          reason.toLowerCase(Locale.ROOT).contains("conflict")
-        // A write whose outcome the answer cannot tell (a timeout, a broken stream): the catalog
-        // decides, by this restore's own commit, the snapshot its unique message names. A changed
-        // table id proves nothing: another writer's replace changes it too.
-        def settledByCatalog(reason: String): Either[(StatusCode, ErrorResponse), RestoreResponse] =
-          val ours = reader.snapshotByCommitMessage(message)
-          if ours.isDefined then committedResponse(ours)
-          else if isConflict(reason) then denied(StatusCode.Conflict, "concurrent_write", reason)
-          else denied(StatusCode.BadGateway, "restore_failed", reason)
+          reason.toLowerCase(Locale.ROOT).contains("conflict") ||
+            MergeDecision.retriesExhausted(reason)
+        def landed(newSnapshot: Long): Answered =
+          Answered(committedResponse(newSnapshot), keepFence = false)
+        // Nothing can land: a statement failed before any COMMIT, or the catalog shows no commit of
+        // this restore and the node itself refused the COMMIT, or the call was cancelled before one
+        // could go out. The fence comes off.
+        def refused(sc: StatusCode, code: String, reason: String): Answered =
+          Answered(denied(sc, code, reason), keepFence = false)
+        def failed(reason: String): Answered =
+          if isConflict(reason) then refused(StatusCode.Conflict, "concurrent_write", reason)
+          else refused(StatusCode.BadGateway, "restore_failed", reason)
+        // Nobody knows whether the replace landed or still will. The fence row STAYS ARMED: the
+        // COMMIT may be in flight (a kill leaves one on another thread) or in DuckLake's retries,
+        // and if it lands after a writer committed to the table it is still refused atomically,
+        // where a disarmed row would let it through to erase that write. A leftover row matches
+        // only this restore's own unique message, so it holds nothing else.
+        def unknown(why: String): Answered =
+          Answered(
+            denied(StatusCode.BadGateway, "restore_outcome_unknown", why),
+            keepFence = true
+          )
+        def check: String = s"check ${req.schema}.${req.table} before retrying"
+        // This restore's commit, by its message, as the catalog tells it. Through a reader
+        // resolved again (the one the restore began with can be closed by the idle sweep or
+        // evicted since), and once more when a read fails: failing twice is an unreadable catalog.
+        def lookup(): scala.util.Try[Option[Long]] =
+          def once() = scala.util.Try(resolveReader(tid, db).snapshotByCommitMessage(message))
+          once().orElse(once())
+        // What an answer cannot tell (a timeout, a lost COMMIT answer, a node's own error on the
+        // COMMIT, which says what the node saw and not what the catalog's Postgres did) and every
+        // clean answer too: the catalog decides, by this restore's own commit. A changed table id
+        // proves nothing: another writer's replace changes it too. Found: landed. Absent: `reason`
+        // stands as a refusal when `canStillLand` is false (the node itself refused the COMMIT, or
+        // the call was cancelled before any COMMIT could go out); otherwise it proves nothing,
+        // since a COMMIT may be in flight and a read can beat it: unknown. A catalog that cannot be
+        // read is unknown too, answered as such and audited, never a bare 500.
+        def settle(reason: String, canStillLand: Boolean): Answered =
+          lookup() match
+            case scala.util.Success(Some(ours))           => landed(ours)
+            case scala.util.Success(None) if canStillLand =>
+              unknown(
+                s"$reason; no commit of this restore is in the catalog yet, and its COMMIT may " +
+                  s"still land: $check"
+              )
+            case scala.util.Success(None) => failed(reason)
+            case scala.util.Failure(t)    =>
+              unknown(
+                s"$reason; the catalog could not be read to settle it " +
+                  s"(${Option(t.getMessage).getOrElse(t.getClass.getSimpleName)}): $check"
+              )
         // The table as validated: `currentSnapshot` (the expectedCurrentSnapshot when the caller
         // sent one) is the newest snapshot that touched it, and `preTableId` its id. Any other
         // commit touching it from here on makes this one's commit refused, atomically with it.
@@ -410,29 +477,60 @@ final class CatalogRestoreHandlers(
           case Left(why) =>
             IO.pure(denied(StatusCode.BadGateway, "restore_failed", why))
           case Right(_) =>
-            writeExecutor(caller, poolKey, sql)
-              .timeout(cfg.restoreTimeoutSec.seconds)
+            // The replace and its COMMIT both run under the bound: the COMMIT fires when the
+            // result is read to its end, and a commit failing there (the fence's refusal included)
+            // is a failure. Once the executor has answered, the result is always read and closed
+            // (masked), so a timeout landing right then cannot orphan its node connection.
+            IO.uncancelable { poll =>
+              poll(writeExecutor(stamped, poolKey, sql)).flatMap {
+                case Left(failure) => IO.pure(Left(failure))
+                case Right(result) => IO.blocking(WriteResults.drain(result)).map(Right(_))
+              }
+            }.timeout(cfg.restoreTimeoutSec.seconds)
               .attempt
-              .map {
+              .flatMap {
                 case Left(e) =>
-                  // Cancellation of the blocking HTTP leg is best-effort, so a replace that
-                  // outlives the timeout may still have committed.
+                  // A replace that outlives the bound is cancelled, which its statement sees when
+                  // it answers: the connection closes without the COMMIT and the transaction rolls
+                  // back, so no COMMIT can land. The catalog is still asked, the call having been
+                  // cancelled at no precise moment.
                   val msg = e match
                     case _: java.util.concurrent.TimeoutException =>
                       s"restore timed out after ${cfg.restoreTimeoutSec}s"
                     case other => s"restore failed: ${other.getMessage}"
-                  settledByCatalog(msg)
+                  IO.blocking(settle(msg, canStillLand = false))
                 case Right(Left(RouterFailure.AccessDenied(reason))) =>
-                  denied(StatusCode.Forbidden, "acl_denied", reason)
-                case Right(Left(failure)) if isConflict(failure.reason) =>
-                  denied(StatusCode.Conflict, "concurrent_write", failure.reason)
-                case Right(Left(failure)) =>
-                  denied(StatusCode.BadGateway, "restore_failed", failure.reason)
-                case Right(Right(result)) =>
-                  // Read to its end before answering: a commit failing there is a failure.
-                  WriteResults.drain(result) match
-                    case Right(_)  => committedResponse()
-                    case Left(why) => settledByCatalog(s"restore failed: $why")
+                  IO.pure(refused(StatusCode.Forbidden, "acl_denied", reason))
+                // A statement that failed before any COMMIT: the COMMIT only fires when a result
+                // is read, so none is in flight.
+                case Right(Left(failure)) => IO.pure(failed(failure.reason))
+                // The COMMIT answered: confirmed by this restore's own commit, which also gives
+                // `newSnapshot` exactly. A kill landing between the statement's answer and the
+                // read closes the result from another thread, which fires a COMMIT of its own that
+                // `drain` does not wait for: a clean answer alone says neither that the replace
+                // landed nor that it did not.
+                case Right(Right(Right(_))) =>
+                  IO.blocking(settle("the restore's COMMIT answered", canStillLand = true))
+                // The COMMIT failed, whatever the failure: the catalog is asked first. A node's own
+                // error says what the node saw, not what the catalog's Postgres did: every
+                // statement error is one, a connection to the catalog lost during the metadata
+                // COMMIT included, and that commit can be durable. `nodeRefused` only decides what
+                // an absent commit means: a refusal when the node itself refused the COMMIT, where
+                // a lost answer (a broken connection, a 5xx) may still be in DuckLake's retries,
+                // and a read that beats it finds nothing.
+                case Right(Right(Left(failure))) =>
+                  IO.blocking(
+                    settle(
+                      s"restore failed: ${failure.message}",
+                      canStillLand = !failure.nodeRefused
+                    )
+                  )
               }
-              .guarantee(IO.blocking(fence.disarm(catalogMeta, message)))
+              // Not a `guarantee`: only an outcome that settles the restore takes the fence off. A
+              // call that ends abnormally (an error, a cancel) leaves it, as an unknown one does.
+              .flatTap(outcome =>
+                if outcome.keepFence then IO.unit
+                else IO.blocking(fence.disarm(catalogMeta, message))
+              )
+              .map(_.result)
         }

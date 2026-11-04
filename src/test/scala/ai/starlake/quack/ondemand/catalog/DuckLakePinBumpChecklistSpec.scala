@@ -93,6 +93,22 @@ class DuckLakePinBumpChecklistSpec extends AnyFlatSpec with Matchers with Postgr
       }
     }
 
+  "a rewrite" should "commit as rewrite_delete, inside the known vocabulary" in
+    withCatalog(
+      "pinrewrite",
+      extraSql = """CREATE TABLE lake.tpch1.rw (id INTEGER);
+                   |INSERT INTO lake.tpch1.rw SELECT range FROM range(100000);
+                   |DELETE FROM lake.tpch1.rw WHERE id < 50000;
+                   |CALL ducklake_rewrite_data_files('lake', 'rw', schema => 'tpch1', delete_threshold => 0.0);
+                   |""".stripMargin
+    ) { (_, _) =>
+      val observed = verbsOf(changesMade())
+      observed should contain("rewrite_delete")
+      val known =
+        DuckLakeCatalogReader.HistoryVerbs.toSet ++ DuckLakeCatalogReader.HistoryIgnoredVerbs
+      (observed -- known) shouldBe empty
+    }
+
   "compaction scheduling" should "backdate schedule_start to the snapshot and hard-delete (item 2)" in
     withCatalog("pinsched", extraSql = battery) { (_, _) =>
       val dbName = currentDbName.getOrElse(fail("outside withCatalog"))
