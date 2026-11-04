@@ -50,16 +50,16 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "compose exactly these ids, whichever replica or release composes them" in {
-    // Worked out by hand, outside this JVM: 16 hex characters of the SHA-256 of
-    // `tenant/tenantDb/pool/index`, as given, before `-<index>`, all of it in 63 characters.
+    // Worked out by hand, outside this JVM: 16 hex characters of the SHA-256 of the tenant,
+    // tenant-db, pool and index as given, joined by a NUL, before `-<index>`, in 63 characters.
     PoolSupervisor.nodeId(
       PoolKey("wayne_corp", "wayne_corp_sales_2026__br_ab12cd34", "__br_ab12cd34"),
       1
-    ) shouldBe "quack-wayne-corp-wayne-corp-sales-2026--br-a-f499e31b6b184a07-1"
+    ) shouldBe "quack-wayne-corp-wayne-corp-sales-2026--br-a-1bec1026d140bc18-1"
     PoolSupervisor.nodeId(
       PoolKey("t" * 61, "t" * 61 + "_d", "p" * 63),
       Int.MaxValue
-    ) shouldBe "quack-ttttttttttttttttttttttttttttt-1ba4e683c528c694-2147483647"
+    ) shouldBe "quack-ttttttttttttttttttttttttttttt-1ccfb0cbc814245e-2147483647"
   }
 
   it should "leave an id of 63 characters byte for byte, and shorten one of 64" in {
@@ -70,7 +70,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val at64 = PoolKey("acme", "acme_default", "p" * 38)
     unbounded(at64, 1).length shouldBe 64
     PoolSupervisor.nodeId(at64, 1) shouldBe
-      "quack-acme-acme-default-pppppppppppppppppppp-05cbf4afedc552f2-1"
+      "quack-acme-acme-default-pppppppppppppppppppp-917ce4e647ac20a3-1"
     // One pool's ids can sit on both sides, when its index gains a digit.
     PoolSupervisor.nodeId(at63, 9) shouldBe unbounded(at63, 9)
     unbounded(at63, 10).length shouldBe 64
@@ -98,6 +98,17 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val right = PoolKey("acme", "acme_" + "x" * 50 + "_y", "z")
     unbounded(left, 1) shouldBe unbounded(right, 1)
     PoolSupervisor.nodeId(left, 1) should not be PoolSupervisor.nodeId(right, 1)
+    // A pool's name follows no rule, so `/` cannot separate the names in the hash: these two would
+    // join to the same text around it, and the cut leaves them only the hash.
+    val slashLeft  = PoolKey("acme", "acme_" + "x" * 60 + "/q", "y")
+    val slashRight = PoolKey("acme", "acme_" + "x" * 60, "q/y")
+    PoolSupervisor.nodeId(slashLeft, 1).dropRight("-0123456789abcdef-1".length) shouldBe
+      PoolSupervisor.nodeId(slashRight, 1).dropRight("-0123456789abcdef-1".length)
+    PoolSupervisor.nodeId(slashLeft, 1) should not be PoolSupervisor.nodeId(slashRight, 1)
+    // And a letter moved across the end of a name: the hash must keep the names apart.
+    val endLeft  = PoolKey("acme", "acme_" + "x" * 50 + "a", "b")
+    val endRight = PoolKey("acme", "acme_" + "x" * 50, "ab")
+    PoolSupervisor.nodeId(endLeft, 1) should not be PoolSupervisor.nodeId(endRight, 1)
   }
 
   it should "fit a Service name and a label value, whatever the names and the index are" in {

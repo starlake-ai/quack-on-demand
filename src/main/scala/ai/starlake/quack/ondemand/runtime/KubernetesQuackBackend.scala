@@ -733,13 +733,22 @@ final class KubernetesQuackBackend(
     * `a_b_c`, `d`), and then share these Secrets: a known defect, since a running pod reads its
     * Secret by this name. A name must also end in an alphanumeric, and a pool `x_` reads `x-`: it
     * ends in `0.qod`, whose dot no slug holds, so it is not the name of a pool `x_0`.
+    *
+    * A pool whose first node id had to be cut takes that id instead, which holds a hash of its
+    * names: two such pools can read alike with different ids, so both pods start, and one name
+    * would hand each the other's password. No pod of such a pool ran before the cut, the API
+    * refused its id, so no running pod's Secret moves.
     */
   private def perPoolSecretName(prefix: String, key: PoolKey): String =
     val safeTenant = key.tenant.replace('_', '-')
     val safeDb     = key.tenantDb.replace('_', '-')
     val safePool   = key.pool.replace('_', '-')
     val name       = s"$prefix-$safeTenant-$safeDb-$safePool"
-    if name.endsWith("-") then s"${name}0.qod" else name
+    val firstNode  = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, 1)
+    if firstNode != s"quack-$safeTenant-$safeDb-$safePool-1" then
+      s"$prefix-${firstNode.stripSuffix("-1")}"
+    else if name.endsWith("-") then s"${name}0.qod"
+    else name
 
   /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
     * pool attaches the same tenant-db with the same credentials.

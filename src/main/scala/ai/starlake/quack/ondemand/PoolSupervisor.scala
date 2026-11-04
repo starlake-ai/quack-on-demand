@@ -5364,9 +5364,10 @@ object PoolSupervisor:
     * `placementForNodeId` read it, and a `-` the cut leaves before the hash is legal inside a
     * label. The hash covers the names as given, because `_` reads `-` here: (`a`, `a_b`, `c_d`) and
     * (`a`, `a_b_c`, `d`) read alike, and at or under the limit they still get one id, a known
-    * defect that an id there cannot change to fix. Pure, on every runtime: each replica composes
-    * the same id. Only a fresh slot is composed: a node with a row keeps the id in it, so one an
-    * earlier release started under a longer id keeps that.
+    * defect that an id there cannot change to fix. It joins them with a NUL, which no name can
+    * hold: a pool's name follows no rule, but Postgres stores no NUL. Pure, on every runtime: each
+    * replica composes the same id. Only a fresh slot is composed: a node with a row keeps the id in
+    * it, so one an earlier release started under a longer id keeps that.
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
     // RFC-1123 forbids '_'; slugs may contain it. Map '_' -> '-' on every component. Labels keep the
@@ -5377,7 +5378,7 @@ object PoolSupervisor:
     val whole      = s"quack-$safeTenant-$safeDb-$safePool-$index"
     if whole.length <= NodeIdMaxChars then whole
     else
-      val names  = s"${key.tenant}/${key.tenantDb}/${key.pool}/$index"
+      val names  = List(key.tenant, key.tenantDb, key.pool, index.toString).mkString("\u0000")
       val digest = java.security.MessageDigest
         .getInstance("SHA-256")
         .digest(names.getBytes(java.nio.charset.StandardCharsets.UTF_8))

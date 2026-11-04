@@ -1194,3 +1194,60 @@ class KubernetesQuackBackendSpec
     val reborn = fedBackend.discoverExisting().unsafeRunSync()
     reborn.map(n => (n.nodeId, n.poolKey)).toSet shouldBe started.toSet
     reborn.foreach(n => withClue(n.nodeId)(n.token should not be empty))
+
+  it should "give two keys that read alike their own per-pool Secrets" in:
+    // Their ids differ by the hash, so both pods start. Under one Secret's name each would read what
+    // the other's start wrote last, the other database's password and federation SQL included.
+    val left    = PoolKey("acme", "acme_" + "x" * 50, "y_z")
+    val right   = PoolKey("acme", "acme_" + "x" * 50 + "_y", "z")
+    val backend = fedBackend
+    val ids     = List(left -> "left", right -> "right").map { (key, who) =>
+      val id = PoolSupervisor.nodeId(key, 1)
+      backend
+        .start(
+          nodeOf(key, id)
+            .copy(metastore = Map("pgPassword" -> s"$who-pw"), extraSetupSql = s"-- $who-sql")
+        )
+        .unsafeRunSync()
+      (id, who)
+    }
+    ids.map(_._1).distinct.size shouldBe 2
+    val read = ids.map { (id, who) =>
+      val files =
+        SecretsVolumeView.files(server.getClient.pods.inNamespace("default").withName(id).get())
+      val (env, sql)         = (files("pgPassword")._1, files("extraSetupSql")._1)
+      def data(name: String) =
+        server.getClient.secrets.inNamespace("default").withName(name).get().getStringData.asScala
+      withClue(who) {
+        data(env)("pgPassword") shouldBe s"$who-pw"
+        data(sql)("extraSetupSql") shouldBe s"-- $who-sql"
+      }
+      (env, sql)
+    }
+    read.map(_._1).distinct.size shouldBe 2
+    read.map(_._2).distinct.size shouldBe 2
+    // The last pod of one goes with its own Secrets only.
+    backend.stop(left, ids.head._1).unsafeRunSync()
+    server.getClient.secrets.inNamespace("default").withName(read.head._1).get() shouldBe null
+    server.getClient.secrets.inNamespace("default").withName(read(1)._1).get() should not be null
+
+  it should "keep a per-pool Secret's name up to a first node id of 63, then take the id's hash" in:
+    // A pool whose first id is 63 or fewer may have pods running, which read their Secret by this
+    // name. One past it never started: the API refused the id before it could be cut.
+    val at63                = PoolKey("acme", "acme_default", "p" * 37)
+    val at64                = PoolKey("acme", "acme_default", "p" * 38)
+    val backend             = fedBackend
+    def names(key: PoolKey) =
+      backend.start(nodeOf(key, PoolSupervisor.nodeId(key, 1))).unsafeRunSync()
+      val pod =
+        server.getClient.pods.inNamespace("default").withName(PoolSupervisor.nodeId(key, 1)).get()
+      val files = SecretsVolumeView.files(pod)
+      (files("pgPassword")._1, files("extraSetupSql")._1)
+    names(at63) shouldBe
+      ((s"qod-nodeenv-acme-acme-default-${"p" * 37}", s"qod-fedsql-acme-acme-default-${"p" * 37}"))
+    names(at64) shouldBe (
+      (
+        "qod-nodeenv-quack-acme-acme-default-pppppppppppppppppppp-917ce4e647ac20a3",
+        "qod-fedsql-quack-acme-acme-default-pppppppppppppppppppp-917ce4e647ac20a3"
+      )
+    )

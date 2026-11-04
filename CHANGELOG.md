@@ -286,8 +286,9 @@ count. To keep counts from a user, refuse on the table.
   plus its tenant's and its parent's names, so a branch of `wayne_corp` / `wayne_corp_sales_2026` answered
   `502 branch_create_failed`, and a pool with long names never started. On every runtime such an id now
   keeps its start and ends `-<hash>-<index>`, 63 characters in all, the hash being 16 hex characters of a
-  SHA-256 of the tenant, database, pool and index. An id of 63 or fewer is unchanged, and a node a local
-  or fleet manager started under a longer id keeps it.
+  SHA-256 of the tenant, database, pool and index. Such a pool's per-pool Secrets are named after that id.
+  An id of 63 or fewer and its pool's Secret names are unchanged, and a node a local or fleet manager
+  started under a longer id keeps it.
 - A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight
