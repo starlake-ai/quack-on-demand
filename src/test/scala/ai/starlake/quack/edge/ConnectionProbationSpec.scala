@@ -70,13 +70,15 @@ class ConnectionProbationSpec extends AnyFlatSpec with Matchers:
       maxConnections: Int = 8,
       timeoutMs: Long = 60000L,
       readBudget: Long = 1000L,
-      behind: () => ChannelHandler = () => new AsksToRead
+      behind: () => ChannelHandler = () => new AsksToRead,
+      backlog: () => Int = () => 0,
+      maxBacklog: Int = 4
   ) =
     val inner = new InternalProtocolNegotiator.ProtocolNegotiator:
       def scheme(): AsciiString                                           = AsciiString.of("http")
       def newHandler(handler: GrpcHttp2ConnectionHandler): ChannelHandler = behind()
       def close(): Unit                                                   = ()
-    new ConnectionProbation(inner, maxConnections, timeoutMs, readBudget)
+    new ConnectionProbation(inner, maxConnections, timeoutMs, readBudget, backlog, maxBacklog)
 
   private def attributesOf(channel: EmbeddedChannel): Attributes =
     Attributes
@@ -325,4 +327,51 @@ class ConnectionProbationSpec extends AnyFlatSpec with Matchers:
     first.runScheduledPendingTasks()
     first.isOpen shouldBe false
     roomForOne(on) shouldBe true
+  }
+
+  // ---- what waits for a thread ---------------------------------------------------------------
+
+  "the limit on what waits for a thread" should "close a new connection past it at once, with no negotiator's handler, no timer and no place" in {
+    var waiting      = 5
+    val on           = probation(maxConnections = 1, backlog = () => waiting, maxBacklog = 4)
+    val (refused, _) = open(on)
+    try
+      refused.isOpen shouldBe false
+      refused.pipeline().get(classOf[AsksToRead]) shouldBe null
+      refused.runScheduledPendingTasks() shouldBe -1L
+    finally refused.finishAndReleaseAll()
+    // Room for one: had the refused one taken a place, this one would not get it.
+    waiting = 0
+    roomForOne(on) shouldBe true
+  }
+
+  it should "take a new connection at the limit" in {
+    roomForOne(probation(backlog = () => 4, maxBacklog = 4)) shouldBe true
+  }
+
+  it should "take the next one when what waits falls" in {
+    var waiting = 100
+    val on      = probation(backlog = () => waiting, maxBacklog = 4)
+    roomForOne(on) shouldBe false
+    waiting = 5
+    roomForOne(on) shouldBe false
+    waiting = 4
+    roomForOne(on) shouldBe true
+  }
+
+  it should "leave a connection already on probation to its own limits and its proof" in {
+    var waiting          = 0
+    val on               = probation(backlog = () => waiting, maxBacklog = 4)
+    val (channel, http2) = open(on)
+    try
+      waiting = 100
+      channel.writeInbound(bytes(10))
+      createAndClose(http2)
+      channel.isOpen shouldBe true
+      onProbation(channel) shouldBe true
+      on.prove(attributesOf(channel))
+      channel.runPendingTasks()
+      http2.remote().maxActiveStreams() shouldBe Int.MaxValue
+      channel.isOpen shouldBe true
+    finally channel.finishAndReleaseAll()
   }

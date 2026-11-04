@@ -8,7 +8,9 @@ import ai.starlake.quack.edge.{
   EdgeConfig,
   FlightProducerImpl
 }
+import ai.starlake.quack.edge.auth.{AuthFailure, AuthScope, AuthenticatedProfile, BasicAuthProvider}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import com.google.protobuf.{Any => ProtoAny, ByteString}
 import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import io.netty.buffer.Unpooled
@@ -40,6 +42,8 @@ import java.io.{ByteArrayOutputStream, DataInputStream, EOFException}
 import java.net.{Socket, SocketTimeoutException}
 import java.security.cert.X509Certificate
 import java.util.{Base64, UUID}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.logging.{Level, Logger}
 import javax.net.ssl.{SSLContext, SSLSocket, TrustManager, X509TrustManager}
 import scala.collection.mutable.ArrayBuffer
@@ -75,12 +79,15 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       SecurityFixtures.freshStore().store,
       enableProviders = true,
       tls = tls,
-      wiring = FlightEdgeHarness.RouterWiring(
-        spawnNodes = spawnNodes,
-        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
-        protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
-      ),
+      wiring = wiring(spawnNodes),
       edgeConfig = edgeConfig
+    )
+
+  private def wiring(spawnNodes: Boolean = false) =
+    FlightEdgeHarness.RouterWiring(
+      spawnNodes = spawnNodes,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
 
   private def basicAuthorization(password: String = SecurityFixtures.AlicePassword): String =
@@ -397,6 +404,9 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val client = h.newClient()
     val silent = plain(h.port)
     try
+      // Connected first: with more waiting for a thread than it has threads, a new connection is
+      // closed.
+      client.getInfo(sqlInfo, basic, timed) should not be null
       // A working credential first: past 8 streams, a connection without one is refused them.
       silent.open("GetFlightInfo", rightPassword)
       silent.await(10000)(silent.lifted) shouldBe true
@@ -896,6 +906,147 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       client.await(300)(client.anyReset) shouldBe false
     finally
       client.close()
+      h.shutdown()
+  }
+
+  // ---- what waits for a thread ---------------------------------------------------------------
+
+  /** Holds every password check once told to, so that a spec can park the whole pool. */
+  private final class ParkingPasswords(store: InMemoryControlPlaneStore) extends BasicAuthProvider:
+    private val passwords = new InMemoryAuthService.InMemoryBasicAuthProvider(store)
+    private val parking   = new AtomicBoolean(false)
+    private val released  = new CountDownLatch(1)
+    val parked            = new AtomicInteger(0)
+    val name              = "parking"
+
+    def park(): Unit = parking.set(true)
+
+    def release(): Unit =
+      parking.set(false)
+      released.countDown()
+
+    def authenticate(
+        scope: AuthScope,
+        username: String,
+        password: String
+    ): Either[AuthFailure, AuthenticatedProfile] =
+      if parking.get then
+        parked.incrementAndGet()
+        released.await(60L, TimeUnit.SECONDS)
+      passwords.authenticate(scope, username, password)
+
+  /** The smallest pool the configuration takes. */
+  private val SmallestPool = 16
+
+  private def bootParked(tls: Boolean = false) =
+    val store     = SecurityFixtures.freshStore().store
+    val passwords = new ParkingPasswords(store)
+    val h         = FlightEdgeHarness.boot(
+      store,
+      tls = tls,
+      wiring = wiring(),
+      authService = Some(InMemoryAuthService.realServiceWithBasicChain(List(passwords))),
+      edgeConfig = _.copy(flightThreads = SmallestPool)
+    )
+    (h, passwords)
+
+  /** Every thread parked and the queue read from the pool itself, exact at each step: it holds what
+    * the check reads, so at each step a spec knows which side of the limit it is on.
+    */
+  private def stalled(h: FlightEdgeHarness.Harness, passwords: ParkingPasswords, queued: Int) =
+    soon {
+      passwords.parked.get shouldBe SmallestPool
+      h.queuedTasks() shouldBe queued
+    }
+
+  /** Past the limit by one task, and at the limit just before it, so nothing but the queue differs
+    * for the connection that is closed.
+    */
+  private def closedPastTheBacklog(tls: Boolean): org.scalatest.Assertion =
+    ConnectionProbation.maxBacklog(
+      SmallestPool,
+      EdgeConfig("127.0.0.1", 31338, tlsEnabled = false, "", "").maxHeaderBytes,
+      Runtime.getRuntime.maxMemory
+    ) shouldBe SmallestPool
+    val (h, passwords) = bootParked(tls)
+    val clients        = ArrayBuffer.empty[RawClient]
+    def connect()      =
+      val client = if tls then overTls(h.port) else plain(h.port)
+      clients += client
+      client
+    try
+      val proven = connect()
+      proven.open("GetFlightInfo", rightPassword)
+      proven.await(10000)(proven.lifted) shouldBe true
+      passwords.park()
+      // 32 calls: as many on the threads as behind them.
+      (1 to 4).foreach { _ =>
+        val filling = connect()
+        (1 to ConnectionProbation.MaxStreams).foreach(_ =>
+          filling.open("GetFlightInfo", rightPassword)
+        )
+      }
+      stalled(h, passwords, SmallestPool)
+      val atTheLimit = connect()
+      atTheLimit.await(5000)(atTheLimit.advertisedStreams.nonEmpty) shouldBe true
+      atTheLimit.open("GetFlightInfo", rightPassword)
+      stalled(h, passwords, SmallestPool + 1)
+      closedBeforeAnything(h.port)
+      // A connection already on probation keeps its limits, and one that showed a credential is
+      // not touched: each is read and each call waits with the others.
+      atTheLimit.open("GetFlightInfo", rightPassword)
+      val asked = proven.open("GetFlightInfo", rightPassword)
+      proven.data(asked, descriptorMessage(sqlInfoCommand), end = true)
+      stalled(h, passwords, SmallestPool + 3)
+      closedBeforeAnything(h.port)
+      passwords.release()
+      proven.await(15000)(proven.answered(asked)) shouldBe true
+      proven.frames(asked).map(_.typ) shouldBe List(Headers, 0, Headers)
+      soon(h.queuedTasks() shouldBe 0)
+      val after = connect()
+      after.await(5000)(after.advertisedStreams.nonEmpty) shouldBe true
+    finally
+      passwords.release()
+      clients.foreach(_.close())
+      h.shutdown()
+
+  "a new connection" should "be closed at once while too many tasks wait for a thread" in
+    closedPastTheBacklog(tls = false)
+
+  it should "be closed the same way over TLS, before any handshake" in
+    closedPastTheBacklog(tls = true)
+
+  "what waits for a thread" should "be tasks: a waiting call whose client left stays, and adds one" in {
+    val (h, passwords) = bootParked()
+    val clients        = ArrayBuffer.empty[RawClient]
+    def connect()      =
+      val client = plain(h.port)
+      clients += client
+      client
+    try
+      passwords.park()
+      (1 to 2).foreach { _ =>
+        val filling = connect()
+        (1 to ConnectionProbation.MaxStreams).foreach(_ =>
+          filling.open("GetFlightInfo", rightPassword)
+        )
+      }
+      stalled(h, passwords, 0)
+      val resetting = connect()
+      val waiting   = resetting.open("GetFlightInfo", rightPassword)
+      stalled(h, passwords, 1)
+      resetting.reset(waiting)
+      stalled(h, passwords, 2)
+      val leaving = connect()
+      (1 to 3).foreach(_ => leaving.open("GetFlightInfo", rightPassword))
+      stalled(h, passwords, 5)
+      leaving.close()
+      stalled(h, passwords, 8)
+      passwords.release()
+      soon(h.queuedTasks() shouldBe 0)
+    finally
+      passwords.release()
+      clients.foreach(_.close())
       h.shutdown()
   }
 

@@ -86,6 +86,8 @@ object FlightEdgeHarness:
     *   independently.
     * @param shutdown
     *   Stops the server and releases the allocator. Idempotent.
+    * @param queuedTasks
+    *   The tasks waiting for a Flight thread now.
     */
   final case class Harness(
       host: String,
@@ -93,7 +95,8 @@ object FlightEdgeHarness:
       allocator: RootAllocator,
       shutdown: () => Unit,
       supervisor: PoolSupervisor,
-      router: FlightSqlRouter
+      router: FlightSqlRouter,
+      queuedTasks: () => Int
   ):
     /** Build a fresh [[FlightClient]] pointed at this harness.
       *
@@ -246,5 +249,6 @@ object FlightEdgeHarness:
         allocator.close()
       },
       supervisor = sup,
-      router = router
+      router = router,
+      queuedTasks = () => srv.queuedTasks
     )

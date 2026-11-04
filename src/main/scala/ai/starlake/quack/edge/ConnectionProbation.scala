@@ -34,22 +34,29 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
   *     client that never ends its streams only blocks itself;
   *   - creates at most [[ConnectionProbation.MaxTotalStreams]] streams in all, whatever became of
   *     them, so a client that resets its own to free places gets no more than that;
-  *   - is read for at most `readBudget` bytes, counted as they leave the socket, ahead of TLS. All
-  *     of the above grows with bytes read, so this also bounds what no rule here names. What the
-  *     read under way already holds still gets decoded, so the bound has the slack of one read
-  *     buffer, at most 64 KiB (Netty's adaptive allocator);
+  *   - is read for at most `readBudget` bytes, counted as they leave the socket, ahead of TLS. What
+  *     one connection can hold grows with bytes read, so this bounds it by whatever route, named
+  *     here or not. What the read under way already holds still gets decoded, so the bound has the
+  *     slack of one read buffer, at most 64 KiB (Netty's adaptive allocator);
   *   - lasts at most `timeoutMs`, whatever its streams;
   *   - is one of at most `maxConnections`, and one past that is closed at once, before any TLS
   *     handshake.
+  *
+  * All of that bounds one connection. Its calls can outlive it: a call waiting for a Flight thread
+  * keeps its headers whatever became of its connection, so while the pool is stalled a client that
+  * closes and reconnects adds to them each time. `maxBacklog` bounds those: while more tasks wait
+  * for a thread than that, a new connection is closed at once, as one past `maxConnections` is,
+  * with no place and no timer. A connection already on probation keeps the limits above.
   *
   * Past the read budget or the stream total it is not closed: closing frees its place, and a
   * reconnect would make either limit worthless. The timer ends it. A client's own frames wait in
   * its socket, so its first call, already read and still being checked, can prove the connection
   * and reading then resumes: a large first statement pauses at the budget while its credential is
-  * checked. A client can end it sooner, as with any close of its own: Netty keeps no record of a
+  * checked. While it is still being read a client can end it sooner: Netty keeps no record of a
   * stream it refused, so DATA on one reads as a stream that never existed and closes the connection
-  * (GOAWAY, PROTOCOL_ERROR). That is what a real client's next call does, as its message follows
-  * its HEADERS at once: it reads UNAVAILABLE and reconnects.
+  * (GOAWAY, PROTOCOL_ERROR). That is what a real client's next call does past the stream total, as
+  * its message follows its HEADERS at once: it reads UNAVAILABLE and reconnects. Past the read
+  * budget that DATA is never read, and the client waits for the timer.
   *
   * A credential ends probation at once. A connection that has shown one has no limit on its streams
   * and does not count, so a flood can neither count it nor limit it, and a large deployment meets
@@ -65,7 +72,9 @@ final class ConnectionProbation(
     inner: InternalProtocolNegotiator.ProtocolNegotiator,
     maxConnections: Int,
     timeoutMs: Long,
-    readBudget: Long
+    readBudget: Long,
+    backlog: () => Int,
+    maxBacklog: Int
 ) extends InternalProtocolNegotiator.ProtocolNegotiator:
 
   /** Holds only connections on probation, so a proven connection pays one failed lookup per call.
@@ -124,9 +133,10 @@ final class ConnectionProbation(
         if streamsCreated >= ConnectionProbation.MaxTotalStreams then
           grpcHandler.connection().remote().maxActiveStreams(0)
 
-    /** Over the limit it closes, and neither TLS nor HTTP/2 ever start. */
+    /** Over either limit it closes, and neither TLS nor HTTP/2 ever start. */
     override def handlerAdded(ctx: ChannelHandlerContext): Unit =
-      if held.incrementAndGet() > maxConnections then
+      if backlog() > maxBacklog then ctx.close()
+      else if held.incrementAndGet() > maxConnections then
         held.decrementAndGet()
         ctx.close()
       else
@@ -218,30 +228,66 @@ object ConnectionProbation:
     */
   private val ReadMarginBytes: Long = 16L * 1024
 
+  /** How far past the read budget a read can go: the largest buffer of Netty's adaptive allocator.
+    */
+  private val ReadSlackBytes: Long = 64L * 1024
+
   /** What one stream holds on probation besides its headers: gRPC's own state. */
   private val StreamStateBytes: Long = 3L * 1024
 
   /** What a connection on probation holds with no stream. */
   private val ConnectionBytes: Long = 100L * 1024
 
-  /** Heap per byte read at the worst rate: an empty DATA frame of 9 bytes on a stream keeps about
-    * 80 B, in gRPC's deframer.
+  /** Heap per byte read at the highest rate found: a 9-byte HEADERS refused past the stream limit,
+    * whose id is not consumed, so that the next can use it too, each answered by a reset that a
+    * client that does not read leaves queued, 232 B. An upper bound, since the kernel's socket
+    * buffer takes the first resets.
     */
-  private val HeapPerByteRead: Long = 9L
+  private val HeapPerByteRead: Long = 26L
+
+  /** The same with TLS, whose queue costs about 100 B per reset. */
+  private val HeapPerByteReadTls: Long = 11L
+
+  /** What waits for a thread gets one part in this many of the heap. */
+  private val BacklogHeapParts: Long = 20L
 
   /** How many bytes of a connection on probation are read: a first call's headers at their limit,
     * and room for what comes with them.
     */
   def readBudget(maxHeaderBytes: Int): Long = maxHeaderBytes.toLong + ReadMarginBytes
 
-  /** What a connection on probation can hold in the heap. Computed, not measured. [[MaxStreams]]
-    * streams with gRPC's state, each with its headers in their worst shape, which take 1.5 times
-    * the limit (1985 one-byte names, 96 KiB at 64 KiB); the read budget at the worst rate per byte
-    * read, which pays for everything else a connection can grow; and the connection itself, with
-    * TLS if it has it. It leaves out the slack of the read budget, at most 64 KiB read at the same
-    * rate.
+  /** What a call holds in the heap from its first read to its end: gRPC's state and its headers in
+    * their worst shape, one-byte names with one-byte values, 1927 pairs, 108 KiB at the 64 KiB
+    * limit.
+    */
+  def callBytes(maxHeaderBytes: Int): Long = maxHeaderBytes.toLong * 5 / 3 + StreamStateBytes
+
+  /** What a connection on probation can hold in the heap: [[MaxStreams]] of [[callBytes]], the read
+    * budget and its slack at the highest rate found, and the connection itself, with TLS if it has
+    * it. Computed from field counts, not measured: a heap histogram should replace these constants.
+    * Not what a stalled pool's calls hold once their connection has gone: [[maxBacklog]] counts
+    * those.
     */
   def heldBytes(maxHeaderBytes: Int, tls: Boolean): Long =
-    val stream = maxHeaderBytes.toLong * 3 / 2 + StreamStateBytes
-    MaxStreams * stream + readBudget(maxHeaderBytes) * HeapPerByteRead + ConnectionBytes +
+    val rate = if tls then HeapPerByteReadTls else HeapPerByteRead
+    MaxStreams * callBytes(maxHeaderBytes) +
+      (readBudget(maxHeaderBytes) + ReadSlackBytes) * rate + ConnectionBytes +
       (if tls then ConnectionBudget.TlsBytes else 0L)
+
+  /** How many tasks may wait for a Flight thread before a new connection is closed: as many as the
+    * pool has threads, and no more than fit a twentieth of the heap at [[callBytes]] each.
+    *
+    * It counts tasks, not calls. gRPC queues a call as one task, a `SerializingExecutor` that runs
+    * its lookup, its start and its later events in turn, and that task keeps the call's headers
+    * until a thread takes it, whatever became of its client. A client that leaves adds a second
+    * task (`ContextCloser`), and the first stays. So a queue this long holds at most this many
+    * calls.
+    *
+    * With every thread busy, a flood's new connections are then closed and its calls stop growing,
+    * at this many plus what connections accepted before can still add, 17 calls per place. At 2 GiB
+    * with TLS that is 512 plus 17 times 76, 1804 calls at about 110 KiB, 193 MiB, about a tenth of
+    * the heap, and 55 MiB more for the calls the 512 threads hold. Computed, not measured. A
+    * connection that has shown a credential is not limited here, and its calls count in the queue.
+    */
+  def maxBacklog(flightThreads: Int, maxHeaderBytes: Int, maxHeapBytes: Long): Int =
+    ConnectionBudget.fit(flightThreads, callBytes(maxHeaderBytes), maxHeapBytes, BacklogHeapParts)

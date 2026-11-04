@@ -12,7 +12,6 @@ import org.apache.arrow.memory.RootAllocator
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.{
-  ExecutorService,
   Executors,
   LinkedBlockingQueue,
   ScheduledExecutorService,
@@ -84,7 +83,12 @@ final class FlightEdgeServer(
   /** gRPC callbacks and DoPut tasks. Ours to shut down: Arrow does not own an executor it is
     * handed.
     */
-  private var executor: ExecutorService = null.asInstanceOf[ExecutorService]
+  private var executor: ThreadPoolExecutor = null.asInstanceOf[ThreadPoolExecutor]
+
+  /** The tasks waiting for a thread, which is what [[ConnectionProbation]] is told: a spec reads
+    * the same number to know how far past the limit it is.
+    */
+  private[quack] def queuedTasks: Int = executor.getQueue.size
 
   def start(): Unit =
     val producer = new FlightProducerImpl(
@@ -112,6 +116,8 @@ final class FlightEdgeServer(
     // and only binds this address.
     val location = Location.forGrpcInsecure(cfg.host, cfg.port)
 
+    val pool = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
+    executor = pool
     val probation = new ConnectionProbation(
       if cfg.tlsEnabled then
         CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
@@ -129,7 +135,13 @@ final class FlightEdgeServer(
         announce = cfg.maxUnauthenticatedConnections != ConnectionProbation.DefaultMaxConnections
       ),
       cfg.probationTimeoutMs,
-      ConnectionProbation.readBudget(cfg.maxHeaderBytes)
+      ConnectionProbation.readBudget(cfg.maxHeaderBytes),
+      () => pool.getQueue.size,
+      ConnectionProbation.maxBacklog(
+        cfg.flightThreads,
+        cfg.maxHeaderBytes,
+        Runtime.getRuntime.maxMemory
+      )
     )
     // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
     // headerAuth runs before the guard: for a call with no header it only mints a peer id, and a
@@ -139,14 +151,13 @@ final class FlightEdgeServer(
         nettyBuilder.maxConcurrentCallsPerConnection(ConnectionProbation.MaxStreams)
         nettyBuilder.protocolNegotiator(probation)
         nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove))
-    executor = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
     // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with
     // RESOURCE_EXHAUSTED as soon as the length prefix arrives, before it holds any of it, and a
     // header list over its limit before any authentication runs.
     val builder = FlightServer
       .builder(allocator, location, producer)
       .headerAuthenticator(headerAuth)
-      .executor(executor)
+      .executor(pool)
       .maxInboundMessageSize(cfg.maxInboundMessageBytes)
       .setMaxHeaderListSize(cfg.maxHeaderBytes)
       .transportHint("grpc.builderConsumer", tuneNetty)
@@ -315,7 +326,7 @@ final class FlightEdgeServer(
       server = null.asInstanceOf[FlightServer]
     if executor != null then
       executor.shutdownNow()
-      executor = null.asInstanceOf[ExecutorService]
+      executor = null.asInstanceOf[ThreadPoolExecutor]
 
 object FlightEdgeServer:
 
@@ -331,9 +342,12 @@ object FlightEdgeServer:
   val SweepSec: Long = 60L
 
   /** A pool of at most `threads` daemon threads, named `<name>-<n>`. A saturated pool makes calls
-    * wait and never fails them; idle threads leave after a minute.
+    * wait and never fails them, and waiting costs heap: a waiting call keeps its headers, whatever
+    * became of its client. [[ConnectionProbation.maxBacklog]] bounds what connections with no
+    * credential can leave waiting. Connections that have shown one have no such bound. Idle threads
+    * leave after a minute.
     */
-  def boundedExecutor(threads: Int, name: String): ExecutorService =
+  def boundedExecutor(threads: Int, name: String): ThreadPoolExecutor =
     val counter                = new AtomicInteger(0)
     val factory: ThreadFactory = r =>
       val t = new Thread(r, s"$name-${counter.incrementAndGet()}")
