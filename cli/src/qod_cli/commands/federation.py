@@ -222,7 +222,8 @@ def create(
     config: str = typer.Option(None, "--config", help="Whole typed config as JSON."),
     read_only: bool = typer.Option(
         None, "--read-only/--no-read-only",
-        help="Deny writes to this catalog. Defaults on for iceberg-rest, postgres and mysql.",
+        help="Deny writes to this catalog. Defaults on for iceberg-rest, postgres and mysql. Once "
+        "a read-only source holds a secret, only a superuser makes it writable.",
     ),
     uri: str = typer.Option(None, "--uri", help="Iceberg REST endpoint."),
     warehouse: str = typer.Option(
@@ -295,8 +296,8 @@ def create(
 ):
     """Create a federated source, or change it: every field left out is reset.
 
-    Once a source holds a secret, only a superuser changes its connection or config; anyone else
-    deletes the source and creates it again with its secrets.
+    Once a source holds a secret, only a superuser changes its connection or config or makes it
+    writable; anyone else deletes the source and creates it again with its secrets.
     """
     wire = _TYPE_WIRE.get(source_type)
     if wire is None:
@@ -397,7 +398,8 @@ def _create_with_secret(
     An existing source is never disabled. A secret it holds, or the first one, is written after the
     source: the manager may refuse the source (only a superuser changes the connection of one
     holding secrets), and then nothing is written. A secret new to a source holding others is
-    written first, so its placeholder resolves at every instant. A new source has no secret endpoint
+    written first, so its placeholder resolves at every instant, and taken back if the source is
+    refused. A new source has no secret endpoint
     yet, so it is saved disabled (disabled sources are in no blob), the secret written, and the
     source saved again as asked.
     """
@@ -413,7 +415,11 @@ def _create_with_secret(
             call(ctx, "PUT", secret_path, body={"name": secret, "value": value}, quiet=True)
         else:
             call(ctx, "PUT", secret_path, body={"name": secret, "value": value}, quiet=True)
-            call(ctx, "POST", _base(tenant, db), body=body)
+            try:
+                call(ctx, "POST", _base(tenant, db), body=body)
+            except typer.Exit:
+                call(ctx, "DELETE", f"{secret_path}/{secret}", quiet=True)
+                raise
         return
 
     call(ctx, "POST", _base(tenant, db), body={**body, "disabled": True}, quiet=True)

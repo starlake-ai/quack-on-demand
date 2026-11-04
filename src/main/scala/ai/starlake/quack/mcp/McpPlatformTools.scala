@@ -297,7 +297,8 @@ final class McpPlatformTools(
       "an 'iceberg_rest' source is declared through config (uri, warehouse, authType, ...); a " +
       "'postgres' or 'mysql' source through connection (host, port, database, user, password). " +
       "Reference secrets as {{secret.NAME}}. Once a source holds a secret, only a superuser changes " +
-      "its config or connection; anyone else deletes it and creates it again with its secrets.",
+      "its config or connection or makes it writable; anyone else deletes it and creates it again " +
+      "with its secrets.",
     objectSchema(
       required = List("database", "alias"),
       props = "database" -> strProp("Database (tenant-db) name."),

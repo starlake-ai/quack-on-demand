@@ -1042,15 +1042,21 @@ export default function FederationSection({
             return;
           }
           // An existing source. The manager may refuse the source: a tenant admin's change of
-          // the connection of one holding secrets. So a secret it holds is written after the source
-          // took, and nothing is written on a refusal. A secret new to a source holding others goes
-          // first, so its placeholder resolves at every instant and a live source is never disabled.
+          // the connection of one holding secrets, or making a read-only one writable. So a secret
+          // it holds is written after the source took, and nothing is written on a refusal. A
+          // secret new to a source holding others goes first, so its placeholder resolves at every
+          // instant and a live source is never disabled, and is taken back on a refusal.
           if (stored != null || secrets.length === 0) {
             await api.createFederatedSource(tenant, tenantDb, request);
             await api.upsertFederatedSecret(tenant, tenantDb, normAlias, target);
           } else {
             await api.upsertFederatedSecret(tenant, tenantDb, normAlias, target);
-            await api.createFederatedSource(tenant, tenantDb, request);
+            try {
+              await api.createFederatedSource(tenant, tenantDb, request);
+            } catch (e) {
+              await api.deleteFederatedSecret(tenant, tenantDb, normAlias, target.name).catch(() => undefined);
+              throw e;
+            }
           }
         } else {
           // A new source: an ENABLED source naming a missing secret fails the whole tenant-db's
@@ -1160,8 +1166,9 @@ export default function FederationSection({
                 source and recreate it to change type.
                 {!superuser && (isIceberg || isRdbms) && (
                   <>
-                    {' '}Once a source holds a secret, its connection stays as it is: a superuser
-                    changes it, or delete the source and create it again with its secrets.
+                    {' '}Once a source holds a secret, its connection stays as it is and a read-only
+                    source stays read-only: a superuser changes it, or delete the source and create
+                    it again with its secrets.
                   </>
                 )}
               </div>

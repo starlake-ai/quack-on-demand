@@ -97,7 +97,11 @@ count. To keep counts from a user, refuse on the table.
   tenant admin's `POST .../federated-sources` (REST, MCP, CLI, console) with another `connection` or `config`
   answers `403 superuser_required`, nothing written: a superuser changes it, or delete the source and create
   it again with its secrets. The same values sent again are no change, however they are spelled, and
-  `description`, `disabled` and `readOnly` stay open, as does a source holding none.
+  `description` and `disabled` stay open, as does a source holding none.
+- On a read-only federated source holding a secret, a tenant admin's write that would leave it writable
+  answers `403 superuser_required`, nothing written, whoever made the source: a superuser changes it, or
+  delete the source and create it again with its secrets. A write leaving a source read-only or making one
+  read-only stays open, as do a source holding none and a new source created writable.
 - A DuckLake create naming no path no longer answers `400`, for any caller: the database gets a folder of
   its own beside the default data path, under its composed name, stored on the row so that it cannot
   move. With no default data path, or one that is a bucket's root, it answers `400 invalid_contract`

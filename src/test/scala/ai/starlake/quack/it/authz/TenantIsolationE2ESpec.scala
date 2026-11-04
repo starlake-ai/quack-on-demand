@@ -1707,6 +1707,122 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       ofTheirs.stop()
   }
 
+  "A read-only federated source holding a secret" should "stay read-only for a tenant admin" in {
+    ready()
+    val t = s"${Prefix}ae$run"
+    tenant(t)
+    val token = adminOf(t, "hb", OtherPw)
+    // A server's own login, and a table it owns there.
+    val login = s"${Prefix}rolero$run"
+    val ext   = s"${t}_ext"
+    roles += login
+    stack.catalogDatabases += ext
+    Using.resource(
+      DriverManager.getConnection(TestPostgres.adminUrl, TestPostgres.pgUser, TestPostgres.pgPass)
+    ) { c =>
+      Using.resource(c.createStatement()) { st =>
+        st.execute(s"""CREATE ROLE "$login" LOGIN PASSWORD '$FedOwnSentinel'""")
+        st.execute(s"""CREATE DATABASE "$ext" OWNER "$login"""")
+      }
+    }
+    def external[A](body: java.sql.Statement => A): A =
+      Using.resource(DriverManager.getConnection(TestPostgres.dbUrl(ext), login, FedOwnSentinel)) {
+        c =>
+          Using.resource(c.createStatement())(body)
+      }
+    def externalRows: List[Int] = external { st =>
+      val rs   = st.executeQuery("SELECT id FROM public.facts ORDER BY id")
+      val rows = ListBuffer.empty[Int]
+      while rs.next() do rows += rs.getInt(1)
+      rows.toList
+    }
+    external { st =>
+      st.execute("CREATE TABLE public.facts (id INT)")
+      st.execute("INSERT INTO public.facts VALUES (1), (2)")
+    }
+
+    val (code, name, body) = createDb(t, "lake", token)
+    withClue(body.take(300))(code shouldBe 200)
+    val base                      = s"/api/tenants/$t/tenant-dbs/$name/federated-sources"
+    def source(readOnly: Boolean) = obj(
+      "alias"      -> s("extro"),
+      "sourceType" -> s("postgres"),
+      "readOnly"   -> Json.fromBoolean(readOnly),
+      "connection" -> Json.obj(
+        "host"     -> s(TestPostgres.pgHost),
+        "port"     -> Json.fromInt(TestPostgres.pgPort),
+        "database" -> s(ext),
+        "user"     -> s(login),
+        "password" -> s("{{secret.pw}}"),
+        "sslMode"  -> s("disable")
+      )
+    )
+    stack.postStatus(base, source(readOnly = true), su)._1 shouldBe 200
+    stack.put(s"$base/extro/secrets", obj("name" -> s("pw"), "value" -> s(FedOwnSentinel)))
+    def storedReadOnly =
+      io.circe.parser
+        .parse(stack.getStatus(s"$base/extro", token)._2)
+        .toOption
+        .flatMap(_.hcursor.get[Boolean]("readOnly").toOption)
+
+    // A plain user holding writes on that table.
+    val role = stack
+      .post("/api/role/create", obj("tenant" -> s(t), "name" -> s("extwriter")), token)
+      .hcursor
+      .get[String]("id")
+      .fold(e => throw e, identity)
+    stack.post(
+      "/api/role/permission/grant",
+      obj(
+        "roleId"  -> s(role),
+        "catalog" -> s("extro"),
+        "schema"  -> s("public"),
+        "table"   -> s("facts"),
+        "verb"    -> s("RW")
+      ),
+      token
+    )
+    stack.post(
+      "/api/user/create",
+      obj(
+        "tenant"   -> s(t),
+        "username" -> s("hu"),
+        "password" -> s(OtherPw),
+        "kind"     -> s("user"),
+        "roles"    -> Json.arr(s("extwriter")),
+        "groups"   -> Json.arr(s("qod_all_pools"))
+      ),
+      token
+    )
+
+    // A tenant admin's flip is refused, and nothing changes on the node or on the server.
+    val (flip, flipBody) = stack.postStatus(base, source(readOnly = false), token)
+    withClue(flipBody.take(300)) {
+      flip shouldBe 403
+      errorOf(flipBody) shouldBe "superuser_required"
+    }
+    storedReadOnly shouldBe Some(true)
+    openPool(t, name, "hr", token)
+    serving(t, "hr", "hu", OtherPw)
+    val insert = "INSERT INTO extro.public.facts VALUES (9)"
+    stack.flight(insert, "hu", OtherPw, t, "hr") match
+      case Left(err) => err should include("QoD: catalog extro is read-only")
+      case Right(_)  => fail("a write through a read-only source was admitted")
+    externalRows shouldBe List(1, 2)
+    closePool(t, name, "hr")
+
+    // What this case tells apart: a superuser's same flip goes through, and a write lands.
+    stack.postStatus(base, source(readOnly = false), su)._1 shouldBe 200
+    storedReadOnly shouldBe Some(false)
+    openPool(t, name, "hs", token)
+    serving(t, "hs", "hu", OtherPw)
+    stack.await("a write through the source", 30.seconds) {
+      stack.flight(insert, "hu", OtherPw, t, "hs").toOption
+    }
+    externalRows shouldBe List(1, 2, 9)
+    closePool(t, name, "hs")
+  }
+
   // ---------- what must keep working ----------
 
   "A tenant admin on the default server" should "create, serve, delete and create again" in {

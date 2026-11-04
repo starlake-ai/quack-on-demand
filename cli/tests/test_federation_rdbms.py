@@ -134,6 +134,28 @@ def test_a_source_the_manager_refuses_keeps_the_secret_it_holds(runner, respx_mo
     assert create.called and not secret.called
 
 
+def test_a_refused_move_to_a_new_secret_name_takes_that_secret_back(runner, respx_mock):
+    create, secret = _routes(respx_mock, existing_secrets=["OLD"])
+    create.mock(return_value=httpx.Response(
+        403, json={"error": "superuser_required", "message": "a superuser changes it"}
+    ))
+    removed = respx_mock.delete(f"{SOURCES}/shop_pg/secrets/NEW").mock(return_value=httpx.Response(204))
+    result = _invoke(runner, *PG, "--password-stdin", "--password-secret", "NEW", input="new-pw\n")
+    assert result.exit_code != 0
+    assert secret.called and removed.called
+
+
+def test_no_read_only_is_sent_as_false_and_a_refusal_writes_no_secret(runner, respx_mock):
+    create, secret = _routes(respx_mock, existing_secrets=["PASSWORD"])
+    create.mock(return_value=httpx.Response(
+        403, json={"error": "superuser_required", "message": "a superuser changes it"}
+    ))
+    result = _invoke(runner, *PG, "--no-read-only", "--password-stdin", input="new-pw\n")
+    assert result.exit_code != 0
+    assert _body(create)["readOnly"] is False
+    assert not secret.called
+
+
 def test_a_failing_source_lookup_stops_instead_of_guessing(runner, respx_mock):
     create, secret = _routes(respx_mock)
     respx_mock.get(f"{SOURCES}/shop_pg/secrets").mock(

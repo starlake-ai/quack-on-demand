@@ -267,10 +267,9 @@ final class FederatedSourceHandlers(
     invalidateSources(tenantDbId)
     publish.topologyChanged()
 
-  /** Whether writing `source` over `stored` would change the connection of a row holding secrets.
-    */
-  private def takesElsewhere(stored: FederatedSource, source: FederatedSource): Boolean =
-    !FederatedSourceRules.sameConfig(source.sourceType, stored.config, source.config) &&
+  /** Whether writing `source` over `stored` changes what a row holding secrets does with them. */
+  private def changesHeldSource(stored: FederatedSource, source: FederatedSource): Boolean =
+    FederatedSourceRules.changesUseOfSecrets(stored, source) &&
       fedStore.listSecrets(stored.id).nonEmpty
 
   /** Whether `req` writes a `sql` source: no sourceType (the default) or one naming `sql`. */
@@ -332,9 +331,10 @@ final class FederatedSourceHandlers(
               toSource(id, tenantDbId, req, existing) match
                 case Left(e) => Left(e)
                 // A stored secret, an externalRef's included, goes only where it was saved for,
-                // the rule TenantSignInWrite holds for a tenant's client secret.
+                // the rule TenantSignInWrite holds for a tenant's client secret, and for what it
+                // was saved for: a read-only source stays read-only.
                 case Right(source)
-                    if superuserDenied(apiKey) && existing.exists(takesElsewhere(_, source)) =>
+                    if superuserDenied(apiKey) && existing.exists(changesHeldSource(_, source)) =>
                   audit.rest(
                     apiKey,
                     "control-plane",
@@ -347,8 +347,8 @@ final class FederatedSourceHandlers(
                     StatusCode.Forbidden -> ErrorResponse(
                       "superuser_required",
                       "this federated source holds secrets, so its connection or config stays as " +
-                        "it is: a superuser changes it, or delete the source and create it again " +
-                        "with its secrets"
+                        "it is, and a read-only source stays read-only: a superuser changes it, or " +
+                        "delete the source and create it again with its secrets"
                     )
                   )
                 case Right(source) =>
@@ -362,13 +362,15 @@ final class FederatedSourceHandlers(
                   // contract and is not being changed here, but it must not be SILENT:
                   // `ManifestImporter` WARNs on exactly this class of downgrade (a sourceType flip
                   // carrying readOnly with it) and this is the matching line for the REST path.
-                  // Logged only on the true -> false direction, and only once the upsert is
-                  // actually going to be written.
-                  if existing.exists(_.readOnly) && !source.readOnly && req.readOnly.isEmpty then
+                  // Logged on every true -> false direction, an explicit false included, and only
+                  // once the upsert is actually going to be written.
+                  if existing.exists(_.readOnly) && !source.readOnly then
+                    val how =
+                      if req.readOnly.isEmpty then "omitted readOnly" else "set readOnly=false"
                     logger.warn(
                       s"federated source '${source.alias}' (tenant-db $tenantDbId) was read-only " +
-                        "and this upsert omitted readOnly, so it becomes WRITABLE; pass " +
-                        "readOnly=true to keep it read-only"
+                        s"and this upsert $how, so it becomes WRITABLE; pass readOnly=true to keep " +
+                        "it read-only"
                     )
                   fedStore.upsertSource(source)
                   sourcesChanged(tenantDbId)

@@ -44,6 +44,14 @@ object FederatedSourceRules:
             "or $ parameter may appear outside a literal)"
         )
 
+  /** Whether a write leaving `source` in place of `stored` changes what a source holding secrets
+    * may do with them: another connection or config, or a read-only source left writable. Judged on
+    * the row the write would leave, so a field left out counts as what it resolves to.
+    */
+  def changesUseOfSecrets(stored: FederatedSource, source: FederatedSource): Boolean =
+    !sameConfig(source.sourceType, stored.config, source.config) ||
+      (stored.readOnly && !source.readOnly)
+
   /** Whether two `config` values of a `t` source say the same, every field included: each read as
     * its type reads it (a connection normalized as it renders), so a key's order, a null, an absent
     * field, blank text, an empty list and surrounding spaces read alike, and a client sending the

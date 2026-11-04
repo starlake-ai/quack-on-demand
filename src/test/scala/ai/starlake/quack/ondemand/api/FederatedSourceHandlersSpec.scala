@@ -1298,9 +1298,175 @@ class FederatedSourceHandlersSpec
       fs.getSource(tdId, "others").value.description shouldBe Some("described")
       create(admin, same.copy(disabled = true)).isRight shouldBe true
       fs.getSource(tdId, "others").value.disabled shouldBe true
-      create(admin, same.copy(readOnly = Some(false))).isRight shouldBe true
-      fs.getSource(tdId, "others").value.readOnly shouldBe false
       fs.getSource(tdId, "others").value.config.value should include("pg.example.com")
+    }
+
+  "A read-only source holding a secret" should "stay read-only for a tenant admin" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      List(
+        pgReq("ro_pg", "postgres", StoredConn),
+        pgReq("ro_my", "mysql", StoredConn.copy(schema = None, sslMode = None)),
+        iceReq("ro_ice")
+      ).foreach { req =>
+        withClue(req.alias) {
+          create(su, req).isRight shouldBe true
+          withSecret(su, req.alias, "PG_PWD")
+          val before = fs.getSource(tdId, req.alias).value
+          before.readOnly shouldBe true
+          val (status, err) = create(admin, req.copy(readOnly = Some(false))).left.value
+          status shouldBe StatusCode.Forbidden
+          err.error shouldBe "superuser_required"
+          err.message should include("a superuser changes it")
+          err.message should include("delete the source and create it again")
+          fs.getSource(tdId, req.alias).value shouldBe before
+          // Whatever else the write holds.
+          create(
+            admin,
+            req.copy(readOnly = Some(false), description = Some("described"), disabled = true)
+          ).left.value._2.error shouldBe "superuser_required"
+          fs.getSource(tdId, req.alias).value shouldBe before
+          // With nothing said of it, a typed source's default keeps it read-only.
+          create(admin, req.copy(description = Some("described"))).isRight shouldBe true
+          fs.getSource(tdId, req.alias).value.readOnly shouldBe true
+          // Said again, it stays.
+          create(admin, req.copy(readOnly = Some(true))).isRight shouldBe true
+          fs.getSource(tdId, req.alias).value.readOnly shouldBe true
+        }
+      }
+      // A request breaking both rules gets one refusal.
+      val moved = pgReq("ro_pg", "postgres", StoredConn.copy(host = "elsewhere.example.com"))
+      val both  = create(admin, moved.copy(readOnly = Some(false))).left.value
+      both._1 shouldBe StatusCode.Forbidden
+      both._2.error shouldBe "superuser_required"
+      // A read-only sql source's default is writable, and a tenant admin writes no sql source.
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-ro-sql",
+          tenantDbId = tdId,
+          alias = "ro_sql",
+          setupSql = "ATTACH 'x';",
+          readOnly = true
+        )
+      )
+      withSecret(su, "ro_sql", "PG_PWD")
+      val sql = FederatedSourceCreateRequest(alias = "ro_sql", setupSql = Some("ATTACH 'x';"))
+      create(admin, sql).left.value._2.error shouldBe "superuser_required"
+      fs.getSource(tdId, "ro_sql").value.readOnly shouldBe true
+      // A superuser may.
+      create(
+        su,
+        pgReq("ro_pg", "postgres", StoredConn).copy(readOnly = Some(false))
+      ).isRight shouldBe
+        true
+      fs.getSource(tdId, "ro_pg").value.readOnly shouldBe false
+    }
+
+  it should "leave open what ends no read-only source writable" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      // A source holding no secret.
+      create(su, pgReq("no_secret", "postgres", StoredConn)).isRight shouldBe true
+      create(
+        admin,
+        pgReq("no_secret", "postgres", StoredConn).copy(readOnly = Some(false))
+      ).isRight shouldBe
+        true
+      fs.getSource(tdId, "no_secret").value.readOnly shouldBe false
+      // A create of a new source.
+      create(
+        admin,
+        pgReq("fresh", "postgres", StoredConn).copy(readOnly = Some(false))
+      ).isRight shouldBe
+        true
+      fs.getSource(tdId, "fresh").value.readOnly shouldBe false
+      // A writable source holding a secret: it stays so when said again, and may turn read-only.
+      val writable = pgReq("writable", "postgres", StoredConn).copy(readOnly = Some(false))
+      create(su, writable).isRight shouldBe true
+      withSecret(su, "writable", "PG_PWD")
+      create(admin, writable).isRight shouldBe true
+      fs.getSource(tdId, "writable").value.readOnly shouldBe false
+      create(admin, writable.copy(readOnly = Some(true))).isRight shouldBe true
+      fs.getSource(tdId, "writable").value.readOnly shouldBe true
+      // And then it stays read-only.
+      create(admin, writable).left.value._2.error shouldBe "superuser_required"
+      // A delete and a recreate, which brings no secret along.
+      admin
+        .deleteSource("acme", "acme_prod", "writable", None)
+        .unsafeRunSync()
+        .isRight shouldBe true
+      create(admin, writable).isRight shouldBe true
+      val row = fs.getSource(tdId, "writable").value
+      row.readOnly shouldBe false
+      fs.listSecrets(row.id) shouldBe empty
+    }
+
+  it should "be audited as denied when a tenant admin's write would leave it writable" in
+    withEnv { (fs, resolver, _) =>
+      val events      = new ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+      val recorder    = new ai.starlake.quack.ondemand.telemetry.AuditRecorder(events, _ => None)
+      val (su, admin) = bothHandlers(fs, resolver, recorder)
+      create(su, pgReq("audited", "postgres", StoredConn)).isRight shouldBe true
+      withSecret(su, "audited", "PG_PWD")
+      events.events.clear()
+      create(
+        admin,
+        pgReq("audited", "postgres", StoredConn).copy(readOnly = Some(false))
+      ).isLeft shouldBe
+        true
+      val denied = events.events.toList.filter(_.outcome == "denied")
+      denied.map(_.action) shouldBe
+        List(ai.starlake.quack.ondemand.telemetry.AuditActions.FederationSourceUpsert)
+      denied.head.target shouldBe Some("audited")
+    }
+
+  "A write leaving a read-only source writable" should "log its line, whoever makes it" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      val logger      = classOf[FederatedSourceHandlers].getName
+      def writable(events: List[ch.qos.logback.classic.spi.ILoggingEvent]) =
+        events.filter(_.getFormattedMessage.contains("WRITABLE"))
+      val req = pgReq("warned", "postgres", StoredConn)
+      create(su, req).isRight shouldBe true
+      withSecret(su, "warned", "PG_PWD")
+      // A tenant admin's is refused, so nothing became writable.
+      val (_, refused) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(logger) {
+        create(admin, req.copy(readOnly = Some(false))).isLeft shouldBe true
+      }
+      writable(refused) shouldBe empty
+      // A superuser's explicit false.
+      val (_, explicit) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(logger) {
+        create(su, req.copy(readOnly = Some(false))).isRight shouldBe true
+      }
+      val line = writable(explicit)
+      line should have size 1
+      line.head.getLevel shouldBe ch.qos.logback.classic.Level.WARN
+      line.head.getFormattedMessage should include("readOnly=false")
+      // False again, and false to true, log nothing.
+      val (_, again) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(logger) {
+        create(su, req.copy(readOnly = Some(false))).isRight shouldBe true
+        create(su, req.copy(readOnly = Some(true))).isRight shouldBe true
+      }
+      writable(again) shouldBe empty
+      // A sql source's omitted field, which its default makes writable.
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-warn-sql",
+          tenantDbId = tdId,
+          alias = "warned_sql",
+          setupSql = "ATTACH 'x';",
+          readOnly = true
+        )
+      )
+      val (_, omitted) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(logger) {
+        create(
+          su,
+          FederatedSourceCreateRequest(alias = "warned_sql", setupSql = Some("ATTACH 'x';"))
+        ).isRight shouldBe true
+      }
+      val omittedLine = writable(omitted)
+      omittedLine should have size 1
+      omittedLine.head.getFormattedMessage should include("omitted readOnly")
     }
 
   it should "take another connection once a tenant admin has deleted and recreated it" in

@@ -292,6 +292,15 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
         args("pg.example.com")*
       ).isRight shouldBe true
       onlySource(tools).downField("connection").get[String]("host") shouldBe Right("pg.example.com")
+      // A read-only one stays read-only.
+      val flipped = call(
+        tools,
+        "upsert_federated_source",
+        tenantPat,
+        (args("pg.example.com") :+ ("read_only" -> Json.fromBoolean(false)))*
+      )
+      flipped.left.toOption.getOrElse(fail("admitted")) should include("superuser_required")
+      onlySource(tools).get[Boolean]("readOnly") shouldBe Right(true)
     }
 
   "upsert_federated_source and secrets" should "round-trip a source with a secret" in

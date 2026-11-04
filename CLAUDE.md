@@ -423,10 +423,12 @@ with a WARN. Manifests carry `initSqlTrusted` and `setupSqlTrusted`. A source's 
 secret: on a source holding any, `FederatedSourceHandlers.createSource` refuses a writer who is not a superuser
 another `connection` or `config` (`403 superuser_required`, nothing written, audited denied), compared by
 `FederatedSourceRules.sameConfig` on the whole value as its type reads it, so a client sending the stored values
-back changes nothing; its other fields stay open, as do a source holding none and a delete and recreate.
+back changes nothing, and likewise a write that would leave a read-only one writable, judged on the row it would
+leave (`changesUseOfSecrets`), whoever made the source, since secrets record no author; its other fields stay open,
+as do a source holding none and a delete and recreate. Every true to false written logs a WARN.
 
 **Read-only federated catalogs bind every principal (decision 24).** A federated source's `readOnly`
-flag is enforced on the node, superusers and the system principal included: since the node never asks
+flag (once it holds a secret, only a superuser makes it writable) is enforced on the node, superusers and the system principal included: since the node never asks
 the manager about a superuser's statement, the set travels in the signed handle (the handle's required
 `readOnly`, the pool's aliases folded with `Locale.ROOT`, sorted; `ReadOnlyCatalogs` /
 `FederatedReadOnlyCatalogs`, disabled sources included, the system principal's handles carry `[]`).
