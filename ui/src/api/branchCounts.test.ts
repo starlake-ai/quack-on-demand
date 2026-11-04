@@ -7,6 +7,7 @@ import {
   conflictPolicyText,
   CountsUnavailableTitle,
   diffChangeType,
+  NotCountedTitle,
   proposalErrorNote,
   rowConflictsHint,
   rowConflictsText,
@@ -14,7 +15,7 @@ import {
 import type { BranchRowConflicts } from './types';
 
 describe('branchCount', () => {
-  const row = { inserted: 7, deleted: 1, updated: 2 };
+  const row = { kind: 'modified', inserted: 7, deleted: 1, updated: 2 };
 
   it('shows a counted table its numbers', () => {
     expect(branchCount({ ...row, countsUnavailable: false }, 'inserted')).toEqual({ text: '7' });
@@ -22,10 +23,30 @@ describe('branchCount', () => {
   });
 
   it('shows a dash, never a 0, when the counts are not available to the viewer', () => {
-    const t = { inserted: 0, deleted: 0, updated: 0, countsUnavailable: true };
+    const t = { kind: 'modified', inserted: 0, deleted: 0, updated: 0, countsUnavailable: true };
     for (const f of ['inserted', 'deleted', 'updated'] as const) {
       expect(branchCount(t, f)).toEqual({ text: '-', title: CountsUnavailableTitle });
     }
+  });
+
+  it('shows a modified table its zeros: there they are counts', () => {
+    expect(branchCount({ kind: 'modified', inserted: 0, deleted: 3, updated: 0 }, 'inserted')).toEqual({ text: '0' });
+  });
+
+  it('shows a dash for any kind but modified: the server counts no other, so its zeros are no counts', () => {
+    for (const kind of ['created', 'dropped', 'recreated', 'altered', 'a kind this console does not know']) {
+      for (const f of ['inserted', 'deleted', 'updated'] as const) {
+        expect(branchCount({ kind, inserted: 0, deleted: 0, updated: 0 }, f), kind).toEqual({
+          text: '-',
+          title: NotCountedTitle,
+        });
+      }
+    }
+  });
+
+  it('gives the kind as the reason, whatever else the row says: no grant would change nothing', () => {
+    const t = { kind: 'created', inserted: 0, deleted: 0, updated: 0, countsUnavailable: true };
+    expect(branchCount(t, 'inserted')).toEqual({ text: '-', title: NotCountedTitle });
   });
 });
 

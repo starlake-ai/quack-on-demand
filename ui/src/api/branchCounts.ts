@@ -7,7 +7,13 @@ import type { BranchRowConflicts } from './types';
 export const CountsUnavailableTitle =
   'Counts are not available to you: no read grant on this table, or the count failed';
 
+/** The server counts rows for a `modified` table only, and sends zeros for every other kind: a table
+  * the branch created reads 0 inserted whatever it holds. Those are no counts either. */
+export const NotCountedTitle =
+  'Rows are counted only for a table the branch modified, not one it created, dropped, recreated or altered';
+
 export interface BranchCounts {
+  kind: string;
   inserted: number;
   deleted: number;
   updated: number;
@@ -18,6 +24,7 @@ export function branchCount(
   t: BranchCounts,
   field: 'inserted' | 'deleted' | 'updated',
 ): { text: string; title?: string } {
+  if (t.kind !== 'modified') return { text: '-', title: NotCountedTitle };
   return t.countsUnavailable
     ? { text: '-', title: CountsUnavailableTitle }
     : { text: String(t[field]) };
