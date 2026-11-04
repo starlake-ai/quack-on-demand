@@ -48,7 +48,7 @@ count. To keep counts from a user, refuse on the table.
   follow its size: at 1B rows, 8 threads and 16GB it passed at 44.0M rows (33.5 s of Apply, 9.3GiB spilled)
   and 68.8M (50.6 s, 22GiB), ran out of memory in Apply at 91.7M, passed at 110M (90.7 s, 45GiB) and ran
   out of memory at about 220M. An out-of-memory failure in Apply retries with ranges: on a real node at
-  91.7M that took 299 s against about 185 s straight to ranges, read back right and left nothing behind.
+  91.7M that took 299 s against 199 s straight to ranges, read back right and left nothing behind.
   So a higher value is a bet on that retry; set it to 20000000 to go back.
 - **Any principal who may connect may branch.** A plain user, or a `--drop-admin` token, may create,
   list, read, diff, propose and discard branches over REST and MCP, in the tenant they belong to, when

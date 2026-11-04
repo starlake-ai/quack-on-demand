@@ -2195,7 +2195,7 @@ rowid ranges, which cost far more on object storage: at that size and 16GB one U
 in 4,253 reads where 64 ranges read 52GB in 116,756, took 91 s of Apply against 156 s, and spilled 45GB
 against 33GB. But whether one UPDATE fits does not follow its size: at 1B rows and 16GB it passed at 44M and
 69M rows, ran out of memory at 92M, passed at 110M and ran out of memory at about 220M. A failure costs a
-retry with ranges, which the merge makes by itself: at 92M it took 299 s against about 185 s straight to
+retry with ranges, which the merge makes by itself: at 92M it took 299 s against 199 s straight to
 ranges. So raising the setting is a bet on that retry.
 Compact a table in very many small files before creating the branch, because maintenance skips
 compaction while the database has a live branch: on object storage those reads and writes are the cost.
