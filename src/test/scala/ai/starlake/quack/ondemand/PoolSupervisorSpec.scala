@@ -3144,12 +3144,14 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(dbPoolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
 
     // Simulate a GET (redacted: no s3_secret_access_key) round-tripped back on an edit that only
-    // means to change s3_region, the way the UI's edit form does (DatabaseSection.tsx).
+    // means to change s3_region, the way the UI's edit form does for a superuser
+    // (DatabaseSection.tsx); anyone else sends the secret with the change.
     val out = sup.updateTenantDb(
       "acme",
       "acme_objstore2",
       TenantDbPatch(
-        objectStore = Some(Map("s3_access_key_id" -> "k", "s3_region" -> "eu-west-1"))
+        objectStore = Some(Map("s3_access_key_id" -> "k", "s3_region" -> "eu-west-1")),
+        writerTrusted = true
       )
     ).unsafeRunSync().toOption.get
 

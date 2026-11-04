@@ -38,14 +38,14 @@ private trait SpawnScriptTempDir extends BeforeAndAfterEach:
       (Seq(NodeSecretFiles.TokenKey -> "t") ++ secret).toMap,
       Some(tempDir)
     )
-    Process(
-      cmd,
-      None,
-      (plain ++ Seq(
-        NodeSecretFiles.DirEnv       -> dir.toString,
-        NodeSecretFiles.EphemeralEnv -> "1"
-      ))*
-    ).!!
+    val builder = new java.lang.ProcessBuilder(cmd.asJava)
+    // Only what a case names: this JVM holds the manager's store keys for a spec that needs a store.
+    builder.environment().keySet.removeIf(_.startsWith("QOD_S3_"))
+    (plain ++ Seq(
+      NodeSecretFiles.DirEnv       -> dir.toString,
+      NodeSecretFiles.EphemeralEnv -> "1"
+    )).foreach((k, v) => builder.environment().put(k, v))
+    Process(builder).!!
 
 /** The DuckLake ATTACH option naming the catalog password's temporary secret. */
 private val CatalogSecretParam = "METADATA_PARAMETERS MAP {'SECRET': 'qod_catalog_pg'}"

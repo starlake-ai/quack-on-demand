@@ -30,6 +30,8 @@ class SpawnScriptTenantInitSpec extends AnyFlatSpec with Matchers with SpawnScri
     val pb = new java.lang.ProcessBuilder("bash", script, "23361")
       .directory(Files.createDirectories(tempDir.resolve("start")).toFile)
       .redirectErrorStream(true)
+    // Only what a case names: this JVM holds the manager's store keys for a spec that needs a store.
+    pb.environment().keySet.removeIf(_.startsWith("QOD_S3_"))
     pb.environment()
       .putAll(
         (Seq(
