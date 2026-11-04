@@ -154,10 +154,31 @@ final class BranchService(
         )
       case Some(td) => Right(td)
 
+  private def noSuchBranch(parent: TenantDb, name: String): BranchFailure =
+    BranchFailure.notFound(s"branch '$name' not found on '${parent.name}'")
+
   private def liveBranch(parent: TenantDb, name: String): Res[Branch] =
-    store
-      .findBranch(parent.id, name)
-      .toRight(BranchFailure.notFound(s"branch '$name' not found on '${parent.name}'"))
+    store.findBranch(parent.id, name).toRight(noSuchBranch(parent, name))
+
+  /** The lock a run of `b`, a propose or a merge, holds from start to end, and that a discard or an
+    * expiry must get. Without it they would drop the catalog and files under the run, whose own
+    * status write would then bring back a branch with nothing left. Its own lock and not the
+    * parent's `__merge`: that one is held for a whole run of any branch of the database, so a
+    * discard would fail while a sibling merges, and a plain user looping `propose` on their branch
+    * would keep the others alive past their TTL. Like `__merge`, it names no real pool. A run takes
+    * it inside the parent's lock ([[underRunLocks]]), and nothing inside a run takes it again:
+    * `PoolLocker` has no nesting. [[retire]] only tries it, and holds it for the status writes.
+    */
+  private def runLock(b: Branch): PoolKey = PoolKey(b.tenant, b.parentDbName, s"__run_${b.id}")
+
+  /** One run at a time per parent, since each can take a merge node, and none under a discard or an
+    * expiry of its branch. Whoever enters reads the branch's row again first: a queued run holds no
+    * lock of the branch, and a discard or a merge may have ended it since the look that found it.
+    */
+  private def underRunLocks[A](b: Branch)(run: IO[A]): IO[A] =
+    sup.poolLocks.withLock(PoolKey(b.tenant, b.parentDbName, "__merge"))(
+      sup.poolLocks.withLock(runLock(b))(run)
+    )
 
   /** The branch's own pool key: where its statements run. */
   def poolKeyOf(b: Branch): PoolKey = PoolKey(b.tenant, b.tenantDbName, b.poolName)
@@ -591,9 +612,12 @@ final class BranchService(
           case BranchStatus.Open | BranchStatus.Proposed => Right(())
           case other => Left(BranchFailure.conflict("not_open", s"branch '$name' is ${other.wire}"))
       yield b
-    // Reads the catalog, so only inside IO.blocking: under the lock, and at the record step.
-    def replaceable(parent: TenantDb): Res[Branch] =
-      proposable(parent).flatMap(b => unsettled(tenant, parent, b).toLeft(b))
+    // Reads the catalog, so only inside IO.blocking: under the locks, and at the record step. Only
+    // the branch whose lock this run holds: the name may have passed to a new one since.
+    def replaceable(parent: TenantDb, locked: Branch): Res[Branch] =
+      proposable(parent)
+        .filterOrElse(_.id == locked.id, noSuchBranch(parent, name))
+        .flatMap(b => unsettled(b).toLeft(b))
     val pre = for
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
@@ -601,14 +625,14 @@ final class BranchService(
       b <- liveBranch(parent, name)
       _ <- ownerOrAdmin(b, actor, "propose")
       _ <- proposable(parent)
-    yield parent
+    yield (parent, b)
     pre match
-      case Left(f)       => denied(f)
-      case Right(parent) =>
+      case Left(f)                => denied(f)
+      case Right((parent, first)) =>
         // One merge node at a time per parent, as for a merge, and a proposal never overlaps one: a
         // merge must not find its proposal replaced, nor a proposal revive what a merge ended.
-        sup.poolLocks.withLock(PoolKey(tenant, parent.name, "__merge"))(
-          IO.blocking(replaceable(parent)).flatMap {
+        underRunLocks(first)(
+          IO.blocking(replaceable(parent, first)).flatMap {
             case Left(f)  => denied(f)
             case Right(b) =>
               // The lifecycle's own summary (stored on the merge row): every modified table, counted
@@ -626,9 +650,10 @@ final class BranchService(
                         else countAs(tenant, parent, b, shape, countsAs, actor.seesTable)
                     yield (stored, reply)).flatMap { (cs, reply) =>
                       IO.blocking {
-                        // A discard or an expiry does not take the lock: the analysis may have
-                        // outlived the branch.
-                        replaceable(parent).map { current =>
+                        // The open proposal's commit can land during the analysis, on a node that
+                        // outlived its stop. The row comes with the look: a discard or an expiry
+                        // needs this run's lock, so the branch itself is as it was.
+                        replaceable(parent, first).map { current =>
                           store
                             .listBranchMerges(current.id)
                             .filter(_.status == BranchMergeStatus.Proposed)
@@ -692,7 +717,7 @@ final class BranchService(
     * landed: the open proposal's, which the next merge's first look settles, or an older one's,
     * which only a discard ends.
     */
-  private def unsettled(tenant: String, parent: TenantDb, b: Branch): Option[BranchFailure] =
+  private def unsettled(b: Branch): Option[BranchFailure] =
     def mergeAgain = BranchFailure.conflict(
       "proposal_unsettled",
       s"the last merge of branch '${b.name}' may have landed on main; merge again, or discard it"
@@ -703,7 +728,7 @@ final class BranchService(
       .exists(_.error.exists(_.startsWith(MergeExecutor.TimedOut)))
     if timedOut then Some(mergeAgain)
     else
-      landedCommit(tenant, parent, b).map {
+      landedCommit(b).map {
         case (m, _) if m.status == BranchMergeStatus.Proposed => mergeAgain
         case (m, snapshot)                                    => landedElsewhere(m, snapshot)
       }
@@ -714,12 +739,8 @@ final class BranchService(
     * its status, the open one first: its commit settles whatever else is on main. One catalog read
     * per proposal. Blocks.
     */
-  private def landedCommit(
-      tenant: String,
-      parent: TenantDb,
-      b: Branch
-  ): Option[(BranchMerge, Long)] =
-    lazy val reader = resolveReader(tenant, parent.name)
+  private def landedCommit(b: Branch): Option[(BranchMerge, Long)] =
+    lazy val reader = resolveReader(b.tenant, b.parentDbName)
     store
       .listBranchMerges(b.id)
       .sortBy(_.status != BranchMergeStatus.Proposed)
@@ -916,11 +937,12 @@ final class BranchService(
       )
       IO.pure(Left(f))
     pre match
-      case Left(f)               => denied(f)
-      case Right((parent, _, _)) =>
-        val lockKey = PoolKey(tenant, parent.name, "__merge")
-        // Read again under the lock: another merge or a new proposal may have gone first.
-        sup.poolLocks.withLock(lockKey)(
+      case Left(f)              => denied(f)
+      case Right((_, first, _)) =>
+        // Read again under the locks: another merge, a new proposal or a discard may have gone
+        // first. The proposal's id holds this to the branch whose lock it has: a new branch of the
+        // same name has other proposals.
+        underRunLocks(first)(
           IO.blocking(pre).flatMap {
             case Left(f)                    => denied(f)
             case Right((current, b, merge)) =>
@@ -960,7 +982,7 @@ final class BranchService(
     def unlessFound(
         next: => IO[Res[(Branch, BranchMerge, BranchChangeSet)]]
     ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
-      IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+      IO.blocking(landedCommit(b)).flatMap {
         case Some((landed, snapshot)) if landed.id == merge.id => settle(snapshot, merge.attempts)
         case Some((landed, snapshot)) => refuse(landedElsewhere(landed, snapshot), false, 0)
         case None                     => next
@@ -977,7 +999,7 @@ final class BranchService(
         attempts: Int
     ): IO[Res[(Branch, BranchMerge, BranchChangeSet)]] =
       if closes then
-        IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+        IO.blocking(landedCommit(b)).flatMap {
           case Some((landed, snapshot)) if landed.id == merge.id =>
             // Before any attempt of this run, the count is the one of the run that sent it.
             settle(snapshot, if attempts > 0 then attempts else merge.attempts)
@@ -1260,7 +1282,7 @@ final class BranchService(
       * record that a commit can still land. After any other answer a failed look raises.
       */
     def lookAfter(reason: Option[String]): IO[Option[(BranchMerge, Long)]] =
-      IO.blocking(landedCommit(tenant, parent, b)).handleErrorWith {
+      IO.blocking(landedCommit(b)).handleErrorWith {
         case NonFatal(e) if reason.exists(_.startsWith(MergeExecutor.TimedOut)) =>
           IO.blocking(
             logger.error(
@@ -1342,7 +1364,7 @@ final class BranchService(
         // in, below the S this attempt's fence starts at, where neither the fence nor DuckLake's
         // own check sees it. Reading S first makes this look complete: a landing it misses is above
         // S, so the fence refuses the send and the look after the send finds it.
-        IO.blocking(landedCommit(tenant, parent, b)).flatMap {
+        IO.blocking(landedCommit(b)).flatMap {
           case Some((landed, snapshot)) if landed.id == merge.id =>
             IO.pure((AttemptEnd.Committed(snapshot, cs), n))
           case Some((landed, snapshot)) =>
@@ -1681,6 +1703,16 @@ final class BranchService(
       actor: BranchActor,
       apiKey: Option[String]
   ): IO[Res[Branch]] =
+    def denied(f: BranchFailure): IO[Res[Branch]] =
+      audit.rest(
+        apiKey,
+        "control-plane",
+        AuditActions.BranchDiscard,
+        "denied",
+        tenant = Some(tenant),
+        detail = Map("error" -> f.code)
+      )
+      IO.pure(Left(f))
     val pre = for
       _      <- enabled
       parent <- parentOf(tenant, parentDb)
@@ -1688,31 +1720,33 @@ final class BranchService(
       _      <- ownerOrAdmin(b, actor, "discard")
     yield (parent, b)
     pre match
-      case Left(f) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.BranchDiscard,
-          "denied",
-          tenant = Some(tenant)
-        )
-        IO.pure(Left(f))
+      case Left(f)            => denied(f)
       case Right((parent, b)) =>
-        retire(b, BranchStatus.Discarded, "discard").map { done =>
-          audit.rest(
-            apiKey,
-            "control-plane",
-            AuditActions.BranchDiscard,
-            "ok",
-            tenant = Some(tenant),
-            target = Some(s"${parent.name}/$name"),
-            detail = Map("branchId" -> b.id)
-          )
-          Right(done)
+        retire(b, BranchStatus.Discarded, "discard").flatMap {
+          case BranchService.RetireEnd.Retired(done) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.BranchDiscard,
+              "ok",
+              tenant = Some(tenant),
+              target = Some(s"${parent.name}/$name"),
+              detail = Map("branchId" -> b.id)
+            )
+            IO.pure(Right(done))
+          case BranchService.RetireEnd.Busy =>
+            denied(
+              BranchFailure.conflict(
+                "branch_busy",
+                s"a propose or a merge of branch '$name' is running; try again when it ends"
+              )
+            )
+          case BranchService.RetireEnd.Gone => denied(noSuchBranch(parent, name))
         }
 
   /** Expire every live branch whose TTL has passed; returns the branch names discarded. Run by the
-    * leader's sweep.
+    * leader's sweep. A branch a run holds, or one gone since the listing, is left to the next
+    * sweep.
     */
   def expireDue(): IO[List[Branch]] = IO.defer {
     val sweptAt = now()
@@ -1723,7 +1757,7 @@ final class BranchService(
     due.foldLeft(IO.pure(List.empty[Branch])) { (acc, b) =>
       acc.flatMap { done =>
         retire(b, BranchStatus.Expired, "expired").attempt.map {
-          case Right(x) =>
+          case Right(BranchService.RetireEnd.Retired(x)) =>
             audit.restAs(
               "system",
               "system",
@@ -1735,7 +1769,8 @@ final class BranchService(
               detail = Map("branchId" -> b.id)
             )
             done :+ x
-          case Left(e) =>
+          case Right(BranchService.RetireEnd.Busy | BranchService.RetireEnd.Gone) => done
+          case Left(e)                                                            =>
             logger.warn(
               s"branch expiry: ${b.tenant}/${b.parentDbName}@${b.name} failed: ${e.getMessage}"
             )
@@ -1745,16 +1780,42 @@ final class BranchService(
     }
   }
 
-  /** Status transition + open merge abandonment, then teardown. */
-  private def retire(b: Branch, status: BranchStatus, reason: String): IO[Branch] =
-    IO.blocking {
-      store.listBranchMerges(b.id).filter(_.status == BranchMergeStatus.Proposed).foreach { m =>
-        store.updateBranchMerge(
-          m.copy(status = BranchMergeStatus.Abandoned, decidedAt = Some(now()))
-        )
+  /** The only way to `Discarded` or `Expired`: the branch's status and its open proposal, written
+    * under [[runLock]] from the row as it is there, then the teardown. `b` only names the branch: a
+    * row read before the lock can be stale, and a sweep writing from it would put `Expired` over
+    * `Merged`. The teardown runs with the lock released: the status has flipped, so nothing live
+    * reads the branch any more, and a lock must not sit over a long purge.
+    */
+  private def retire(
+      b: Branch,
+      status: BranchStatus,
+      reason: String
+  ): IO[BranchService.RetireEnd] =
+    sup.poolLocks
+      .tryWithLock(runLock(b))(
+        IO.blocking {
+          store.getBranch(b.id).filter(row => BranchStatus.Live(row.status)) match
+            case None          => BranchService.RetireEnd.Gone
+            case Some(current) =>
+              store
+                .listBranchMerges(current.id)
+                .filter(_.status == BranchMergeStatus.Proposed)
+                .foreach { m =>
+                  store.updateBranchMerge(
+                    m.copy(status = BranchMergeStatus.Abandoned, decidedAt = Some(now()))
+                  )
+                }
+              BranchService.RetireEnd.Retired(
+                store.updateBranch(current.copy(status = status)).getOrElse(current)
+              )
+        }
+      )
+      .flatMap {
+        case Some(retired: BranchService.RetireEnd.Retired) =>
+          teardown(retired.branch, reason).as(retired)
+        case Some(other) => IO.pure(other)
+        case None        => IO.pure(BranchService.RetireEnd.Busy)
       }
-      store.updateBranch(b.copy(status = status)).getOrElse(b)
-    }.flatMap(done => teardown(done, reason).as(done))
 
   /** Free the branch's compute and catalog: pool (stop nodes), tenant-db row + Postgres database
     * (through the supervisor, which also evicts the catalog reader), then the branch-only files.
@@ -1809,6 +1870,14 @@ object BranchService:
         throw new IllegalArgumentException(s"changed table ${t.schema}.${t.table} has no id")
       t.tableId
     }.toSet
+
+  /** How a discard or an expiry ended: done, a run of the branch holds it, or it ended since the
+    * row that named it was read.
+    */
+  private[branch] enum RetireEnd:
+    case Retired(branch: Branch)
+    case Busy
+    case Gone
 
   /** How one merge attempt ended. */
   private[branch] enum AttemptEnd:

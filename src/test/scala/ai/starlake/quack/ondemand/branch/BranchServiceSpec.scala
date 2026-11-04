@@ -30,7 +30,9 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.collection.mutable
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration.*
 
 /** Lifecycle state machine and authorization of the branch service on the in-memory store with a
@@ -91,19 +93,41 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       attemptWait: FiniteDuration = Duration.Zero,
       holdSettle: FiniteDuration = Duration.Zero
   ):
-    val store   = new InMemoryControlPlaneStore()
+
+    /** Runs after every read of a branch row by name. */
+    var afterBranchRead: () => Unit = () => ()
+
+    /** Runs after a sweep lists a tenant's branches: what it holds is stale from here on. */
+    var afterSweepList: () => Unit = () => ()
+    val store                      = new InMemoryControlPlaneStore:
+      override def findBranch(parentDbId: String, name: String, liveOnly: Boolean): Option[Branch] =
+        val row = super.findBranch(parentDbId, name, liveOnly)
+        afterBranchRead()
+        row
+      override def listTenantBranches(tenant: String, statuses: Set[BranchStatus]): List[Branch] =
+        val rows = super.listTenantBranches(tenant, statuses)
+        afterSweepList()
+        rows
     val created = mutable.ListBuffer.empty[String]
     val dropped = mutable.ListBuffer.empty[String]
     val admin   = new DbAdmin:
       def createDatabase(name: String): Either[String, Unit] = { created += name; Right(()) }
       def dropDatabase(name: String): Either[String, Unit]   = { dropped += name; Right(()) }
     val backend = new StubQuackBackend()
-    val sup     = new PoolSupervisor(
+
+    /** Runs when a `withLock` is asked for, before it waits. */
+    var onLockAsked: PoolKey => Unit = _ => ()
+    private val realLocks            = PoolLocker.inProcess()
+    val sup                          = new PoolSupervisor(
       backend,
       new NodeLoadTracker,
       store,
       dbAdmin = admin,
-      locks = PoolLocker.inProcess()
+      locks = new PoolLocker:
+        def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
+          IO.blocking(onLockAsked(key)) *> realLocks.withLock(key)(io)
+        override def tryWithLock[A](key: PoolKey)(io: IO[A]): IO[Option[A]] =
+          realLocks.tryWithLock(key)(io)
     )
     val tenant = sup.createTenant(Tenant("acme", acl = tenantAcl)).unsafeRunSync().toOption.get
     val parent = sup
@@ -167,7 +191,10 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val fenceArms    = mutable.ListBuffer.empty[(String, String, Long, Set[Long], Option[Int])]
     val fenceDisarms = mutable.ListBuffer.empty[String]
     val purged       = mutable.ListBuffer.empty[String]
-    val auditStore   = new RecordingTelemetryStore
+
+    /** Runs as the files of a branch are purged, the teardown's last step. */
+    var duringPurge = () => ()
+    val auditStore  = new RecordingTelemetryStore
 
     /** Each change count asked for: who it ran as, and of which table. */
     val countedAs = mutable.ListBuffer.empty[(String, String)]
@@ -254,7 +281,11 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
           countedAs += ((caller.identity, c.table))
           IO.pure(Right((3L, 1L, 2L)))
       ,
-      purgeFiles = (path, _) => { purged += path; Right(()) },
+      purgeFiles = (path, _) =>
+        duringPurge()
+        purged += path
+        Right(())
+      ,
       audit = new AuditRecorder(auditStore, _ => None),
       now = () => Instant.parse("2026-09-20T12:00:00Z"),
       attemptWait = attemptWait,
@@ -336,6 +367,46 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     def row(id: String): BranchMerge = store.getBranchMerge(id).get
 
     def status: BranchStatus = store.findBranch(parent.id, "x").get.status
+
+    /** The status of the branch `name`, live or not. */
+    def statusOf(name: String): BranchStatus =
+      store.findBranch(parent.id, name, liveOnly = false).get.status
+
+    /** Past its TTL, for the next sweep. */
+    def due(name: String = "x"): Unit =
+      val b = store.findBranch(parent.id, name).get
+      store.updateBranch(b.copy(expiresAt = Some(Instant.parse("2026-09-20T11:00:00Z")))): Unit
+
+    def sweep(): List[Branch] = service.expireDue().unsafeRunSync()
+
+    def discard(name: String = "x", actor: BranchActor = admin1) =
+      service.discard("acme", parent.name, name, actor, None).unsafeRunSync()
+
+    /** Holds every run at its first batch of Prepare or Decide, until [[release]]. */
+    final class Hold:
+      private val reached = new CountDownLatch(1)
+      private val letGo   = new CountDownLatch(1)
+      duringAnalysis = () =>
+        reached.countDown()
+        letGo.await(60, TimeUnit.SECONDS): Unit
+
+      def awaitRun(): Unit = reached.await(30, TimeUnit.SECONDS) shouldBe true
+      def release(): Unit  = letGo.countDown()
+
+    type Run = Either[BranchFailure, (Branch, BranchMerge, BranchChangeSet)]
+
+    /** A propose or a merge running in the background. */
+    def startPropose(name: String = "x"): Future[Run] =
+      service
+        .propose("acme", parent.name, name, ProposeOptions(), admin1, Proposer, None)
+        .unsafeToFuture()
+
+    def startMerge(name: String = "x"): Future[Run] =
+      service
+        .merge("acme", parent.name, name, openProposal(name), None, false, admin2, None)
+        .unsafeToFuture()
+
+    def ended(run: Future[Run]): Run = Await.result(run, 60.seconds)
 
     /** Two proposals: the first, replaced, and the second, open. */
     def replacedAndOpen(): (String, String) =
@@ -2809,6 +2880,301 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       BranchStatus.Expired
     )
     f.store.findBranch(f.parent.id, "soon").map(_.status) shouldBe Some(BranchStatus.Open)
+  }
+
+  /** None of what a teardown of `b` removes is gone. */
+  private def notTornDown(f: Fixture, b: Branch): Unit =
+    f.purged shouldBe empty
+    f.dropped should not contain b.tenantDbName
+    f.sup.findTenantDb("acme", b.tenantDbName).isDefined shouldBe true
+    f.sup.get(PoolKey("acme", b.tenantDbName, b.poolName)).isDefined shouldBe true
+
+  private def expiryAudits(f: Fixture) =
+    f.auditStore.events.filter(_.action == AuditActions.BranchExpire).toList
+
+  "a discard during a merge of the branch" should "answer branch_busy, change nothing, and let the merge finish" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val hold = new f.Hold
+    val run  = f.startMerge()
+    hold.awaitRun()
+    val before  = f.store.findBranch(f.parent.id, "x").get
+    val rows    = f.store.listBranchMerges(before.id)
+    val refused = f.discard()
+    refused.left.map(r => (r.status, r.code)) shouldBe Left((409, "branch_busy"))
+    refused.left.toOption.get.message shouldBe
+      "a propose or a merge of branch 'x' is running; try again when it ends"
+    f.store.findBranch(f.parent.id, "x") shouldBe Some(before)
+    f.store.listBranchMerges(before.id) shouldBe rows
+    notTornDown(f, before)
+    val audited = f.auditStore.events.filter(_.action == AuditActions.BranchDiscard).toList
+    audited.map(e => (e.outcome, e.detail.get("error"))) shouldBe
+      List(("denied", Some("branch_busy")))
+    hold.release()
+    val (b, m, _) = f.ended(run).toOption.get
+    (b.status, m.status) shouldBe (BranchStatus.Merged, BranchMergeStatus.Merged)
+    f.statusOf("x") shouldBe BranchStatus.Merged
+    f.purged shouldBe List(before.dataPath)
+  }
+
+  "a discard during a propose of the branch" should "do the same, and pass once the propose has ended" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val hold = new f.Hold
+    val run  = f.startPropose()
+    hold.awaitRun()
+    val before  = f.store.findBranch(f.parent.id, "x").get
+    val refused = f.discard()
+    refused.left.map(r => (r.status, r.code)) shouldBe Left((409, "branch_busy"))
+    f.store.findBranch(f.parent.id, "x") shouldBe Some(before)
+    notTornDown(f, before)
+    hold.release()
+    f.ended(run).isRight shouldBe true
+    f.status shouldBe BranchStatus.Proposed
+    f.discard().map(_.status) shouldBe Right(BranchStatus.Discarded)
+    f.purged shouldBe List(before.dataPath)
+  }
+
+  "an expiry during a merge of the branch" should "skip it silently and tear nothing down: the merge's end stands" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    f.due()
+    val hold = new f.Hold
+    val run  = f.startMerge()
+    hold.awaitRun()
+    val before        = f.store.findBranch(f.parent.id, "x").get
+    val (swept, logs) = LogCapture.logged(ServiceLog)(f.sweep())
+    swept shouldBe Nil
+    logs.filter(_.getLevel.isGreaterOrEqual(Level.WARN)) shouldBe empty
+    expiryAudits(f) shouldBe empty
+    f.store.findBranch(f.parent.id, "x") shouldBe Some(before)
+    notTornDown(f, before)
+    hold.release()
+    f.ended(run).isRight shouldBe true
+    f.statusOf("x") shouldBe BranchStatus.Merged
+    f.sweep() shouldBe Nil
+    f.statusOf("x") shouldBe BranchStatus.Merged
+    f.purged shouldBe List(before.dataPath)
+  }
+
+  "an expiry during a propose of the branch" should "skip it, and the next sweep retires it" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.due()
+    val hold = new f.Hold
+    val run  = f.startPropose()
+    hold.awaitRun()
+    val before = f.store.findBranch(f.parent.id, "x").get
+    f.sweep() shouldBe Nil
+    expiryAudits(f) shouldBe empty
+    notTornDown(f, before)
+    hold.release()
+    val (_, m, _) = f.ended(run).toOption.get
+    f.status shouldBe BranchStatus.Proposed
+    f.sweep().map(_.name) shouldBe List("x")
+    f.statusOf("x") shouldBe BranchStatus.Expired
+    f.row(m.id).status shouldBe BranchMergeStatus.Abandoned
+    expiryAudits(f).map(_.outcome) shouldBe List("ok")
+    f.purged shouldBe List(before.dataPath)
+  }
+
+  "a run of a branch" should "hold only that branch: a sibling's discard and expiry pass meanwhile" in {
+    for merging <- List(true, false) do
+      val f = new Fixture
+      f.create("x")
+      f.create("y")
+      f.create("z")
+      f.touchBranch()
+      if merging then f.propose().isRight shouldBe true
+      f.due("z")
+      val before = f.statusOf("x")
+      val hold   = new f.Hold
+      val run    = if merging then f.startMerge() else f.startPropose()
+      hold.awaitRun()
+      f.discard("y").map(_.status) shouldBe Right(BranchStatus.Discarded)
+      f.sweep().map(_.name) shouldBe List("z")
+      f.statusOf("z") shouldBe BranchStatus.Expired
+      f.statusOf("x") shouldBe before
+      hold.release()
+      f.ended(run).isRight shouldBe true
+      f.statusOf("x") shouldBe (if merging then BranchStatus.Merged else BranchStatus.Proposed)
+  }
+
+  /** Branch `x` and a sibling whose run is held open, so that a run of `x` queues behind it, on the
+    * parent's lock and holding nothing of its own. Starts that run, lets a discard of `x` through
+    * and then the sibling's run go, and gives the queued run's answer.
+    */
+  private def queuedBehindSibling(f: Fixture)(start: => Future[f.Run]): f.Run =
+    f.create("y")
+    val hold    = new f.Hold
+    val sibling = f.startPropose("y")
+    hold.awaitRun()
+    val queued = new CountDownLatch(1)
+    f.onLockAsked = k => if k.pool == "__merge" then queued.countDown()
+    val started = f.nodesStarted
+    val run     = start
+    queued.await(30, TimeUnit.SECONDS) shouldBe true
+    f.discard().map(_.status) shouldBe Right(BranchStatus.Discarded)
+    hold.release()
+    f.ended(sibling).isRight shouldBe true
+    val end = f.ended(run)
+    f.nodesStarted shouldBe started
+    f.mergeBatches shouldBe empty
+    f.statusOf("x") shouldBe BranchStatus.Discarded
+    end
+
+  "a discard that wins first" should "refuse the merge queued behind it, with no node started" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val open = f.openProposal()
+    queuedBehindSibling(f)(f.startMerge()).left.map(_.status) shouldBe Left(404)
+    f.row(open).status shouldBe BranchMergeStatus.Abandoned
+  }
+
+  it should "refuse the propose queued behind it, with no node started" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    queuedBehindSibling(f)(f.startPropose()).left.map(_.status) shouldBe Left(404)
+    val b = f.store.findBranch(f.parent.id, "x", liveOnly = false).get
+    f.store.listBranchMerges(b.id) shouldBe Nil
+  }
+
+  /** A discard let through just as the run asks for the branch's own lock, the parent's in hand. */
+  private def discardBeforeBranchLock(f: Fixture): () => Option[Either[BranchFailure, Branch]] =
+    var won = Option.empty[Either[BranchFailure, Branch]]
+    f.onLockAsked = k => if k.pool.startsWith("__run_") && won.isEmpty then won = Some(f.discard())
+    () => won
+
+  it should "be seen by a merge holding the parent's lock: it reads the row under the branch's" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val won     = discardBeforeBranchLock(f)
+    val started = f.nodesStarted
+    f.merge().left.map(_.status) shouldBe Left(404)
+    won().map(_.isRight) shouldBe Some(true)
+    f.nodesStarted shouldBe started
+    f.mergeBatches shouldBe empty
+    f.statusOf("x") shouldBe BranchStatus.Discarded
+  }
+
+  it should "be seen by a propose holding the parent's lock: it reads the row under the branch's" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    val won = discardBeforeBranchLock(f)
+    f.propose().left.map(_.status) shouldBe Left(404)
+    won().map(_.isRight) shouldBe Some(true)
+    f.nodesStarted shouldBe 0
+    f.statusOf("x") shouldBe BranchStatus.Discarded
+  }
+
+  it should "stop a propose even when the name passes to a new branch, whose lock it does not hold" in {
+    val f     = new Fixture
+    val first = f.create("x").toOption.get
+    f.touchBranch()
+    var fresh = Option.empty[Branch]
+    f.onLockAsked = k =>
+      if k.pool == "__merge" && fresh.isEmpty then
+        f.discard().isRight shouldBe true
+        fresh = f.create("x").toOption
+    f.propose().left.map(_.status) shouldBe Left(404)
+    fresh.isDefined shouldBe true
+    fresh.get.id should not be first.id
+    f.nodesStarted shouldBe 0
+    f.store.listBranchMerges(fresh.get.id) shouldBe Nil
+    f.store.findBranch(f.parent.id, "x").map(_.status) shouldBe Some(BranchStatus.Open)
+  }
+
+  "a sweep holding a stale row" should "leave a branch merged since: Merged stays, and nothing is torn down twice" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    f.due()
+    val id   = f.openProposal()
+    var once = true
+    f.afterSweepList = () =>
+      if once then
+        once = false
+        f.merge().isRight shouldBe true
+    f.sweep() shouldBe Nil
+    f.statusOf("x") shouldBe BranchStatus.Merged
+    f.row(id).status shouldBe BranchMergeStatus.Merged
+    f.purged.size shouldBe 1
+    expiryAudits(f) shouldBe empty
+  }
+
+  it should "leave a branch discarded since: Discarded stays, and nothing is torn down twice" in {
+    val f = new Fixture
+    f.create("x")
+    f.due()
+    var once = true
+    f.afterSweepList = () =>
+      if once then
+        once = false
+        f.discard().isRight shouldBe true
+    f.sweep() shouldBe Nil
+    f.statusOf("x") shouldBe BranchStatus.Discarded
+    f.purged.size shouldBe 1
+    expiryAudits(f) shouldBe empty
+  }
+
+  "a discard holding a stale row" should "answer as for a branch that is gone, tearing nothing down twice" in {
+    val f = new Fixture
+    f.create("x")
+    var other = Option.empty[Either[BranchFailure, Branch]]
+    var once  = true
+    f.afterBranchRead = () =>
+      if once then
+        once = false
+        other = Some(f.discard())
+    val refused = f.discard()
+    other.map(_.isRight) shouldBe Some(true)
+    refused.left.map(r => (r.status, r.code, r.message)) shouldBe
+      Left((404, "not_found", s"branch 'x' not found on '${f.parent.name}'"))
+    f.purged.size shouldBe 1
+  }
+
+  it should "abandon the proposal it finds under the lock, not the ones its stale row knew of" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    var once = true
+    f.afterBranchRead = () =>
+      if once then
+        once = false
+        f.propose().isRight shouldBe true
+    f.discard().map(_.status) shouldBe Right(BranchStatus.Discarded)
+    val b = f.store.findBranch(f.parent.id, "x", liveOnly = false).get
+    f.store.listBranchMerges(b.id).map(_.status) shouldBe List(BranchMergeStatus.Abandoned)
+  }
+
+  "a retire" should "write the status before the teardown, and hold no lock over the teardown" in {
+    for sweep <- List(false, true) do
+      val f = new Fixture
+      val b = f.create("x").toOption.get
+      f.due()
+      val lock = PoolKey("acme", f.parent.name, s"__run_${b.id}")
+      var seen = Option.empty[(BranchStatus, Boolean)]
+      f.duringPurge = () =>
+        seen = Some(
+          (f.statusOf("x"), f.sup.poolLocks.tryWithLock(lock)(IO.unit).unsafeRunSync().isDefined)
+        )
+      if sweep then f.sweep().map(_.name) shouldBe List("x")
+      else f.discard().isRight shouldBe true
+      seen shouldBe
+        Some((if sweep then BranchStatus.Expired else BranchStatus.Discarded, true))
   }
 
   "the parent" should "refuse deletion while a live branch exists, and pin the fork snapshot" in {

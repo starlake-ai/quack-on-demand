@@ -526,6 +526,64 @@ class BranchThreeWayE2ESpec
         s"INSERT INTO $td.main.fact VALUES ($id, 'landed', 1); COMMIT"
     )
 
+  it should "answer a discard with branch_busy while it runs, and end as it would have" in {
+    ready()
+    val td = database("busy")
+    tableAndBranch(td, "busy", "feature")
+    sql("busy", s"UPDATE $td.main.fact SET note = 'b' WHERE id < 100", Some("feature"))
+    val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), tessToken)
+    // Every look for a branch's commits reads this table, so a lock on it holds the merge at its
+    // first look, with its locks taken.
+    Using.resource(
+      DriverManager.getConnection(TestPostgres.dbUrl(td), TestPostgres.pgUser, TestPostgres.pgPass)
+    ) { catalog =>
+      catalog.setAutoCommit(false)
+      catalog
+        .createStatement()
+        .execute("LOCK TABLE ducklake_snapshot_changes IN ACCESS EXCLUSIVE MODE")
+      val answer = new java.util.concurrent.atomic.AtomicReference[(Int, String)]()
+      val merge  = new Thread(() =>
+        answer.set(
+          stack.postStatus(
+            "/api/branch/merge",
+            proposeBody(td, "feature", idOf(proposed)),
+            timeoutSec = 120
+          )
+        )
+      )
+      merge.start()
+      stack.await("the merge's look waiting on the catalog", 30.seconds) {
+        val rs = catalog
+          .createStatement()
+          .executeQuery(
+            "SELECT count(*) FROM pg_locks WHERE NOT granted " +
+              "AND relation = 'ducklake_snapshot_changes'::regclass"
+          )
+        rs.next()
+        Option.when(rs.getLong(1) > 0L)(())
+      }
+      val (code, body) =
+        stack.postStatus("/api/branch/discard", proposeBody(td, "feature"), tessToken)
+      withClue(body) {
+        code shouldBe 409
+        body should include("branch_busy")
+      }
+      catalog.rollback()
+      merge.join(120000)
+      withClue(answer.get()) {
+        answer.get()._1 shouldBe 200
+      }
+    }
+    sql("busy", s"SELECT count(*) FROM $td.main.fact WHERE note = 'b'") shouldBe List("100")
+    stack
+      .get(branchesOf(td))
+      .hcursor
+      .downField("branches")
+      .values
+      .toList
+      .flatten shouldBe empty
+  }
+
   it should "settle a commit that landed and never settled, doubling no row" in {
     ready()
     val td = database("landed")
