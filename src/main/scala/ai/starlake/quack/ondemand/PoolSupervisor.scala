@@ -1385,8 +1385,9 @@ final class PoolSupervisor(
     */
   def maintenanceNodeSpec(tenantName: String, tenantDbName: String): Option[NodeSpec] =
     findTenantDb(tenantName, tenantDbName).map { td =>
-      val key    = PoolKey(tenantName, td.name, "__maint")
-      val nodeId = s"maint-${td.name}-${System.nanoTime()}"
+      val key = PoolKey(tenantName, td.name, "__maint")
+      // A pod and Service name on Kubernetes, as nodeId below: no underscore, 63 characters at most.
+      val nodeId = s"maint-${td.name.replace('_', '-').take(36)}-${System.nanoTime()}"
       // Borrow a serving pool's resolved config when one exists (s3 creds, kindWire, initSql).
       val donor = pools.values.find(s => s.key.tenant == key.tenant && s.key.tenantDb == td.name)
       val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
@@ -4931,7 +4932,8 @@ object PoolSupervisor:
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
     // RFC-1123 forbids '_'; slugs may contain it. Map '_' -> '-' on every component. Collision-free
-    // since a valid slug never contains '-'. Labels keep the raw slug.
+    // since a valid slug never contains '-'. Labels keep the slug, wrapped only where the label rule
+    // refuses it (`PoolLabelValue`).
     val safeTenant = key.tenant.replace('_', '-')
     val safeDb     = key.tenantDb.replace('_', '-')
     val safePool   = key.pool.replace('_', '-')

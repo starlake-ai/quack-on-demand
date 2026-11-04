@@ -1942,6 +1942,26 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     spec.objectStoreSql should include("SECRET 's'")
     spec.objectStoreSql should include("SCOPE ['s3://bucket/db']")
 
+  it should "name its node as a Kubernetes API server accepts, and so should a merge" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    // The API server's rule for a Service name, and the composed tenant-db at its longest.
+    val serviceName = "[a-z]([-a-z0-9]*[a-z0-9])?"
+    List("my_db", "n" * 58).foreach { suffix =>
+      sup.createTenantDb("acme", suffix, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+      val db = s"acme_$suffix"
+      val maint = sup.maintenanceNodeSpec("acme", db).get.nodeId
+      withClue(maint) {
+        maint should fullyMatch regex serviceName
+        maint.length should be <= 63
+      }
+      val merge = sup.mergeNodeSpec("acme", db, s"${db.take(50)}__br_ab12cd34", "/var/x/").get.nodeId
+      withClue(merge) {
+        merge should fullyMatch regex serviceName
+        merge.length should be <= 63
+      }
+    }
+
   // ---------- effectiveSetForUser: column policies ----------
 
   "effectiveSetForUser" should "include column policies attached to the user's roles" in:
