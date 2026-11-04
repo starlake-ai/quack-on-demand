@@ -1777,9 +1777,9 @@ object FlightProducerImpl:
 
   /** The largest command an anonymous peer may send: several times what every id GetSqlInfo defines
     * takes. GetSqlInfo answers a row per id listed, repeats included, in Arrow memory that no limit
-    * covers, and goes on after its client left, which gives its place back: one anonymous call
-    * listing 16 million ids, a 16 MiB message, took the JVM from 373 to 2295 MiB and held its
-    * thread for 4 s after the client left, so a few of them would have had the container killed
-    * whatever the limit on calls at once.
+    * covers, and goes on after its client left: one anonymous call listing 16 million ids, a 16 MiB
+    * message, took the JVM from 373 to 2295 MiB and held its thread for 4 s after the client left.
+    * Its place stays held while `send` runs, as the end of a call queues behind its handler, so
+    * what the limit on calls at once bounds is that many such calls.
     */
   val MaxAnonymousCommandBytes: Int = 4096

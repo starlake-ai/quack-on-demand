@@ -42,8 +42,8 @@ class CertGenSpec extends AnyFlatSpec with Matchers:
     sans should contain("localhost")
     sans should contain("127.0.0.1")
 
-    // The key is an unencrypted PKCS8 RSA private key - the format Arrow's
-    // FlightServer.Builder.useTls consumes.
+    // The key is an unencrypted PKCS8 RSA private key - the format gRPC's
+    // GrpcSslContexts.forServer consumes.
     val keyBytes = pemBody(key, "PRIVATE KEY")
     noException should be thrownBy
       KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(keyBytes))

@@ -548,10 +548,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     override def hasRoot(): Boolean                                  = true
     override def getRoot(): org.apache.arrow.vector.VectorSchemaRoot = emptyRoot
 
-  // What FlightStream does on an interrupt: a runtime failure.
+  // What FlightStream.getDescriptor does on an interrupt: sets the flag again and fails.
   private def interruptibly(latch: java.util.concurrent.CountDownLatch): Unit =
     try latch.await()
-    catch case e: InterruptedException => throw new RuntimeException(e)
+    catch
+      case e: InterruptedException =>
+        Thread.currentThread().interrupt()
+        throw new RuntimeException(e)
 
   private def put(
       producer: FlightProducerImpl,
