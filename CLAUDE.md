@@ -620,7 +620,9 @@ table its statistics for the rest of the transaction. A conflict refuses the mer
 names a winner, `--on-conflict main|branch`; `--key` catches rows both sides inserted; `--hold-writers`
 on the merge holds other commits on the merged tables. A merge names the proposal it approves,
 `proposalId` / `--proposal`, because proposing again replaces the open row: another one in its place is
-`409 proposal_replaced`. A branch's commit lands once: every look reads the message of every proposal of
+`409 proposal_replaced`, and one that has merged is `409 already_merged`, naming the main snapshot and the
+tag, which is what a retry after a lost answer reads, ahead of the live-branch lookup that would call the
+branch gone or a new branch's. A branch's commit lands once: every look reads the message of every proposal of
 the branch; the open one's settles, another's refuses propose and merge, `409 proposal_unsettled`. An
 Apply is marked on the row before it goes, `error` with the timeout prefix, so a crash reads like a
 timed-out send: the proposal stays open and the fence row stays. A stage that writes is a list of single

@@ -584,6 +584,28 @@ class BranchThreeWayE2ESpec
       .flatten shouldBe empty
   }
 
+  it should "answer the same merge again with already_merged, leaving main as it is" in {
+    ready()
+    val td = database("again")
+    tableAndBranch(td, "again", "feature")
+    sql("again", s"UPDATE $td.main.fact SET note = 'b' WHERE id < 100", Some("feature"))
+    val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), tessToken)
+    val done     = stack.post("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)))
+    val merge    = done.hcursor.downField("merge")
+    merge.get[String]("status") shouldBe Right("merged")
+    val head         = sql("again", s"SELECT max(snapshot_id) FROM $td.snapshots()")
+    val (code, body) =
+      stack.postStatus("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)))
+    withClue(body) {
+      code shouldBe 409
+      body should include("already_merged")
+      body should include(s"main snapshot ${merge.get[Long]("mainSnapshotAfter").toOption.get}")
+      body should include(merge.get[String]("tagName").toOption.get)
+    }
+    sql("again", s"SELECT max(snapshot_id) FROM $td.snapshots()") shouldBe head
+    sql("again", s"SELECT count(*) FROM $td.main.fact WHERE note = 'b'") shouldBe List("100")
+  }
+
   it should "settle a commit that landed and never settled, doubling no row" in {
     ready()
     val td = database("landed")

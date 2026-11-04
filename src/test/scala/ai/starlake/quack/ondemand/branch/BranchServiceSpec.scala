@@ -3487,6 +3487,179 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     f.row(id).status shouldBe BranchMergeStatus.Abandoned
   }
 
+  /** A proposal of branch `x` that merged, so its branch is gone. */
+  private def mergedProposal(f: Fixture): BranchMerge =
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val merged = f.merge().toOption.get._2
+    // The commit's snapshot, for a later proposal to read main's history through.
+    f.mainReader.changes = f.mainReader.changes :+ ((11L, "inlined_insert:2"))
+    merged
+
+  private def alreadyMergedText(m: BranchMerge): String =
+    s"proposal ${m.id} of branch 'x' is already merged: main snapshot " +
+      s"${m.mainSnapshotAfter.get}, tag ${m.tagName.get}"
+
+  "a merge of a proposal that merged" should "answer already_merged, naming the snapshot and the tag, and do nothing" in {
+    val f       = new Fixture
+    val m       = mergedProposal(f)
+    val started = f.nodesStarted
+    val tag     = s"merge-x-${m.id.stripPrefix("mg-").take(8)}"
+    f.merge(proposal = Some(m.id)).left.map(r => (r.status, r.code, r.message)) shouldBe Left(
+      (
+        409,
+        "already_merged",
+        s"proposal ${m.id} of branch 'x' is already merged: main snapshot 11, tag $tag"
+      )
+    )
+    f.nodesStarted shouldBe started
+    f.mergeBatches.size shouldBe 1
+    f.mainReader.head shouldBe 11L
+    f.purged.size shouldBe 1
+    f.emitted.count(_.isInstanceOf[ManagerEvent.BranchMerged]) shouldBe 1
+    f.row(m.id) shouldBe m
+    // Its audit row claims no merge.
+    f.auditStore.events
+      .filter(_.action == AuditActions.BranchMerge)
+      .toList
+      .map(e => (e.outcome, e.detail.get("error"))) shouldBe
+      List(("ok", None), ("denied", Some("already_merged")))
+    // Its proposer is an admin too, and is told the same rather than not to approve their own.
+    f.merge(actor = f.admin1, proposal = Some(m.id)).left.map(_.code) shouldBe
+      Left("already_merged")
+  }
+
+  it should "answer the same to a merge that queued behind the run that merged it" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id    = f.openProposal()
+    val hold  = new f.Hold
+    val first = f.startMerge()
+    hold.awaitRun()
+    val queued = new CountDownLatch(1)
+    f.onLockAsked = k => if k.pool == "__merge" then queued.countDown()
+    // A second approver, or the first one again after an answer that was lost.
+    val second = f.service
+      .merge("acme", f.parent.name, "x", id, None, false, BranchActor.admin("carol"), None)
+      .unsafeToFuture()
+    queued.await(30, TimeUnit.SECONDS) shouldBe true
+    val started = f.nodesStarted
+    hold.release()
+    val (_, m, _) = f.ended(first).toOption.get
+    f.ended(second).left.map(r => (r.status, r.code, r.message)) shouldBe
+      Left((409, "already_merged", alreadyMergedText(m)))
+    f.nodesStarted shouldBe started
+    f.mergeBatches.size shouldBe 1
+    f.row(id).approver shouldBe Some("boss")
+  }
+
+  it should "answer the same when a new branch has reused the name, and leave that branch alone" in {
+    val f = new Fixture
+    val m = mergedProposal(f)
+    val b = f.create("x").toOption.get
+    // With no proposal on it, this would read not_proposed.
+    f.merge(proposal = Some(m.id)).left.map(r => (r.code, r.message)) shouldBe
+      Left(("already_merged", alreadyMergedText(m)))
+    f.propose().isRight shouldBe true
+    val open    = f.openProposal()
+    val started = f.nodesStarted
+    // With one, proposal_replaced.
+    f.merge(proposal = Some(m.id)).left.map(r => (r.code, r.message)) shouldBe
+      Left(("already_merged", alreadyMergedText(m)))
+    f.nodesStarted shouldBe started
+    f.row(open).status shouldBe BranchMergeStatus.Proposed
+    f.store.findBranch(f.parent.id, "x").map(r => (r.id, r.status)) shouldBe
+      Some((b.id, BranchStatus.Proposed))
+  }
+
+  it should "answer for a row that names no snapshot or tag" in {
+    val f = new Fixture
+    val m = mergedProposal(f)
+    f.store.updateBranchMerge(m.copy(mainSnapshotAfter = None, tagName = None))
+    f.merge(proposal = Some(m.id)).left.map(r => (r.code, r.message)) shouldBe Left(
+      (
+        "already_merged",
+        s"proposal ${m.id} of branch 'x' is already merged: main snapshot unknown, tag none"
+      )
+    )
+  }
+
+  it should "say nothing of it to anyone but an admin whose credential may merge" in {
+    val f = new Fixture
+    val m = mergedProposal(f)
+    f.merge(actor = f.alice, proposal = Some(m.id)).left.map(r => (r.status, r.code)) shouldBe
+      Left((403, "admin_required"))
+    f.merge(actor = BranchActor.admin("carol", branchOnly = true), proposal = Some(m.id))
+      .left
+      .map(r => (r.status, r.code)) shouldBe Left((403, "branch_only_token"))
+  }
+
+  "a merge of a proposal that did not merge" should "keep today's answers, its branch live or dead" in {
+    val abandoned = new Fixture
+    abandoned.create("x")
+    abandoned.touchBranch()
+    abandoned.propose().isRight shouldBe true
+    val dropped = abandoned.openProposal()
+    abandoned.discard().isRight shouldBe true
+    abandoned.row(dropped).status shouldBe BranchMergeStatus.Abandoned
+    abandoned.merge(proposal = Some(dropped)).left.map(r => (r.status, r.code)) shouldBe
+      Left((404, "not_found"))
+
+    val closed = new Fixture
+    closed.create("x")
+    closed.touchBranch()
+    closed.propose().isRight shouldBe true
+    val failed = closed.openProposal()
+    closed.nodeFails = Some("merge node spawn failed: no free port")
+    closed.merge().left.map(_.code) shouldBe Left("merge_failed")
+    closed.row(failed).status shouldBe BranchMergeStatus.Failed
+    closed.merge(proposal = Some(failed)).left.map(_.code) shouldBe Left("not_proposed")
+    closed.discard().isRight shouldBe true
+    closed.merge(proposal = Some(failed)).left.map(r => (r.status, r.code)) shouldBe
+      Left((404, "not_found"))
+
+    val again         = new Fixture
+    val (replaced, _) = again.replacedAndOpen()
+    again.merge(proposal = Some(replaced)).left.map(_.code) shouldBe Left("proposal_replaced")
+    again.discard().isRight shouldBe true
+    again.merge(proposal = Some(replaced)).left.map(r => (r.status, r.code)) shouldBe
+      Left((404, "not_found"))
+  }
+
+  "a merge naming a merged proposal of another branch" should "keep today's answers" in {
+    val f = new Fixture
+    val m = mergedProposal(f)
+    // Another name, with no such branch, then a live one with no proposal, then with one.
+    f.merge(name = "y", proposal = Some(m.id)).left.map(r => (r.status, r.code)) shouldBe
+      Left((404, "not_found"))
+    f.create("y")
+    f.merge(name = "y", proposal = Some(m.id)).left.map(_.code) shouldBe Left("not_proposed")
+    f.propose("y").isRight shouldBe true
+    f.merge(name = "y", proposal = Some(m.id)).left.map(_.code) shouldBe Left("proposal_replaced")
+    // Another parent of this tenant, and of another tenant, under the same branch name.
+    def elsewhere(tenant: String, suffix: String): Either[BranchFailure, Any] =
+      val other = f.sup
+        .createTenantDb(
+          tenant,
+          suffix,
+          TenantDbKind.DuckLake,
+          f.parent.metastore,
+          s"/tmp/qod-$suffix/"
+        )
+        .unsafeRunSync()
+        .toOption
+        .get
+      f.service
+        .merge(tenant, other.name, "x", m.id, None, false, f.admin2, None)
+        .unsafeRunSync()
+    elsewhere("acme", "other").left.map(r => (r.status, r.code)) shouldBe Left((404, "not_found"))
+    f.sup.createTenant(Tenant("globex")).unsafeRunSync()
+    elsewhere("globex", "tpch").left.map(r => (r.status, r.code)) shouldBe Left((404, "not_found"))
+  }
+
   "the parent" should "refuse deletion while a live branch exists, and pin the fork snapshot" in {
     val f = new Fixture
     val b = f.create("x").toOption.get

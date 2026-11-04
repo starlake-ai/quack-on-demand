@@ -2127,7 +2127,7 @@ token with
 on the live database are then refused with `write_requires_branch`, reads are
 unchanged, and every child token inherits the flag.
 
-An open proposal's `error` starting `timeout:` means a merge is running or may have landed. Merging again settles it; if it landed on a branch that has moved since, that removes what was written on the branch since.
+An open proposal's `error` starting `timeout:` means a merge is running or may have landed. Merging again settles it; if it landed on a branch that has moved since, that removes what was written on the branch since. A retry that reads `409 already_merged` found the first run landed and on record: that merge is done.
 
 After a manager restart mid-merge, merge again. If that does not settle it, the branch's pool is still frozen (disabled and suspended): `qod branch show` gives its `catalogDb` and `pool`, then `qod pool set-disabled --tenant acme --db <catalogDb> --pool <pool> --enabled` and `qod pool resume --tenant acme --db <catalogDb> --pool <pool>` (the pool belongs to the branch's own database, not the parent).
 
@@ -2137,7 +2137,7 @@ A crash can also leave the merge node running. It has no node row, so nothing re
 - Kubernetes: delete the `merge-*` pod and Service and the `qod-token-merge-*` and `qod-store-merge-*` Secrets. Two per-pool Secrets, which hold the catalog password and cloud keys, outlive them until a later merge or proposal on that database stops its node with none left. When no merge of that database is running, delete `qod-nodeenv-<tenant>-<db>---merge` and `qod-fedsql-<tenant>-<db>---merge` too (their names write `_` as `-`, so the pool `__merge` reads `--merge`).
 - Fleet: find the server holding the `merge-*` node in `qod fleet servers`, then `qod fleet drain <name>` and `qod fleet undrain <name>`. With `QOD_FLEET_EPHEMERAL=local` the node runs on the manager host, `qod fleet servers` lists no such server, and the local sweep applies.
 
-`qod branch propose` and `merge` have no read limit: they wait for the server, which bounds each stage. If a NAT or load balancer drops the connection during a long merge, the CLI waits until Ctrl-C; merging again is safe.
+`qod branch propose` and `merge` have no read limit: they wait for the server, which bounds each stage. If a NAT or load balancer drops the connection during a long merge, the CLI waits until Ctrl-C; merging again is safe: it waits behind a run still going, and `409 already_merged` then means that run landed.
 
 What refuses a merge, and what to do:
 
@@ -2147,12 +2147,13 @@ What refuses a merge, and what to do:
 | `409 conflicts_changed` | Main moved: a conflict, or a delete from main, the proposal did not show | Propose again |
 | `409 proposal_stale` | The branch changed since the proposal | Propose again |
 | `409 proposal_replaced` | Another proposal replaced the one you read | Read the new one, then merge it by its id |
+| `409 already_merged` | The proposal you named has merged; the refusal names the main snapshot and the tag. What a retry reads when the first run landed, and what a second approver reads | Nothing: the merge is done, whatever became of the first answer |
 | `409 not_proposed` | The branch has no open proposal: a refusal that closes one (`merge_conflict`, `conflicts_changed`, `proposal_stale`, `history_gap`, and `merge_failed` when the node failed) leaves none | Propose again, unless the closing refusal's row says otherwise |
 | `409 proposal_unsettled` | On propose or merge: a merge may have landed on main. On discard: a merge of the branch landed on main and is not on record | Merge again, which settles it and needs an admin other than its proposer, or, when it says another proposal landed, discard the branch |
 | `409 branch_busy` | On discard: a propose or a merge of the branch is running | Try again when it ends |
 | `409 branch_expired` | On propose, whoever asks: the branch passed its TTL and the next sweep discards it. An open proposal stays as it is | Create a new branch. An admin other than its proposer can still merge an open proposal until the sweep runs |
 | `502 catalog_unavailable` | On discard: main's catalog cannot be read to look for a merge that landed, so nothing changed | Try again |
-| `502 merge_failed` | The merge node failed, or a stage timed out | After a timeout or a manager restart mid-merge, merge again and never propose first; raise `QOD_BRANCH_MERGE_TIMEOUT_SEC` if a stage needs longer. Otherwise fix the cause and propose again; for "the merge node needs more memory" that is the node's memory limit (see Size below) |
+| `502 merge_failed` | The merge node failed, or a stage timed out | After a timeout or a manager restart mid-merge, merge again and never propose first (`409 already_merged` on that retry means the first run landed); raise `QOD_BRANCH_MERGE_TIMEOUT_SEC` if a stage needs longer. Otherwise fix the cause and propose again; for "the merge node needs more memory" that is the node's memory limit (see Size below) |
 | `409 concurrent_write` | Main kept moving across `QOD_BRANCH_MERGE_MAX_ATTEMPTS` attempts, or is not at the snapshot `--expect-main` names | Merge again, with a current `--expect-main` or none, or `--hold-writers` if the writers are on the merged tables |
 | `409 history_gap` | A snapshot from the fork on is gone, on main or on the branch: expired by hand, by a maintenance run that started just before the branch was created, or, on a branch an earlier release created, by maintenance before the expiry floor existed | Discard the branch and create it again |
 | `422 merge_unsupported` | A schema change on a merged table, views, macros, a column named `rowid` or `snapshot_id`, or a snapshot that mixes maintenance and data | Use a fresh branch for data changes; apply DDL on main; rename a reserved column |

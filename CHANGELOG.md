@@ -22,7 +22,8 @@ count. To keep counts from a user, refuse on the table.
 
 - Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
   `--proposal`: the approver names the proposal they read, and another one in its place is
-  `409 proposal_replaced`.
+  `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and
+  the tag: what a retry reads after an answer that was lost, or a second approver.
 - Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
   used to take the newer head. Proposing a branch that is already proposed replaces its open
   proposal, and `409 already_proposed` is gone.

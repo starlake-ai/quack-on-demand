@@ -4681,19 +4681,21 @@ paths:
         Admins only (403 admin_required). Human-gated: the approver must differ from
         the proposer (403 self_merge_forbidden) and no MCP tool exposes it. proposalId
         names the open proposal the approver read: another one in its place is 409
-        proposal_replaced, and nothing changes. 409 proposal_unsettled: another proposal
-        of this branch landed; discard the branch. holdWriters refuses other commits
-        on the merged tables until the merge ends; DuckLake retries them for about
-        9 seconds. 409 merge_conflict names the tables in conflict and closes the
-        proposal; 409 conflicts_changed, proposal_stale and history_gap close it too;
-        409 concurrent_write on an expectedMainSnapshot mismatch or when main kept
-        moving keeps it open (merge again, or with holdWriters); 422 merge_unsupported
-        for schema changes, views and macros; 422 nothing_to_merge; 502 merge_failed
-        closes it when the node failed, and keeps it open after a timeout or when
-        the fence could not be armed: merge again. The reply''s changes carries no
-        row counts (inserted, deleted and updated read 0) and, when a merge settled,
-        reads main after the landing; merge.summary and merge.rowConflicts hold the
-        numbers, for a superuser. A tenant admin gets those flagged countsUnavailable.'
+        proposal_replaced, and nothing changes. 409 already_merged when that proposal
+        has merged, naming the main snapshot and the tag: what a retry reads when
+        the first run landed, and what a second approver reads; nothing changes. 409
+        proposal_unsettled: another proposal of this branch landed; discard the branch.
+        holdWriters refuses other commits on the merged tables until the merge ends;
+        DuckLake retries them for about 9 seconds. 409 merge_conflict names the tables
+        in conflict and closes the proposal; 409 conflicts_changed, proposal_stale
+        and history_gap close it too; 409 concurrent_write on an expectedMainSnapshot
+        mismatch or when main kept moving keeps it open (merge again, or with holdWriters);
+        422 merge_unsupported for schema changes, views and macros; 422 nothing_to_merge;
+        502 merge_failed closes it when the node failed, and keeps it open after a
+        timeout or when the fence could not be armed: merge again. The reply''s changes
+        carries no row counts (inserted, deleted and updated read 0) and, when a merge
+        settled, reads main after the landing; merge.summary and merge.rowConflicts
+        hold the numbers, for a superuser. A tenant admin gets those flagged countsUnavailable.'
       operationId: postApiBranchMerge
       parameters:
       - name: X-API-Key

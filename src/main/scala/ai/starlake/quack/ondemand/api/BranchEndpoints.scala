@@ -195,8 +195,10 @@ object BranchEndpoints:
           "Human-gated: the approver must " +
           "differ from the proposer (403 self_merge_forbidden) and no MCP tool exposes it. " +
           "proposalId names the open proposal the approver read: another one in its place is 409 " +
-          "proposal_replaced, and nothing changes. 409 proposal_unsettled: another proposal of this " +
-          "branch landed; discard the branch. " +
+          "proposal_replaced, and nothing changes. 409 already_merged when that proposal has " +
+          "merged, naming the main snapshot and the tag: what a retry reads when the first run " +
+          "landed, and what a second approver reads; nothing changes. 409 proposal_unsettled: " +
+          "another proposal of this branch landed; discard the branch. " +
           "holdWriters refuses other commits on the merged tables until the merge ends; " +
           "DuckLake retries them for about 9 seconds. 409 merge_conflict names the tables in " +
           "conflict and closes the proposal; 409 conflicts_changed, proposal_stale and " +

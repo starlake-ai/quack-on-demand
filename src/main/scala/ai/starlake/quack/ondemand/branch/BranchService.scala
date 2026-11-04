@@ -910,6 +910,7 @@ final class BranchService(
                 "credential without the branch-only restriction"
             )
           )
+      _     <- alreadyMerged(parent, name, proposalId).toLeft(())
       b     <- liveBranch(parent, name)
       merge <- b.status match
         case BranchStatus.Proposed =>
@@ -967,6 +968,28 @@ final class BranchService(
               runMerge(tenant, current, b, merge, expectedMainSnapshot, holdWriters, actor, apiKey)
           }
         )
+
+  /** The refusal for a proposal of this parent's branch `name` that has merged. What a retry reads
+    * after an answer that was lost, as the runbook says to merge again, and what a second approver
+    * reads: the branch is gone by then, or the name is a new branch's, so nothing further on could
+    * say what became of their merge. Only `Merged`, and only a row of this branch: any other keeps
+    * its answer. The parent was found in this tenant, so its id holds the tenant too.
+    */
+  private def alreadyMerged(
+      parent: TenantDb,
+      name: String,
+      proposalId: String
+  ): Option[BranchFailure] =
+    for
+      m <- store.getBranchMerge(proposalId).filter(_.status == BranchMergeStatus.Merged)
+      _ <- store.getBranch(m.branchId).filter(b => b.parentDbId == parent.id && b.name == name)
+    yield
+      val snapshot = m.mainSnapshotAfter.fold("unknown")(_.toString)
+      BranchFailure.conflict(
+        "already_merged",
+        s"proposal ${m.id} of branch '$name' is already merged: main snapshot $snapshot, tag " +
+          m.tagName.getOrElse("none")
+      )
 
   private def runMerge(
       tenant: String,
