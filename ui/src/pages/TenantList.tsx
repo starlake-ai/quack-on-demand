@@ -25,11 +25,10 @@ export default function TenantList() {
   const [createErr, setCreateErr]     = useState<string | null>(null);
 
   // Lowercase identifier slug suggested for the tenant id from the display
-  // name: lowercase, non [a-z0-9_] runs collapsed to nothing, must start with
-  // a letter. e.g. "Acme Corp" -> "acme_corp".
+  // name: lowercase, anything but [a-z0-9] dropped, must start with a letter.
+  // e.g. "Acme Corp" -> "acmecorp".
   function slugify(s: string): string {
-    // Must start with a letter, then letters/digits/underscore.
-    return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+$/g, '').replace(/^[^a-z]+/, '');
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, '').replace(/^[^a-z]+/, '');
   }
   function onDisplayNameChange(v: string) {
     setNewDisplayName(v);
@@ -138,8 +137,8 @@ export default function TenantList() {
               value={newId}
               onChange={ev => { setIdEdited(true); setNewId(ev.target.value); }}
               placeholder="acme"
-              pattern="[a-zA-Z][a-zA-Z0-9_]*"
-              title="lowercase identifier: start with a letter, then letters/digits/underscore only"
+              pattern="[a-zA-Z][a-zA-Z0-9]*"
+              title="start with a letter, then letters and digits only"
               required
             />
             <span className="subtle">The one key used in URLs and APIs. Suggested from the display name; edit if needed.</span>

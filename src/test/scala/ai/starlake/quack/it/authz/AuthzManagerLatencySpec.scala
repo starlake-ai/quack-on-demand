@@ -39,7 +39,7 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
   private val Rounds = Latency.rounds(sys.env.get("QOD_AUTHZ_LATENCY_ROUNDS"))
   private val Warmup = math.min(200, Rounds)
   private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Tenant = s"lat_authz_latency_$run"
+  private val Tenant = s"latauthzx$run"
   private val Pw     = "lat-e2e-pw-1"
 
   private var stack: AuthzStack = null
@@ -61,7 +61,7 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
         23240,
         23249,
         filesRoot = Files.createDirectories(root.resolve("files")),
-        stackPrefixes = List("lat_authz_latency_")
+        stackPrefixes = List("latauthzx")
       )
       stack.boot()
       def obj(f: (String, Json)*) = Json.obj(f*).noSpaces

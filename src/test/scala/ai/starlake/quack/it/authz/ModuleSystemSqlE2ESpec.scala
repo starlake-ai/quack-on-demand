@@ -36,7 +36,7 @@ class ModuleSystemSqlE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
   private val ModuleName = "e2e-system-sql"
   private val run        = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Tenant     = s"msql_e2e_$run"
+  private val Tenant     = s"msqle2ex$run"
   private val ErinPw     = "erin-msql-pw-1"
 
   @volatile private var ctx: ManagerContext = null
@@ -75,7 +75,7 @@ class ModuleSystemSqlE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         23270,
         23274,
         filesRoot = root,
-        stackPrefixes = List("msql_e2e_"),
+        stackPrefixes = List("msqle2ex"),
         modules = List(module)
       )
       stack.boot()

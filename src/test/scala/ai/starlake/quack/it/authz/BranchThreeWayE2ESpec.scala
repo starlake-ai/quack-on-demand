@@ -34,7 +34,7 @@ class BranchThreeWayE2ESpec
     with BeforeAndAfterEach:
 
   private val run  = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Acme = s"acme_br3_$run"
+  private val Acme = s"acmebr3x$run"
 
   // Never written whole in a statement: a superuser's statement text is journaled, so any occurrence
   // in stored rows can only come from the merge.
@@ -54,7 +54,7 @@ class BranchThreeWayE2ESpec
   private var stack: AuthzStack = null
   private var tessToken: String = ""
 
-  private val Other   = s"other_br3_$run"
+  private val Other   = s"otherbr3x$run"
   private val BobPw   = "Bob-Pw-3391"
   private val CarolPw = "Carol-Pw-3391"
   private val ErinPw  = "Erin-Pw-3391"
@@ -80,7 +80,7 @@ class BranchThreeWayE2ESpec
         23280,
         23289,
         filesRoot = root,
-        stackPrefixes = List("acme_br3_"),
+        stackPrefixes = List("acmebr3x"),
         // The default, 60 s, is a third of what the maintenance case waits for its run.
         maintenanceTickSec = Some(2)
       )

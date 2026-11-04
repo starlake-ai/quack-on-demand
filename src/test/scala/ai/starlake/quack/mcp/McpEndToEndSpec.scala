@@ -256,9 +256,8 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     def field(json: Json, name: String): String =
       json.hcursor.get[String](name).toOption.getOrElse(fail(s"missing '$name' in $json"))
 
-    // Names.normalizeOrError forbids the hyphen a display slug like "e2e-corp" would use;
-    // underscore is the closest allowed stand-in.
-    val tenant = "e2e_corp"
+    // A tenant name holds letters and digits only (Names.normalizeTenantId).
+    val tenant = "e2ecorp"
 
     call("create_tenant", "id" -> Json.fromString(tenant))
 

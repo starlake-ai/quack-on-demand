@@ -27,7 +27,7 @@ import scala.util.Try
 class CatalogStampedE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Acme   = s"acme_cstamp_$run"
+  private val Acme   = s"acmecstampx$run"
   private val TessPw = "Tess-Pw-3392"
   private val Pool   = "lake"
 
@@ -60,7 +60,7 @@ class CatalogStampedE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
         23310,
         23314,
         filesRoot = root,
-        stackPrefixes = List("acme_cstamp_"),
+        stackPrefixes = List("acmecstampx"),
         stampWrites = false
       )
       stack.boot()

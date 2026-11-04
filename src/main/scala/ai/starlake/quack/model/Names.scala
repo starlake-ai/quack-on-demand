@@ -31,6 +31,24 @@ object Names:
   def normalizeOrError(raw: String, label: String = "name"): Either[String, String] =
     if !isValid(raw) then Left(reject(raw, label)) else Right(raw.toLowerCase(Locale.ROOT))
 
+  private val TenantIdPattern = "^[a-zA-Z][a-zA-Z0-9]*$".r
+
+  /** A new tenant's id, lowercased: letters and digits only, starting with a letter. A database is
+    * named `<tenant>_<suffix>` ([[normalizeTenantDbName]]), so with no `_` in a tenant's name the
+    * first `_` of a database name marks where the tenant's ends. Only creating a tenant applies
+    * this: a name a manifest import brings, or one stored before the rule, stays as it is.
+    */
+  def normalizeTenantId(raw: String): Either[String, String] =
+    if raw != null && raw.length <= MaxLength && TenantIdPattern.matches(raw) then
+      Right(raw.toLowerCase(Locale.ROOT))
+    else
+      Left(
+        s"invalid tenant id '${if raw == null then "<null>" else raw}': a tenant name holds " +
+          s"letters and digits only, starts with a letter and is at most $MaxLength characters. " +
+          "Its databases are named <tenant>_<database>, and this keeps two tenants from ever " +
+          "composing the same database name"
+      )
+
   /** Compose a tenant-db name from a tenant + a user-supplied suffix. The output is the actual
     * Postgres database name on the shared server, so we always insert a `_` between tenant and
     * suffix.

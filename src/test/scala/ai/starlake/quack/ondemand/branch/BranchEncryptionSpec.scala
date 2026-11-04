@@ -91,10 +91,12 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
     * fix against that specific collision instead of matching by name only.
     */
   it should "resolve the parent's encryption by tenant, not by a name that collides across tenants" in {
-    val sup =
-      new PoolSupervisor(new StubQuackBackend, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    val store = new InMemoryControlPlaneStore()
+    // A tenant stored before a new tenant's name lost its underscores keeps its name.
+    store.upsertTenant(Tenant("a_b"))
+    val sup = new PoolSupervisor(new StubQuackBackend, new NodeLoadTracker, store)
+    sup.restore()
     sup.createTenant(Tenant("a")).unsafeRunSync()
-    sup.createTenant(Tenant("a_b")).unsafeRunSync()
     // tenant "a", tenant-db "b_c" -> composed name "a_b_c", NOT encrypted.
     sup
       .createTenantDb(

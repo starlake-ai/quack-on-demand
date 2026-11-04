@@ -27,7 +27,7 @@ def list_(ctx: typer.Context):
 )
 def create(
     ctx: typer.Context,
-    tenant_id: str = typer.Argument(..., metavar="ID", help="Lowercase slug, e.g. acme."),
+    tenant_id: str = typer.Argument(..., metavar="ID", help="Letters and digits only, starting with a letter, e.g. acme."),
     display_name: str = typer.Option("", "--display-name"),
     auth_provider: str = typer.Option("db", "--auth-provider", help="db|keycloak|google|azure|aws"),
     auth_config: list[str] = typer.Option(None, "--auth-config", help="KEY=VALUE, repeatable."),

@@ -30,7 +30,7 @@ import scala.util.Try
 class OpaDryRunLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private val run           = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Tenant        = s"opadry_$run"
+  private val Tenant        = s"opadryx$run"
   private val Pw            = "ana-dry-pw-1"
   private val StatementPath = "/v1/data/qod/authz/statement"
   private val ConnectPath   = "/v1/data/qod/authz/connect"
@@ -59,7 +59,7 @@ class OpaDryRunLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         23260,
         23264,
         filesRoot = Files.createDirectories(root.resolve("files")),
-        stackPrefixes = List("opadry_")
+        stackPrefixes = List("opadryx")
       )
       stack.boot()
       stack.post(

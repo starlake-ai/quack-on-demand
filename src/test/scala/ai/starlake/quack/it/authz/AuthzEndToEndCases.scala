@@ -66,8 +66,8 @@ abstract class AuthzEndToEndCases(
     with BeforeAndAfterAll:
 
   private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Acme   = s"acme_${stackName}_$run"
-  private val Globex = s"globex_${stackName}_$run"
+  private val Acme   = s"acme${stackName.replace("_", "")}x$run"
+  private val Globex = s"globex${stackName.replace("_", "")}x$run"
   private val Bucket = s"qod-authz-$run"
   private val Alias  = s"e2e_alias_$run"
 
@@ -169,7 +169,11 @@ abstract class AuthzEndToEndCases(
         userS3Endpoints = s"$Rustfs,${fake.endpoint}",
         // Tenant catalogs and the Postgres source database of an earlier run of this stack.
         stackPrefixes =
-          List(s"acme_${stackName}_", s"globex_${stackName}_", s"qod_pg_${stackName}_")
+          List(
+            s"acme${stackName.replace("_", "")}x",
+            s"globex${stackName.replace("_", "")}x",
+            s"qod_pg_${stackName}_"
+          )
       )
       stack.boot()
       provisionFiles()

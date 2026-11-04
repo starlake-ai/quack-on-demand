@@ -127,6 +127,16 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
     listed.toOption.get.hcursor.downField("tenants").values.get.size shouldBe 1
   }
 
+  it should "refuse a name holding an underscore, as a superuser too (invalid_id)" in {
+    val f   = new Fixture
+    val out =
+      f.call("create_tenant", McpSuperuserPat.principal, "id" -> Json.fromString("acme_corp"))
+    out.isLeft shouldBe true
+    out.left.toOption.get should include("invalid_id")
+    val listed = f.call("list_tenants", McpSuperuserPat.principal)
+    listed.toOption.get.hcursor.downField("tenants").values.get.size shouldBe 0
+  }
+
   it should "refuse a tenant-scoped admin PAT (superuser_required)" in {
     val f   = new Fixture
     val out = f.call("create_tenant", adminPat(), "id" -> Json.fromString("evil"))

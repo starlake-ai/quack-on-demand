@@ -91,11 +91,11 @@ final class McpIdentityTools(
 
   private val createTenantTool = McpToolDef(
     name = "create_tenant",
-    description = "Create a tenant. Superuser credentials only. `id` is the lowercase slug key " +
-      "used in URLs and scope checks (e.g. 'acme').",
+    description = "Create a tenant. Superuser credentials only. `id` is the key used in URLs and " +
+      "scope checks: letters and digits only, starting with a letter (e.g. 'acme').",
     inputSchema = objectSchema(
       required = List("id"),
-      props = "id" -> strProp("Tenant slug id (lowercase identifier starting with a letter)."),
+      props = "id" -> strProp("Tenant id: letters and digits only, starting with a letter."),
       "display_name"  -> strProp("Human label; defaults to the id."),
       "auth_provider" -> strProp("One of db|keycloak|google|azure|aws (default db)."),
       "auth_config"   -> objProp("Provider config object; e.g. {\"issuer\": \"...\"}.")

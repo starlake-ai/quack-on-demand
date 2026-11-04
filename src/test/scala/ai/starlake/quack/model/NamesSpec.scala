@@ -65,6 +65,32 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     val long = "a" * (Names.MaxLength - 4) // 4 = len("acme_")-1: composing pushes past 63
     Names.normalizeTenantDbName("acme", long).isLeft shouldBe true
 
+  "Names.normalizeTenantId" should "lowercase a name of letters and digits" in:
+    Names.normalizeTenantId("Acme")   shouldBe Right("acme")
+    Names.normalizeTenantId("acme2")  shouldBe Right("acme2")
+    Names.normalizeTenantId("A1b2C3") shouldBe Right("a1b2c3")
+
+  it should "refuse an underscore anywhere, saying what a tenant name holds and why" in:
+    List("acme_corp", "_acme", "acme_", "a__b").foreach { id =>
+      val out = Names.normalizeTenantId(id)
+      withClue(id)(out.isLeft shouldBe true)
+      out.swap.toOption.get should include("letters and digits only")
+      out.swap.toOption.get should include("<tenant>_<database>")
+    }
+
+  it should "refuse a name not starting with a letter, or holding anything else" in:
+    List("1acme", "-acme", "acme-corp", "acme.eu", "acme corp", "", null).foreach { id =>
+      withClue(String.valueOf(id))(Names.normalizeTenantId(id).isLeft shouldBe true)
+    }
+
+  it should "refuse a name past MaxLength and accept one at it" in:
+    Names.normalizeTenantId("a" * Names.MaxLength).isRight      shouldBe true
+    Names.normalizeTenantId("a" * (Names.MaxLength + 1)).isLeft shouldBe true
+
+  it should "keep a letter outside ASCII out" in:
+    // The Kelvin sign lowercases to an ASCII k; a tenant id is a slug, composed as text.
+    Names.normalizeTenantId("Kelvin").isLeft shouldBe true
+
   "Names.newSurrogateId" should "produce a prefix + 32 lowercase hex chars" in:
     val id = Names.newSurrogateId("t")
     id should fullyMatch regex "^t-[0-9a-f]{32}$"

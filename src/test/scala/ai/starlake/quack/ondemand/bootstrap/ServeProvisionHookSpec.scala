@@ -184,6 +184,19 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     f.telemetry.events shouldBe empty
   }
 
+  it should "refuse a new tenant whose name holds an underscore, at the tenant step" in {
+    val f = new Fixture
+    f.write(tenant = TenantRequest(id = "acme_corp", displayName = "Acme"))
+    f.run() shouldBe Right(())
+    f.outcomeJson.hcursor.get[String]("status") shouldBe Right("failed")
+    f.outcomeJson.hcursor.get[String]("step") shouldBe Right("tenant")
+    f.outcomeJson.hcursor.get[String]("reason").toOption.get should include(
+      "letters and digits only"
+    )
+    f.store.snapshot().tenants shouldBe empty
+    f.store.snapshot().tenantDbs shouldBe empty
+  }
+
   it should "stop at a refused step and record it in the outcome file and the log, never failing" in {
     val f       = new Fixture
     val refused = Database.copy(

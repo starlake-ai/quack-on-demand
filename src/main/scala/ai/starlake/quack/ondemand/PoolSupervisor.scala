@@ -2078,11 +2078,10 @@ final class PoolSupervisor(
   def createTenant(t: Tenant): IO[Either[SupervisorError, Tenant]] = IO.blocking {
     withCacheRecovery("createTenant") {
       // The tenant id is a normalized lowercase slug; displayName is a free-form label (falls back
-      // to the id when blank).
-      Names.normalizeOrError(t.id, "tenant id") match
+      // to the id when blank). Every creating path but a manifest import reaches this function, a
+      // module's direct call included, so the rule on a new tenant's name lives here.
+      Names.normalizeTenantId(t.id) match
         case Left(err) => Left(SupervisorError.InvalidName(err))
-        case Right(id) if !id.headOption.exists(_.isLetter) =>
-          Left(SupervisorError.InvalidName(s"tenant id '$id' must start with a letter"))
         case Right(id) =>
           if tenants.values.exists(_.id == id) then
             Left(SupervisorError.AlreadyExists(s"tenant already exists: $id"))

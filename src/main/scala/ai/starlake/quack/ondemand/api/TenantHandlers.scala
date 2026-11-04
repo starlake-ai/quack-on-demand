@@ -83,22 +83,6 @@ final class TenantHandlers(
               (StatusCode.BadRequest, ErrorResponse("invalid_id", "tenant id must be non-empty"))
             )
           )
-        else if !ai.starlake.quack.model.Names.isValid(req.id) || !req.id.headOption.exists(
-            _.isLetter
-          )
-        then
-          IO.pure(
-            Left(
-              (
-                StatusCode.BadRequest,
-                ErrorResponse(
-                  "invalid_id",
-                  "tenant id must be a slug: 1..63 chars, start with a letter, " +
-                    "and contain only letters, digits and underscore"
-                )
-              )
-            )
-          )
         else if req.displayName.trim.isEmpty then
           IO.pure(
             Left(
@@ -146,6 +130,9 @@ final class TenantHandlers(
                   detail = Map("displayName" -> t.displayName, "authProvider" -> t.authProvider)
                 )
                 Right(toResponse(t))
+              // The supervisor owns the rule on a tenant's name; this only says it in HTTP.
+              case Left(err: SupervisorError.InvalidName) =>
+                Left((StatusCode.BadRequest, ErrorResponse("invalid_id", err.message)))
               case Left(err) => Left((StatusCode.Conflict, ErrorResponse("exists", err.message)))
             }
 
