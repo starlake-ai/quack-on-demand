@@ -39,15 +39,17 @@ count. To keep counts from a user, refuse on the table.
   propose with `409 proposal_unsettled`: merge again, which settles it. Maintenance expires no
   snapshot at or after the oldest live branch's fork (a merge reads main's changes over consecutive
   snapshots), so with no TTL, expiry above that fork stops until the branch is merged or discarded.
-  New settings `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (100000000).
+  New settings `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (50000000).
   The API changes are under Breaking.
-- **One UPDATE per table up to 100M rows.** `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` defaults to 100000000,
-  up from the 20000000 this work first used, since rowid ranges cost far more: at 1B rows, 100M changes
-  per side and a 16GB limit, one UPDATE of 110M rows read 2GB in 4,253 reads and took 91 s of Apply,
-  where 64 ranges read 52GB in 116,756 reads and took 156 s. About twice that ran out of memory in Apply;
-  a smaller memory limit fails in Decide first, and an out-of-memory failure in Apply retries with
-  ranges. That 110M is above the default, so raise the setting to keep such an update whole, or set it
-  to 20000000 to go back.
+- **One UPDATE per table up to 50M rows.** `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` defaults to 50000000, up
+  from the 20000000 this work first used, since rowid ranges cost far more: at 1B rows, 100M changes per
+  side and a 16GB limit, one UPDATE of 110M rows read 2GB in 4,253 reads and took 91 s of Apply, where 64
+  ranges read 52GB in 116,756 reads and took 156 s. It stops at 50M since whether one UPDATE fits does not
+  follow its size: at 1B rows, 8 threads and 16GB it passed at 44.0M rows (33.5 s of Apply, 9.3GiB spilled)
+  and 68.8M (50.6 s, 22GiB), ran out of memory in Apply at 91.7M, passed at 110M (90.7 s, 45GiB) and ran
+  out of memory at about 220M. An out-of-memory failure in Apply retries with ranges: on a real node at
+  91.7M that took 299 s against about 185 s straight to ranges, read back right and left nothing behind.
+  So a higher value is a bet on that retry; set it to 20000000 to go back.
 - **Any principal who may connect may branch.** A plain user, or a `--drop-admin` token, may create,
   list, read, diff, propose and discard branches over REST and MCP, in the tenant they belong to, when
   they may connect to one of the parent's pools (else `403 no_pool_access`; another tenant is `403

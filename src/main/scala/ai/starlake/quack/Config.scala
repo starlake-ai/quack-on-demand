@@ -1275,9 +1275,11 @@ final case class BranchingConfig(
       description =
         "Rows one UPDATE may carry per table in a merge. Above it, or after an out-of-memory " +
           "failure, the update splits into rowid ranges inside the same transaction, which read " +
-          "far more data: 26 times the bytes at 1B rows and 110M rows updated."
+          "far more data: 26 times the bytes at 1B rows and 110M rows updated. Raising it is a " +
+          "bet: whether one UPDATE fits does not follow its size (at 16GB it passed at 69M and " +
+          "110M rows and ran out of memory at 92M), and a failure costs a retry with ranges."
     )
-    mergeUpdateChunkRows: Long = 100000000L
+    mergeUpdateChunkRows: Long = 50000000L
 ):
   require(defaultTtlHours >= 0, "branching: defaultTtlHours must be >= 0")
   require(maxPerDatabase >= 1, "branching: maxPerDatabase must be >= 1")

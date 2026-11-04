@@ -2190,11 +2190,13 @@ smallest pool's, or restore the text after the merge (that restarts them again).
 At 1B rows and 100M changes per side, 16GB is the lowest limit that passed. Below it a propose or a merge
 is refused with "the merge node needs more memory", unpredictably (a merge can fail where its propose
 passed, and 12GB can fail where 8GB passed), so leave a margin rather than search for the floor.
-An update of up to `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` rows (100M) goes as one UPDATE, a larger one as
+An update of up to `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` rows (50M) goes as one UPDATE, a larger one as
 rowid ranges, which cost far more on object storage: at that size and 16GB one UPDATE of 110M rows read 2GB
 in 4,253 reads where 64 ranges read 52GB in 116,756, took 91 s of Apply against 156 s, and spilled 45GB
-against 33GB. That 110M is above the default, so raise the setting to keep such an update whole. About
-twice as many rows ran out of memory in one UPDATE, and a merge that does retries with ranges.
+against 33GB. But whether one UPDATE fits does not follow its size: at 1B rows and 16GB it passed at 44M and
+69M rows, ran out of memory at 92M, passed at 110M and ran out of memory at about 220M. A failure costs a
+retry with ranges, which the merge makes by itself: at 92M it took 299 s against about 185 s straight to
+ranges. So raising the setting is a bet on that retry.
 Compact a table in very many small files before creating the branch, because maintenance skips
 compaction while the database has a live branch: on object storage those reads and writes are the cost.
 
@@ -2207,7 +2209,7 @@ or discarded. Knobs: `QOD_BRANCH_ENABLED`, `QOD_BRANCH_DEFAULT_TTL_HOURS` (168),
 per call to the merge node, and a stage makes several), `QOD_BRANCH_NODE_READY_TIMEOUT_SEC` (120, how
 long to wait for the merge node to accept connections: the `merge_failed` text "did not accept
 connections within 120s" is this one), `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and
-`QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (100000000, rows one UPDATE may carry per table: above that, or after
+`QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (50000000, rows one UPDATE may carry per table: above that, or after
 an out-of-memory failure, the update splits into rowid ranges inside the same transaction).
 `qod branch create --from-snapshot` is reserved (forks at head only).
 

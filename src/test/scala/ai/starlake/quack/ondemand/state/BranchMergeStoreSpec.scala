@@ -122,7 +122,7 @@ class BranchMergeStoreSpec extends AnyFlatSpec with Matchers:
   "BranchingConfig" should "default the merge settings and refuse nonsense" in {
     val cfg = BranchingConfig()
     cfg.mergeMaxAttempts shouldBe 5
-    cfg.mergeUpdateChunkRows shouldBe 100000000L
+    cfg.mergeUpdateChunkRows shouldBe 50000000L
     an[IllegalArgumentException] should be thrownBy BranchingConfig(mergeMaxAttempts = 0)
     an[IllegalArgumentException] should be thrownBy BranchingConfig(mergeUpdateChunkRows = 0L)
   }
@@ -134,6 +134,6 @@ class BranchMergeStoreSpec extends AnyFlatSpec with Matchers:
       .resolve(ConfigResolveOptions.noSystem())
       .getConfig("quack-on-demand.branching")
     shipped.getInt("mergeMaxAttempts") shouldBe BranchingConfig().mergeMaxAttempts
-    shipped.getLong("mergeUpdateChunkRows") shouldBe 100000000L
+    shipped.getLong("mergeUpdateChunkRows") shouldBe 50000000L
     shipped.getLong("mergeUpdateChunkRows") shouldBe BranchingConfig().mergeUpdateChunkRows
   }
