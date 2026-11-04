@@ -1452,8 +1452,10 @@ final case class FlightConfig(
     @field @ConfigField(
       envVar = "PROXY_FLIGHT_THREADS",
       description =
-        "Threads of the FlightSQL edge's fixed executor, at least 16. A call waits for a free one. " +
-          "A quarter of them is the most DoPuts that may wait for their data at once."
+        "Threads of the FlightSQL edge's fixed executor, at least 16. A call waits for a free one; " +
+          "while more tasks wait than there are threads, or than fit a twentieth of the heap, a " +
+          "new connection is closed at once. A quarter of them is the most DoPuts that may wait " +
+          "for their data at once."
     )
     flightThreads: Int = 512,
     @field @ConfigField(

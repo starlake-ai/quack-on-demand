@@ -34,10 +34,11 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
   *     client that never ends its streams only blocks itself;
   *   - creates at most [[ConnectionProbation.MaxTotalStreams]] streams in all, whatever became of
   *     them, so a client that resets its own to free places gets no more than that;
-  *   - is read for at most `readBudget` bytes, counted as they leave the socket, ahead of TLS. What
-  *     one connection can hold grows with bytes read, so this bounds it by whatever route, named
-  *     here or not. What the read under way already holds still gets decoded, so the bound has the
-  *     slack of one read buffer, at most 64 KiB (Netty's adaptive allocator);
+  *   - is read for at most `readBudget` bytes, counted as they leave the socket, ahead of TLS.
+  *     Beyond its streams, which the two rules above cap, what one connection can hold grows with
+  *     bytes read, so this bounds it by whatever route, named here or not. What the read under way
+  *     already holds still gets decoded, so the bound has the slack of one read buffer, at most 64
+  *     KiB (Netty's adaptive allocator);
   *   - lasts at most `timeoutMs`, whatever its streams;
   *   - is one of at most `maxConnections`, and one past that is closed at once, before any TLS
   *     handshake.
