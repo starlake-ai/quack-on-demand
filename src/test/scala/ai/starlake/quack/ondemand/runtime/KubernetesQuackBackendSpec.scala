@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
 import ch.qos.logback.classic.Level
@@ -1141,3 +1142,55 @@ class KubernetesQuackBackendSpec
     }
     backend.discoverExisting().unsafeRunSync().map(n => (n.nodeId, n.poolKey)).toSet shouldBe
       keys.zipWithIndex.map((key, i) => (s"disc-n$i", key)).toSet
+
+  "a long node id" should "name all a node reaches as the API accepts, and read back" in:
+    // A Service name and a label value hold 63 characters, a Secret's name 253. The mock checks
+    // neither, so this reads what was written against the rules.
+    val serviceName = "[a-z]([-a-z0-9]*[a-z0-9])?"
+    val secretName  = "[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
+    val tenant      = "t" * 61
+    val nodes       = List(
+      // The longest names there are, and the branch that used to answer 502.
+      (PoolKey(tenant, s"${tenant}_d", "p" * 63), Int.MaxValue),
+      (PoolKey("wayne_corp", "wayne_corp_sales_2026__br_ab12cd34", "__br_ab12cd34"), 1)
+    )
+    val backend = fedBackend
+    val started = nodes.map { (key, index) =>
+      val id = PoolSupervisor.nodeId(key, index)
+      backend.start(nodeOf(key, id).copy(objectStoreSql = "CREATE SECRET s")).unsafeRunSync()
+      (id, key)
+    }
+    started.foreach { (id, key) =>
+      withClue(id) {
+        val service = server.getClient.services.inNamespace("default").withName(id).get()
+        service.getMetadata.getName should fullyMatch regex serviceName
+        service.getMetadata.getName.length should be <= 63
+        val labels = podLabelsOf(id)
+        labels("quack-node-id") shouldBe id
+        service.getSpec.getSelector.get("quack-node-id") shouldBe id
+        labels.values.foreach { v =>
+          LabelRule.matches(v) shouldBe true
+          v.length should be <= 63
+        }
+        backend.liveNodeIds(key).unsafeRunSync() shouldBe Some(Set(id))
+      }
+    }
+    val secrets = server.getClient.secrets
+      .inNamespace("default")
+      .list()
+      .getItems
+      .asScala
+      .toList
+      .map(_.getMetadata.getName)
+    // Per node a token and an object-store Secret, per pool a federation and a node-env one.
+    secrets.size shouldBe 4 * nodes.size
+    secrets.foreach { name =>
+      withClue(name) {
+        name should fullyMatch regex secretName
+        name.length should be <= 253
+      }
+    }
+    // A restart finds the same nodes, under the same keys, with their tokens.
+    val reborn = fedBackend.discoverExisting().unsafeRunSync()
+    reborn.map(n => (n.nodeId, n.poolKey)).toSet shouldBe started.toSet
+    reborn.foreach(n => withClue(n.nodeId)(n.token should not be empty))

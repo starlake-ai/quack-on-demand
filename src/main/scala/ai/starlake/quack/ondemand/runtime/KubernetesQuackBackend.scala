@@ -729,9 +729,10 @@ final class KubernetesQuackBackend(
 
   /** A per-pool Secret's name. Hyphenizes the underscore on every segment (tenant / tenantDb /
     * pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does, so the result is
-    * RFC-1123 compatible. Slugs never contain '-', so '_' -> '-' is collision-free. A name must
-    * also end in an alphanumeric, and a pool `x_` reads `x-`: it ends in `0.qod`, whose dot no slug
-    * holds, so it is not the name of a pool `x_0`.
+    * RFC-1123 compatible. Two keys can read alike through that, (`a`, `a_b`, `c_d`) and (`a`,
+    * `a_b_c`, `d`), and then share these Secrets: a known defect, since a running pod reads its
+    * Secret by this name. A name must also end in an alphanumeric, and a pool `x_` reads `x-`: it
+    * ends in `0.qod`, whose dot no slug holds, so it is not the name of a pool `x_0`.
     */
   private def perPoolSecretName(prefix: String, key: PoolKey): String =
     val safeTenant = key.tenant.replace('_', '-')

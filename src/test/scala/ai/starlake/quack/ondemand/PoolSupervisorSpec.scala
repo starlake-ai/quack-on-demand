@@ -1,8 +1,9 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{Names, NodePlacement, NodeSpec, PoolCohort, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.branch.BranchNames
+import ai.starlake.quack.ondemand.fleet.MissingSlots
 import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
@@ -32,17 +33,138 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     PoolSupervisor.nodeId(k, 7) shouldBe "quack-acme-acme-default-sales-7"
   }
 
-  it should "take 36 characters plus the tenant's and the parent's names on a branch's node" in {
-    // The sum the skill gives for a branch create on Kubernetes, where a node id must fit a Service
-    // name and a label value: the branch's id8 is in its database and in its pool.
+  it should "take 36 characters plus the tenant's and parent's names on a branch, up to 63" in {
+    // The branch's id8 is in its database and in its pool. Past 63 the id no longer grows: a node
+    // id must fit a Service name and a label value.
     val branch = BranchNames.newId()
     val names  = List("acme" -> "acme_tpch", "wayne_corp" -> "wayne_corp_sales_2026")
     names.foreach { (tenant, parent) =>
       val key =
         PoolKey(tenant, BranchNames.tenantDbName(parent, branch), BranchNames.poolName(branch))
-      PoolSupervisor.nodeId(key, 1).length shouldBe 36 + tenant.length + parent.length
+      val whole = unbounded(key, 1)
+      whole.length shouldBe 36 + tenant.length + parent.length
+      val id = PoolSupervisor.nodeId(key, 1)
+      id.length shouldBe math.min(whole.length, 63)
+      if whole.length <= 63 then id shouldBe whole
     }
   }
+
+  it should "compose exactly these ids, whichever replica or release composes them" in {
+    // Worked out by hand, outside this JVM: 16 hex characters of the SHA-256 of
+    // `tenant/tenantDb/pool/index`, as given, before `-<index>`, all of it in 63 characters.
+    PoolSupervisor.nodeId(
+      PoolKey("wayne_corp", "wayne_corp_sales_2026__br_ab12cd34", "__br_ab12cd34"),
+      1
+    ) shouldBe "quack-wayne-corp-wayne-corp-sales-2026--br-a-f499e31b6b184a07-1"
+    PoolSupervisor.nodeId(
+      PoolKey("t" * 61, "t" * 61 + "_d", "p" * 63),
+      Int.MaxValue
+    ) shouldBe "quack-ttttttttttttttttttttttttttttt-1ba4e683c528c694-2147483647"
+  }
+
+  it should "leave an id of 63 characters byte for byte, and shorten one of 64" in {
+    val at63 = PoolKey("acme", "acme_default", "p" * 37)
+    unbounded(at63, 1).length shouldBe 63
+    PoolSupervisor.nodeId(at63, 1) shouldBe
+      "quack-acme-acme-default-ppppppppppppppppppppppppppppppppppppp-1"
+    val at64 = PoolKey("acme", "acme_default", "p" * 38)
+    unbounded(at64, 1).length shouldBe 64
+    PoolSupervisor.nodeId(at64, 1) shouldBe
+      "quack-acme-acme-default-pppppppppppppppppppp-05cbf4afedc552f2-1"
+    // One pool's ids can sit on both sides, when its index gains a digit.
+    PoolSupervisor.nodeId(at63, 9) shouldBe unbounded(at63, 9)
+    unbounded(at63, 10).length shouldBe 64
+    val tenth = PoolSupervisor.nodeId(at63, 10)
+    tenth.length shouldBe 63
+    tenth should endWith("-10")
+  }
+
+  it should "tell apart two keys that share a long prefix, or that read alike" in {
+    val shared = "p" * 100
+    val a      = PoolKey("acme", "acme_default", s"${shared}a")
+    val b      = PoolKey("acme", "acme_default", s"${shared}b")
+    // Only the hash and the index can tell these apart: the cut falls inside what they share.
+    val ids = List(
+      PoolSupervisor.nodeId(a, 1),
+      PoolSupervisor.nodeId(b, 1),
+      PoolSupervisor.nodeId(a, 2),
+      PoolSupervisor.nodeId(b, 2)
+    )
+    ids.distinct.size shouldBe 4
+    ids.map(_.dropRight("-0123456789abcdef-1".length)).distinct.size shouldBe 1
+    // `_` reads `-`, so these two keys read the same before the cut, and only the names as given
+    // tell them apart.
+    val left  = PoolKey("acme", "acme_" + "x" * 50, "y_z")
+    val right = PoolKey("acme", "acme_" + "x" * 50 + "_y", "z")
+    unbounded(left, 1) shouldBe unbounded(right, 1)
+    PoolSupervisor.nodeId(left, 1) should not be PoolSupervisor.nodeId(right, 1)
+  }
+
+  it should "fit a Service name and a label value, whatever the names and the index are" in {
+    val nodes = generatedNodes(seed = 20261104L, count = 4000)
+    // The property must have run on both sides of the limit, and on every width of an index.
+    val (short, long) = nodes.partition((k, i) => unbounded(k, i).length <= 63)
+    short.size should be > 400
+    long.size should be > 400
+    long.map(_._2.toString.length).toSet should contain allOf (1, 2, 10)
+    nodes.foreach { (key, index) =>
+      val id = PoolSupervisor.nodeId(key, index)
+      withClue(s"$key at $index gave $id: ") {
+        id.length should be <= 63
+        ServiceNameRule.matches(id) shouldBe true
+        LabelValueRule.matches(id) shouldBe true
+        // Pure: another replica, given the same names, composes the same id.
+        PoolSupervisor.nodeId(PoolKey(key.tenant, key.tenantDb, key.pool), index) shouldBe id
+        // The index stays last: read with the parser fresh slots are numbered by.
+        val running =
+          RunningNode(id, key, Role.Dual, "h", 1, "t", None, None, Instant.EPOCH, maxConcurrent = 1)
+        MissingSlots.nextIndexBase(List(running)) shouldBe index
+        val whole = unbounded(key, index)
+        if whole.length <= 63 then id shouldBe whole
+        else
+          id.length shouldBe 63
+          id should fullyMatch regex s".*-[0-9a-f]{16}-$index"
+          whole should startWith(id.dropRight(s"-0123456789abcdef-$index".length))
+      }
+    }
+    // Two different long keys, two ids, even when their names read alike.
+    val longIds = long.distinct.map((k, i) => PoolSupervisor.nodeId(k, i))
+    longIds.distinct.size shouldBe longIds.size
+  }
+
+  // What an API server answers 422 to: a Service name is an RFC 1035 label, and the id is also the
+  // value of the `quack-node-id` label.
+  private val ServiceNameRule = "[a-z]([-a-z0-9]*[a-z0-9])?".r
+  private val LabelValueRule  = "(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?".r
+
+  /** A key's id as it read before any bound, which an id of 63 or fewer must stay. */
+  private def unbounded(key: PoolKey, index: Int): String =
+    s"quack-${key.tenant}-${key.tenantDb}-${key.pool}-$index".replace('_', '-')
+
+  /** Keys as `Names` composes them, branch pools among them, with every width of an index. */
+  private def generatedNodes(seed: Long, count: Int): List[(PoolKey, Int)] =
+    val random                    = new scala.util.Random(seed)
+    def pick(chars: String): Char = chars(random.nextInt(chars.length))
+    def slug(maxLength: Int): String =
+      val bound  = if random.nextBoolean() then math.min(8, maxLength) else maxLength
+      val length = 1 + random.nextInt(bound)
+      (pick("abzAZ___") +: List.fill(length - 1)(pick("abz019AZ___"))).mkString
+    val indices = Vector(1, 2, 9, 10, 99, 100, 12345, Int.MaxValue)
+    List
+      .fill(count) {
+        val tenant = slug(30)
+        val suffix = slug(Names.MaxLength - tenant.length - 1)
+        Names.normalizeTenantDbName(tenant, suffix).toOption.map { db =>
+          val index = indices(random.nextInt(indices.size))
+          if random.nextInt(4) == 0 then
+            val branch = f"br-${random.nextInt()}%08x"
+            val key    =
+              PoolKey(tenant, BranchNames.tenantDbName(db, branch), BranchNames.poolName(branch))
+            (key, index)
+          else (PoolKey(tenant, db, slug(Names.MaxLength)), index)
+        }
+      }
+      .flatten
 
   "PoolSupervisor.replaceLastSegment" should "derive sibling paths for filesystem roots" in {
     PoolSupervisor.replaceLastSegment("./ducklake/tpch", "acme_tpch")  shouldBe "./ducklake/acme_tpch"
@@ -781,6 +903,61 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     b.specs.size shouldBe specsBefore + 1
     st.listNodes(pid).size shouldBe 2
     sup.get(key).get.nodes.size shouldBe 2
+
+  it should "respawn a node of a long-named pool under its id, placed by the index it ends in" in:
+    val (sup, b, _) = freshSupervisorWithStore()
+    b.spawnPid = None // k8s-style: liveNodeIds is the only membership signal
+    val long = PoolKey("acme", "acme_default", "p" * 63)
+    def cohort(zone: String) =
+      PoolCohort(NodePlacement(Map("zone" -> zone), Nil), RoleDistribution(0, 0, 1))
+    sup
+      .createPool(long, RoleDistribution(0, 0, 2), cohorts = List(cohort("a"), cohort("b")))
+      .unsafeRunSync()
+    val ids = sup.get(long).get.nodes.map(_.nodeId)
+    ids shouldBe List(PoolSupervisor.nodeId(long, 1), PoolSupervisor.nodeId(long, 2))
+    b.liveIds = Some(Set(ids.head)) // the second node is dead
+
+    val specsBefore = b.specs.size
+    sup.reconcile().unsafeRunSync()
+
+    val respawned = b.specs.drop(specsBefore).toList
+    respawned.map(_.nodeId) shouldBe List(ids(1))
+    respawned.map(_.placement.nodeSelector) shouldBe List(Map("zone" -> "b"))
+
+  it should "keep the longer id an earlier release stored, adopted or respawned, and number on" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None // k8s-style: liveNodeIds is the only membership signal
+    val long = PoolKey("acme", "acme_default", "p" * 63)
+    sup.createPool(long, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val pid = st.snapshot().pools.head.id
+    // The row an earlier release wrote, on a runtime where such an id ran: nothing here renames it.
+    val earlier = unbounded(long, 1)
+    earlier.length should be > 63
+    st.deleteNode(sup.get(long).get.nodes.head.nodeId)
+    st.upsertNode(
+      RunningNode(earlier, long, Role.Dual, "127.0.0.1", 21998, "tok", None, None,
+        Instant.EPOCH, maxConcurrent = 4),
+      pid
+    )
+
+    // A restart reads that row, and the pod is live.
+    sup.restore()
+    b.liveIds = Some(Set(earlier))
+    val specsBefore = b.specs.size
+    sup.reconcile().unsafeRunSync()
+    b.specs.size shouldBe specsBefore // adopted as it is, not started again
+    sup.get(long).get.nodes.map(_.nodeId) shouldBe List(earlier)
+    st.listNodes(pid).map(_.nodeId) shouldBe List(earlier)
+
+    b.liveIds = Some(Set.empty)
+    sup.reconcile().unsafeRunSync()
+    b.specs.drop(specsBefore).map(_.nodeId).toList shouldBe List(earlier)
+    st.listNodes(pid).map(_.nodeId) shouldBe List(earlier)
+
+    // A fresh slot is numbered above it, under today's rule.
+    b.liveIds = Some(Set(earlier))
+    sup.scale(long, 2, RoleDistribution(0, 0, 2), force = false).unsafeRunSync()
+    sup.get(long).get.nodes.map(_.nodeId) shouldBe List(earlier, PoolSupervisor.nodeId(long, 2))
 
   it should "fall back to the flat distribution in spawnFromDistribution when the cached " +
     "cohort plan disagrees with the authoritative target" in:

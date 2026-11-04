@@ -581,24 +581,30 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       (Status.ServiceUnavailable, DecideRoute.DecisionFailed, Some(MediaType.text.plain))
   }
 
-  it should "answer a node whose id is the longest PoolSupervisor composes" in {
-    val f       = new Fixture()
-    val tenant  = "t" * 61
-    val key     = PoolKey(tenant, s"${tenant}_d", "p" * 63)
-    val longest = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, Int.MaxValue)
-    longest.length should be > 128
-    val node          = Node.copy(nodeId = longest, poolKey = key)
-    val body          = request(f.keys.handle(node, Root), "plan", plan())
-    val (st, text, _) =
-      f.call(
-        body,
-        node = Some(longest),
-        signature = Some(sign(body, NodeHandles.nodeKey(Secret, longest)))
-      )
-    st shouldBe Status.Ok
-    verdict(text, NodeHandles.nodeKey(Secret, longest)).get[String]("decision") shouldBe Right(
-      "allow"
-    )
+  it should "answer a node with the longest id an earlier release composed, and with today's" in {
+    val tenant = "t" * 61
+    val key    = PoolKey(tenant, s"${tenant}_d", "p" * 63)
+    // A node that started under such an id keeps it (a respawn reuses the stored id), so the signed
+    // header must go on admitting it though `PoolSupervisor.nodeId` now stops at 63 characters.
+    val earlier = s"quack-$tenant-$tenant-d-${"p" * 63}-${Int.MaxValue}"
+    earlier.length shouldBe 206
+    List(earlier, ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, Int.MaxValue)).foreach {
+      longest =>
+        val f             = new Fixture()
+        val node          = Node.copy(nodeId = longest, poolKey = key)
+        val body          = request(f.keys.handle(node, Root), "plan", plan())
+        val (st, text, _) =
+          f.call(
+            body,
+            node = Some(longest),
+            signature = Some(sign(body, NodeHandles.nodeKey(Secret, longest)))
+          )
+        withClue(longest) {
+          st shouldBe Status.Ok
+          verdict(text, NodeHandles.nodeKey(Secret, longest)).get[String]("decision") shouldBe
+            Right("allow")
+        }
+    }
   }
 
   it should "refuse an unsigned call before reading its body, and a declared oversize at once" in {

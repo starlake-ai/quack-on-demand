@@ -5344,19 +5344,45 @@ object PoolSupervisor:
   def joinInitAndBlob(first: String, second: String): String =
     InitSql.join(List(first, second).map(f => Option(f).getOrElse("").trim))
 
+  /** The most characters a composed node id holds: on Kubernetes it is a Service name (an RFC 1035
+    * label) and the value of the `quack-node-id` label, 63 characters each.
+    */
+  private val NodeIdMaxChars: Int = 63
+
+  /** Hex characters of the hash in a node id that had to be cut: 64 bits, so a million such ids in
+    * one control plane collide with a probability of about 3 in 100 million.
+    */
+  private val NodeIdHashChars: Int = 16
+
   /** Compose a node id safe as a Kubernetes pod + service name. `key.tenantDb` is the composed
     * Postgres name `${tenant}_${tenantDb}` and carries an underscore, valid in Postgres but illegal
     * in pod names (RFC 1123). The Postgres name is unchanged; this only sanitizes the node-id
     * surface.
+    *
+    * An id of [[NodeIdMaxChars]] or fewer is what it has always been. A longer one keeps its start
+    * and ends `-<hash>-<index>`: the index stays last, since [[MissingSlots]] and
+    * `placementForNodeId` read it, and a `-` the cut leaves before the hash is legal inside a
+    * label. The hash covers the names as given, because `_` reads `-` here: (`a`, `a_b`, `c_d`) and
+    * (`a`, `a_b_c`, `d`) read alike, and at or under the limit they still get one id, a known
+    * defect that an id there cannot change to fix. Pure, on every runtime: each replica composes
+    * the same id. Only a fresh slot is composed: a node with a row keeps the id in it, so one an
+    * earlier release started under a longer id keeps that.
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
-    // RFC-1123 forbids '_'; slugs may contain it. Map '_' -> '-' on every component. Collision-free
-    // since a valid slug never contains '-'. Labels keep the slug, wrapped only where the label rule
-    // refuses it (`PoolLabelValue`).
+    // RFC-1123 forbids '_'; slugs may contain it. Map '_' -> '-' on every component. Labels keep the
+    // slug, wrapped only where the label rule refuses it (`PoolLabelValue`).
     val safeTenant = key.tenant.replace('_', '-')
     val safeDb     = key.tenantDb.replace('_', '-')
     val safePool   = key.pool.replace('_', '-')
-    s"quack-$safeTenant-$safeDb-$safePool-$index"
+    val whole      = s"quack-$safeTenant-$safeDb-$safePool-$index"
+    if whole.length <= NodeIdMaxChars then whole
+    else
+      val names  = s"${key.tenant}/${key.tenantDb}/${key.pool}/$index"
+      val digest = java.security.MessageDigest
+        .getInstance("SHA-256")
+        .digest(names.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      val tail = s"-${java.util.HexFormat.of().formatHex(digest).take(NodeIdHashChars)}-$index"
+      whole.take(NodeIdMaxChars - tail.length) + tail
 
   /** Replace the last segment of a dataPath with `newSegment`, to derive a per-tenant-db dataPath
     * alongside the root. URI-style paths (`<scheme>://...`) are string-handled so `Paths.get`

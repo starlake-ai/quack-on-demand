@@ -281,9 +281,13 @@ count. To keep counts from a user, refuse on the table.
   Merge, maintenance and branch nodes could not start on a real cluster (`422`), and now every proposal
   of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`:
   until now every maintenance run on Kubernetes ended `failed` with `node spawn failed`, its cause at WARN
-  only. A pool ending in `_` gets Secret names the API accepts. A node id past 63 characters is still
-  refused (`422`): a branch pool's takes 36 characters plus its tenant and parent names, and `branch
-  create` answers `502 branch_create_failed`; a merge node's stays within 35.
+  only. A pool ending in `_` gets Secret names the API accepts.
+- Kubernetes: a node id past 63 characters no longer gets a `422`. A branch pool's id takes 36 characters
+  plus its tenant's and its parent's names, so a branch of `wayne_corp` / `wayne_corp_sales_2026` answered
+  `502 branch_create_failed`, and a pool with long names never started. On every runtime such an id now
+  keeps its start and ends `-<hash>-<index>`, 63 characters in all, the hash being 16 hex characters of a
+  SHA-256 of the tenant, database, pool and index. An id of 63 or fewer is unchanged, and a node a local
+  or fleet manager started under a longer id keeps it.
 - A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight

@@ -245,18 +245,26 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
       Status.Unauthorized
   }
 
-  it should "answer a node whose id is the longest PoolSupervisor composes" in {
-    val f       = new Fixture
-    val tenant  = "t" * 61
-    val key     = PoolKey(tenant, s"${tenant}_d", "p" * 63)
-    val longest = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, Int.MaxValue)
-    longest.length should be > 128
-    val b = body(f.keys.handle(Node.copy(nodeId = longest, poolKey = key), NodePrincipal.System))
-    f.call(
-      b,
-      node = Some(longest),
-      signature = Some(sign(b, NodeHandles.nodeKey(Secret, longest)))
-    )._1 shouldBe Status.Ok
+  it should "answer a node with the longest id an earlier release composed, and with today's" in {
+    val tenant = "t" * 61
+    val key    = PoolKey(tenant, s"${tenant}_d", "p" * 63)
+    // A node that started under such an id keeps it (a respawn reuses the stored id), so the signed
+    // header must go on admitting it though `PoolSupervisor.nodeId` now stops at 63 characters.
+    val earlier = s"quack-$tenant-$tenant-d-${"p" * 63}-${Int.MaxValue}"
+    earlier.length shouldBe 206
+    List(earlier, ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, Int.MaxValue)).foreach {
+      longest =>
+        val f = new Fixture
+        val b =
+          body(f.keys.handle(Node.copy(nodeId = longest, poolKey = key), NodePrincipal.System))
+        withClue(longest) {
+          f.call(
+            b,
+            node = Some(longest),
+            signature = Some(sign(b, NodeHandles.nodeKey(Secret, longest)))
+          )._1 shouldBe Status.Ok
+        }
+    }
   }
 
   it should "refuse a malformed, oversized or expired request" in {

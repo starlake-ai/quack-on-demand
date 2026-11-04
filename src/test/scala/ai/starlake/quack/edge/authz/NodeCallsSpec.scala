@@ -153,16 +153,19 @@ class NodeCallsSpec extends AnyFlatSpec with Matchers:
     answered.get() shouldBe 1
   }
 
-  "the node-id bound" should "admit the longest id PoolSupervisor composes" in {
-    val tenant  = "t" * 61
-    val longest = PoolSupervisor.nodeId(
-      PoolKey(tenant, s"${tenant}_d", "p" * 63),
-      Int.MaxValue
-    )
+  "the node-id bound" should "admit the longest id an earlier release composed, and today's" in {
+    val tenant = "t" * 61
     // The composed tenant-db name is at most 63 characters.
     s"${tenant}_d".length shouldBe 63
-    longest.length should be <= NodeCalls.MaxNodeIdLength
-    NodeCalls.NodeIdText.matches(longest) shouldBe true
+    // A node that started under such an id keeps it (a respawn reuses the stored id), so the bound
+    // must go on admitting it though `PoolSupervisor.nodeId` now stops at 63 characters.
+    val earlier = s"quack-$tenant-$tenant-d-${"p" * 63}-${Int.MaxValue}"
+    earlier.length shouldBe 206
+    val today = PoolSupervisor.nodeId(PoolKey(tenant, s"${tenant}_d", "p" * 63), Int.MaxValue)
+    List(earlier, today).foreach { longest =>
+      longest.length should be <= NodeCalls.MaxNodeIdLength
+      NodeCalls.NodeIdText.matches(longest) shouldBe true
+    }
     NodeCalls.NodeIdText.matches("q" * NodeCalls.MaxNodeIdLength) shouldBe true
     NodeCalls.NodeIdText.matches("q" * (NodeCalls.MaxNodeIdLength + 1)) shouldBe false
   }
