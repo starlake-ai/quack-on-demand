@@ -535,21 +535,27 @@ Write-Host "Runtime:    $(Get-EnvOr 'QOD_RUNTIME_TYPE' 'local')"
 Write-Host ""
 
 # ---- Port preflight ----
-# Abort if the REST/Flight ports are held or an orphan listener sits inside the
+# Abort if the REST/Flight/verdict-listener ports are held or an orphan listener sits inside the
 # node port range (the port allocator skips a port something listens on, but a
 # stale Quack node there keeps its memory until you kill it).
+# The node verdict listener's port is QOD_INTERNAL_PORT when it is set above 0, else the REST port
+# + 1. It binds after reconcile has spawned the nodes, so a taken port would fail the boot with
+# those nodes left running.
 function Get-PortListeners([int]$Port) {
   try { return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop) }
   catch { return @() }
 }
+$internalPort = [int](Get-EnvOr 'QOD_INTERNAL_PORT' '0')
+if ($internalPort -le 0) { $internalPort = [int]$restPort + 1 }
 if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-  foreach ($p in @([int]$restPort, [int]$flightPort)) {
+  foreach ($p in @([int]$restPort, [int]$flightPort, $internalPort)) {
     # Wrap in @() at the call site: PowerShell unrolls a function's 1-element
     # array return, so without this $held would be a bare CimInstance (no .Count).
     $held = @(Get-PortListeners $p)
     if ($held.Count -gt 0) {
       $pids = ($held | Select-Object -ExpandProperty OwningProcess -Unique) -join ', '
-      Write-Error "port $p already in use (pid(s): $pids). Stop the holder (.\scripts\stop-jar.ps1) and retry."
+      $what = if ($p -eq $internalPort) { " (the node verdict listener's: QOD_INTERNAL_PORT, by default the REST port + 1)" } else { '' }
+      Write-Error "port $p$what already in use (pid(s): $pids). Stop the holder (.\scripts\stop-jar.ps1) and retry."
       exit 1
     }
   }
@@ -575,10 +581,11 @@ keep their memory and ports until killed. Kill them and retry
 }
 
 # ---- Run ----
-# The assembly jar carries Add-Opens in its manifest (JEP 261) so Arrow's unsafe
-# allocator works on Java 17+ without extra flags. The system property pins the
-# allocator - without it Arrow picks netty and crashes (NoSuchFieldError:
-# chunkSize).
+# The assembly jar carries Add-Opens in its manifest (JEP 261), so Arrow's unsafe
+# allocator, which reflects into java.nio, needs no extra flags (Java 17 and later
+# block that reflection unless it is opened). The manager itself needs JDK 21 or
+# later. The system property pins the allocator - without it Arrow picks netty and
+# crashes (NoSuchFieldError: chunkSize).
 $javaArgs = @('-Darrow.allocation.manager.type=Unsafe')
 if (-not [string]::IsNullOrEmpty($env:JAVA_OPTS)) { $javaArgs += ($env:JAVA_OPTS -split '\s+') }
 $javaArgs += @('-jar', $Jar)

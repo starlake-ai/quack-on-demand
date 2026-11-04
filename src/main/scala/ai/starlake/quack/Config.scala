@@ -481,6 +481,69 @@ object TelemetryConfig:
         else Right(())
       case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
 
+/** The REST listener's request limits (`quack-on-demand.restLimits`). */
+final case class RestLimitsConfig(
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_BODY_BYTES",
+      description = "Largest request body the REST port reads for an admitted caller, in bytes."
+    )
+    maxBodyBytes: Long = 16777216L,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_PUBLIC_BODY_BYTES",
+      description =
+        "Largest request body the REST port reads on a public route (login, password reset, SSO), " +
+          "in bytes: read before any credential is checked."
+    )
+    maxPublicBodyBytes: Long = 65536L,
+    @field @ConfigField(
+      envVar = "QOD_REST_BODY_TIMEOUT_SEC",
+      description = "Seconds a REST request has to send its whole body."
+    )
+    bodyTimeoutSec: Long = 30L,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_CONNECTIONS",
+      description =
+        "Most connections the REST port keeps open at once. Fewer when a fifth of the heap " +
+          "cannot hold that many: boot says so."
+    )
+    maxConnections: Int = 1024,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_HEADER_BYTES",
+      description =
+        "Largest request line, and largest header block, the REST port reads, in bytes each. " +
+          "Raising it lowers how many connections fit the heap."
+    )
+    maxHeaderBytes: Int = 8192,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES",
+      description =
+        "Largest request body the REST port reads on a module's public route, in bytes: read " +
+          "before any credential is checked. Raising it lowers how many connections fit the " +
+          "heap on a manager with such routes."
+    )
+    maxModulePublicBodyBytes: Long = 1048576L
+):
+  require(
+    maxBodyBytes > 0 && maxPublicBodyBytes > 0 && maxModulePublicBodyBytes > 0 &&
+      bodyTimeoutSec > 0 && maxConnections > 0,
+    "restLimits (QOD_REST_MAX_BODY_BYTES, QOD_REST_MAX_PUBLIC_BODY_BYTES, " +
+      "QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES, QOD_REST_BODY_TIMEOUT_SEC, " +
+      "QOD_REST_MAX_CONNECTIONS) must be positive"
+  )
+  require(
+    maxHeaderBytes >= 1024 && maxHeaderBytes <= 1048576,
+    s"restLimits.maxHeaderBytes (QOD_REST_MAX_HEADER_BYTES) must be between 1024 and 1048576, " +
+      s"got $maxHeaderBytes"
+  )
+  // A body is held in one array, which stops short of 2 GiB.
+  require(
+    maxBodyBytes <= Int.MaxValue - 8L && maxPublicBodyBytes <= Int.MaxValue - 8L &&
+      maxModulePublicBodyBytes <= Int.MaxValue - 8L,
+    s"QOD_REST_MAX_BODY_BYTES, QOD_REST_MAX_PUBLIC_BODY_BYTES and " +
+      s"QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
+  )
+  require(bodyTimeoutSec <= 86400L, "QOD_REST_BODY_TIMEOUT_SEC must be at most 86400")
+
 final case class ManagerConfig(
     @field @ConfigField(
       envVar = "QOD_ON_DEMAND_HOST",
@@ -587,6 +650,7 @@ final case class ManagerConfig(
     pat: PatConfig = PatConfig(),
     tenantFiles: TenantFilesConfig = TenantFilesConfig(),
     userS3: UserS3Config = UserS3Config(),
+    restLimits: RestLimitsConfig = RestLimitsConfig(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
     nodeAuthzLimits: NodeAuthzLimitsConfig = NodeAuthzLimitsConfig(),
@@ -704,18 +768,35 @@ final case class NodeAuthzConfig(
       description =
         "URL nodes reach this replica on, carried in every session handle: nodes call " +
           "it for their statements' verdicts (plain http). Default " +
-          "`http://<QOD_POD_IP>:<manager port>` when the pod IP is set, else " +
-          "`http://<QOD_ON_DEMAND_HOST>:<manager port>` when the manager listens on one specific " +
-          "address, else `http://127.0.0.1:<manager port>`. " +
+          "`http://<QOD_POD_IP>:<internal port>` when the pod IP is set, else " +
+          "`http://127.0.0.1:<internal port>`. " +
           "Required in fleet mode (this replica's own address, one per replica, never a load " +
-          "balancer); never a loopback URL on Kubernetes."
+          "balancer); never a loopback URL on Kubernetes. It must name the internal port, not " +
+          "the manager's REST port."
     )
     internalUrl: String = "",
+    @field @ConfigField(
+      envVar = "QOD_INTERNAL_PORT",
+      description =
+        "Port of the listener that answers nodes' verdict and credential calls. 0 means the " +
+          "manager port + 1."
+    )
+    internalPort: Int = 0,
+    @field @ConfigField(
+      envVar = "QOD_INTERNAL_MAX_CONNECTIONS",
+      description =
+        "How many connections the node verdict listener serves at once. A node opens one per " +
+          "call. A call's body, up to 1 MiB, is read before its signature can be checked, so " +
+          "this bounds the heap a client reaching the port can hold, at about 1.4 MiB per " +
+          "connection: keep clients off the port. Fewer when a fifth of the heap cannot hold " +
+          "that many: boot says so."
+    )
+    internalMaxConnections: Int = 256,
     @field @ConfigField(
       envVar = "QOD_POD_IP",
       description = "This replica's pod IP; the Helm chart sets it from the downward API. With " +
         "QOD_INTERNAL_URL unset, nodes reach this replica on " +
-        "`http://<pod IP>:<manager port>`, so the replica that minted a handle, not the " +
+        "`http://<pod IP>:<internal port>`, so the replica that minted a handle, not the " +
         "Service, answers its node."
     )
     podIp: String = "",
@@ -736,29 +817,32 @@ final case class NodeAuthzConfig(
     s"nodeAuthz.handleContextsMax (QOD_AUTHZ_HANDLE_CONTEXTS_MAX) must be at least " +
       s"${NodeAuthzConfig.HandleContextsFloor}, got $handleContextsMax"
   )
+  require(
+    internalPort >= 0 && internalPort <= 65535,
+    s"nodeAuthz.internalPort (QOD_INTERNAL_PORT) must be 0 or a port, got $internalPort"
+  )
+  require(
+    internalMaxConnections >= 1,
+    s"nodeAuthz.internalMaxConnections (QOD_INTERNAL_MAX_CONNECTIONS) must be at least 1, got " +
+      s"$internalMaxConnections"
+  )
 
-  /** [[internalUrl]]; else this pod's address on `restPort`; else, when the manager listens on one
-    * specific address (`bindHost`, QOD_ON_DEMAND_HOST, neither a wildcard nor `localhost` /
-    * `127.0.0.1`), that address; else this host's loopback URL on `restPort`. An IPv6 address goes
-    * in brackets.
+  /** The port of the node verdict listener. */
+  def listenerPort(restPort: Int): Int = if internalPort > 0 then internalPort else restPort + 1
+
+  /** [[internalUrl]]; else this pod's address on the listener's port; else this host's loopback
+    * URL: the local runtime's nodes share the manager's host, whatever address REST binds. An IPv6
+    * address goes in brackets.
     */
-  def replicaUrl(bindHost: String, restPort: Int): String =
+  def replicaUrl(restPort: Int): String =
     val pod  = podIp.trim
-    val bind = bindHost.trim
+    val port = listenerPort(restPort)
     if internalUrl.trim.nonEmpty then internalUrl.trim
-    else if pod.nonEmpty then s"http://${urlHost(pod)}:$restPort"
-    else if specificBindHost(bind) then s"http://${urlHost(bind)}:$restPort"
-    else s"http://127.0.0.1:$restPort"
+    else if pod.nonEmpty then s"http://${urlHost(pod)}:$port"
+    else s"http://127.0.0.1:$port"
 
   private def urlHost(host: String): String =
     if host.contains(':') && !host.startsWith("[") then s"[$host]" else host
-
-  /** A bind address the loopback default does not reach: not blank, not a wildcard, not `localhost`
-    * or `127.0.0.1`.
-    */
-  private def specificBindHost(host: String): Boolean =
-    !Set("", "*", "0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0", "localhost", "127.0.0.1")
-      .contains(host.toLowerCase(java.util.Locale.ROOT))
 
 object NodeAuthzConfig:
 
@@ -1362,8 +1446,55 @@ final case class FlightConfig(
       envVar = "PROXY_RESUME_HOLD_TIMEOUT_SEC",
       description = "Max seconds the edge holds a statement while a suspended pool cold-starts."
     )
-    resumeHoldTimeoutSec: Long
-)
+    resumeHoldTimeoutSec: Long,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_INBOUND_MESSAGE_BYTES",
+      description =
+        "Largest gRPC message the FlightSQL edge reads, in bytes, whatever the method and " +
+          "whether or not the caller has credentials: a larger one is refused with " +
+          "RESOURCE_EXHAUSTED. Bound parameters are never read, so only SQL text needs room."
+    )
+    maxInboundMessageBytes: Int = 16777216,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_HEADER_BYTES",
+      description = "Largest gRPC header list the FlightSQL edge reads, in bytes."
+    )
+    maxHeaderBytes: Int = 65536,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_ANONYMOUS_CALLS",
+      description =
+        "FlightSQL calls with no credentials at once. Only GetSqlInfo and GetXdbcTypeInfo answer " +
+          "them, for clients that ask before they present their credentials; past this they are " +
+          "refused with UNAVAILABLE."
+    )
+    maxAnonymousCalls: Int = 256,
+    @field @ConfigField(
+      envVar = "PROXY_FLIGHT_THREADS",
+      description =
+        "Threads of the FlightSQL edge's fixed executor, at least 16. A call waits for a free one; " +
+          "while more tasks wait than there are threads, or than fit a twentieth of the heap, a " +
+          "new connection is closed at once. A quarter of them is the most DoPuts that may wait " +
+          "for their data at once."
+    )
+    flightThreads: Int = 512,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+      description =
+        "FlightSQL connections at once that have not yet shown a working credential; one past this " +
+          "is closed at once. The edge takes no more than fit a tenth of the heap. Connections that " +
+          "have shown one do not count and have no limit."
+    )
+    maxUnauthenticatedConnections: Int = 1024
+):
+  require(
+    maxInboundMessageBytes > 0 && maxHeaderBytes > 0 && maxAnonymousCalls > 0 &&
+      maxUnauthenticatedConnections > 0,
+    "PROXY_MAX_INBOUND_MESSAGE_BYTES, PROXY_MAX_HEADER_BYTES, PROXY_MAX_ANONYMOUS_CALLS and " +
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS must be positive (got " +
+      s"$maxInboundMessageBytes, $maxHeaderBytes, $maxAnonymousCalls and " +
+      s"$maxUnauthenticatedConnections)"
+  )
+  require(flightThreads >= 16, s"PROXY_FLIGHT_THREADS must be at least 16 (got $flightThreads)")
 
 /** The native Quack protocol front door (`quack-native` block): the listener DuckDB clients
   * `ATTACH 'quack:host:port'` to. Identity, routing, policies and audit are the FlightSQL edge's;
@@ -1410,5 +1541,58 @@ final case class QuackNativeConfig(
       description =
         "Largest request body accepted on /quack, in bytes (appends and streamed inserts)."
     )
-    maxBodyBytes: Long
-)
+    maxBodyBytes: Long,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_CONNECT_BODY_BYTES",
+      description =
+        "Largest CONNECTION_REQUEST accepted on /quack, in bytes: read before any credential is checked."
+    )
+    maxConnectBodyBytes: Long = 65536L,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC",
+      description =
+        "Seconds a /quack request has to send its message header and, for a CONNECTION_REQUEST, its body."
+    )
+    connectBodyTimeoutSec: Long = 30L,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_BODY_TIMEOUT_SEC",
+      description = "Seconds a live session's message has to arrive whole on /quack."
+    )
+    bodyTimeoutSec: Long = 300L,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_CONNECTIONS",
+      description =
+        "Most connections the Quack front door keeps open at once. Fewer when a fifth of the " +
+          "heap cannot hold that many: boot says so."
+    )
+    maxConnections: Int = 1024,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_HEADER_BYTES",
+      description =
+        "Largest request line, and largest header block, the Quack front door reads, in bytes " +
+          "each. Raising it lowers how many connections fit the heap."
+    )
+    maxHeaderBytes: Int = 4096
+):
+  require(
+    maxBodyBytes > 0 && maxConnectBodyBytes > 0 && connectBodyTimeoutSec > 0 &&
+      bodyTimeoutSec > 0 && maxConnections > 0,
+    "quack-native limits (QOD_QUACK_MAX_BODY_BYTES, QOD_QUACK_MAX_CONNECT_BODY_BYTES, " +
+      "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC, QOD_QUACK_BODY_TIMEOUT_SEC, QOD_QUACK_MAX_CONNECTIONS) " +
+      "must be positive"
+  )
+  require(
+    maxHeaderBytes >= 1024 && maxHeaderBytes <= 1048576,
+    s"quack-native.maxHeaderBytes (QOD_QUACK_MAX_HEADER_BYTES) must be between 1024 and 1048576, " +
+      s"got $maxHeaderBytes"
+  )
+  // A body is held in one array, which stops short of 2 GiB.
+  require(
+    maxBodyBytes <= Int.MaxValue - 8L && maxConnectBodyBytes <= Int.MaxValue - 8L,
+    s"QOD_QUACK_MAX_BODY_BYTES and QOD_QUACK_MAX_CONNECT_BODY_BYTES must be at most ${Int.MaxValue - 8L}"
+  )
+  require(
+    connectBodyTimeoutSec <= bodyTimeoutSec && bodyTimeoutSec <= 86400L,
+    "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC must not exceed QOD_QUACK_BODY_TIMEOUT_SEC, which must be " +
+      "at most 86400"
+  )

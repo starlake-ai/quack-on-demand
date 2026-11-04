@@ -67,6 +67,18 @@ final class AuditRecorder(
     val effectivePatId = patId.orElse(token.flatMap(patIdOf))
     restAs(actor, realm, family, action, outcome, tenant, target, detail, effectivePatId)
 
+  /** Every REST row is written here, and some of what lands in it is text a stranger chose: a
+    * failed login records the typed user name twice and the typed tenant once, and the route needs
+    * no credential. A row is kept for the audit retention, and a NUL in any text makes the insert
+    * fail, which erases the row of whoever sent one. So, once and for every caller, `actor`,
+    * `tenant`, `target` and each `detail` value lose their control characters (a tab, a newline and
+    * a carriage return read as a space) and are cut to [[AuditRecorder.MaxNameChars]] (the first
+    * three) and [[AuditRecorder.MaxDetailChars]] (the values), as `ManagerServer`'s guard does for
+    * the path it records. No caller needs a longer value whole. The longest legitimate values are a
+    * module's recorded SQL, which its own caller cuts to 500 characters, and the joined role and
+    * group lists of a created user (`UserHandlers`), which pass 1024 characters only for some 50
+    * roles and are stored as memberships anyway.
+    */
   def restAs(
       actor: String,
       actorRealm: String,
@@ -85,19 +97,20 @@ final class AuditRecorder(
   ): Unit =
     if store.enabled then
       try
+        import AuditRecorder.{MaxDetailChars, MaxNameChars, clean}
         store.appendAudit(
           List(
             AuditEvent(
               Instant.now(),
               family,
-              actor,
+              clean(actor, MaxNameChars),
               actorRealm,
-              tenant,
+              tenant.map(clean(_, MaxNameChars)),
               action,
-              target,
+              target.map(clean(_, MaxNameChars)),
               outcome,
               "rest",
-              detail,
+              detail.map((key, value) => key -> clean(value, MaxDetailChars)),
               patId
             )
           )
@@ -109,6 +122,26 @@ final class AuditRecorder(
 
 object AuditRecorder:
   val noop: AuditRecorder = new AuditRecorder(NoopTelemetryStore, _ => None)
+
+  /** The most characters of an `actor`, a `tenant` or a `target` that a REST row keeps. */
+  val MaxNameChars: Int = 256
+
+  /** The most characters of a `detail` value that a REST row keeps. */
+  val MaxDetailChars: Int = 1024
+
+  /** `text` without its control characters (the C0 ones, DEL and the C1 ones), cut to `max`
+    * characters. A tab, a newline and a carriage return read as a space instead of vanishing, so
+    * that a module's recorded `SELECT *\nFROM t` does not read `SELECT *FROM t`. The control
+    * characters go first, so they use none of the budget (a space does), and a cut never leaves
+    * half of a surrogate pair at the end.
+    */
+  private[telemetry] def clean(text: String, max: Int): String =
+    val readable = text
+      .map(c => if c == '\t' || c == '\n' || c == '\r' then ' ' else c)
+      .filter(c => !Character.isISOControl(c))
+    if readable.length <= max then readable
+    else if Character.isHighSurrogate(readable.charAt(max - 1)) then readable.substring(0, max - 1)
+    else readable.substring(0, max)
 
 /** One event per key per interval; used to keep anonymous /api 401 bursts (port scans) from
   * flooding the audit table.

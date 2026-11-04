@@ -270,6 +270,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val server = new QuackFrontDoorServer(
       QuackNativeConfig(true, "127.0.0.1", port, false, "", "", 3600, 1L << 28),
       frontDoor.handle,
+      frontDoor.isLive,
       frontDoor.sweep,
       frontDoor.closeAll()
     )

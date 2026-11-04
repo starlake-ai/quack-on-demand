@@ -20,7 +20,8 @@ import ai.starlake.quack.boot.{
   CatalogReaders,
   EdgeRewriters,
   LeaderDuties,
-  ManagementAuthWiring
+  ManagementAuthWiring,
+  NettyMemory
 }
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
 import ai.starlake.quack.model.{RunningNode, TenantDb}
@@ -77,6 +78,10 @@ import pureconfig.generic.semiauto.deriveReader
 
 object Main extends IOApp with LazyLogging:
 
+  // First, before anything that can load a Netty class: Netty decides whether to count its direct
+  // buffers apart from the JDK's when PlatformDependent initializes, and never again.
+  NettyMemory.configure()
+
   // Match application.conf's camelCase keys instead of pureconfig's kebab-case
   // default; also shadows the `derives ConfigReader` defaults of the edge auth types.
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
@@ -89,6 +94,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
+  given ProductHint[RestLimitsConfig]          = ProductHint[RestLimitsConfig](camelMapping)
   given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
   given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
   given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
@@ -127,6 +133,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagerAuthConfig]        = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
+  given ConfigReader[RestLimitsConfig]         = deriveReader[RestLimitsConfig]
   given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
   given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
   given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]
@@ -274,7 +281,9 @@ object Main extends IOApp with LazyLogging:
         * environment and the raw configuration. Tests pass their own.
         */
       env: String => Option[String] = sys.env.get,
-      rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
+      rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load(),
+      /** Whether this JDK has `HttpClient.shutdownNow` (21 and later); tests pass their own. */
+      shutdownNowAvailable: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow
   ): IO[ExitCode] =
     // The retired settings first, at the top of bootManager, before it opens any socket: they read
     // the configuration alone. One asking for what the manager cannot do (QOD_ACL_ENABLED or
@@ -284,6 +293,12 @@ object Main extends IOApp with LazyLogging:
     BootPreflight.checkRetiredSettings(env, rawConfig) match
       case Left(refusal)   => sys.error(refusal)
       case Right(warnings) => warnings.foreach(w => System.err.println(w))
+    // A JDK below 21 cannot shut an HTTP client down, which the manager relies on to close what a
+    // refused answer leaves open: said on stderr, since the launcher does not refuse such a JDK.
+    BootPreflight.checkHttpClientShutdown(shutdownNowAvailable).foreach(w => System.err.println(w))
+    // Netty counting its direct buffers in the JDK's budget lets a flood of FlightSQL calls starve a
+    // socket read on another listener, which halts the manager: said on stderr as well.
+    NettyMemory.warning().foreach(w => System.err.println(w))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
@@ -348,19 +363,32 @@ object Main extends IOApp with LazyLogging:
       else "account lockout: disabled"
     )
 
-    // The URL nodes call back for verdicts must be reachable from the runtime's nodes: on
-    // Kubernetes this pod's address (the chart sets QOD_POD_IP), in fleet mode the address the
-    // servers heartbeat to. Configuration only, so it runs before the Postgres preflight. The line
-    // is printed, not logged, as the session secret's source is: the logger's default ERROR root
-    // level would swallow it, and operators need to see which URL their nodes call.
+    // The listener nodes call back for verdicts needs a port of its own, and the URL they call must
+    // be reachable from the runtime's nodes: on Kubernetes this pod's address (the chart sets
+    // QOD_POD_IP), in fleet mode the address the servers heartbeat to. Configuration only, so it
+    // runs before the Postgres preflight. The line is printed, not logged, as the session secret's
+    // source is: the logger's default ERROR root level would swallow it, and operators need to see
+    // which URL their nodes call.
+    val internalPort =
+      BootPreflight.checkInternalPort(
+        mgrCfg0.nodeAuthz,
+        mgrCfg0.port,
+        edgeCfg.port,
+        Option.when(quackCfgResolved.enabled)(quackCfgResolved.port),
+        mgrCfg0.minPort,
+        mgrCfg0.maxPort
+      ) match
+        case Left(msg)   => sys.error(msg)
+        case Right(port) => port
+    val internalHost =
+      BootPreflight.internalBindHost(mgrCfg0.nodeAuthz, mgrCfg0.host, mgrCfg0.port)
     BootPreflight.checkInternalUrl(
       mgrCfg0.runtimeType,
       mgrCfg0.nodeAuthz,
-      mgrCfg0.host,
       mgrCfg0.port
     ) match
       case Left(msg)  => sys.error(msg)
-      case Right(url) => println(BootPreflight.decideUrlLine(url))
+      case Right(url) => println(BootPreflight.decideUrlLine(url, internalHost, internalPort))
 
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
@@ -395,11 +423,14 @@ object Main extends IOApp with LazyLogging:
       opaCfg,
       modules,
       quackCfgResolved,
-      qodNodeBin
+      qodNodeBin,
+      internalHost,
+      internalPort
     )
 
   /** The boot after the Liquibase apply and the session secret's resolution: `mgrCfg` carries the
-    * resolved secret, and the configuration as loaded is not in scope.
+    * resolved secret, and the configuration as loaded is not in scope. `internalHost` and
+    * `internalPort` are where the node verdict listener binds (checked at the top of the boot).
     */
   private def bootResolved(
       mgrCfg: ManagerConfig,
@@ -409,7 +440,9 @@ object Main extends IOApp with LazyLogging:
       opaCfg: OpaConfig,
       modules: List[ai.starlake.quack.spi.ManagerModule],
       quackCfgResolved: QuackNativeConfig,
-      qodNodeBin: Option[java.nio.file.Path]
+      qodNodeBin: Option[java.nio.file.Path],
+      internalHost: String,
+      internalPort: Int
   ): IO[ExitCode] =
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
@@ -529,7 +562,7 @@ object Main extends IOApp with LazyLogging:
         case Right(secret) =>
           new ai.starlake.quack.edge.authz.NodeKeys(
             secret,
-            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.host, mgrCfg.port),
+            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
             versions = policyVersions,
             creds = servedUserS3,
             issued = Some(issuedHandles),
@@ -751,18 +784,8 @@ object Main extends IOApp with LazyLogging:
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaders.get(tenant, tenantDb)
 
-    val healthCache =
-      new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
-    def dbHealthy(): Boolean =
-      val (ts, ok) = healthCache.get()
-      val now      = System.nanoTime()
-      if now - ts < 5_000_000_000L then ok
-      else
-        val fresh = store.ping()
-        healthCache.set((now, fresh))
-        fresh
-
-    val health = new HealthHandler(sup, dbHealthy)
+    val dbHealth = new CachedDbHealth(() => store.ping())
+    val health   = new HealthHandler(sup, () => dbHealth.healthy())
 
     val sessionTokens = new SessionTokenStore(
       secret = mgrCfg.auth.management.sessionJwtSecret,
@@ -1207,8 +1230,9 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
       val classifier = EdgeRewriters.statementClassifier()
-      // ONE OPA authorizer per manager (one HttpClient, one decision cache), shared by the
-      // decision pipeline below, the handshake and the admin dry-run.
+      // ONE OPA authorizer per manager (one decision cache; each of its calls runs in a client of
+      // its own, see BoundedHttp), shared by the decision pipeline below, the handshake and the
+      // admin dry-run.
       val opaDecisions = new ai.starlake.quack.edge.opa.OpaDecisionCache(opaCfg.cacheTtlSec)
       // Every bounded authorization cache reports its size, hits, misses, evictions and capacity
       // (cache_*{cache=...}, qod_cache_capacity{cache=...}), on every replica: each is this
@@ -1235,8 +1259,8 @@ object Main extends IOApp with LazyLogging:
         mgrCfg.tenantFiles.rootOpt,
         auditRecorder
       )
-      // The node decision pipeline and its endpoint (POST /api/internal/authz/decide), sharing
-      // the one OPA authorizer.
+      // The node decision pipeline and its endpoint (POST /api/internal/authz/decide, served by
+      // the node verdict listener), sharing the one OPA authorizer.
       val authzDecider =
         BootFactories.authzDecider(sup, opaCfg, opaAuthorizer, locationRules)
       val decideRoute =
@@ -1533,7 +1557,12 @@ object Main extends IOApp with LazyLogging:
               edgeCfg.tlsEnabled,
               edgeCfg.tlsCertChain,
               edgeCfg.tlsPrivateKey,
-              edgeCfg.sessionTtlSec
+              edgeCfg.sessionTtlSec,
+              edgeCfg.maxInboundMessageBytes,
+              edgeCfg.maxHeaderBytes,
+              maxAnonymousCalls = edgeCfg.maxAnonymousCalls,
+              flightThreads = edgeCfg.flightThreads,
+              maxUnauthenticatedConnections = edgeCfg.maxUnauthenticatedConnections
             ),
             fsRouter,
             authService,
@@ -1568,8 +1597,14 @@ object Main extends IOApp with LazyLogging:
             sessionTtlSec = edgeCfg.sessionTtlSec,
             maxHeartbeatSec = quackCfgResolved.maxHeartbeatTimeoutSec
           )
+          // HTTP/1.1 only: the JDK offers `Upgrade: h2c` on every http:// request, and its HTTP/2
+          // reader queues inbound frames with no bound (see BoundedHttp). A node is ours, but the
+          // client costs nothing to keep to what the node speaks.
           val transport = new ai.starlake.quack.edge.adapter.QuackProtocol.JdkHttpTransport(
-            java.net.http.HttpClient.newHttpClient()
+            java.net.http.HttpClient
+              .newBuilder()
+              .version(java.net.http.HttpClient.Version.HTTP_1_1)
+              .build()
           )
           val door = new ai.starlake.quack.edge.quack.QuackFrontDoor(
             fsRouter,
@@ -1582,6 +1617,7 @@ object Main extends IOApp with LazyLogging:
           new ai.starlake.quack.edge.quack.QuackFrontDoorServer(
             quackCfgResolved,
             door.handle,
+            door.isLive,
             door.sweep,
             door.closeAll()
           )
@@ -1801,8 +1837,9 @@ object Main extends IOApp with LazyLogging:
         locationRules.dataFolderOverlap,
         auditRecorder
       )
-      // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), outside the
-      // api-key guard; it answers only handles this replica minted (issuedHandles).
+      // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), served by the
+      // node verdict listener, not the REST port; it answers only handles this replica minted
+      // (issuedHandles).
       val credentialsRoute =
         new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, servedUserS3)
 
@@ -2022,7 +2059,8 @@ object Main extends IOApp with LazyLogging:
               dataTools.tools ++ branchTools.toList.flatMap(_.tools) ++ adminTools.tools ++
                 identityTools.tools ++ accessTools.tools ++ platformTools.tools ++
                 new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
-              serverVersion = "dev"
+              serverVersion = "dev",
+              limits = mgrCfg.restLimits
             ).routes
       if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
         logger.warn("mcp: enabled but a required handler is unwired; POST /mcp not mounted")
@@ -2098,8 +2136,14 @@ object Main extends IOApp with LazyLogging:
         quackCfg = Some(quackCfgResolved),
         icebergCatalog = icebergCatalogHandlers,
         tenantLocations = Some(tenantLocationHandlers),
-        s3Credentials = Some(s3CredentialHandlers),
-        internalRoutes = List(credentialsRoute.routes, decideRoute.routes)
+        s3Credentials = Some(s3CredentialHandlers)
+      )
+      // Nodes' verdict and credential calls: a listener of their own, bound with REST.
+      val nodeInternal = new ai.starlake.quack.edge.authz.NodeInternalServer(
+        internalHost,
+        internalPort,
+        mgrCfg.nodeAuthz.internalMaxConnections,
+        List(credentialsRoute.routes, decideRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
@@ -2209,7 +2253,8 @@ object Main extends IOApp with LazyLogging:
         // enforcement off while module suites (which wire gates directly) stay green.
         IO.defer(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
         IO.delay(buildManagerServer()).flatMap { mgr =>
-          mgr.serve.use { _ =>
+          // The node listener first, then REST, released in the reverse order: one `use`.
+          nodeInternal.resource.flatMap(_ => mgr.serve).use { _ =>
             logger.info(
               s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
                 s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"

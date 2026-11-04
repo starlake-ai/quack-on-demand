@@ -1,9 +1,11 @@
 package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.ManagementOidcConfig
+import com.typesafe.scalalogging.LazyLogging
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import scala.util.control.NonFatal
 
 object OidcSsoService:
   val STATE_COOKIE  = "qod_oidc_state"
@@ -39,7 +41,7 @@ class OidcSsoService(
     httpExchange: (String, String) => Either[String, String],
     buildValidator: OidcEndpoints => OidcBearerAuthenticator,
     nowMillis: () => Long = () => System.currentTimeMillis()
-):
+) extends LazyLogging:
   import OidcSsoService.*
 
   private def enc(s: String): String = URLEncoder.encode(s, StandardCharsets.UTF_8)
@@ -104,7 +106,7 @@ class OidcSsoService(
                 .flatMap { body =>
                   JsonField.first(body, "id_token").toRight(OidcSsoError.IdpError).flatMap {
                     idToken =>
-                      buildValidator(ep).authenticate(idToken) match
+                      validated(ep, idToken) match
                         case Left(_)        => Left(OidcSsoError.IdpError)
                         case Right(profile) =>
                           if profile.claims.get("nonce").contains(claims.nonce) then
@@ -113,6 +115,20 @@ class OidcSsoService(
                   }
                 }
             }
+
+  /** The profile of `idToken`, checked against the key set the issuer's document names. The
+    * validator is built from that document, and it runs on a token the issuer signed, on an
+    * anonymous request: a failure to build it or to run it is the IdP's error like any other, and
+    * not an exception out of the callback, which was a 500 and an ERROR entry with its stack (4.3
+    * KB) for each request, 1.5 MB a second of log from one client. The log gets the class of what
+    * was thrown at WARN, and nothing the issuer chose.
+    */
+  private def validated(ep: OidcEndpoints, idToken: String): Either[String, AuthenticatedProfile] =
+    try buildValidator(ep).authenticate(idToken)
+    catch
+      case NonFatal(e) =>
+        logger.warn(s"OIDC id_token validation failed: ${e.getClass.getSimpleName}")
+        Left(e.getClass.getSimpleName)
 
   def endSessionUrl(scope: OidcScope, idTokenHint: Option[String]): Option[String] =
     resolver

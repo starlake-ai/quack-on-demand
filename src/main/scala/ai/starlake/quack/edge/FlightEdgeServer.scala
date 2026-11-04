@@ -4,13 +4,22 @@ import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, AuthzRequest, HandshakeDenial}
 import com.typesafe.scalalogging.LazyLogging
+import io.grpc.netty.{GrpcSslContexts, InternalProtocolNegotiators}
 import org.apache.arrow.flight.*
 import org.apache.arrow.flight.auth2.CallHeaderAuthenticator
 import org.apache.arrow.memory.RootAllocator
 
 import java.io.File
 import java.util.UUID
-import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{
+  Executors,
+  LinkedBlockingQueue,
+  ScheduledExecutorService,
+  ThreadFactory,
+  ThreadPoolExecutor,
+  TimeUnit
+}
+import java.util.concurrent.atomic.AtomicInteger
 
 final class FlightEdgeServer(
     cfg: EdgeConfig,
@@ -71,8 +80,23 @@ final class FlightEdgeServer(
     */
   private var sweeper: ScheduledExecutorService = null.asInstanceOf[ScheduledExecutorService]
 
+  /** gRPC callbacks and DoPut tasks. Ours to shut down: Arrow does not own an executor it is
+    * handed.
+    */
+  private var executor: ThreadPoolExecutor = null.asInstanceOf[ThreadPoolExecutor]
+
+  /** The tasks waiting for a thread, which is what [[ConnectionProbation]] is told: a spec reads
+    * the same number to know how far past the limit it is.
+    */
+  private[quack] def queuedTasks: Int = executor.getQueue.size
+
   def start(): Unit =
-    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = cfg.sessionTtlSec)
+    val producer = new FlightProducerImpl(
+      router,
+      preparedIdleTtlSec = cfg.sessionTtlSec,
+      maxPutDrains = cfg.flightThreads / 4,
+      putDrainTimeoutMs = cfg.putDrainTimeoutMs
+    )
     ConnectionContext.onEvict(FlightEdgeServer.sessionEvicted(router, producer))
     sweeper = Executors.newSingleThreadScheduledExecutor { r =>
       val t = new Thread(r, "flight-session-sweeper"); t.setDaemon(true); t
@@ -88,17 +112,55 @@ final class FlightEdgeServer(
       FlightEdgeServer.SweepSec,
       TimeUnit.SECONDS
     )
-    val location =
-      if cfg.tlsEnabled then Location.forGrpcTls(cfg.host, cfg.port)
-      else Location.forGrpcInsecure(cfg.host, cfg.port)
+    // TLS is the negotiator's, below. Arrow refuses a TLS location with no certificate of its own,
+    // and only binds this address.
+    val location = Location.forGrpcInsecure(cfg.host, cfg.port)
 
+    val pool = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
+    executor = pool
+    val probation = new ConnectionProbation(
+      if cfg.tlsEnabled then
+        CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
+        InternalProtocolNegotiators.serverTls(
+          GrpcSslContexts.forServer(new File(cfg.tlsCertChain), new File(cfg.tlsPrivateKey)).build()
+        )
+      else InternalProtocolNegotiators.serverPlaintext(),
+      // The default is more than most heaps take: only an operator who asked for more hears of it.
+      ConnectionBudget.slots(
+        "The FlightSQL edge",
+        "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+        cfg.maxUnauthenticatedConnections,
+        ConnectionProbation.heldBytes(cfg.maxHeaderBytes, cfg.tlsEnabled),
+        heapParts = ConnectionBudget.FlightHeapParts,
+        announce = cfg.maxUnauthenticatedConnections != ConnectionProbation.DefaultMaxConnections
+      ),
+      cfg.probationTimeoutMs,
+      ConnectionProbation.readBudget(cfg.maxHeaderBytes),
+      () => pool.getQueue.size,
+      ConnectionProbation.maxBacklog(
+        cfg.flightThreads,
+        cfg.maxHeaderBytes,
+        Runtime.getRuntime.maxMemory
+      )
+    )
+    // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
+    // headerAuth runs before the guard: for a call with no header it only mints a peer id, and a
+    // credential that fails never reaches the guard.
+    val tuneNetty: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
+      nettyBuilder =>
+        nettyBuilder.maxConcurrentCallsPerConnection(ConnectionProbation.MaxStreams)
+        nettyBuilder.protocolNegotiator(probation)
+        nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove))
+    // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with
+    // RESOURCE_EXHAUSTED as soon as the length prefix arrives, before it holds any of it, and a
+    // header list over its limit before any authentication runs.
     val builder = FlightServer
       .builder(allocator, location, producer)
       .headerAuthenticator(headerAuth)
-
-    if cfg.tlsEnabled then
-      CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
-      builder.useTls(new File(cfg.tlsCertChain), new File(cfg.tlsPrivateKey))
+      .executor(pool)
+      .maxInboundMessageSize(cfg.maxInboundMessageBytes)
+      .setMaxHeaderListSize(cfg.maxHeaderBytes)
+      .transportHint("grpc.builderConsumer", tuneNetty)
 
     server = builder.build()
     server.start()
@@ -124,16 +186,7 @@ final class FlightEdgeServer(
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
-        // Read `Authorization` first; fall back to `x-qod-authorization` for
-        // clients whose driver / proxy strips the standard header but passes
-        // arbitrary `x-*` headers through. Confirmed needed by the Apache
-        // Arrow Flight SQL ODBC build that the current Power BI connector
-        // wraps: it forwards `tenant` / `pool` (which are arbitrary
-        // passthrough keys) but discards `Authorization`. The two header
-        // names are accepted identically; the value format is unchanged
-        // (`Basic <base64>` or `Bearer <token>`).
-        val authHeader = Option(headers.get("Authorization"))
-          .orElse(Option(headers.get("x-qod-authorization")))
+        val authHeader    = FlightEdgeServer.authHeaderOf(headers)
         val bearer        = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
         val basicPair     = FlightEdgeServer.basicPairOf(authHeader)
         val basicUsername = basicPair.map(_._1)
@@ -209,18 +262,17 @@ final class FlightEdgeServer(
             // identification metadata is not tenant data, so admitting an
             // anonymous peer here lets the SQLGetInfo cache load.
             //
-            // Producer methods that need tenant context look up
-            // `ConnectionContext.poolFor(peer)` and reject the anonymous
-            // peer downstream with UNAUTHENTICATED (see
-            // FlightProducerImpl.runStatement etc.). Only the static
-            // GetSqlInfo / GetXdbcTypeInfo paths are reachable anonymously.
+            // Only `GetFlightInfo` and `DoGet` get past AnonymousCallGuard
+            // without a header, and the producer serves such a peer only
+            // GetSqlInfo and GetXdbcTypeInfo (FlightProducerImpl.refuseAnonymous).
             //
             // A malformed Authorization header (e.g. `Bearer <stale id>`,
             // or `Basic <unparseable>`) is NOT silently anonymized: it
             // falls through to handshake so the client gets a precise
             // credential error instead of a downstream "no pool bound"
             // surprise.
-            if authHeader.isEmpty then authResult(s"anonymous-${UUID.randomUUID()}")
+            if authHeader.isEmpty then
+              authResult(s"${FlightEdgeServer.AnonymousPeerPrefix}${UUID.randomUUID()}")
             else
               handshake.authenticate(bearer, basicPair, poolHdr, tenantHdr, superuserHdr) match
                 case Left(HandshakeFailure.Unauthenticated(msg)) =>
@@ -272,6 +324,9 @@ final class FlightEdgeServer(
     if server != null then
       server.close()
       server = null.asInstanceOf[FlightServer]
+    if executor != null then
+      executor.shutdownNow()
+      executor = null.asInstanceOf[ThreadPoolExecutor]
 
 object FlightEdgeServer:
 
@@ -285,6 +340,41 @@ object FlightEdgeServer:
 
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
+
+  /** A pool of at most `threads` daemon threads, named `<name>-<n>`. A saturated pool makes calls
+    * wait and never fails them, and waiting costs heap: a waiting call keeps its headers, whatever
+    * became of its client. [[ConnectionProbation.maxBacklog]] bounds what connections with no
+    * credential can leave waiting. Connections that have shown one have no such bound. Idle threads
+    * leave after a minute.
+    */
+  def boundedExecutor(threads: Int, name: String): ThreadPoolExecutor =
+    val counter                = new AtomicInteger(0)
+    val factory: ThreadFactory = r =>
+      val t = new Thread(r, s"$name-${counter.incrementAndGet()}")
+      t.setDaemon(true)
+      t
+    val pool = new ThreadPoolExecutor(
+      threads,
+      threads,
+      60L,
+      TimeUnit.SECONDS,
+      new LinkedBlockingQueue[Runnable](),
+      factory
+    )
+    pool.allowCoreThreadTimeOut(true)
+    pool
+
+  /** The peer id prefix of a call with no credentials. */
+  val AnonymousPeerPrefix: String = "anonymous-"
+
+  /** The credential header of a call: `Authorization`, else `x-qod-authorization` for clients whose
+    * driver or proxy strips the standard one but passes arbitrary `x-*` headers. Confirmed needed
+    * by the Apache Arrow Flight SQL ODBC build that the current Power BI connector wraps. The two
+    * are accepted identically, and the value format is unchanged (`Basic <base64>` or `Bearer
+    * <token>`).
+    */
+  def authHeaderOf(headers: CallHeaders): Option[String] =
+    Option(headers.get("Authorization")).orElse(Option(headers.get("x-qod-authorization")))
 
   /** The `(user, password)` of a `Basic <base64>` authorization value, or None when it is not one.
     * The value comes from an unauthenticated client: one that is not base64 gives no pair (the

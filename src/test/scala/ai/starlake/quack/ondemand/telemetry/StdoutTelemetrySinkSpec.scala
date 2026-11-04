@@ -166,6 +166,47 @@ class StdoutTelemetrySinkSpec extends AnyFlatSpec with Matchers:
     f.inner.events.head.actor shouldBe typed
   }
 
+  // restAs cuts the actor at 256 characters and each detail value at 1024, so the actor of a failed
+  // login is no longer equal to the typed name once the name is longer than 256 (a pasted token is
+  // that long): the line used to carry its first 256 characters in clear, which is what the hash is
+  // for. Through the real recorder, so the cut is the production one.
+  it should "hash a typed login name that the recorder cut, in the actor as in the detail" in {
+    val f        = new Fixture
+    val recorder = new AuditRecorder(f.sink, _ => None)
+    val typed    = "pasted-secret-" + ("k" * 400)
+
+    recorder.restAs(
+      typed,
+      "tenant",
+      "auth",
+      AuditActions.AuthLoginFailure,
+      "denied",
+      tenant = Some("acme"),
+      detail = Map("username" -> typed)
+    )
+    // The same name, short enough to arrive whole: both are hashed alike.
+    recorder.restAs(
+      "pasted-secret-short",
+      "tenant",
+      "auth",
+      AuditActions.AuthLoginFailure,
+      "denied",
+      tenant = Some("acme"),
+      detail = Map("username" -> "pasted-secret-short")
+    )
+
+    val lines = f.flushed()
+    lines should have size 2
+    lines.foreach(_ should not include "pasted-secret")
+    lines.foreach { line =>
+      val actor = js(line).get[String]("actor").toOption.get
+      actor should startWith("hmac:")
+      js(line).downField("detail").get[String]("username") shouldBe Right(actor)
+    }
+    // The store still gets the cut original.
+    f.inner.events.head.actor shouldBe typed.take(256)
+  }
+
   it should "drop and count lines instead of blocking when stdout stalls" in {
     val release = new CountDownLatch(1)
     val f       = new Fixture(capacity = 1, write = _ => release.await())

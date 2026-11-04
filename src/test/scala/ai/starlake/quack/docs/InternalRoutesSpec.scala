@@ -4,9 +4,9 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 /** The node-to-manager routes (`/api/internal/...`: edge.authz.CredentialsRoute, DecideRoute) are
-  * raw http4s routes mounted ahead of the api-key guard. Registering one as a Tapir endpoint would
-  * put it behind the guard (every node call 401) and into the OpenAPI contract, CLI parity and the
-  * MCP surface.
+  * raw http4s routes served by the node verdict listener (edge.authz.NodeInternalServer), not by
+  * the REST port. Registering one as a Tapir endpoint would put it on the REST port, behind the
+  * guard, and into the OpenAPI contract, CLI parity and the MCP surface.
   */
 class InternalRoutesSpec extends AnyFlatSpec with Matchers:
 

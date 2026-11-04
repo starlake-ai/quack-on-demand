@@ -35,6 +35,10 @@ START_GRACE_S = 60
 BACKOFF_MIN_S = 5
 BACKOFF_MAX_S = 300
 STDERR_TAIL = 20
+# The most of a failed node's error a heartbeat carries. The manager reads a heartbeat under 64 KiB
+# before it looks at it, and the stderr tail has no limit per line: a longer body is answered 413, and
+# the node would never restart. The cause is usually the last thing the node wrote, so the end is kept.
+ERROR_REPORT_CHARS = 8192
 PIDFILE = "node.pid"
 
 # A failed node's error (exit status and stderr tail) -> the fix to suggest; first match wins.
@@ -502,7 +506,7 @@ class FleetMember:
         if n.state != "starting":
             n.drop_secrets()
         return {"assignmentEpoch": n.assignment["epoch"], "nodeId": n.assignment["nodeId"], "state": n.state,
-                "pid": n.proc.pid if alive else None, "error": n.error,
+                "pid": n.proc.pid if alive else None, "error": n.error[-ERROR_REPORT_CHARS:] if n.error else None,
                 "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(n.wall_started_at)),
                 "action": node_failure_action(n.error, n.assignment["port"]) if n.state == "failed" else None}
 

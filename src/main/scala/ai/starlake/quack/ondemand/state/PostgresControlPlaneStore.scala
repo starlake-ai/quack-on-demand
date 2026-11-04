@@ -1812,13 +1812,12 @@ final class PostgresControlPlaneStore(
         // Best effort: peers heal via the periodic refresh fallback.
         logger.warn(s"pg_notify($channel) failed: ${t.getMessage}")
 
+  /** Whether the database answers within 2 s. `isValid` sets that as the socket's timeout for this
+    * one call; the URL sets none, so a plain query here could wait forever on a stalled socket, and
+    * the readiness probe waits for this call ([[ai.starlake.quack.ondemand.api.CachedDbHealth]]).
+    */
   override def ping(): Boolean =
-    try
-      withConn { c =>
-        val st = c.prepareStatement("SELECT 1")
-        try st.executeQuery().next()
-        finally st.close()
-      }
+    try withConn(_.isValid(2))
     catch case _: Throwable => false
 
   // ---------------- Snapshot ----------------

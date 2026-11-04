@@ -2,6 +2,8 @@ package ai.starlake.quack.edge.opa
 
 import ai.starlake.acl.model.TableRef
 import ai.starlake.acl.parser.{TableAccess, Verb}
+import ai.starlake.quack.edge.BoundedHttp
+import ai.starlake.quack.edge.auth.{AtOnce, EchoingServer}
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
@@ -12,10 +14,12 @@ import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.client.WireMock.*
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import org.scalatest.BeforeAndAfterAll
+import org.scalatest.concurrent.Eventually
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.time.{Seconds, Span}
 
-class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
+class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll with Eventually:
 
   private val wm                 = new WireMockServer(options().dynamicPort())
   override def beforeAll(): Unit = wm.start()
@@ -318,6 +322,65 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     result.isLeft shouldBe true
     val leaked = result.left.toOption.exists(_.contains("s3cr3t-opa-token"))
     leaked shouldBe false
+
+  // A token is often a JWT of several hundred characters, and the Left of a transport error is cut:
+  // the token must be masked before the cut, or the cut leaves the beginning of it.
+  it should "never carry any part of a long bearer token in a transport error" in:
+    val token  = ("Zq9" * 200) + "\ninjected"
+    val result = OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", Some(token))
+    result.isLeft shouldBe true
+    result.left.toOption.exists(_.contains("Zq9Zq9")) shouldBe false
+
+  // A server can echo the credential it was sent into a malformed status line, which the JDK quotes
+  // in its exception: the same rule, on the path that reaches a server.
+  it should "never carry any part of a bearer token that a server echoes into its answer" in:
+    val token  = "Zq9" * 100
+    val server = new EchoingServer(EchoingServer.Shape.AuthorizationHeader)
+    try
+      val result =
+        OpaClient.jdkPost(2000)(s"${server.base}/v1/data/qod/authz/connect", "{}", Some(token))
+      // It reached the server, and the JDK quoted the line it got back.
+      server.requests shouldBe 1
+      result.left.toOption.exists(_.contains("Invalid status line")) shouldBe true
+      result.left.toOption.exists(_.contains("<redacted>")) shouldBe true
+      result.left.toOption.exists(_.contains("Zq9Zq9")) shouldBe false
+    finally server.close()
+
+  // At most 256 OPA exchanges run at once, a selector thread each. With none free a decision is
+  // an error at once (fail closed, and an error is never cached), and nobody is asked.
+  it should "answer Busy and ask nobody when no OPA exchange is free" in:
+    wm.resetAll()
+    // AtOnce: a call that waited for a permit would park here for good, with nobody to give one.
+    AtOnce(
+      OpaClient.jdkPost(500, new BoundedHttp.Exchanges(0))(
+        s"$base/v1/data/qod/authz/connect",
+        "{}",
+        None
+      )
+    ) shouldBe Left(BoundedHttp.Busy)
+    wm.verify(0, postRequestedFor(anyUrl()))
+
+  // The permits of OPA are its own: a flood of exchanges with identity providers (an issuer is a
+  // tenant admin's choice) must not refuse the decisions of every tenant.
+  it should "have permits of its own, which a flood of identity provider exchanges does not take" in:
+    OpaClient.ExchangeLimit shouldBe 256
+    OpaClient.exchanges should not be theSameInstanceAs(BoundedHttp.idpExchanges)
+    // eventually: an exchange another spec of this JVM left in flight gives its permit back by its
+    // own deadline.
+    eventually(timeout(Span(20, Seconds)))(OpaClient.exchanges.available shouldBe 256)
+    wm.resetAll()
+    wm.stubFor(post(anyUrl()).willReturn(okJson("""{"result":{"allow":true}}""")))
+    val held = BoundedHttp.idpExchanges.drain()
+    try
+      // A bound wide enough for a decision made on a loaded machine: it is only here so that a
+      // call that waited for a permit fails the case instead of parking the suite.
+      AtOnce.within(15000L)(
+        OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", None)
+      ) match
+        case Right((200, _)) => succeed
+        case other           =>
+          fail(s"an OPA decision was refused while identity providers were busy: $other")
+    finally BoundedHttp.idpExchanges.give(held)
 
   "decide" should "key the decision cache on kinds, columns, via and locations" in:
     var calls = 0

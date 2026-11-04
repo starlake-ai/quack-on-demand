@@ -50,6 +50,10 @@
 #   DATA_PATH        host dir bind-mounted as /app/ducklake (default <CWD>/ducklake)
 #   CERTS_DIR        host dir for auto-generated TLS cert   (default <CWD>/certs)
 #   CONTAINER_NAME   docker --name                          (default quack-on-demand)
+#   JAVA_OPTS        extra JVM flags for the manager        (default empty)
+#                    (e.g. -Xmx2g: its listeners take no more connections
+#                    than a fifth of the heap holds, and boot says so when
+#                    that is fewer)
 #
 #   NUKE             "1" stops the prior container and wipes DATA_PATH +
 #                    CERTS_DIR before starting. Does NOT drop the remote
@@ -279,6 +283,7 @@ exec docker run --rm \
   -e PROXY_TLS_ENABLED="$TLS" \
   -e QOD_MIN_PORT="$QOD_NODE_MIN_PORT" \
   -e QOD_MAX_PORT="$QOD_NODE_MAX_PORT" \
+  -e JAVA_OPTS="${JAVA_OPTS:-}" \
   ${HTTP_PROXY:+-e HTTP_PROXY="$HTTP_PROXY"} \
   ${HTTPS_PROXY:+-e HTTPS_PROXY="$HTTPS_PROXY"} \
   ${NO_PROXY:+-e NO_PROXY="$NO_PROXY"} \

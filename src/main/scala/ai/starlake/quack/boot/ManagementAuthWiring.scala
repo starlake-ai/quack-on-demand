@@ -1,7 +1,11 @@
 package ai.starlake.quack.boot
 
+import java.net.URI
+import java.net.http.HttpRequest
+import java.time.Duration
 import java.util.Locale
 import ai.starlake.quack.{ManagementOidcConfig, ManagerConfig}
+import ai.starlake.quack.edge.BoundedHttp
 import ai.starlake.quack.edge.auth.{
   OidcBearerAuthenticator,
   OidcDiscovery,
@@ -34,6 +38,69 @@ final case class ManagementAuthComponents(
 )
 
 object ManagementAuthWiring extends LazyLogging:
+
+  /** What a failed read of a discovery document says, whatever went wrong. Its `Left` reaches the
+    * page of the SQL-token flow, and the issuer is a URL the manager reads for anyone who asks, so
+    * the answer quotes no server: not the JDK's message (which quotes a malformed status line, or a
+    * `Location`), not a status code. The log gets the cause, cut.
+    */
+  private[boot] val DiscoveryUnavailable = "discovery unavailable"
+
+  /** `GET url`, the way the manager reads an identity provider's discovery document: its body when
+    * the answer is 200, else [[DiscoveryUnavailable]]. A tenant admin picks the issuer, so the
+    * answer is read under [[BoundedHttp.MaxIdpAnswerBytes]] and [[BoundedHttp.IdpTimeoutMs]] over
+    * the whole exchange (`HttpRequest.timeout` alone bounds only the headers): one anonymous `GET
+    * /api/auth/oidc/start` makes this call, and a large or trickled answer, read whole, halted the
+    * manager or held a blocking thread for as long as the issuer liked.
+    *
+    * It is one of the [[BoundedHttp.idpExchanges]]: with none free the answer is
+    * [[BoundedHttp.Busy]], passed on as it is, since OidcDiscovery behind it must tell a refusal
+    * for lack of a permit from a failure of the issuer (it remembers a failure for 10 s).
+    */
+  private[boot] def discoveryGet(
+      url: String,
+      exchanges: BoundedHttp.Exchanges = BoundedHttp.idpExchanges
+  ): Either[String, String] =
+    val answer =
+      try
+        val req = HttpRequest
+          .newBuilder()
+          .uri(URI.create(url))
+          .GET()
+          .timeout(Duration.ofMillis(BoundedHttp.IdpTimeoutMs))
+          .build()
+        BoundedHttp.send(
+          req,
+          BoundedHttp.MaxIdpAnswerBytes,
+          BoundedHttp.IdpTimeoutMs,
+          "discovery",
+          exchanges,
+          secret = None
+        )
+      catch case e: Exception => Left(BoundedHttp.describe(e))
+    answer match
+      case Right((200, body)) => Right(body)
+      case Right((code, _))   =>
+        logger.warn(s"discovery read failed: HTTP $code")
+        Left(DiscoveryUnavailable)
+      case Left(BoundedHttp.Busy) =>
+        // The one refusal that is not a failure of the issuer: it passes on as it is, for
+        // OidcDiscovery to tell it from a failure it remembers. Below WARN, as the cheapest thing
+        // an anonymous caller can ask for.
+        logger.debug(s"discovery read refused: ${BoundedHttp.Busy}")
+        Left(BoundedHttp.Busy)
+      case Left(why) =>
+        logger.warn(s"discovery read failed: $why")
+        Left(DiscoveryUnavailable)
+
+  /** The code-to-token exchange: `form` POSTed to the token endpoint, its body when the answer is
+    * 200, else why not, under the same limits as [[discoveryGet]]. The form holds the client
+    * secret, so no failure text carries any of the exchange: a refused status is named by its code
+    * alone, and any other failure by one fixed text ([[BoundedHttp.tokenExchange]]), never by the
+    * provider's answer or the JDK's exception, which may quote what the provider was sent.
+    */
+  private[boot] def tokenExchange(url: String, form: String): Either[String, String] =
+    BoundedHttp.tokenExchange(url, form, code => s"token endpoint HTTP $code")
 
   def build(
       mgrCfg: ManagerConfig,
@@ -82,7 +149,8 @@ object ManagementAuthWiring extends LazyLogging:
     * `QOD_MGMT_OIDC_CLIENT_ID` are set. Nothing is fetched here: discovery runs on the first login
     * of each issuer.
     *
-    * Discovery + token exchange use a shared java.net.http client; id_token validation reuses
+    * Discovery and the token exchange go through [[BoundedHttp]] (HTTP/1.1, a client for each
+    * exchange, a bound on the exchanges in flight); id_token validation reuses
     * OidcBearerAuthenticator against the discovered jwks_uri. redirect_uri is built from the public
     * base URL (must match the IdP client's registered redirect URI).
     */
@@ -92,25 +160,8 @@ object ManagementAuthWiring extends LazyLogging:
       identitySource: ManagementIdentitySource,
       loadTenant: String => Option[Tenant]
   ): OidcSsoService =
-    val httpClient = java.net.http.HttpClient
-      .newBuilder()
-      .connectTimeout(java.time.Duration.ofSeconds(10))
-      .build()
-    val discovery = new OidcDiscovery(httpGet =
-      url =>
-        try
-          val req = java.net.http.HttpRequest
-            .newBuilder()
-            .uri(java.net.URI.create(url))
-            .GET()
-            .timeout(java.time.Duration.ofSeconds(15))
-            .build()
-          val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-          if resp.statusCode() == 200 then Right(resp.body())
-          else Left(s"discovery HTTP ${resp.statusCode()}")
-        catch case e: Exception => Left(e.getMessage)
-    )
-    val resolver = new OidcEndpointResolver(
+    val discovery = new OidcDiscovery(httpGet = url => discoveryGet(url))
+    val resolver  = new OidcEndpointResolver(
       loadTenant = loadTenant,
       secrets = SecretRefResolver.default,
       discovery = discovery
@@ -127,19 +178,6 @@ object ManagementAuthWiring extends LazyLogging:
     val publicBaseUrlOf = () =>
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
-    val httpExchange = (url: String, form: String) =>
-      try
-        val req = java.net.http.HttpRequest
-          .newBuilder()
-          .uri(java.net.URI.create(url))
-          .header("Content-Type", "application/x-www-form-urlencoded")
-          .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
-          .timeout(java.time.Duration.ofSeconds(15))
-          .build()
-        val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-        if resp.statusCode() == 200 then Right(resp.body())
-        else Left(s"token endpoint HTTP ${resp.statusCode()}")
-      catch case e: Exception => Left(e.getMessage)
     val buildValidator = (ep: OidcEndpoints) =>
       new OidcBearerAuthenticator(
         ep.provider,
@@ -159,7 +197,7 @@ object ManagementAuthWiring extends LazyLogging:
       codec = codec,
       roleClaim = authCfg.roleClaim,
       publicBaseUrlOf = publicBaseUrlOf,
-      httpExchange = httpExchange,
+      httpExchange = tokenExchange,
       buildValidator = buildValidator
     )
 
@@ -178,24 +216,7 @@ object ManagementAuthWiring extends LazyLogging:
       val base = mgrCfg.auth.management.publicBaseUrl
       if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
     if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
-      val sqlTokenHttp = java.net.http.HttpClient
-        .newBuilder()
-        .connectTimeout(java.time.Duration.ofSeconds(10))
-        .build()
-      val sqlTokenDiscovery = new OidcDiscovery(httpGet =
-        url =>
-          try
-            val req = java.net.http.HttpRequest
-              .newBuilder()
-              .uri(java.net.URI.create(url))
-              .GET()
-              .timeout(java.time.Duration.ofSeconds(15))
-              .build()
-            val resp = sqlTokenHttp.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-            if resp.statusCode() == 200 then Right(resp.body())
-            else Left(s"discovery HTTP ${resp.statusCode()}")
-          catch case e: Exception => Left(e.getMessage)
-      )
+      val sqlTokenDiscovery = new OidcDiscovery(httpGet = url => discoveryGet(url))
       Some(
         new SqlTokenOidcService(
           authCfg,

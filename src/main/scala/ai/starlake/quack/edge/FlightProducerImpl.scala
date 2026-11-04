@@ -9,7 +9,8 @@ import org.apache.arrow.flight.sql.NoOpFlightSqlProducer
 import org.apache.arrow.flight.sql.FlightSqlProducer.Schemas
 import org.apache.arrow.flight.sql.impl.FlightSql
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
-import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
+import org.apache.arrow.vector.{BigIntVector, VectorLoader, VectorSchemaRoot, VectorUnloader}
+import org.apache.arrow.vector.ipc.message.ArrowRecordBatch
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 
 import java.nio.charset.StandardCharsets
@@ -23,14 +24,25 @@ import scala.jdk.CollectionConverters.*
   * `preparedIdleTtlSec`: a prepared handle unused this long is dropped ([[PreparedHandles]]); the
   * edge passes its session TTL. The edge also drops a session's handles when the session leaves
   * [[ConnectionContext]] ([[dropSession]], through [[FlightEdgeServer.sessionEvicted]]).
+  *
+  * `maxPutDrains`: how many DoPuts may wait for their data at once. Arrow runs a DoPut task on the
+  * executor that delivers its data, so waiting tasks must never fill it ([[FlightEdgeServer]]
+  * passes a quarter of its threads). `maxPutDrainBytes`: how much parameter data one DoPut may
+  * send, all of it ignored. `putDrainTimeoutMs`: how long one DoPut may wait for its first message
+  * and its data.
   */
 final class FlightProducerImpl(
     router: FlightSqlRouter,
-    preparedIdleTtlSec: Long
+    preparedIdleTtlSec: Long,
+    maxPutDrains: Int = FlightProducerImpl.DefaultMaxPutDrains,
+    maxPutDrainBytes: Long = FlightProducerImpl.DefaultMaxPutDrainBytes,
+    putDrainTimeoutMs: Long = FlightProducerImpl.DefaultPutDrainTimeoutMs
 ) extends NoOpFlightSqlProducer
     with LazyLogging:
 
   private val allocator: BufferAllocator = new RootAllocator()
+
+  private val putDrainSlots = new java.util.concurrent.Semaphore(maxPutDrains)
 
   /** DEBUG statement logging must never leak a SQL admin dialect password literal (`CREATE USER ...
     * PASSWORD '...'`, `ALTER USER ... PASSWORD '...'`): those statements are otherwise logged
@@ -216,14 +228,46 @@ final class FlightProducerImpl(
       -1L
     )
 
-  /** Diagnostic-only override: logs the DoGet peer + ticket shape before forwarding to the
-    * FlightSqlProducer dispatcher.
+  /** An anonymous peer ([[AnonymousCallGuard]]) gets server metadata only: GetSqlInfo and
+    * GetXdbcTypeInfo, what ODBC asks before it replays its bearer, in a command the guard has
+    * limited to about [[FlightProducerImpl.MaxAnonymousCommandBytes]]. Anything else, static
+    * metadata included, needs a credential.
+    */
+  private def refuseAnonymous(
+      context: FlightProducer.CallContext,
+      command: => Array[Byte]
+  ): Unit =
+    val peer = Option(context.peerIdentity()).getOrElse("")
+    if peer.startsWith(FlightEdgeServer.AnonymousPeerPrefix) then
+      val bytes   = command
+      val allowed = scala.util
+        .Try(ProtoAny.parseFrom(bytes))
+        .toOption
+        .exists(any =>
+          any.is(classOf[FlightSql.CommandGetSqlInfo]) ||
+            any.is(classOf[FlightSql.CommandGetXdbcTypeInfo])
+        )
+      if !allowed then throw noContext(peer, _ => "no pool bound to session; authenticate first")
+
+  override def getFlightInfo(
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): FlightInfo =
+    refuseAnonymous(
+      context,
+      if descriptor.isCommand then descriptor.getCommand else Array.emptyByteArray
+    )
+    super.getFlightInfo(context, descriptor)
+
+  /** Logs the DoGet peer and ticket shape at DEBUG, and refuses an anonymous peer, before
+    * forwarding to the FlightSqlProducer dispatcher.
     */
   override def getStream(
       context: FlightProducer.CallContext,
       ticket: Ticket,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
+    refuseAnonymous(context, ticket.getBytes)
     if logger.underlying.isDebugEnabled then
       val peer        = Option(context.peerIdentity()).getOrElse("(null)")
       val ticketBytes = ticket.getBytes
@@ -258,12 +302,11 @@ final class FlightProducerImpl(
       .toRuntimeException()
 
   /** #106 signature 1: a stamped write's COMMIT (see the `adapter.StampedCommitArrowReader` doc)
-    * fires from INSIDE `streamArrow`'s `loadNextBatch()` loop, after the statement's own result has
-    * already been streamed to the client, and from DoPut's drain before the update count is
-    * acknowledged ([[ackUpdateResult]]). When that COMMIT loses a genuine DuckLake
-    * optimistic-concurrency race, the exception used to fall into the generic [[internalError]]
-    * bucket: a scary opaque "internal error" for what is, underneath, an ordinary concurrent-write
-    * conflict.
+    * fires from INSIDE `streamArrow`'s `loadNextBatch()` loop, before a Count answer is streamed
+    * ([[streamAfterExhaustion]]), and from DoPut's drain before the update count is acknowledged
+    * ([[ackUpdateResult]]). When that COMMIT loses a genuine DuckLake optimistic-concurrency race,
+    * the exception used to fall into the generic [[internalError]] bucket: a scary opaque "internal
+    * error" for what is, underneath, an ordinary concurrent-write conflict.
     *
     * The matcher below recognizes ONLY DuckLake's known-transient
     * write-write/concurrent-modification signature -- reusing the word check already pinned against
@@ -317,10 +360,9 @@ final class FlightProducerImpl(
     * Of that second bucket, only BEGIN/COMMIT/ROLLBACK/DROP/ALTER (`StatementKind.SkipExecute`
     * territory -- see [[PrepareStrategy.choose]]) actually reach this coercion: the edge advertises
     * `countSchema` for those WITHOUT probing, so a real `Success: BOOLEAN` reply drifts from what
-    * was promised. VACUUM/ANALYZE/SET classify as `StatementKind.Other` -> `FullExecute`, meaning
-    * the edge probes and advertises their REAL schema up front, so advertised and actual always
-    * agree for them and coercion never triggers -- they are DuckDB facts, not statements this code
-    * path handles.
+    * was promised. VACUUM/ANALYZE/SET classify as `StatementKind.Other` -> `Unprobed`, meaning the
+    * edge advertises no schema for them, so nothing is promised and coercion never triggers -- they
+    * are DuckDB facts, not statements this code path handles.
     *
     * The split does not track the classifier's Read/Write/Ddl buckets (CREATE INDEX -> Count but
     * DROP INDEX -> Success), so predicting it per statement kind is a trap, not a fix -- this
@@ -341,12 +383,7 @@ final class FlightProducerImpl(
     * otherwise-silent data loss is at least auditable.
     */
   private[edge] def coerceSuccessToCount(root: VectorSchemaRoot): VectorSchemaRoot =
-    val fields         = root.getSchema.getFields
-    val isSuccessShape =
-      fields.size() == 1 &&
-        fields.get(0).getName == "Success" &&
-        fields.get(0).getType.isInstanceOf[ArrowType.Bool]
-    if !isSuccessShape then root
+    if !isSuccessShape(root) then root
     else
       val coerced = VectorSchemaRoot.create(countSchema, allocator)
       val vec     = coerced.getVector("Count").asInstanceOf[BigIntVector]
@@ -355,6 +392,12 @@ final class FlightProducerImpl(
       vec.setValueCount(1)
       coerced.setRowCount(1)
       coerced
+
+  private def isSuccessShape(root: VectorSchemaRoot): Boolean =
+    val fields = root.getSchema.getFields
+    fields.size() == 1 &&
+    fields.get(0).getName == "Success" &&
+    fields.get(0).getType.isInstanceOf[ArrowType.Bool]
 
   /** Resolve a prepared handle into an executable plan, enforcing two invariants: the calling peer
     * must be the handle's creator (a leaked handle cannot be replayed), and the [[EffectiveSet]] is
@@ -423,7 +466,13 @@ final class FlightProducerImpl(
     liveSession(peer, noContext(peer)) match
       case Right((ConnectionContext.Entry(poolKey, connId, user, _, _), eff)) =>
         // Registers the handle and answers the Prepare with the advertised schema (None: absent).
-        def prepared(schema: Option[Schema], node: Option[String], durationMs: Option[Long]) =
+        // `answered` is what the Prepare result itself says, when it differs from `schema`.
+        def prepared(
+            schema: Option[Schema],
+            node: Option[String],
+            durationMs: Option[Long],
+            answered: Option[ByteString] = None
+        ) =
           val handle = java.util.UUID.randomUUID().toString
           preparedStatements.put(
             handle,
@@ -441,7 +490,9 @@ final class FlightProducerImpl(
           val resp = FlightSql.ActionCreatePreparedStatementResult
             .newBuilder()
             .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
-            .setDatasetSchema(schema.map(serializeSchema).getOrElse(ByteString.EMPTY))
+            .setDatasetSchema(
+              answered.getOrElse(schema.map(serializeSchema).getOrElse(ByteString.EMPTY))
+            )
             // The ODBC driver throws on an ABSENT parameter_schema, so advertise
             // zero parameters explicitly via the empty schema.
             .setParameterSchema(emptySchemaBytes)
@@ -473,10 +524,17 @@ final class FlightProducerImpl(
             // SQL admin mutation, which always delivers (status, detail) - advertise
             // adminStatusSchema instead (see its doc for the incident this fixes). Not executed
             // here either way - only the schema advertised at Prepare differs.
-            val skipSchema =
-              if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then adminStatusSchema
-              else countSchema
-            prepared(Some(skipSchema), None, None)
+            //
+            // A Count result answers Prepare itself with zero fields, while GetFlightInfo and
+            // GetSchema keep advertising Count. The Arrow JDBC driver decides from this answer
+            // alone: with Count it takes the write for a query, and Statement.executeUpdate
+            // returns -1 without reading the count from its result set. With zero fields it goes
+            // through DoPut and gets the count. The answer is present rather than absent as the
+            // ODBC driver refuses an absent parameter_schema; it reads the result schema from
+            // FlightInfo and GetSchema, like ADBC.
+            if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
+              prepared(Some(adminStatusSchema), None, None)
+            else prepared(Some(countSchema), None, None, answered = Some(emptySchemaBytes))
 
           case PrepareStrategy.Unprobed =>
             // No node call: running the text to read its schema would run its effects, and the
@@ -531,8 +589,9 @@ final class FlightProducerImpl(
         // The ODBC driver reads the result schema from FlightInfo.schema (not the
         // GetSchema RPC): a null here breaks Power BI, and the cached Prepare-time
         // schema matches the DoGet stream so ADBC's mismatch guard stays happy. An unprobed
-        // statement has no schema to give: absent (null) lets ADBC and JDBC take the stream's,
-        // where a zero-field schema would fail ADBC's guard.
+        // statement has no schema to give: absent (null) lets ADBC take the stream's, where a
+        // zero-field schema would fail its guard. The Arrow JDBC driver never gets here for one:
+        // it reads the absent schema as an update and goes through DoPut, so it sees no rows.
         new FlightInfo(
           p.datasetSchema.orNull,
           descriptor,
@@ -904,9 +963,87 @@ final class FlightProducerImpl(
   ): Unit =
     emitEmpty(Schemas.GET_CROSS_REFERENCE_SCHEMA, listener)
 
+  /** Every DoPut starts here. Arrow's own acceptPut parses the command of the stream's first
+    * message, and it waits for that message with no time limit, past the client's disconnect
+    * (`FlightStream` completes its descriptor only from a message). So the session is checked
+    * before any wait; then one slot and one deadline cover the wait and the drain. A task that gets
+    * past them re-checks its session and runs its statement holding no slot.
+    */
+  override def acceptPut(
+      context: FlightProducer.CallContext,
+      flightStream: FlightStream,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Runnable =
+    val peer     = Option(context.peerIdentity()).getOrElse("anonymous")
+    val admitted =
+      liveSession(peer, noContext(peer, _ => "no pool bound to session; authenticate first"))
+        .flatMap(_ =>
+          withinPutLimits(flightStream, arrowAcceptPut(context, flightStream, ackStream))
+        )
+    admitted match
+      case Right(task) => task
+      case Left(err)   => () => ackStream.onError(err)
+
+  private def arrowAcceptPut(
+      context: FlightProducer.CallContext,
+      flightStream: FlightStream,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Runnable = super.acceptPut(context, flightStream, ackStream)
+
+  /** `firstMessage` then the drain, under a slot and a deadline. Left when no slot is free, when
+    * the client sends more than `maxPutDrainBytes`, or at the deadline. A failure of the stream
+    * itself (its client gone, an unknown command) propagates to Arrow, which answers it on the ack
+    * stream.
+    */
+  private def withinPutLimits(
+      flightStream: FlightStream,
+      firstMessage: => Runnable
+  ): Either[Throwable, Runnable] =
+    if !putDrainSlots.tryAcquire() then
+      Left(
+        CallStatus.UNAVAILABLE
+          .withDescription("too many concurrent updates; retry")
+          .toRuntimeException()
+      )
+    else
+      try
+        FlightProducerImpl
+          .interruptAfter(putDrainTimeoutMs) {
+            val task = firstMessage
+            drainPutStream(flightStream, 0L).map(_ => task)
+          }
+          .getOrElse(
+            Left(
+              CallStatus.TIMED_OUT
+                .withDescription(s"no data from the client within $putDrainTimeoutMs ms")
+                .toRuntimeException()
+            )
+          )
+      finally putDrainSlots.release()
+
+  /** Drain and discard the DoPut request stream: half-closing without reading the client's
+    * parameter batches breaks its in-flight write ("UNAVAILABLE: io exception").
+    */
+  @scala.annotation.tailrec
+  private def drainPutStream(flightStream: FlightStream, seen: Long): Either[Throwable, Unit] =
+    if !flightStream.next() then Right(())
+    else
+      val batch =
+        if flightStream.hasRoot then
+          flightStream.getRoot.getFieldVectors.asScala.map(_.getBufferSize.toLong).sum
+        else 0L
+      val total = seen + math.max(batch, FlightProducerImpl.MinBatchBytes)
+      if total > maxPutDrainBytes then
+        Left(
+          CallStatus.INVALID_ARGUMENT
+            .withDescription("bound parameters are not supported")
+            .toRuntimeException()
+        )
+      else drainPutStream(flightStream, total)
+
   /** Literal executeUpdate entrypoint: run the SQL through the router and ack the affected-row
-    * count as a DoPutUpdateResult. No bound parameters are supported, so `flightStream` is drained,
-    * never read.
+    * count as a DoPutUpdateResult. Bound parameters are never read: [[acceptPut]] has already
+    * drained `flightStream`, so this does not touch it.
     */
   override def acceptPutStatement(
       command: FlightSql.CommandStatementUpdate,
@@ -918,7 +1055,6 @@ final class FlightProducerImpl(
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
     new Runnable:
       def run(): Unit =
-        drainPutStream(flightStream)
         liveSession(
           peer,
           noContext(peer, _ => "no pool bound to session; authenticate first")
@@ -935,7 +1071,8 @@ final class FlightProducerImpl(
 
   /** Prepared-update entrypoint: Arrow JDBC / ADBC / DBeaver prepare every statement, so literal
     * DML lands here rather than [[acceptPutStatement]]. Replays the Prepare-time SQL and acks the
-    * count. Literal updates only: bound parameters are never read.
+    * count. Literal updates only: bound parameters are never read, as [[acceptPut]] has already
+    * drained `flightStream`, so this does not touch it.
     */
   override def acceptPutPreparedStatementUpdate(
       command: FlightSql.CommandPreparedStatementUpdate,
@@ -946,7 +1083,6 @@ final class FlightProducerImpl(
     val handle = command.getPreparedStatementHandle.toStringUtf8
     new Runnable:
       def run(): Unit =
-        drainPutStream(flightStream)
         resolvePreparedCall(handle, context) match
           case Left(err) => ackStream.onError(err)
           case Right(p)  =>
@@ -970,13 +1106,6 @@ final class FlightProducerImpl(
               ackStream,
               "acceptPutPreparedStatementUpdate"
             )
-
-  /** Drain and discard the DoPut request stream: half-closing without reading the client's
-    * parameter batches breaks its in-flight write ("UNAVAILABLE: io exception"). `null` only in
-    * unit tests, which drive run() directly.
-    */
-  private def drainPutStream(flightStream: FlightStream): Unit =
-    if flightStream != null then while flightStream.next() do ()
 
   /** Shared tail of the two update entrypoints: outcome -> DoPutUpdateResult ack or typed error on
     * the ack stream. Closes the result either way.
@@ -1007,24 +1136,31 @@ final class FlightProducerImpl(
       case scala.util.Failure(t) =>
         ackStream.onError(internalError(label, t))
 
-  /** Drain `reader` to exhaustion and return the affected-row count: DuckDB's single-row Count cell
-    * of the first batch, or -1 (accepted by FlightSQL clients as "unknown"). A failure to read the
-    * stream (the deferred COMMIT among them) propagates; only an unreadable count cell is -1.
+  /** Drain `reader` to exhaustion and return the affected-row count: see [[updateCountOf]]. A
+    * failure to read the stream (the deferred COMMIT among them) propagates.
+    *
+    * Never -1, though FlightSQL defines it as "unknown". The Arrow JDBC driver hands the value to
+    * Avatica, where -1 means "no count, open a result set". On a prepared statement that signature
+    * is null, so the client hits an NPE. On a plain statement the result set fails, Avatica retries
+    * the statement, and each of its 5 attempts runs it again through DoPut and DoGet (issue 170).
     */
   private def drainUpdateCount(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
-    if reader.loadNextBatch() then
-      val root  = reader.getVectorSchemaRoot
-      val count =
-        try
-          if root.getRowCount >= 1 && !root.getFieldVectors.isEmpty then
-            root.getFieldVectors.get(0).getObject(0) match
-              case n: java.lang.Number => n.longValue()
-              case _                   => -1L
-          else -1L
-        catch case _: Throwable => -1L
-      while reader.loadNextBatch() do ()
-      count
-    else -1L
+    var count = 0L
+    while reader.loadNextBatch() do count += updateCountOf(reader.getVectorSchemaRoot).max(0L)
+    count
+
+  /** What one batch adds to the count: DuckDB's `Count` cell, 0 for its `Success` answer ("ran,
+    * produced no count", as in [[coerceSuccessToCount]]), and the rows of any other result. Only
+    * the `Count` column carries a count: the first cell of a `RETURNING id` is an id.
+    */
+  private def updateCountOf(root: VectorSchemaRoot): Long =
+    val fields = root.getSchema.getFields
+    if isSuccessShape(root) then 0L
+    else if fields.size() == 1 && fields.get(0).getName == "Count" && root.getRowCount >= 1 then
+      root.getVector(0).getObject(0) match
+        case n: java.lang.Number => n.longValue()
+        case _                   => root.getRowCount.toLong
+    else root.getRowCount.toLong
 
   /** Ack the update count; the buffer is released only after onNext + onCompleted have consumed it.
     */
@@ -1524,45 +1660,18 @@ final class FlightProducerImpl(
     * legitimately abandon streams mid-flight, and pumping batches into a cancelled gRPC stream
     * wastes node reads and spams netty warnings.
     *
-    * `advertisedWasCount` is true when the caller advertised [[countSchema]] for this statement
-    * (see [[coerceSuccessToCount]]'s doc for why); when the node's first batch turns out to be the
-    * single-row `Success: BOOLEAN` shape instead, the coerced Count row is streamed in its place
-    * and any further node batches are drained unread (there should be none for a single-row
-    * result).
+    * `advertisedWasCount` is true when the caller advertised [[countSchema]] for this statement:
+    * see [[streamAfterExhaustion]].
     */
   private[edge] def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
       listener: FlightProducer.ServerStreamListener,
       advertisedWasCount: Boolean = false
   ): Unit =
-    val root: VectorSchemaRoot = reader.getVectorSchemaRoot
-    var hasMore                = reader.loadNextBatch()
-    // Schema is known independently of hasMore (a Success:BOOLEAN result can report zero
-    // materialized rows - see coerceSuccessToCount's doc), so the coercion check does not gate on
-    // hasMore; it only matters for the untouched pass-through branch below.
-    val toStream: VectorSchemaRoot =
-      if advertisedWasCount then coerceSuccessToCount(root) else root
-    if toStream ne root then
-      // Minor-risk audit trail (see coerceSuccessToCount's doc): this shape is assumed impossible
-      // for a genuine result carrying real rows, but if it ever isn't, warn instead of silently
-      // discarding data. firstBatchRows is read BEFORE the drain loop refills the same root.
-      val firstBatchRows = root.getRowCount
-      try
-        listener.start(toStream)
-        if !listener.isCancelled() then listener.putNext()
-        var laterBatchHadRows = false
-        while reader.loadNextBatch() && !listener.isCancelled() do
-          if root.getRowCount > 0 then laterBatchHadRows = true
-        if firstBatchRows > 1 || laterBatchHadRows then
-          logger.warn(
-            "coerceSuccessToCount discarded a Success:BOOLEAN result carrying real row data " +
-              s"(firstBatchRows=$firstBatchRows, laterBatchHadRows=$laterBatchHadRows) - a " +
-              "statement legitimately returning rows under this exact shape would silently lose " +
-              "them; see coerceSuccessToCount's doc"
-          )
-        listener.completed()
-      finally toStream.close()
+    if advertisedWasCount then streamAfterExhaustion(reader, listener)
     else
+      val root: VectorSchemaRoot = reader.getVectorSchemaRoot
+      var hasMore                = reader.loadNextBatch()
       listener.start(root)
       if !hasMore then
         // Empty result set: emit a zero-row batch so the client receives the
@@ -1573,3 +1682,103 @@ final class FlightProducerImpl(
         listener.putNext()
         hasMore = reader.loadNextBatch()
       listener.completed()
+
+  /** Answer a statement advertised as [[countSchema]] only once its stream is exhausted, which is
+    * what fires a stamped write's deferred COMMIT (`adapter.StampedCommitArrowReader`). The Arrow
+    * JDBC driver returns from `executeUpdate` as soon as it holds the first batch and never reads
+    * further, so with the Count row sent first its next statement could run before the COMMIT
+    * (`Table with name ... does not exist` right after the CTAS that created it), and a COMMIT that
+    * failed reached nobody: a rolled-back write looked like a success (issue 170). A failure here
+    * propagates to the caller before anything is sent.
+    *
+    * Holding the batches is cheap: such a statement answers one row. A node reply of the
+    * `Success: BOOLEAN` shape is coerced ([[coerceSuccessToCount]]) and its rows dropped, with a
+    * WARN if it carried real data.
+    */
+  private def streamAfterExhaustion(
+      reader: org.apache.arrow.vector.ipc.ArrowReader,
+      listener: FlightProducer.ServerStreamListener
+  ): Unit =
+    val root    = reader.getVectorSchemaRoot
+    val batches = scala.collection.mutable.ListBuffer.empty[ArrowRecordBatch]
+    try
+      while reader.loadNextBatch() do batches += new VectorUnloader(root).getRecordBatch
+      val coerced = coerceSuccessToCount(root)
+      if coerced ne root then
+        try
+          val rows = batches.iterator.map(_.getLength.toLong).sum
+          if rows > 1 then
+            logger.warn(
+              s"coerceSuccessToCount discarded a Success:BOOLEAN result carrying real row data " +
+                s"($rows rows) - a statement legitimately returning rows under this exact shape " +
+                "would silently lose them; see coerceSuccessToCount's doc"
+            )
+          listener.start(coerced)
+          if !listener.isCancelled() then listener.putNext()
+          listener.completed()
+        finally coerced.close()
+      else
+        // The held batches share the reader's buffers, which Arrow only lets vectors of an allocator
+        // with the same root take over.
+        val owner = root.getFieldVectors.asScala.headOption.fold(allocator)(_.getAllocator)
+        val out   = VectorSchemaRoot.create(root.getSchema, owner)
+        try
+          listener.start(out)
+          if batches.isEmpty then
+            out.setRowCount(0)
+            listener.putNext()
+          val loader = new VectorLoader(out)
+          for batch <- batches if !listener.isCancelled() do
+            loader.load(batch)
+            listener.putNext()
+          listener.completed()
+        finally out.close()
+    finally batches.foreach(_.close())
+
+object FlightProducerImpl:
+  val DefaultMaxPutDrains: Int       = 128
+  val DefaultMaxPutDrainBytes: Long  = 16777216L
+  val DefaultPutDrainTimeoutMs: Long = 30000L
+
+  /** The least a batch counts for, so that empty batches are bounded too. */
+  private val MinBatchBytes: Long = 1024L
+
+  /** Runs `body` on this thread and interrupts it if `body` is still running after `ms`. A failure
+    * of `body` after the deadline fired is the deadline's: None. No interrupt outlives this method:
+    * the lock orders the interrupt against the end of `body`, so one that fired is always cleared
+    * here.
+    */
+  private def interruptAfter[A](ms: Long)(body: => A): Option[A] =
+    val thread = Thread.currentThread()
+    val lock   = new Object
+    var open   = true
+    var fired  = false
+    val timer  = new java.util.concurrent.CompletableFuture[Unit]()
+      .orTimeout(ms, java.util.concurrent.TimeUnit.MILLISECONDS)
+    timer.whenComplete { (_, failure) =>
+      if failure != null then
+        lock.synchronized {
+          if open then
+            fired = true
+            thread.interrupt()
+        }
+    }
+    try
+      try Some(body)
+      catch case scala.util.control.NonFatal(_) if lock.synchronized(fired) => None
+    finally
+      lock.synchronized {
+        open = false
+        if fired then Thread.interrupted()
+      }
+      timer.complete(())
+
+  /** The largest command an anonymous peer may send, which [[AnonymousCallGuard]] applies: several
+    * times what every id GetSqlInfo defines takes. GetSqlInfo answers a row per id listed, repeats
+    * included, in Arrow memory that no limit covers, and goes on after its client left: one
+    * anonymous call listing 16 million ids, a 16 MiB message, took the JVM from 373 to 2295 MiB and
+    * held its thread for 4 s after the client left. Its place stays held while `send` runs, as the
+    * end of a call queues behind its handler, so what the limit on calls at once bounds is that
+    * many such calls.
+    */
+  val MaxAnonymousCommandBytes: Int = 4096

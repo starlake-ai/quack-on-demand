@@ -78,6 +78,14 @@ class DescriptionSpec extends AnyFlatSpec with Matchers:
     Description.decode(bytes("[]")).isLeft shouldBe true
   }
 
+  it should "refuse a nested value without printing it" in {
+    val nested = "[" * 32000 + "]" * 32000
+    // The decoder reads `statement` first, and a String decoder prints the value it refuses.
+    val left = Description.decode(bytes(s"""{"v":1,"statement":$nested}"""))
+    left.isLeft shouldBe true
+    left.left.toOption.get should not include "[["
+  }
+
   "ScreenDescription.decode" should "read the contract's screen description v1" in {
     val screen =
       """{"locations":[{"access":"read","given":"s3://acme-etl/in/*.csv","resolved":"s3://acme-etl/in/*.csv","via":"read_csv"}],"v":1}"""

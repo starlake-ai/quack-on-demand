@@ -86,6 +86,8 @@ object FlightEdgeHarness:
     *   independently.
     * @param shutdown
     *   Stops the server and releases the allocator. Idempotent.
+    * @param queuedTasks
+    *   The tasks waiting for a Flight thread now.
     */
   final case class Harness(
       host: String,
@@ -93,7 +95,8 @@ object FlightEdgeHarness:
       allocator: RootAllocator,
       shutdown: () => Unit,
       supervisor: PoolSupervisor,
-      router: FlightSqlRouter
+      router: FlightSqlRouter,
+      queuedTasks: () => Int
   ):
     /** Build a fresh [[FlightClient]] pointed at this harness.
       *
@@ -143,13 +146,17 @@ object FlightEdgeHarness:
     * @param authService
     *   the authentication service the edge validates credentials with, in place of the in-memory
     *   one `enableProviders` configures (e.g. a real chain over a stub identity provider).
+    * @param edgeConfig
+    *   changes the edge's configuration (the message and header limits, for one) before the server
+    *   starts; the harness's own host, port and TLS settings are what it receives.
     */
   def boot(
       store: InMemoryControlPlaneStore,
       enableProviders: Boolean = true,
       tls: Boolean = false,
       wiring: RouterWiring,
-      authService: Option[AuthenticationService] = None
+      authService: Option[AuthenticationService] = None,
+      edgeConfig: EdgeConfig => EdgeConfig = identity
   ): Harness =
     val port = ephemeralPort()
     val host = "127.0.0.1"
@@ -160,13 +167,15 @@ object FlightEdgeHarness:
     val certPath = certDir.resolve("server-cert.pem").toString
     val keyPath  = certDir.resolve("server-key.pem").toString
 
-    val cfg = EdgeConfig(
-      host = host,
-      port = port,
-      tlsEnabled = tls,
-      tlsCertChain = certPath,
-      tlsPrivateKey = keyPath,
-      sessionTtlSec = 3600L
+    val cfg = edgeConfig(
+      EdgeConfig(
+        host = host,
+        port = port,
+        tlsEnabled = tls,
+        tlsCertChain = certPath,
+        tlsPrivateKey = keyPath,
+        sessionTtlSec = 3600L
+      )
     )
 
     val tracker = new NodeLoadTracker
@@ -240,5 +249,6 @@ object FlightEdgeHarness:
         allocator.close()
       },
       supervisor = sup,
-      router = router
+      router = router,
+      queuedTasks = () => srv.queuedTasks
     )

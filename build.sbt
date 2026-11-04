@@ -262,6 +262,7 @@ lazy val root = (project in file("."))
       Dependencies.caffeine,
       Dependencies.jakartaMail,
       Dependencies.scalaTest,
+      Dependencies.flightSqlJdbc,
       Dependencies.wireMock,
       Dependencies.http4sBlazeClient % Test
     ),
@@ -303,15 +304,22 @@ lazy val root = (project in file("."))
     // Arrow Flight's arrow-memory-unsafe allocator reflects into java.nio
     // internals (Buffer.address etc.), which Java 17+ blocks under JPMS.
     // sbt run / sbt test must fork so javaOptions take effect.
+    //
+    // io.netty.tryReflectionSetAccessible makes Netty count its direct buffers apart from the JDK's
+    // (it needs the java.nio opens above): Main sets it too, before any Netty class loads, which is
+    // all a launch from the jar has, and the forked JVMs get it so that the suite runs what
+    // production runs.
     Compile / run / fork := true,
     Test / fork          := true,
     Compile / run / javaOptions ++= Seq(
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
-      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "-Dio.netty.tryReflectionSetAccessible=true"
     ),
     Test / javaOptions ++= Seq(
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
-      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "-Dio.netty.tryReflectionSetAccessible=true"
     ),
     // libquackwire links libduckdb through an rpath that only exists on the build machine, so the
     // forked test JVM relies on LibDuckDbPreload finding the pinned copy (macOS SIP strips DYLD_*

@@ -190,7 +190,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
 
   "health" should "report counts" in:
     val (sup, _, _) = fixture
-    val handler     = new HealthHandler(sup)
+    val handler     = new HealthHandler(sup, () => true)
     val out         = handler.health.unsafeRunSync()
     out shouldBe a[Right[_, _]]
     out.toOption.get.poolsCount shouldBe 1

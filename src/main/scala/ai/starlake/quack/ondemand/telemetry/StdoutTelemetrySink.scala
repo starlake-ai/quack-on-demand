@@ -114,7 +114,10 @@ final class StdoutTelemetrySink(
       case Some(typed) if e.family == "auth" && e.outcome != "ok" =>
         val name = pseudonym(typed)
         e.copy(
-          actor = if e.actor == typed then name else e.actor,
+          // AuditRecorder.restAs cuts the actor at 256 characters and a detail value at 1024, so
+          // the actor of a login failure is a prefix of the typed name, not equal to it, when the
+          // name is long (a pasted token is).
+          actor = if typed.startsWith(e.actor) then name else e.actor,
           tenant = e.tenant.map(pseudonym),
           detail = detail.updated("username", name)
         )

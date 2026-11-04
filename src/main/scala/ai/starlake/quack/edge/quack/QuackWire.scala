@@ -48,6 +48,9 @@ object QuackWire:
 
   private val Terminator = 0xffff
 
+  private val TruncatedMessage = "truncated message"
+  private val TruncatedString  = "truncated string"
+
   final case class Header(msgType: Int, connectionId: String, clientQueryId: Long)
 
   /** A framed message: the decoded header plus the offset where the body object starts. */
@@ -87,7 +90,7 @@ object QuackWire:
     var pos: Int = 0
 
     private def next(): Int =
-      if pos >= bytes.length then throw DecodeError("truncated message")
+      if pos >= bytes.length then throw DecodeError(TruncatedMessage)
       else
         val b = bytes(pos) & 0xff
         pos += 1
@@ -128,7 +131,7 @@ object QuackWire:
     def string(): String =
       val len = varintU()
       if len < 0 || len > Int.MaxValue || pos + len > bytes.length then
-        throw DecodeError("truncated string")
+        throw DecodeError(TruncatedString)
       else
         val s = new String(bytes, pos, len.toInt, UTF_8)
         pos += len.toInt
@@ -239,6 +242,22 @@ object QuackWire:
     if msgType < 0 then throw DecodeError("header without a message type")
     else Frame(Header(msgType, connId, clientQid), r.pos, bytes)
   }
+
+  /** What the first bytes of a message say about its header. */
+  enum HeaderPeek:
+    case Complete(header: Header)
+    case NeedMore
+    case Malformed
+
+  /** The header of a message of which only the first bytes may have arrived. A decode that ran off
+    * the end asks for more; any other failure is malformed.
+    */
+  def peekHeader(bytes: Array[Byte]): HeaderPeek =
+    frame(bytes) match
+      case Right(f) => HeaderPeek.Complete(f.header)
+      case Left(e) if e.message == TruncatedMessage || e.message == TruncatedString =>
+        HeaderPeek.NeedMore
+      case Left(_) => HeaderPeek.Malformed
 
   private def bodyReader(f: Frame): Reader =
     val r = new Reader(f.bytes)

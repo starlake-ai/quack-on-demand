@@ -123,12 +123,68 @@ count. To keep counts from a user, refuse on the table.
   are counted only for a table the branch modified. The Merge column says `cannot be merged` of a
   table listed under table conflicts, where it said `ok`.
 
+## 0.11.1
+
+### FlightSQL: limits before a credential
+
+**Upgrade if clients you do not trust can reach the FlightSQL port.** On 0.11.0 and earlier, any
+client that reaches it can halt the manager, with no credentials and no account: calls that never
+finish held a thread each until the container was killed out of memory, or filled the heap until the
+process stayed up and answered nothing. Until you upgrade, keep that port behind your network.
+
+What a client can now see, most of it only when it sends no working credential:
+
+- **A call with no credentials reaches server metadata and nothing else:** `GetSqlInfo` and
+  `GetXdbcTypeInfo`, which the Arrow Flight SQL ODBC driver behind Power BI and Excel asks for before
+  it presents its credentials. Any other call answers `UNAUTHENTICATED`, including static metadata
+  such as `GetTableTypes`, which used to answer, and a `Handshake` with no credentials: send
+  credentials on every call. `ListFlights` still answers `UNIMPLEMENTED`. Such a call has a command of
+  at most about 4 KiB, may not be compressed, and at most 256 run at once
+  (`PROXY_MAX_ANONYMOUS_CALLS`; past that `UNAVAILABLE`, "too many calls with no credentials; retry").
+- **A connection that has not shown a working credential is held to little:** at most 8 streams open
+  (`MAX_CONCURRENT_STREAMS`, raised once it shows one), 16 in all, `PROXY_MAX_HEADER_BYTES` plus
+  16 KiB read (80 KiB by default), and 60 s. The first call with a working credential lifts all of
+  it. A client that sends credentials on its first call sees no difference, with these exceptions:
+  - A connection making only calls with no working credential is closed after 16 calls or 60 s, and
+    the client reconnects on its next call.
+  - A first statement over about 80 KiB pauses until its credential is checked. If the credential is
+    missing or fails, the client waits up to 60 s or its own deadline and reads `UNAVAILABLE`, not
+    `UNAUTHENTICATED`.
+  - A proxy opening more than 8 streams on a new upstream connection, before it reads the server's
+    SETTINGS, can lose that connection.
+- **New connections can be refused.** At most `PROXY_MAX_UNAUTHENTICATED_CONNECTIONS` (1024)
+  connections can be in that state at once, and no more than fit a tenth of the heap: 76 with TLS and
+  44 without at a 2 GiB heap, 38 and 22 at 1 GiB. The next one is closed at once, before TLS, and the
+  client reads a connection error (JDBC's `getConnection` throws): retry. A connection that has shown
+  a credential does not count. Boot prints a line only when the variable was set above what fits.
+- **The edge runs on a fixed pool,** `PROXY_FLIGHT_THREADS` (512, at least 16), where it started a
+  thread per call with no limit. A call holds a thread while it streams its results, and past that
+  number calls wait. While more tasks wait for a thread than the pool has threads, or than fit a
+  twentieth of the heap, a new connection is closed at once as above, with or without a credential.
+  Raise it if you run more calls than that at once.
+- **A DoPut waits within limits:** at most a quarter of `PROXY_FLIGHT_THREADS` wait for their data at
+  once (past that `UNAVAILABLE`, "too many concurrent updates; retry"), each for 30 s (`TIMED_OUT`),
+  for at most 16 MiB of data (`INVALID_ARGUMENT`, "bound parameters are not supported"). JDBC and ADBC
+  half-close at once and are unaffected. Arrow Java's literal `FlightSqlClient.executeUpdate` reads
+  its answer before it half-closes, so it gets `TIMED_OUT` after 30 s, where it used to wait for good.
+
+Known limits. A flood of wrong passwords, or of bearer tokens naming a tenant whose identity provider
+hangs, holds the edge's threads, so FlightSQL calls wait and new connections are refused for every
+tenant while it lasts. Clients retrying a wrong password can also make a correct login fail after 5 s
+with `UNAUTHENTICATED`, "Authentication failed: database: Database error", as on 0.11.0: retry, and
+look for the client sending the wrong password. A few silent connections a second keep new connections
+out; connections that have shown a credential go on working, though a flood can slow them. A client
+with a valid login is not held to any of these limits and can still fill the heap. Behind an HTTP/2
+proxy the connection limits apply per upstream connection. None of these refusals is logged or counted.
+Keep the port behind your network where that matters. On a network you do not trust, put a gRPC-aware
+proxy with stream and per-address connection limits in front of it.
+
 ## 0.11.0
 
 ### Upgrading from 0.10.x (read first)
 
 0.11.0 moves every authorization decision into the node. It is not a drop-in upgrade: a manager
-still carrying a removed setting refuses to boot, every node must restart, and tenant users lose
+still carrying some removed settings refuses to boot, every node must restart, and tenant users lose
 access the old switches used to grant. Work through these steps in order; the sections below give
 the details.
 
@@ -138,41 +194,168 @@ Before upgrading:
    the `qodstate_pool.lockdown` column the previous release reads.
 2. Replace the static API key: mint PATs for automation (`qod login`, then `qod auth pat create`),
    point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every
-   environment, chart value and Compose file. A manager with it set refuses to boot.
+   environment, chart value and Compose file. A manager with it set ignores it and warns at boot, so
+   whatever still sends it stops working.
 3. Unset `QOD_ACL_ENABLED`, `QOD_ACL_FILTERED_METADATA`, `QOD_ACL_DIALECT` and `QOD_NODE_LOCKDOWN`
    everywhere (`qod setup --unset <NAME>` for a persisted one), with their HOCON keys
-   (`quack-flightsql.acl.*`, `quack-flightsql.nodeLockdown`): boot refuses each of them, in either
-   form. Drop the Helm values `security.aclEnabled` and `security.nodeLockdown` too: the chart no
-   longer reads them, so they change nothing, but the same variables set through the chart's `env`
-   are refused at boot like any other.
+   (`quack-flightsql.acl.*`, `quack-flightsql.nodeLockdown`): boot refuses
+   `QOD_ACL_FILTERED_METADATA` and `QOD_ACL_DIALECT` at any value, and the other two when set to
+   off (any other value only warns), in either form. Drop the Helm values `security.aclEnabled`
+   and `security.nodeLockdown` too: the chart no longer reads them, so they change nothing, but the
+   same variables set through the chart's `env` are refused at boot like any other.
 4. Grant tenant users what they read: enforcement can no longer be turned off, and per-pool
    lockdown is gone.
 5. On OPA tenants, update the policies for the node's input (`columns`, `via`, `locations`).
 6. If users load files, set `QOD_TENANT_FILES_ROOT`, and list in `QOD_USER_S3_ALLOWED_ENDPOINTS`
    any endpoint other than AWS that users' own S3 keys target.
-7. In fleet mode set `QOD_INTERNAL_URL` on every manager; on Kubernetes without the chart set
-   `QOD_POD_IP`. Under HA, set `QOD_NODE_KEY_SECRET` to the same value on every replica, or leave
-   it unset on all.
+7. In fleet mode set `QOD_INTERNAL_URL` on every manager, on the node verdict listener's port (the
+   REST port + 1 by default, `QOD_INTERNAL_PORT`), and let the servers reach that port, and only
+   them: a client that reaches it can hold its connection slots, which stops authorization (see
+   "Limits on unauthenticated work"). Name this host's own address in the URL, as a literal, and the
+   listener binds only that address; with another host name it binds where REST binds. Boot refuses
+   a URL naming the REST port. On Kubernetes, with or without the chart, nodes call port 20901: set
+   `networkPolicy.enabled=true`, or any pod can hold its slots, and open it to node pods alone in any
+   policy of your own. Without the chart also set `QOD_POD_IP`. Under HA, set `QOD_NODE_KEY_SECRET`
+   to the same value on every replica, or leave it unset on all.
+8. On every runtime the REST port + 1 (20901 by default) must be free, or set `QOD_INTERNAL_PORT`:
+   the node verdict listener binds it, and two managers on one host on consecutive REST ports are
+   the likeliest clash. `run-jar.sh` and `run-jar.ps1` check it before they start.
+9. Run the manager on JDK 21 or later (`java -jar`, `run-jar.sh`; the image has it). An older JDK
+   boots with a warning.
+10. The REST port now refuses a request line or a header block over 8 KiB (`431
+    headers_too_large`), which a browser with many cookies on the manager's host can reach,
+    including on `localhost`, where every port shares them: `QOD_REST_MAX_HEADER_BYTES` raises it.
+11. A proxy in front that re-sends a POST as chunked gets `411` on login and the other public
+    routes: it must send a `Content-Length`.
+12. A `JAVA_OPTS` in a container's environment or the chart's `env` now takes effect (the image
+    ignored it), and `docker-compose.yml` and `scripts/docker/run-docker.sh` pass on the
+    `JAVA_OPTS` of the shell that runs them: check yours.
+13. With the chart the heap becomes 2 GiB and direct memory 512 MiB (`javaOpts`; both were 1 GiB).
+    With a memory limit under 3Gi set `javaOpts` first, or the kernel kills the pod. Review any
+    `env.JAVA_OPTS`: it takes effect now, and replaces `javaOpts`.
+14. `helm upgrade` fails on `env.QOD_INTERNAL_URL` (at any replica count), `env.QOD_INTERNAL_PORT`
+    and `env.QOD_POD_IP`: the chart sets the pod's address and the listener's port itself, so unset
+    them.
+15. Read "Limits on unauthenticated work" below for the rest: the `/metrics` scrape shared for 4 s,
+    the audit rows that changed (alert rules that count them), the identity provider and OPA
+    exchange limits (and `net.ipv4.tcp_tw_reuse` on Linux), each HTTPS OPA call now a TLS
+    handshake, and the 300 s a front door message has to arrive in.
 
 During the upgrade:
 
-8. Upgrade every HA replica together: scale to one replica or use a `Recreate` rollout, since
-   `0055` drops a column the previous release reads.
-9. Upgrade the `qod` CLI with the manager, and in fleet mode upgrade `qod` on every server.
+16. Upgrade every HA replica together: scale to one replica or use a `Recreate` rollout, since
+    `0055` drops a column the previous release reads.
+17. Upgrade the `qod` CLI with the manager, and in fleet mode upgrade `qod` on every server.
 
 After upgrading:
 
-10. Restart every node. Nodes speak protocol 6 with session handle v4; a node started by an earlier
+18. Restart every node. Nodes speak protocol 6 with session handle v4; a node started by an earlier
     release, or an earlier node image, does not work with this manager. On Kubernetes pull this
     release's node image.
-11. Read the boot log. Review the WARNs about untrusted initSql and `sql` federation sources (a
+19. Read the boot log. Review the WARNs about untrusted initSql and `sql` federation sources (a
     superuser re-saves what should stay trusted), and the ERROR lines naming tenants whose
-    sign-in `clientSecretRef` was parked (a superuser restores each one).
-12. If tenant admins are not fully trusted, rotate the manager's secrets as described under
+    sign-in `clientSecretRef` was parked (a superuser restores each one). A line `... takes at most
+    N of the M connections of QOD_..._MAX_CONNECTIONS` says a listener fits fewer connections than
+    configured: raise the heap, for example `JAVA_OPTS=-Xmx2g`. A `WARNING: this JDK has no
+    HttpClient.shutdownNow` says to run on JDK 21 or later.
+20. If tenant admins are not fully trusted, rotate the manager's secrets as described under
     "Security: upgrade promptly" below.
-13. Tell tenant users that DuckDB's built-in listing views are now refused to them
+21. Tell tenant users that DuckDB's built-in listing views are now refused to them
     (`pg_catalog.*`, `sqlite_master`, bare `SHOW` / `DESCRIBE`, `system.information_schema.*`).
     They keep `information_schema.*`, `SHOW TABLES` and `duckdb_*()`, filtered to their grants.
+
+### Limits on unauthenticated work
+
+A client with no credentials can no longer halt the manager through the REST port, the Quack front
+door, the node verdict listener or FlightSQL's direct memory, and one that reaches only the REST
+port can no longer stop authorization. A flood of connections can still fill the REST port's and
+the front door's slots, which in fleet mode also stops the servers' heartbeats (their nodes are
+unroutable after 30 s): limit connections in a proxy or firewall in front. FlightSQL still admits
+calls with no credentials and still reads DoPut streams, and password checks are unchanged.
+
+- **Node verdicts have their own listener**, on the REST port + 1 (`QOD_INTERNAL_PORT`, the chart's
+  20901): slow clients on the REST port cannot stop authorization. `POST
+  /api/internal/authz/*` is served only on this listener. With `QOD_INTERNAL_URL` unset the decide
+  URL names the pod IP, else loopback, whatever `QOD_ON_DEMAND_HOST` says. The listener binds
+  loopback for a loopback URL, the URL's own address when that is a literal address of this host,
+  else the REST bind address. It serves at most 256 connections at once
+  (`QOD_INTERNAL_MAX_CONNECTIONS`), and reads a call's body, up to 1 MiB within 5 s, before it can
+  check the call's signature, so a client that reaches it can hold a slot and about 1.4 MiB of heap
+  in each. Keep clients off this port: one that reaches it can fill those slots, which stops
+  authorization. The chart refuses `env.QOD_INTERNAL_URL` at any replica count: its Service has no
+  verdict port.
+- **Request bodies are limited** on the REST port and the Quack front door. REST: 64 KiB on public
+  routes (`QOD_REST_MAX_PUBLIC_BODY_BYTES`), 1 MiB on a module's public routes
+  (`QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES`, counted in the connection budget on a manager that has
+  such routes), 16 MiB elsewhere (`QOD_REST_MAX_BODY_BYTES`), 30 s to arrive
+  (`QOD_REST_BODY_TIMEOUT_SEC`), answered `413 payload_too_large` and `408 request_timeout`.
+  Quack front door: 64 KiB for a CONNECTION_REQUEST (`QOD_QUACK_MAX_CONNECT_BODY_BYTES`) within 30 s
+  (`QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC`), a live session's message within 300 s
+  (`QOD_QUACK_BODY_TIMEOUT_SEC`; boot refuses a connect timeout above it, or either above 86400), and
+  nothing read for a message that names no live session; a body that misses its deadline is answered
+  `408`. With TLS on, its reads have a 60 s deadline. It also refuses a token of more than 32
+  `key=value` pairs. `QOD_REST_MAX_CONNECTIONS` and `QOD_QUACK_MAX_CONNECTIONS` set the connection
+  limits.
+- **Request lines and headers are limited, and each of these listeners takes no more connections than
+  fit its share of the heap.** REST: 8 KiB each (`QOD_REST_MAX_HEADER_BYTES`), the front door 4 KiB
+  (`QOD_QUACK_MAX_HEADER_BYTES`), the verdict listener 4 KiB, answered `431`. The HTTP server's own
+  limit is 40 KiB each, which let one client with no credentials halt the manager. A browser with many
+  cookies on the manager's host or parent domain can reach 8 KiB and then sees `headers_too_large`:
+  raise the variable, and fewer connections fit. `QOD_REST_MAX_CONNECTIONS`,
+  `QOD_QUACK_MAX_CONNECTIONS` and `QOD_INTERNAL_MAX_CONNECTIONS` are ceilings (1024 by default for
+  REST and the front door): a listener takes fewer when a fifth of the heap cannot hold them (at a
+  1 GiB heap 260, 431 (322 with TLS) and 145), and boot prints a line saying so. Raise the heap
+  (for example `JAVA_OPTS=-Xmx2g`) to take more.
+- **FlightSQL:** messages over 16 MiB (`PROXY_MAX_INBOUND_MESSAGE_BYTES`) and header lists over 64 KiB
+  (`PROXY_MAX_HEADER_BYTES`) are refused, with or without credentials (a message is answered
+  `RESOURCE_EXHAUSTED`). Netty counts its direct memory apart from the JDK's, so a flood of FlightSQL
+  calls fails its own streams and leaves the other listeners' reads alone. Direct memory can now
+  reach twice `-XX:MaxDirectMemorySize`, Netty's and the JDK's each (`-Dio.netty.maxDirectMemory`
+  sets Netty's alone). A launch with `-cp` must pass `--add-opens=java.base/java.nio=ALL-UNNAMED`,
+  and boot warns otherwise.
+- **`GET /metrics` shares one scrape for 4 s**, writes it in chunks of at most 8 KiB, and gives a
+  response 30 s to finish. It used to build a copy of the scrape for every request and hold it until
+  the client read it, at the cost of a refresh and a serialization each. A request that waits 10 s for
+  a scrape in progress answers `503`, and a scraper that polls more often than every 4 s sees repeated
+  samples.
+- **Anonymous auth routes write and call less.** `GET /api/auth/oidc/logout` writes an audit row and
+  calls Starlake only for a live session: it wrote a row and started a detached call for any cookie,
+  whatever it held. A login refused with `sso_required` (per tenant) and a denied `POST
+  /api/auth/sso/redeem` write at most one audit row a minute each per replica, where each wrote one
+  per request, kept for the audit retention. Audit rows written for REST calls drop control
+  characters (a tab or a line break reads as a space) and cap a name at 256 characters and a
+  detail value at 1024.
+- **Exchanges with a tenant's identity provider and OPA are bounded.** A tenant admin picks the
+  issuer, and anyone can make the manager call it, so an issuer a tenant admin set could halt the
+  manager for every tenant. A discovery document or token answer is read under 256 KiB and 15 s
+  over the whole exchange, a JWKS under 50 KiB and 5 s and never from `file:`, and a token nested
+  too deeply is refused. A discovery document is refused (the sign-in then fails with
+  `discovery_failed`) when its `jwks_uri`, `token_endpoint` or `authorization_endpoint` is not an
+  absolute http(s) URL, or when one of its fields, or the issuer URL, is over 2048 characters. A
+  failed discovery is remembered for 10 s and a good one for a day. At most 128 such exchanges run
+  at once, half of them to any one origin; OPA has its own 256, split the same way, and a decision
+  past that answers a retryable `UNAVAILABLE`. These clients speak HTTP/1.1 only, as the JDK's
+  HTTP/2 reader queues frames with no bound; the
+  manager-wide password grant and the Google group lookup, which an operator configures, only keep
+  to HTTP/1.1, and read a whole answer. Each exchange uses a client and a connection of its own,
+  closed when it ends, so on Linux sustained exchanges to one identity provider or OPA instance
+  above about 470 a second run out of local ports unless `net.ipv4.tcp_tw_reuse=1`. A JWKS URL may
+  now redirect from http to https. Errors quote no status line or body of what a server answered,
+  only its status code. Run on JDK 21 or later: boot prints a warning on an older one, where the
+  connection of a refused answer can stay open.
+- **Chunked framing is refused before a credential:** `411` (`length_required` on REST) on public REST
+  routes, the front door and the node routes. A client sending a body with a `Content-Length` is
+  unaffected, and an admitted REST or MCP caller may still send chunked.
+- **A nested JSON body no longer halts the manager.** One anonymous POST of 8 KB holding `[[[...]]]`
+  ended the JVM. REST, MCP and the node routes refuse JSON nested past 256 levels (REST:
+  `400 json_too_deep`).
+- **`GET /ready` and `POST /api/auth/sso/redeem` no longer block a compute thread.** `/ready` runs one
+  database ping at a time, and other callers get the last answer.
+- **Image and chart:** the image's ENTRYPOINT expands `JAVA_OPTS`, and the image exposes 20901. The
+  chart passes `javaOpts`, default `-XX:MaxRAMPercentage=50 -XX:MaxDirectMemorySize=512m`, so its heap
+  goes from 1 GiB to 2 GiB and its direct memory from 1 GiB to 512 MiB under its default 4 GiB
+  limit. Below a limit of 3Gi set your own. A stale `env.JAVA_OPTS`, ignored before, now takes effect
+  and replaces `javaOpts`.
 
 ### Phases A-C
 
@@ -181,8 +364,8 @@ After upgrading:
   own sign-in configuration, should upgrade to this release promptly and then rotate every secret
   held in the manager's environment, in particular `QOD_SESSION_JWT_SECRET` (which also ends every
   open session), `QOD_PG_PASSWORD` and the cloud credentials. `QOD_API_KEY` is not rotated but
-  unset: this release removes the static API key, and a manager with it set refuses to boot (see
-  below). Also review the personal access tokens owned by superuser rows and the recent superuser
+  unset: this release removes the static API key, and a manager with it set ignores it and warns at
+  boot (see below). Also review the personal access tokens owned by superuser rows and the recent superuser
   sign-ins in the audit log.
 
 - **Security: BREAKING: a tenant's sign-in stays inside that tenant.** Management sign-in and the
@@ -322,10 +505,11 @@ After upgrading:
 - **BREAKING: the static API key is gone.** The manager no longer accepts `QOD_API_KEY` /
   `quack-on-demand.apiKey`: every REST, MCP and SCIM caller is a session or a personal access
   token (PAT), and every admin action is attributed to a user. A non-empty `QOD_API_KEY` in the
-  environment, or a non-empty `quack-on-demand.apiKey` in an operator's config file, stops the
-  boot with "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a
-  static API key. Use a personal access token (qod auth pat create) or a qod login session, and
-  unset QOD_API_KEY."; an empty value passes (older Compose files render `API_KEY=` as one). Boot
+  environment, or a non-empty `quack-on-demand.apiKey` in an operator's config file, is ignored,
+  with "WARNING: QOD_API_KEY (quack-on-demand.apiKey) was removed and is ignored: the manager no
+  longer accepts a static API key, so clients sending it are refused. Use a personal access token
+  (qod auth pat create) or a qod login session, and unset QOD_API_KEY." on stderr at boot; an
+  empty value passes silently (older Compose files render `API_KEY=` as one). Boot
   no longer generates a key, prints no secret (see the session secret entry below), and it
   refuses to start when nothing could create a session: no password backend
   (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in
@@ -717,22 +901,26 @@ After upgrading:
 
 - **BREAKING for fleet mode and hand-written Kubernetes manifests: nodes call the manager back.**
   Every handle carries the URL of the replica that minted it (`QOD_INTERNAL_URL`,
-  `quack-on-demand.nodeAuthz.internalUrl`), which nodes call for their verdicts. Its default is
-  `http://<QOD_POD_IP>:<port>` when the pod IP is set, else `http://<QOD_ON_DEMAND_HOST>:<port>` when
-  the manager binds one specific address, else `http://127.0.0.1:<port>`. The manager now refuses to
-  boot:
+  `quack-on-demand.nodeAuthz.internalUrl`), which nodes call for their verdicts, on the node verdict
+  listener's port (see "Limits on unauthenticated work" above). Its default is
+  `http://<QOD_POD_IP>:<internal port>` when the pod IP is set, else
+  `http://127.0.0.1:<internal port>`. The manager now refuses to boot:
   - in fleet mode without `QOD_INTERNAL_URL`: set it next to `QOD_RUNTIME_TYPE=fleet` and
     `QOD_FLEET_JOIN_TOKEN`, to this replica's own plain `http://` address on the servers' private
-    network (under HA one per replica, never a load balancer); `docker-compose.fleet.yml` sets
-    `http://host.docker.internal:20900`;
+    network and the verdict listener's port (under HA one per replica, never a load balancer);
+    `docker-compose.fleet.yml` sets `http://host.docker.internal:20901` (`MANAGER_INTERNAL_PORT`) and
+    publishes that port on every host interface, like the ports beside it, so keep it off any network
+    clients are on;
   - on Kubernetes with a loopback decide URL: the Helm chart sets `QOD_POD_IP` from the downward API
-    (and fails on `env.QOD_POD_IP`, or on `env.QOD_INTERNAL_URL` with more than one replica); a
-    hand-written manifest must set `QOD_POD_IP` from `status.podIP`, or `QOD_INTERNAL_URL`;
+    (and fails on `env.QOD_POD_IP`, on `env.QOD_INTERNAL_PORT`, or on `env.QOD_INTERNAL_URL` at any
+    replica count); a hand-written manifest must set `QOD_POD_IP` from `status.podIP`, or
+    `QOD_INTERNAL_URL`;
   - on any runtime with a URL qod-node cannot call (not lowercase `http://`, user info, a query,
-    a bad port).
-  Boot prints `node decide URL: <url>`. With `networkPolicy.enabled`, the chart's policies now let
-  node pods reach the manager pods on TCP 20900 whatever `networkPolicy.ingressFrom` says (the whole
-  REST port: a network policy cannot filter by path), in the release namespace only. A node host
+    a bad port), or an explicit one naming the REST port.
+  Boot prints `node decide URL: <url> (listening on <host>:<port>)`. With `networkPolicy.enabled`, the
+  chart's policies now let node pods reach the manager pods on TCP 20901 whatever
+  `networkPolicy.ingressFrom` says (the verdict listener, where every call authenticates with the
+  node's key), in the release namespace only. A node host
   name in `QOD_INTERNAL_URL` is resolved once per 30 s by each node. Fleet servers must run this
   release's `qod fleet join`: the assignment's `dbInitSql` is gone (the manager's resource SETs are
   `resourceSql`, the tenant's initSql rides its own secret files with its trust), and an older join
@@ -972,6 +1160,30 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Drain waits for in-flight statements before stopping a node, on FlightSQL and the native front
   door (#161, thanks `ItsM0rty`). The wait is bounded by the new `QOD_POOL_DRAIN_TIMEOUT_SEC`
   (default 20 s).
+- A lone `USE`, `SET`, `VACUUM`, `CALL` and other statements with no count work again over the
+  Arrow Flight SQL JDBC driver, and run once (#170). Since 0.10.0 the driver sent them through
+  DoPut, the edge acknowledged a count of -1, and the driver read that as "open a result set". On a
+  plain statement this failed, and the client saw `Failed to successfully execute query after 5
+  attempts` for a statement that had succeeded ten times, so `INSERT ... RETURNING <text>` on a
+  catalog that allows it wrote ten rows. A prepared statement hit a null `signature` instead,
+  `DROP TABLE` included. The edge no longer acknowledges -1: a DoPut client reads `Count` when the
+  result is DuckDB's `Count`, 0 for a `Success` answer, and otherwise the number of rows. So a
+  `RETURNING id` no longer reports its first id as the count, nor a read its first number. Over
+  JDBC these statements return no rows: an `executeQuery` of `CALL`, `EXPLAIN ANALYZE` or a batch
+  answers `Statement did not return a result set`, after running once.
+- A FlightSQL write now answers only after its commit (#170). The edge sent the `Count` row first,
+  and the Arrow JDBC driver returns from `executeUpdate` once it holds that row. The next statement
+  could therefore run before the commit (`Table with name ... does not exist` right after the
+  `CREATE TABLE AS` that made it, which had looked like an effect of `setAutoCommit`), and a failed
+  commit reached nobody: a rolled-back write looked like a success. A JDBC client now gets the
+  failure as a `SQLException`.
+- Behaviour change over the Arrow JDBC driver: a plain write is now a real update (#170).
+  `Statement.executeUpdate` returns its row count instead of -1, and `Statement.execute` returns
+  `false` with the count in `getUpdateCount`, instead of a result set holding a `Count` row. So an
+  `executeQuery` of a write now answers `Statement did not return a result set`, after running
+  once: a client reading that `Count` row must use `executeUpdate`. `GetFlightInfo` and `GetSchema`
+  still advertise `Count`, so ADBC is unchanged; only the Prepare answer has zero fields. ODBC reads
+  the same two, but this was not tested against the ODBC driver or Power BI.
 
 ## 0.10.1
 

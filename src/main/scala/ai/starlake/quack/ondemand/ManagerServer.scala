@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
+import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import ai.starlake.quack.ondemand.api._
+import ai.starlake.quack.ondemand.state.PatStore
 import ai.starlake.quack.ondemand.telemetry.{
   AuditActions,
   AuditRateLimiter,
@@ -19,6 +21,7 @@ import org.http4s.headers.Location
 import org.http4s.server.{staticcontent, Router}
 import org.http4s.server.staticcontent.FileService
 import org.typelevel.ci.CIString
+import scala.concurrent.duration.{FiniteDuration, SECONDS}
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
 import fs2.io.file.{Path => FsPath}
@@ -106,13 +109,7 @@ final class ManagerServer(
     tenantLocations: Option[TenantLocationHandlers] = None,
     // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
     // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
-    s3Credentials: Option[UserS3CredentialHandlers] = None,
-    // The node-to-manager calls (POST /api/internal/authz/*: CredentialsRoute here, Task 6's
-    // DecideRoute): mounted IN FRONT of apiKeyGuard, since a node has no session; each route
-    // authenticates every call itself (the node-key MAC of the body, then the handle). Empty (tests)
-    // leaves them unmounted, so a node's call is refused (fail closed). Never Tapir endpoints: they
-    // stay out of the OpenAPI contract, CLI parity and McpCoverageSpec.
-    internalRoutes: List[HttpRoutes[IO]] = Nil
+    s3Credentials: Option[UserS3CredentialHandlers] = None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -136,6 +133,13 @@ final class ManagerServer(
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
     catch case _: Exception => ""
 
+  /** A public path a module declared. It takes a body limit of its own,
+    * `restLimits.maxModulePublicBodyBytes`: a provider's webhook does not fit the core public
+    * routes' limit, and no core route lives there.
+    */
+  private def isModulePublic(path: String): Boolean =
+    modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
     path == "/api/auth/login" || path == "/api/auth/change-password" ||
@@ -154,7 +158,7 @@ final class ManagerServer(
       // Fleet heartbeat (qod fleet join): the handler validates X-Fleet-Token itself. Gated on the
       // runtime so the path stays 401 at the guard everywhere else.
       (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
-      modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+      isModulePublic(path)
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface. Everything else on
     * `/api` but [[isBranchApi]] answers `403 admin_required` for such sessions, so that no other
@@ -224,6 +228,113 @@ final class ManagerServer(
         named(t, d, b)
       case _ => false)
 
+  private val limits = cfg.restLimits
+
+  /** The largest body a connection reads before any credential is checked: a core public route's,
+    * or, when a module has public routes, the larger of that and the module's.
+    */
+  private val unauthenticatedBodyBytes: Long =
+    if modulePublicPrefixes.nonEmpty then
+      math.max(limits.maxPublicBodyBytes, limits.maxModulePublicBodyBytes)
+    else limits.maxPublicBodyBytes
+
+  private val bodyDeadline = FiniteDuration(limits.bodyTimeoutSec, SECONDS)
+
+  /** How long a refusal waits for the small body it reads and discards. */
+  private val refusalDrainDeadline = FiniteDuration(math.min(limits.bodyTimeoutSec, 5L), SECONDS)
+
+  private def bodyRefusal(status: Status, code: String, message: String): Response[IO] =
+    Response[IO](status)
+      .withEntity(s"""{"error":"$code","message":"$message"}""")
+      .withContentType(org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json))
+      .putHeaders(org.http4s.headers.Connection.close)
+
+  /** `routes` on `req`, its body read first within `maxBytes` and the deadline. Past either the
+    * answer is 413 or 408 and the rest stays unread. Every request goes through the read, whatever
+    * its headers say: a request with no body reads as empty at once, and the headers must not
+    * decide (see [[BoundedBody.read]]).
+    */
+  private def withBoundedBody(req: Request[IO], maxBytes: Long)(
+      routes: HttpRoutes[IO]
+  ): OptionT[IO, Response[IO]] =
+    OptionT.liftF(BoundedBody.read(req, maxBytes, bodyDeadline)).flatMap {
+      case BoundedBody.Outcome.Read(bytes) => routes(BoundedBody.replay(req, bytes))
+      case BoundedBody.Outcome.TooLarge    =>
+        OptionT.pure[IO](
+          bodyRefusal(
+            Status.PayloadTooLarge,
+            "payload_too_large",
+            s"request body exceeds $maxBytes bytes"
+          )
+        )
+      case BoundedBody.Outcome.TooDeep =>
+        OptionT.pure[IO](
+          bodyRefusal(
+            Status.BadRequest,
+            "json_too_deep",
+            s"request body nests deeper than ${BoundedBody.MaxNesting} levels"
+          )
+        )
+      case BoundedBody.Outcome.TimedOut =>
+        OptionT.pure[IO](
+          bodyRefusal(
+            Status.RequestTimeout,
+            "request_timeout",
+            "request body did not arrive in time"
+          )
+        )
+    }
+
+  /** The largest request body a refusal reads and discards before answering. */
+  private val RefusalDrainBytes: Long = 1L << 20
+
+  /** `resp`, after reading the rest of `req`'s body. Ember answers a request whose body the app
+    * left partly unread as keep-alive and then closes the connection, so a client that reuses it
+    * for its next request finds it closed (the JDK client does not retry a POST: "header parser
+    * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
+    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read. Any
+    * other body (chunked, longer, awaiting a go-ahead) is left unread, and the answer then says
+    * `Connection: close`, so a pooling client opens a new connection instead of reusing the one
+    * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
+    * neither. The read gets [[refusalDrainDeadline]]: past it, or on a read failure, the answer
+    * says `Connection: close` too.
+    *
+    * Only one `Content-Length` http4s can read counts as announced, as Ember frames a body by the
+    * last such header and by `toLong`: `Content-Length: 1` then a huge one would be drained past
+    * the limit, and `+100` would read as no body.
+    */
+  private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
+    val chunked = BoundedBody.asksChunked(req)
+    val lengths = req.headers.get(CIString("Content-Length"))
+    val drain   =
+      !chunked && lengths.exists(_.length == 1) && req.contentLength
+        .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
+    val bodyless = !chunked && lengths.isEmpty
+    val closing  = resp.putHeaders(org.http4s.headers.Connection.close)
+    OptionT.liftF(
+      if drain then
+        req.body.compile.drain.as(resp).timeout(refusalDrainDeadline).handleError(_ => closing)
+      else if bodyless then IO.pure(resp)
+      else IO.pure(closing)
+    )
+
+  /** The session behind `token`. A session JWT needs only an HMAC, so it stays on the compute
+    * thread; a PAT costs database lookups, so it does not.
+    */
+  private def resolveCredential(
+      token: Option[String]
+  ): IO[Option[SessionTokenStore.Session]] =
+    token match
+      case Some(t) if t.startsWith(PatStore.TokenPrefix) => IO.blocking(sessionOfToken(t))
+      case Some(t)                                       => IO(sessionOfToken(t))
+      case None                                          => IO.pure(None)
+
+  /** Writes a denial's audit row, at most one per `key` and interval. The write blocks on the
+    * database, so it runs off the compute threads; a refused one costs no thread hop.
+    */
+  private def auditDenial(key: String)(write: => Unit): OptionT[IO, Unit] =
+    OptionT.liftF(if auditLimiter.allow(key) then IO.blocking(write) else IO.unit)
+
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token or a live personal access token, admitted with exactly its owner's scope (admin
     * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
@@ -240,31 +351,19 @@ final class ManagerServer(
     * credential, and a user blocked by must_change_password has no session to present),
     * `/api/config/client`, `/health`, `/ready`, and everything outside `/api/...` (incl.
     * `/ui/...`).
+    *
+    * Request bodies are read here, whole, before a route sees one ([[withBoundedBody]]), within
+    * `restLimits.bodyTimeoutSec`. A public route takes no chunked framing, as no credential has
+    * been checked: a core one reads at most `restLimits.maxPublicBodyBytes`, a module's at most
+    * `restLimits.maxModulePublicBodyBytes`, and an admitted caller's at most
+    * `restLimits.maxBodyBytes`. A body nesting too deep is refused there too (see
+    * [[BoundedBody.MaxNesting]]). No route outside `/api` reads a body except `/mcp`, which applies
+    * the limit itself, so nothing is read here for such a path.
+    *
+    * What blocks on the database leaves the compute threads: a PAT is resolved on `IO.blocking`
+    * ([[resolveCredential]]), and so are the two denial audit rows the guard writes. A session JWT
+    * needs only an HMAC and stays where it is.
     */
-  /** The largest request body a refusal reads and discards before answering. */
-  private val RefusalDrainBytes: Long = 1L << 20
-
-  /** `resp`, after reading the rest of `req`'s body. Ember answers a request whose body the app
-    * left partly unread as keep-alive and then closes the connection, so a client that reuses it
-    * for its next request finds it closed (the JDK client does not retry a POST: "header parser
-    * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
-    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read. Any
-    * other body (chunked, longer, awaiting a go-ahead) is left unread, and the answer then says
-    * `Connection: close`, so a pooling client opens a new connection instead of reusing the one
-    * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
-    * neither.
-    */
-  private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
-    val drain =
-      req.contentLength
-        .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
-    val bodyless = req.contentLength.isEmpty && !req.isChunked
-    OptionT.liftF(
-      if drain then req.body.compile.drain.attempt.void.as(resp)
-      else if bodyless then IO.pure(resp)
-      else IO.pure(resp.putHeaders(org.http4s.headers.Connection.close))
-    )
-
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     Kleisli { req =>
       // Router parity: tapir segments the path as
@@ -280,7 +379,21 @@ final class ManagerServer(
       }
       val branchApi = isBranchApi(req.method, segments, req.uri.path.endsWithSlash)
       if !path.startsWith("/api/") && path != "/api" then routes(req)
-      else if isPublicApi(path) then routes(req)
+      else if isPublicApi(path) then
+        // No credential has been checked: see BoundedBody.asksChunked.
+        if BoundedBody.asksChunked(req) then
+          OptionT.pure[IO](
+            bodyRefusal(
+              Status.LengthRequired,
+              "length_required",
+              "this route takes a Content-Length, not chunked framing"
+            )
+          )
+        else
+          val maxBytes =
+            if isModulePublic(path) then limits.maxModulePublicBodyBytes
+            else limits.maxPublicBodyBytes
+          withBoundedBody(req, maxBytes)(routes)
       else
         // Admit on X-API-Key header OR on the qod_session cookie. The cookie
         // is the browser path (HttpOnly so JS can't read it; SameSite=Lax so
@@ -306,92 +419,98 @@ final class ManagerServer(
         // lookups race a session expiring between them: admitted as admin by the first,
         // then an absent scope skipped the tenant check. A PAT's synthetic session carries
         // role "admin" exactly when PatAuthenticator.isAdmin holds.
-        val resolved        = provided.flatMap(sessionOfToken)
-        val sessionAdmin    = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
-        val tokenScope      = resolved.map(_.scope)
-        val nonAdminSession = resolved.isDefined && !sessionAdmin
+        OptionT.liftF(resolveCredential(provided)).flatMap { resolved =>
+          val sessionAdmin    = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
+          val tokenScope      = resolved.map(_.scope)
+          val nonAdminSession = resolved.isDefined && !sessionAdmin
 
-        val admitted = sessionAdmin || (nonAdminSession && (isProfileApi(path) || branchApi))
-        // Strip control characters -- jsonb rejects NUL (0x00); cap length so
-        // detail stays bounded. An unsanitized `%00` in the path would make
-        // the insert throw and the attacker would erase their own trail.
-        // Shared by both denial arms below.
-        val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
-        if !admitted then
-          if nonAdminSession then
-            // A real, valid session without an admin grant. Answer with the
-            // same stable code the login gate uses so clients treat both alike
-            // -- and not with the anonymous 401, which would send a browser
-            // back to the login screen it just came from.
-            //
-            // Audited under the caller's REAL identity (recoverable from the
-            // session), so a low-privilege insider sweeping admin endpoints
-            // leaves a trail.
-            val caller   = resolved.map(_.profile)
-            val username = caller.map(_.username).getOrElse("unknown")
-            // Rate-limited per principal, not per host: the recorder writes
-            // synchronously on the request path, so one authenticated session
-            // could otherwise insert an audit row per request at line rate.
-            // Collapsing a flood to one row per interval is deliberate -- the
-            // first row is the signal; the rest are the attacker's volume.
-            if auditLimiter.allow("session:" + username) then
-              audit.restAs(
-                username,
-                "tenant",
-                "auth",
-                AuditActions.AuthAdminRequired,
-                "denied",
-                tenant = caller.flatMap(_.tenant),
-                detail = Map("path" -> safePath)
-              )
-            refuse(
-              req,
-              Response[IO](Status.Forbidden)
-                .withEntity(
-                  """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
+          val admitted = sessionAdmin || (nonAdminSession && (isProfileApi(path) || branchApi))
+          // Strip control characters -- jsonb rejects NUL (0x00); cap length so
+          // detail stays bounded. An unsanitized `%00` in the path would make
+          // the insert throw and the attacker would erase their own trail.
+          // Shared by both denial arms below.
+          val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
+          if !admitted then
+            if nonAdminSession then
+              // A real, valid session without an admin grant. Answer with the
+              // same stable code the login gate uses so clients treat both alike
+              // -- and not with the anonymous 401, which would send a browser
+              // back to the login screen it just came from.
+              //
+              // Audited under the caller's REAL identity (recoverable from the
+              // session), so a low-privilege insider sweeping admin endpoints
+              // leaves a trail.
+              val caller   = resolved.map(_.profile)
+              val username = caller.map(_.username).getOrElse("unknown")
+              // Rate-limited per principal, not per host: the recorder writes
+              // synchronously on the request path, so one authenticated session
+              // could otherwise insert an audit row per request at line rate.
+              // Collapsing a flood to one row per interval is deliberate -- the
+              // first row is the signal; the rest are the attacker's volume.
+              // The write blocks on the database, so it runs off the compute threads.
+              auditDenial("session:" + username)(
+                audit.restAs(
+                  username,
+                  "tenant",
+                  "auth",
+                  AuditActions.AuthAdminRequired,
+                  "denied",
+                  tenant = caller.flatMap(_.tenant),
+                  detail = Map("path" -> safePath)
                 )
-                .withContentType(
-                  org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
-                )
-            )
-          else
-            val source = req.remote.map(_.host.toString).getOrElse("unknown")
-            if auditLimiter.allow(source) then
-              audit.restAs(
-                "anonymous",
-                "system",
-                "auth",
-                AuditActions.AuthApiKeyFailure,
-                "denied",
-                detail = Map("path" -> safePath, "source" -> source)
               )
-            refuse(req, Response[IO](Status.Unauthorized))
-        else
-          // Per-request tenant scope check on the admitted credential's scope.
-          // Body-tenant endpoints do their own check via TenantScopeCheck.reject, and the branch
-          // routes through their one gate: a plain member reaches their own tenant there, which
-          // holds no admin grant for this check to find.
-          val queryTenant = req.uri.query.params.get("tenant")
-          val pathTenant  =
-            if branchApi then None
+                .flatMap(_ =>
+                  refuse(
+                    req,
+                    Response[IO](Status.Forbidden)
+                      .withEntity(
+                        """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
+                      )
+                      .withContentType(
+                        org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                      )
+                  )
+                )
             else
-              TenantScopeGuard
-                .extractTenant(path, queryTenant)
-                .map(t => canonicalTenantIdOf(t).getOrElse(t))
-          (tokenScope, pathTenant) match
-            case (Some(scope), Some(t))
-                if !scope.superuser && !scope.manageableTenants.contains(t) =>
-              refuse(
-                req,
-                Response[IO](Status.Forbidden)
-                  .withEntity(
-                    s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""
-                  )
-                  .withContentType(
-                    org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
-                  )
+              val source = req.remote.map(_.host.toString).getOrElse("unknown")
+              auditDenial(source)(
+                audit.restAs(
+                  "anonymous",
+                  "system",
+                  "auth",
+                  AuditActions.AuthApiKeyFailure,
+                  "denied",
+                  detail = Map("path" -> safePath, "source" -> source)
+                )
               )
-            case _ => routes(req)
+                .flatMap(_ => refuse(req, Response[IO](Status.Unauthorized)))
+          else
+            // Per-request tenant scope check on the admitted credential's scope.
+            // Body-tenant endpoints do their own check via TenantScopeCheck.reject, and the branch
+            // routes through their one gate: a plain member reaches their own tenant there, which
+            // holds no admin grant for this check to find.
+            val queryTenant = req.uri.query.params.get("tenant")
+            val pathTenant  =
+              if branchApi then None
+              else
+                TenantScopeGuard
+                  .extractTenant(path, queryTenant)
+                  .map(t => canonicalTenantIdOf(t).getOrElse(t))
+            (tokenScope, pathTenant) match
+              case (Some(scope), Some(t))
+                  if !scope.superuser && !scope.manageableTenants.contains(t) =>
+                refuse(
+                  req,
+                  Response[IO](Status.Forbidden)
+                    .withEntity(
+                      s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""
+                    )
+                    .withContentType(
+                      org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                    )
+                )
+              case _ => withBoundedBody(req, limits.maxBodyBytes)(routes)
+        }
     }
 
   def serve: Resource[IO, org.http4s.server.Server] =
@@ -1264,9 +1383,28 @@ final class ManagerServer(
       .default[IO]
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
+      .withMaxConnections(
+        ConnectionBudget.slots(
+          "The REST port",
+          "QOD_REST_MAX_CONNECTIONS",
+          limits.maxConnections,
+          ConnectionBudget.heldBytes(limits.maxHeaderBytes, unauthenticatedBodyBytes, tls = false)
+        )
+      )
+      .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
+      .withMaxHeaderSize(limits.maxHeaderBytes)
+      .withErrorHandler(
+        BoundedBody.headerLimitHandler(
+          bodyRefusal(
+            Status.RequestHeaderFieldsTooLarge,
+            "headers_too_large",
+            s"request line or headers exceed ${limits.maxHeaderBytes} bytes " +
+              "(QOD_REST_MAX_HEADER_BYTES)"
+          )
+        )
+      )
       .withHttpApp(
-        (internalRoutes.foldLeft(HttpRoutes.empty[IO])(_ <+> _) <+> apiKeyGuard(apiRoutes) <+>
-          mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+> moduleStatic <+>
-          rootRedirect).orNotFound
+        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+>
+          moduleStatic <+> rootRedirect).orNotFound
       )
       .build

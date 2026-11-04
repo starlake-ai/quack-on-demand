@@ -951,6 +951,14 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     errorText(fx.door.handle(bare(Type.Disconnect, connId)).unsafeRunSync()) shouldBe
       "Invalid connection id"
 
+  "isLive" should "be true after a connect and false after a disconnect" in:
+    val fx = setup()
+    fx.door.isLive("ghost") shouldBe false
+    val connId = connect(fx)
+    fx.door.isLive(connId) shouldBe true
+    fx.door.handle(bare(Type.Disconnect, connId)).unsafeRunSync() shouldBe success
+    fx.door.isLive(connId) shouldBe false
+
   "an unsupported message" should "be refused like a node does" in:
     val fx     = setup()
     val connId = connect(fx)

@@ -146,11 +146,12 @@ RUN install -d -o quack -g quack /app/certs /app/state /app/ducklake
 
 USER quack
 
-# Manager REST + UI (20900), FlightSQL edge (31338) and the native Quack
-# protocol front door (9494, what a DuckDB client ATTACHes to).
+# Manager REST + UI (20900), the node verdict listener (20901), FlightSQL edge
+# (31338) and the native Quack protocol front door (9494, what a DuckDB client
+# ATTACHes to).
 # Local-mode Quack nodes lease ports from QOD_MIN_PORT..QOD_MAX_PORT;
 # expose the default range so a host port-forward can reach them too.
-EXPOSE 20900 31338 9494 21900-22500
+EXPOSE 20900 20901 31338 9494 21900-22500
 
 # Sensible container defaults. Override at run time via -e.
 ENV QOD_ON_DEMAND_HOST=0.0.0.0 \
@@ -162,6 +163,9 @@ ENV QOD_ON_DEMAND_HOST=0.0.0.0 \
     JAVA_OPTS=""
 
 # `-Darrow.allocation.manager.type=Unsafe` pins Arrow to arrow-memory-unsafe;
-# without it Arrow picks netty and crashes with NoSuchFieldError on Java 17+.
-# Add-Opens is set in the jar manifest, so no extra --add-opens flags here.
-ENTRYPOINT ["/usr/bin/tini", "--", "java", "-Darrow.allocation.manager.type=Unsafe", "-jar", "/app/quack-on-demand.jar"]
+# without it Arrow picks netty and crashes with NoSuchFieldError: chunkSize.
+# Add-Opens is set in the jar manifest (Java 17 and later block the reflection
+# Arrow's unsafe allocator needs unless it is opened), so no extra --add-opens
+# flags here. The manager needs JDK 21 or later; this image has it.
+# sh expands JAVA_OPTS; exec keeps the JVM as tini's child, so it gets the signals.
+ENTRYPOINT ["/usr/bin/tini", "--", "sh", "-c", "exec java -Darrow.allocation.manager.type=Unsafe $JAVA_OPTS -jar /app/quack-on-demand.jar \"$@\"", "--"]

@@ -32,6 +32,10 @@ trait ManagerModule:
   def name: String
   def changelogPath: Option[String]
   def start(ctx: ManagerContext): IO[Unit]
+
+  /** The module's REST routes. A route that reads a request body lives under `/api`: the REST
+    * limits (`quack-on-demand.restLimits`) are applied there.
+    */
   def endpoints: List[ServerEndpoint[Any, IO]]
   def publicPathPrefixes: Set[String]
   def staticMounts: List[StaticMount] = Nil

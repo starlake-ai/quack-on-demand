@@ -1,8 +1,10 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.edge.BoundedHttp
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
 import io.circe.parser.parse
 
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /** A subset of an OIDC provider's well-known configuration. */
 final case class OidcDiscoveryDoc(
@@ -15,37 +17,180 @@ final case class OidcDiscoveryDoc(
 
 /** Resolves and caches an OIDC issuer's discovery document. `httpGet` is injected so the unit suite
   * runs without network: it maps a URL to either the response body or an error string.
+  *
+  * A document is cached for a day ([[OidcDiscovery.DocumentTtlNanos]]) and a failure for
+  * `failureTtlNanos`, each per issuer and each in a table of at most [[OidcDiscovery.MaxIssuers]]:
+  * the issuer is a tenant admin's choice, and every setting of a new one would otherwise leave an
+  * entry for the life of the process. An entry lost to the bound or to the day costs one more GET,
+  * never a wrong answer, and a day ends a document that an issuer has since changed.
+  *
+  * What an entry costs is bounded too. A table keeps the five parsed fields of a document, not the
+  * document, and the issuer URL it is keyed by; a failure it keeps is cut to
+  * [[BoundedHttp.MaxFailureChars]] characters, whatever `httpGet` answered (the production one
+  * answers a short text of its own, but this class keeps what it is given, and a failure quoted
+  * from a server once ran a 256 MiB heap out after 474 issuers). A document with a field over
+  * [[OidcDiscovery.MaxFieldChars]] characters is refused (a `Left` naming the field, never its
+  * value, remembered like any failure), and so is an issuer URL over
+  * [[OidcDiscovery.MaxIssuerUrlChars]], before it is asked or kept: a tenant admin picks it, and
+  * nothing but the size of a REST body would bound it. Without that, one field of a document of the
+  * 256 KiB that `BoundedHttp` lets through could fill an entry, and 1024 of them would pin about
+  * 256 MiB for a day. With it the document table holds about 12 MiB at most (5 fields and a key of
+  * 2048 characters in 1024 entries; twice that if every character were outside Latin-1). A real
+  * endpoint URL is far shorter.
+  *
+  * Every call that finds a failure answers the same `Left` without asking the issuer: a tenant
+  * admin picks the issuer, and an anonymous `GET /api/auth/oidc/start` resolves it, so with the
+  * issuer down each request would otherwise make its own outbound GET and hold a blocking thread
+  * for as long as the GET takes (up to 15 s). The time runs from the failed attempt, and a refused
+  * call does not extend it. A success clears the failure. `nanoTime` is injectable for tests.
+  *
+  * A refusal of the GET for lack of a permit ([[BoundedHttp.Busy]]: too many exchanges with
+  * identity providers in flight) is not a failure of the issuer and is not remembered, neither as a
+  * failure nor otherwise: remembered for 10 s it would turn one tenant's flood against its own
+  * issuer into 10 s of failed discovery for another tenant's healthy one. The next call asks.
+  *
+  * A failure is remembered once its GET has returned, not before: calls that arrive while a GET is
+  * still waiting on an issuer that never answers each make their own, so the memo ends the traffic
+  * to an issuer that fails, and only shortens it for one that hangs. How many of those run at once
+  * is bounded by the GET behind `httpGet` (the production one goes through
+  * [[BoundedHttp.idpExchanges]]: 128 at once, half of them for any one issuer, and a call past that
+  * is refused at once as [[BoundedHttp.Busy]], which is not remembered).
+  *
+  * The URLs of a document are the manager's to act on, and a tenant admin picks the document: the
+  * key set is read from `jwks_uri`, the code is exchanged at `token_endpoint`, and a browser is
+  * sent to `authorization_endpoint`. A `jwks_uri` that was no URI threw out of the SSO callback (a
+  * 500 and an ERROR entry with its stack, 4.3 KB, for each of 200 anonymous callbacks). So a
+  * document whose `jwks_uri`, `token_endpoint` or `authorization_endpoint` is not an absolute
+  * http(s) URL ([[OidcDiscovery.isHttpUrl]]) is refused here, as a failure that names the field and
+  * never its value.
   */
-class OidcDiscovery(httpGet: String => Either[String, String]):
+class OidcDiscovery(
+    httpGet: String => Either[String, String],
+    failureTtlNanos: Long = 10L * 1000 * 1000 * 1000,
+    nanoTime: () => Long = () => System.nanoTime()
+):
 
-  private val cache = new ConcurrentHashMap[String, OidcDiscoveryDoc]()
+  private val documents: Cache[String, OidcDiscoveryDoc] = Caffeine
+    .newBuilder()
+    .ticker(() => nanoTime())
+    .executor(_.run())
+    .maximumSize(OidcDiscovery.MaxIssuers)
+    .expireAfterWrite(OidcDiscovery.DocumentTtlNanos, TimeUnit.NANOSECONDS)
+    .build[String, OidcDiscoveryDoc]()
+
+  private val failures: Cache[String, String] = Caffeine
+    .newBuilder()
+    .ticker(() => nanoTime())
+    .executor(_.run())
+    .maximumSize(OidcDiscovery.MaxIssuers)
+    .expireAfterWrite(failureTtlNanos, TimeUnit.NANOSECONDS)
+    .build[String, String]()
 
   def resolve(issuerUrl: String): Either[String, OidcDiscoveryDoc] =
-    Option(cache.get(issuerUrl)) match
-      case Some(doc) => Right(doc)
-      case None      =>
-        val url = issuerUrl.stripSuffix("/") + "/.well-known/openid-configuration"
-        httpGet(url).flatMap(parseDoc).map { doc =>
-          cache.put(issuerUrl, doc)
-          doc
-        }
+    // The URL is the key of both tables, and a tenant admin picks it: refused before it is asked or
+    // kept, with a text that does not quote it.
+    if issuerUrl.length > OidcDiscovery.MaxIssuerUrlChars then
+      Left(s"issuer URL is longer than ${OidcDiscovery.MaxIssuerUrlChars} characters")
+    else
+      Option(documents.getIfPresent(issuerUrl)) match
+        case Some(doc) => Right(doc)
+        case None      =>
+          Option(failures.getIfPresent(issuerUrl)) match
+            case Some(why) => Left(why)
+            case None      => fetch(issuerUrl)
+
+  /** Visible for tests: the documents still held, once the bound has been applied. */
+  private[auth] def cachedDocuments: Long =
+    documents.cleanUp()
+    documents.estimatedSize()
+
+  private def fetch(issuerUrl: String): Either[String, OidcDiscoveryDoc] =
+    val url = issuerUrl.stripSuffix("/") + "/.well-known/openid-configuration"
+    httpGet(url).flatMap(parseDoc) match
+      case Right(doc) =>
+        documents.put(issuerUrl, doc)
+        failures.invalidate(issuerUrl)
+        Right(doc)
+      case Left(BoundedHttp.Busy) =>
+        // A refusal for lack of a permit says nothing of the issuer: not remembered.
+        Left(BoundedHttp.Busy)
+      case Left(why) =>
+        val kept = BoundedHttp.cut(why)
+        failures.put(issuerUrl, kept)
+        Left(kept)
+
+  private def checkedUrl(field: String, value: String): Either[String, String] =
+    if OidcDiscovery.isHttpUrl(value) then Right(value)
+    else Left(s"field '$field' in discovery document is not an absolute http(s) URL")
 
   private def parseDoc(body: String): Either[String, OidcDiscoveryDoc] =
-    parse(body).left.map(_.getMessage).flatMap { json =>
-      val c                                          = json.hcursor
+    // The parser's own failure quotes the start of the body ("expected json value got 'Secret...'"),
+    // which is the issuer's text: one fixed text, as the Lefts below name a field and never a value.
+    parse(body).left.map(_ => OidcDiscovery.NotJson).flatMap { json =>
+      val c = json.hcursor
+      // The Left names the field, never its value: it is remembered and shown.
+      def bounded(field: String, value: String): Either[String, String] =
+        if value.length > OidcDiscovery.MaxFieldChars then
+          Left(
+            s"field '$field' in discovery document is longer than " +
+              s"${OidcDiscovery.MaxFieldChars} characters"
+          )
+        else Right(value)
       def str(field: String): Either[String, String] =
-        c.get[String](field).left.map(_ => s"missing field '$field' in discovery document")
+        c.get[String](field)
+          .left
+          .map(_ => s"missing field '$field' in discovery document")
+          .flatMap(bounded(field, _))
+      // A URL the manager acts on: read (the key set), called (the token endpoint) or sent to (the
+      // authorization endpoint, the end session endpoint). The Left names the field, never the
+      // value, for the same reason.
+      def url(field: String): Either[String, String] =
+        str(field).flatMap(checkedUrl(field, _))
       for
         issuer    <- str("issuer")
-        authorize <- str("authorization_endpoint")
-        token     <- str("token_endpoint")
-        jwks      <- str("jwks_uri")
+        authorize <- url("authorization_endpoint")
+        token     <- url("token_endpoint")
+        jwks      <- url("jwks_uri")
+        // end_session_endpoint is OPTIONAL in the OIDC spec; default to empty when absent. It is not
+        // checked as a URL: only the manager-wide issuer's (the operator's, never a tenant's) is
+        // ever used, in the Location of the logout.
+        endSession <- c
+          .get[String]("end_session_endpoint")
+          .fold(_ => Right(""), bounded("end_session_endpoint", _))
       yield OidcDiscoveryDoc(
         issuer = issuer,
         authorizationEndpoint = authorize,
         tokenEndpoint = token,
         jwksUri = jwks,
-        // end_session_endpoint is OPTIONAL in the OIDC spec; default to empty when absent.
-        endSessionEndpoint = c.get[String]("end_session_endpoint").getOrElse("")
+        endSessionEndpoint = endSession
       )
     }
+
+object OidcDiscovery:
+
+  /** How many issuers a table keeps (documents and failures each). */
+  private[auth] val MaxIssuers = 1024
+
+  /** How long a document is kept: a day. */
+  val DocumentTtlNanos: Long = TimeUnit.DAYS.toNanos(1)
+
+  /** The most characters a field of a document may hold: a longer one refuses the document. */
+  val MaxFieldChars: Int = 2048
+
+  /** The most characters of an issuer URL, the key of both tables: a longer one is refused. */
+  val MaxIssuerUrlChars: Int = 2048
+
+  /** What a body that is no JSON is answered, whatever the issuer sent. */
+  val NotJson: String = "discovery document is not valid JSON"
+
+  /** True for an absolute `http` or `https` URL with a host (the scheme in any case), the only kind
+    * the JDK client reads and the only kind a browser is sent to. `file:`, `ftp:`, `javascript:`, a
+    * relative reference, a URL with no host and anything `java.net.URI` refuses (a space, a line
+    * break, a broken host) are not.
+    */
+  private[auth] def isHttpUrl(value: String): Boolean =
+    try
+      val uri = new java.net.URI(value)
+      uri.isAbsolute && uri.getHost != null &&
+      Option(uri.getScheme).exists(s => s.equalsIgnoreCase("http") || s.equalsIgnoreCase("https"))
+    catch case _: java.net.URISyntaxException => false

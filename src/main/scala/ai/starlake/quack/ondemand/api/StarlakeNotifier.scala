@@ -26,9 +26,9 @@ object StarlakeNotifier:
       .map("%02x".format(_))
       .mkString
 
-/** Posts the sha256 of the revoked session token to Starlake's backchannel-logout endpoint.
-  * `post` is injectable for tests; the default implementation is a plain JDK `HttpClient` call
-  * with a 5s timeout.
+/** Posts the sha256 of the revoked session token to Starlake's backchannel-logout endpoint. `post`
+  * is injectable for tests; the default implementation is a plain JDK `HttpClient` call with a 5s
+  * timeout.
   */
 final class HttpStarlakeNotifier(
     slUrl: String,
@@ -43,8 +43,15 @@ final class HttpStarlakeNotifier(
       case Left(err)                                 => Left(err)
 
 object HttpStarlakeNotifier:
+  // HTTP/1.1 only, as every client of ours to a URL that is not ours: the JDK offers `Upgrade: h2c`
+  // on every http:// request, and its HTTP/2 reader queues inbound frames with no bound (see
+  // BoundedHttp).
   private lazy val client =
-    HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
+    HttpClient
+      .newBuilder()
+      .version(HttpClient.Version.HTTP_1_1)
+      .connectTimeout(Duration.ofSeconds(5))
+      .build()
 
   def jdkPost(url: String, body: String): Either[String, Int] =
     try
