@@ -90,7 +90,7 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     (b, sup, st, PoolKey("acme", "acme_db", "bi"))
 
-  private def id(n: Int) = s"quack-acme-acme-db-bi-$n"
+  private def id(n: Int) = s"quack--acme--acme-db--bi--$n"
 
   private def storedIds(sup: PoolSupervisor, st: InMemoryControlPlaneStore, key: PoolKey) =
     st.listNodes(sup.poolId(key).get).map(_.nodeId).sorted
@@ -380,7 +380,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       while !cond && System.nanoTime() < deadline do Thread.sleep(10)
       cond shouldBe true
 
-  private def id(n: Int) = s"quack-acme-acme-db-bi-$n"
+  private def id(n: Int) = s"quack--acme--acme-db--bi--$n"
 
   "reconcile (real fleet backend)" should "move a drained server's node to another server" in {
     val fx = new Fx

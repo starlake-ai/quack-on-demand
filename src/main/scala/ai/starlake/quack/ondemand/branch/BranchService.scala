@@ -421,7 +421,8 @@ final class BranchService(
                 cpu = donor.map(_.cpu).getOrElse(""),
                 memory = donor.map(_.memory).getOrElse(""),
                 podTemplateYaml = donor.map(_.podTemplateYaml).getOrElse(""),
-                idleTimeoutSec = donor.flatMap(_.idleTimeoutSec)
+                idleTimeoutSec = donor.flatMap(_.idleTimeoutSec),
+                internalName = true
               )
               .attempt
               .flatMap {

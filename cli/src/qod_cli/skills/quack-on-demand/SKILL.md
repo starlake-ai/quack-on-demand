@@ -495,6 +495,12 @@ qod tenant list
 # otherwise, for a superuser too): its databases are named <tenant>_<database>, and this keeps two
 # tenants from ever composing the same database name. A tenant that already holds an underscore,
 # or one a manifest import brings, keeps its name.
+# A new database or pool name is letters, digits and single underscores, starts with a letter and
+# does not end with an underscore: __ and a leading or trailing _ are refused (400 invalid_name).
+# A pool name may also hold a hyphen (eu-west) and is at most 63 characters, but not beside another
+# pool of its database that reads the same once _ becomes - (eu_west): 409 pool_reads_alike, naming
+# it. A database or pool name made before this rule keeps working, and a manifest import keeps
+# importing one, with one ERROR per name.
 qod tenant create acme
 qod database create --tenant acme --name tpch \
   --metastore schemaName=tpch1
@@ -2206,7 +2212,7 @@ After a manager restart mid-merge, merge again. If that does not settle it, the 
 A crash can also leave the merge node running. It has no node row, so nothing reaps it: it keeps its port, its memory (many GB at scale) and a transaction open on the parent's catalog, which holds back VACUUM there and can make a catalog migration's DDL time out. Sweep it:
 
 - Local runtime: `qod stop`, then `qod start` (`qod serve <target>` for a `qod serve` manager). This stops the serving nodes too. On Windows `qod stop` exits 1 and names the way to stop.
-- Kubernetes: delete the `merge-*` pod and Service and the `qod-token-merge-*` and `qod-store-merge-*` Secrets. Two per-pool Secrets, which hold the catalog password and cloud keys, outlive them until a later merge or proposal on that database stops its node with none left. When no merge of that database is running, delete `qod-nodeenv-<tenant>-<db>---merge` and `qod-fedsql-<tenant>-<db>---merge` too (their names write `_` as `-`, so the pool `__merge` reads `--merge`).
+- Kubernetes: delete the `merge-*` pod and Service and the `qod-token-merge-*` and `qod-store-merge-*` Secrets. Two per-pool Secrets, which hold the catalog password and cloud keys, outlive them until a later merge or proposal on that database stops its node with none left. When no merge of that database is running, delete them too, by their labels: `kubectl delete secret -l quack-tenant=<tenant>,quack-tenant-db=<db>,quack-pool=qod.__merge.qod`.
 - Fleet: find the server holding the `merge-*` node in `qod fleet servers`, then `qod fleet drain <name>` and `qod fleet undrain <name>`. With `QOD_FLEET_EPHEMERAL=local` the node runs on the manager host, `qod fleet servers` lists no such server, and the local sweep applies.
 
 `qod branch propose` and `merge` have no read limit: they wait for the server, which bounds each stage. If a NAT or load balancer drops the connection during a long merge, the CLI waits until Ctrl-C; merging again is safe: it waits behind a run still going, and `409 already_merged` then means that run landed.

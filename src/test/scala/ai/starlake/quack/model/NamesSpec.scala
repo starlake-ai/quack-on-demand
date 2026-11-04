@@ -109,3 +109,78 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     // ~77K, sanity check that we're not back there.)
     val ids = (1 to 10000).map(_ => Names.newSurrogateId("t")).toSet
     ids.size shouldBe 10000
+
+  "Names.reading" should "lowercase a name and read an underscore as a hyphen" in:
+    Names.reading("Eu_West") shouldBe "eu-west"
+    Names.reading("eu-west") shouldBe "eu-west"
+    Names.reading("acme") shouldBe "acme"
+
+  "Names.readsAsOneField" should "take a name with a middle underscore or hyphen" in:
+    List("a", "acme", "acme_corp", "a_b_c", "eu-west", "a1", "A_B").foreach { name =>
+      withClue(name)(Names.readsAsOneField(name) shouldBe true)
+    }
+
+  it should "refuse what cannot be split back apart around `--`" in:
+    List(
+      "",
+      "_",
+      "-",
+      "_a",
+      "a_",
+      "-a",
+      "a-",
+      "a__b",
+      "a--b",
+      "a_-b",
+      "a-_b",
+      "__merge",
+      "__br_ab12cd34",
+      "acme__br_ab12cd34"
+    ).foreach(name => withClue(name)(Names.readsAsOneField(name) shouldBe false))
+
+  "Names.fieldRefusal" should "say what is refused and why, for a name that breaks the rule" in:
+    Names.fieldRefusal("acme", "tenant id") shouldBe None
+    Names.fieldRefusal("acme_corp", "tenant id") shouldBe None
+    List("a__b", "_a", "a_").foreach { name =>
+      val refusal = Names.fieldRefusal(name, "tenant id")
+      withClue(name) {
+        refusal.get should include(s"tenant id '$name'")
+        refusal.get should include("'--'")
+      }
+    }
+
+  "Names.poolNameRefusal" should "accept letters, digits, `_` and `-`, starting with a letter" in:
+    List("bi", "eu-west", "eu_west", "a1", "A1", "a-b_c", "p" * Names.MaxLength).foreach { name =>
+      withClue(name)(Names.poolNameRefusal(name) shouldBe None)
+    }
+
+  it should "refuse anything else, saying so about that name" in:
+    List(
+      "",
+      "1a",
+      "-a",
+      "_a",
+      "my pool",
+      "a/b",
+      "a.b",
+      "a\u0000b",
+      "café",
+      "__br_x",
+      "__merge",
+      "p" * (Names.MaxLength + 1)
+    ).foreach { name =>
+      withClue(name) {
+        val refusal = Names.poolNameRefusal(name)
+        refusal.get should include(s"'$name'")
+        refusal.get should include("starting with a letter")
+      }
+    }
+
+  it should "refuse a pool name that would not stand as one field" in:
+    List("a_", "a-", "a__b", "a--b", "a_-b", "a-_b").foreach { name =>
+      withClue(name) {
+        val refusal = Names.poolNameRefusal(name)
+        refusal.get should include(s"'$name'")
+        refusal.get should include("'--'")
+      }
+    }

@@ -123,6 +123,7 @@ object Banner:
         val head  = p.kind match
           case Kind.Blocked    => s"${p.tenant}/${p.database}: BLOCKED, $pools NOT started"
           case Kind.Federation => s"${p.tenant}/${p.database}: federation aliases missing ($pools)"
+          case Kind.ReadAlike  => s"${p.tenant}/${p.database}: reads alike ($pools)"
         val fixes = p.fixes.zipWithIndex.map { (f, i) =>
           if i == 0 then s"     fix : $f" else s"      or : $f"
         }

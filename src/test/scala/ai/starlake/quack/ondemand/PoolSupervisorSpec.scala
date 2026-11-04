@@ -5,7 +5,7 @@ import ai.starlake.quack.model.{Names, NodePlacement, NodeSpec, PoolCohort, Pool
 import ai.starlake.quack.ondemand.branch.BranchNames
 import ai.starlake.quack.ondemand.fleet.MissingSlots
 import ai.starlake.quack.ondemand.ha.PoolLocker
-import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.{KubernetesQuackBackend, QuackBackend}
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -24,28 +24,62 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     // so the node-id surface must hyphenize it.
     val k = PoolKey("tpch", "tpch_tpch1", "sales")
     val id = PoolSupervisor.nodeId(k, 1)
-    id shouldBe "quack-tpch-tpch-tpch1-sales-1"
+    id shouldBe "quack--tpch--tpch-tpch1--sales--1"
     id should fullyMatch regex "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
   }
 
   it should "leave already-hyphenated tenant-db names alone" in {
     val k = PoolKey("acme", "acme-default", "sales")
-    PoolSupervisor.nodeId(k, 7) shouldBe "quack-acme-acme-default-sales-7"
+    PoolSupervisor.nodeId(k, 7) shouldBe "quack--acme--acme-default--sales--7"
   }
 
-  it should "take 36 characters plus the tenant's and parent's names on a branch, up to 63" in {
-    // The branch's id8 is in its database and in its pool. Past 63 the id no longer grows: a node
-    // id must fit a Service name and a label value.
+  it should "give pools that read alike under one `-` ids of their own, across fields and tenants" in {
+    val a = PoolKey("acme", "acme_sales", "eu_west")
+    val b = PoolKey("acme", "acme_sales_eu", "west")
+    oldForm(a, 1) shouldBe oldForm(b, 1)
+    PoolSupervisor.nodeId(a, 1) shouldBe "quack--acme--acme-sales--eu-west--1"
+    PoolSupervisor.nodeId(b, 1) shouldBe "quack--acme--acme-sales-eu--west--1"
+    val x  = PoolKey("x", "x_x_x_a", "b")
+    val xx = PoolKey("x_x", "x_x_a", "b")
+    oldForm(x, 1) shouldBe oldForm(xx, 1)
+    PoolSupervisor.nodeId(x, 1) shouldBe "quack--x--x-x-x-a--b--1"
+    PoolSupervisor.nodeId(xx, 1) shouldBe "quack--x-x--x-x-a--b--1"
+  }
+
+  it should "hash a key holding a name the rule refuses, however short: `--` cannot split it" in {
+    // Names made before the rule stay, and these two would read alike under `--` though they do not
+    // under `-`.
+    val left  = PoolKey("acme", "acme_b__c", "p")
+    val right = PoolKey("acme", "acme_b", "c__p")
+    plainForm(left, 1) shouldBe plainForm(right, 1)
+    oldForm(left, 1) should not be oldForm(right, 1)
+    PoolSupervisor.nodeId(left, 1) shouldBe "quack--acme--acme-b--c--p-b67f892de30de2f0-1"
+    PoolSupervisor.nodeId(right, 1) shouldBe "quack--acme--acme-b--c--p-e7d094d95c0f77d0-1"
+    // A leading or trailing `_`, on any field.
+    List(
+      PoolKey("_t", "_t_d", "p"),
+      PoolKey("t_", "t__d", "p"),
+      PoolKey("t", "t_d_", "p"),
+      PoolKey("t", "t_d", "_p"),
+      PoolKey("t", "t_d", "p_"),
+      PoolKey("t", "t_d", "__merge")
+    ).foreach { key =>
+      val id = PoolSupervisor.nodeId(key, 1)
+      withClue(key)(id should fullyMatch regex "quack--.*[a-z0-9-]-[0-9a-f]{16}-1")
+    }
+    // A hash form never equals a plain one: only a plain id has `--` before its index.
+    PoolSupervisor.nodeId(PoolKey("t", "t_d", "p"), 1) should fullyMatch regex ".*--1"
+  }
+
+  it should "hash a branch's node, whose names hold `__` by design, and keep it in 63 characters" in {
     val branch = BranchNames.newId()
     val names  = List("acme" -> "acme_tpch", "wayne_corp" -> "wayne_corp_sales_2026")
     names.foreach { (tenant, parent) =>
       val key =
         PoolKey(tenant, BranchNames.tenantDbName(parent, branch), BranchNames.poolName(branch))
-      val whole = unbounded(key, 1)
-      whole.length shouldBe 36 + tenant.length + parent.length
       val id = PoolSupervisor.nodeId(key, 1)
-      id.length shouldBe math.min(whole.length, 63)
-      if whole.length <= 63 then id shouldBe whole
+      id.length shouldBe 63
+      id should fullyMatch regex "quack--.*-[0-9a-f]{16}-1"
     }
   }
 
@@ -55,31 +89,35 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     PoolSupervisor.nodeId(
       PoolKey("wayne_corp", "wayne_corp_sales_2026__br_ab12cd34", "__br_ab12cd34"),
       1
-    ) shouldBe "quack-wayne-corp-wayne-corp-sales-2026--br-a-1bec1026d140bc18-1"
+    ) shouldBe "quack--wayne-corp--wayne-corp-sales-2026--br-1bec1026d140bc18-1"
+    PoolSupervisor.nodeId(
+      PoolKey("acme", "acme_tpch__br_ab12cd34", "__br_ab12cd34"),
+      1
+    ) shouldBe "quack--acme--acme-tpch--br-ab12cd34----br-ab-8aca0b84a5283696-1"
     PoolSupervisor.nodeId(
       PoolKey("t" * 61, "t" * 61 + "_d", "p" * 63),
       Int.MaxValue
-    ) shouldBe "quack-ttttttttttttttttttttttttttttt-1ccfb0cbc814245e-2147483647"
+    ) shouldBe "quack--tttttttttttttttttttttttttttt-1ccfb0cbc814245e-2147483647"
   }
 
-  it should "leave an id of 63 characters byte for byte, and shorten one of 64" in {
-    val at63 = PoolKey("acme", "acme_default", "p" * 37)
-    unbounded(at63, 1).length shouldBe 63
+  it should "leave an id of 63 characters plain, and shorten one of 64" in {
+    val at63 = PoolKey("acme", "acme_default", "p" * 33)
+    plainForm(at63, 1).length shouldBe 63
     PoolSupervisor.nodeId(at63, 1) shouldBe
-      "quack-acme-acme-default-ppppppppppppppppppppppppppppppppppppp-1"
-    val at64 = PoolKey("acme", "acme_default", "p" * 38)
-    unbounded(at64, 1).length shouldBe 64
+      "quack--acme--acme-default--ppppppppppppppppppppppppppppppppp--1"
+    val at64 = PoolKey("acme", "acme_default", "p" * 34)
+    plainForm(at64, 1).length shouldBe 64
     PoolSupervisor.nodeId(at64, 1) shouldBe
-      "quack-acme-acme-default-pppppppppppppppppppp-917ce4e647ac20a3-1"
+      "quack--acme--acme-default--ppppppppppppppppp-aeb52d900b8bc3e6-1"
     // One pool's ids can sit on both sides, when its index gains a digit.
-    PoolSupervisor.nodeId(at63, 9) shouldBe unbounded(at63, 9)
-    unbounded(at63, 10).length shouldBe 64
+    PoolSupervisor.nodeId(at63, 9) shouldBe plainForm(at63, 9)
+    plainForm(at63, 10).length shouldBe 64
     val tenth = PoolSupervisor.nodeId(at63, 10)
     tenth.length shouldBe 63
     tenth should endWith("-10")
   }
 
-  it should "tell apart two keys that share a long prefix, or that read alike" in {
+  it should "tell apart two long keys that share a prefix, or that shift across fields" in {
     val shared = "p" * 100
     val a      = PoolKey("acme", "acme_default", s"${shared}a")
     val b      = PoolKey("acme", "acme_default", s"${shared}b")
@@ -92,14 +130,13 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     )
     ids.distinct.size shouldBe 4
     ids.map(_.dropRight("-0123456789abcdef-1".length)).distinct.size shouldBe 1
-    // `_` reads `-`, so these two keys read the same before the cut, and only the names as given
-    // tell them apart.
+    // These two read the same under one `-`, and the cut leaves them only the hash.
     val left  = PoolKey("acme", "acme_" + "x" * 50, "y_z")
     val right = PoolKey("acme", "acme_" + "x" * 50 + "_y", "z")
-    unbounded(left, 1) shouldBe unbounded(right, 1)
+    oldForm(left, 1) shouldBe oldForm(right, 1)
     PoolSupervisor.nodeId(left, 1) should not be PoolSupervisor.nodeId(right, 1)
-    // A pool's name follows no rule, so `/` cannot separate the names in the hash: these two would
-    // join to the same text around it, and the cut leaves them only the hash.
+    // A pool made before the rule can hold `/`, so `/` cannot separate the names in the hash: these
+    // two would join to the same text around it.
     val slashLeft  = PoolKey("acme", "acme_" + "x" * 60 + "/q", "y")
     val slashRight = PoolKey("acme", "acme_" + "x" * 60, "q/y")
     PoolSupervisor.nodeId(slashLeft, 1).dropRight("-0123456789abcdef-1".length) shouldBe
@@ -109,18 +146,35 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val endLeft  = PoolKey("acme", "acme_" + "x" * 50 + "a", "b")
     val endRight = PoolKey("acme", "acme_" + "x" * 50, "ab")
     PoolSupervisor.nodeId(endLeft, 1) should not be PoolSupervisor.nodeId(endRight, 1)
+    // Two long pools that read the same in one database, which a manifest can still bring.
+    val hyphen     = PoolKey("acme", "acme_" + "x" * 50, "eu-west")
+    val underscore = PoolKey("acme", "acme_" + "x" * 50, "eu_west")
+    PoolSupervisor.nodeId(hyphen, 1) should not be PoolSupervisor.nodeId(underscore, 1)
   }
 
-  it should "fit a Service name and a label value, whatever the names and the index are" in {
-    val nodes = generatedNodes(seed = 20261104L, count = 4000)
-    // The property must have run on both sides of the limit, and on every width of an index.
-    val (short, long) = nodes.partition((k, i) => unbounded(k, i).length <= 63)
+  it should "give distinct pools distinct ids and Secret names, for any names the rule lets through" in {
+    val generated = ruleNodes(seed = 20261104L, count = 6000)
+    val nodes     = generated ++ List(
+      (PoolKey("acme", "acme_sales", "eu_west"), 1),
+      (PoolKey("acme", "acme_sales_eu", "west"), 1),
+      (PoolKey("x", "x_x_x_a", "b"), 1),
+      (PoolKey("x_x", "x_x_a", "b"), 1)
+    )
+    // The property must have run on both sides of the limit, on every width of an index, and on
+    // names that really do shift across fields: some read alike under one `-`.
+    val (short, long) = nodes.partition((k, i) => plainForm(k, i).length <= 63)
     short.size should be > 400
     long.size should be > 400
     long.map(_._2.toString.length).toSet should contain allOf (1, 2, 10)
+    val keys = nodes.map(_._1).distinctBy(k => (k.tenant, k.tenantDb, Names.reading(k.pool)))
+    keys.groupBy(oldForm(_, 1)).values.count(_.size > 1) should be > 10
+    keys.groupBy(oldForm(_, 1)).values.count(_.map(_.tenant).distinct.size > 1) should be > 0
     nodes.foreach { (key, index) =>
       val id = PoolSupervisor.nodeId(key, index)
       withClue(s"$key at $index gave $id: ") {
+        List(key.tenant, key.tenantDb.stripPrefix(key.tenant + "_"))
+          .flatMap(Names.fieldRefusal(_, "name")) shouldBe Nil
+        Names.poolNameRefusal(key.pool) shouldBe None
         id.length should be <= 63
         ServiceNameRule.matches(id) shouldBe true
         LabelValueRule.matches(id) shouldBe true
@@ -130,7 +184,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
         val running =
           RunningNode(id, key, Role.Dual, "h", 1, "t", None, None, Instant.EPOCH, maxConcurrent = 1)
         MissingSlots.nextIndexBase(List(running)) shouldBe index
-        val whole = unbounded(key, index)
+        val whole = plainForm(key, index)
         if whole.length <= 63 then id shouldBe whole
         else
           id.length shouldBe 63
@@ -138,9 +192,19 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
           whole should startWith(id.dropRight(s"-0123456789abcdef-$index".length))
       }
     }
-    // Two different long keys, two ids, even when their names read alike.
-    val longIds = long.distinct.map((k, i) => PoolSupervisor.nodeId(k, i))
-    longIds.distinct.size shouldBe longIds.size
+    // Two different keys, two ids at each index, and their Secrets their own.
+    List(1, 10).foreach { index =>
+      val ids = keys.map(PoolSupervisor.nodeId(_, index))
+      ids.distinct.size shouldBe ids.size
+    }
+    val prefixes = List(
+      KubernetesQuackBackend.NodeEnvSecretPrefix,
+      KubernetesQuackBackend.FederationSecretPrefix
+    )
+    prefixes.foreach { prefix =>
+      val secrets = keys.map(KubernetesQuackBackend.perPoolSecretName(prefix, _))
+      secrets.distinct.size shouldBe secrets.size
+    }
   }
 
   // What an API server answers 422 to: a Service name is an RFC 1035 label, and the id is also the
@@ -148,31 +212,34 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   private val ServiceNameRule = "[a-z]([-a-z0-9]*[a-z0-9])?".r
   private val LabelValueRule  = "(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?".r
 
-  /** A key's id as it read before any bound, which an id of 63 or fewer must stay. */
-  private def unbounded(key: PoolKey, index: Int): String =
+  /** A key's id before `--`, which a node started by an earlier release keeps. */
+  private def oldForm(key: PoolKey, index: Int): String =
     s"quack-${key.tenant}-${key.tenantDb}-${key.pool}-$index".replace('_', '-')
 
-  /** Keys as `Names` composes them, branch pools among them, with every width of an index. */
-  private def generatedNodes(seed: Long, count: Int): List[(PoolKey, Int)] =
+  /** A key's id with `--` between fields, before any cut. */
+  private def plainForm(key: PoolKey, index: Int): String =
+    s"quack--${Names.reading(key.tenant)}--${Names.reading(key.tenantDb)}--" +
+      s"${Names.reading(key.pool)}--$index"
+
+  /** Keys the name rule lets through, of few letters so that many shift across fields, with every
+    * width of an index, past 63 characters often enough.
+    */
+  private def ruleNodes(seed: Long, count: Int): List[(PoolKey, Int)] =
     val random                    = new scala.util.Random(seed)
     def pick(chars: String): Char = chars(random.nextInt(chars.length))
-    def slug(maxLength: Int): String =
-      val bound  = if random.nextBoolean() then math.min(8, maxLength) else maxLength
-      val length = 1 + random.nextInt(bound)
-      (pick("abzAZ___") +: List.fill(length - 1)(pick("abz019AZ___"))).mkString
+    def segment(): String =
+      val length = if random.nextInt(8) == 0 then 8 + random.nextInt(12) else 1 + random.nextInt(2)
+      (pick("ab") +: List.fill(length - 1)(pick("ab0"))).mkString
+    def name(separators: String): String =
+      val segments = List.fill(1 + random.nextInt(4))(segment())
+      segments.reduce((a, b) => s"$a${pick(separators)}$b")
     val indices = Vector(1, 2, 9, 10, 99, 100, 12345, Int.MaxValue)
+    val tenants = Vector("a", "b", "a_a", "a_b", "a_a_b")
     List
       .fill(count) {
-        val tenant = slug(30)
-        val suffix = slug(Names.MaxLength - tenant.length - 1)
-        Names.normalizeTenantDbName(tenant, suffix).toOption.map { db =>
-          val index = indices(random.nextInt(indices.size))
-          if random.nextInt(4) == 0 then
-            val branch = f"br-${random.nextInt()}%08x"
-            val key    =
-              PoolKey(tenant, BranchNames.tenantDbName(db, branch), BranchNames.poolName(branch))
-            (key, index)
-          else (PoolKey(tenant, db, slug(Names.MaxLength)), index)
+        val tenant = if random.nextBoolean() then tenants(random.nextInt(tenants.size)) else name("_")
+        Names.normalizeTenantDbName(tenant, name("_")).toOption.map { db =>
+          (PoolKey(tenant, db, name("_-")), indices(random.nextInt(indices.size)))
         }
       }
       .flatten
@@ -591,9 +658,9 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "stop the nodes started earlier in the same call when a later start fails" in:
     val (sup, b, st) = freshSupervisorWithStore()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    val n1 = "quack-acme-acme-default-sales-1"
-    val n2 = "quack-acme-acme-default-sales-2"
-    val n3 = "quack-acme-acme-default-sales-3"
+    val n1 = "quack--acme--acme-default--sales--1"
+    val n2 = "quack--acme--acme-default--sales--2"
+    val n3 = "quack--acme--acme-default--sales--3"
     b.failStarts += n3
     val err = intercept[RuntimeException] {
       sup.scale(key, 3, RoleDistribution(0, 0, 3), force = true).unsafeRunSync()
@@ -611,9 +678,9 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "stop the nodes started earlier in the same call when the call is cancelled mid-start" in:
     val (sup, b, st) = freshSupervisorWithStore()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    val n1 = "quack-acme-acme-default-sales-1"
-    val n2 = "quack-acme-acme-default-sales-2"
-    val n3 = "quack-acme-acme-default-sales-3"
+    val n1 = "quack--acme--acme-default--sales--1"
+    val n2 = "quack--acme--acme-default--sales--2"
+    val n3 = "quack--acme--acme-default--sales--3"
     b.hangStarts += n3
     def awaitHang: IO[Unit] =
       IO(b.hangEntered.contains(n3)).flatMap(if _ then IO.unit else IO.sleep(10.millis) *> awaitHang)
@@ -942,7 +1009,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(long, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val pid = st.snapshot().pools.head.id
     // The row an earlier release wrote, on a runtime where such an id ran: nothing here renames it.
-    val earlier = unbounded(long, 1)
+    val earlier = oldForm(long, 1)
     earlier.length should be > 63
     st.deleteNode(sup.get(long).get.nodes.head.nodeId)
     st.upsertNode(
@@ -970,7 +1037,273 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.scale(long, 2, RoleDistribution(0, 0, 2), force = false).unsafeRunSync()
     sup.get(long).get.nodes.map(_.nodeId) shouldBe List(earlier, PoolSupervisor.nodeId(long, 2))
 
-  it should "fall back to the flat distribution in spawnFromDistribution when the cached " +
+  it should "run a pool on both forms of id: a stored one stays, a new slot takes the new form" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None // k8s-style: liveNodeIds is the only membership signal
+    def cohort(zone: String) =
+      PoolCohort(NodePlacement(Map("zone" -> zone), Nil), RoleDistribution(0, 0, 1))
+    sup
+      .createPool(key, RoleDistribution(0, 0, 2), cohorts = List(cohort("a"), cohort("b")))
+      .unsafeRunSync()
+    val pid = st.snapshot().pools.head.id
+    // The rows an earlier release wrote: nothing here renames them.
+    val old1 = oldForm(key, 1)
+    val old2 = oldForm(key, 2)
+    old1 shouldBe "quack-acme-acme-default-sales-1"
+    st.deleteNodesForPool(pid)
+    List(old1, old2).zipWithIndex.foreach { (id, i) =>
+      st.upsertNode(
+        RunningNode(id, key, Role.Dual, "127.0.0.1", 21990 + i, "tok", None, None,
+          Instant.EPOCH, maxConcurrent = 4),
+        pid
+      )
+    }
+
+    // A restart adopts them as they are.
+    sup.restore()
+    b.liveIds = Some(Set(old1, old2))
+    val adoptedFrom = b.specs.size
+    sup.reconcile().unsafeRunSync()
+    b.specs.size shouldBe adoptedFrom
+    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(old1, old2)
+
+    // The second dies: it comes back under its own id, placed by the index it ends in.
+    b.liveIds = Some(Set(old1))
+    sup.reconcile().unsafeRunSync()
+    val respawned = b.specs.drop(adoptedFrom).toList
+    respawned.map(_.nodeId) shouldBe List(old2)
+    respawned.map(_.placement.nodeSelector) shouldBe List(Map("zone" -> "b"))
+
+    // A new slot is numbered above both, in the new form.
+    b.liveIds = Some(Set(old1, old2))
+    sup.scale(key, 3, RoleDistribution(0, 0, 3), force = false).unsafeRunSync()
+    val third = "quack--acme--acme-default--sales--3"
+    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(old1, old2, third)
+    st.listNodes(pid).map(_.nodeId).toSet shouldBe Set(old1, old2, third)
+
+    // A slot a peer's scale-up leaves missing is filled above the highest index of either form.
+    val row = st.snapshot().pools.head
+    st.upsertPool(row.copy(size = 4, distribution = RoleDistribution(0, 0, 4)))
+    b.liveIds = Some(Set(old1, old2, third))
+    sup.reconcile().unsafeRunSync()
+    b.specs.last.nodeId shouldBe "quack--acme--acme-default--sales--4"
+
+  "PoolSupervisor.createPool" should "refuse a name the rule refuses, whoever asks, writing nothing" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    List("__br_x", "__merge", "_x", "x_", "a__b", "a--b", "a_-b", "my pool", "1a", "a/b", "p" * 64)
+      .foreach { name =>
+        val refused = intercept[PoolSupervisor.InvalidPoolName] {
+          sup
+            .createPool(PoolKey("acme", "acme_default", name), RoleDistribution(0, 0, 1))
+            .unsafeRunSync()
+        }
+        withClue(name)(refused.getMessage should include(s"'$name'"))
+      }
+    st.snapshot().pools shouldBe Nil
+    b.specs shouldBe empty
+
+  it should "take a name the manager makes itself, only by the path that says so" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    val branchPool   = PoolKey("acme", "acme_default", "__br_ab12cd34")
+    sup.createPool(branchPool, RoleDistribution(0, 0, 1), internalName = true).unsafeRunSync()
+    st.snapshot().pools.map(_.name) shouldBe List("__br_ab12cd34")
+    b.specs.map(_.nodeId) shouldBe List(PoolSupervisor.nodeId(branchPool, 1))
+
+  it should "accept a hyphen, and refuse a pool that reads the same as another of its database" in:
+    val (sup, _, st) = freshSupervisorWithStore()
+    sup
+      .createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val dist = RoleDistribution(0, 0, 1)
+    sup.createPool(PoolKey("acme", "acme_default", "eu-west"), dist).unsafeRunSync()
+    val refused = intercept[PoolSupervisor.PoolReadsAlike] {
+      sup.createPool(PoolKey("acme", "acme_default", "eu_west"), dist).unsafeRunSync()
+    }
+    refused.other shouldBe "eu-west"
+    refused.getMessage should include("'eu_west'")
+    refused.getMessage should include("'eu-west'")
+    st.snapshot().pools.map(_.name) shouldBe List("eu-west")
+    // In the other order too.
+    sup.createPool(PoolKey("acme", "acme_default", "us_east"), dist).unsafeRunSync()
+    val other = intercept[PoolSupervisor.PoolReadsAlike] {
+      sup.createPool(PoolKey("acme", "acme_default", "us-east"), dist).unsafeRunSync()
+    }
+    other.other shouldBe "us_east"
+    // In another database of the tenant they are different pools, with different ids.
+    sup.createPool(PoolKey("acme", "acme_other", "eu_west"), dist).unsafeRunSync()
+    sup.get(PoolKey("acme", "acme_other", "eu_west")).get.nodes.map(_.nodeId) shouldBe
+      List("quack--acme--acme-other--eu-west--1")
+    // What the store holds counts, whichever replica or release wrote it.
+    st.upsertPool(
+      ai.starlake.quack.model.Pool(
+        id = "p-peer",
+        tenantId = "acme",
+        tenantDbId = sup.findTenantDb("acme", "acme_other").get.id,
+        name = "from_a_peer",
+        size = 0,
+        distribution = RoleDistribution(0, 0, 0)
+      )
+    )
+    intercept[PoolSupervisor.PoolReadsAlike] {
+      sup.createPool(PoolKey("acme", "acme_other", "from-a-peer"), dist).unsafeRunSync()
+    }.other shouldBe "from_a_peer"
+
+  it should "queue two replicas creating such a pair on the converted name, and refuse the second" in:
+    // Both replicas read the store, not each other's memory, and the lock is the only thing between
+    // the first one's check and its write.
+    val atFirstWrite = new java.util.concurrent.CountDownLatch(1)
+    val letItWrite   = new java.util.concurrent.CountDownLatch(1)
+    val held         = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val st           = new InMemoryControlPlaneStore():
+      override def upsertPool(p: ai.starlake.quack.model.Pool): Unit =
+        if p.name == "eu-west" && held.compareAndSet(false, true) then
+          atFirstWrite.countDown()
+          letItWrite.await(20, java.util.concurrent.TimeUnit.SECONDS)
+        super.upsertPool(p)
+    val locks  = PoolLocker.inProcess()
+    def replica = new PoolSupervisor(new CapturingBackend, new NodeLoadTracker, st, locks = locks)
+    val first  = replica
+    first.createTenant(Tenant("acme")).unsafeRunSync()
+    first
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val second = replica
+    second.restore()
+    val dist = RoleDistribution(0, 0, 1)
+    val a    = first.createPool(PoolKey("acme", "acme_default", "eu-west"), dist).unsafeToFuture()
+    atFirstWrite.await(20, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+    val b = second
+      .createPool(PoolKey("acme", "acme_default", "eu_west"), dist)
+      .attempt
+      .unsafeToFuture()
+    // It must be queued behind the lock, not past its check with nothing yet to see.
+    Thread.sleep(700)
+    b.isCompleted shouldBe false
+    letItWrite.countDown()
+    scala.concurrent.Await.result(a, 20.seconds).map(_.nodeId) shouldBe
+      List("quack--acme--acme-default--eu-west--1")
+    scala.concurrent.Await.result(b, 20.seconds) match
+      case Left(refused: PoolSupervisor.PoolReadsAlike) => refused.other shouldBe "eu-west"
+      case other => fail(s"the second create should be refused, got $other")
+    st.snapshot().pools.map(_.name) shouldBe List("eu-west")
+
+  "PoolSupervisor.createTenant" should "refuse a tenant id the rule refuses, whoever asks" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    List("a__b", "a_").foreach { id =>
+      sup.createTenant(Tenant(id)).unsafeRunSync() match
+        case Left(err: ai.starlake.quack.ondemand.SupervisorError.InvalidName) =>
+          withClue(id)(err.message should include(s"'$id'"))
+        case other => fail(s"$id: $other")
+    }
+    sup.createTenant(Tenant("a_b")).unsafeRunSync().isRight shouldBe true
+
+  "PoolSupervisor.createTenantDb" should "refuse a database name the rule refuses, whoever asks" in:
+    val (sup, _, _) = freshSupervisorWithStore()
+    List("_x", "x_", "a__b", "acme__b", "acme_a__b").foreach { name =>
+      sup
+        .createTenantDb("acme", name, TenantDbKind.InMemory, Map.empty, dataPath = "")
+        .unsafeRunSync() match
+        case Left(err: ai.starlake.quack.ondemand.SupervisorError.InvalidName) =>
+          withClue(name)(err.message should include("'--'"))
+        case other => fail(s"$name: $other")
+    }
+    sup
+      .createTenantDb("acme", "a_b", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .map(_.name) shouldBe Right("acme_a_b")
+    // The composed name's own prefix does not count against the suffix.
+    sup
+      .createTenantDb("acme", "acme_c", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .map(_.name) shouldBe Right("acme_c")
+
+  it should "let a tenant made before the rule go on making databases of legal names" in:
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(new CapturingBackend, new NodeLoadTracker, st)
+    st.createTenantWithBuiltins(
+      Tenant("a__b"),
+      ai.starlake.quack.ondemand.state.BuiltinRbac.rowsFor("a__b")
+    )
+    sup.restore()
+    sup
+      .createTenantDb("a__b", "sales", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .map(_.name) shouldBe Right("a__b_sales")
+
+  "A pool made before the rule" should "go on running, on an id that cannot read like another's" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    st.upsertPool(
+      ai.starlake.quack.model.Pool(
+        id = "p-old",
+        tenantId = "acme",
+        tenantDbId = sup.findTenantDb("acme", "acme_default").get.id,
+        name = "a__b",
+        size = 1,
+        distribution = RoleDistribution(0, 0, 1)
+      )
+    )
+    sup.restore()
+    sup.reconcile().unsafeRunSync()
+    val old = PoolKey("acme", "acme_default", "a__b")
+    b.specs.map(_.nodeId) shouldBe List(PoolSupervisor.nodeId(old, 1))
+    b.specs.head.nodeId should fullyMatch regex ".*-[0-9a-f]{16}-1"
+    sup.get(old).get.nodes.size shouldBe 1
+
+  "PoolSupervisor.readAlikePools" should "pair the pools that read alike under one `-`" in:
+    val a  = PoolKey("acme", "acme_sales", "eu_west")
+    val b  = PoolKey("acme", "acme_sales_eu", "west")
+    val x  = PoolKey("x", "x_x_x_a", "b")
+    val xx = PoolKey("x_x", "x_x_a", "b")
+    val c  = PoolKey("acme", "acme_sales", "other")
+    PoolSupervisor.readAlikePools(List(xx, c, b, x, a)) shouldBe List((a, b), (x, xx))
+    PoolSupervisor.readAlikePools(List(a, c)) shouldBe Nil
+    PoolSupervisor.readAlikePools(Nil) shouldBe Nil
+    // A manifest can still bring two pools of one database that read the same.
+    val h = PoolKey("acme", "acme_sales", "eu-west")
+    PoolSupervisor.readAlikePools(List(a, h)) shouldBe List((h, a))
+    // Three: every pair.
+    val third = PoolKey("acme", "acme_sales_eu_west", "x")
+    PoolSupervisor.readAlikePools(List(third, PoolKey("acme", "acme_sales_eu", "west_x"))) shouldBe
+      List((PoolKey("acme", "acme_sales_eu", "west_x"), third))
+
+  "startupProblems" should "report two pools that read alike, naming both and the way out" in:
+    val (sup, _, st) = freshSupervisorWithStore()
+    val other = sup
+      .createTenantDb("acme", "default_eu", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .toOption
+      .get
+    val td = sup.findTenantDb("acme", "acme_default").get
+    // Rows an earlier release made: `eu_west` of acme_default and `west` of acme_default_eu.
+    List(("p-1", td.id, "eu_west"), ("p-2", other.id, "west")).foreach { (id, db, name) =>
+      st.upsertPool(
+        ai.starlake.quack.model.Pool(
+          id = id,
+          tenantId = "acme",
+          tenantDbId = db,
+          name = name,
+          size = 0,
+          distribution = RoleDistribution(0, 0, 0)
+        )
+      )
+    }
+    sup.restore()
+    val problems = sup.startupProblems()
+    problems.map(p => (p.tenant, p.database, p.kind, p.pools)) shouldBe List(
+      ("acme", "acme_default", PoolSupervisor.StartupProblem.Kind.ReadAlike, List("eu_west"))
+    )
+    problems.head.reason should include("acme/acme_default/eu_west")
+    problems.head.reason should include("acme/acme_default_eu/west")
+    problems.head.fixes.mkString(" ") should include("under another name")
+    // Reported, and nothing blocked: both still answer.
+    sup.poolBlockReason(PoolKey("acme", "acme_default", "eu_west")) shouldBe None
+
+  it should "report nothing for pools that do not read alike" in:
+    val (sup, _, _) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.startupProblems() shouldBe Nil
+
+  "reconcile heal" should "fall back to the flat distribution in spawnFromDistribution when the cached " +
     "cohort plan disagrees with the authoritative target" in:
     // Fix 2 makes the empty-pool spawn gate (state.nodes.isEmpty && distribution.total > 0) fire
     // off the authoritative, store-refreshed distribution -- but spawnFromDistribution's PLAN

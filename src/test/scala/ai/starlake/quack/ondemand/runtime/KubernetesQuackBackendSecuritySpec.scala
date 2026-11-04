@@ -202,7 +202,7 @@ class KubernetesQuackBackendSecuritySpec
       fromData ++ fromString
     }
 
-  private val nodeEnvSecretName = "qod-nodeenv-acme-acme-lake-bi"
+  private val nodeEnvSecretName = "qod-nodeenv--acme--acme-lake--bi"
 
   "the pod spec" should "not carry pgPassword as a plain env var" in:
     val backend = makeBackend()
@@ -273,7 +273,7 @@ class KubernetesQuackBackendSecuritySpec
     // Task 20 (review I2): the tenant initSql shares the pool's init SQL Secret, each text under the
     // key its trust names, and the pod projects only the keys its spec holds: no env flag.
     env.map(_.getName).filter(_.startsWith("QOD_INIT_")) shouldBe empty
-    secretPayload("qod-fedsql-acme-acme-lake-bi").value shouldBe Map(
+    secretPayload("qod-fedsql--acme--acme-lake--bi").value shouldBe Map(
       "extraSetupSql"                          -> "SELECT 1;",
       NodeSecretFiles.TenantDbInitKey          -> "SET threads = 2;",
       NodeSecretFiles.TenantPoolInitTrustedKey -> "SET threads = 3;"
@@ -303,7 +303,7 @@ class KubernetesQuackBackendSecuritySpec
     secretRefs("quack-trust-b").get(NodeSecretFiles.TenantDbInitKey).map(_._2) shouldBe
       Some(NodeSecretFiles.TenantDbInitKey)
     secretRefs("quack-trust-b").keySet should not contain NodeSecretFiles.TenantDbInitTrustedKey
-    val payload = secretPayload("qod-fedsql-acme-acme-lake-bi").value
+    val payload = secretPayload("qod-fedsql--acme--acme-lake--bi").value
     payload.get(NodeSecretFiles.TenantDbInitTrustedKey) shouldBe None
     payload.get(NodeSecretFiles.TenantDbInitKey) shouldBe Some("CREATE SECRET s (TYPE s3);")
 

@@ -28,7 +28,66 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.upsertUserWithHash(tenant = None, username = "admin", passwordHash = pre, kind = "admin")
     s
 
-  "ManifestImporter.apply" should "bcrypt plaintext passwords" in {
+  "ManifestImporter.apply" should "import a name a new create would refuse, with one ERROR for it" in {
+    val s = new InMemoryControlPlaneStore()
+    def pool(name: String, db: String) =
+      ManifestPool(name = name, tenantDb = db, roleDistribution = ManifestRoleDistribution(0, 0, 1))
+    val m = base.copy(
+      tenants = List(
+        ManifestTenant(
+          name = "a__b",
+          tenantDbs = List(ManifestTenantDb(name = "a__b_c__d", kind = "memory")),
+          pools = List(pool("clean", "a__b_c__d"))
+        ),
+        ManifestTenant(
+          name = "acme",
+          tenantDbs = List(
+            ManifestTenantDb(name = "acme_x_", kind = "memory"),
+            ManifestTenantDb(name = "acme_ok", kind = "memory"),
+            // A branch's names hold `__` by design: nothing to report.
+            ManifestTenantDb(
+              name = "acme_ok__br_ab12cd34",
+              kind = "memory",
+              branchOf = Some("acme_ok")
+            )
+          ),
+          pools = List(
+            pool("x__y", "acme_x_"),
+            pool("my pool", "acme_ok"),
+            pool("eu-west", "acme_ok"),
+            pool("eu_west", "acme_ok"),
+            pool("__br_ab12cd34", "acme_ok__br_ab12cd34")
+          )
+        )
+      )
+    )
+    val (result, logs) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(
+      ManifestImporter.getClass.getName
+    )(ManifestImporter.apply(m, s, requireEncryption = false))
+    result shouldBe Right(())
+    s.snapshot().pools.map(_.name).toSet shouldBe
+      Set("clean", "x__y", "my pool", "eu-west", "eu_west", "__br_ab12cd34")
+    s.snapshot().tenantDbs.map(_.name).toSet shouldBe
+      Set("a__b_c__d", "acme_x_", "acme_ok", "acme_ok__br_ab12cd34")
+    val errors = logs.filter(_.getLevel.toString == "ERROR").map(_.getFormattedMessage)
+    def about(what: String) = errors.count(_.startsWith(what))
+    withClue(errors.mkString("\n")) {
+      about("tenant 'a__b'") shouldBe 1
+      about("database 'a__b_c__d'") shouldBe 1
+      about("database 'acme_x_'") shouldBe 1
+      about("pool 'x__y'") shouldBe 1
+      about("pool 'my pool'") shouldBe 1
+      about("pools 'eu-west' and 'eu_west'") shouldBe 1
+      errors.size shouldBe 6
+      errors.exists(_.contains("br_ab12cd34")) shouldBe false
+    }
+    // A backup of it restores: the export imports back.
+    val again = ManifestExporter.build(s, Instant.EPOCH, "0.2.0", "test").toOption.get
+    ManifestImporter.apply(again, new InMemoryControlPlaneStore(), requireEncryption = false) shouldBe
+      Right(())
+  }
+
+  it should "bcrypt plaintext passwords" in {
     val s = new InMemoryControlPlaneStore()
     val m = base.copy(users =
       List(

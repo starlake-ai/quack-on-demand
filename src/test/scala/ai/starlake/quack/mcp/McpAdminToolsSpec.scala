@@ -360,6 +360,26 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     f.sup.get(PoolKey(Tenant0, TenantDb, "etl")).isDefined shouldBe true
   }
 
+  it should "refuse a name the rule refuses, an internal one included, and a read-alike sibling" in {
+    val f = new Fixture
+    def create(pool: String) = f.call(
+      "create_pool",
+      McpSuperuserPat.principal,
+      "tenant"   -> Json.fromString(Tenant0),
+      "database" -> Json.fromString(TenantDb),
+      "pool"     -> Json.fromString(pool),
+      "dual"     -> Json.fromInt(1)
+    )
+    List("a__b", "__br_x", "my pool").foreach { pool =>
+      withClue(pool) {
+        create(pool).left.toOption.get should include("invalid_name")
+        f.sup.get(PoolKey(Tenant0, TenantDb, pool)) shouldBe None
+      }
+    }
+    create("eu-west").isRight shouldBe true
+    create("eu_west").left.toOption.get should include("pool_reads_alike")
+  }
+
   "set_pool_disabled" should "flip the disabled flag" in {
     val f   = new Fixture
     val out = f.call(
@@ -437,7 +457,20 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
 
   // Task 20 Part D: the tool goes through the REST handler, so a tenant admin's initSql gets the
   // same write-time check and the same refusal.
-  "create_database" should "refuse a tenant admin's initSql the allowlist refuses" in {
+  "create_database" should "refuse a name the rule refuses" in {
+    val f = new Fixture
+    val out = f.call(
+      "create_database",
+      McpSuperuserPat.principal,
+      "tenant" -> Json.fromString(Tenant0),
+      "name"   -> Json.fromString("a__b"),
+      "kind"   -> Json.fromString("memory")
+    )
+    out.left.toOption.get should include("invalid_name")
+    f.sup.findTenantDb(Tenant0, s"${Tenant0}_a__b") shouldBe None
+  }
+
+  it should "refuse a tenant admin's initSql the allowlist refuses" in {
     val bin = ai.starlake.quack.ondemand.runtime.QodNodeTestBinary.path
     assume(bin.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val f = new Fixture(initSqlChecker =

@@ -379,12 +379,47 @@ object ManifestImporter extends LazyLogging:
       // written before it (the deletes of the replace passes included), so a refused import
       // changes nothing. Errors are thrown out of the transaction to roll it back.
       try
-        store.atomically {
+        val applied = store.atomically {
           val result = applyValidated(m, store, federatedStore, requireEncryption, tenantFilesRoot)
           result.left.foreach(errs => throw ApplyRefused(errs))
           result
         }
+        namesANewCreateWouldRefuse(m).foreach(line => logger.error(line))
+        applied
       catch case ApplyRefused(errs) => Left(errs)
+    }
+
+  /** One line per name of `m` a new create would refuse: a backup always restores, since these were
+    * legal in the release that exported it, and an operator hears about them. A branch's database
+    * and pool hold `__` by design, known by the row that says it is a branch, and are not reported.
+    * Nodes of such a pool take a hashed id, so the name itself breaks nothing.
+    */
+  private[manifest] def namesANewCreateWouldRefuse(m: ConfigManifest): List[String] =
+    val Kept = "imported as it is, but a new create would refuse it"
+    m.tenants.flatMap { t =>
+      val tenantLine = Names.fieldRefusal(t.name, "tenant").map(_ => s"tenant '${t.name}': $Kept")
+      val branchDbs  = t.tenantDbs.filter(_.branchOf.isDefined).map(_.name).toSet
+      val dbLines    = t.tenantDbs.filterNot(d => branchDbs(d.name)).flatMap { d =>
+        Names
+          .fieldRefusal(d.name.stripPrefix(s"${t.name}_"), "database")
+          .map(_ => s"database '${d.name}' of tenant '${t.name}': $Kept")
+      }
+      val pools     = t.pools.filterNot(p => branchDbs(p.tenantDb))
+      val poolLines = pools.flatMap { p =>
+        Names
+          .poolNameRefusal(p.name)
+          .map(_ => s"pool '${p.name}' of tenant '${t.name}': $Kept")
+      }
+      val readAlike = pools
+        .groupBy(p => (p.tenantDb, Names.reading(p.name)))
+        .toList
+        .collect {
+          case ((db, _), same) if same.map(_.name).distinct.size > 1 =>
+            val names = same.map(_.name).distinct.sorted.map(n => s"'$n'").mkString(" and ")
+            s"pools $names of database '$db': they read the same, so they share a node id and " +
+              "Secrets; recreate one under another name"
+        }
+      tenantLine.toList ++ dbLines ++ poolLines ++ readAlike
     }
 
   private final case class ApplyRefused(errs: List[String])

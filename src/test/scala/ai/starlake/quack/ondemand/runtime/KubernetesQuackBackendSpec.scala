@@ -119,7 +119,7 @@ class KubernetesQuackBackendSpec
     container.getEnv.asScala.map(_.getValue) should not contain "quackquack"
     val pod = server.getClient.pods.inNamespace("default").withName(node.podName.get).get()
     SecretsVolumeView.files(pod).get("QOD_S3_SECRET_ACCESS_KEY") shouldBe
-      Some(("qod-nodeenv-acme-acme-default-sales", "QOD_S3_SECRET_ACCESS_KEY"))
+      Some(("qod-nodeenv--acme--acme-default--sales", "QOD_S3_SECRET_ACCESS_KEY"))
     env.get("QOD_S3_REGION") shouldBe Some("us-east-1")
     env.get("QOD_S3_URL_STYLE") shouldBe Some("path")
     env.get("QOD_S3_USE_SSL") shouldBe Some("false")
@@ -237,7 +237,7 @@ class KubernetesQuackBackendSpec
 
   /** PoolKey with a tenantDb that contains an underscore; the Secret name must hyphenize it. */
   private val FedKey  = PoolKey("acme", "acme_default", "sales")
-  private val FedName = "qod-fedsql-acme-acme-default-sales"
+  private val FedName = "qod-fedsql--acme--acme-default--sales"
 
   "federation Secret wiring" should "create a per-pool Secret and reference it from the pod" in:
     val backend = fedBackend
@@ -294,14 +294,14 @@ class KubernetesQuackBackendSpec
     backend.start(spec).unsafeRunSync()
     server.getClient.secrets
       .inNamespace("default")
-      .withName("qod-fedsql-acme-acme-default-sales")
+      .withName(FedName)
       .get() should not be null
     // Pod vanishes out-of-band (node-group replacement).
     server.getClient.pods.inNamespace("default").withName("quack-fed-gone").delete()
     backend.stop(key, "quack-fed-gone").unsafeRunSync()
     server.getClient.secrets
       .inNamespace("default")
-      .withName("qod-fedsql-acme-acme-default-sales")
+      .withName(FedName)
       .get() shouldBe null
 
   it should "GC the Secret even when an unmanaged pod wears the pool labels" in:
@@ -1004,8 +1004,8 @@ class KubernetesQuackBackendSpec
   private val LabelRule = "(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?".r
 
   private val MergeKey     = PoolKey("acme", "acme_default", "__merge")
-  private val MergeFedName = "qod-fedsql-acme-acme-default---merge"
-  private val MergeEnvName = "qod-nodeenv-acme-acme-default---merge"
+  private val MergeFedName = "qod-fedsql--quack--acme--acme-default----merge-6537ded44a1a6782"
+  private val MergeEnvName = "qod-nodeenv--quack--acme--acme-default----merge-6537ded44a1a6782"
 
   /** A node of `key` with both per-pool Secrets. */
   private def nodeOf(key: PoolKey, nodeId: String) = NodeSpec(
@@ -1098,7 +1098,7 @@ class KubernetesQuackBackendSpec
     server.getClient.secrets.inNamespace("default").withName(MergeFedName).get() shouldBe null
     server.getClient.secrets.inNamespace("default").withName(MergeEnvName).get() shouldBe null
 
-  it should "name each per-pool Secret as the API accepts, for a pool ending in an underscore too" in:
+  it should "name each per-pool Secret as the API accepts, for a pool the rule refuses too" in:
     // A real API server's rule for a Secret's name. No two pools share one: `x_` is not `x_0`.
     val secretName = "[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
     val backend    = fedBackend
@@ -1114,17 +1114,18 @@ class KubernetesQuackBackendSpec
       .toList
       .map(_.getMetadata.getName)
     names.foreach(name => withClue(name)(name should fullyMatch regex secretName))
-    names.count(_.startsWith("qod-fedsql-")) shouldBe pools.size
-    names.count(_.startsWith("qod-nodeenv-")) shouldBe pools.size
-    // A name that was valid stays what it was: a running pod reads its Secret by it.
-    names should contain("qod-fedsql-acme-acme-default-sales")
-    names should contain("qod-nodeenv-acme-acme-default---merge")
-    names should contain("qod-fedsql-acme-acme-default-x-0")
+    names.count(_.startsWith("qod-fedsql--")) shouldBe pools.size
+    names.count(_.startsWith("qod-nodeenv--")) shouldBe pools.size
+    // A name that holds to the rule reads as it is.
+    names should contain("qod-fedsql--acme--acme-default--sales")
+    names should contain("qod-fedsql--acme--acme-default--x-0")
+    // One that does not takes a hash, since `--` could not split it.
+    names should contain(MergeEnvName)
     // The pod draws from the Secret written, and the last pod's stop removes it.
     val pod   = server.getClient.pods.inNamespace("default").withName("named-n0").get()
     val trail = SecretsVolumeView.files(pod)("extraSetupSql")._1
     names should contain(trail)
-    trail shouldBe "qod-fedsql-acme-acme-default-x-0.qod"
+    trail should fullyMatch regex "qod-fedsql--quack--acme--acme-default--x-*-[0-9a-f]{16}"
     backend.stop(PoolKey("acme", "acme_default", "x_"), "named-n0").unsafeRunSync()
     server.getClient.secrets.inNamespace("default").withName(trail).get() shouldBe null
 
@@ -1196,8 +1197,8 @@ class KubernetesQuackBackendSpec
     reborn.foreach(n => withClue(n.nodeId)(n.token should not be empty))
 
   it should "give two keys that read alike their own per-pool Secrets" in:
-    // Their ids differ by the hash, so both pods start. Under one Secret's name each would read what
-    // the other's start wrote last, the other database's password and federation SQL included.
+    // Both pods start. Under one Secret's name each would read what the other's start wrote last,
+    // the other database's password and federation SQL included.
     val left    = PoolKey("acme", "acme_" + "x" * 50, "y_z")
     val right   = PoolKey("acme", "acme_" + "x" * 50 + "_y", "z")
     val backend = fedBackend
@@ -1231,11 +1232,9 @@ class KubernetesQuackBackendSpec
     server.getClient.secrets.inNamespace("default").withName(read.head._1).get() shouldBe null
     server.getClient.secrets.inNamespace("default").withName(read(1)._1).get() should not be null
 
-  it should "keep a per-pool Secret's name up to a first node id of 63, then take the id's hash" in:
-    // A pool whose first id is 63 or fewer may have pods running, which read their Secret by this
-    // name. One past it never started: the API refused the id before it could be cut.
-    val at63                = PoolKey("acme", "acme_default", "p" * 37)
-    val at64                = PoolKey("acme", "acme_default", "p" * 38)
+  it should "read a per-pool Secret's name plainly up to a first node id of 63, then take the hash" in:
+    val at63                = PoolKey("acme", "acme_default", "p" * 33)
+    val at64                = PoolKey("acme", "acme_default", "p" * 34)
     val backend             = fedBackend
     def names(key: PoolKey) =
       backend.start(nodeOf(key, PoolSupervisor.nodeId(key, 1))).unsafeRunSync()
@@ -1244,10 +1243,268 @@ class KubernetesQuackBackendSpec
       val files = SecretsVolumeView.files(pod)
       (files("pgPassword")._1, files("extraSetupSql")._1)
     names(at63) shouldBe
-      ((s"qod-nodeenv-acme-acme-default-${"p" * 37}", s"qod-fedsql-acme-acme-default-${"p" * 37}"))
+      (
+        (
+          s"qod-nodeenv--acme--acme-default--${"p" * 33}",
+          s"qod-fedsql--acme--acme-default--${"p" * 33}"
+        )
+      )
     names(at64) shouldBe (
       (
-        "qod-nodeenv-quack-acme-acme-default-pppppppppppppppppppp-917ce4e647ac20a3",
-        "qod-fedsql-quack-acme-acme-default-pppppppppppppppppppp-917ce4e647ac20a3"
+        "qod-nodeenv--quack--acme--acme-default--ppppppppppppppppp-aeb52d900b8bc3e6",
+        "qod-fedsql--quack--acme--acme-default--ppppppppppppppppp-aeb52d900b8bc3e6"
       )
     )
+
+  "two pools that read alike under one `-`" should "get pods, Services and Secrets of their own" in:
+    val pairs = List(
+      PoolKey("acme", "acme_sales", "eu_west") -> PoolKey("acme", "acme_sales_eu", "west"),
+      PoolKey("x", "x_x_x_a", "b")             -> PoolKey("x_x", "x_x_a", "b")
+    )
+    val backend = fedBackend
+    pairs.foreach { (a, b) =>
+      val started = List(a -> "a", b -> "b").map { (key, who) =>
+        val id = PoolSupervisor.nodeId(key, 1)
+        backend
+          .start(nodeOf(key, id).copy(metastore = Map("pgPassword" -> s"$key-pw")))
+          .unsafeRunSync()
+        id
+      }
+      started.distinct.size shouldBe 2
+      List(a, b).zip(started).foreach { (key, id) =>
+        val files =
+          SecretsVolumeView.files(server.getClient.pods.inNamespace("default").withName(id).get())
+        val env =
+          server.getClient.secrets.inNamespace("default").withName(files("pgPassword")._1).get()
+        withClue(id) {
+          env.getStringData.asScala("pgPassword") shouldBe s"$key-pw"
+          server.getClient.services.inNamespace("default").withName(id).get() should not be null
+        }
+      }
+    }
+
+  // ---------- a pod an earlier release started ----------
+
+  /** The per-pool Secrets and the pod of a release before `--`: its id and its Secrets' names in
+    * the old form, each Secret holding `who`'s values, and its volume naming them literally, as a
+    * pod's spec does for as long as the pod lives.
+    */
+  private def earlierPod(key: PoolKey, id: String, who: String): Pod =
+    val env    = KubernetesQuackBackend.legacyPerPoolSecretName("qod-nodeenv", key)
+    val fed    = KubernetesQuackBackend.legacyPerPoolSecretName("qod-fedsql", key)
+    val labels = Map(
+      "managed-by"      -> "quack-on-demand",
+      "quack-tenant"    -> PoolLabelValue.encode(key.tenant),
+      "quack-tenant-db" -> PoolLabelValue.encode(key.tenantDb),
+      "quack-pool"      -> PoolLabelValue.encode(key.pool)
+    )
+    earlierSecret(env, labels, "pgPassword"    -> s"$who-pw")
+    earlierSecret(fed, labels, "extraSetupSql" -> s"-- $who-sql")
+    earlierSecret(
+      s"qod-token-$id",
+      Map("managed-by" -> "quack-on-demand", "quack-node-id" -> id),
+      "QOD_NODE_TOKEN" -> s"$who-token"
+    )
+    val projected = new io.fabric8.kubernetes.api.model.ProjectedVolumeSource()
+    projected.setSources(
+      List(s"qod-token-$id" -> "QOD_NODE_TOKEN", env -> "pgPassword", fed -> "extraSetupSql").map {
+        (secret, file) =>
+          val item = new io.fabric8.kubernetes.api.model.KeyToPath()
+          item.setKey(file)
+          item.setPath(file)
+          val source = new io.fabric8.kubernetes.api.model.SecretProjection()
+          source.setName(secret)
+          source.setItems(List(item).asJava)
+          val projection = new io.fabric8.kubernetes.api.model.VolumeProjection()
+          projection.setSecret(source)
+          projection
+      }.asJava
+    )
+    val volume = new io.fabric8.kubernetes.api.model.Volume()
+    volume.setName(KubernetesQuackBackend.SecretsVolumeName)
+    volume.setProjected(projected)
+    val spec = new PodSpec()
+    spec.setVolumes(List(volume).asJava)
+    val container = new Container()
+    container.setName("quack")
+    spec.setContainers(List(container).asJava)
+    val meta = new ObjectMeta()
+    meta.setName(id)
+    meta.setLabels((labels ++ Map("quack-role" -> "Dual", "quack-node-id" -> id)).asJava)
+    val pod = new Pod()
+    pod.setMetadata(meta)
+    pod.setSpec(spec)
+    server.getClient.pods.inNamespace("default").resource(pod).create()
+
+  private def earlierSecret(
+      name: String,
+      labels: Map[String, String],
+      data: (String, String)
+  ): Unit =
+    val meta = new ObjectMeta()
+    meta.setName(name)
+    meta.setLabels(labels.asJava)
+    val secret = new io.fabric8.kubernetes.api.model.Secret()
+    secret.setMetadata(meta)
+    secret.setStringData(Map(data).asJava)
+    server.getClient.secrets.inNamespace("default").resource(secret).create()
+    ()
+
+  private def secretExists(name: String): Boolean =
+    server.getClient.secrets.inNamespace("default").withName(name).get() != null
+
+  private val EarlierKey = PoolKey("acme", "acme_lake", "sales")
+  private val OldEnv     = "qod-nodeenv-acme-acme-lake-sales"
+  private val OldFed     = "qod-fedsql-acme-acme-lake-sales"
+  private val NewEnv     = "qod-nodeenv--acme--acme-lake--sales"
+  private val NewFed     = "qod-fedsql--acme--acme-lake--sales"
+  private val OldId      = "quack-acme-acme-lake-sales-1"
+
+  "an upgrade" should "read back both forms from discovery" in:
+    earlierPod(EarlierKey, OldId, "old")
+    val backend = fedBackend
+    val fresh   = PoolSupervisor.nodeId(EarlierKey, 2)
+    backend.start(nodeOf(EarlierKey, fresh)).unsafeRunSync()
+    val found = fedBackend.discoverExisting().unsafeRunSync()
+    found.map(n => (n.nodeId, n.poolKey)).toSet shouldBe
+      Set((OldId, EarlierKey), (fresh, EarlierKey))
+    found.find(_.nodeId == OldId).get.token shouldBe "old-token"
+    fedBackend.liveNodeIds(EarlierKey).unsafeRunSync() shouldBe Some(Set(OldId, fresh))
+
+  it should "leave a running pod its Secrets, while a new slot of its pool gets new ones" in:
+    earlierPod(EarlierKey, OldId, "old")
+    val backend = fedBackend
+    val fresh   = PoolSupervisor.nodeId(EarlierKey, 2)
+    backend
+      .start(
+        nodeOf(EarlierKey, fresh)
+          .copy(metastore = Map("pgPassword" -> "new-pw"), extraSetupSql = "-- new-sql")
+      )
+      .unsafeRunSync()
+    fresh shouldBe "quack--acme--acme-lake--sales--2"
+    // The old pod's names still hold its values: its next container start reads them.
+    def data(name: String) =
+      server.getClient.secrets.inNamespace("default").withName(name).get().getStringData.asScala
+    data(OldEnv)("pgPassword") shouldBe "old-pw"
+    data(OldFed)("extraSetupSql") shouldBe "-- old-sql"
+    // The new pod reads its own.
+    val files =
+      SecretsVolumeView.files(server.getClient.pods.inNamespace("default").withName(fresh).get())
+    files("pgPassword")._1 shouldBe NewEnv
+    files("extraSetupSql")._1 shouldBe NewFed
+    data(NewEnv)("pgPassword") shouldBe "new-pw"
+    // A stop of the new pod leaves the old one what it reads, and the pool's new Secrets too.
+    backend.stop(EarlierKey, fresh).unsafeRunSync()
+    List(OldEnv, OldFed, NewEnv, NewFed).foreach(n => withClue(n)(secretExists(n) shouldBe true))
+
+  it should "start a stored id's next pod on Secrets it finds, and collect the old ones then" in:
+    earlierPod(EarlierKey, OldId, "old")
+    // The pod is gone out of band: the manager starts its stored id again.
+    server.getClient.pods.inNamespace("default").withName(OldId).delete()
+    val backend = fedBackend
+    backend.start(nodeOf(EarlierKey, OldId)).unsafeRunSync()
+    val files =
+      SecretsVolumeView.files(server.getClient.pods.inNamespace("default").withName(OldId).get())
+    files("pgPassword")._1 shouldBe NewEnv
+    files("extraSetupSql")._1 shouldBe NewFed
+    List(NewEnv, NewFed).foreach(n => withClue(n)(secretExists(n) shouldBe true))
+    // No pod reads them any more, and they hold a password.
+    List(OldEnv, OldFed).foreach(n => withClue(n)(secretExists(n) shouldBe false))
+
+  it should "collect the old names when the last pod reading them stops, the pool running on" in:
+    earlierPod(EarlierKey, OldId, "old")
+    val backend = fedBackend
+    val fresh   = PoolSupervisor.nodeId(EarlierKey, 2)
+    backend.start(nodeOf(EarlierKey, fresh)).unsafeRunSync()
+    backend.stop(EarlierKey, OldId).unsafeRunSync()
+    List(OldEnv, OldFed).foreach(n => withClue(n)(secretExists(n) shouldBe false))
+    List(NewEnv, NewFed).foreach(n => withClue(n)(secretExists(n) shouldBe true))
+
+  it should "collect both forms when the pool's last pod stops" in:
+    earlierPod(EarlierKey, OldId, "old")
+    val backend = fedBackend
+    val fresh   = PoolSupervisor.nodeId(EarlierKey, 2)
+    backend.start(nodeOf(EarlierKey, fresh)).unsafeRunSync()
+    backend.stop(EarlierKey, fresh).unsafeRunSync()
+    backend.stop(EarlierKey, OldId).unsafeRunSync()
+    List(OldEnv, OldFed, NewEnv, NewFed).foreach(n => withClue(n)(secretExists(n) shouldBe false))
+
+  it should "keep an old name another pool's pod still reads: two pools could share one" in:
+    val a  = PoolKey("acme", "acme_sales", "eu_west")
+    val b  = PoolKey("acme", "acme_sales_eu", "west")
+    val id = "quack-acme-acme-sales-eu-west-1"
+    earlierPod(a, id, "a")
+    // Pool b's pod, a higher slot of the same old name, reading the same Secrets.
+    val second = server.getClient.pods.inNamespace("default").withName(id).get()
+    val copy   = new Pod()
+    val meta   = new ObjectMeta()
+    meta.setName("quack-acme-acme-sales-eu-west-2")
+    meta.setLabels(
+      Map(
+        "managed-by"      -> "quack-on-demand",
+        "quack-tenant"    -> "acme",
+        "quack-tenant-db" -> "acme_sales_eu",
+        "quack-pool"      -> "west",
+        "quack-role"      -> "Dual"
+      ).asJava
+    )
+    copy.setMetadata(meta)
+    copy.setSpec(second.getSpec)
+    server.getClient.pods.inNamespace("default").resource(copy).create()
+    val shared = "qod-nodeenv-acme-acme-sales-eu-west"
+    fedBackend.stop(a, id).unsafeRunSync()
+    secretExists(shared) shouldBe true
+    fedBackend.stop(b, "quack-acme-acme-sales-eu-west-2").unsafeRunSync()
+    secretExists(shared) shouldBe false
+
+  it should "collect at boot an old-named Secret no pod reads, and nothing else" in:
+    val labels = Map(
+      "managed-by"      -> "quack-on-demand",
+      "quack-tenant"    -> "acme",
+      "quack-tenant-db" -> "acme_gone",
+      "quack-pool"      -> "bi"
+    )
+    earlierSecret("qod-nodeenv-acme-acme-gone-bi", labels, "pgPassword"   -> "left-behind")
+    earlierSecret("qod-fedsql-acme-acme-gone-bi", labels, "extraSetupSql" -> "-- left behind")
+    // Not of the old form, or not ours: left alone.
+    earlierSecret("qod-nodeenv--acme--acme-gone--bi", labels, "pgPassword"        -> "new")
+    earlierSecret("qod-token-quack-acme-acme-gone-bi-1", labels, "QOD_NODE_TOKEN" -> "t")
+    earlierSecret("qod-nodeenv-acme-acme-gone-bi-backup", labels, "pgPassword" -> "an operator's")
+    // An old-named Secret a pod reads, by the volume or by an older pod's secretKeyRef.
+    earlierPod(EarlierKey, OldId, "old")
+    val keyRefLabels = labels ++ Map("quack-tenant-db" -> "acme_ref")
+    earlierSecret("qod-nodeenv-acme-acme-ref-bi", keyRefLabels, "pgPassword" -> "by-env")
+    val selector     = new io.fabric8.kubernetes.api.model.SecretKeySelector()
+    selector.setName("qod-nodeenv-acme-acme-ref-bi")
+    selector.setKey("pgPassword")
+    val source = new io.fabric8.kubernetes.api.model.EnvVarSource()
+    source.setSecretKeyRef(selector)
+    val envVar = new io.fabric8.kubernetes.api.model.EnvVar()
+    envVar.setName("pgPassword")
+    envVar.setValueFrom(source)
+    val container = new Container()
+    container.setName("quack")
+    container.setEnv(List(envVar).asJava)
+    val spec = new PodSpec()
+    spec.setContainers(List(container).asJava)
+    val meta = new ObjectMeta()
+    meta.setName("quack-acme-acme-ref-bi-1")
+    meta.setLabels(keyRefLabels.asJava)
+    val pod = new Pod()
+    pod.setMetadata(meta)
+    pod.setSpec(spec)
+    server.getClient.pods.inNamespace("default").resource(pod).create()
+
+    fedBackend.discoverExisting().unsafeRunSync()
+
+    List("qod-nodeenv-acme-acme-gone-bi", "qod-fedsql-acme-acme-gone-bi").foreach { n =>
+      withClue(n)(secretExists(n) shouldBe false)
+    }
+    List(
+      "qod-nodeenv--acme--acme-gone--bi",
+      "qod-token-quack-acme-acme-gone-bi-1",
+      "qod-nodeenv-acme-acme-gone-bi-backup",
+      OldEnv,
+      OldFed,
+      "qod-nodeenv-acme-acme-ref-bi"
+    ).foreach(n => withClue(n)(secretExists(n) shouldBe true))

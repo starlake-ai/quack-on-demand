@@ -18,10 +18,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Mirrors ai.starlake.quack.model.Names: 1..63 chars, leading letter or
-# underscore, then letters, digits, underscore. Kept in sync by
-# test_composed_db_name_mirrors_the_server and require_valid_name's tests.
-_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# Mirrors ai.starlake.quack.model.Names for a new name: 1..63 chars, leading
+# letter, then letters, digits and single underscores, ending with a letter or a
+# digit. Kept in sync by test_composed_db_name_mirrors_the_server and
+# require_valid_name's tests.
+_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9]*(_[a-zA-Z0-9]+)*$")
 _NAME_MAX = 63
 
 _REMOTE_SCHEMES = (
@@ -57,15 +58,15 @@ def sanitize_name(raw: str) -> str:
     slug = re.sub(r"_+", "_", slug)
     if slug and slug[0].isdigit():
         slug = "db_" + slug
-    return slug[:_NAME_MAX]
+    return slug[:_NAME_MAX].rstrip("_")
 
 
 def require_valid_name(name: str, origin: str) -> str:
     if not name or len(name) > _NAME_MAX or not _NAME_RE.match(name):
         raise TargetError(
-            f"cannot derive a database name from {origin!r} (got {name!r}). Names follow "
-            "Postgres identifier rules: 1-63 characters, starting with a letter or "
-            "underscore, then letters, digits, or underscores. Pass --name explicitly."
+            f"cannot derive a database name from {origin!r} (got {name!r}). A name is 1-63 "
+            "characters: a letter, then letters, digits and single underscores, ending with a "
+            "letter or a digit. Pass --name explicitly."
         )
     return name
 

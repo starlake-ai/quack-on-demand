@@ -263,6 +263,27 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     f.telemetry.events.exists(_.detail.values.exists(_.contains(Marker))) shouldBe false
   }
 
+  it should "stop at a name the naming rule refuses, at the step that names it" in {
+    def outcomeOf(
+        tenant: TenantRequest = TenantReq,
+        database: TenantDbRequest = Database,
+        pool: CreatePoolRequest = PoolReq
+    ): Json =
+      val f = new Fixture
+      f.write(database = database, tenant = tenant, pool = pool)
+      f.run() shouldBe Right(())
+      f.outcomeJson
+    val tenant = outcomeOf(tenant = TenantRequest(id = "a__b", displayName = "a__b"))
+    tenant.hcursor.get[String]("step") shouldBe Right("tenant")
+    tenant.hcursor.get[String]("reason").toOption.get should include("a__b")
+    val database = outcomeOf(database = Database.copy(name = "x__y"))
+    database.hcursor.get[String]("step") shouldBe Right("database")
+    database.hcursor.get[String]("reason").toOption.get should include("x__y")
+    val pool = outcomeOf(pool = PoolReq.copy(pool = "__br_x"))
+    pool.hcursor.get[String]("step") shouldBe Right("pool")
+    pool.hcursor.get[String]("reason").toOption.get should include("__br_x")
+  }
+
   it should "refuse a database that exists with other data, and leave it as it is" in {
     // Same kind and location, other views.
     val f = new Fixture

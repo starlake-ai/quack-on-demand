@@ -20,13 +20,14 @@ import scala.jdk.CollectionConverters._
   * (`qod-node-secrets`, mode 0400, mounted at [[KubernetesQuackBackend.SecretsMountPath]] and named
   * by `QOD_SECRETS_DIR`), never as env vars: a node user with SQL can read its own process
   * environment back.
-  *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the pool's init SQL: the resolved
-  *     federation SQL (`spec.extraSetupSql`) and the tenant-db's and the pool's own initSql
-  *     (`spec.tenantDbInitSql`, `spec.tenantPoolInitSql`), each key only when non-empty, the Secret
-  *     only when one is; all pods of the pool share it. Each initSql sits under the key its trust
-  *     names ([[NodeSecretFiles.tenantInitFiles]]), and a pod projects only the keys its own spec
-  *     holds, so a pod started for a trusted text never reads a later untrusted one as trusted.
-  *   - per-pool `qod-nodeenv-${tenant}-${tenantDb}-${pool}` holds the sensitive metastore values
+  *   - per-pool `qod-fedsql--${tenant}--${tenantDb}--${pool}` holds the pool's init SQL: the
+  *     resolved federation SQL (`spec.extraSetupSql`) and the tenant-db's and the pool's own
+  *     initSql (`spec.tenantDbInitSql`, `spec.tenantPoolInitSql`), each key only when non-empty,
+  *     the Secret only when one is; all pods of the pool share it. Each initSql sits under the key
+  *     its trust names ([[NodeSecretFiles.tenantInitFiles]]), and a pod projects only the keys its
+  *     own spec holds, so a pod started for a trusted text never reads a later untrusted one as
+  *     trusted.
+  *   - per-pool `qod-nodeenv--${tenant}--${tenantDb}--${pool}` holds the sensitive metastore values
   *     ([[ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys]]: `pgPassword`, `encryptionKey`,
   *     taken from the metastore by [[NodeMetastore.secrets]]) plus the manager's own object-store
   *     credentials ([[NodeSecretFiles.CloudCredKeys]]); all pods of the pool share it, since they
@@ -40,6 +41,10 @@ import scala.jdk.CollectionConverters._
   *   - per-pod `qod-store-${nodeId}` holds the scoped per-database object-store `CREATE SECRET` SQL
   *     (authored by `ObjectStoreSecret.sql`, [[ai.starlake.quack.model.NodeSpec.objectStoreSql]])
   *     when non-empty; only that one node's pod references it.
+  *
+  * A pod an earlier release started reads its per-pool Secrets under the names of that release, `-`
+  * between the names, until its next start: those stay until no pod reads them
+  * ([[collectLegacySecrets]]).
   *
   * UPGRADE NOTE: pods created by an earlier manager still carry the old shape (`secretKeyRef` env
   * vars, or plain env before that) and are NOT healed in place: restart every node after upgrading.
@@ -511,6 +516,11 @@ final class KubernetesQuackBackend(
       // overwritten pre-existing Service must survive cleanup (it may be an incumbent's).
       client.services.inNamespace(namespace).resource(svc).createOr(o => o.update())
       if !svcExisted then created.add("service")
+      // This pod reads the new names: it may have been the last to read the old ones.
+      try collectLegacySecrets(spec.poolKey, stopping = None)
+      catch
+        case e: Throwable =>
+          logger.warn(s"collecting old-named Secrets of ${spec.poolKey} failed: ${e.getMessage}")
 
       RunningNode(
         nodeId = spec.nodeId,
@@ -700,12 +710,81 @@ final class KubernetesQuackBackend(
           .inNamespace(namespace)
           .withName(nodeEnvSecretNameFor(key))
           .delete()
-        ()
+      collectLegacySecrets(key, stopping = Some(nodeId))
     catch
       case e: Throwable =>
         logger.warn(s"per-pool secret GC for $key failed (non-fatal): ${e.getMessage}")
     ()
   }
+
+  /** Every Secret a pod of the namespace still reads, whichever way it reads it, whoever started
+    * it. `stopping` is a pod on its way out, which may still be listed.
+    */
+  private def secretsInUse(stopping: Option[String]): Set[String] =
+    client.pods
+      .inNamespace(namespace)
+      .list()
+      .getItems
+      .asScala
+      .toList
+      .filterNot(p => stopping.contains(p.getMetadata.getName))
+      .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
+      .flatMap(referencedSecretNames)
+      .toSet
+
+  /** Remove `key`'s per-pool Secrets under their old names ([[KubernetesQuackBackend
+    * .legacyPerPoolSecretName]]) once no pod reads them. They hold a catalog password, and no start
+    * writes them any more, so a pool restarted one node at a time would otherwise keep them for
+    * ever. A pod started by an earlier release reads them by name for as long as it lives, and
+    * never loses them here; two pools could share such a name, so a pod of either keeps it.
+    */
+  private def collectLegacySecrets(key: PoolKey, stopping: Option[String]): Unit =
+    val present = KubernetesQuackBackend.PerPoolSecretPrefixes
+      .map(KubernetesQuackBackend.legacyPerPoolSecretName(_, key))
+      .filter(name => client.secrets.inNamespace(namespace).withName(name).get() != null)
+    if present.nonEmpty then
+      val inUse = secretsInUse(stopping)
+      present.filterNot(inUse).foreach { name =>
+        client.secrets.inNamespace(namespace).withName(name).delete()
+        logger.info(s"removed old-named Secret $name of $key: no pod reads it any more")
+      }
+
+  /** The same at boot, for a Secret no start or stop of its pool will come to: every Secret of ours
+    * named as an earlier release named its own pool's, by the labels it carries, that no pod reads.
+    */
+  private def collectAllLegacySecrets(): Unit =
+    val legacy = client.secrets
+      .inNamespace(namespace)
+      .withLabel(labelKey, labelValue)
+      .list()
+      .getItems
+      .asScala
+      .toList
+      .filter { s =>
+        val labels =
+          Option(s.getMetadata.getLabels).map(_.asScala.toMap).getOrElse(Map.empty[String, String])
+        val key = for
+          tenant   <- labels.get("quack-tenant")
+          tenantDb <- labels.get("quack-tenant-db")
+          pool     <- labels.get("quack-pool")
+        yield PoolKey(
+          PoolLabelValue.decode(tenant),
+          PoolLabelValue.decode(tenantDb),
+          PoolLabelValue.decode(pool)
+        )
+        key.exists { k =>
+          KubernetesQuackBackend.PerPoolSecretPrefixes.exists { prefix =>
+            s.getMetadata.getName == KubernetesQuackBackend.legacyPerPoolSecretName(prefix, k)
+          }
+        }
+      }
+      .map(_.getMetadata.getName)
+    if legacy.nonEmpty then
+      val inUse = secretsInUse(None)
+      legacy.filterNot(inUse).foreach { name =>
+        client.secrets.inNamespace(namespace).withName(name).delete()
+        logger.info(s"removed old-named Secret $name: no pod reads it any more")
+      }
 
   /** The sensitive subset of a spec's metastore, i.e. exactly the entries delivered through the
     * per-pool node-env Secret. The ONE place this subset is computed: [[buildPod]] uses it to strip
@@ -727,36 +806,15 @@ final class KubernetesQuackBackend(
       .flatMap(k => readEnv(k).filter(_.nonEmpty).map(k -> _))
     fromMetastore ++ fromManager
 
-  /** A per-pool Secret's name. Hyphenizes the underscore on every segment (tenant / tenantDb /
-    * pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does, so the result is
-    * RFC-1123 compatible. Two keys can read alike through that, (`a`, `a_b`, `c_d`) and (`a`,
-    * `a_b_c`, `d`), and then share these Secrets: a known defect, since a running pod reads its
-    * Secret by this name. A name must also end in an alphanumeric, and a pool `x_` reads `x-`: it
-    * ends in `0.qod`, whose dot no slug holds, so it is not the name of a pool `x_0`.
-    *
-    * A pool whose first node id had to be cut takes that id instead, which holds a hash of its
-    * names: two such pools can read alike with different ids, so both pods start, and one name
-    * would hand each the other's password. No pod of such a pool ran before the cut, the API
-    * refused its id, so no running pod's Secret moves.
-    */
-  private def perPoolSecretName(prefix: String, key: PoolKey): String =
-    val safeTenant = key.tenant.replace('_', '-')
-    val safeDb     = key.tenantDb.replace('_', '-')
-    val safePool   = key.pool.replace('_', '-')
-    val name       = s"$prefix-$safeTenant-$safeDb-$safePool"
-    val firstNode  = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, 1)
-    if firstNode != s"quack-$safeTenant-$safeDb-$safePool-1" then
-      s"$prefix-${firstNode.stripSuffix("-1")}"
-    else if name.endsWith("-") then s"${name}0.qod"
-    else name
-
   /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
     * pool attaches the same tenant-db with the same credentials.
     */
-  private def nodeEnvSecretNameFor(key: PoolKey): String = perPoolSecretName("qod-nodeenv", key)
+  private def nodeEnvSecretNameFor(key: PoolKey): String =
+    KubernetesQuackBackend.perPoolSecretName(KubernetesQuackBackend.NodeEnvSecretPrefix, key)
 
   /** K8s Secret name for a pool's federation SQL. */
-  private def secretNameFor(key: PoolKey): String = perPoolSecretName("qod-fedsql", key)
+  private def secretNameFor(key: PoolKey): String =
+    KubernetesQuackBackend.perPoolSecretName(KubernetesQuackBackend.FederationSecretPrefix, key)
 
   /** K8s Secret name for a node's bearer token. `nodeId` is already RFC-1123 safe (see
     * [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]), so the prefix is the only addition.
@@ -896,6 +954,10 @@ final class KubernetesQuackBackend(
   }
 
   def discoverExisting(): IO[List[RunningNode]] = IO.blocking {
+    try collectAllLegacySecrets()
+    catch
+      case e: Throwable =>
+        logger.warn(s"collecting old-named Secrets failed: ${e.getMessage}")
     val pods = client.pods
       .inNamespace(namespace)
       .withLabel(labelKey, labelValue)
@@ -1018,6 +1080,30 @@ final class KubernetesQuackBackend(
       .flatMap(_.asScala.toList)
       .flatMap(src => Option(src.getSecret).map(_.getName))
 
+  /** Every Secret the pod reads: by its volumes, projected or plain, and by its containers' env,
+    * the shape pods of earlier releases carry.
+    */
+  private def referencedSecretNames(p: Pod): List[String] =
+    val spec  = Option(p.getSpec)
+    val plain = spec
+      .flatMap(ps => Option(ps.getVolumes))
+      .map(_.asScala.toList)
+      .getOrElse(Nil)
+      .flatMap(v => Option(v.getSecret).flatMap(s => Option(s.getSecretName)))
+    val containers = spec.toList.flatMap { ps =>
+      Option(ps.getContainers).map(_.asScala.toList).getOrElse(Nil) ++
+        Option(ps.getInitContainers).map(_.asScala.toList).getOrElse(Nil)
+    }
+    val byEnv =
+      containers.flatMap(c => Option(c.getEnv).map(_.asScala.toList).getOrElse(Nil)).flatMap { e =>
+        Option(e.getValueFrom).flatMap(vf => Option(vf.getSecretKeyRef)).map(_.getName)
+      }
+    val byEnvFrom =
+      containers.flatMap(c => Option(c.getEnvFrom).map(_.asScala.toList).getOrElse(Nil)).flatMap {
+        e => Option(e.getSecretRef).map(_.getName)
+      }
+    projectedSecretNames(p) ++ plain ++ byEnv ++ byEnvFrom
+
   /** The node-env Secret this pod's containers reference, if any. Read off the pod's own
     * `secretKeyRef`s rather than rebuilt from labels, so it reports what the running pod actually
     * points at. A pod spawned by an earlier manager (sensitive values inlined as plain env) has no
@@ -1039,6 +1125,32 @@ final class KubernetesQuackBackend(
 end KubernetesQuackBackend
 
 object KubernetesQuackBackend:
+
+  /** Prefix of the per-pool Secret holding the sensitive metastore values. */
+  val NodeEnvSecretPrefix: String = "qod-nodeenv"
+
+  /** Prefix of the per-pool Secret holding the pool's federation SQL and initSql. */
+  val FederationSecretPrefix: String = "qod-fedsql"
+
+  private[runtime] val PerPoolSecretPrefixes: List[String] =
+    List(FederationSecretPrefix, NodeEnvSecretPrefix)
+
+  /** A per-pool Secret's name: `<prefix>--<tenant>--<db>--<pool>`, as a node id reads them
+    * ([[ai.starlake.quack.ondemand.PoolSupervisor.poolReading]]), so that two pools share one no
+    * more than a node id. A pool whose first node id cannot read so takes that id's hash instead.
+    */
+  private[ondemand] def perPoolSecretName(prefix: String, key: PoolKey): String =
+    val reading   = ai.starlake.quack.ondemand.PoolSupervisor.poolReading(key)
+    val firstNode = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, 1)
+    if firstNode == s"quack--$reading--1" then s"$prefix--$reading"
+    else s"$prefix--${firstNode.stripSuffix("-1")}"
+
+  /** A per-pool Secret's name as the releases before `--` composed it: a pod started by one reads
+    * its Secret by this name for as long as it runs. Two pools can share such a name.
+    */
+  private[ondemand] def legacyPerPoolSecretName(prefix: String, key: PoolKey): String =
+    val name = s"$prefix-${key.tenant}-${key.tenantDb}-${key.pool}".replace('_', '-')
+    if name.endsWith("-") then s"${name}0.qod" else name
 
   /** Key inside the per-pool federation Secret holding the resolved SQL. Same string as the env var
     * name `buildPod` sets on the pod, so an operator who shells into the pod and runs

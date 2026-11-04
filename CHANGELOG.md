@@ -164,6 +164,13 @@ NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, f
 before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
 proposed.
 
+Node ids and per-pool Secrets change form. A node keeps its stored id across every restart, and a new
+slot takes the new form, `quack--<tenant>--<db>--<pool>--<index>`, so one pool can show both. On
+Kubernetes a running pod reads its per-pool Secrets under their old names until its next start, which
+moves it to the new ones, and the old ones go once no pod reads them. Restart every node after upgrading,
+as usual. Under HA, finish a rolling upgrade before stopping or deleting a pool on Kubernetes: a replica
+still on 0.11.0 removes only the old names.
+
 On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
 cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
 upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
@@ -174,6 +181,11 @@ count. To keep counts from a user, refuse on the table.
 
 ### Breaking
 
+- A new tenant, database or pool name may not hold `__` nor start or end with `_` (a tenant answers
+  `400 invalid_id`, a database and a pool `400 invalid_name`). A pool name, which had no rule at all, is
+  now 1 to 63 letters, digits, `_` or `-`, starting with a letter. A pool that reads the same as another
+  of its database once `_` becomes `-` (`eu-west`, `eu_west`) is `409 pool_reads_alike`. Names that exist
+  keep working, and a manifest import keeps importing them, with one ERROR per name.
 - Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
   `--proposal`: the approver names the proposal they read, and another one in its place is
   `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and
@@ -282,13 +294,22 @@ count. To keep counts from a user, refuse on the table.
   of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`:
   until now every maintenance run on Kubernetes ended `failed` with `node spawn failed`, its cause at WARN
   only. A pool ending in `_` gets Secret names the API accepts.
-- Kubernetes: a node id past 63 characters no longer gets a `422`. A branch pool's id takes 36 characters
+- Kubernetes: a node id past 63 characters no longer gets a `422`. A branch pool's id took 36 characters
   plus its tenant's and its parent's names, so a branch of `wayne_corp` / `wayne_corp_sales_2026` answered
   `502 branch_create_failed`, and a pool with long names never started. On every runtime such an id now
   keeps its start and ends `-<hash>-<index>`, 63 characters in all, the hash being 16 hex characters of a
-  SHA-256 of the tenant, database, pool and index. Such a pool's per-pool Secrets are named after that id.
-  An id of 63 or fewer and its pool's Secret names are unchanged, and a node a local or fleet manager
-  started under a longer id keeps it.
+  SHA-256 of the tenant, database, pool and index. A node a local or fleet manager started under a longer
+  id keeps it.
+- Two pools can no longer share a node id or a Secret. `-` between the names, with `_` read as `-`, made
+  (`acme`, `acme_sales`, `eu_west`) and (`acme`, `acme_sales_eu`, `west`) read alike, and two tenants like
+  `x` and `x_x` could too. On the local and fleet runtimes the second pool's create took the first's node
+  with no error, and each then restarted the other on every reconcile pass. On Kubernetes the second start
+  answered `500 start_failed` (a `409`) after overwriting the per-pool Secrets the first pool's pods read,
+  so a pod's next container start could read the other database's `pgPassword`, federation SQL and
+  initSql. Node ids and per-pool Secret names now put `--` between the names, and names that would break
+  that are refused (see Breaking). Pools that already read alike are named at boot under PROBLEMS: restart
+  every node of both, which gives each Secrets of its own, and recreate one under another name to clear the
+  report.
 - A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight

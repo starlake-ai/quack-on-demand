@@ -193,6 +193,32 @@ class BannerSpec extends AnyFlatSpec with Matchers:
     b should include("Client connection strings:")
   }
 
+  it should "say two pools read alike, under PROBLEMS, with nothing said to be blocked" in {
+    import ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem
+    val b = Banner.startup(
+      meta,
+      "0.0.0.0",
+      20900,
+      "0.0.0.0",
+      31338,
+      tlsEnabled = true,
+      problems = List(
+        StartupProblem(
+          "acme",
+          "acme_sales",
+          StartupProblem.Kind.ReadAlike,
+          "pool acme/acme_sales/eu_west and pool acme/acme_sales_eu/west read alike",
+          List("recreate one of them under another name"),
+          List("eu_west")
+        )
+      )
+    )
+    b should include("is up, with 1 problem(s)")
+    b should include("   acme/acme_sales: reads alike (pools eu_west)\n")
+    b should include("     fix : recreate one of them under another name\n")
+    (b should not).include("BLOCKED")
+  }
+
   it should "print no PROBLEMS section when there is none" in {
     val b = Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true)
     (b should not).include("PROBLEMS")

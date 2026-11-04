@@ -356,6 +356,14 @@ final class PoolHandlers(
                               ErrorResponse(PoolSupervisor.LocalFilesOffCode, off.getMessage)
                             )
                           )
+                        case n: PoolSupervisor.InvalidPoolName =>
+                          Left(
+                            (StatusCode.BadRequest, ErrorResponse("invalid_name", n.getMessage))
+                          )
+                        case r: PoolSupervisor.PoolReadsAlike =>
+                          Left(
+                            (StatusCode.Conflict, ErrorResponse("pool_reads_alike", r.getMessage))
+                          )
                         case t =>
                           // The supervisor logs nothing when the first node fails to start.
                           logger.error(s"pool create for $key failed", t)

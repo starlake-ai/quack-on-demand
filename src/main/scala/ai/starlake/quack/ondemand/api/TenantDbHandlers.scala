@@ -290,6 +290,10 @@ final class TenantDbHandlers(
                           (StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message))
                         )
                       )
+                    case Left(err: SupervisorError.InvalidName) =>
+                      IO.pure(
+                        Left((StatusCode.BadRequest, ErrorResponse("invalid_name", err.message)))
+                      )
                     case Left(err: SupervisorError.QuotaExceeded) =>
                       actor.controlPlane(
                         audit,

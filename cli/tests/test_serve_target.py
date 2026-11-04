@@ -247,6 +247,17 @@ def test_require_valid_name_rejects_bad_identifiers():
         require_valid_name("", "x")
     with pytest.raises(TargetError, match="--name"):
         require_valid_name("9lives", "x")
+    # What the server refuses for a new name: `__`, or an underscore at either end.
+    for name in ("a__b", "_a", "a_", "__br_x"):
+        with pytest.raises(TargetError, match="--name"):
+            require_valid_name(name, "x")
+    assert require_valid_name("a_b", "x") == "a_b"
+
+
+def test_sanitize_name_never_ends_on_an_underscore_after_the_cut():
+    name = sanitize_name("a" * 62 + "_b")
+    assert name == "a" * 62
+    assert require_valid_name(name, "x") == name
 
 
 def test_composed_db_name_mirrors_the_server():

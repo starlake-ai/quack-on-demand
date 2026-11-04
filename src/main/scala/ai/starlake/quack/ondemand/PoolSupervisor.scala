@@ -703,7 +703,9 @@ final class PoolSupervisor(
     * federation blob failed to resolve (its nodes lack federation aliases), both for a database
     * that has both, so fixing one never uncovers the other later. Sorted by tenant and database,
     * blocked ones first. An HA follower lists only what it reads from the rows, a local data path
-    * with local files off ([[localFilesBlock]]), until it leads: it runs no DuckLake init.
+    * with local files off ([[localFilesBlock]]), until it leads: it runs no DuckLake init. Then,
+    * from the names alone, every two pools that read alike under the old form of a node id
+    * ([[PoolSupervisor.readAlikePools]]).
     */
   def startupProblems(): List[PoolSupervisor.StartupProblem] =
     import PoolSupervisor.StartupProblem
@@ -736,7 +738,23 @@ final class PoolSupervisor(
           )
         }
       }
-    blocked.sortBy(p => (p.tenant, p.database)) ++ federation.sortBy(p => (p.tenant, p.database))
+    val readAlike = PoolSupervisor.readAlikePools(pools.keys).map { (a, b) =>
+      StartupProblem(
+        a.tenant,
+        a.tenantDb,
+        StartupProblem.Kind.ReadAlike,
+        s"pool $a and pool $b read alike in the node ids and Secret names releases before this one " +
+          "composed: they can have taken each other's node, or written each other's per-pool " +
+          "Secrets, the catalog password included",
+        List(
+          "recreate one of them under another name, which ends this report",
+          "until then, restart every node of both once: new-form Secrets hold each pool's own values"
+        ),
+        List(a.pool)
+      )
+    }
+    blocked.sortBy(p => (p.tenant, p.database)) ++ federation.sortBy(p => (p.tenant, p.database)) ++
+      readAlike
 
   /** Test-only seam: record a federation resolution failure as restore() would. */
   private[ondemand] def failFederationForTest(tenantDbId: String, message: String): Unit =
@@ -2553,10 +2571,15 @@ final class PoolSupervisor(
       case Right(())    =>
         IO.blocking {
           withCacheRecovery("createTenantDb") {
-            Names.normalizeTenantDbName(tenantName, suffix) match
+            // The rule judges the name made here, not the tenant's part: a tenant made before the
+            // rule goes on making databases of legal names.
+            val tn       = tenantName.toLowerCase(Locale.ROOT)
+            val composed = Names.normalizeTenantDbName(tenantName, suffix).flatMap { full =>
+              Names.fieldRefusal(full.stripPrefix(s"${tn}_"), "database name").toLeft(full)
+            }
+            composed match
               case Left(err)   => Left(SupervisorError.InvalidName(err))
               case Right(full) =>
-                val tn = tenantName.toLowerCase(Locale.ROOT)
                 // What only a superuser chooses, for a writer stating it is not one. REST and MCP
                 // have asked already (TenantDbHandlers.createRefusal), so that a refused write
                 // never reaches their initSql check.
@@ -3157,7 +3180,11 @@ final class PoolSupervisor(
       // manager-wide default; 0 = explicit opt-out; positive = idle window (5-minute floor
       // applied by the sweep).
       idleTimeoutSec: Option[Int] = None,
-      gateBypass: Boolean = false
+      gateBypass: Boolean = false,
+      /** The manager's own name, made by its own path (a branch's pool, `__br_<id8>`): no naming
+        * rule applies to it, and no other pool can read like it. Never from a request.
+        */
+      internalName: Boolean = false
   ): IO[List[RunningNode]] =
     gateCheck(
       ai.starlake.quack.spi.StructureMutation
@@ -3167,7 +3194,7 @@ final class PoolSupervisor(
       case Left(reason) =>
         IO.raiseError(new ai.starlake.quack.spi.QuotaExceededException(reason))
       case Right(()) =>
-        locks.withLock(key)(withCacheRecoveryIO("createPool")(IO.defer {
+        underCreateLock(key, internalName)(withCacheRecoveryIO("createPool")(IO.defer {
           val size = dist.total
           require(
             dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
@@ -3315,6 +3342,40 @@ final class PoolSupervisor(
                 }
               }
         }))
+    }
+
+  /** Run a pool's create under its lock, past the naming rule. A new name the rule refuses goes no
+    * further. Otherwise the create takes the lock every mutation of the pool takes and, first, the
+    * one on its converted name, so that two replicas creating `eu-west` and `eu_west` at once queue
+    * up and the second finds what the first wrote ([[refuseReadAlike]]). The manager's own names
+    * skip all this: they cannot read like a pool a user can make.
+    */
+  private def underCreateLock[A](key: PoolKey, internalName: Boolean)(io: IO[A]): IO[A] =
+    if internalName then locks.withLock(key)(io)
+    else
+      Names.poolNameRefusal(key.pool) match
+        case Some(message) => IO.raiseError(new PoolSupervisor.InvalidPoolName(message))
+        case None          =>
+          val converted = PoolKey(key.tenant, key.tenantDb, Names.reading(key.pool))
+          val checked   = refuseReadAlike(key) *> io
+          if converted == key then locks.withLock(key)(checked)
+          else locks.withLock(converted)(locks.withLock(key)(checked))
+
+  /** Refuse a new pool that reads the same as another of its database once `_` becomes `-`: the two
+    * would share a node id and Secrets. Read from the store, since another replica's pool may not
+    * be in this one's memory yet.
+    */
+  private def refuseReadAlike(key: PoolKey): IO[Unit] =
+    IO.blocking {
+      findTenantDb(key.tenant, key.tenantDb).flatMap { td =>
+        store
+          .listPools(td.id)
+          .map(_.name)
+          .find(name => name != key.pool && Names.reading(name) == Names.reading(key.pool))
+      }
+    }.flatMap {
+      case Some(other) => IO.raiseError(new PoolSupervisor.PoolReadsAlike(key, other))
+      case None        => IO.unit
     }
 
   def setPoolDisabled(key: PoolKey, disabled: Boolean): IO[Either[SupervisorError, Pool]] =
@@ -5207,8 +5268,9 @@ object PoolSupervisor:
     )
 
   /** Something boot found wrong that leaves the manager up but a database degraded, as the boot
-    * banner reports it: `Blocked` (its pools are never started) or `Federation` (its nodes start
-    * without its federation aliases).
+    * banner reports it: `Blocked` (its pools are never started), `Federation` (its nodes start
+    * without its federation aliases) or `ReadAlike` (one of its pools read like another under the
+    * old form of a node id: nothing is stopped).
     */
   final case class StartupProblem(
       tenant: String,
@@ -5220,7 +5282,33 @@ object PoolSupervisor:
   )
   object StartupProblem:
     enum Kind:
-      case Blocked, Federation
+      case Blocked, Federation, ReadAlike
+
+  /** A new pool's name the naming rule refuses (`Names.poolNameRefusal`). */
+  final class InvalidPoolName(message: String) extends IllegalArgumentException(message)
+
+  /** A new pool whose name reads the same as another pool's of its database once `_` becomes `-`.
+    */
+  final class PoolReadsAlike(val key: PoolKey, val other: String)
+      extends IllegalStateException(
+        s"pool '${key.pool}' reads the same as pool '$other' of database '${key.tenantDb}' once " +
+          "'_' becomes '-', so the two would share a node id and Secrets: choose another name"
+      )
+
+  /** How a pool's names read before `--` separated them: `-` between fields too. */
+  private def oldReading(key: PoolKey): String =
+    s"${key.tenant}-${key.tenantDb}-${key.pool}".replace('_', '-')
+
+  /** The pairs of pools that read alike in that old form, sorted: they could share a node id and
+    * per-pool Secrets under the release that composed it.
+    */
+  def readAlikePools(keys: Iterable[PoolKey]): List[(PoolKey, PoolKey)] =
+    keys.toList
+      .groupBy(oldReading)
+      .values
+      .toList
+      .flatMap(_.sortBy(_.toString).combinations(2).map(pair => (pair(0), pair(1))))
+      .sortBy((a, b) => (a.toString, b.toString))
 
   private def lastSegment(path: String): String =
     val trimmed = path.stripSuffix("/")
@@ -5349,41 +5437,47 @@ object PoolSupervisor:
     */
   private val NodeIdMaxChars: Int = 63
 
+  /** A pool's names as they read in a node id and a per-pool Secret's name, `--` between them. */
+  def poolReading(key: PoolKey): String =
+    List(key.tenant, key.tenantDb, key.pool).map(Names.reading).mkString("--")
+
   /** Hex characters of the hash in a node id that had to be cut: 64 bits, so a million such ids in
     * one control plane collide with a probability of about 3 in 100 million.
     */
   private val NodeIdHashChars: Int = 16
 
-  /** Compose a node id safe as a Kubernetes pod + service name. `key.tenantDb` is the composed
-    * Postgres name `${tenant}_${tenantDb}` and carries an underscore, valid in Postgres but illegal
-    * in pod names (RFC 1123). The Postgres name is unchanged; this only sanitizes the node-id
-    * surface.
+  /** Compose a node id safe as a Kubernetes pod + service name:
+    * `quack--<tenant>--<db>--<pool>--<i>`, each name lowercase with `_` as `-`. The Postgres names
+    * are unchanged; this only sanitizes the node-id surface.
     *
-    * An id of [[NodeIdMaxChars]] or fewer is what it has always been. A longer one keeps its start
-    * and ends `-<hash>-<index>`: the index stays last, since [[MissingSlots]] and
-    * `placementForNodeId` read it, and a `-` the cut leaves before the hash is legal inside a
-    * label. The hash covers the names as given, because `_` reads `-` here: (`a`, `a_b`, `c_d`) and
-    * (`a`, `a_b_c`, `d`) read alike, and at or under the limit they still get one id, a known
-    * defect that an id there cannot change to fix. It joins them with a NUL, which no name can
-    * hold: a pool's name follows no rule, but Postgres stores no NUL. Pure, on every runtime: each
-    * replica composes the same id. Only a fresh slot is composed: a node with a row keeps the id in
-    * it, so one an earlier release started under a longer id keeps that.
+    * `--` between fields makes two pools read alike only if a name holds it or an end of a name
+    * touches it, which `Names`' rule refuses for a new name, so a plain id can be split back into
+    * its key. `pool/create` refuses the one case left, two pools of a database with one reading
+    * (`eu-west`, `eu_west`). Past [[NodeIdMaxChars]], or with a name that breaks the rule (made
+    * before it, or by the manager, `__br_<id8>`), an id cannot be split, so it keeps its start and
+    * ends `-<hash>-<index>`. A plain id has `--` before its index and a hashed one a hex digit, so
+    * the two never meet. The index stays last, since [[MissingSlots]] and `placementForNodeId` read
+    * it.
+    *
+    * The hash covers the names as given, joined by a NUL, which no name can hold: a pool made
+    * before the rule can hold anything else, but Postgres stores no NUL. Pure, on every runtime:
+    * each replica composes the same id. Only a fresh slot is composed: a node with a row keeps the
+    * id in it, so one an earlier release started keeps its form, `-` between fields and possibly
+    * past the limit.
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
-    // RFC-1123 forbids '_'; slugs may contain it. Map '_' -> '-' on every component. Labels keep the
-    // slug, wrapped only where the label rule refuses it (`PoolLabelValue`).
-    val safeTenant = key.tenant.replace('_', '-')
-    val safeDb     = key.tenantDb.replace('_', '-')
-    val safePool   = key.pool.replace('_', '-')
-    val whole      = s"quack-$safeTenant-$safeDb-$safePool-$index"
-    if whole.length <= NodeIdMaxChars then whole
+    val stem  = s"quack--${poolReading(key)}"
+    val whole = s"$stem--$index"
+    val plain = whole.length <= NodeIdMaxChars &&
+      List(key.tenant, key.tenantDb, key.pool).forall(Names.readsAsOneField)
+    if plain then whole
     else
       val names  = List(key.tenant, key.tenantDb, key.pool, index.toString).mkString("\u0000")
       val digest = java.security.MessageDigest
         .getInstance("SHA-256")
         .digest(names.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       val tail = s"-${java.util.HexFormat.of().formatHex(digest).take(NodeIdHashChars)}-$index"
-      whole.take(NodeIdMaxChars - tail.length) + tail
+      stem.take(NodeIdMaxChars - tail.length) + tail
 
   /** Replace the last segment of a dataPath with `newSegment`, to derive a per-tenant-db dataPath
     * alongside the root. URI-style paths (`<scheme>://...`) are string-handled so `Paths.get`
