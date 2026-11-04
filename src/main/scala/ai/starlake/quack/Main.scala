@@ -763,6 +763,7 @@ object Main extends IOApp with LazyLogging:
     // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
     val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
     denySet.set(() => locationRules.dataFolders())
+    sup.dataFolderDenySet = () => locationRules.dataFolders()
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>
       sup.serverLivenessAll =

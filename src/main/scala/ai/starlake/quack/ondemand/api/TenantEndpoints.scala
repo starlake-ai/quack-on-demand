@@ -148,9 +148,11 @@ object TenantEndpoints:
         "Create a database in a tenant. A DuckLake database naming no dataPath is placed by QoD in " +
           "a folder of its own beside the default data path, stored on the row: 400 with no default " +
           "to place it by, 409 data_path_taken over a folder another database holds. A caller who " +
-          "is not a superuser names no other path than a remote one (s3, s3a, r2, gs, az, azure, " +
-          "abfss) with explicit keys of their own in objectStore, complete for its scheme, and no " +
-          "metastore.dataPath: anything else is 403 superuser_required, nothing written. So is any " +
+          "is not a superuser names no other path than a folder of a remote store (s3, s3a, r2, " +
+          "gs, az, azure, abfss), not its root, with explicit keys of their own in objectStore, " +
+          "complete for its scheme, and no metastore.dataPath: anything else is 403 " +
+          "superuser_required, nothing written; a folder at, under or above one another database " +
+          "holds is 409 data_path_taken. So is any " +
           "of pgHost, pgPort, pgUser, pgPassword or dbName (dbName stays free on kind=duckdb-file): " +
           "a superuser names a Postgres server. A catalog on a server its tenant controls gives " +
           "that tenant the node's file access, so a superuser who creates one accepts that."

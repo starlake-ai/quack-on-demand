@@ -229,6 +229,15 @@ final class PoolSupervisor(
     */
   @volatile var serverLivenessAll: () => Map[String, String] = () => Map.empty
 
+  /** The folders no new database of an untrusted writer may overlap: all the location rules deny,
+    * which `Main` wires (`LiveLocationRules.dataFolders`: data paths, those it still remembers,
+    * managed prefixes within retention); Left when they cannot be read.
+    */
+  @volatile var dataFolderDenySet: () => Either[String, List[String]] =
+    () =>
+      Try(dataPaths() ++ store.unpurgedManagedPrefixes().map(_.prefix)).toEither.left
+        .map(_ => "the database data folders could not be read")
+
   // tenant-db.id -> the PreInitMismatchException message that blocked it (a dataPath or an
   // encryption disagreement between the control-plane row and the catalog's own metadata).
   // Populated by ensureDuckLakeInitialized when a pre-init guard refuses at boot; consulted by
@@ -2348,6 +2357,22 @@ final class PoolSupervisor(
           )
         else Right(path)
 
+  /** Why a path an untrusted writer names cannot be theirs: it lies at, under or above a folder the
+    * location rules deny, naming no one. Unreadable, the set refuses.
+    */
+  private def namedDataPathTaken(path: String): Option[SupervisorError] =
+    dataFolderDenySet() match
+      case Left(why)      => Some(SupervisorError.Internal(why))
+      case Right(folders) =>
+        Option.when(
+          folders.exists(ai.starlake.quack.edge.authz.location.DataFolders.overlap(path, _))
+        )(
+          SupervisorError.DataPathTaken(
+            "the data path named overlaps a folder another database holds on this server: " +
+              "choose another path"
+          )
+        )
+
   /** The Postgres database of a new DuckLake row of QoD's own server. A create that may adopt keeps
     * whatever is there; any other refuses a database already held by another tenant's row, or
     * holding anything at all, and reuses an empty one: what a crash between the create and the
@@ -2433,6 +2458,7 @@ final class PoolSupervisor(
                       .superuserChoiceError(None, kind, dataPath, metastore, objectStore, metastore)
                   )
                   .flatten
+                lazy val namedTaken = namedDataPathTaken(dataPath)
                 // A DuckLake row that names no path anywhere: QoD's to place, for every caller.
                 lazy val placed: Option[Either[SupervisorError, String]] = Option.when(
                   kind == TenantDbKind.DuckLake && dataPath.isEmpty && !managedStorage &&
@@ -2456,6 +2482,8 @@ final class PoolSupervisor(
                     )
                   case Some(_) if choice.isDefined =>
                     Left(SupervisorError.SuperuserChoice(choice.get))
+                  case Some(_) if !writerTrusted && dataPath.nonEmpty && namedTaken.isDefined =>
+                    Left(namedTaken.get)
                   case Some(_) if placed.exists(_.isLeft) =>
                     Left(placed.flatMap(_.left.toOption).get)
                   case Some(t) =>

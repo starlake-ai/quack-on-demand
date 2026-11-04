@@ -876,8 +876,9 @@ final class McpAdminTools(
           "sets pgHost, pgPort, pgUser, pgPassword and a DuckLake database's dbName."
       ),
       "data_path" -> strProp(
-        "Leave out of a DuckLake database and QoD places it. A path of your own: a remote URL " +
-          "with your own keys in object_store, or a superuser's credential."
+        "Leave out of a DuckLake database and QoD places it. A path of your own: a folder of a " +
+          "remote store, not its root, with your own keys in object_store, or a superuser's " +
+          "credential."
       ),
       "object_store"     -> objProp("Object-store credentials config."),
       "default_database" -> strProp("Default catalog name presented to clients."),

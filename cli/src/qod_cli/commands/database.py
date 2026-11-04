@@ -50,8 +50,8 @@ def create(
     data_path: str = typer.Option(
         "",
         "--data-path",
-        help="Leave out of a DuckLake database and QoD places it. A path of your own: a remote URL "
-        "with your own keys in --object-store, or a superuser's credential.",
+        help="Leave out of a DuckLake database and QoD places it. A path of your own: a folder of a "
+        "remote store, not its root, with your own keys in --object-store, or a superuser's credential.",
     ),
     object_store: list[str] = typer.Option(None, "--object-store", help="KEY=VALUE, repeatable."),
     default_database: str = typer.Option(None, "--default-database"),

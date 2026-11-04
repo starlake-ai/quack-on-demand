@@ -1397,6 +1397,170 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       (StatusCode.Forbidden, "superuser_required")
   }
 
+  // ---------- a named remote path ----------
+
+  /** Keys complete for `path`'s scheme. */
+  private def keysFor(path: String): Map[String, String] =
+    if path.startsWith("gs://") then Map("gcs_hmac_key_id" -> "k", "gcs_hmac_secret" -> "s")
+    else if path.startsWith("az://") || path.startsWith("azure://") || path.startsWith("abfss://")
+    then Map("azure_account" -> "a", "azure_account_key" -> "k")
+    else OwnKeys
+
+  private def named(f: Fixture, path: String, suffix: String = "mine") =
+    f.rest(tenantAdmin, suffix, dataPath = path, objectStore = keysFor(path))
+
+  "A tenant admin's named remote path" should
+    "be refused 409 at, under or above a row's folder, in any spelling, naming no one" in {
+      val f = new Fixture
+      f.create("held", dataPath = "s3://shared/lakes/held/").isRight shouldBe true
+      List(
+        "s3://shared/lakes/held/",
+        "s3://shared/lakes/held",
+        "s3://shared//lakes//held/",
+        "s3://SHARED/lakes/held/",
+        "s3a://shared/lakes/held/",
+        "r2://shared/lakes/held/",
+        "gs://shared/lakes/held/",
+        "az://shared/lakes/held/",
+        "azure://shared/lakes/held/",
+        "abfss://shared@acct.dfs.core.windows.net/lakes/held/",
+        "s3://shared/lakes/held/below/",
+        "s3://shared/lakes/"
+      ).foreach { path =>
+        withClue(path) {
+          val out = named(f, path)
+          codeOf(out) shouldBe (StatusCode.Conflict, "data_path_taken")
+          out.left.toOption.get._2.message should not include "held"
+          out.left.toOption.get._2.message should not include "shared"
+        }
+      }
+      f.rows shouldBe List("acme_held")
+      f.inits.size shouldBe 1
+      f.admin.created.toList shouldBe List("acme_held")
+    }
+
+  it should "be free beside a folder, even one whose name begins the same" in {
+    val f = new Fixture
+    f.create("held", dataPath = "s3://shared/lakes/held/").isRight shouldBe true
+    named(f, "s3://shared/lakes/held2/") shouldBe Right("acme_mine")
+    named(f, "s3://other/lakes/held/", "mine2") shouldBe Right("acme_mine2")
+  }
+
+  it should "overlap no default data path" in {
+    val f = new Fixture(defaults = Defaults.updated("dataPath", "s3://shared/lakes/root/"))
+    codeOf(named(f, "s3://shared/lakes/root/x/")) shouldBe (StatusCode.Conflict, "data_path_taken")
+    named(f, "s3://shared/lakes/mine/") shouldBe Right("acme_mine")
+  }
+
+  it should "overlap no managed prefix within retention" in {
+    val f   = new Fixture
+    val now = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+    f.store.insertManagedPrefix(
+      "td-gone",
+      "globex",
+      "globex_old",
+      "s3://managed/globex_old-1/",
+      now
+    )
+    f.store.markManagedPrefixDeleted("td-gone", now, now.plusSeconds(3600))
+    codeOf(named(f, "s3://managed/globex_old-1/mine/")) shouldBe
+      (StatusCode.Conflict, "data_path_taken")
+    codeOf(named(f, "s3://managed/")) shouldBe (StatusCode.Forbidden, "superuser_required")
+    f.rows shouldBe empty
+  }
+
+  it should "ask the set the location rules deny, and fail closed when it cannot be read" in {
+    val f = new Fixture
+    f.sup.dataFolderDenySet = () => Right(List("s3://remembered/old/"))
+    codeOf(named(f, "s3://remembered/old/x/")) shouldBe (StatusCode.Conflict, "data_path_taken")
+    f.sup.dataFolderDenySet = () => Left("the database data folders could not be read")
+    val out = named(f, "s3://elsewhere/x/")
+    codeOf(out) shouldBe (StatusCode.InternalServerError, "internal")
+    out.left.toOption.get._2.message should include("could not be read")
+    f.rows shouldBe empty
+  }
+
+  it should "be refused 403 at a bucket's root, in every spelling of a remote scheme" in {
+    val f = new Fixture
+    List(
+      "s3://b",
+      "s3://b/",
+      "s3://b//",
+      "s3a://b",
+      "s3a://b/",
+      "r2://b",
+      "r2://b/",
+      "gs://b",
+      "gs://b/",
+      "az://c",
+      "az://c/",
+      "azure://c",
+      "azure://c/",
+      "abfss://c@acct.dfs.core.windows.net",
+      "abfss://c@acct.dfs.core.windows.net/"
+    ).foreach { path =>
+      withClue(path)(codeOf(named(f, path)) shouldBe (StatusCode.Forbidden, "superuser_required"))
+    }
+    f.rows shouldBe empty
+    f.inits shouldBe empty
+  }
+
+  it should "be refused 403 when a segment is one a node's reader could read otherwise" in {
+    val f = new Fixture
+    List(
+      "s3://b/./",
+      "s3://b/x/..",
+      "s3://b/x/../y/",
+      "s3://b/*/",
+      "s3://b/x?y/",
+      "s3://b/[xy]/",
+      "s3://b/%2e%2e/",
+      "s3://*/x/"
+    ).foreach { path =>
+      withClue(path)(codeOf(named(f, path)) shouldBe (StatusCode.Forbidden, "superuser_required"))
+    }
+    f.rows shouldBe empty
+  }
+
+  it should "meet a direct call stating no trusted writer the same" in {
+    val f = new Fixture
+    f.create("held", dataPath = "s3://shared/lakes/held/").isRight shouldBe true
+    f.untrusted("a", dataPath = "s3://shared/lakes/held/x/", objectStore = OwnKeys)
+      .left
+      .toOption
+      .get shouldBe a[SupervisorError.DataPathTaken]
+    f.untrusted("a", dataPath = "s3://shared/", objectStore = OwnKeys).left.toOption.get shouldBe
+      a[SupervisorError.SuperuserChoice]
+  }
+
+  it should "not be judged for a superuser, qod serve's provisioning or a direct trusted call" in {
+    val f = new Fixture
+    f.create("held", dataPath = "s3://shared/lakes/held/").isRight shouldBe true
+    f.rest(superuser, "su", dataPath = "s3://shared/lakes/held/x/") shouldBe Right("acme_su")
+    f.rest(superuser, "root", dataPath = "s3://shared/") shouldBe Right("acme_root")
+    f.handlers
+      .createTenantDbAs(
+        TenantDbRequest(
+          tenant = "acme",
+          name = "sv",
+          kind = "ducklake",
+          dataPath = "s3://shared/lakes/held/y/"
+        ),
+        SessionScope.Superuser,
+        AuditActor.System
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.create("direct", dataPath = "s3://shared/lakes/").map(_.name) shouldBe Right("acme_direct")
+  }
+
+  it should "not reach a path QoD derives, which recreating a database of that name may reuse" in {
+    val f = new Fixture
+    // The deny set remembers a dropped database; a name placed again is the same database's.
+    f.sup.dataFolderDenySet = () => Right(List("/data/acme_lake/"))
+    f.rest(tenantAdmin, "lake") shouldBe Right("acme_lake")
+  }
+
   // ---------- the tenant-name rule, at the handler's path ----------
 
   "tenant/create" should "keep answering a bad name 400 once the supervisor refuses it" in {

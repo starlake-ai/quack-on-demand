@@ -1158,6 +1158,52 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     (Files.readAllBytes(file).toList, Files.getLastModifiedTime(file)) shouldBe before
   }
 
+  "A tenant admin's named remote path" should "take no folder another database holds" in {
+    ready()
+    val holder = s"${Prefix}e5$run"
+    val t      = s"${Prefix}e6$run"
+    tenant(holder)
+    tenant(t)
+    val holderToken = adminOf(holder, "ga", OtherPw)
+    val token       = adminOf(t, "gb", OtherPw)
+    val keys        = Json.obj("s3_access_key_id" -> s("AK"), "s3_secret_access_key" -> s("SK"))
+    def create(owner: String, suffix: String, session: String, path: String) =
+      createDb(owner, suffix, session, "dataPath" -> s(path), "objectStore" -> keys)
+    val shared                     = s"s3://qod-iso-no-bucket/e5$run"
+    val (held, heldName, heldBody) = create(holder, "held", holderToken, s"$shared/held/")
+    withClue(heldBody.take(300))(held shouldBe 200)
+
+    List(s"$shared/held/", s"$shared/held", s"$shared/held/below/", s"$shared/").foreach { path =>
+      val (code, name, body) = create(t, "mine", token, path)
+      withClue(s"$path: ${body.take(300)}") {
+        code shouldBe 409
+        errorOf(body) shouldBe "data_path_taken"
+        name shouldBe ""
+        body should not include "e5"
+        body should not include heldName
+      }
+    }
+    // A bucket's root is no one's to name but a superuser's.
+    List("s3://qod-iso-no-bucket", "s3://qod-iso-no-bucket/").foreach { path =>
+      val (code, _, body) = create(t, "mine", token, path)
+      code shouldBe 403
+      errorOf(body) shouldBe "superuser_required"
+    }
+    rowOf(t, s"${t}_mine", token) shouldBe None
+
+    // Beside it, free. A superuser is not judged, and a folder the location rules still remember
+    // stays taken a while after its database is gone.
+    val (beside, mine, besideBody) = create(t, "mine", token, s"$shared/mine/")
+    withClue(besideBody.take(300))(beside shouldBe 200)
+    createDb(t, "su", su, "dataPath" -> s(s"$shared/held/su/"))._1 shouldBe 200
+    // The next create reads the set, which then holds this folder.
+    create(t, "next", token, s"$shared/next/")._1 shouldBe 200
+    deleteDb(t, mine, token)._1 shouldBe 200
+    val (again, _, againBody) = create(holder, "other", holderToken, s"$shared/mine/")
+    withClue(againBody.take(300))(again shouldBe 409)
+    errorOf(againBody) shouldBe "data_path_taken"
+  }
+
   "A superuser" should "still name a data path" in {
     ready()
     val t = s"${Prefix}f5$run"

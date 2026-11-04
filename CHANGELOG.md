@@ -73,6 +73,11 @@ count. To keep counts from a user, refuse on the table.
   a create or an update, answers `403 superuser_required` with nothing written, and an update cannot
   remove or weaken the keys of a row holding them. Existing rows are not judged and keep working. A
   superuser, `qod serve`'s provisioning, a manifest import and a branch still name any path.
+- A tenant admin's named remote path answers `409 data_path_taken`, naming no one, at, under or above a
+  folder the location rules deny: another database's data folder, one dropped within the last ten minutes,
+  or a managed prefix within retention. A bucket's or a container's root, or a path with a `.` or `..`
+  segment, a glob or an escape in it, answers `403 superuser_required`. A superuser, `qod serve`'s
+  provisioning and a manifest import are not judged.
 - A DuckLake create naming no path no longer answers `400`, for any caller: the database gets a folder of
   its own beside the default data path, under its composed name, stored on the row so that it cannot
   move. With no default data path, or one that is a bucket's root, it answers `400 invalid_contract`

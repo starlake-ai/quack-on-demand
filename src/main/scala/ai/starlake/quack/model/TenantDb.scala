@@ -316,6 +316,15 @@ object TenantDb {
   def holdsOwnKeys(dataPath: String, objectStore: Map[String, String]): Boolean =
     ownKeyNames(dataPath).exists(_.forall(k => objectStore.get(k).exists(_.trim.nonEmpty)))
 
+  /** Whether a remote path names a folder under its bucket or container, not their root in any
+    * spelling, and each of its segments reads as itself: no `.` or `..`, no glob, no escape.
+    */
+  private def namesRemoteFolder(dataPath: String): Boolean =
+    val segments =
+      dataPath.substring(dataPath.indexOf("://") + 3).split('/').toList.filter(_.nonEmpty)
+    segments.sizeIs > 1 &&
+    segments.forall(s => s != "." && s != ".." && !s.exists("*?[]%".contains(_)))
+
   /** The metastore keys that name a Postgres server, a login on it and a database there. */
   val ServerKeys: List[String] = List("pgHost", "pgPort", "pgUser", "pgPassword", "dbName")
 
@@ -397,12 +406,14 @@ object TenantDb {
   ): Option[String] =
     val chooses =
       "a database's data path is QoD's or a superuser's to choose: leave dataPath out of a " +
-        "DuckLake database and QoD places it, or name a remote path (s3://, s3a://, r2://, gs://, " +
-        "az://, azure://, abfss://) with your own keys in objectStore, complete for its scheme"
+        "DuckLake database and QoD places it, or name a folder of a remote store (s3://, s3a://, " +
+        "r2://, gs://, az://, azure://, abfss://), not its root, with your own keys in " +
+        "objectStore, complete for its scheme"
     val storage = stored match
       case None =>
         val named = metastore.contains("dataPath") ||
-          (dataPath.nonEmpty && !holdsOwnKeys(dataPath, objectStore))
+          (dataPath.nonEmpty &&
+            !(holdsOwnKeys(dataPath, objectStore) && namesRemoteFolder(dataPath)))
         Option.when(named)(chooses)
       case Some(td) =>
         val path =

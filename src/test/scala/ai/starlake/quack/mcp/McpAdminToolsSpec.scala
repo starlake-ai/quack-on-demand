@@ -493,6 +493,34 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     create("su", McpSuperuserPat.principal, local).isRight shouldBe true
   }
 
+  it should "keep a tenant admin off another folder and a bucket's root" in {
+    val f                                                           = new Fixture
+    def create(name: String, path: String, principal: McpPrincipal) = f.call(
+      "create_database",
+      principal,
+      "tenant"       -> Json.fromString(Tenant0),
+      "name"         -> Json.fromString(name),
+      "kind"         -> Json.fromString("memory"),
+      "data_path"    -> Json.fromString(path),
+      "object_store" -> Json.obj(
+        "s3_access_key_id"     -> Json.fromString("AK"),
+        "s3_secret_access_key" -> Json.fromString("SK")
+      )
+    )
+    create("first", "s3://mcp-shared/lakes/first/", adminPat()).isRight shouldBe true
+    create("second", "s3://mcp-shared/lakes/first/below/", adminPat()).left.toOption
+      .getOrElse(fail("admitted")) should include("choose another path")
+    create("second", "s3://mcp-shared/", adminPat()).left.toOption
+      .getOrElse(fail("admitted")) should include("leave dataPath out")
+    f.store.snapshot().tenantDbs.map(_.name) should not contain s"${Tenant0}_second"
+    create(
+      "second",
+      "s3://mcp-shared/lakes/first/below/",
+      McpSuperuserPat.principal
+    ).isRight shouldBe
+      true
+  }
+
   "update_database" should "move no data path for a tenant admin" in {
     val f                                             = new Fixture
     def update(principal: McpPrincipal, path: String) = f.call(

@@ -316,6 +316,13 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     on(" ").isDefined shouldBe true
     on("", meta = Map("dataPath" -> "/data/x")).isDefined shouldBe true
     on("", meta = Map("dataPath" -> "")).isDefined shouldBe true
+    on("s3://b", remoteRow.objectStore).isDefined shouldBe true
+    on("s3://b/", remoteRow.objectStore).isDefined shouldBe true
+    on("s3://b//", remoteRow.objectStore).isDefined shouldBe true
+    on("s3://b/x/..", remoteRow.objectStore).isDefined shouldBe true
+    on("s3://b/*", remoteRow.objectStore).isDefined shouldBe true
+    on("s3://b/x%2f", remoteRow.objectStore).isDefined shouldBe true
+    on("s3://b/x", remoteRow.objectStore) shouldBe None
     on("s3://b/x", remoteRow.objectStore, Map("dataPath" -> "s3://b/x")).isDefined shouldBe true
   }
 
