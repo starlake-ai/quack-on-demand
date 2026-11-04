@@ -22,10 +22,16 @@ class NodePgAddressSpec extends AnyFlatSpec with Matchers:
     NodePgAddress.rewrite(spelled, "postgres", "5432", "10.0.0.5", "15432") shouldBe
       spelled ++ Map("pgHost" -> "10.0.0.5", "pgPort" -> "15432")
   }
-  it should "keep a non-default port of the managed host" in {
+  it should "never rewrite a row on another port of the managed host" in {
     val custom = managed.updated("pgPort", "6543")
-    NodePgAddress.rewrite(custom, "postgres", "5432", "10.0.0.5", "15432") shouldBe
-      custom.updated("pgHost", "10.0.0.5")
+    NodePgAddress.rewrite(custom, "postgres", "5432", "10.0.0.5", "15432") shouldBe custom
+    NodePgAddress.rewrite(custom, "postgres", "5432", "10.0.0.5", "") shouldBe custom
+  }
+  it should "read a default with no port as the spawn scripts do" in {
+    NodePgAddress.rewrite(managed, "postgres", "", "10.0.0.5", "") shouldBe
+      managed.updated("pgHost", "10.0.0.5")
+    val custom = managed.updated("pgPort", "6543")
+    NodePgAddress.rewrite(custom, "postgres", "", "10.0.0.5", "") shouldBe custom
   }
   it should "pass a database on its own Postgres through untouched" in {
     val own = managed.updated("pgHost", "pg.customer.example")
