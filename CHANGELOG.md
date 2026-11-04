@@ -111,6 +111,16 @@ count. To keep counts from a user, refuse on the table.
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight
   `UNAVAILABLE`).
+- The console's Branches page. The create form checks a branch's name before sending it: its pattern
+  never compiled in a browser. In a row diff, choosing `all` after a filter lists every change type
+  again, where the list stayed on the filter. An action with no answer says it may still be running,
+  where a merge read `Failed to fetch` as it ran on and landed and a gateway's 504 showed its HTML. A
+  form, and what became of an action, now appear on screen, where a form could open below the fold and
+  a click seem to do nothing. A failed read of the list keeps the list and what the action said, where
+  it read as no branches. A merge answered `409 already_merged` reads as a note, since the merge is
+  done, not as an error. A created, dropped, recreated or altered table shows dashes, where it read
+  `0 0 0` whatever it held, as rows are counted only for a table the branch modified. The Merge column
+  says `cannot be merged` of a table listed under table conflicts, where it said `ok`.
 
 ## 0.11.0
 
