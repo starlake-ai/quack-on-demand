@@ -97,6 +97,86 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
     ConnectionBudget.fit(Int.MaxValue, rest, oneGiB) should be >
       ConnectionBudget.fit(Int.MaxValue, listener, oneGiB)
 
+  // The FlightSQL edge's connections on probation, in their own tenth of the heap.
+
+  private val flight    = ConnectionProbation.heldBytes(65536, tls = false)
+  private val flightTls = ConnectionProbation.heldBytes(65536, tls = true)
+
+  "the FlightSQL edge" should "read 80 KiB of a connection at the default header limit" in:
+    ConnectionProbation.readBudget(65536) shouldBe 81920L
+    ConnectionProbation.readBudget(1024) shouldBe 17408L
+
+  it should "hold what a connection on probation can leave at the default header limit" in:
+    flight shouldBe 4834640L
+    flightTls shouldBe 2791760L
+    ConnectionProbation.heldBytes(1024, tls = false) shouldBe 2297168L
+    ConnectionProbation.heldBytes(1024, tls = true) shouldBe 1221968L
+
+  it should "take a tenth of the heap, leaving the other listeners their fifths" in:
+    ConnectionBudget.fit(1024, flight, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 22
+    ConnectionBudget.fit(1024, flightTls, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 38
+    ConnectionBudget.fit(1024, flight, chartHeap, ConnectionBudget.FlightHeapParts) shouldBe 44
+    ConnectionBudget.fit(1024, flightTls, chartHeap, ConnectionBudget.FlightHeapParts) shouldBe 76
+    ConnectionBudget.fit(16, flightTls, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 16
+    // Leaving out the parts is a fifth, as the three HTTP listeners take.
+    ConnectionBudget.fit(1024, flightTls, oneGiB) shouldBe 76
+
+  it should "say a tenth at boot" in:
+    ConnectionBudget.notice(
+      "The FlightSQL edge",
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+      2048,
+      38,
+      flightTls,
+      oneGiB,
+      heapParts = ConnectionBudget.FlightHeapParts
+    ) shouldBe
+      "The FlightSQL edge takes at most 38 of the 2048 connections of " +
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS: each can hold 2726 KiB before any credential, against " +
+      "a tenth of this 1024 MiB heap. Raise the heap (-Xmx) or lower the limits to take more"
+
+  "maxBacklog" should "price a call at its headers in their worst shape" in:
+    ConnectionProbation.callBytes(65536) shouldBe 112298L
+    ConnectionProbation.callBytes(1024) shouldBe 4778L
+
+  it should "be as many as the pool has threads at the chart's heap" in:
+    ConnectionProbation.maxBacklog(512, 65536, chartHeap) shouldBe 512
+
+  it should "be what fits a twentieth of a smaller heap" in:
+    ConnectionProbation.maxBacklog(512, 65536, oneGiB) shouldBe 478
+    ConnectionProbation.maxBacklog(512, 65536, 512L << 20) shouldBe 239
+    ConnectionProbation.maxBacklog(512, 65536, 256L << 20) shouldBe 119
+
+  it should "be at least one, on a heap too small for one" in:
+    ConnectionProbation.maxBacklog(512, 65536, noMemoryFor) shouldBe 1
+
+  it should "follow the pool and the header limit" in:
+    ConnectionProbation.maxBacklog(16, 65536, oneGiB) shouldBe 16
+    ConnectionProbation.maxBacklog(2048, 65536, chartHeap) shouldBe 956
+    ConnectionProbation.maxBacklog(512, 1024, 256L << 20) shouldBe 512
+
+  it should "leave what a flood can queue at about a tenth of the chart's heap" in:
+    // Its own arithmetic in the scaladoc: the limit, and 17 calls for each place taken before it.
+    val places = ConnectionBudget.fit(1024, flightTls, chartHeap, ConnectionBudget.FlightHeapParts)
+    val calls  = ConnectionProbation.maxBacklog(512, 65536, chartHeap) + 17L * places
+    calls shouldBe 1804L
+    val queued = calls * ConnectionProbation.callBytes(65536)
+    queued / (1L << 20) shouldBe 193L
+    queued should be < chartHeap / 10
+
+  "slots" should "say nothing when told not to, and take the same" in:
+    val printed = new java.io.ByteArrayOutputStream()
+    val taken   = Console.withOut(printed)(
+      ConnectionBudget.slots("A listener", "AN_ENV", Int.MaxValue, 1L << 20, announce = false)
+    )
+    printed.toString("UTF-8") shouldBe empty
+    taken shouldBe ConnectionBudget.fit(Int.MaxValue, 1L << 20, Runtime.getRuntime.maxMemory)
+
+  it should "say so otherwise" in:
+    val printed = new java.io.ByteArrayOutputStream()
+    Console.withOut(printed)(ConnectionBudget.slots("A listener", "AN_ENV", Int.MaxValue, 1L << 20))
+    printed.toString("UTF-8") should include("A listener takes at most")
+
   // What boot says when a listener takes fewer connections than it is configured to.
 
   "notice" should "say what the listener takes, why, and how to take more" in:

@@ -1440,13 +1440,42 @@ final case class FlightConfig(
       envVar = "PROXY_MAX_HEADER_BYTES",
       description = "Largest gRPC header list the FlightSQL edge reads, in bytes."
     )
-    maxHeaderBytes: Int = 65536
+    maxHeaderBytes: Int = 65536,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_ANONYMOUS_CALLS",
+      description =
+        "FlightSQL calls with no credentials at once. Only GetSqlInfo and GetXdbcTypeInfo answer " +
+          "them, for clients that ask before they present their credentials; past this they are " +
+          "refused with UNAVAILABLE."
+    )
+    maxAnonymousCalls: Int = 256,
+    @field @ConfigField(
+      envVar = "PROXY_FLIGHT_THREADS",
+      description =
+        "Threads of the FlightSQL edge's fixed executor, at least 16. A call waits for a free one; " +
+          "while more tasks wait than there are threads, or than fit a twentieth of the heap, a " +
+          "new connection is closed at once. A quarter of them is the most DoPuts that may wait " +
+          "for their data at once."
+    )
+    flightThreads: Int = 512,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+      description =
+        "FlightSQL connections at once that have not yet shown a working credential; one past this " +
+          "is closed at once. The edge takes no more than fit a tenth of the heap. Connections that " +
+          "have shown one do not count and have no limit."
+    )
+    maxUnauthenticatedConnections: Int = 1024
 ):
   require(
-    maxInboundMessageBytes > 0 && maxHeaderBytes > 0,
-    "PROXY_MAX_INBOUND_MESSAGE_BYTES and PROXY_MAX_HEADER_BYTES must be positive " +
-      s"(got $maxInboundMessageBytes and $maxHeaderBytes)"
+    maxInboundMessageBytes > 0 && maxHeaderBytes > 0 && maxAnonymousCalls > 0 &&
+      maxUnauthenticatedConnections > 0,
+    "PROXY_MAX_INBOUND_MESSAGE_BYTES, PROXY_MAX_HEADER_BYTES, PROXY_MAX_ANONYMOUS_CALLS and " +
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS must be positive (got " +
+      s"$maxInboundMessageBytes, $maxHeaderBytes, $maxAnonymousCalls and " +
+      s"$maxUnauthenticatedConnections)"
   )
+  require(flightThreads >= 16, s"PROXY_FLIGHT_THREADS must be at least 16 (got $flightThreads)")
 
 /** The native Quack protocol front door (`quack-native` block): the listener DuckDB clients
   * `ATTACH 'quack:host:port'` to. Identity, routing, policies and audit are the FlightSQL edge's;

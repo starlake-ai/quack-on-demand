@@ -17,5 +17,20 @@ final case class EdgeConfig(
     // DoPut batches are never read, so only SQL text needs room.
     maxInboundMessageBytes: Int = 16777216,
     // Largest header list read. gRPC buffers headers before any authentication runs.
-    maxHeaderBytes: Int = 65536
+    maxHeaderBytes: Int = 65536,
+    // Calls with no credentials at once (GetFlightInfo and DoGet: AnonymousCallGuard).
+    maxAnonymousCalls: Int = 256,
+    // Threads of the edge's fixed executor, for gRPC callbacks and DoPut tasks alike.
+    flightThreads: Int = 512,
+    // How long a DoPut may wait for its first message and its data. Not a setting: bound parameters
+    // are never read, and JDBC and ADBC half-close at once. Arrow Java's literal
+    // FlightSqlClient.executeUpdate does not: it reads its answer before it half-closes, so it holds
+    // a slot for this long and gets TIMED_OUT (it used to wait for good).
+    putDrainTimeoutMs: Long = FlightProducerImpl.DefaultPutDrainTimeoutMs,
+    // Connections that have shown no working credential, on the listener (ConnectionProbation).
+    maxUnauthenticatedConnections: Int = ConnectionProbation.DefaultMaxConnections,
+    // How long a connection may stay without showing one. Not a setting: a real client's first call
+    // shows one as soon as it is checked (a password takes bcrypt, 250 ms or more, and more under a
+    // queue), or the client reconnects when it next needs to.
+    probationTimeoutMs: Long = 60000L
 )

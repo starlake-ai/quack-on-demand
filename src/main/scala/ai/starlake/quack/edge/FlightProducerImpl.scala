@@ -24,14 +24,25 @@ import scala.jdk.CollectionConverters.*
   * `preparedIdleTtlSec`: a prepared handle unused this long is dropped ([[PreparedHandles]]); the
   * edge passes its session TTL. The edge also drops a session's handles when the session leaves
   * [[ConnectionContext]] ([[dropSession]], through [[FlightEdgeServer.sessionEvicted]]).
+  *
+  * `maxPutDrains`: how many DoPuts may wait for their data at once. Arrow runs a DoPut task on the
+  * executor that delivers its data, so waiting tasks must never fill it ([[FlightEdgeServer]]
+  * passes a quarter of its threads). `maxPutDrainBytes`: how much parameter data one DoPut may
+  * send, all of it ignored. `putDrainTimeoutMs`: how long one DoPut may wait for its first message
+  * and its data.
   */
 final class FlightProducerImpl(
     router: FlightSqlRouter,
-    preparedIdleTtlSec: Long
+    preparedIdleTtlSec: Long,
+    maxPutDrains: Int = FlightProducerImpl.DefaultMaxPutDrains,
+    maxPutDrainBytes: Long = FlightProducerImpl.DefaultMaxPutDrainBytes,
+    putDrainTimeoutMs: Long = FlightProducerImpl.DefaultPutDrainTimeoutMs
 ) extends NoOpFlightSqlProducer
     with LazyLogging:
 
   private val allocator: BufferAllocator = new RootAllocator()
+
+  private val putDrainSlots = new java.util.concurrent.Semaphore(maxPutDrains)
 
   /** DEBUG statement logging must never leak a SQL admin dialect password literal (`CREATE USER ...
     * PASSWORD '...'`, `ALTER USER ... PASSWORD '...'`): those statements are otherwise logged
@@ -217,14 +228,46 @@ final class FlightProducerImpl(
       -1L
     )
 
-  /** Diagnostic-only override: logs the DoGet peer + ticket shape before forwarding to the
-    * FlightSqlProducer dispatcher.
+  /** An anonymous peer ([[AnonymousCallGuard]]) gets server metadata only: GetSqlInfo and
+    * GetXdbcTypeInfo, what ODBC asks before it replays its bearer, in a command the guard has
+    * limited to about [[FlightProducerImpl.MaxAnonymousCommandBytes]]. Anything else, static
+    * metadata included, needs a credential.
+    */
+  private def refuseAnonymous(
+      context: FlightProducer.CallContext,
+      command: => Array[Byte]
+  ): Unit =
+    val peer = Option(context.peerIdentity()).getOrElse("")
+    if peer.startsWith(FlightEdgeServer.AnonymousPeerPrefix) then
+      val bytes   = command
+      val allowed = scala.util
+        .Try(ProtoAny.parseFrom(bytes))
+        .toOption
+        .exists(any =>
+          any.is(classOf[FlightSql.CommandGetSqlInfo]) ||
+            any.is(classOf[FlightSql.CommandGetXdbcTypeInfo])
+        )
+      if !allowed then throw noContext(peer, _ => "no pool bound to session; authenticate first")
+
+  override def getFlightInfo(
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): FlightInfo =
+    refuseAnonymous(
+      context,
+      if descriptor.isCommand then descriptor.getCommand else Array.emptyByteArray
+    )
+    super.getFlightInfo(context, descriptor)
+
+  /** Logs the DoGet peer and ticket shape at DEBUG, and refuses an anonymous peer, before
+    * forwarding to the FlightSqlProducer dispatcher.
     */
   override def getStream(
       context: FlightProducer.CallContext,
       ticket: Ticket,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
+    refuseAnonymous(context, ticket.getBytes)
     if logger.underlying.isDebugEnabled then
       val peer        = Option(context.peerIdentity()).getOrElse("(null)")
       val ticketBytes = ticket.getBytes
@@ -921,9 +964,87 @@ final class FlightProducerImpl(
   ): Unit =
     emitEmpty(Schemas.GET_CROSS_REFERENCE_SCHEMA, listener)
 
+  /** Every DoPut starts here. Arrow's own acceptPut parses the command of the stream's first
+    * message, and it waits for that message with no time limit, past the client's disconnect
+    * (`FlightStream` completes its descriptor only from a message). So the session is checked
+    * before any wait; then one slot and one deadline cover the wait and the drain. A task that gets
+    * past them re-checks its session and runs its statement holding no slot.
+    */
+  override def acceptPut(
+      context: FlightProducer.CallContext,
+      flightStream: FlightStream,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Runnable =
+    val peer     = Option(context.peerIdentity()).getOrElse("anonymous")
+    val admitted =
+      liveSession(peer, noContext(peer, _ => "no pool bound to session; authenticate first"))
+        .flatMap(_ =>
+          withinPutLimits(flightStream, arrowAcceptPut(context, flightStream, ackStream))
+        )
+    admitted match
+      case Right(task) => task
+      case Left(err)   => () => ackStream.onError(err)
+
+  private def arrowAcceptPut(
+      context: FlightProducer.CallContext,
+      flightStream: FlightStream,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Runnable = super.acceptPut(context, flightStream, ackStream)
+
+  /** `firstMessage` then the drain, under a slot and a deadline. Left when no slot is free, when
+    * the client sends more than `maxPutDrainBytes`, or at the deadline. A failure of the stream
+    * itself (its client gone, an unknown command) propagates to Arrow, which answers it on the ack
+    * stream.
+    */
+  private def withinPutLimits(
+      flightStream: FlightStream,
+      firstMessage: => Runnable
+  ): Either[Throwable, Runnable] =
+    if !putDrainSlots.tryAcquire() then
+      Left(
+        CallStatus.UNAVAILABLE
+          .withDescription("too many concurrent updates; retry")
+          .toRuntimeException()
+      )
+    else
+      try
+        FlightProducerImpl
+          .interruptAfter(putDrainTimeoutMs) {
+            val task = firstMessage
+            drainPutStream(flightStream, 0L).map(_ => task)
+          }
+          .getOrElse(
+            Left(
+              CallStatus.TIMED_OUT
+                .withDescription(s"no data from the client within $putDrainTimeoutMs ms")
+                .toRuntimeException()
+            )
+          )
+      finally putDrainSlots.release()
+
+  /** Drain and discard the DoPut request stream: half-closing without reading the client's
+    * parameter batches breaks its in-flight write ("UNAVAILABLE: io exception").
+    */
+  @scala.annotation.tailrec
+  private def drainPutStream(flightStream: FlightStream, seen: Long): Either[Throwable, Unit] =
+    if !flightStream.next() then Right(())
+    else
+      val batch =
+        if flightStream.hasRoot then
+          flightStream.getRoot.getFieldVectors.asScala.map(_.getBufferSize.toLong).sum
+        else 0L
+      val total = seen + math.max(batch, FlightProducerImpl.MinBatchBytes)
+      if total > maxPutDrainBytes then
+        Left(
+          CallStatus.INVALID_ARGUMENT
+            .withDescription("bound parameters are not supported")
+            .toRuntimeException()
+        )
+      else drainPutStream(flightStream, total)
+
   /** Literal executeUpdate entrypoint: run the SQL through the router and ack the affected-row
-    * count as a DoPutUpdateResult. No bound parameters are supported, so `flightStream` is drained,
-    * never read.
+    * count as a DoPutUpdateResult. Bound parameters are never read: [[acceptPut]] has already
+    * drained `flightStream`, so this does not touch it.
     */
   override def acceptPutStatement(
       command: FlightSql.CommandStatementUpdate,
@@ -935,7 +1056,6 @@ final class FlightProducerImpl(
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
     new Runnable:
       def run(): Unit =
-        drainPutStream(flightStream)
         liveSession(
           peer,
           noContext(peer, _ => "no pool bound to session; authenticate first")
@@ -952,7 +1072,8 @@ final class FlightProducerImpl(
 
   /** Prepared-update entrypoint: Arrow JDBC / ADBC / DBeaver prepare every statement, so literal
     * DML lands here rather than [[acceptPutStatement]]. Replays the Prepare-time SQL and acks the
-    * count. Literal updates only: bound parameters are never read.
+    * count. Literal updates only: bound parameters are never read, as [[acceptPut]] has already
+    * drained `flightStream`, so this does not touch it.
     */
   override def acceptPutPreparedStatementUpdate(
       command: FlightSql.CommandPreparedStatementUpdate,
@@ -963,7 +1084,6 @@ final class FlightProducerImpl(
     val handle = command.getPreparedStatementHandle.toStringUtf8
     new Runnable:
       def run(): Unit =
-        drainPutStream(flightStream)
         resolvePreparedCall(handle, context) match
           case Left(err) => ackStream.onError(err)
           case Right(p)  =>
@@ -987,13 +1107,6 @@ final class FlightProducerImpl(
               ackStream,
               "acceptPutPreparedStatementUpdate"
             )
-
-  /** Drain and discard the DoPut request stream: half-closing without reading the client's
-    * parameter batches breaks its in-flight write ("UNAVAILABLE: io exception"). `null` only in
-    * unit tests, which drive run() directly.
-    */
-  private def drainPutStream(flightStream: FlightStream): Unit =
-    if flightStream != null then while flightStream.next() do ()
 
   /** Shared tail of the two update entrypoints: outcome -> DoPutUpdateResult ack or typed error on
     * the ack stream. Closes the result either way.
@@ -1622,3 +1735,51 @@ final class FlightProducerImpl(
           listener.completed()
         finally out.close()
     finally batches.foreach(_.close())
+
+object FlightProducerImpl:
+  val DefaultMaxPutDrains: Int       = 128
+  val DefaultMaxPutDrainBytes: Long  = 16777216L
+  val DefaultPutDrainTimeoutMs: Long = 30000L
+
+  /** The least a batch counts for, so that empty batches are bounded too. */
+  private val MinBatchBytes: Long = 1024L
+
+  /** Runs `body` on this thread and interrupts it if `body` is still running after `ms`. A failure
+    * of `body` after the deadline fired is the deadline's: None. No interrupt outlives this method:
+    * the lock orders the interrupt against the end of `body`, so one that fired is always cleared
+    * here.
+    */
+  private def interruptAfter[A](ms: Long)(body: => A): Option[A] =
+    val thread = Thread.currentThread()
+    val lock   = new Object
+    var open   = true
+    var fired  = false
+    val timer  = new java.util.concurrent.CompletableFuture[Unit]()
+      .orTimeout(ms, java.util.concurrent.TimeUnit.MILLISECONDS)
+    timer.whenComplete { (_, failure) =>
+      if failure != null then
+        lock.synchronized {
+          if open then
+            fired = true
+            thread.interrupt()
+        }
+    }
+    try
+      try Some(body)
+      catch case scala.util.control.NonFatal(_) if lock.synchronized(fired) => None
+    finally
+      lock.synchronized {
+        open = false
+        if fired then Thread.interrupted()
+      }
+      timer.complete(())
+
+  /** The largest command an anonymous peer may send, which [[AnonymousCallGuard]] applies: several
+    * times what every id GetSqlInfo defines takes. GetSqlInfo answers a row per id listed, repeats
+    * included, in Arrow memory that no limit covers, and goes on after its client left: one
+    * anonymous call listing 16 million ids, a 16 MiB message, took the JVM from 373 to 2295 MiB and
+    * held its thread for 4 s after the client left. Its place stays held while `send` runs, as the
+    * end of a call queues behind its handler, so what the limit on calls at once bounds is that
+    * many such calls.
+    */
+  val MaxAnonymousCommandBytes: Int = 4096

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.11.1
+
+### FlightSQL: limits before a credential
+
+**Upgrade if clients you do not trust can reach the FlightSQL port.** On 0.11.0 and earlier, any
+client that reaches it can halt the manager, with no credentials and no account: calls that never
+finish held a thread each until the container was killed out of memory, or filled the heap until the
+process stayed up and answered nothing. Until you upgrade, keep that port behind your network.
+
+What a client can now see, most of it only when it sends no working credential:
+
+- **A call with no credentials reaches server metadata and nothing else:** `GetSqlInfo` and
+  `GetXdbcTypeInfo`, which the Arrow Flight SQL ODBC driver behind Power BI and Excel asks for before
+  it presents its credentials. Any other call answers `UNAUTHENTICATED`, including static metadata
+  such as `GetTableTypes`, which used to answer, and a `Handshake` with no credentials: send
+  credentials on every call. `ListFlights` still answers `UNIMPLEMENTED`. Such a call has a command of
+  at most about 4 KiB, may not be compressed, and at most 256 run at once
+  (`PROXY_MAX_ANONYMOUS_CALLS`; past that `UNAVAILABLE`, "too many calls with no credentials; retry").
+- **A connection that has not shown a working credential is held to little:** at most 8 streams open
+  (`MAX_CONCURRENT_STREAMS`, raised once it shows one), 16 in all, `PROXY_MAX_HEADER_BYTES` plus
+  16 KiB read (80 KiB by default), and 60 s. The first call with a working credential lifts all of
+  it. A client that sends credentials on its first call sees no difference, with these exceptions:
+  - A connection making only calls with no working credential is closed after 16 calls or 60 s, and
+    the client reconnects on its next call.
+  - A first statement over about 80 KiB pauses until its credential is checked. If the credential is
+    missing or fails, the client waits up to 60 s or its own deadline and reads `UNAVAILABLE`, not
+    `UNAUTHENTICATED`.
+  - A proxy opening more than 8 streams on a new upstream connection, before it reads the server's
+    SETTINGS, can lose that connection.
+- **New connections can be refused.** At most `PROXY_MAX_UNAUTHENTICATED_CONNECTIONS` (1024)
+  connections can be in that state at once, and no more than fit a tenth of the heap: 76 with TLS and
+  44 without at a 2 GiB heap, 38 and 22 at 1 GiB. The next one is closed at once, before TLS, and the
+  client reads a connection error (JDBC's `getConnection` throws): retry. A connection that has shown
+  a credential does not count. Boot prints a line only when the variable was set above what fits.
+- **The edge runs on a fixed pool,** `PROXY_FLIGHT_THREADS` (512, at least 16), where it started a
+  thread per call with no limit. A call holds a thread while it streams its results, and past that
+  number calls wait. While more tasks wait for a thread than the pool has threads, or than fit a
+  twentieth of the heap, a new connection is closed at once as above, with or without a credential.
+  Raise it if you run more calls than that at once.
+- **A DoPut waits within limits:** at most a quarter of `PROXY_FLIGHT_THREADS` wait for their data at
+  once (past that `UNAVAILABLE`, "too many concurrent updates; retry"), each for 30 s (`TIMED_OUT`),
+  for at most 16 MiB of data (`INVALID_ARGUMENT`, "bound parameters are not supported"). JDBC and ADBC
+  half-close at once and are unaffected. Arrow Java's literal `FlightSqlClient.executeUpdate` reads
+  its answer before it half-closes, so it gets `TIMED_OUT` after 30 s, where it used to wait for good.
+
+Known limits. A flood of wrong passwords, or of bearer tokens naming a tenant whose identity provider
+hangs, holds the edge's threads, so FlightSQL calls wait and new connections are refused for every
+tenant while it lasts. Clients retrying a wrong password can also make a correct login fail after 5 s
+with `UNAUTHENTICATED`, "Authentication failed: database: Database error", as on 0.11.0: retry, and
+look for the client sending the wrong password. A few silent connections a second keep new connections
+out; connections that have shown a credential go on working, though a flood can slow them. A client
+with a valid login is not held to any of these limits and can still fill the heap. Behind an HTTP/2
+proxy the connection limits apply per upstream connection. None of these refusals is logged or counted.
+Keep the port behind your network where that matters. On a network you do not trust, put a gRPC-aware
+proxy with stream and per-address connection limits in front of it.
+
 ## 0.11.0
 
 ### Upgrading from 0.10.x (read first)
