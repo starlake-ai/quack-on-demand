@@ -664,7 +664,8 @@ final class FlightProducerImpl(
         |  AND catalog_name NOT LIKE '\_\_ducklake\_metadata\_%' ESCAPE '\'
         |ORDER BY 1""".stripMargin,
       context,
-      listener
+      listener,
+      Some(Schemas.GET_CATALOGS_SCHEMA)
     )
 
   override def getFlightInfoSchemas(
@@ -695,7 +696,8 @@ final class FlightProducerImpl(
          |WHERE $filters
          |ORDER BY 1, 2""".stripMargin,
       context,
-      listener
+      listener,
+      Some(Schemas.GET_SCHEMAS_SCHEMA)
     )
 
   override def getFlightInfoTables(
@@ -735,7 +737,8 @@ final class FlightProducerImpl(
          |FROM information_schema.tables
          |WHERE $filters
          |ORDER BY 1, 2, 3""".stripMargin
-    if !command.getIncludeSchema then runStatement(listSql, context, listener)
+    if !command.getIncludeSchema then
+      runStatement(listSql, context, listener, Some(Schemas.GET_TABLES_SCHEMA_NO_SCHEMA))
     else streamTablesWithSchema(listSql, context, listener)
 
   /** include_schema=true variant of getStreamTables: each row carries the table's Arrow schema as
@@ -887,7 +890,8 @@ final class FlightProducerImpl(
     runStatement(
       "SELECT 'TABLE' AS table_type UNION ALL SELECT 'VIEW' AS table_type",
       context,
-      listener
+      listener,
+      Some(Schemas.GET_TABLE_TYPES_SCHEMA)
     )
 
   // -----------------------------------------------------------------
@@ -1626,7 +1630,8 @@ final class FlightProducerImpl(
   private def runStatement(
       sql: String,
       context: FlightProducer.CallContext,
-      listener: FlightProducer.ServerStreamListener
+      listener: FlightProducer.ServerStreamListener,
+      announced: Option[Schema] = None
   ): Unit =
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
     liveSession(peer, noContext(peer)) match
@@ -1645,7 +1650,7 @@ final class FlightProducerImpl(
             val advertisedWasCount =
               strategyOf(sql) == PrepareStrategy.SkipExecute
                 && !ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql)
-            try streamArrow(result.rows, listener, advertisedWasCount)
+            try streamArrow(result.rows, listener, advertisedWasCount, announced)
             catch
               case t: Throwable =>
                 listener.error(commitConflictOrInternal("streaming Arrow batches", t))
@@ -1663,23 +1668,30 @@ final class FlightProducerImpl(
     *
     * `advertisedWasCount` is true when the caller advertised [[countSchema]] for this statement:
     * see [[streamAfterExhaustion]].
+    *
+    * `announced` is the schema a metadata call's FlightInfo gave: see
+    * [[FlightProducerImpl.underAnnounced]].
     */
   private[edge] def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
       listener: FlightProducer.ServerStreamListener,
-      advertisedWasCount: Boolean = false
+      advertisedWasCount: Boolean = false,
+      announced: Option[Schema] = None
   ): Unit =
     if advertisedWasCount then streamAfterExhaustion(reader, listener)
     else
       val root: VectorSchemaRoot = reader.getVectorSchemaRoot
+      val sent                   = announced.fold(root)(FlightProducerImpl.underAnnounced(root, _))
       var hasMore                = reader.loadNextBatch()
-      listener.start(root)
+      listener.start(sent)
       if !hasMore then
         // Empty result set: emit a zero-row batch so the client receives the
         // schema even if there's no data.
-        root.setRowCount(0)
+        sent.setRowCount(0)
         listener.putNext()
       while hasMore && !listener.isCancelled() do
+        // A root of the same vectors keeps its own row count, which the reader does not set.
+        if sent ne root then sent.setRowCount(root.getRowCount)
         listener.putNext()
         hasMore = reader.loadNextBatch()
       listener.completed()
@@ -1737,6 +1749,19 @@ final class FlightProducerImpl(
     finally batches.foreach(_.close())
 
 object FlightProducerImpl:
+
+  /** `root`'s own vectors under `announced`. A metadata call's FlightInfo gives Arrow's standard
+    * schema, some of whose columns are not null, and its rows come from SQL, whose columns are all
+    * nullable, and ADBC refuses an answer whose stream differs from what its FlightInfo said
+    * ("inconsistent schema"). Only when every column has the announced name and type: otherwise
+    * `root` itself, as announcing a type a column does not have would break any client.
+    */
+  private[edge] def underAnnounced(root: VectorSchemaRoot, announced: Schema): VectorSchemaRoot =
+    def columns(schema: Schema) = schema.getFields.asScala.map(f => (f.getName, f.getType)).toList
+    if columns(root.getSchema) == columns(announced) then
+      new VectorSchemaRoot(announced, root.getFieldVectors, 0)
+    else root
+
   val DefaultMaxPutDrains: Int       = 128
   val DefaultMaxPutDrainBytes: Long  = 16777216L
   val DefaultPutDrainTimeoutMs: Long = 30000L
