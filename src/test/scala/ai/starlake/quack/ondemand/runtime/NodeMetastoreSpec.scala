@@ -80,6 +80,18 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers with OptionValues:
     TenantDb.NodeEnvKeys.filter(NodeSecretFiles.isKey) shouldBe empty
   }
 
+  "Both spawn scripts" should "hold no password fallback, nor do the wheel's copies" in
+    List("scripts", "cli/src/qod_cli/scripts").foreach { dir =>
+      withClue(s"$dir/spawn-quack-node.sh: ") {
+        Files.readString(Paths.get(s"$dir/spawn-quack-node.sh")) should
+          include("pgPassword=\"${pgPassword:-}\"")
+      }
+      withClue(s"$dir/spawn-quack-node.ps1: ") {
+        Files.readString(Paths.get(s"$dir/spawn-quack-node.ps1")) should
+          include("$pgPassword = Secret-Or 'pgPassword' ''")
+      }
+    }
+
   "TenantDb.KnownMetastoreKeys" should "be the launcher's keys but the stamps, plus the secrets" in {
     val stamps = Set(TenantDb.EncryptedKey, TenantDb.CreateDatabaseKey)
     TenantDb.KnownMetastoreKeys shouldBe (allowed.keySet -- stamps) ++ Set(

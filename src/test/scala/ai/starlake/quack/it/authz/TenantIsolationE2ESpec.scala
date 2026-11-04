@@ -602,6 +602,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         listener.await(1, 60.seconds)
         listener.connections should be > 0
         listener.seen.exists(_.matchesDefault) shouldBe false
+        listener.seen.forall(!_.passwordArrived) shouldBe true
         // The catalog's own database only: no admin connection to create one there.
         listener.seen.map(_.database).toSet shouldBe Set(td)
         closePool(t, td, "b5p")
@@ -642,6 +643,12 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     code shouldBe 200
     openPool(other, mine, "cpool2", otherToken)
     serving(other, "cpool2", "cb", OtherPw)
+    stack
+      .flight(s"CREATE TABLE $mine.main.own (id BIGINT)", "cb", OtherPw, other, "cpool2")
+      .isRight shouldBe true
+    stack
+      .flight(s"INSERT INTO $mine.main.own VALUES (1), (2), (3)", "cb", OtherPw, other, "cpool2")
+      .isRight shouldBe true
 
     val (up, body) = updateDb(other, mine, otherToken, "dbName" -> target)
     withClue(body.take(300))(up shouldBe 403)
@@ -655,7 +662,9 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
     // Its node stays on its own catalog, and the owner's rows are the owner's.
     settle()
-    stack.flight("SELECT 1", "cb", OtherPw, other, "cpool2").isRight shouldBe true
+    stack.flight(s"SELECT count(*) FROM $mine.main.own", "cb", OtherPw, other, "cpool2") shouldBe
+      Right(List("3"))
+    stack.flight("SHOW TABLES", "cb", OtherPw, other, "cpool2") shouldBe Right(List("own"))
     stack
       .flight(s"SELECT count(*) FROM $target.main.fact", "cb", OtherPw, other, "cpool2")
       .isLeft shouldBe
@@ -693,6 +702,15 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     stack
       .flight(
         s"CREATE TABLE $target.main.fact (id BIGINT, colofholder VARCHAR)",
+        "cc",
+        HolderPw,
+        holder,
+        "cpool3"
+      )
+      .isRight shouldBe true
+    stack
+      .flight(
+        s"INSERT INTO $target.main.fact VALUES (1, 'a'), (2, 'b'), (3, 'c')",
         "cc",
         HolderPw,
         holder,
@@ -761,6 +779,18 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       out.toOption.toList.flatten.mkString.contains("colofholder") shouldBe false
     }
     closePool(other, mine, "cpool4")
+
+    // The holder's rows are the holder's.
+    openPool(holder, target, "cpool5", holderToken)
+    serving(holder, "cpool5", "cc", HolderPw)
+    stack.flight(
+      s"SELECT id, colofholder FROM $target.main.fact ORDER BY id",
+      "cc",
+      HolderPw,
+      holder,
+      "cpool5"
+    ) shouldBe Right(List("1,a", "2,b", "3,c"))
+    closePool(holder, target, "cpool5")
   }
 
   // ---------- create and drop act on what the row owns ----------
@@ -1058,7 +1088,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       ._1 shouldBe 200
   }
 
-  it should "keep a remote path's own keys complete: the node would sign it with QoD's otherwise" in {
+  it should "keep a remote path's own keys complete" in {
     ready()
     val t = s"${Prefix}f4$run"
     tenant(t)
@@ -1140,35 +1170,35 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       ._1 shouldBe 200
   }
 
-  it should "reach no other tenant's database file, nor make a file at a path of their choosing" in {
+  it should "name no local data path, existing or not, with no row written" in {
     ready()
-    val victim   = s"${Prefix}f7$run"
-    val attacker = s"${Prefix}f8$run"
-    tenant(victim)
-    tenant(attacker)
-    val token = adminOf(attacker, "ff", OtherPw)
+    val other = s"${Prefix}f7$run"
+    val t     = s"${Prefix}f8$run"
+    tenant(other)
+    tenant(t)
+    val token = adminOf(t, "ff", OtherPw)
     // The other tenant's file, its row a superuser's to write.
     val file = root.resolve(s"f7_$run.duckdb")
     Using.resource(DriverManager.getConnection(s"jdbc:duckdb:$file")) { c =>
       Using.resource(c.createStatement()) { st =>
-        st.execute("CREATE TABLE vrows (id BIGINT)")
-        st.execute("INSERT INTO vrows VALUES (1), (2)")
+        st.execute("CREATE TABLE held (id BIGINT)")
+        st.execute("INSERT INTO held VALUES (1), (2)")
       }
     }
     val before = (Files.readAllBytes(file).toList, Files.getLastModifiedTime(file))
     createDb(
-      victim,
-      "vfile",
+      other,
+      "heldfile",
       su,
       "kind"      -> s("duckdb-file"),
       "dataPath"  -> s(file.toString),
-      "metastore" -> Json.obj("dbName" -> s("viccat"), "schemaName" -> s("main"))
+      "metastore" -> Json.obj("dbName" -> s("heldcat"), "schemaName" -> s("main"))
     )._1 shouldBe 200
 
     val absent = root.resolve(s"f8_$run.duckdb")
-    List("steal" -> file, "fresh" -> absent).foreach { (suffix, path) =>
+    List("held" -> file, "absent" -> absent).foreach { (suffix, path) =>
       val (code, name, body) = createDb(
-        attacker,
+        t,
         suffix,
         token,
         "kind"      -> s("duckdb-file"),
@@ -1182,8 +1212,8 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       }
     }
     settle()
-    stack.getStatus(s"/api/database/list?tenant=$attacker", token)._2 should not include "steal"
-    stack.getStatus(s"/api/database/list?tenant=$attacker", token)._2 should not include "fresh"
+    stack.getStatus(s"/api/database/list?tenant=$t", token)._2 should not include "held"
+    stack.getStatus(s"/api/database/list?tenant=$t", token)._2 should not include "absent"
     Files.exists(absent) shouldBe false
     (Files.readAllBytes(file).toList, Files.getLastModifiedTime(file)) shouldBe before
   }
@@ -1281,9 +1311,13 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       ._1 shouldBe 200
     rowOf(t, td, token).get.hcursor.get[String]("dataPath") shouldBe Right(path)
     // One with no path of its own keeps deriving it, and no tenant admin gives it one.
+    def effective = rowOf(t, bare, token).get.hcursor.get[String]("effectiveDataPath")
+    effective shouldBe Right(lakes.resolve(bare).toString)
     val (up, body) = updateDb(t, bare, token, "dataPath" -> dataDir(s"f6b_$run"))
     up shouldBe 403
     errorOf(body) shouldBe "superuser_required"
+    effective shouldBe Right(lakes.resolve(bare).toString)
+    rowOf(t, bare, token).get.hcursor.get[String]("dataPath") shouldBe Right("")
   }
 
   // ---------- only a superuser names a Postgres server ----------
@@ -1440,7 +1474,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       other.stop()
   }
 
-  it should "not aim a row's own dbName at QoD's server by dropping the rest" in {
+  it should "read a removal of pgHost as a change of server" in {
     ready()
     val t = s"${Prefix}fc$run"
     tenant(t)
@@ -1499,7 +1533,13 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       // That server's own login: a role of its own, owning the catalog's database.
       val role = s"${Prefix}role$run"
       roles += role
-      TestPostgres.psql("postgres", s"""CREATE ROLE "$role" LOGIN PASSWORD '$OwnRolePw'""")
+      Using.resource(
+        DriverManager.getConnection(TestPostgres.adminUrl, TestPostgres.pgUser, TestPostgres.pgPass)
+      ) { c =>
+        Using.resource(c.createStatement()) { st =>
+          st.execute(s"""CREATE ROLE "$role" LOGIN PASSWORD '$OwnRolePw'""")
+        }
+      }
       val login = Json.obj(
         "pgHost"     -> s("127.0.0.1"),
         "pgPort"     -> s(server.port.toString),
@@ -1543,14 +1583,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       stack.flight(s"SELECT count(*) FROM $name.main.fact", "gu", OtherPw, t, "g6p") shouldBe
         Right(List("2"))
 
-      // Every login that server saw is the row's: the manager's reads and the node's alike.
-      assume(
-        server.encrypted == 0,
-        "the test Postgres takes TLS: its startup messages cannot be read"
-      )
-      server.users should not be empty
-      server.users.toSet shouldBe Set(role)
-
       // A branch needs a database QoD can create next to it.
       val (branch, branchBody) = stack.postStatus(
         "/api/branch/create",
@@ -1561,18 +1593,25 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       errorOf(branchBody) shouldBe "branch_own_server"
       dbExists(s"${name}__br_") shouldBe false
 
-      // Its catalog is its owner's: a tenant admin's delete leaves it.
+      // Its catalog is its owner's: a tenant admin's delete leaves it, and its rows are there.
       closePool(t, name, "g6p")
       deleteDb(t, name, token)._1 shouldBe 200
       dbExists(catalog) shouldBe true
-      Using.resource(
-        DriverManager
-          .getConnection(TestPostgres.dbUrl(catalog), TestPostgres.pgUser, TestPostgres.pgPass)
-      ) { c =>
-        Using.resource(c.createStatement()) { st =>
-          st.executeQuery("SELECT count(*) FROM ducklake_table").next() shouldBe true
-        }
-      }
+      val (again, sameName, againBody) = createDb(t, "byo", su, "metastore" -> login)
+      withClue(againBody.take(300))(again shouldBe 200)
+      openPool(t, sameName, "g6q", su)
+      serving(t, "g6q", "gu", OtherPw)
+      stack.flight(s"SELECT count(*) FROM $sameName.main.fact", "gu", OtherPw, t, "g6q") shouldBe
+        Right(List("2"))
+      closePool(t, sameName, "g6q")
+
+      // Every login that server saw is the row's: the manager's reads and the node's alike.
+      assume(
+        server.encrypted == 0,
+        "the test Postgres takes TLS: its startup messages cannot be read"
+      )
+      server.users should not be empty
+      server.users.toSet shouldBe Set(role)
     finally server.stop()
   }
 

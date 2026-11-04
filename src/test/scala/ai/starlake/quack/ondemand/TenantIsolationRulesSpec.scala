@@ -799,7 +799,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       .isRight shouldBe true
   }
 
-  it should "stay refused for a superuser who wants the default password elsewhere: they type it" in {
+  it should "let a superuser type the password of another server" in {
     val f = new Fixture
     f.create("lake").isRight shouldBe true
     f.update(
@@ -847,6 +847,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
         val f             = new Fixture(defaults = defaults)
         val (status, err) = f.rest(tenantAdmin, "lake").left.toOption.get
         status shouldBe StatusCode.BadRequest
+        err.error shouldBe "invalid_contract"
         err.message should include("managed storage")
         err.message should include("superuser")
         f.rows shouldBe empty
@@ -865,6 +866,10 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     val above = new Fixture
     above.create("up", dataPath = "/data").isRight shouldBe true
     codeOf(above.rest(tenantAdmin, "lake")) shouldBe (StatusCode.Conflict, "data_path_taken")
+
+    val at = new Fixture
+    at.create("same", dataPath = "/data/acme_lake").isRight shouldBe true
+    codeOf(at.rest(tenantAdmin, "lake")) shouldBe (StatusCode.Conflict, "data_path_taken")
 
     // A folder whose name only begins the same is another folder.
     val beside = new Fixture
@@ -1118,7 +1123,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.row("acme_lake") shouldBe before
   }
 
-  it should "not aim a row's own dbName at QoD's server by a drop of its host" in {
+  it should "read a removal of pgHost as a change of server" in {
     val f = new Fixture
     f.store.upsertTenantDb(
       TenantDb(
@@ -1145,7 +1150,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.sup.effectiveMetastoreFor("acme", "acme_own")("pgHost") shouldBe "pg.other"
   }
 
-  it should "answer no guess of a stored password: one sent is a change, whatever it says" in {
+  it should "count a password sent as a change, whatever it says" in {
     val f = new Fixture
     f.create("lake", OwnLogin).isRight shouldBe true
     val shown = f.row("acme_lake").metastore - "pgPassword"

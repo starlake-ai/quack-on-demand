@@ -37,7 +37,7 @@ describe('metastoreToSend', () => {
   it('drops what was typed for a key of the server', () => {
     const sent = metastoreToSend(
       stored,
-      { pgHost: 'evil', pgPort: '1', pgUser: 'x', pgPassword: 'guess', dbName: 'other', schemaName: 'main' },
+      { pgHost: 'pg.other', pgPort: '1', pgUser: 'x', pgPassword: 'sent', dbName: 'other', schemaName: 'main' },
       'ducklake',
       false,
     );

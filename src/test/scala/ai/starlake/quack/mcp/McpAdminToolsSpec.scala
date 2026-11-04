@@ -613,7 +613,9 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
           include("a superuser sets")
       }
     }
-    update(adminPat(), stored + ("pgPassword" -> "")).isLeft shouldBe true
+    update(adminPat(), stored + ("pgPassword" -> "")).left.toOption.getOrElse(
+      fail("admitted")
+    ) should include("a superuser sets")
     f.store.snapshot().tenantDbs.find(_.name == TenantDb).get shouldBe before
     // As stored, the password left out: allowed.
     update(adminPat(), stored + ("schemaName" -> "s2")).isRight shouldBe true
