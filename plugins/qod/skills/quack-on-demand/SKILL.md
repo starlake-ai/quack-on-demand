@@ -2147,7 +2147,7 @@ What refuses a merge, and what to do:
 | `409 conflicts_changed` | Main moved: a conflict, or a delete from main, the proposal did not show | Propose again |
 | `409 proposal_stale` | The branch changed since the proposal | Propose again |
 | `409 proposal_replaced` | Another proposal replaced the one you read | Read the new one, then merge it by its id |
-| `409 already_merged` | The proposal you named has merged; the refusal names the main snapshot and the tag. What a retry reads when the first run landed, and what a second approver reads | Nothing: the merge is done, whatever became of the first answer |
+| `409 already_merged` | The proposal you named has merged; the refusal names the main snapshot and the tag. What a retry reads when the first run landed, and what a second approver reads | Nothing: the merge is done, whatever became of the first answer. `qod branch merge` exits 1 with `409 already_merged` on stderr, so a script retrying a merge treats that code as done |
 | `409 not_proposed` | The branch has no open proposal: a refusal that closes one (`merge_conflict`, `conflicts_changed`, `proposal_stale`, `history_gap`, and `merge_failed` when the node failed) leaves none | Propose again, unless the closing refusal's row says otherwise |
 | `409 proposal_unsettled` | On propose or merge: a merge may have landed on main. On discard: a merge of the branch landed on main and is not on record | Merge again, which settles it and needs an admin other than its proposer, or, when it says another proposal landed, discard the branch |
 | `409 branch_busy` | On discard: a propose or a merge of the branch is running | Try again when it ends |
