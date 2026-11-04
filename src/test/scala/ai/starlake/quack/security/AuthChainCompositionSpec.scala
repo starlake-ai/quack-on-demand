@@ -514,6 +514,48 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
       result shouldBe Left(AuthFailure.PasswordChangeRequired)
     finally svc.close()
 
+  "AuthChainCompositionSpec (D15)" should
+    "answer Unavailable when one provider could not check and the others refused, in either order" in:
+    val down    = new FixedBasicAuthProvider("down", Left(AuthFailure.Unavailable))
+    val refuses = new FixedBasicAuthProvider("refuses", Left(AuthFailure.InvalidCredentials("nope")))
+    for chain <- List(List(down, refuses), List(refuses, down)) do
+      val svc = realServiceWithBasicChain(chain)
+      try
+        svc.authenticateBasic(AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "pw") shouldBe
+          Left(AuthFailure.Unavailable)
+      finally svc.close()
+
+  "AuthChainCompositionSpec (D16)" should
+    "keep a locked account and a forced password change over a provider that could not check" in:
+    val down = new FixedBasicAuthProvider("down", Left(AuthFailure.Unavailable))
+    for failure <- List(AuthFailure.AccountLocked, AuthFailure.PasswordChangeRequired) do
+      val svc = realServiceWithBasicChain(List(down, new FixedBasicAuthProvider("row", Left(failure))))
+      try
+        svc.authenticateBasic(AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "pw") shouldBe
+          Left(failure)
+      finally svc.close()
+
+  "AuthChainCompositionSpec (D17)" should
+    "let a later provider's success stand over one that could not check" in:
+    val profile = AuthenticatedProfile(
+      username   = "alice",
+      role       = "user",
+      groups     = Set.empty,
+      claims     = Map.empty,
+      authMethod = "provider-b",
+      tenant     = Some(SecurityFixtures.TenantId)
+    )
+    val svc = realServiceWithBasicChain(
+      List(
+        new FixedBasicAuthProvider("down", Left(AuthFailure.Unavailable)),
+        new FixedBasicAuthProvider("provider-b", Right(profile))
+      )
+    )
+    try
+      svc.authenticateBasic(AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "pw") shouldBe
+        Right(profile)
+    finally svc.close()
+
   "AuthChainCompositionSpec (D13)" should
     "let a later provider's success short-circuit an earlier PasswordChangeRequired (IdP-authoritative)" in:
     val profile = AuthenticatedProfile(

@@ -284,7 +284,8 @@ final class FlightEdgeServer(
                   // from "no access to this pool" without parsing strings.
                   throw CallStatus.UNAUTHORIZED.withDescription(msg).toRuntimeException()
                 case Left(HandshakeFailure.Unavailable(msg)) =>
-                  // The tenant's OPA could not be reached: retryable, not a permission error.
+                  // The tenant's OPA could not be reached, or the password could not be checked:
+                  // retryable, neither a permission error nor a wrong password.
                   throw CallStatus.UNAVAILABLE.withDescription(msg).toRuntimeException()
                 case Right(bound) =>
                   val peerId    = UUID.randomUUID().toString

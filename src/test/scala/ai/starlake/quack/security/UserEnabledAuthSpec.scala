@@ -161,12 +161,12 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       )
       try
         val r = auth.authenticate(AuthScope.System, "root", "pw")
-        r.isLeft shouldBe true
-        r.left.toOption.get match
-          case ai.starlake.quack.edge.auth.AuthFailure.InvalidCredentials(msg) =>
-            msg should not include "qodstate_missing"
-            msg.toLowerCase should not include "relation"
-          case other => fail(s"expected InvalidCredentials, got $other")
+        // Nothing is known about the password, so it is not called wrong: see
+        // PasswordCheckUnavailableSpec.
+        r shouldBe Left(ai.starlake.quack.edge.auth.AuthFailure.Unavailable)
+        val msg = r.left.toOption.get.message
+        msg should not include "qodstate_missing"
+        msg.toLowerCase should not include "relation"
       finally auth.close()
     }
 
