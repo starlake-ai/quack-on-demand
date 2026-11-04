@@ -198,6 +198,9 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val auditStore  = new RecordingTelemetryStore
     val emitted     = mutable.ListBuffer.empty[ManagerEvent]
 
+    /** The service's clock. */
+    @volatile var clock = Instant.parse("2026-09-20T12:00:00Z")
+
     /** Each change count asked for: who it ran as, and of which table. */
     val countedAs = mutable.ListBuffer.empty[(String, String)]
     val service   = new BranchService(
@@ -290,7 +293,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       ,
       audit = new AuditRecorder(auditStore, _ => None),
       events = e => emitted += e: Unit,
-      now = () => Instant.parse("2026-09-20T12:00:00Z"),
+      now = () => clock,
       attemptWait = attemptWait,
       holdSettle = holdSettle
     )
@@ -2972,22 +2975,151 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("x")
     f.touchBranch()
-    f.due()
+    f.propose().isRight shouldBe true
+    val open = f.openProposal()
     val hold = new f.Hold
     val run  = f.startPropose()
     hold.awaitRun()
+    // The TTL passes under the run.
+    f.due()
     val before = f.store.findBranch(f.parent.id, "x").get
     f.sweep() shouldBe Nil
     expiryAudits(f) shouldBe empty
     notTornDown(f, before)
     hold.release()
-    val (_, m, _) = f.ended(run).toOption.get
+    f.ended(run).left.map(_.code) shouldBe Left("branch_expired")
     f.status shouldBe BranchStatus.Proposed
     f.sweep().map(_.name) shouldBe List("x")
     f.statusOf("x") shouldBe BranchStatus.Expired
-    f.row(m.id).status shouldBe BranchMergeStatus.Abandoned
+    f.row(open).status shouldBe BranchMergeStatus.Abandoned
     expiryAudits(f).map(_.outcome) shouldBe List("ok")
     f.purged shouldBe List(before.dataPath)
+  }
+
+  "a propose past the branch's TTL" should "be refused, for a plain owner and an admin, with no node started" in {
+    def refused(actorOf: Fixture => BranchActor): Unit =
+      val f = new Fixture
+      val b = f.create("x", actor = f.alice).toOption.get
+      f.touchBranch()
+      f.due()
+      f.propose(actor = actorOf(f)).left.map(r => (r.status, r.code, r.message)) shouldBe
+        Left((409, "branch_expired", "branch 'x' passed its TTL and is being discarded"))
+      f.nodesStarted shouldBe 0
+      f.store.listBranchMerges(b.id) shouldBe Nil
+      f.status shouldBe BranchStatus.Open
+      f.auditStore.events
+        .filter(_.action == AuditActions.BranchPropose)
+        .toList
+        .map(e => (e.outcome, e.detail.get("error"))) shouldBe
+        List(("denied", Some("branch_expired")))
+    refused(_.alice)
+    refused(_.admin1)
+  }
+
+  it should "answer a stranger not_owner first, saying nothing of the TTL" in {
+    val f = new Fixture
+    f.create("x", actor = f.alice)
+    f.touchBranch()
+    f.due()
+    f.propose(actor = BranchActor.plain("bob", sees = (_, _) => true)).left.map(_.code) shouldBe
+      Left("not_owner")
+  }
+
+  it should "leave an open proposal as it is, which a merge past the TTL still lands" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id      = f.openProposal()
+    val row     = f.row(id)
+    val started = f.nodesStarted
+    f.due()
+    f.propose().left.map(_.code) shouldBe Left("branch_expired")
+    f.row(id) shouldBe row
+    f.status shouldBe BranchStatus.Proposed
+    f.nodesStarted shouldBe started
+    val branch = f.store.findBranch(f.parent.id, "x").get
+    f.store.listBranchMerges(branch.id).map(_.id) shouldBe List(id)
+    // A merge is an admin's, and it cannot loop: the TTL does not stop it.
+    val (b, m, _) = f.merge().toOption.get
+    (b.status, m.id, m.status) shouldBe (BranchStatus.Merged, id, BranchMergeStatus.Merged)
+    f.mergeBatches.size shouldBe 1
+  }
+
+  it should "leave an unsettled proposal to the merge that records it" in {
+    val f      = new Fixture
+    val id     = landedUnrecorded(f)
+    val before = f.row(id)
+    f.due()
+    f.propose().left.map(_.code) shouldBe Left("branch_expired")
+    f.row(id) shouldBe before
+    recordedByMerge(f, id)
+  }
+
+  it should "catch a TTL that passes while it queues behind a sibling's run, and the sweep then retires the branch" in {
+    val f = new Fixture
+    f.create("x", ttl = Some(1))
+    f.create("y", ttl = Some(0))
+    f.touchBranch()
+    val hold    = new f.Hold
+    val sibling = f.startPropose("y")
+    hold.awaitRun()
+    val queued = new CountDownLatch(1)
+    f.onLockAsked = k => if k.pool == "__merge" then queued.countDown()
+    val started = f.nodesStarted
+    val run     = f.startPropose()
+    queued.await(30, TimeUnit.SECONDS) shouldBe true
+    f.clock = f.clock.plusSeconds(7200)
+    hold.release()
+    f.ended(sibling).isRight shouldBe true
+    f.ended(run).left.map(_.code) shouldBe Left("branch_expired")
+    f.nodesStarted shouldBe started
+    val branch = f.store.findBranch(f.parent.id, "x").get
+    f.store.listBranchMerges(branch.id) shouldBe Nil
+    // Nothing holds it now.
+    f.sweep().map(_.name) shouldBe List("x")
+    f.statusOf("x") shouldBe BranchStatus.Expired
+    f.statusOf("y") shouldBe BranchStatus.Proposed
+    f.purged shouldBe List(branch.dataPath)
+  }
+
+  it should "catch a TTL that passes during the analysis, recording nothing" in {
+    val f = new Fixture
+    f.create("x", ttl = Some(1))
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id     = f.openProposal()
+    val before = f.row(id)
+    f.duringAnalysis = () => f.clock = Instant.parse("2026-09-20T14:00:00Z")
+    f.propose().left.map(_.code) shouldBe Left("branch_expired")
+    f.row(id) shouldBe before
+    val branch = f.store.findBranch(f.parent.id, "x").get
+    f.store.listBranchMerges(branch.id).map(_.id) shouldBe List(id)
+  }
+
+  it should "pass with no TTL, with one still ahead, and at the instant a sweep would not take it either" in {
+    val never = new Fixture
+    never.create("x", ttl = Some(0)).toOption.get.expiresAt shouldBe None
+    never.touchBranch()
+    never.clock = never.clock.plusSeconds(7200)
+    never.propose().isRight shouldBe true
+
+    val ahead = new Fixture
+    ahead.create("x", ttl = Some(1))
+    ahead.touchBranch()
+    ahead.clock = ahead.clock.plusSeconds(3000)
+    ahead.propose().isRight shouldBe true
+
+    val edge = new Fixture
+    val end  = edge.create("x", ttl = Some(1)).toOption.get.expiresAt.get
+    edge.touchBranch()
+    edge.clock = end
+    edge.sweep() shouldBe Nil
+    edge.propose().isRight shouldBe true
+    // One tick later, both agree the other way.
+    edge.clock = end.plusNanos(1000)
+    edge.propose().left.map(_.code) shouldBe Left("branch_expired")
+    edge.sweep().map(_.name) shouldBe List("x")
   }
 
   "a run of a branch" should "hold only that branch: a sibling's discard and expiry pass meanwhile" in {

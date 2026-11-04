@@ -90,6 +90,9 @@ upgrade: its first runs do all the snapshot expiry, compaction and file cleanup 
   parent. Another proposal's commit stops neither, since a discard is its only way out. When main's
   catalog cannot be read to look, a discard answers `502 catalog_unavailable` and a sweep tries again at
   its next pass.
+- A propose past the branch's TTL answers `409 branch_expired`, for every principal, leaving an open
+  proposal as it is: since a sweep skips a branch a run holds, a loop of proposals could otherwise keep a
+  branch past its TTL, and with it the snapshots of the whole database. A merge past the TTL stays allowed.
 - Kubernetes: a label an API server refuses is no longer written. `quack-tenant`, `quack-tenant-db` and
   `quack-pool` hold a name as it is, so running pods and their selectors stay, or `qod.<name>.qod` when a
   label value cannot hold it: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end.

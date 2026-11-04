@@ -4743,9 +4743,11 @@ paths:
         again replaces an open proposal, unless its last merge may have landed (409
         proposal_unsettled: merge again, which settles it; a discard is refused once
         that commit is on main, and is the only way out when another proposal''s commit
-        is). 400 invalid_on_conflict, invalid_key (a key on a table the caller holds
-        no read grant on, unless they are an admin, reads as one not in the change
-        set); 409 history_gap.'
+        is). 409 branch_expired once the branch passed its TTL, for every principal:
+        an open proposal stays as it is, and an admin can still merge it until the
+        sweep discards the branch. 400 invalid_on_conflict, invalid_key (a key on
+        a table the caller holds no read grant on, unless they are an admin, reads
+        as one not in the change set); 409 history_gap.'
       operationId: postApiBranchPropose
       parameters:
       - name: X-API-Key

@@ -172,6 +172,11 @@ final class BranchService(
     */
   private def runLock(b: Branch): PoolKey = PoolKey(b.tenant, b.parentDbName, s"__run_${b.id}")
 
+  /** Whether the next sweep ends `b`. A propose past this is refused; a merge is not: it is an
+    * admin's, it cannot loop, and it is how an unsettled proposal gets recorded.
+    */
+  private def pastTtl(b: Branch, at: Instant): Boolean = b.expiresAt.exists(_.isBefore(at))
+
   /** One run at a time per parent, since each can take a merge node, and none under a discard or an
     * expiry of its branch. Whoever enters reads the branch's row again first: a queued run holds no
     * lock of the branch, and a discard or a merge may have ended it since the look that found it.
@@ -605,13 +610,24 @@ final class BranchService(
         detail = Map("error" -> f.code)
       )
       IO.pure(Left(f))
-    // The branch as it is now: a merge or a discard may have ended it since the last look.
+    // The branch as it is now: a merge or a discard may have ended it since the last look, and its
+    // TTL may have passed. For every principal: a sweep skips a branch a run holds, so a loop of
+    // proposals would keep it past its TTL, holding back snapshot expiry for the whole database.
     def proposable(parent: TenantDb): Res[Branch] =
       for
         b <- liveBranch(parent, name)
         _ <- b.status match
           case BranchStatus.Open | BranchStatus.Proposed => Right(())
           case other => Left(BranchFailure.conflict("not_open", s"branch '$name' is ${other.wire}"))
+        _ <-
+          if pastTtl(b, now()) then
+            Left(
+              BranchFailure.conflict(
+                "branch_expired",
+                s"branch '$name' passed its TTL and is being discarded"
+              )
+            )
+          else Right(())
       yield b
     // Reads the catalog, so only inside IO.blocking: under the locks, and at the record step. Only
     // the branch whose lock this run holds: the name may have passed to a new one since.
@@ -652,8 +668,8 @@ final class BranchService(
                     yield (stored, reply)).flatMap { (cs, reply) =>
                       IO.blocking {
                         // The open proposal's commit can land during the analysis, on a node that
-                        // outlived its stop. The row comes with the look: a discard or an expiry
-                        // needs this run's lock, so the branch itself is as it was.
+                        // outlived its stop, and the TTL can pass. The row comes with the look: a
+                        // discard or an expiry needs this run's lock, so the branch is as it was.
                         replaceable(parent, first).map { current =>
                           store
                             .listBranchMerges(current.id)
@@ -1774,7 +1790,7 @@ final class BranchService(
     val due     = sup
       .listTenants()
       .flatMap(t => store.listTenantBranches(t.id, BranchStatus.Live))
-      .filter(b => b.expiresAt.exists(_.isBefore(sweptAt)))
+      .filter(pastTtl(_, sweptAt))
     due.foldLeft(IO.pure(List.empty[Branch])) { (acc, b) =>
       acc.flatMap { done =>
         retire(b, BranchStatus.Expired, "expired").attempt.map {

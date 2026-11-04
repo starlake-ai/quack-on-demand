@@ -642,7 +642,11 @@ path to `Discarded` or `Expired`, tries it around a fresh read of the row and th
 down with it released. Busy, a discard answers `409 branch_busy` and a sweep skips the branch. An open
 proposal whose own commit is on main is never abandoned: a discard answers `409 proposal_unsettled` and a
 sweep skips the branch with an ERROR, so it stays, holding back expiry on the parent, until a merge records
-it; a look that cannot be read is `502 catalog_unavailable`, or a WARN and the next sweep.
+it; a look that cannot be read is `502 catalog_unavailable`, or a WARN and the next sweep. A propose past
+the branch's TTL is `409 branch_expired`, for every principal, before any node and again under the locks,
+leaving an open proposal as it is: since a sweep skips a branch a run holds, a loop of proposals would
+otherwise keep it, and the expiry floor, past the TTL. A merge past the TTL stays allowed: it is an admin's,
+it cannot loop, and it is how an unsettled proposal gets recorded.
 
 **Who may branch:** any principal who may connect to one of the parent's pools, over REST and MCP, in the
 tenant it belongs to (`BranchHandlers.gate`, the one gate of every endpoint; design 8.2). Own tenant only:

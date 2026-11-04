@@ -169,7 +169,8 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
         "different identity, and an admin, reviews and merges " +
         "(there is no merge tool). Proposing again replaces an open proposal, unless its last " +
         "merge may have landed: that refuses with proposal_unsettled, and the human merges it " +
-        "again or discards the branch, as the refusal says.",
+        "again or discards the branch, as the refusal says. A branch past its TTL refuses with " +
+        "branch_expired: the next sweep discards it, so create a new one.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
