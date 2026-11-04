@@ -123,12 +123,15 @@ object Names:
       .when(!isValid(name))(reject(name, "database name"))
       .orElse(fieldRefusal(name.toLowerCase(Locale.ROOT).stripPrefix(prefix), "database name"))
 
-  /** Whether a new create could make these three names, as far as `--` between them goes: then a
-    * plain node id or per-pool Secret name splits back into them. The one condition of both a plain
-    * id (`PoolSupervisor.nodeId`, which hashes any other key) and of what a manifest import reports
-    * (`ManifestImporter.namesANewCreateWouldRefuse`, through the three refusals), so the two cannot
-    * differ. A rule a create holds to for another reason does not belong in those refusals: it
-    * would hash names `--` splits perfectly well.
+  /** Whether a new create could make these three names, by each name's own rule: what
+    * [[tenantNameRefusal]], [[databaseNameRefusal]] and [[poolNameRefusal]] ask, short of what a
+    * create adds in composing a database's name (its tenant's prefix, not being its tenant's name).
+    * A plain node id or per-pool Secret name splits back into such names. The one condition of both
+    * a plain id (`PoolSupervisor.nodeId`, which hashes any other key) and of what a manifest import
+    * reports (`ManifestImporter.namesANewCreateWouldRefuse`, through the three refusals), so the
+    * two cannot differ. A rule narrowing what a new name may hold for another reason goes at the
+    * create it applies to, not in these refusals: in them, every stored key holding such a name
+    * would start hashing.
     */
   def newCreateCouldMake(tenant: String, tenantDb: String, pool: String): Boolean =
     tenantNameRefusal(tenant).isEmpty && databaseNameRefusal(tenant, tenantDb).isEmpty &&

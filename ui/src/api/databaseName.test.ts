@@ -12,7 +12,7 @@ describe('databaseSuffixError', () => {
     expect(databaseSuffixError('')).toContain('required');
   });
 
-  it('refuses what the server refuses, saying what a name may hold', () => {
+  it('refuses what the form does not take, saying what a name may hold', () => {
     for (const bad of ['a__b', 'a_', '_a', '__br_x', '1a', 'a-b', 'a b', 'a.b']) {
       expect(databaseSuffixError(bad), bad).toContain('single underscores');
     }

@@ -297,9 +297,9 @@ count. To keep counts from a user, refuse on the table.
 - A propose past the branch's TTL answers `409 branch_expired`, for every principal, leaving an open
   proposal as it is: since a sweep skips a branch a run holds, a loop of proposals could otherwise keep a
   branch past its TTL, and with it the snapshots of the whole database. A merge past the TTL stays allowed.
-- Kubernetes: a label an API server refuses is no longer written. `quack-tenant`, `quack-tenant-db` and
-  `quack-pool` hold a name as it is, so running pods and their selectors stay, or `qod.<name>.qod` when a
-  label value cannot hold it: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end.
+- Kubernetes: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end no longer make a label
+  an API server refuses. `quack-tenant`, `quack-tenant-db` and `quack-pool` hold a name as it is, so running
+  pods and their selectors stay, or, for those, `qod.<name>.qod`.
   Merge, maintenance and branch nodes could not start on a real cluster (`422`), and now every proposal
   of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`:
   until now every maintenance run on Kubernetes ended `failed` with `node spawn failed`, its cause at WARN

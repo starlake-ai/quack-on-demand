@@ -43,8 +43,8 @@ import scala.jdk.CollectionConverters._
   *     when non-empty; only that one node's pod references it.
   *
   * A pod an earlier release started reads its per-pool Secrets under the names of that release, `-`
-  * between the names, until its next start: those stay until no pod reads them
-  * ([[collectLegacySecrets]]).
+  * between the names, until the manager next starts it (a container restart is not that): those
+  * stay until no pod reads them ([[collectLegacySecrets]]).
   *
   * UPGRADE NOTE: pods created by an earlier manager still carry the old shape (`secretKeyRef` env
   * vars, or plain env before that) and are NOT healed in place: restart every node after upgrading.

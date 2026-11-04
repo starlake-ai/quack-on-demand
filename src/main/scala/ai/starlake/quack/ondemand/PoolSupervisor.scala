@@ -5419,8 +5419,8 @@ object PoolSupervisor:
     * `--` between fields makes two pools read alike only if a name holds it or an end of a name
     * touches it, which `Names`' rule refuses for a new name, so a plain id can be split back into
     * its key. `pool/create` refuses the one case left, two pools of a database with one reading
-    * (`eu-west`, `eu_west`). Past [[NodeIdMaxChars]], or with a name no new create could make
-    * ([[Names.newCreateCouldMake]]: made before the rule, brought by a manifest, or by the manager,
+    * (`eu-west`, `eu_west`). Past [[NodeIdMaxChars]], or with a name the rule refuses
+    * ([[Names.newCreateCouldMake]]: made before it, brought by a manifest, or by the manager,
     * `__br_<id8>`), an id keeps its start and ends `-<hash>-<index>`. A plain id has `--` before
     * its index and a hashed one a hex digit, so the two never meet. The index stays last, since
     * [[MissingSlots]] and `placementForNodeId` read it.

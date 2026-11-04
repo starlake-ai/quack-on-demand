@@ -4,8 +4,12 @@ package ai.starlake.quack.ondemand.runtime
   * answers 422 to a value [[Rule]] refuses, and a name can be one: a name made before `Names`' rule
   * may start or end with `_`, and the reserved pools `__merge`, `__maint` and `__br_<id8>` do. A
   * name the rule accepts stays as it is, so every running pod and its selector stay too; any other
-  * is wrapped, `qod.<name>.qod`. A slug holds no `.`, so no real name can be mistaken for a wrapped
-  * one. An encoded name past 63 characters still fails at the API, as a long name always has.
+  * is wrapped, `qod.<name>.qod`. The wrap cures an end the rule refuses and no more: a wrapped name
+  * past 63 characters, or holding anything else a label value cannot hold (a space or a `/`, in a
+  * name made before `Names`' rule), still fails at the API. A slug holds no `.`, so a name made
+  * under that rule cannot be mistaken for a wrapped one. A stored name holding `.` can: `qod.x.qod`
+  * reads back as `x`, which only the count `discoverExisting` logs and its boot sweep of old-named
+  * Secrets read.
   */
 object PoolLabelValue:
 
