@@ -33,7 +33,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     new PoolHandlers(sup, tracker)
 
   /** Variant without any tenant/tenant-db -- for the missing-tenant test. */
@@ -210,7 +210,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     val td = sup
-      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "")
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
       .unsafeRunSync()
       .toOption
       .get
@@ -282,7 +282,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
@@ -316,7 +316,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h = new PoolHandlers(sup, tracker, podTemplateEnabled = false)
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
@@ -333,7 +333,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
@@ -383,7 +383,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h = new PoolHandlers(sup, tracker)
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
@@ -409,7 +409,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h = new PoolHandlers(sup, tracker)
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
@@ -433,7 +433,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h   = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
@@ -449,7 +449,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h   = new PoolHandlers(sup, tracker, podTemplateEnabled = false)
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
@@ -464,7 +464,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h   = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
@@ -722,7 +722,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
         new InMemoryControlPlaneStore()
       )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     // The injected lookup echoes BOTH its arguments back inside the alias, so the assertion below
     // pins the incarnation key (the node's own startedAt) and not merely "some timestamp": an
     // Instant.now() at the call site, or a swapped/derived/constant value, changes the expected
@@ -771,7 +771,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     val h = new PoolHandlers(sup, tracker)
     h.createPool(req(size = 2, dist = RoleDistribution(0, 1, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()

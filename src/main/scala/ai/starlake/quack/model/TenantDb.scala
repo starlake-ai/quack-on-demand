@@ -82,6 +82,13 @@ object TenantDb {
     */
   val EncryptedKey: String = "encrypted"
 
+  /** Metastore key the manager stamps on a DuckLake row of QoD's own server (`PoolSupervisor`'s
+    * effective metastore): only then may the node's launcher run `CREATE DATABASE` for a catalog
+    * database that is missing. A catalog on any other server is its owner's to manage. Never a
+    * caller's key: [[KnownMetastoreKeys]] leaves it out.
+    */
+  val CreateDatabaseKey: String = "createDatabase"
+
   /** The non-secret metastore keys a node's launcher reads from its environment:
     * `scripts/spawn-quack-node.sh` and `.ps1` read exactly these (the node image's entrypoint and
     * `qod fleet join` run the bash script). Every launcher overlay passes these and no other
@@ -103,19 +110,21 @@ object TenantDb {
       "catalogAlias",
       "schemaName",
       "dataPath",
-      "encrypted"
+      "encrypted",
+      "createDatabase"
     )
 
   /** Every key a caller may store in a tenant-db's metastore, compared by exact name: the
-    * launcher's [[NodeEnvKeys]] minus [[EncryptedKey]] (stamped by the manager from the row's
-    * flag), plus the secrets [[NodeSecretEnvKeys]]. They are also every metastore key manager-side
-    * code reads (the DuckLake initializer, the catalog reader, the branch cloner and merge fence).
-    * `database/create`, `database/update` and a manifest import refuse any other key with
-    * `400 invalid_metastore_key` before anything is written, except that `database/update` also
-    * takes a secret-named key ([[SecretKeys]]) sent empty, which removes it
+    * launcher's [[NodeEnvKeys]] minus [[EncryptedKey]] and [[CreateDatabaseKey]] (stamped by the
+    * manager), plus the secrets [[NodeSecretEnvKeys]]. They are also every metastore key
+    * manager-side code reads (the DuckLake initializer, the catalog reader, the branch cloner and
+    * merge fence). `database/create`, `database/update` and a manifest import refuse any other key
+    * with `400 invalid_metastore_key` before anything is written, except that `database/update`
+    * also takes a secret-named key ([[SecretKeys]]) sent empty, which removes it
     * ([[metastoreUpdateKeyError]]).
     */
-  val KnownMetastoreKeys: Set[String] = (NodeEnvKeys - EncryptedKey) ++ NodeSecretEnvKeys
+  val KnownMetastoreKeys: Set[String] =
+    (NodeEnvKeys - EncryptedKey - CreateDatabaseKey) ++ NodeSecretEnvKeys
 
   /** The clause naming [[KnownMetastoreKeys]], sorted, in every line that refuses or drops another
     * key: the API's refusal, a node's dropped key, a manifest export's left-out key.
@@ -178,6 +187,117 @@ object TenantDb {
           "leaves a secret key out keeps it."
       case None =>
         "Remove it by sending the database's full metastore without it through database/update."
+
+  /** The login QoD fills in from its own defaults, and only on its own server
+    * ([[inheritedDefaults]]).
+    */
+  val LoginKeys: Set[String] = Set("pgUser", "pgPassword")
+
+  /** Whitespace ends a value in a libpq connection string, where the launchers write `host`,
+    * `port`, `dbname` and `user` unquoted, so a value holding any reads as further keywords.
+    */
+  private def breaksConnString(value: String): Boolean =
+    value.exists(c => c <= ' ' || Character.isWhitespace(c) || Character.isSpaceChar(c))
+
+  /** ASCII only, and no resolving: a name that folds to the default's through Unicode, or that a
+    * resolver answers with the default's address today, may reach another host tomorrow. So
+    * `127.0.0.1` is not `localhost`: such a row names no host, or brings its own login.
+    */
+  def normalizedHost(host: String): String =
+    val trimmed = host.trim
+    val bare    =
+      if trimmed.startsWith("[") && trimmed.endsWith("]") then
+        trimmed.substring(1, trimmed.length - 1)
+      else trimmed
+    bare.stripSuffix(".").map(c => if c >= 'A' && c <= 'Z' then (c + 32).toChar else c)
+
+  def normalizedPort(port: String): String =
+    val trimmed = port.trim
+    if trimmed.nonEmpty && trimmed.forall(c => c >= '0' && c <= '9') then
+      val digits = trimmed.dropWhile(_ == '0')
+      if digits.isEmpty then "0" else digits
+    else trimmed
+
+  /** The server a metastore connects to: its own host and port, else the defaults', else what the
+    * spawn scripts fall back on, normalized.
+    */
+  private def serverOf(
+      metastore: Map[String, String],
+      defaults: Map[String, String]
+  ): (String, String) =
+    def resolved(key: String, fallback: String) =
+      metastore.get(key).orElse(defaults.get(key)).getOrElse(fallback)
+    (normalizedHost(resolved("pgHost", "localhost")), normalizedPort(resolved("pgPort", "5432")))
+
+  /** Whether `metastore` uses QoD's own Postgres server: the host and the port of `defaults`, once
+    * normalized. A row whose `pgUser` or `dbName` could read as further connection keywords does
+    * not, whatever its host says.
+    */
+  def onDefaultServer(metastore: Map[String, String], defaults: Map[String, String]): Boolean =
+    serverOf(metastore, defaults) == serverOf(Map.empty, defaults) &&
+      !metastore.get("pgUser").exists(breaksConnString) &&
+      !metastore.get("dbName").exists(breaksConnString)
+
+  /** What of the manager's defaults a row inherits: all of them on QoD's own server, every one but
+    * [[LoginKeys]] on another, whoever wrote the row.
+    */
+  def inheritedDefaults(
+      metastore: Map[String, String],
+      defaults: Map[String, String]
+  ): Map[String, String] =
+    if onDefaultServer(metastore, defaults) then defaults else defaults -- LoginKeys
+
+  /** The one place a row's blanks are filled from the manager's defaults. */
+  def withDefaults(
+      metastore: Map[String, String],
+      defaults: Map[String, String]
+  ): Map[String, String] =
+    inheritedDefaults(metastore, defaults) ++ metastore
+
+  /** The refusal of a metastore on another server that does not bring both its own user and its own
+    * password; None on QoD's own server.
+    */
+  def ownLoginError(
+      metastore: Map[String, String],
+      defaults: Map[String, String]
+  ): Option[String] =
+    if onDefaultServer(metastore, defaults) then None
+    else
+      Option.when(!LoginKeys.forall(k => metastore.get(k).exists(_.trim.nonEmpty)))(
+        "this database names another Postgres server than QoD's own: provide a pgUser and a " +
+          "pgPassword for that server, or leave pgHost and pgPort out to use QoD's own. QoD's " +
+          "login is used only on its own server."
+      )
+
+  /** `database/update`: the refusal of a metastore that moves a row to another server with its
+    * stored password carried over (`PoolSupervisor.mergeSecretKeys` keeps a secret an update leaves
+    * out). The password is sent again for the new server, or sent empty to remove it. `stored` is
+    * the row's metastore, `merged` the row's after the update, `sent` the update's own map.
+    */
+  def movedPasswordError(
+      stored: Map[String, String],
+      merged: Map[String, String],
+      sent: Map[String, String],
+      defaults: Map[String, String]
+  ): Option[String] =
+    def holdsPassword(m: Map[String, String]) =
+      m.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.nonEmpty)
+    val moved = serverOf(stored, defaults) != serverOf(merged, defaults)
+    Option.when(moved && holdsPassword(merged) && !sent.get("pgPassword").exists(_.nonEmpty))(
+      "this update changes the database's Postgres server, and its stored password does not follow " +
+        "it: send pgPassword again for the new server."
+    )
+
+  /** The refusal of a change of a DuckLake row's `dbName`, which names its catalog database for
+    * good once the row is made; a superuser's update skips this. Compared as the effective
+    * metastore resolves it: a name left out means the row's own.
+    */
+  def dbNameChangeError(td: TenantDb, metastore: Map[String, String]): Option[String] =
+    val held = td.metastore.getOrElse("dbName", td.name)
+    Option.when(td.kind == TenantDbKind.DuckLake && metastore.getOrElse("dbName", td.name) != held)(
+      s"dbName of database '${td.name}' cannot be changed: it names the database's catalog. " +
+        s"Leave it out, or send the one it holds, '$held'."
+    )
 
   /** The DuckDB catalog alias for a resolved metastore: `catalogAlias` when set, else `dbName`,
     * else `fallback`. Every site that derives the alias from a metastore (USE prelude, author
@@ -260,6 +380,17 @@ object TenantDb {
         )
       case _ => None
 
+  /** `pgHost` and `pgUser` are written unquoted into a node's connection string, and `pgHost` into
+    * the manager's JDBC URL: whitespace would start another libpq keyword, and `?`, `&`, `=` or `#`
+    * another URL parameter.
+    */
+  private def connStringError(metastore: Map[String, String]): Option[String] =
+    if metastore.get("pgUser").exists(breaksConnString) then
+      Some("invalid pgUser: must not contain whitespace")
+    else if metastore.get("pgHost").exists(h => breaksConnString(h) || h.exists("?&=#".contains))
+    then Some("invalid pgHost: must not contain whitespace or any of ? & = #")
+    else None
+
   /** `pgPort` is interpolated into `port=$pgPort` inside a single-quoted connection literal; a
     * non-numeric value could smuggle SQL, so we require it to be all digits.
     */
@@ -335,6 +466,7 @@ object TenantDb {
       .orElse(connParamError(td.metastore, "pgHost"))
       .orElse(connParamError(td.metastore, "pgUser"))
       .orElse(connParamError(td.metastore, "pgPassword"))
+      .orElse(connStringError(td.metastore))
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
       .orElse(objectStoreError(td.objectStore))
@@ -357,8 +489,8 @@ object TenantDb {
   /** Returns Some(error) if the value violates its per-kind contract. Enforces required-key
     * presence AND injection safety; use on the REST createTenantDb path where the metastore is
     * supplied inline. `defaults` is the manager's `quack-on-demand.defaultMetastore` map: a
-    * required DuckLake key missing from the request but carrying a non-empty value in `defaults` is
-    * satisfied there, because the runtime merge
+    * required DuckLake key missing from the request but carrying a non-empty value in what the row
+    * inherits of `defaults` ([[inheritedDefaults]]) is satisfied there, because the runtime merge
     * ([[ai.starlake.quack.ondemand.PoolSupervisor.effectiveMetastoreFor]]) fills it at spawn time.
     * Only the DuckLake arm consults `defaults`; duckdb-file keeps requiring its keys inline, and
     * injection safety always runs on the supplied values.
@@ -366,7 +498,7 @@ object TenantDb {
   def validate(td: TenantDb, defaults: Map[String, String] = Map.empty): Option[String] =
     td.kind match {
       case TenantDbKind.DuckLake =>
-        val defaulted = defaultedMetastoreKeys(defaults)
+        val defaulted = defaultedMetastoreKeys(inheritedDefaults(td.metastore, defaults))
         val missing   = requiredMetastoreKeys(td.kind) -- td.metastore.keySet -- defaulted
         if missing.nonEmpty then
           Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")

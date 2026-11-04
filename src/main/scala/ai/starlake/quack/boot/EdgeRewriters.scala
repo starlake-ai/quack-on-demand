@@ -71,8 +71,9 @@ object EdgeRewriters extends LazyLogging:
   /** DuckLake-backed column catalog shared by the SELECT-path [[columnPolicyRewriter]] and the
     * write-path [[protectedWriteGuard]]. Both must resolve a table's columns identically so the
     * guard's Deny-mode oracle and the rewriter agree on which columns a masked SELECT exposes.
-    * Resolves a DuckDB-side catalog name to its DuckLakeCatalogReader via the tenant-db owning that
-    * catalog; unknown catalogs return Nil so the caller's unresolvedMode decides deny-vs-pass.
+    * Resolves a DuckDB-side catalog name to its DuckLakeCatalogReader via the asking tenant's own
+    * tenant-db of that name; a name nothing of the tenant holds returns Nil so the caller's
+    * unresolvedMode decides deny-vs-pass.
     */
   def columnCatalog(
       sup: PoolSupervisor,
@@ -80,9 +81,9 @@ object EdgeRewriters extends LazyLogging:
       stmtInstruments: StatementInstruments
   ): ColumnCatalog =
     new DuckLakeColumnCatalog(
-      fetch = (cat, sch, tab) =>
+      fetch = (tenant, cat, sch, tab) =>
         IO.blocking {
-          sup.findTenantDbByCatalogName(cat) match
+          sup.findTenantDbByCatalogName(tenant, cat) match
             case None     => Nil
             case Some(td) =>
               sup.getTenantById(td.tenantId) match

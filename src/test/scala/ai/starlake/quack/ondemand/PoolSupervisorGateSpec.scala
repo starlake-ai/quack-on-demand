@@ -31,7 +31,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     sup
 
   private def dbName(sup: PoolSupervisor) =
@@ -69,7 +69,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
     val sup = setup()
     sup.setMutationGates(List(denyAll)).unsafeRunSync()
     sup
-      .createTenantDb("acme", "second", TenantDbKind.InMemory, Map.empty, "")
+      .createTenantDb("acme", "second", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
       .unsafeRunSync() match
       case Left(SupervisorError.QuotaExceeded(msg)) => msg shouldBe "denied"
       case other                                    => fail(s"expected QuotaExceeded, got $other")
@@ -91,7 +91,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup.scale(key, 2, RoleDistribution(0, 0, 2), force = false).unsafeRunSync()
     sup
-      .createTenantDb("acme", "second", TenantDbKind.InMemory, Map.empty, "")
+      .createTenantDb("acme", "second", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
       .unsafeRunSync()
       .isRight shouldBe true
   }

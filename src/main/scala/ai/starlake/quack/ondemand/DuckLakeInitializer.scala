@@ -60,8 +60,16 @@ object DuckLakeInitializer extends LazyLogging:
     * unencrypted. It carries no default on purpose: a defaulted `false` here is the same
     * implicit-dangerous-value hazard, one no caller would notice until the catalog was already
     * created unencrypted and unfixable.
+    *
+    * `createMissingDatabase`, equally without a default, says whether a missing catalog database is
+    * created here: only for a row of QoD's own server. On another server the catalog is its owner's
+    * to manage, and a missing one is a [[CatalogDatabaseMissingException]].
     */
-  def initBlocking(metastore: Map[String, String], encrypted: Boolean): Unit =
+  def initBlocking(
+      metastore: Map[String, String],
+      encrypted: Boolean,
+      createMissingDatabase: Boolean
+  ): Unit =
     val dbName   = metastore.getOrElse("dbName", "")
     val dataPath = metastore.getOrElse("dataPath", "")
     if !metastore.contains("pgHost") || dbName.isEmpty || dataPath.isEmpty then
@@ -75,13 +83,27 @@ object DuckLakeInitializer extends LazyLogging:
       val pgUser     = metastore.getOrElse("pgUser", "postgres")
       val pgPassword = metastore.getOrElse("pgPassword", "")
       val schemaName = metastore.getOrElse("schemaName", "main")
-      runInit(pgHost, pgPort, pgUser, pgPassword, dbName, schemaName, dataPath, encrypted)
+      runInit(
+        pgHost,
+        pgPort,
+        pgUser,
+        pgPassword,
+        dbName,
+        schemaName,
+        dataPath,
+        encrypted,
+        createMissingDatabase
+      )
 
   /** IO wrapper around [[initBlocking]]. Retained for callers that already compose `IO` (none today
     * inside the codebase - kept for symmetry with the rest of the bootstrap chain).
     */
-  def init(metastore: Map[String, String], encrypted: Boolean): IO[Unit] =
-    IO.blocking(initBlocking(metastore, encrypted))
+  def init(
+      metastore: Map[String, String],
+      encrypted: Boolean,
+      createMissingDatabase: Boolean
+  ): IO[Unit] =
+    IO.blocking(initBlocking(metastore, encrypted, createMissingDatabase))
 
   private def runInit(
       pgHost: String,
@@ -91,7 +113,8 @@ object DuckLakeInitializer extends LazyLogging:
       dbName: String,
       schemaName: String,
       dataPath: String,
-      encrypted: Boolean
+      encrypted: Boolean,
+      createMissingDatabase: Boolean
   ): Unit =
     logger.info(
       s"DuckLake pre-init: ATTACHing ducklake:postgres://$pgHost:$pgPort/$dbName " +
@@ -99,44 +122,9 @@ object DuckLakeInitializer extends LazyLogging:
     )
     Class.forName("org.duckdb.DuckDBDriver")
     Class.forName("org.postgresql.Driver")
-    // Idempotently provision the target Postgres database before the
-    // DuckLake ATTACH. The YAML bootstrap can run BEFORE the loader
-    // scripts have created the tenant-db Postgres databases (compose's
-    // `exec` loaders run after the manager comes up), so we must not
-    // assume the database already exists. CREATE DATABASE cannot run
-    // inside the target DB, so connect to the admin DB first.
-    val adminDb  = sys.env.getOrElse("PG_ADMIN_DB", "postgres")
-    val adminUrl =
-      s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(adminDb, "UTF-8")}"
-    val adminConn = DriverManager.getConnection(adminUrl, pgUser, pgPassword)
-    try
-      // pg_database lookup uses a PreparedStatement bind so we never
-      // SQL-format `dbName` -- which is operator-controlled today but
-      // could become user-controlled if tenant-db creation ever moves
-      // closer to the wire.
-      val checkStmt = adminConn.prepareStatement(
-        "SELECT 1 FROM pg_database WHERE datname = ?"
-      )
-      val exists =
-        try
-          checkStmt.setString(1, dbName)
-          val rs = checkStmt.executeQuery()
-          try rs.next()
-          finally rs.close()
-        finally checkStmt.close()
-      if !exists then
-        val createStmt = adminConn.createStatement()
-        // CREATE DATABASE cannot use parameter binding for the identifier;
-        // standard double-quote ident escape.
-        try createStmt.execute(s"CREATE DATABASE ${quoteIdent(dbName)}")
-        catch
-          case t: java.sql.SQLException if t.getMessage.contains("already exists") =>
-            // Lost a race with a concurrent loader; harmless.
-            ()
-        finally createStmt.close()
-    finally
-      try adminConn.close()
-      catch case _: Throwable => ()
+    if createMissingDatabase then
+      createDatabaseIfMissing(pgHost, pgPort, pgUser, pgPassword, dbName)
+    else requireCatalogDatabase(pgHost, pgPort, pgUser, pgPassword, dbName)
 
     val ext  = DuckDbExtensionSource.fromEnv
     val conn = DriverManager.getConnection("jdbc:duckdb:", ext.connectionProperties)
@@ -279,6 +267,74 @@ object DuckLakeInitializer extends LazyLogging:
     finally
       try conn.close()
       catch case _: Throwable => ()
+
+  /** Idempotently provision the target Postgres database before the DuckLake ATTACH. The YAML
+    * bootstrap can run BEFORE the loader scripts have created the tenant-db Postgres databases
+    * (compose's `exec` loaders run after the manager comes up), so we must not assume the database
+    * already exists. CREATE DATABASE cannot run inside the target DB, so connect to the admin DB
+    * first.
+    */
+  private def createDatabaseIfMissing(
+      pgHost: String,
+      pgPort: String,
+      pgUser: String,
+      pgPassword: String,
+      dbName: String
+  ): Unit =
+    val adminDb  = sys.env.getOrElse("PG_ADMIN_DB", "postgres")
+    val adminUrl =
+      s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(adminDb, "UTF-8")}"
+    val adminConn = DriverManager.getConnection(adminUrl, pgUser, pgPassword)
+    try
+      // pg_database lookup uses a PreparedStatement bind so we never
+      // SQL-format `dbName` -- which is operator-controlled today but
+      // could become user-controlled if tenant-db creation ever moves
+      // closer to the wire.
+      val checkStmt = adminConn.prepareStatement(
+        "SELECT 1 FROM pg_database WHERE datname = ?"
+      )
+      val exists =
+        try
+          checkStmt.setString(1, dbName)
+          val rs = checkStmt.executeQuery()
+          try rs.next()
+          finally rs.close()
+        finally checkStmt.close()
+      if !exists then
+        val createStmt = adminConn.createStatement()
+        // CREATE DATABASE cannot use parameter binding for the identifier;
+        // standard double-quote ident escape.
+        try createStmt.execute(s"CREATE DATABASE ${quoteIdent(dbName)}")
+        catch
+          case t: java.sql.SQLException if t.getMessage.contains("already exists") =>
+            // Lost a race with a concurrent loader; harmless.
+            ()
+        finally createStmt.close()
+    finally
+      try adminConn.close()
+      catch case _: Throwable => ()
+
+  /** A catalog on another server than QoD's own is its owner's to make: Postgres's
+    * `invalid_catalog_name` (SQLSTATE 3D000) on connecting is a
+    * [[CatalogDatabaseMissingException]]. Any other failure is left to the caller's
+    * log-and-continue.
+    */
+  private def requireCatalogDatabase(
+      pgHost: String,
+      pgPort: String,
+      pgUser: String,
+      pgPassword: String,
+      dbName: String
+  ): Unit =
+    val url = s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(dbName, "UTF-8")}"
+    try DriverManager.getConnection(url, pgUser, pgPassword).close()
+    catch
+      case t: java.sql.SQLException if t.getSQLState == "3D000" =>
+        throw CatalogDatabaseMissingException(
+          s"the catalog database '$dbName' does not exist on $pgHost:$pgPort: QoD creates no " +
+            "database on a server other than its own, so create it there, then send this " +
+            "request again"
+        )
 
   /** Emit the SQL needed for httpfs / azure secrets when the data path lives on object storage.
     * Same shape `spawn-quack-node.sh` produces. Reads credentials from this process's env; the
@@ -588,6 +644,12 @@ object DuckLakeInitializer extends LazyLogging:
     */
   final case class CatalogLockTimeoutException(message: String, cause: Throwable)
       extends RuntimeException(message, cause)
+
+  /** A database on another server than QoD's own has no catalog database there yet. The supervisor
+    * refuses the create with this message; nothing is written and nothing retried.
+    */
+  final case class CatalogDatabaseMissingException(message: String)
+      extends RuntimeException(message)
 
   /** Compares the catalog's recorded `ducklake_metadata.encrypted` against what the tenant-db row
     * asks for. `None` recorded means a fresh catalog, which the ATTACH is about to stamp. Same role

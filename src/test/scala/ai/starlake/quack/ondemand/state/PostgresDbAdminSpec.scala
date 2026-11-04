@@ -76,6 +76,49 @@ class PostgresDbAdminSpec extends AnyFlatSpec with Matchers:
     exists(name) shouldBe false
   }
 
+  private def inDb(name: String)(sql: String*): Unit =
+    val c = DriverManager.getConnection(s"jdbc:postgresql://$pgHost:$pgPort/$name", pgUser, pgPass)
+    try
+      val st = c.createStatement()
+      try sql.foreach(st.execute)
+      finally st.close()
+    finally c.close()
+
+  "PostgresDbAdmin.holdsAnything" should "read a database that does not exist as holding nothing" in
+    withFreshName { (admin, name) =>
+      admin.holdsAnything(name) shouldBe Right(false)
+      exists(name) shouldBe false
+    }
+
+  it should "read a fresh database as holding nothing" in withFreshName { (admin, name) =>
+    admin.createDatabase(name) shouldBe Right(())
+    admin.holdsAnything(name) shouldBe Right(false)
+  }
+
+  it should "see every kind of object a database can hold" in {
+    List(
+      "CREATE TABLE t (id int)",
+      "CREATE TABLE ducklake_metadata (key text)",
+      "CREATE VIEW v AS SELECT 1 AS id",
+      "CREATE SEQUENCE s",
+      "CREATE SCHEMA own",
+      "CREATE SCHEMA own; CREATE TABLE own.t (id int)",
+      "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+      "CREATE TYPE ty AS ENUM ('a')",
+      "SELECT lo_create(0)"
+    ).foreach { ddl =>
+      withFreshName { (admin, name) =>
+        admin.createDatabase(name) shouldBe Right(())
+        inDb(name)(ddl)
+        withClue(ddl)(admin.holdsAnything(name) shouldBe Right(true))
+      }
+    }
+  }
+
+  it should "surface a Left when it cannot read the database" in:
+    val bad = new PostgresDbAdmin("127.0.0.1", "1", pgUser, pgPass)
+    bad.holdsAnything(s"qod_adm_bad_${System.nanoTime()}").isLeft shouldBe true
+
   it should "surface a Left when the admin server is unreachable" in:
     // Use an unreachable host:port instead of bad credentials -- local
     // dev Postgres often uses `trust` auth and would happily accept a

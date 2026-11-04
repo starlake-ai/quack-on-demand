@@ -78,7 +78,7 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     */
   private final class Fixture(
       backend: QuackBackend = StubQuackBackend.noop(),
-      duckLakeInitializer: (Map[String, String], Boolean) => Unit = (_, _) => ()
+      duckLakeInitializer: (Map[String, String], Boolean, Boolean) => Unit = (_, _, _) => ()
   ):
     val store = new InMemoryControlPlaneStore()
     val sup   = new PoolSupervisor(
@@ -166,7 +166,8 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.InMemory,
         Map.empty,
         "",
-        defaultSchema = Some("sales")
+        defaultSchema = Some("sales"),
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
       .isRight shouldBe true
@@ -242,7 +243,8 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.InMemory,
         Map.empty,
         "",
-        initSql = "CREATE VIEW v AS SELECT 1 AS a"
+        initSql = "CREATE VIEW v AS SELECT 1 AS a",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     f.write() // the spec's database has no initSql: other views
@@ -263,7 +265,7 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     val g = new Fixture
     g.sup.createTenant(Tenant("acme")).unsafeRunSync()
     g.sup
-      .createTenantDb("acme", "shop", TenantDbKind.InMemory, Map.empty, "/data/old")
+      .createTenantDb("acme", "shop", TenantDbKind.InMemory, Map.empty, "/data/old", adoptExistingDatabase = false)
       .unsafeRunSync()
     g.write(Database.copy(dataPath = s"/data/$Marker"))
     val (result, logs) = LogCapture.logged(HookLogger)(g.run())
@@ -282,7 +284,7 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
   it should "refuse a pool name that already serves another database of the tenant" in {
     val f = new Fixture
     f.sup.createTenant(Tenant("acme")).unsafeRunSync()
-    f.sup.createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    f.sup.createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     f.sup
       .createPool(PoolKey("acme", "acme_other", "main"), RoleDistribution(0, 0, 1))
       .unsafeRunSync()
@@ -385,7 +387,7 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     )
     // A DuckLake pre-init refusal quotes the catalog's recorded data path, which the spec chose.
     val g = new Fixture(duckLakeInitializer =
-      (_, _) => throw DuckLakeInitializer.DataPathMismatchException(s"catalog records '$Marker'")
+      (_, _, _) => throw DuckLakeInitializer.DataPathMismatchException(s"catalog records '$Marker'")
     )
     g.write(database = Database.copy(kind = "ducklake", dataPath = "/data/shop"))
     val (dbResult, dbLogs) = LogCapture.logged(HookLogger)(g.run())

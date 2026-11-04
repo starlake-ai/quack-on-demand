@@ -57,7 +57,8 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
         "default",
         TenantDbKind.InMemory,
         Map.empty,
-        dataPath = ""
+        dataPath = "",
+        adoptExistingDatabase = false
       )
       nodes <- supervisor.createPool(key, RoleDistribution(0, 0, 1))
     yield (supervisor, tracker, nodes.head.nodeId, stopped)
@@ -202,7 +203,7 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
         locks = locks
       )
       _     <- sup.createTenant(Tenant("acme"))
-      _     <- sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "")
+      _     <- sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
       nodes <- sup.createPool(key, RoleDistribution(0, 0, size))
     yield Pool(sup, tracker, nodes.map(_.nodeId), stops)
 

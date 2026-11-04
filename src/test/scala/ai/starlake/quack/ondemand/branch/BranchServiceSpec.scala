@@ -114,6 +114,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     val admin   = new DbAdmin:
       def createDatabase(name: String): Either[String, Unit] = { created += name; Right(()) }
       def dropDatabase(name: String): Either[String, Unit]   = { dropped += name; Right(()) }
+      def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val backend = new StubQuackBackend()
 
     /** Runs when a `withLock` is asked for, before it waits. */
@@ -123,6 +124,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       backend,
       new NodeLoadTracker,
       store,
+      // The parent's server below is QoD's own: only there can a branch be made.
+      defaultMetastore = Map("pgHost" -> "127.0.0.1", "pgPort" -> "5432"),
       dbAdmin = admin,
       locks = new PoolLocker:
         def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
@@ -145,7 +148,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-branch-spec/acme_tpch/",
-        encrypted = parentEncrypted
+        encrypted = parentEncrypted,
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
       .toOption
@@ -466,6 +470,29 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       .find(_.branchOf.contains(f.parent.id))
       .get
       .encrypted shouldBe true
+  }
+
+  it should "refuse a parent on its own server, creating nothing anywhere" in {
+    val f   = new Fixture()
+    val own = f.sup
+      .createTenantDb(
+        "acme",
+        "byo",
+        TenantDbKind.DuckLake,
+        Map("pgHost" -> "pg.other", "pgUser" -> "me", "pgPassword" -> "mine", "schemaName" -> "main"),
+        "/tmp/qod-branch-spec/acme_byo/",
+        adoptExistingDatabase = false
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+    f.created.clear()
+    val out =
+      f.service.create("acme", own.name, "feature", None, None, f.admin1, None).unsafeRunSync()
+    out.left.map(_.code) shouldBe Left("branch_own_server")
+    out.left.map(_.status) shouldBe Left(400)
+    f.created shouldBe empty
+    f.store.findBranch(own.id, "feature") shouldBe None
   }
 
   it should "refuse duplicates, bad names, branches of branches and the per-db cap" in {
@@ -3647,7 +3674,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
           suffix,
           TenantDbKind.DuckLake,
           f.parent.metastore,
-          s"/tmp/qod-$suffix/"
+          s"/tmp/qod-$suffix/",
+          adoptExistingDatabase = false
         )
         .unsafeRunSync()
         .toOption

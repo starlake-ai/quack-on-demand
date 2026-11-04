@@ -38,7 +38,7 @@ class TwoSupervisorConcurrencySpec extends AnyFlatSpec with Matchers:
       val supA = mkSup()
       supA.createTenant(Tenant("acme")).unsafeRunSync()
       supA
-        .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+        .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", adoptExistingDatabase = false)
         .unsafeRunSync()
       // createTenantDb("acme", "default", ...) composes the tenant-db name as
       // `acme_default` (Names.normalizeTenantDbName prefixes the tenant), so the

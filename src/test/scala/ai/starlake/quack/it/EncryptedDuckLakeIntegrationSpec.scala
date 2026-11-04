@@ -157,7 +157,11 @@ class EncryptedDuckLakeIntegrationSpec extends AnyFlatSpec with Matchers:
   "an encrypted DuckLake database" should "write Parquet a reader without the catalog cannot open" in
     withFreshCatalog { (db, dataPath) =>
       orSkip(
-        DuckLakeInitializer.initBlocking(metastoreFor(db, dataPath.toString), encrypted = true)
+        DuckLakeInitializer.initBlocking(
+          metastoreFor(db, dataPath.toString),
+          encrypted = true,
+          createMissingDatabase = true
+        )
       )
       orSkip(writeOneRow(db, dataPath, encrypted = true))
 
@@ -185,7 +189,11 @@ class EncryptedDuckLakeIntegrationSpec extends AnyFlatSpec with Matchers:
   "an unencrypted DuckLake database" should "write Parquet the same reader opens fine" in
     withFreshCatalog { (db, dataPath) =>
       orSkip(
-        DuckLakeInitializer.initBlocking(metastoreFor(db, dataPath.toString), encrypted = false)
+        DuckLakeInitializer.initBlocking(
+          metastoreFor(db, dataPath.toString),
+          encrypted = false,
+          createMissingDatabase = true
+        )
       )
       orSkip(writeOneRow(db, dataPath, encrypted = false))
 

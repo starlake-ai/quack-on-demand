@@ -68,8 +68,8 @@ final case class TenantDbPatch(
     defaultSchema: Option[String] = None,
     initSql: Option[String] = None,
     // The writer is a superuser or the manager: a carried initSql is then trusted
-    // (InitSqlTrust.afterWrite).
-    initSqlWriterTrusted: Boolean = false
+    // (InitSqlTrust.afterWrite), and only such a writer may change a DuckLake row's dbName.
+    writerTrusted: Boolean = false
 )
 
 /** Result of [[PoolSupervisor.updateTenantDb]]: updated row, restarted node ids, and per-node
@@ -144,7 +144,11 @@ final class PoolSupervisor(
       * stamps on the tombstone row.
       */
     managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None,
-    duckLakeInitializer: (Map[String, String], Boolean) => Unit = DuckLakeInitializer.initBlocking,
+    /** The metastore, whether the row is encrypted, and whether a missing catalog database is
+      * created (a row of QoD's own server only).
+      */
+    duckLakeInitializer: (Map[String, String], Boolean, Boolean) => Unit =
+      DuckLakeInitializer.initBlocking,
     /** How long after its spawn a pid-carrying (local) node whose process is alive but whose port
       * is still closed counts as starting rather than dead. The local backend returns at fork time,
       * well before DuckDB finishes INSTALL/LOAD + ATTACH and listens, so without this window a
@@ -547,9 +551,10 @@ final class PoolSupervisor(
 
   // ---------- Bootstrap / replay ----------
 
-  /** Per-tenant-db naming and data location, resolved per kind on top of `defaultMetastore ++
-    * td.metastore`. The manager default describes the BOOTSTRAP tenant-db (a DuckLake directory
-    * plus its own `dbName`), so inheriting it wholesale is wrong for every other kind.
+  /** Per-tenant-db naming and data location, resolved per kind on top of [[TenantDb.withDefaults]],
+    * which copies the manager's login only onto a row of its own server. The manager default
+    * describes the BOOTSTRAP tenant-db (a DuckLake directory plus its own `dbName`), so inheriting
+    * it wholesale is wrong for every other kind.
     *
     *   - `ducklake`: each tenant-db is its own Postgres database named after `td.name`, with
     *     parquet alongside at `parent(defaultDataPath)/td.name`. Operators override via
@@ -566,7 +571,7 @@ final class PoolSupervisor(
     * `schemaName` is left as the merge yields it for every kind (the default `main` is correct).
     */
   private def effectiveMetastoreFor(td: TenantDb): Map[String, String] =
-    val merged  = defaultMetastore ++ td.metastore
+    val merged  = TenantDb.withDefaults(td.metastore, defaultMetastore)
     val perKind = td.kind match
       case TenantDbKind.DuckLake =>
         val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
@@ -599,9 +604,15 @@ final class PoolSupervisor(
     // `catalogAlias` uses. Stamped from the row's flag, whatever the stored metastore says (no
     // caller may store it: TenantDb.KnownMetastoreKeys). Emitted only when true, and never for
     // InMemory, which has nothing at rest: the scripts treat an absent value as false.
-    if td.encrypted && td.kind != TenantDbKind.InMemory then
-      perKind.updated(TenantDb.EncryptedKey, "true")
-    else perKind.removed(TenantDb.EncryptedKey)
+    val stamped =
+      if td.encrypted && td.kind != TenantDbKind.InMemory then
+        perKind.updated(TenantDb.EncryptedKey, "true")
+      else perKind.removed(TenantDb.EncryptedKey)
+    // The same plumbing tells the bash spawn script it may create a missing catalog database: only
+    // for a DuckLake row of QoD's own server, whatever the stored metastore says.
+    if td.kind == TenantDbKind.DuckLake && TenantDb.onDefaultServer(td.metastore, defaultMetastore)
+    then stamped.updated(TenantDb.CreateDatabaseKey, "true")
+    else stamped.removed(TenantDb.CreateDatabaseKey)
 
   /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
     * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a
@@ -1017,7 +1028,11 @@ final class PoolSupervisor(
     */
   private def initDuckLake(td: TenantDb, ctx: String): Unit =
     try
-      duckLakeInitializer(effectiveMetastoreFor(td), td.encrypted)
+      duckLakeInitializer(
+        effectiveMetastoreFor(td),
+        td.encrypted,
+        TenantDb.onDefaultServer(td.metastore, defaultMetastore)
+      )
       dataPathBlocked.remove(td.id)
       duckLakeInitPending.remove(td.id)
     catch
@@ -2003,15 +2018,16 @@ final class PoolSupervisor(
       tenantDbs.values.find(td => td.tenantId == t.id && td.name == nm)
     }
 
-  /** Find the (tenant, tenantDb) whose composed Postgres `dbName` (`${tenant}_${tenantDb}`,
+  /** Find the tenant-db of `tenantId` whose composed Postgres `dbName` (`${tenant}_${tenantDb}`,
     * lowercased, persisted into `TenantDb.name`) matches `catalog`. Used by the CLS rewriter's
-    * column-catalog fetcher. Matching `td.name` with `equalsIgnoreCase` stays in sync with the
-    * formula `effectiveMetastoreFor` / `spawn-quack-node.sh` use, with no drift. `None` if no
-    * tenant-db matches.
+    * column-catalog fetcher, for the asking principal's own tenant: another tenant's catalog is not
+    * looked at, whatever a statement or an attach alias names. Matching `td.name` with
+    * `equalsIgnoreCase` stays in sync with the formula `effectiveMetastoreFor` /
+    * `spawn-quack-node.sh` use, with no drift. `None` if no tenant-db matches.
     */
-  def findTenantDbByCatalogName(catalog: String): Option[TenantDb] =
+  def findTenantDbByCatalogName(tenantId: String, catalog: String): Option[TenantDb] =
     if catalog == null || catalog.isEmpty then None
-    else tenantDbs.values.find(_.name.equalsIgnoreCase(catalog))
+    else tenantDbs.values.find(td => td.tenantId == tenantId && td.name.equalsIgnoreCase(catalog))
 
   /** Fleet mode: the server currently hosting `nodeId`, from the in-memory topology. None for an
     * unknown id and on every other runtime.
@@ -2261,12 +2277,7 @@ final class PoolSupervisor(
               removeTenantDbRow(td.id)
               try onTenantDbDeleted(name.toLowerCase(Locale.ROOT), td.name)
               catch case _: Throwable => ()
-              dbAdmin.dropDatabase(td.name) match
-                case Right(_)  => ()
-                case Left(err) =>
-                  logger.warn(
-                    s"deleteTenant: tenant-db row removed but DROP DATABASE \"${td.name}\" failed: $err"
-                  )
+              dropCatalogDatabase(td, "deleteTenant")
               events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
             if tdbs.nonEmpty then dataFoldersChanged()
@@ -2281,6 +2292,58 @@ final class PoolSupervisor(
   }
 
   // ---------- TenantDb API ----------
+
+  /** The Postgres database of a deleted row, on QoD's own server. Only a DuckLake row of that
+    * server has one there: a create makes none for any other kind, and a catalog on another server
+    * is its owner's, so what is left in place is logged where the default log level shows it. The
+    * control-plane database is never dropped, whatever a row is named.
+    */
+  private def dropCatalogDatabase(td: TenantDb, ctx: String): Unit =
+    if td.kind == TenantDbKind.DuckLake then
+      if !TenantDb.onDefaultServer(td.metastore, defaultMetastore) then
+        logger.error(
+          s"$ctx: tenant-db row '${td.name}' removed; its catalog database lies on its own server, " +
+            "where QoD drops nothing: drop it there once it is no longer wanted"
+        )
+      else if defaultMetastore.get("dbName").contains(td.name) then
+        logger.error(
+          s"$ctx: tenant-db row '${td.name}' removed; it is named after the control-plane " +
+            "database, which stays"
+        )
+      else
+        dbAdmin.dropDatabase(td.name) match
+          case Right(_)  => ()
+          case Left(err) =>
+            logger.warn(
+              s"$ctx: control-plane row removed but DROP DATABASE \"${td.name}\" failed: $err"
+            )
+
+  /** The Postgres database of a new DuckLake row of QoD's own server. A create that may adopt keeps
+    * whatever is there; any other refuses a database already held by another tenant's row, or
+    * holding anything at all, and reuses an empty one: what a crash between the create and the
+    * row's write leaves. The refusal names no one.
+    */
+  private def provisionCatalogDatabase(
+      name: String,
+      tenantId: String,
+      adoptExistingDatabase: Boolean
+  ): Either[SupervisorError, Unit] =
+    val taken: Either[String, Boolean] =
+      if adoptExistingDatabase then Right(false)
+      else if tenantDbs.values.exists(o => o.name == name && o.tenantId != tenantId) then
+        Right(true)
+      else dbAdmin.holdsAnything(name)
+    val failed = (err: String) =>
+      SupervisorError.Internal(s"failed to provision Postgres database '$name': $err")
+    taken match
+      case Left(err)   => Left(failed(err))
+      case Right(true) =>
+        Left(
+          SupervisorError.DatabaseNameTaken(
+            s"database name '$name' is taken on this server: choose another name"
+          )
+        )
+      case Right(false) => dbAdmin.createDatabase(name).left.map(failed)
 
   def createTenantDb(
       tenantName: String,
@@ -2311,7 +2374,12 @@ final class PoolSupervisor(
         * response. Create-time only: neither engine can encrypt an existing database in place.
         */
       encrypted: Boolean = false,
-      gateBypass: Boolean = false
+      gateBypass: Boolean = false,
+      /** Whether this create may take over a Postgres database that already holds something: a
+        * superuser's or the manager's, never a tenant admin's. No default: every caller states it.
+        * A manifest import does not come here, and adopts by writing its rows.
+        */
+      adoptExistingDatabase: Boolean
   ): IO[Either[SupervisorError, TenantDb]] =
     gateCheck(
       ai.starlake.quack.spi.StructureMutation.CreateTenantDb(tenantName.toLowerCase(Locale.ROOT)),
@@ -2403,29 +2471,45 @@ final class PoolSupervisor(
                       encrypted = encrypted
                     )
 
-                    TenantDb.validate(td, defaultMetastore) match
-                      case Some(msg) =>
-                        Left(
-                          SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg")
+                    // A row of another server: no CREATE DATABASE anywhere, its catalog is its
+                    // owner's to manage.
+                    val onDefault = TenantDb.onDefaultServer(effectiveMeta, defaultMetastore)
+                    def invalid(msg: String): SupervisorError =
+                      SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg")
+                    // A value that breaks a connection string says so, before the login rule reads
+                    // it as another server. `validate` then adds what only a create requires.
+                    val refused: Option[SupervisorError] =
+                      TenantDb
+                        .validateSafety(td)
+                        .map(invalid)
+                        .orElse(
+                          Option
+                            .when(kind == TenantDbKind.DuckLake)(
+                              TenantDb.ownLoginError(effectiveMeta, defaultMetastore)
+                            )
+                            .flatten
+                            .map(SupervisorError.OwnLoginRequired(_))
                         )
-                      case None =>
+                        .orElse(TenantDb.validate(td, defaultMetastore).map(invalid))
+                    refused match
+                      case Some(err) => Left(err)
+                      case None      =>
                         kind match
                           case TenantDbKind.DuckLake =>
-                            dbAdmin.createDatabase(full) match
-                              case Left(err) =>
-                                Left(
-                                  SupervisorError.Internal(
-                                    s"failed to provision Postgres database '$full': $err"
-                                  )
-                                )
-                              case Right(_) =>
+                            (if onDefault then
+                               provisionCatalogDatabase(full, t.id, adoptExistingDatabase)
+                             else Right(())) match
+                              case Left(err) => Left(err)
+                              case Right(_)  =>
                                 // Pre-init the ducklake_* metadata tables so the first pool nodes
                                 // don't race on `CREATE TABLE __ducklake_metadata`.
                                 try
                                   duckLakeInitializer(
-                                    (defaultMetastore ++ effectiveMeta)
+                                    TenantDb
+                                      .withDefaults(effectiveMeta, defaultMetastore)
                                       .updated("dataPath", effectiveDataPath),
-                                    encrypted
+                                    encrypted,
+                                    onDefault
                                   )
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()
@@ -2435,6 +2519,8 @@ final class PoolSupervisor(
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                   Right(td)
                                 catch
+                                  case t: DuckLakeInitializer.CatalogDatabaseMissingException =>
+                                    Left(SupervisorError.CatalogDatabaseMissing(t.getMessage))
                                   case t: DuckLakeInitializer.PreInitMismatchException =>
                                     // Not transient: retrying reproduces the DATA_PATH or
                                     // encryption error on every future node spawn, so refuse to
@@ -2555,13 +2641,7 @@ final class PoolSupervisor(
                   federationFailed.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
                   catch case _: Throwable => ()
-                  dbAdmin.dropDatabase(td.name) match
-                    case Right(_)  => ()
-                    case Left(err) =>
-                      logger.warn(
-                        s"deleteTenantDb: control-plane row removed but " +
-                          s"DROP DATABASE \"${td.name}\" failed: $err"
-                      )
+                  dropCatalogDatabase(td, "deleteTenantDb")
                   publish.topologyChanged()
                   events.emit(ManagerEvent.TenantDbDeleted(tenantName, tenantDbName))
                   Right(())
@@ -2572,8 +2652,11 @@ final class PoolSupervisor(
     * when node-affecting fields (metastore, objectStore, initSql) changed. Restart is all-at-once
     * via restartNode's path; per-node failures are collected, not thrown (reconcile heals).
     * Response-redacted keys (`TenantDb.SecretKeys`) are preserved when omitted; an empty value
-    * removes the key. For DuckLake, clearing a required key such as `pgPassword` reverts that key
-    * to the manager default at runtime.
+    * removes the key. For DuckLake on QoD's own server, clearing a required key such as
+    * `pgPassword` reverts that key to the manager default at runtime. A metastore naming another
+    * server brings its own login, a preserved password does not follow a change of server, a row
+    * moving onto QoD's own server meets the rule of a create there, and only a trusted writer
+    * changes `dbName`.
     */
   def updateTenantDb(
       tenantName: String,
@@ -2594,18 +2677,38 @@ final class PoolSupervisor(
             td.initSql,
             td.initSqlTrusted,
             patch.initSql,
-            patch.initSqlWriterTrusted
+            patch.writerTrusted
           )
         )
-        TenantDb.validateSafety(merged) match
-          case Some(msg) => IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
-          case None      =>
+        // The stored row's result is what is judged: a secret the update leaves out is kept.
+        val refused: Option[SupervisorError] =
+          Option
+            .when(merged.kind == TenantDbKind.DuckLake)(patch.metastore)
+            .flatten
+            .flatMap { sent =>
+              Option
+                .when(!patch.writerTrusted)(TenantDb.dbNameChangeError(td, merged.metastore))
+                .flatten
+                .map(SupervisorError.DbNameFixed(_))
+                .orElse(
+                  TenantDb
+                    .movedPasswordError(td.metastore, merged.metastore, sent, defaultMetastore)
+                    .orElse(TenantDb.ownLoginError(merged.metastore, defaultMetastore))
+                    .map(SupervisorError.OwnLoginRequired(_))
+                )
+            }
+        (TenantDb.validateSafety(merged), refused) match
+          case (Some(msg), _) => IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
+          case (_, Some(err)) => IO.pure(Left(err))
+          case (None, None)   =>
             // Keys the manager config can stand in for: dropping one of these from a
             // ducklake row is "revert to default", not a contract violation. duckdb-file
             // has no default-merge contract on create, so it keeps the strict guard.
             val defaultedKeys =
               if merged.kind == TenantDbKind.DuckLake then
-                TenantDb.defaultedMetastoreKeys(defaultMetastore)
+                TenantDb.defaultedMetastoreKeys(
+                  TenantDb.inheritedDefaults(merged.metastore, defaultMetastore)
+                )
               else Set.empty[String]
             val droppedRequired =
               (td.metastore.keySet & TenantDb.requiredMetastoreKeys(merged.kind)) --
@@ -2707,8 +2810,27 @@ final class PoolSupervisor(
                         }
                     }
                   }
-              refresh *> restarts.map { case (ok, failed) =>
-                Right(TenantDbUpdateResult(merged, ok, failed))
+              // A row moving onto QoD's own server meets the rule of a create there: the last check,
+              // since it may create the database.
+              val movesOntoQodServer = merged.kind == TenantDbKind.DuckLake &&
+                !TenantDb.onDefaultServer(td.metastore, defaultMetastore) &&
+                TenantDb.onDefaultServer(merged.metastore, defaultMetastore)
+              val provisioned: IO[Either[SupervisorError, Unit]] =
+                if movesOntoQodServer then
+                  IO.blocking(
+                    provisionCatalogDatabase(
+                      merged.metastore.getOrElse("dbName", merged.name),
+                      merged.tenantId,
+                      adoptExistingDatabase = patch.writerTrusted
+                    )
+                  )
+                else IO.pure(Right(()))
+              provisioned.flatMap {
+                case Left(err) => IO.pure(Left(err))
+                case Right(_)  =>
+                  refresh *> restarts.map { case (ok, failed) =>
+                    Right(TenantDbUpdateResult(merged, ok, failed))
+                  }
               }
             }
     }

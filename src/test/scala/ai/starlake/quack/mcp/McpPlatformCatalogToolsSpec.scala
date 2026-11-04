@@ -132,7 +132,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> "ignored",
           "schemaName" -> "main"
         ),
-        "/tmp/qod-mcp-platform-catalog-test"
+        "/tmp/qod-mcp-platform-catalog-test",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     sup.createPool(PoolKey(Tenant0, TenantDb, "bi"), RoleDistribution(0, 0, 1)).unsafeRunSync()

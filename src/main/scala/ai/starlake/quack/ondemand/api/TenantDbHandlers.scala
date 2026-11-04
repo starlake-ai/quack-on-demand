@@ -219,6 +219,9 @@ final class TenantDbHandlers(
                 IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
               case Right(kind) =>
                 val gateBypass = SuperuserCheck.forScope(scope).isEmpty
+                // Who may take over a Postgres database that already holds something: a superuser,
+                // on REST or as the manager (`qod serve`'s boot provisioning), never a tenant admin.
+                val adoptExistingDatabase = gateBypass
                 sup
                   .createTenantDb(
                     tenantName = req.tenant,
@@ -235,7 +238,8 @@ final class TenantDbHandlers(
                     initSqlTrusted = gateBypass,
                     managedStorage = req.managedStorage,
                     encrypted = req.encrypted,
-                    gateBypass = gateBypass
+                    gateBypass = gateBypass,
+                    adoptExistingDatabase = adoptExistingDatabase
                   )
                   .flatMap {
                     case Right(td) =>
@@ -289,7 +293,13 @@ final class TenantDbHandlers(
                         )
                       )
                     case Left(err) =>
-                      IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
+                      IO.pure(
+                        Left(
+                          SupervisorErrorHttp
+                            .special(err)
+                            .getOrElse((StatusCode.Conflict, ErrorResponse("exists", err.message)))
+                        )
+                      )
                   }
 
   def listTenantDbs(tenant: String, apiKey: Option[String])(
@@ -427,7 +437,7 @@ final class TenantDbHandlers(
               defaultDatabase = req.defaultDatabase,
               defaultSchema = req.defaultSchema,
               initSql = req.initSql,
-              initSqlWriterTrusted = SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty
+              writerTrusted = SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty
             )
             sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
               case Right(r) =>
@@ -461,7 +471,13 @@ final class TenantDbHandlers(
               case Left(err: SupervisorError.InvalidArgument) =>
                 IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", err.message))))
               case Left(err) =>
-                IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
+                IO.pure(
+                  Left(
+                    SupervisorErrorHttp
+                      .special(err)
+                      .getOrElse((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+                  )
+                )
             }
 
 object TenantDbHandlers:

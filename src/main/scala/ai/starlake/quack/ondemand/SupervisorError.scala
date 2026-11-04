@@ -35,6 +35,16 @@ package ai.starlake.quack.ondemand
   *     user-create roles/groups were empty or named an unknown object; `code` is the REST error
   *     code (`roles_required`, `groups_required`, `unknown_role`, `unknown_group`,
   *     `memberships_not_applicable`).
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.DatabaseNameTaken DatabaseNameTaken]]: a create
+  *     would use a Postgres database that already holds something; REST 409 `database_name_taken`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.OwnLoginRequired OwnLoginRequired]]: a
+  *     metastore on another server than QoD's own lacks its own login; REST 400
+  *     `own_login_required`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.DbNameFixed DbNameFixed]]: an update would
+  *     change a DuckLake database's `dbName`; REST 400 `db_name_fixed`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.CatalogDatabaseMissing CatalogDatabaseMissing]]:
+  *     a create on another server found no catalog database there; REST 400
+  *     `catalog_database_missing`.
   */
 enum SupervisorError(val message: String):
   case NotFound(msg: String)                        extends SupervisorError(msg)
@@ -48,3 +58,7 @@ enum SupervisorError(val message: String):
   case BuiltinProtected(msg: String)                extends SupervisorError(msg)
   case ReservedName(msg: String)                    extends SupervisorError(msg)
   case InvalidMembership(code: String, msg: String) extends SupervisorError(msg)
+  case DatabaseNameTaken(msg: String)               extends SupervisorError(msg)
+  case OwnLoginRequired(msg: String)                extends SupervisorError(msg)
+  case DbNameFixed(msg: String)                     extends SupervisorError(msg)
+  case CatalogDatabaseMissing(msg: String)          extends SupervisorError(msg)

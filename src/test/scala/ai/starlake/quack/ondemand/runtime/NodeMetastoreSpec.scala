@@ -20,14 +20,15 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers with OptionValues:
 
   /** Every key the launcher reads from its environment, as the manager resolves them. */
   private val allowed = Map(
-    "pgHost"       -> "pg.internal",
-    "pgPort"       -> "5432",
-    "pgUser"       -> "qod",
-    "dbName"       -> "acme_lake",
-    "catalogAlias" -> "acme_lake",
-    "schemaName"   -> "main",
-    "dataPath"     -> "/data/acme_lake",
-    "encrypted"    -> "true"
+    "pgHost"         -> "pg.internal",
+    "pgPort"         -> "5432",
+    "pgUser"         -> "qod",
+    "dbName"         -> "acme_lake",
+    "catalogAlias"   -> "acme_lake",
+    "schemaName"     -> "main",
+    "dataPath"       -> "/data/acme_lake",
+    "encrypted"      -> "true",
+    "createDatabase" -> "true"
   )
 
   /** Names bash, the dynamic loader, the spawn script or qod-node would act on, a manager-owned
@@ -69,6 +70,9 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers with OptionValues:
     val ps1 = Files.readString(Paths.get("scripts/spawn-quack-node.ps1"))
     TenantDb.NodeEnvKeys.foreach { k =>
       withClue(s"spawn-quack-node.sh reads $k: ")(sh.contains("${" + k + ":-") shouldBe true)
+    }
+    // The PowerShell script creates no catalog database, so it has no use for that stamp.
+    (TenantDb.NodeEnvKeys - TenantDb.CreateDatabaseKey).foreach { k =>
       val ps1Reads = ps1.contains(s"Env-Or '$k'") || ps1.contains(s"GetEnvironmentVariable('$k')")
       withClue(s"spawn-quack-node.ps1 reads $k: ")(ps1Reads shouldBe true)
     }
@@ -76,11 +80,15 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers with OptionValues:
     TenantDb.NodeEnvKeys.filter(NodeSecretFiles.isKey) shouldBe empty
   }
 
-  "TenantDb.KnownMetastoreKeys" should "be the launcher's keys but the stamp, plus the secrets" in {
-    TenantDb.KnownMetastoreKeys shouldBe
-      (allowed.keySet - TenantDb.EncryptedKey) ++ Set("pgPassword", "encryptionKey")
-    TenantDb.unknownMetastoreKeys(allowed ++ hostile) shouldBe
-      (hostile.keySet + TenantDb.EncryptedKey).toList.sorted
+  "TenantDb.KnownMetastoreKeys" should "be the launcher's keys but the stamps, plus the secrets" in {
+    val stamps = Set(TenantDb.EncryptedKey, TenantDb.CreateDatabaseKey)
+    TenantDb.KnownMetastoreKeys shouldBe (allowed.keySet -- stamps) ++ Set(
+      "pgPassword",
+      "encryptionKey"
+    )
+    TenantDb.unknownMetastoreKeys(
+      allowed ++ hostile
+    ) shouldBe (hostile.keySet ++ stamps).toList.sorted
   }
 
   "NodeMetastore.env" should "keep exactly TenantDb.NodeEnvKeys" in {

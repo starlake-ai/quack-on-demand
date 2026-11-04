@@ -219,6 +219,19 @@ final class BranchService(
   def proposalOf(b: Branch): Option[BranchMerge] =
     store.listBranchMerges(b.id).find(_.status == BranchMergeStatus.Proposed)
 
+  /** A branch is a database next to its parent's, and QoD creates databases on its own server only.
+    */
+  private def onQodServer(parent: TenantDb): Res[Unit] =
+    if TenantDb.onDefaultServer(parent.metastore, sup.metastoreDefaults) then Right(())
+    else
+      Left(
+        BranchFailure.badRequest(
+          "branch_own_server",
+          s"database '${parent.name}' lies on its own Postgres server, where QoD creates no " +
+            "database, so it cannot be branched"
+        )
+      )
+
   private def enabled: Res[Unit] =
     if cfg.enabled then Right(())
     else
@@ -293,6 +306,7 @@ final class BranchService(
           .left
           .map(BranchFailure.badRequest("invalid_name", _))
         _ <- validTtl(ttlHours, actor)
+        _ <- onQodServer(parent)
         _ <- noDuplicate(parent, name)
         _ <- underLimit(parent)
       yield

@@ -34,7 +34,8 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.DuckLake,
         lakeMeta,
         dataPath = "/var/lake",
-        encrypted = true
+        encrypted = true,
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     sup
@@ -44,7 +45,8 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.DuckLake,
         lakeMeta,
         dataPath = "/var/plain",
-        encrypted = false
+        encrypted = false,
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     sup
@@ -105,7 +107,8 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.DuckLake,
         lakeMeta,
         dataPath = "/var/a_b_c",
-        encrypted = false
+        encrypted = false,
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     // tenant "a_b", tenant-db "c" -> composed name ALSO "a_b_c", but for an unrelated tenant, and
@@ -117,7 +120,8 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.DuckLake,
         lakeMeta,
         dataPath = "/var/other_a_b_c",
-        encrypted = true
+        encrypted = true,
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
 

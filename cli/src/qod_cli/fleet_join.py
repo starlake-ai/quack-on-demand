@@ -116,7 +116,9 @@ _CLOUD_CRED_KEYS = _SECRET_KEYS[11:]
 # script, PATH, QOD_NODE_BIN...) would run commands on this server or replace what this
 # process sets. The manager filters too; this is defense in depth against an older manager or a
 # manager bug. Same set as TenantDb.NodeEnvKeys on the manager (NodeSecretFilesSpec pins it).
-_NODE_ENV_KEYS = ("pgHost", "pgPort", "pgUser", "dbName", "catalogAlias", "schemaName", "dataPath", "encrypted")
+_NODE_ENV_KEYS = (
+    "pgHost", "pgPort", "pgUser", "dbName", "catalogAlias", "schemaName", "dataPath", "encrypted", "createDatabase",
+)
 # The metastore's own secrets, taken from an assignment's env in any spelling: same set as
 # TenantDb.NodeSecretEnvKeys (NodeSecretFilesSpec pins it).
 _METASTORE_SECRET_KEYS = ("pgPassword", "encryptionKey")

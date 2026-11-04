@@ -172,7 +172,9 @@ function Env-Or([string]$name, [string]$default) {
 $pgHost     = Env-Or 'pgHost'     'localhost'
 $pgPort     = Env-Or 'pgPort'     '5432'
 $pgUser     = Env-Or 'pgUser'     'postgres'
-$pgPassword = Secret-Or 'pgPassword' 'azizam'
+# No fallback: a database with no password of its own on another server than QoD's arrives with
+# none, and fails to connect.
+$pgPassword = Secret-Or 'pgPassword' ''
 $dbName     = Env-Or 'dbName'     'db1'
 $catalogAlias = Env-Or 'catalogAlias' $dbName
 $schemaName = Env-Or 'schemaName' 'main'

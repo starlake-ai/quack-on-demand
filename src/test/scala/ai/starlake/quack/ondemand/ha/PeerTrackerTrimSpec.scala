@@ -51,7 +51,7 @@ class PeerTrackerTrimSpec extends AnyFlatSpec with Matchers:
   private def seedTenant(sup: PoolSupervisor): Unit =
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
-      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", adoptExistingDatabase = false)
       .unsafeRunSync()
     ()
 

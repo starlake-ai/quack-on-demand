@@ -1155,8 +1155,10 @@ object DuckLakeCatalogReader:
     cfg.setJdbcUrl(
       s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
     )
-    cfg.setUsername(meta("pgUser"))
-    cfg.setPassword(meta("pgPassword"))
+    // No login is a row of another server that holds none of its own: it fails to connect, and
+    // browsing degrades as for a catalog that is down.
+    cfg.setUsername(meta.getOrElse("pgUser", "postgres"))
+    cfg.setPassword(meta.getOrElse("pgPassword", ""))
     cfg.setMaximumPoolSize(2)
     // Idle connections give themselves up after a minute rather than pinning
     // the underlying socket for the lifetime of the (now sweeper-evictable)

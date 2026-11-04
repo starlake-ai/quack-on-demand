@@ -109,7 +109,7 @@ final class ColumnPolicyRewriter(
   private def rewriteCanonical(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
     if readsOnlyCatalogFunctions(sql) then IO.pure(Passthrough)
     else
-      buildSchema(sql, ctx).map { schema =>
+      buildSchema(sql, eff.user.tenant.getOrElse(""), ctx).map { schema =>
         TooDeep.orElse(Denied(TooDeep.Reason))(rewriteResolved(sql, schema, eff, ctx))
       }
 
@@ -179,7 +179,11 @@ final class ColumnPolicyRewriter(
     * real schema names. A system table not in that static set stays unresolved and keeps failing
     * closed (worst case: a denied metadata query, never a leak).
     */
-  private def buildSchema(sql: String, ctx: SchemaContext): IO[Map[String, List[String]]] =
+  private def buildSchema(
+      sql: String,
+      tenant: String,
+      ctx: SchemaContext
+  ): IO[Map[String, List[String]]] =
     Try(ai.starlake.sql.JSqlStatements.parseFirst(sql)) match
       case Failure(_)            => IO.pure(Map.empty)
       case Success(stmt: Select) =>
@@ -188,7 +192,7 @@ final class ColumnPolicyRewriter(
           .traverse { case (key, (cat, sch, tab)) =>
             if SystemSchemaColumns.isSystemSchema(sch) then
               IO.pure(None) // resolved via SystemSchemaColumns inside the inner rewriter
-            else catalog.columnsOf(cat, sch, tab).map(cols => Some(key -> cols))
+            else catalog.columnsOf(tenant, cat, sch, tab).map(cols => Some(key -> cols))
           }
           .map(_.flatten.toMap)
       case Success(_) => IO.pure(Map.empty)

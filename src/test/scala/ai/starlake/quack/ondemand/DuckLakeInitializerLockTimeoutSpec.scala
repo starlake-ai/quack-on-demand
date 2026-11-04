@@ -89,7 +89,7 @@ class DuckLakeInitializerLockTimeoutSpec extends AnyFlatSpec with Matchers with 
     (msg.contains("extension") && msg.contains("not found"))
 
   private def init(meta: Map[String, String]): Unit =
-    Try(DuckLakeInitializer.initBlocking(meta, encrypted = false)) match
+    Try(DuckLakeInitializer.initBlocking(meta, encrypted = false, createMissingDatabase = true)) match
       case Success(_)                            => ()
       case Failure(t) if extensionUnavailable(t) =>
         cancel(s"DuckDB extensions unavailable (${t.getMessage}); skipping")
@@ -217,7 +217,9 @@ class DuckLakeInitializerLockTimeoutSpec extends AnyFlatSpec with Matchers with 
     val reader             = openReader(db)
     given ExecutionContext = ExecutionContext.global
     val started            = System.nanoTime()
-    val attempt            = Future(Try(DuckLakeInitializer.initBlocking(meta, encrypted = false)))
+    val attempt            = Future(
+      Try(DuckLakeInitializer.initBlocking(meta, encrypted = false, createMissingDatabase = true))
+    )
     val outcome            =
       try Await.result(attempt, 90.seconds)
       finally

@@ -22,10 +22,17 @@ trait DbAdmin:
     */
   def dropDatabase(name: String): Either[String, Unit]
 
+  /** Whether the database exists with anything in it: a table, a view, a sequence, a function, a
+    * type, a large object, an extension or a schema of its own. `Right(false)` when it does not
+    * exist or is as `CREATE DATABASE` leaves it. A database that cannot be read is a `Left`.
+    */
+  def holdsAnything(name: String): Either[String, Boolean]
+
 /** Test fixture that never touches a real server. */
 object NoopDbAdmin extends DbAdmin:
-  def createDatabase(name: String): Either[String, Unit] = Right(())
-  def dropDatabase(name: String): Either[String, Unit]   = Right(())
+  def createDatabase(name: String): Either[String, Unit]   = Right(())
+  def dropDatabase(name: String): Either[String, Unit]     = Right(())
+  def holdsAnything(name: String): Either[String, Boolean] = Right(false)
 
 /** Production [[DbAdmin]] backed by an admin JDBC connection.
   *
@@ -71,6 +78,27 @@ final class PostgresDbAdmin(
         finally st.close()
     }
 
+  def holdsAnything(name: String): Either[String, Boolean] =
+    try
+      val conn = DriverManager.getConnection(jdbcUrl, user, password)
+      val here =
+        try exists(conn, name)
+        finally conn.close()
+      if !here then Right(false)
+      else
+        val url =
+          s"jdbc:postgresql://$host:$port/${java.net.URLEncoder.encode(name, "UTF-8")}"
+        val target = DriverManager.getConnection(url, user, password)
+        try
+          val st = target.createStatement()
+          try
+            val rs = st.executeQuery(PostgresDbAdmin.HoldsAnythingSql)
+            try Right(rs.next() && rs.getBoolean(1))
+            finally rs.close()
+          finally st.close()
+        finally target.close()
+    catch case t: Throwable => Left(t.getMessage)
+
   private def exists(conn: Connection, name: String): Boolean =
     val ps = conn.prepareStatement("SELECT 1 FROM pg_database WHERE datname = ?")
     try
@@ -95,6 +123,26 @@ final class PostgresDbAdmin(
   private def escapeIdent(s: String): String = s.replace("\"", "\"\"")
 
 object PostgresDbAdmin:
+
+  /** A fresh database holds only Postgres's own schemas, `public` empty, and `plpgsql`. */
+  private val HoldsAnythingSql: String =
+    """SELECT EXISTS (
+      |    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      |    WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+      |  ) OR EXISTS (
+      |    SELECT 1 FROM pg_namespace n
+      |    WHERE n.nspname NOT IN ('public', 'information_schema') AND n.nspname NOT LIKE 'pg\_%'
+      |  ) OR EXISTS (
+      |    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      |    WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+      |  ) OR EXISTS (
+      |    SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+      |    WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+      |  ) OR EXISTS (
+      |    SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql'
+      |  ) OR EXISTS (
+      |    SELECT 1 FROM pg_largeobject_metadata
+      |  )""".stripMargin
 
   /** Build a [[PostgresDbAdmin]] from the global `defaultMetastore` map. `adminDbName` defaults to
     * `"postgres"`.

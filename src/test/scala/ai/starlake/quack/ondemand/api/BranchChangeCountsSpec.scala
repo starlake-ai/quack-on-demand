@@ -144,8 +144,16 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     val admin = new DbAdmin:
       def createDatabase(name: String): Either[String, Unit] = Right(())
       def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val sup =
-      new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store, dbAdmin = admin)
+      new PoolSupervisor(
+        new StubQuackBackend(),
+        new NodeLoadTracker,
+        store,
+        // The parent's server below is QoD's own: only there can a branch be made.
+        defaultMetastore = Map("pgHost" -> "127.0.0.1", "pgPort" -> "5432"),
+        dbAdmin = admin
+      )
     sup
       .createTenant(Tenant(id = "acme", displayName = "acme", authProvider = "db", acl = tenantAcl))
       .unsafeRunSync()
@@ -165,7 +173,8 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> "ignored",
           "schemaName" -> "main"
         ),
-        "/tmp/qod-branch-counts-spec/acme_tpch/"
+        "/tmp/qod-branch-counts-spec/acme_tpch/",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
       .toOption

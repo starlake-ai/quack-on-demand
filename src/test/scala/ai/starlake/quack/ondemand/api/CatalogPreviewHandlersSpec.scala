@@ -128,7 +128,8 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> "ignored",
           "schemaName" -> "main"
         ),
-        "/tmp/qod-preview-test"
+        "/tmp/qod-preview-test",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     if withPool then
@@ -405,10 +406,11 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         "files",
         TenantDbKind.DuckDbFile,
         Map("dbName" -> "filesdb", "schemaName" -> "main"),
-        "/tmp/qod-preview-test/files.db"
+        "/tmp/qod-preview-test/files.db",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
-    sup.createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "mem1", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
     sup
       .createPool(PoolKey("acme", "acme_files", "files_bi"), RoleDistribution(1, 0, 0))
       .unsafeRunSync()

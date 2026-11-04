@@ -117,6 +117,7 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
         def createDatabase(name: String): Either[String, Unit] = Right(())
         def dropDatabase(name: String): Either[String, Unit]   = Right(())
+        def holdsAnything(name: String): Either[String, Boolean] = Right(false)
       sup = new PoolSupervisor(backend, tracker, store, dbAdmin = admin)
       sup.createTenant(Tenant("acme")).unsafeRunSync()
       sup
@@ -132,7 +133,8 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
             "dbName"     -> "ignored",
             "schemaName" -> "tpch1"
           ),
-          s"$dir/data"
+          s"$dir/data",
+          adoptExistingDatabase = false
         )
         .unsafeRunSync()
       sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()

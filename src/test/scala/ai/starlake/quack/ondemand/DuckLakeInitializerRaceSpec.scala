@@ -103,7 +103,7 @@ class DuckLakeInitializerRaceSpec extends AnyFlatSpec with Matchers:
     (msg.contains("extension") && msg.contains("not found"))
 
   private def initOrSkip(metastore: Map[String, String], encrypted: Boolean): Unit =
-    Try(DuckLakeInitializer.initBlocking(metastore, encrypted)) match
+    Try(DuckLakeInitializer.initBlocking(metastore, encrypted, createMissingDatabase = true)) match
       case Success(_)                            => ()
       case Failure(t) if extensionUnavailable(t) =>
         cancel(s"DuckDB extensions unavailable (${t.getMessage}); skipping")
@@ -140,7 +140,9 @@ class DuckLakeInitializerRaceSpec extends AnyFlatSpec with Matchers:
       val threads: List[Thread] = (1 to n).toList.map { i =>
         val runnable: Runnable = () =>
           barrier.await()
-          val r = Try(DuckLakeInitializer.initBlocking(metastore, encrypted = false)).toEither
+          val r = Try(
+            DuckLakeInitializer.initBlocking(metastore, encrypted = false, createMissingDatabase = true)
+          ).toEither
           results.add(r.map(_ => ()))
           ()
         val t = new Thread(runnable, s"ducklake-init-$i")
@@ -190,7 +192,11 @@ class DuckLakeInitializerRaceSpec extends AnyFlatSpec with Matchers:
       val dataPath  = java.nio.file.Files.createTempDirectory("qoddl-enc2-").toString
       val metastore = metastoreFor(db, dataPath)
       initOrSkip(metastore, encrypted = true)
-      noException should be thrownBy DuckLakeInitializer.initBlocking(metastore, encrypted = true)
+      noException should be thrownBy DuckLakeInitializer.initBlocking(
+        metastore,
+        encrypted = true,
+        createMissingDatabase = true
+      )
       metadataValue(db, "encrypted") shouldBe Some("true")
     }
 
@@ -204,7 +210,7 @@ class DuckLakeInitializerRaceSpec extends AnyFlatSpec with Matchers:
       val metastore = metastoreFor(db, dataPath)
       initOrSkip(metastore, encrypted = false)
       val ex = intercept[DuckLakeInitializer.EncryptionMismatchException] {
-        DuckLakeInitializer.initBlocking(metastore, encrypted = true)
+        DuckLakeInitializer.initBlocking(metastore, encrypted = true, createMissingDatabase = true)
       }
       ex.getMessage should include("was created unencrypted")
       ex.getMessage should include(db)

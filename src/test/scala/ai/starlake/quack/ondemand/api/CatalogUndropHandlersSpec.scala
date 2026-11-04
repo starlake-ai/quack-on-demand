@@ -74,7 +74,8 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> "ignored",
           "schemaName" -> "main"
         ),
-        "/tmp/qod-undrop-test"
+        "/tmp/qod-undrop-test",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     if withPool then

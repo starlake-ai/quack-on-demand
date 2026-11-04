@@ -20,6 +20,7 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     val admin = new DbAdmin:
       def createDatabase(name: String): Either[String, Unit] = Right(())
       def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val backend = new StubQuackBackend()
     val sup     = new PoolSupervisor(
       backend,
@@ -41,7 +42,8 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> "ignored",
           "schemaName" -> "main"
         ),
-        "/tmp/qod-maint-test"
+        "/tmp/qod-maint-test",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
       .toOption
@@ -54,7 +56,8 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
         "mem1",
         TenantDbKind.InMemory,
         Map.empty,
-        ""
+        "",
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     val handlers = new MaintenanceHandlers(sup, store)

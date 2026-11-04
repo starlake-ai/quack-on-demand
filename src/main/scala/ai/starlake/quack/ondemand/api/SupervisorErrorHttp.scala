@@ -14,4 +14,12 @@ object SupervisorErrorHttp:
       Some(StatusCode.BadRequest -> ErrorResponse("reserved_name", m))
     case SupervisorError.InvalidMembership(code, m) =>
       Some(StatusCode.BadRequest -> ErrorResponse(code, m))
+    case SupervisorError.DatabaseNameTaken(m) =>
+      Some(StatusCode.Conflict -> ErrorResponse("database_name_taken", m))
+    case SupervisorError.OwnLoginRequired(m) =>
+      Some(StatusCode.BadRequest -> ErrorResponse("own_login_required", m))
+    case SupervisorError.DbNameFixed(m) =>
+      Some(StatusCode.BadRequest -> ErrorResponse("db_name_fixed", m))
+    case SupervisorError.CatalogDatabaseMissing(m) =>
+      Some(StatusCode.BadRequest -> ErrorResponse("catalog_database_missing", m))
     case _ => None

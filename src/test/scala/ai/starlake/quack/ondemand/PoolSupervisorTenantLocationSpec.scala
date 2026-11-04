@@ -19,7 +19,7 @@ class PoolSupervisorTenantLocationSpec extends AnyFlatSpec with Matchers:
     List("acme", "globex").foreach { t =>
       sup.createTenant(Tenant(t)).unsafeRunSync()
       sup
-        .createTenantDb(t, "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+        .createTenantDb(t, "default", TenantDbKind.InMemory, Map.empty, dataPath = "", adoptExistingDatabase = false)
         .unsafeRunSync()
     }
     (sup, store)

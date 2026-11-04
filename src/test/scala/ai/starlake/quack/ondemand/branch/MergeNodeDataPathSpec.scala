@@ -31,7 +31,8 @@ class MergeNodeDataPathSpec extends AnyFlatSpec with Matchers:
           "pgPassword" -> "p",
           "schemaName" -> "main"
         ),
-        dataPath = dataPath
+        dataPath = dataPath,
+        adoptExistingDatabase = false
       )
       .unsafeRunSync()
     withClue(created)(created.isRight shouldBe true)

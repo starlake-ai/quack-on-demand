@@ -2,7 +2,7 @@
 # K8s entrypoint for the Quack node image. The manager (KubernetesQuackBackend)
 # passes the listen port via QOD_NODE_PORT and the node's id via QOD_NODE_ID; the
 # other plain env vars are the metastore keys the spawn script reads (TenantDb.NodeEnvKeys:
-# pgHost, pgPort, pgUser, dbName, catalogAlias, schemaName, dataPath, encrypted; no other
+# pgHost, pgPort, pgUser, dbName, catalogAlias, schemaName, dataPath, encrypted, createDatabase; no other
 # metastore key reaches a pod) and what the manager sets itself (kind,
 # the three QOD_NODE_*_EXTENSIONS policy variables, QOD_AUTHZ_DECIDE_TIMEOUT_MS and
 # QOD_AUTHZ_CACHE_ENTRIES, the optional non-secret QOD_S3_* knobs). The sensitive values (token, node

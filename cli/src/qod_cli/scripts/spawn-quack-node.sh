@@ -25,6 +25,9 @@
 #                                       like "$dbName"."customer" resolve as ambiguous.)
 #   dataPath                           (DuckLake data files directory)
 #   encrypted                          (`true` for an encrypted database, stamped by the manager)
+#   createDatabase                     (`true` on a DuckLake database of QoD's own Postgres server,
+#                                       stamped by the manager: only then does this script create a
+#                                       missing catalog database)
 #
 # These are TenantDb.NodeEnvKeys: every launcher passes these metastore keys and no other (a
 # metastore is tenant-admin input), so a metastore key this script starts reading must be added
@@ -129,7 +132,9 @@ export -n "${SECRET_KEYS[@]}" INIT_NONCE QOD_SECRETS_DIR QOD_SECRETS_DIR_EPHEMER
 pgHost="${pgHost:-localhost}"
 pgPort="${pgPort:-5432}"
 pgUser="${pgUser:-postgres}"
-pgPassword="${pgPassword:-azizam}"
+# No fallback: a database with no password of its own on another server than QoD's arrives with
+# none, and fails to connect.
+pgPassword="${pgPassword:-}"
 dbName="${dbName:-db1}"
 catalogAlias="${catalogAlias:-$dbName}"
 schemaName="${schemaName:-main}"
@@ -433,12 +438,14 @@ printf '%s' "$SPILL_DIR" > "$NODE_DIR/spill.path"
 # Ensure the Postgres database $dbName exists. Connects to PG_ADMIN_DB (default
 # `postgres`) as admin and runs CREATE DATABASE if missing. Skipped when psql
 # isn't available - the DuckLake ATTACH below will fail loudly in that case.
-# Only needed for kind=ducklake.
+# Only for kind=ducklake on QoD's own server (the manager's createDatabase stamp): a catalog on
+# another server is its owner's to manage.
 # Still dry-run-gated (unlike mkdir above): SpawnScriptEncryptionSpec's ducklake cases use a
 # fake pgHost, and a real psql invocation would attempt a network connection to it - DNS
 # resolution of an unresolvable host has no bounded latency guarantee, so this would make the
 # test's runtime depend on the test machine's network/resolver behavior.
-if [[ "$kind" == "ducklake" && "${QOD_SPAWN_DRY_RUN:-}" != "1" ]] && command -v psql >/dev/null 2>&1; then
+if [[ "$kind" == "ducklake" && "${createDatabase:-}" == "true" && "${QOD_SPAWN_DRY_RUN:-}" != "1" ]] \
+  && command -v psql >/dev/null 2>&1; then
   ADMIN_DB="${PG_ADMIN_DB:-postgres}"
   # The password reaches psql through a private passfile, never PGPASSWORD: psql's own
   # environment is as readable as the node's while it runs. It sits in NODE_DIR, so cleanup()

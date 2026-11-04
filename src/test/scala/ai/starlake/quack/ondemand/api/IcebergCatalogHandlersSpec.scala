@@ -199,10 +199,10 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
       "schemaName" -> "main"
     )
     sup
-      .createTenantDb("acme", "tpch1", TenantDbKind.DuckLake, meta, "/tmp/qod-iceberg-test")
+      .createTenantDb("acme", "tpch1", TenantDbKind.DuckLake, meta, "/tmp/qod-iceberg-test", adoptExistingDatabase = false)
       .unsafeRunSync()
     sup
-      .createTenantDb("acme", "other", TenantDbKind.DuckLake, meta, "/tmp/qod-iceberg-test2")
+      .createTenantDb("acme", "other", TenantDbKind.DuckLake, meta, "/tmp/qod-iceberg-test2", adoptExistingDatabase = false)
       .unsafeRunSync()
     if withPool then sup.createPool(poolKey, RoleDistribution(1, 0, 0)).unsafeRunSync()
     sup
