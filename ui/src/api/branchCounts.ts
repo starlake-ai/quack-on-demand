@@ -99,6 +99,13 @@ export function actionErrorText(e: unknown): string {
     'Refresh shows where it stands.';
 }
 
+/** The note for a merge refused because its proposal has merged, in the server's words, and `null`
+  * for anything else. What a retry reads after an answer that was lost, and what a second approver
+  * reads: the merge is done, so it is no error. Decided by the code, never by the words. */
+export function alreadyMergedNote(e: unknown): string | null {
+  return e instanceof ApiError && e.code === 'already_merged' ? e.message : null;
+}
+
 /** The note after a merge request's status chip, for a request that carries an error. On an open
   * proposal an error starting `timeout: ` is no failure: a send was made and has not answered, so a
   * merge is running or may have landed. The server tests the prefix and never the word, since an

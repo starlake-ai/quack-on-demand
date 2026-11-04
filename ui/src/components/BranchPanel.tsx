@@ -1,8 +1,8 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import {
-  actionErrorText, branchCount, conflictPolicyText, diffChangeType, proposalErrorNote, rowConflictsHint,
-  rowConflictsText,
+  actionErrorText, alreadyMergedNote, branchCount, conflictPolicyText, diffChangeType, proposalErrorNote,
+  rowConflictsHint, rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import { BranchNamePattern } from '../api/branchName';
@@ -439,7 +439,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         // refusal closed, a merge that timed out and wrote only its merge row). The panel is read
         // again only if it is this branch's. `reload` clears the error, so it goes first.
         reload(expanded === b.name);
-        setError(`${label} '${b.name}': ${actionErrorText(e)}`);
+        const done = alreadyMergedNote(e);
+        if (done !== null) setNote(done);
+        else setError(`${label} '${b.name}': ${actionErrorText(e)}`);
       })
       .finally(() => setBusy(null));
   }

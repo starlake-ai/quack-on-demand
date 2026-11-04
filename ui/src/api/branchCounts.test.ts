@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from './client';
 import {
   actionErrorText,
+  alreadyMergedNote,
   branchCount,
   conflictPolicyText,
   CountsUnavailableTitle,
@@ -214,5 +215,29 @@ describe('actionErrorText', () => {
     expect(text).toContain('no answer from the server (HTTP 504)');
     expect(text).toContain('may still be running');
     expect(text).not.toContain('<html>');
+  });
+});
+
+describe('alreadyMergedNote', () => {
+  const text = "proposal mg-1 of branch 'b' is already merged: main snapshot 6, tag merge-b-1";
+
+  it("gives the server's text for that one code, as a note: the merge is done", () => {
+    expect(alreadyMergedNote(new ApiError(409, text, 'already_merged'))).toBe(text);
+  });
+
+  it('leaves every other refusal to the banner', () => {
+    for (const code of ['merge_conflict', 'proposal_replaced', 'proposal_unsettled', 'self_merge_forbidden', 'not_found']) {
+      expect(alreadyMergedNote(new ApiError(409, 'refused', code)), code).toBeNull();
+    }
+  });
+
+  it('goes by the code and never by the words', () => {
+    expect(alreadyMergedNote(new ApiError(409, 'is already merged', 'merge_conflict'))).toBeNull();
+    expect(alreadyMergedNote(new ApiError(409, 'is already merged'))).toBeNull();
+  });
+
+  it('leaves an action with no answer to the banner, whatever it says', () => {
+    expect(alreadyMergedNote(new TypeError('Failed to fetch'))).toBeNull();
+    expect(alreadyMergedNote(new TypeError('already_merged'))).toBeNull();
   });
 });
