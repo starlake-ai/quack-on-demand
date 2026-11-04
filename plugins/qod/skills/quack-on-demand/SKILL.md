@@ -2043,6 +2043,11 @@ on a branch never touch the live database. Grants, row and column policies
 written against the parent apply unchanged on the branch (same catalog name).
 Branch names: lowercase letter first, then letters, digits, `_` or `-`, at most
 48 characters. Only DuckLake databases can be branched, and never a branch.
+On Kubernetes a branch's node id is 36 characters plus the tenant's and the parent
+database's names, and it must fit a Service name and a label value, 63 characters
+each, so a create past that answers `502 branch_create_failed` (`wayne_corp` and
+`wayne_corp_sales_2026` make 67); a merge node's id holds neither name and stays
+within 35 characters, so `propose` and `merge` have no such limit.
 
 ```bash
 # 1. Create a branch of acme's tpch1 database (expires after 24h; omit for the server default).

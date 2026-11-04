@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.ondemand.branch.BranchNames
 import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
@@ -29,6 +30,18 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "leave already-hyphenated tenant-db names alone" in {
     val k = PoolKey("acme", "acme-default", "sales")
     PoolSupervisor.nodeId(k, 7) shouldBe "quack-acme-acme-default-sales-7"
+  }
+
+  it should "take 36 characters plus the tenant's and the parent's names on a branch's node" in {
+    // The sum the skill gives for a branch create on Kubernetes, where a node id must fit a Service
+    // name and a label value: the branch's id8 is in its database and in its pool.
+    val branch = BranchNames.newId()
+    val names  = List("acme" -> "acme_tpch", "wayne_corp" -> "wayne_corp_sales_2026")
+    names.foreach { (tenant, parent) =>
+      val key =
+        PoolKey(tenant, BranchNames.tenantDbName(parent, branch), BranchNames.poolName(branch))
+      PoolSupervisor.nodeId(key, 1).length shouldBe 36 + tenant.length + parent.length
+    }
   }
 
   "PoolSupervisor.replaceLastSegment" should "derive sibling paths for filesystem roots" in {
@@ -1958,7 +1971,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       val merge = sup.mergeNodeSpec("acme", db, s"${db.take(50)}__br_ab12cd34", "/var/x/").get.nodeId
       withClue(merge) {
         merge should fullyMatch regex serviceName
-        merge.length should be <= 63
+        // `merge-`, the id8, `-`, a Long: neither name, so a propose has no limit of a branch's.
+        merge.length should be <= 35
       }
     }
 

@@ -10,6 +10,10 @@ NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, f
 before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
 proposed.
 
+On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
+cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
+upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
+
 ### Breaking
 
 - Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
@@ -90,10 +94,11 @@ proposed.
   `quack-pool` hold a name as it is, so running pods and their selectors stay, or `qod.<name>.qod` when a
   label value cannot hold it: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end.
   Merge, maintenance and branch nodes could not start on a real cluster (`422`), and now every proposal
-  of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`, and
-  a pool ending in `_` gets Secret names the API accepts. A node id past 63 characters is still refused
-  (`422`): a branch pool's takes 36 characters plus its tenant and parent names, and `branch create`
-  answers `502 branch_create_failed`.
+  of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`:
+  until now every maintenance run on Kubernetes ended `failed` with `node spawn failed`, its cause at WARN
+  only. A pool ending in `_` gets Secret names the API accepts. A node id past 63 characters is still
+  refused (`422`): a branch pool's takes 36 characters plus its tenant and parent names, and `branch
+  create` answers `502 branch_create_failed`; a merge node's stays within 35.
 - A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight
