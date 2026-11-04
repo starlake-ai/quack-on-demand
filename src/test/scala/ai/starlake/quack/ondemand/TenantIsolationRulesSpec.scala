@@ -1846,6 +1846,55 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.row("acme_managed__br_12345678").objectStore shouldBe ManagedKeys
   }
 
+  // ---------- what a lookup and a block message hold ----------
+
+  "The metastore of an unknown tenant and database" should
+    "hold neither QoD's login nor its control-plane database" in {
+      val f    = new Fixture
+      val meta = f.sup.effectiveMetastoreFor("acme", "no_such_db")
+      meta.keySet should contain noneOf ("pgUser", "pgPassword", "dbName")
+      meta.values should not contain DefaultPassword
+      TenantDb.catalogAlias(meta, "no_such_db") shouldBe "no_such_db"
+      f.sup
+        .effectiveMetastoreFor("no_such_tenant", "acme_x")
+        .values should not contain DefaultPassword
+      // A row keeps what it inherits.
+      f.rest(tenantAdmin, "known") shouldBe Right("acme_known")
+      val known = f.sup.effectiveMetastoreFor("acme", "acme_known")
+      known("pgPassword") shouldBe DefaultPassword
+      known("dbName") shouldBe "acme_known"
+    }
+
+  "A data path's block message" should "print no secret of the row, in any spelling" in {
+    val secrets = Map(
+      "pgPassword"           -> "block-sentinel-1",
+      "PgPassword"           -> "block-sentinel-2",
+      "PGPASSWORD"           -> "block-sentinel-3",
+      "encryptionKey"        -> "block-sentinel-4",
+      "ENCRYPTIONKEY"        -> "block-sentinel-5",
+      "S3_Secret_Access_Key" -> "block-sentinel-6"
+    )
+    val plain = Map("dbName" -> "acme_x", "schemaName" -> "s1")
+    List(
+      // Derived from the default: the fix pins the row.
+      TenantDb("td", "acme", "acme_x", TenantDbKind.DuckLake, plain ++ secrets, ""),
+      // In the metastore: the fix points the row.
+      TenantDb(
+        "td",
+        "acme",
+        "acme_x",
+        TenantDbKind.DuckLake,
+        plain ++ secrets + ("dataPath" -> "/old"),
+        ""
+      )
+    ).foreach { td =>
+      val block = PoolSupervisor.dataPathBlockReason(td, "acme", "/lakes/default", "/old", "/new")
+      val text  = (block.reason :: block.fixes).mkString("\n")
+      text should include("schemaName=s1")
+      text should not include "block-sentinel"
+    }
+  }
+
   // ---------- the tenant-name rule, at the handler's path ----------
 
   "tenant/create" should "keep answering a bad name 400 once the supervisor refuses it" in {

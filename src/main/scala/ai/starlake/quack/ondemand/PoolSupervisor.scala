@@ -2053,12 +2053,13 @@ final class PoolSupervisor(
     pools.keys.find(k => k.tenant == t && k.pool == poolName)
 
   /** Effective metastore for a tenant-db (defaults + td params + per-tenant-db naming). Used by the
-    * catalog browser.
+    * catalog browser and for catalog aliases. An unknown pair gets the defaults without QoD's login
+    * and without its `dbName`: its alias is the name asked for, and no reader can be built on it.
     */
   def effectiveMetastoreFor(tenantName: String, tenantDbName: String): Map[String, String] =
     findTenantDb(tenantName, tenantDbName)
       .map(effectiveMetastoreFor)
-      .getOrElse(defaultMetastore)
+      .getOrElse(defaultMetastore -- TenantDb.LoginKeys - "dbName")
 
   /** The manager-wide metastore defaults (`quack-on-demand.defaultMetastore`), raw. Backing for the
     * REST `database/metastore-defaults` endpoint; response surfaces must never include
@@ -5076,7 +5077,7 @@ object PoolSupervisor:
     val shared =
       "if two installations share this control plane (a dev checkout and the qod launcher), give " +
         "each its own with QOD_PG_DBNAME"
-    val plainMetastore = td.metastore.filterNot((k, _) => TenantDb.SecretKeys.contains(k))
+    val plainMetastore                 = td.metastore.filterNot((k, _) => TenantDb.isSecretKey(k))
     def pin(keys: Map[String, String]) =
       val args = (keys + ("dataPath" -> recorded)).toList.sortBy(_._1).map { (k, v) =>
         s"--metastore ${shellWord(s"$k=$v")}"

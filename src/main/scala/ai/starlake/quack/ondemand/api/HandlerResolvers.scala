@@ -23,13 +23,8 @@ object HandlerResolvers:
       .map(_.id)
       .orElse(tenants.find(_.displayName == raw.toLowerCase(Locale.ROOT)).map(_.id))
 
-  /** Keys that must never round-trip in an API response: see [[TenantDb.SecretKeys]], the single
-    * source of truth shared with `PoolSupervisor.mergeSecretKeys` so the two sites cannot drift.
-    */
-  private val redactedKeys: Set[String] = TenantDb.SecretKeys
-
-  /** Hide secret-like keys (pgPassword plus the object-store secret keys) from a
-    * metastore/objectStore map before it goes out on the wire.
+  /** Hide secret-like keys ([[TenantDb.isSecretKey]]: pgPassword plus the object-store secret keys)
+    * from a metastore/objectStore map before it goes out on the wire.
     */
   def redactPassword(m: Map[String, String]): Map[String, String] =
-    m.filterNot { case (k, _) => redactedKeys.exists(_.equalsIgnoreCase(k)) }
+    m.filterNot { case (k, _) => TenantDb.isSecretKey(k) }
