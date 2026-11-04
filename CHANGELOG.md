@@ -86,6 +86,9 @@ count. To keep counts from a user, refuse on the table.
   database, a local one, a value that was never complete, and one of managed storage or a branch of it,
   whose `objectStore` holds QoD's keys. A value left as stored is not judged, so an edit not touching it
   still works, and a secret sent counts as a change whatever it says.
+- A node's `quack_azure` secret, the manager's `QOD_AZURE_CONNECTION_STRING`, exists only for a database
+  with no `objectStore` and is scoped to its data path and its branches' prefix, as `qod_data_s3` is. Any
+  other `az://` path no longer signs with it: a superuser reading one creates a secret of their own.
 - A DuckLake create naming no path no longer answers `400`, for any caller: the database gets a folder of
   its own beside the default data path, under its composed name, stored on the row so that it cannot
   move. With no default data path, or one that is a bucket's root, it answers `400 invalid_contract`

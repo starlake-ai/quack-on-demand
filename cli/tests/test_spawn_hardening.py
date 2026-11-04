@@ -63,6 +63,51 @@ def test_the_init_sql_holds_no_dot_command_and_passes_values_through(tmp_path):
     assert "quack_serve" not in res.stdout
 
 
+_AZURE_PATH = "az://cont/lakes/acme_lake"
+_AZURE_DB = dict(kind="ducklake", dbName="acme_lake", catalogAlias="acme_lake", pgHost="h", pgPort="5432",
+                 pgUser="u", dataPath=_AZURE_PATH)
+
+
+def _azure_secret(sql):
+    start = sql.find("CREATE OR REPLACE SECRET quack_azure (")
+    return None if start < 0 else sql[start:sql.index(");", start)]
+
+
+def test_the_managers_azure_connection_is_scoped_to_the_data_path(tmp_path):
+    res = _dry_run(tmp_path, secrets={"QOD_AZURE_CONNECTION_STRING": "AccountName=a;AccountKey=a2V5",
+                                      "pgPassword": "p"}, **_AZURE_DB)
+    assert res.returncode == 0, res.stderr
+    statement = _azure_secret(res.stdout)
+    assert statement is not None
+    assert f"SCOPE ['{_AZURE_PATH}/', '{_AZURE_PATH}__br_']" in statement
+
+
+def test_a_branch_scopes_the_managers_azure_connection_to_its_parent_and_itself(tmp_path):
+    branch = _AZURE_PATH + "__br_0123abcd/"
+    res = _dry_run(tmp_path, secrets={"QOD_AZURE_CONNECTION_STRING": "AccountName=a;AccountKey=a2V5",
+                                      "pgPassword": "p"}, **{**_AZURE_DB, "dataPath": branch})
+    assert res.returncode == 0, res.stderr
+    assert f"SCOPE ['{_AZURE_PATH}/', '{branch}']" in _azure_secret(res.stdout)
+
+
+def test_a_database_with_its_own_keys_gets_no_azure_secret_of_the_managers(tmp_path):
+    res = _dry_run(tmp_path, secrets={"QOD_AZURE_CONNECTION_STRING": "AccountName=a;AccountKey=a2V5",
+                                      "objectStoreSql": "SELECT 'own store';", "pgPassword": "p"},
+                   **_AZURE_DB)
+    assert res.returncode == 0, res.stderr
+    assert _azure_secret(res.stdout) is None
+    assert "SELECT 'own store';" in res.stdout
+
+
+def test_the_powershell_twin_scopes_the_azure_connection_alike():
+    text = (ROOT / "cli" / "src" / "qod_cli" / "scripts" / "spawn-quack-node.ps1").read_text(encoding="utf-8")
+    start = text.index("'^(az|azure|abfss)://'")
+    arm = text[start:text.index("break", start)]
+    assert "[string]::IsNullOrEmpty($objectStoreSql)" in arm
+    assert "SCOPE [$dataScopes]" in arm
+    assert "CONNECTION_STRING '$(Sql-Quote $azConn)'" in arm
+
+
 def test_the_sweep_never_follows_a_symlinked_node_directory(tmp_path):
     victim = tmp_path / "victim"
     victim.mkdir()

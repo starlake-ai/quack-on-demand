@@ -368,7 +368,9 @@ bytes another user's keys fetched). Nodes hold no unscoped `quack_s3` any more (
 embedded DuckDB in `DuckLakeInitializer` does): the data path signs with `qod_data_s3` (the manager's
 `QOD_S3_*` keys, or `PROVIDER credential_chain` after `INSTALL aws` / `LOAD aws` when there are none)
 or the database's own `qod_db_store`, scoped to the data path and its branches' `<path>__br_` prefix
-(a branch node: the parent's and its own), every key named. When httpfs loads, qod-node resets the
+(a branch node: the parent's and its own), every key named; `quack_azure`, the manager's
+`QOD_AZURE_CONNECTION_STRING`, exists under the same two rules: only on a row with no `objectStore`, and
+scoped to those data scopes. When httpfs loads, qod-node resets the
 GLOBAL settings httpfs copied from `AWS_*` / `DUCKDB_S3_*` to their defaults
 (`ResetS3EnvironmentDefaults`), and when aws loads it sets `aws_default_credentials` false (its default
 storage would sign any URL no secret matches with the instance's credential chain). Non-superusers may

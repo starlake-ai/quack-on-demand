@@ -188,18 +188,23 @@ STORAGE_SQL=""
 # The quote rides a variable: inside double quotes, bash 3.2 (macOS) keeps the backslashes of an
 # escaped quote in the replacement.
 sql_quote() { local q="'"; printf '%s' "${1//$q/$q$q}"; }
+# Where the manager's own credentials sign on this node: the scopes ObjectStoreSecret.dataScopes gives
+# a database's own keys.
+set_data_scopes() {
+  if [[ "$kind" == "duckdb-file" ]]; then
+    data_scopes="'$(sql_quote "$dataPath")'"
+  elif [[ "$dataPath" =~ ^(.*)__br_[0-9a-f]{8}/?$ ]]; then
+    data_scopes="'$(sql_quote "${BASH_REMATCH[1]}/")', '$(sql_quote "${dataPath%/}/")'"
+  else
+    data_scopes="'$(sql_quote "${dataPath%/}/")', '$(sql_quote "${dataPath%/}__br_")'"
+  fi
+}
 case "$dataPath" in
   s3://*|s3a://*|gs://*|r2://*)
     IS_REMOTE=1
     STORAGE_SQL="INSTALL httpfs;"$'\n'"LOAD httpfs;"
     if [[ -z "${objectStoreSql:-}" ]]; then
-      if [[ "$kind" == "duckdb-file" ]]; then
-        data_scopes="'$(sql_quote "$dataPath")'"
-      elif [[ "$dataPath" =~ ^(.*)__br_[0-9a-f]{8}/?$ ]]; then
-        data_scopes="'$(sql_quote "${BASH_REMATCH[1]}/")', '$(sql_quote "${dataPath%/}/")'"
-      else
-        data_scopes="'$(sql_quote "${dataPath%/}/")', '$(sql_quote "${dataPath%/}__br_")'"
-      fi
+      set_data_scopes
       # USE_SSL is spliced into SQL unquoted: true or false only.
       s3_use_ssl="$(printf '%s' "${QOD_S3_USE_SSL:-true}" | tr '[:upper:]' '[:lower:]')"
       if [[ "$s3_use_ssl" != "true" && "$s3_use_ssl" != "false" ]]; then
@@ -256,11 +261,13 @@ CREATE OR REPLACE SECRET qod_data_s3 (
   az://*|azure://*|abfss://*)
     IS_REMOTE=1
     STORAGE_SQL="INSTALL azure;"$'\n'"LOAD azure;"
-    if [[ -n "${QOD_AZURE_CONNECTION_STRING:-}" ]]; then
+    if [[ -z "${objectStoreSql:-}" && -n "${QOD_AZURE_CONNECTION_STRING:-}" ]]; then
+      set_data_scopes
       STORAGE_SQL="$STORAGE_SQL
 CREATE OR REPLACE SECRET quack_azure (
   TYPE azure,
-  CONNECTION_STRING '${QOD_AZURE_CONNECTION_STRING}'
+  CONNECTION_STRING '$(sql_quote "$QOD_AZURE_CONNECTION_STRING")',
+  SCOPE [$data_scopes]
 );"
     fi
     ;;

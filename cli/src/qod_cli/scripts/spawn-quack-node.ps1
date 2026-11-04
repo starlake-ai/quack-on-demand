@@ -219,20 +219,25 @@ ERROR: schemaName ($schemaName) must differ from the catalog alias ($catalogAlia
 $isRemote   = $false
 $storageSql = ''
 function Sql-Quote([string]$v) { return $v.Replace("'", "''") }
+# Where the manager's own credentials sign on this node: the scopes ObjectStoreSecret.dataScopes gives
+# a database's own keys.
+function Get-DataScopes {
+  if ($kind -ceq 'duckdb-file') { $scopes = @($dataPath) }
+  elseif ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') {
+    $scopes = @(($Matches[1] + '/'), (($dataPath -replace '/$', '') + '/'))
+  }
+  else {
+    $base = $dataPath -replace '/$', ''
+    $scopes = @(($base + '/'), ($base + '__br_'))
+  }
+  return ($scopes | ForEach-Object { "'" + (Sql-Quote $_) + "'" }) -join ', '
+}
 switch -Regex ($dataPath) {
   '^(s3|s3a|gs|r2)://' {
     $isRemote = $true
     $storageSql = "INSTALL httpfs;`nLOAD httpfs;"
     if ([string]::IsNullOrEmpty($objectStoreSql)) {
-      if ($kind -ceq 'duckdb-file') { $scopes = @($dataPath) }
-      elseif ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') {
-        $scopes = @(($Matches[1] + '/'), (($dataPath -replace '/$', '') + '/'))
-      }
-      else {
-        $base = $dataPath -replace '/$', ''
-        $scopes = @(($base + '/'), ($base + '__br_'))
-      }
-      $dataScopes = ($scopes | ForEach-Object { "'" + (Sql-Quote $_) + "'" }) -join ', '
+      $dataScopes = Get-DataScopes
       $ep = Env-Or 'QOD_S3_ENDPOINT' ''
       $ep = Sql-Quote ($ep -replace '^https?://', '' -replace '/$', '')
       # USE_SSL is spliced into SQL unquoted: true or false only (mirrors spawn-quack-node.sh).
@@ -294,12 +299,14 @@ CREATE OR REPLACE SECRET qod_data_s3 (
     $isRemote = $true
     $storageSql = "INSTALL azure;`nLOAD azure;"
     $azConn = Secret-Or 'QOD_AZURE_CONNECTION_STRING' ''
-    if (-not [string]::IsNullOrEmpty($azConn)) {
+    if ([string]::IsNullOrEmpty($objectStoreSql) -and -not [string]::IsNullOrEmpty($azConn)) {
+      $dataScopes = Get-DataScopes
       $storageSql += @"
 
 CREATE OR REPLACE SECRET quack_azure (
   TYPE azure,
-  CONNECTION_STRING '$azConn'
+  CONNECTION_STRING '$(Sql-Quote $azConn)',
+  SCOPE [$dataScopes]
 );
 "@
     }

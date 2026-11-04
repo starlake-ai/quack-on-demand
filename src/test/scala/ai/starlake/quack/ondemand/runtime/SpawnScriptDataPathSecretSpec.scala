@@ -104,6 +104,58 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
       ManagerKeys.foreach(opt => withClue(opt)(data should include(opt)))
     }
 
+    it should "scope the manager's Azure connection to the data path and its branches" in {
+      val conn = "QOD_AZURE_CONNECTION_STRING" -> "AccountName=acct;AccountKey=a2V5"
+      List(
+        "az://cont/lakes/acme_lake" -> List(
+          "az://cont/lakes/acme_lake/",
+          "az://cont/lakes/acme_lake__br_"
+        ),
+        "azure://cont/lakes/acme_lake/" -> List(
+          "azure://cont/lakes/acme_lake/",
+          "azure://cont/lakes/acme_lake__br_"
+        ),
+        "abfss://cont@acct.dfs.core.windows.net/lakes/acme_lake" -> List(
+          "abfss://cont@acct.dfs.core.windows.net/lakes/acme_lake/",
+          "abfss://cont@acct.dfs.core.windows.net/lakes/acme_lake__br_"
+        ),
+        "az://cont/lakes/acme_lake__br_0123abcd/" -> List(
+          "az://cont/lakes/acme_lake/",
+          "az://cont/lakes/acme_lake__br_0123abcd/"
+        )
+      ).foreach { (path, scopes) =>
+        withClue(path) {
+          val sql   = initSql(path, conn)
+          val azure = secret(sql, "quack_azure").getOrElse(fail(s"no quack_azure in:\n$sql"))
+          scopesOf(azure) shouldBe Some(scopes)
+          azure should include("CONNECTION_STRING 'AccountName=acct;AccountKey=a2V5'")
+        }
+      }
+      val file = "az://cont/acme.duckdb"
+      scopesOf(secret(initSql(file, conn, "kind" -> "duckdb-file"), "quack_azure").get) shouldBe
+        Some(List(file))
+    }
+
+    it should "create no Azure secret for a database with its own object-store secret" in {
+      val path = "az://cont/lakes/acme_lake"
+      val own  = ObjectStoreSecret.sql(
+        Map("azure_account" -> "own", "azure_account_key" -> "a2V5"),
+        path,
+        "ducklake"
+      )
+      val sql = initSql(
+        path,
+        "QOD_AZURE_CONNECTION_STRING" -> "AccountName=acct;AccountKey=a2V5",
+        "objectStoreSql"              -> own
+      )
+      secret(sql, "quack_azure") shouldBe None
+      sql should include("INSTALL azure;")
+    }
+
+    it should "create no Azure secret without the manager's connection string" in {
+      secret(initSql("az://cont/lakes/acme_lake"), "quack_azure") shouldBe None
+    }
+
     it should "create no unscoped s3 secret, whatever signs the data path" in
       List(
         initSql("s3://lake/acme_lake"),
@@ -324,6 +376,46 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
     val (okRc, _, _) = runCli(cli, "INSTALL httpfs;\nLOAD httpfs;\nSELECT 1;\n")
     assume(okRc == 0, "httpfs cannot be installed on this host (offline, no cache)")
     cli
+
+  it should "match the manager's Azure connection inside the data scopes and nowhere else" in {
+    val cli          = duckdbCli.getOrElse(cancel("no DuckDB CLI (DUCKDB_CLI or DUCKDB_CACHE_DIR)"))
+    val (okRc, _, _) = runCli(cli, "INSTALL azure;\nLOAD azure;\nSELECT 1;\n")
+    assume(okRc == 0, "azure cannot be installed on this host (offline, no cache)")
+    // A well-formed string naming no real account: which_secret reads scopes and connects to nothing.
+    val conn = "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=a2V5;" +
+      "EndpointSuffix=core.windows.net"
+    def winners(dataPath: String, files: List[String]) =
+      val init = initSql(dataPath, "QOD_AZURE_CONNECTION_STRING" -> conn)
+      val sql  = (List("INSTALL azure;", "LOAD azure;") ++ secret(init, "quack_azure").toList ++
+        files.map(f => s"SELECT coalesce((SELECT name FROM which_secret('$f', 'azure')), 'none');"))
+        .mkString("\n")
+      val (rc, out, err) = runCli(cli, sql + "\n")
+      withClue(s"stderr: $err ") {
+        rc shouldBe 0
+        err.trim shouldBe ""
+      }
+      out.linesIterator.map(_.trim).filter(_.nonEmpty).toList.takeRight(files.size)
+    winners(
+      "az://cont/lakes/a",
+      List(
+        "az://cont/lakes/a/main/t/part-0.parquet",
+        "az://cont/lakes/a__br_0123abcd/part-0.parquet",
+        "az://cont/lakes/ab/part-0.parquet",
+        "az://cont/lakes/b/part-0.parquet",
+        "az://other/part-0.parquet",
+        "abfss://cont@acct.dfs.core.windows.net/lakes/a/part-0.parquet"
+      )
+    ) shouldBe List("quack_azure", "quack_azure", "none", "none", "none", "none")
+    val abfss = "abfss://cont@acct.dfs.core.windows.net/lakes/a"
+    winners(
+      abfss,
+      List(
+        s"$abfss/part-0.parquet",
+        s"${abfss}b/part-0.parquet",
+        "az://cont/lakes/a/part-0.parquet"
+      )
+    ) shouldBe List("quack_azure", "none", "none")
+  }
 
   it should "sign the data path with its own secret and a user's URL with the user's" in {
     val cli = cliOrCancel()

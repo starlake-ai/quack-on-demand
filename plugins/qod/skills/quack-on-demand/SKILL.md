@@ -1348,9 +1348,8 @@ pool set-init-sql ...`), then restart its nodes.
 
 `objectStore` on a database takes effect at node spawn: it authors a DuckDB
 secret scoped to that database's `dataPath`, so this database authenticates
-its own bucket with its own keys, coexisting with the process-global
-`QOD_S3_*` / `QOD_AZURE_*` / `QOD_GCS_*` default secret (DuckDB picks the most
-specific scope per path). Keys, by `dataPath` scheme:
+its own bucket with its own keys, and its nodes hold no secret of the manager's
+`QOD_S3_*` / `QOD_AZURE_*` keys. Keys, by `dataPath` scheme:
 
 - `s3://` / `s3a://` / `r2://`: `s3_region`, `s3_access_key_id`,
   `s3_secret_access_key`, `s3_endpoint`, `s3_url_style`.
@@ -1367,8 +1366,9 @@ qod database create --tenant acme --name coldstore --kind ducklake \
   --object-store s3_secret_access_key=...
 ```
 
-An empty (or absent) `objectStore` falls back to the global env credentials -
-exact back-compat for every deployment that only ever used one set of keys. A
+An empty (or absent) `objectStore` falls back to the global env credentials,
+scoped to that database's data path and its branches: exact back-compat for
+every deployment that only ever used one set of keys. A
 path that falls back on them is a superuser's to name. A tenant admin sends `objectStore`
 on a create only with a remote path it completes, and changes it only on a database holding
 complete keys of its own, which may change, the endpoint included, and stay complete. Every
