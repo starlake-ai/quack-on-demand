@@ -2105,7 +2105,9 @@ nothing, even of a table they altered on their own branch), and
 table, and a key on one as for a table not in the change set. They see a table's
 row numbers only when their own count of it succeeds, and the count of a user
 holding a column or row policy never does: such a user gets no `rowConflicts` at
-all. An OPA tenant's users see nothing listed, as with their `SHOW TABLES`.
+all. An OPA tenant's users see what their QoD grants cover for reading, as with
+their `SHOW TABLES`, since OPA does not narrow those grants: nothing with no such
+grant, and every name on the default built-ins.
 `mergeable` is always the whole branch's, and a refusal's text can still name
 another table of it. An admin sees every table.
 
@@ -2158,7 +2160,8 @@ tables are fine. The merge retries by itself. On a table that commits too often,
 about 9 seconds (only a superuser can raise `ducklake_max_retry_count`; other writers retry themselves),
 then fail with "table is being merged". A writer whose transaction was open when the merge committed
 fails once and must redo its transaction. The hold ends by itself after `QOD_BRANCH_MERGE_TIMEOUT_SEC`,
-even if the manager dies.
+even if the manager dies. It is sized by that timeout, not by the expected merge, so raising the timeout
+for a slow Apply also lengthens the worst-case hold after a manager's death.
 
 Rows are matched by DuckDB's `rowid`, so no primary key is needed. Rowids survive updates, compaction
 and moves between partitions. A pipeline that rewrites rows by delete and re-insert gives them new

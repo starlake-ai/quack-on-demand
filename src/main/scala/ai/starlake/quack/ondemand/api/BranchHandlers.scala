@@ -636,8 +636,9 @@ object BranchHandlers:
     * `SHOW TABLES` and `DESCRIBE` hide the table, and a reply naming it, or a `schema-diff` read as
     * the system, would undo that. `alias`, the parent's catalog, is the only session catalog, so a
     * wildcard catalog covers it and nothing else. An empty set (nothing could be resolved) shows
-    * nothing. An OPA tenant's users hold no QoD grants to go by, so they see nothing listed, as
-    * with their `SHOW TABLES`.
+    * nothing. On an OPA tenant `eff` is still the closure of the user's QoD grants, which OPA does
+    * not narrow, so they see what those cover, as with their `SHOW TABLES`: nothing with no such
+    * grant, and every name on the default built-ins.
     */
   def seenBy(eff: EffectiveSet, alias: String): (String, String) => Boolean =
     (schema, table) =>

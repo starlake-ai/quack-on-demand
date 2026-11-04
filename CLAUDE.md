@@ -177,8 +177,13 @@ refused the COMMIT, or a timeout cancelled the call before any COMMIT went out) 
 on another thread) or in DuckLake's retries and a read can beat it. The fence row stays armed on every
 unknown outcome: a late COMMIT is still held to the table state the restore validated and cannot erase a
 write committed meanwhile, and a leftover row matches only that restore's own message. An undrop's
-`undrop_outcome_unknown` is the same idea without a fence: a failure reading its result's end is settled
-from the catalog too, and an absent commit there is unknown, never a refusal.
+`undrop_outcome_unknown` is the same idea without a fence: a timeout or a failure reading its result's end
+is settled from the catalog too. Found is success. A catalog that cannot be read is
+`undrop_outcome_unknown`, and so is an absent commit with a table now holding the target name, since
+another writer may have created it. An absent commit with no such table is `undrop_failed`, though after a
+lost answer a COMMIT still in flight can land; it says `retryable` and "nothing was committed" only when the
+node itself refused the COMMIT because DuckLake gave up on its retries. A restore answers that refusal `409
+concurrent_write`, like the fence's (`MergeDecision.retriesExhausted`).
 
 **Node-side authorization (node protocol 6).** A non-superuser statement is decided on what
 DuckDB resolved for it, on the node, before it runs, and nowhere else. The parse screen re-parses every PREPARE with
@@ -669,8 +674,9 @@ branch reads it only through `otherTables`, as their `SHOW TABLES` hides it.
 see are not counted as them. `diff` and `schema-diff` of such a table answer exactly as for no such table,
 at the point where that is decided (the `hidden` argument of `CatalogPreviewHandlers.dataDiff` /
 `schemaDiff`, which has no default: the catalog's own endpoints pass `NoneHidden`), and a key on one as for
-a table not in the change set, so its columns cannot be probed. An OPA tenant's users see
-nothing listed, as with their `SHOW TABLES`. Residuals, not holes to report: refusal text and a merge row's
+a table not in the change set, so its columns cannot be probed. An OPA tenant's users see what their QoD
+grants cover for reading, as with their `SHOW TABLES`, since OPA does not narrow the handshake's effective
+set: nothing with no such grant, and every name on the default built-ins. Residuals, not holes to report: refusal text and a merge row's
 `error` can name a table of the change set; `list` shows every branch's owner and name; a proposer sees
 whether an admin's merge of their proposal was refused for row conflicts, one bit per merge an admin runs;
 and `threeWay` and a visible table's conflict reason tell a policy holder that main touched a table they

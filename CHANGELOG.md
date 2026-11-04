@@ -1,5 +1,104 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading from 0.11.0
+
+Back up the control-plane database: Liquibase `0056` runs at boot and adds the columns of a three-way
+merge to `qodstate_branch_merge`. A proposal from before the upgrade reads `head_snapshot_at_propose`
+NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, finish a rolling upgrade
+before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
+proposed.
+
+### Breaking
+
+- Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
+  `--proposal`: the approver names the proposal they read, and another one in its place is
+  `409 proposal_replaced`.
+- Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
+  used to take the newer head. Proposing a branch that is already proposed replaces its open
+  proposal, and `409 already_proposed` is gone.
+- Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
+  rename the column), as one named `rowid` already did not.
+
+### Added
+
+- **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
+  (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
+  proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,
+  `--hold-writers` holds other commits on the merged tables. A merge that may have landed refuses
+  propose with `409 proposal_unsettled`: merge again, which settles it. Maintenance expires no
+  snapshot at or after the oldest live branch's fork (a merge reads main's changes over consecutive
+  snapshots), so with no TTL, expiry above that fork stops until the branch is merged or discarded.
+  New settings `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (20000000).
+  The API changes are under Breaking.
+- **Any principal who may connect may branch.** A plain user, or a `--drop-admin` token, may create,
+  list, read, diff, propose and discard branches over REST and MCP, in the tenant they belong to, when
+  they may connect to one of the parent's pools (else `403 no_pool_access`; another tenant is `403
+  tenant_forbidden`; `acl_denied` is gone from `branch create`). They propose and discard only their own
+  branches (`403 not_owner`) and ask for a TTL from 1 up to the server's default (`400 invalid_ttl`).
+  Merge stays admin only. Their replies follow filtered metadata: only the tables they hold a read grant
+  on (`RO`, `RW` or `ALL`, never `DDL` alone) are named, `otherTables` counts the rest (new on
+  `BranchChangesResponse`), and row numbers show only where their own count succeeded, never to a holder
+  of a column or row policy. `BranchActor.isAdmin` is now decided for the tenant in hand: an admin of
+  another tenant is a plain member here.
+
+### Fixed
+
+- An undrop (REST, MCP, `UNDROP TABLE`) stamps its commit with its own message whatever
+  `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
+  that failed, it used to land with no message, and an answer lost afterwards could not be settled
+  from the catalog. A table restore, whose commit fence matches its message, does the same.
+- A table restore that cannot tell whether its replace committed answers `502
+  restore_outcome_unknown`, audited, and its commit fence stays armed: its COMMIT's answer was lost (a
+  broken connection, a 5xx), or it answered and no commit of the restore is in the catalog yet (a kill
+  leaves a COMMIT in flight), or the catalog cannot be read to settle it. Check the table before
+  retrying: the replace may still land, and the fence keeps it from erasing a write committed
+  meanwhile. A node's own error on the COMMIT asks the catalog first too, since a connection to the
+  catalog lost during the metadata COMMIT can leave that commit durable: the commit found is success,
+  and only a catalog showing no commit of the restore makes the node's refusal `restore_failed` or
+  `409 concurrent_write` (which takes the fence off). Every clean answer is confirmed by the
+  restore's own commit, whose snapshot is `newSnapshot`. A restore that outlives
+  `restoreTimeoutSec` rolls back when its statement answers. An undrop whose stamp failed answers
+  `undrop_failed` with `retryable: true`, its
+  cause and "nothing was committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no
+  other node says what failed first. `qod catalog restore`, `qod catalog undrop` and `qod profile
+  undrop` wait for the server's answer instead of giving up at 30 s.
+- A database's or a pool's `initSql` whose last statement has no final `;`, even when the text ends
+  in a `-- comment`, no longer runs into the statement after it. Both were lost, so the node came up
+  without the setting and without whatever followed (DuckLake's own setup, at the database level).
+  The spawn scripts now close every trusted text they add to the node's init SQL with a `;` on a
+  line of its own; a tenant admin's untrusted text needs no terminator, since it is cut on its marker
+  lines. The stored text is not changed.
+- A `sql` federated source whose text has no final `;`, even when it ends in a `-- comment`, no
+  longer runs into the first statement of the next source's block, which lost both; and a merge
+  node's federation blob ending that way no longer swallows the branch attach. The manager now puts
+  a `;` on a line of its own between the blocks; the stored text is not changed.
+- A discard or a TTL expiry no longer runs under a propose or a merge of that branch, where it dropped
+  the catalog and files under the run, whose end could then bring back a branch with nothing left, which
+  counted toward `QOD_BRANCH_MAX_PER_DATABASE` and held back snapshot expiry on its parent. A discard
+  answers `409 branch_busy` while one runs and a sweep skips the branch until its next pass; a run of
+  another branch stops neither.
+- A discard or a TTL expiry no longer records as abandoned a merge that landed on main with nothing on
+  record, as when a manager dies between the COMMIT and its record. A discard answers `409
+  proposal_unsettled` and a sweep skips the branch with an ERROR in the log: merging it again records it,
+  which needs an admin other than its proposer, and until then it holds back snapshot expiry on its
+  parent. Another proposal's commit stops neither, since a discard is its only way out. When main's
+  catalog cannot be read to look, a discard answers `502 catalog_unavailable` and a sweep tries again at
+  its next pass.
+- Kubernetes: a label an API server refuses is no longer written. `quack-tenant`, `quack-tenant-db` and
+  `quack-pool` hold a name as it is, so running pods and their selectors stay, or `qod.<name>.qod` when a
+  label value cannot hold it: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end.
+  Merge, maintenance and branch nodes could not start on a real cluster (`422`), and now every proposal
+  of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`, and
+  a pool ending in `_` gets Secret names the API accepts. A node id past 63 characters is still refused
+  (`422`): a branch pool's takes 36 characters plus its tenant and parent names, and `branch create`
+  answers `502 branch_create_failed`.
+- A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
+  the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
+  answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight
+  `UNAVAILABLE`).
+
 ## 0.11.0
 
 ### Upgrading from 0.10.x (read first)
@@ -11,7 +110,7 @@ the details.
 
 Before upgrading:
 
-1. Back up the control-plane database. Liquibase `0047` to `0056` run at boot, and `0055` drops
+1. Back up the control-plane database. Liquibase `0047` to `0055` run at boot, and `0055` drops
    the `qodstate_pool.lockdown` column the previous release reads.
 2. Replace the static API key: mint PATs for automation (`qod login`, then `qod auth pat create`),
    point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every
@@ -739,14 +838,6 @@ In-engine authorization, Phase D: the node decides every statement alone.
   developer shell exporting a removed variable fails every in-process boot test (run them under
   `env -u`). Manager modules must be recompiled (constructor changes: `FlightSqlRouter`,
   `NodeKeys`, `QuackHttpAdapter`, the backends, `MetricsBindings`, `FederatedSourceHandlers`, ...).
-- Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
-  `--proposal`: the approver names the proposal they read, and another one in its place is
-  `409 proposal_replaced`.
-- Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
-  used to take the newer head. Proposing a branch that is already proposed replaces its open
-  proposal, and `409 already_proposed` is gone.
-- Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
-  rename the column), as one named `rowid` already did not.
 
 ### Added
 
@@ -796,25 +887,6 @@ In-engine authorization, Phase D: the node decides every statement alone.
   system caller, for a module's own provisioning statements, never SQL a user supplied; each is
   labelled `module:<name>` in statement history and audited as `module.sql`, both shown to the
   tenant's admins with the statement's values masked (as the stdout audit sink masks them).
-- **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
-  (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
-  proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,
-  `--hold-writers` holds other commits on the merged tables. A merge that may have landed refuses
-  propose with `409 proposal_unsettled`: merge again, or discard. Maintenance expires no snapshot at or
-  after the oldest live branch's fork (a merge reads main's changes over consecutive snapshots), so
-  with no TTL, expiry above that fork stops until the branch is merged or discarded. New settings
-  `QOD_BRANCH_MERGE_MAX_ATTEMPTS` (5) and `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS` (20000000). The API
-  changes are under Breaking.
-- **Any principal who may connect may branch.** A plain user, or a `--drop-admin` token, may create,
-  list, read, diff, propose and discard branches over REST and MCP, in the tenant they belong to, when
-  they may connect to one of the parent's pools (else `403 no_pool_access`; another tenant is `403
-  tenant_forbidden`; `acl_denied` is gone from `branch create`). They propose and discard only their own
-  branches (`403 not_owner`) and ask for a TTL from 1 up to the server's default (`400 invalid_ttl`).
-  Merge stays admin only. Their replies follow filtered metadata: only the tables they hold a read grant
-  on (`RO`, `RW` or `ALL`, never `DDL` alone) are named, `otherTables` counts the rest (new on
-  `BranchChangesResponse`), and row numbers show only where their own count succeeded, never to a holder
-  of a column or row policy. `BranchActor.isAdmin` is now decided for the tenant in hand: an admin of
-  another tenant is a plain member here.
 
 ### Fixed
 
@@ -836,24 +908,6 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - The restore dry run (REST `POST /api/catalog/restore` with `dryRun`, MCP `restore_snapshot`)
   counts as the requester instead of the system caller; a table they may not read answers 403
   `acl_denied`.
-- An undrop (REST, MCP, `UNDROP TABLE`) stamps its commit with its own message whatever
-  `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
-  that failed, it used to land with no message, and an answer lost afterwards could not be settled
-  from the catalog. A table restore, whose commit fence matches its message, does the same.
-- A table restore that cannot tell whether its replace committed answers `502
-  restore_outcome_unknown`, audited, and its commit fence stays armed: its COMMIT's answer was lost (a
-  broken connection, a 5xx), or it answered and no commit of the restore is in the catalog yet (a kill
-  leaves a COMMIT in flight), or the catalog cannot be read to settle it. Check the table before
-  retrying: the replace may still land, and the fence keeps it from erasing a write committed
-  meanwhile. A node's own error on the COMMIT asks the catalog first too, since a connection to the
-  catalog lost during the metadata COMMIT can leave that commit durable: the commit found is success,
-  and only a catalog showing no commit of the restore makes the node's refusal `restore_failed` or
-  `409 concurrent_write` (which takes the fence off). Every clean answer is confirmed by the
-  restore's own commit, whose snapshot is `newSnapshot`. A restore that outlives `restoreTimeoutSec` rolls back when its
-  statement answers. An undrop whose stamp failed answers `undrop_failed` with `retryable: true`, its
-  cause and "nothing was committed" (`UNDROP TABLE`: Flight `UNAVAILABLE`); a retry that finds no
-  other node says what failed first. `qod catalog restore`, `qod catalog undrop` and `qod profile
-  undrop` wait for the server's answer instead of giving up at 30 s.
 - A revoke now reaches open FlightSQL and native sessions on their next statement (inside an open
   native transaction too, which it ends: "transaction aborted: <reason>; ROLLBACK to continue"); a
   re-grant restores them without a reconnect; a user disabled, deleted or without the pool is
@@ -894,15 +948,6 @@ In-engine authorization, Phase D: the node decides every statement alone.
 - Drain waits for in-flight statements before stopping a node, on FlightSQL and the native front
   door (#161, thanks `ItsM0rty`). The wait is bounded by the new `QOD_POOL_DRAIN_TIMEOUT_SEC`
   (default 20 s).
-- A database's or a pool's `initSql` whose last statement has no final `;`, even when the text ends
-  in a `-- comment`, no longer runs into the statement after it. Both were lost, so the node came up
-  without the setting and without whatever followed (DuckLake's own setup, at the database level).
-  The spawn scripts now close every text they add to the node's init SQL with a `;` on a line of
-  its own; the stored text is not changed.
-- A `sql` federated source whose text has no final `;`, even when it ends in a `-- comment`, no
-  longer runs into the first statement of the next source's block, which lost both; and a merge
-  node's federation blob ending that way no longer swallows the branch attach. The manager now puts
-  a `;` on a line of its own between the blocks; the stored text is not changed.
 
 ## 0.10.1
 
