@@ -1088,6 +1088,64 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.reconcile().unsafeRunSync()
     b.specs.last.nodeId shouldBe "quack--acme--acme-default--sales--4"
 
+  it should "part two pools that shared an id: a row keeps it, a pool with none starts in the new form" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None
+    val otherDb = sup
+      .createTenantDb("acme", "default_eu", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .toOption
+      .get
+    val holder = PoolKey("acme", "acme_default", "eu_west")
+    val other  = PoolKey("acme", "acme_default_eu", "west")
+    val shared = oldForm(holder, 1)
+    oldForm(other, 1) shouldBe shared
+    // As the last release left them: the primary key on node_id keeps one row per id, with whichever
+    // pool wrote last.
+    val dbOf = Map(holder -> sup.findTenantDb("acme", "acme_default").get.id, other -> otherDb.id)
+    dbOf.foreach { (k, db) =>
+      st.upsertPool(
+        ai.starlake.quack.model.Pool(
+          id = s"p-${k.pool}",
+          tenantId = "acme",
+          tenantDbId = db,
+          name = k.pool,
+          size = 1,
+          distribution = RoleDistribution(0, 0, 1)
+        )
+      )
+    }
+    st.upsertNode(
+      RunningNode(shared, holder, Role.Dual, "127.0.0.1", 21990, "tok", None, None, Instant.EPOCH,
+        maxConcurrent = 4),
+      "p-eu_west"
+    )
+
+    // The upgraded manager boots.
+    sup.restore()
+    b.liveIds = Some(Set(shared))
+    sup.reconcile().unsafeRunSync()
+    val fresh = "quack--acme--acme-default-eu--west--1"
+    b.specs.map(_.nodeId).toList shouldBe List(fresh)
+    sup.get(holder).get.nodes.map(_.nodeId) shouldBe List(shared)
+    sup.get(other).get.nodes.map(_.nodeId) shouldBe List(fresh)
+    st.listNodes("p-eu_west").map(_.nodeId) shouldBe List(shared)
+    st.listNodes("p-west").map(_.nodeId) shouldBe List(fresh)
+
+    // And neither restarts the other any more.
+    b.liveIds = Some(Set(shared, fresh))
+    val started = b.specs.size
+    sup.reconcile().unsafeRunSync()
+    sup.reconcile().unsafeRunSync()
+    b.specs.size shouldBe started
+    b.stopped shouldBe empty
+
+  it should "leave two pools of one database differing by `_` and `-` alike: only a new name parts them" in:
+    val dashed     = PoolKey("acme", "acme_default", "eu-west")
+    val underscore = PoolKey("acme", "acme_default", "eu_west")
+    PoolSupervisor.nodeId(dashed, 1) shouldBe PoolSupervisor.nodeId(underscore, 1)
+    PoolSupervisor.nodeId(dashed, 1) shouldBe "quack--acme--acme-default--eu-west--1"
+
   "PoolSupervisor.createPool" should "refuse a name the rule refuses, whoever asks, writing nothing" in:
     val (sup, b, st) = freshSupervisorWithStore()
     List("__br_x", "__merge", "_x", "x_", "a__b", "a--b", "a_-b", "my pool", "1a", "a/b", "p" * 64)
@@ -1248,60 +1306,6 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     b.specs.map(_.nodeId) shouldBe List(PoolSupervisor.nodeId(old, 1))
     b.specs.head.nodeId should fullyMatch regex ".*-[0-9a-f]{16}-1"
     sup.get(old).get.nodes.size shouldBe 1
-
-  "PoolSupervisor.readAlikePools" should "pair the pools that read alike under one `-`" in:
-    val a  = PoolKey("acme", "acme_sales", "eu_west")
-    val b  = PoolKey("acme", "acme_sales_eu", "west")
-    val x  = PoolKey("x", "x_x_x_a", "b")
-    val xx = PoolKey("x_x", "x_x_a", "b")
-    val c  = PoolKey("acme", "acme_sales", "other")
-    PoolSupervisor.readAlikePools(List(xx, c, b, x, a)) shouldBe List((a, b), (x, xx))
-    PoolSupervisor.readAlikePools(List(a, c)) shouldBe Nil
-    PoolSupervisor.readAlikePools(Nil) shouldBe Nil
-    // A manifest can still bring two pools of one database that read the same.
-    val h = PoolKey("acme", "acme_sales", "eu-west")
-    PoolSupervisor.readAlikePools(List(a, h)) shouldBe List((h, a))
-    // Three: every pair.
-    val third = PoolKey("acme", "acme_sales_eu_west", "x")
-    PoolSupervisor.readAlikePools(List(third, PoolKey("acme", "acme_sales_eu", "west_x"))) shouldBe
-      List((PoolKey("acme", "acme_sales_eu", "west_x"), third))
-
-  "startupProblems" should "report two pools that read alike, naming both and the way out" in:
-    val (sup, _, st) = freshSupervisorWithStore()
-    val other = sup
-      .createTenantDb("acme", "default_eu", TenantDbKind.InMemory, Map.empty, dataPath = "")
-      .unsafeRunSync()
-      .toOption
-      .get
-    val td = sup.findTenantDb("acme", "acme_default").get
-    // Rows an earlier release made: `eu_west` of acme_default and `west` of acme_default_eu.
-    List(("p-1", td.id, "eu_west"), ("p-2", other.id, "west")).foreach { (id, db, name) =>
-      st.upsertPool(
-        ai.starlake.quack.model.Pool(
-          id = id,
-          tenantId = "acme",
-          tenantDbId = db,
-          name = name,
-          size = 0,
-          distribution = RoleDistribution(0, 0, 0)
-        )
-      )
-    }
-    sup.restore()
-    val problems = sup.startupProblems()
-    problems.map(p => (p.tenant, p.database, p.kind, p.pools)) shouldBe List(
-      ("acme", "acme_default", PoolSupervisor.StartupProblem.Kind.ReadAlike, List("eu_west"))
-    )
-    problems.head.reason should include("acme/acme_default/eu_west")
-    problems.head.reason should include("acme/acme_default_eu/west")
-    problems.head.fixes.mkString(" ") should include("under another name")
-    // Reported, and nothing blocked: both still answer.
-    sup.poolBlockReason(PoolKey("acme", "acme_default", "eu_west")) shouldBe None
-
-  it should "report nothing for pools that do not read alike" in:
-    val (sup, _, _) = freshSupervisorWithStore()
-    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    sup.startupProblems() shouldBe Nil
 
   "reconcile heal" should "fall back to the flat distribution in spawnFromDistribution when the cached " +
     "cohort plan disagrees with the authoritative target" in:

@@ -171,6 +171,13 @@ moves it to the new ones, and the old ones go once no pod reads them. Restart ev
 as usual. Under HA, finish a rolling upgrade before stopping or deleting a pool on Kubernetes: a replica
 still on 0.11.0 removes only the old names.
 
+Two pools that already read alike come apart at the first boot: a node keeps its stored id, and a pool
+left with no node row starts in the new form, on the fleet runtime once a server is free (the pair shared
+one). On Kubernetes a running pod keeps reading the old-named Secrets, which can hold the other database's
+`pgPassword`, until the restart above. Two pools of one database that differ only by `_` and `-` (`eu-west`,
+`eu_west`) read alike in the new form too: a fresh slot takes the other's id again, and no restart ends it.
+Recreate one under another name, and on Kubernetes then restart the other's nodes.
+
 On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
 cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
 upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
@@ -307,9 +314,7 @@ count. To keep counts from a user, refuse on the table.
   answered `500 start_failed` (a `409`) after overwriting the per-pool Secrets the first pool's pods read,
   so a pod's next container start could read the other database's `pgPassword`, federation SQL and
   initSql. Node ids and per-pool Secret names now put `--` between the names, and names that would break
-  that are refused (see Breaking). Pools that already read alike are named at boot under PROBLEMS: restart
-  every node of both, which gives each Secrets of its own, and recreate one under another name to clear the
-  report.
+  that are refused (see Breaking). For pools that already read alike, see Upgrading.
 - A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight

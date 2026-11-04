@@ -703,9 +703,7 @@ final class PoolSupervisor(
     * federation blob failed to resolve (its nodes lack federation aliases), both for a database
     * that has both, so fixing one never uncovers the other later. Sorted by tenant and database,
     * blocked ones first. An HA follower lists only what it reads from the rows, a local data path
-    * with local files off ([[localFilesBlock]]), until it leads: it runs no DuckLake init. Then,
-    * from the names alone, every two pools that read alike under the old form of a node id
-    * ([[PoolSupervisor.readAlikePools]]).
+    * with local files off ([[localFilesBlock]]), until it leads: it runs no DuckLake init.
     */
   def startupProblems(): List[PoolSupervisor.StartupProblem] =
     import PoolSupervisor.StartupProblem
@@ -738,23 +736,7 @@ final class PoolSupervisor(
           )
         }
       }
-    val readAlike = PoolSupervisor.readAlikePools(pools.keys).map { (a, b) =>
-      StartupProblem(
-        a.tenant,
-        a.tenantDb,
-        StartupProblem.Kind.ReadAlike,
-        s"pool $a and pool $b read alike in the node ids and Secret names releases before this one " +
-          "composed: they can have taken each other's node, or written each other's per-pool " +
-          "Secrets, the catalog password included",
-        List(
-          "recreate one of them under another name, which ends this report",
-          "until then, restart every node of both once: new-form Secrets hold each pool's own values"
-        ),
-        List(a.pool)
-      )
-    }
-    blocked.sortBy(p => (p.tenant, p.database)) ++ federation.sortBy(p => (p.tenant, p.database)) ++
-      readAlike
+    blocked.sortBy(p => (p.tenant, p.database)) ++ federation.sortBy(p => (p.tenant, p.database))
 
   /** Test-only seam: record a federation resolution failure as restore() would. */
   private[ondemand] def failFederationForTest(tenantDbId: String, message: String): Unit =
@@ -5268,9 +5250,8 @@ object PoolSupervisor:
     )
 
   /** Something boot found wrong that leaves the manager up but a database degraded, as the boot
-    * banner reports it: `Blocked` (its pools are never started), `Federation` (its nodes start
-    * without its federation aliases) or `ReadAlike` (one of its pools read like another under the
-    * old form of a node id: nothing is stopped).
+    * banner reports it: `Blocked` (its pools are never started) or `Federation` (its nodes start
+    * without its federation aliases).
     */
   final case class StartupProblem(
       tenant: String,
@@ -5282,7 +5263,7 @@ object PoolSupervisor:
   )
   object StartupProblem:
     enum Kind:
-      case Blocked, Federation, ReadAlike
+      case Blocked, Federation
 
   /** A new pool's name the naming rule refuses (`Names.poolNameRefusal`). */
   final class InvalidPoolName(message: String) extends IllegalArgumentException(message)
@@ -5294,21 +5275,6 @@ object PoolSupervisor:
         s"pool '${key.pool}' reads the same as pool '$other' of database '${key.tenantDb}' once " +
           "'_' becomes '-', so the two would share a node id and Secrets: choose another name"
       )
-
-  /** How a pool's names read before `--` separated them: `-` between fields too. */
-  private def oldReading(key: PoolKey): String =
-    s"${key.tenant}-${key.tenantDb}-${key.pool}".replace('_', '-')
-
-  /** The pairs of pools that read alike in that old form, sorted: they could share a node id and
-    * per-pool Secrets under the release that composed it.
-    */
-  def readAlikePools(keys: Iterable[PoolKey]): List[(PoolKey, PoolKey)] =
-    keys.toList
-      .groupBy(oldReading)
-      .values
-      .toList
-      .flatMap(_.sortBy(_.toString).combinations(2).map(pair => (pair(0), pair(1))))
-      .sortBy((a, b) => (a.toString, b.toString))
 
   private def lastSegment(path: String): String =
     val trimmed = path.stripSuffix("/")
