@@ -188,7 +188,11 @@ object MergeDecision:
     */
   def mainMoved(error: String): Boolean =
     error.contains("qod merge fence:") || error.contains("Transaction conflict") ||
-      error.contains("Exceeded the maximum retry count")
+      retriesExhausted(error)
+
+  /** DuckLake gave up on a commit after `ducklake_max_retry_count` retries. */
+  def retriesExhausted(error: String): Boolean =
+    error.contains("Exceeded the maximum retry count")
 
   def outOfMemory(error: String): Boolean = error.contains("Out of Memory Error")
 

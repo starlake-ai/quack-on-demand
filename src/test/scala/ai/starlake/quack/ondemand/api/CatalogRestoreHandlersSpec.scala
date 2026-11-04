@@ -438,6 +438,50 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.error shouldBe "concurrent_write"
     fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
 
+  /** What DuckLake answers when writers' commits tip a COMMIT past its retry limit, up to the query
+    * it last tried.
+    */
+  private val RetriesExhausted =
+    "TransactionContext Error: Failed to commit: Failed to commit DuckLake transaction.\n" +
+      "Exceeded the maximum retry count of 10 set by the ducklake_max_retry_count setting.\n" +
+      ". Consider increasing the value with: e.g., \"SET ducklake_max_retry_count = 100;\"\n" +
+      "Failed to flush changes into DuckLake: Failed to execute query"
+
+  it should "409 when DuckLake gave up on its retries, a refusal like the fence's, and take the fence off" in new Stubs:
+    commitLands = false
+    writeResult = IO.pure(
+      Right(QueryResult(refusedReader(RetriesExhausted), () => (), "node-1", 1L))
+    )
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._1 shouldBe StatusCode.Conflict
+    out.left.toOption.get._2.error shouldBe "concurrent_write"
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+    telemetryStore.events.last.outcome should not be "ok"
+
+  it should "answer that text the same way from a statement that failed before its COMMIT" in new Stubs:
+    writeResult = IO.pure(Left(RouterFailure.Internal(RetriesExhausted)))
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._1 shouldBe StatusCode.Conflict
+    out.left.toOption.get._2.error shouldBe "concurrent_write"
+    fenceDisarms.toList shouldBe fenceArms.map(_._1).toList
+
+  it should "ask the catalog first on that text too: a commit found there landed" in new Stubs:
+    writeResult = IO.pure(
+      Right(QueryResult(refusedReader(RetriesExhausted), () => (), "node-1", 1L))
+    )
+    val out = restore(handlers(), to = "39")
+    out.toOption.get.newSnapshot shouldBe Some(43L)
+    telemetryStore.events.last.outcome shouldBe "ok"
+
+  it should "keep the fence when that text comes with an answer that was lost: it can still land" in new Stubs:
+    commitLands = false
+    writeResult = IO.pure(
+      Right(QueryResult(failingReader(RetriesExhausted), () => (), "node-1", 1L))
+    )
+    val out = restore(handlers(), to = "39")
+    out.left.toOption.get._2.error shouldBe "restore_outcome_unknown"
+    fenceDisarms shouldBe empty
+
   it should "answer a COMMIT whose session handle the node refused as a refusal: it never went out" in new Stubs:
     commitLands = false
     writeResult = IO.pure(

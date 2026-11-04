@@ -5,6 +5,7 @@ import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.branch.MergeDecision
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -411,11 +412,13 @@ final class CatalogRestoreHandlers(
               dryRun = false
             )
           )
-        // DuckLake's optimistic-concurrency loser error and the commit fence's refusal both
-        // mention a conflict. A false negative surfaces as 502 instead of 409 (retry guidance is
-        // the same); a false positive requires "conflict" in an unrelated engine error.
+        // A commit that lost to other writers: DuckLake's optimistic-concurrency loser error and the
+        // commit fence's refusal both mention a conflict, and writers can tip the commit past
+        // DuckLake's retries before the fence refuses it. A permanent failure in these words
+        // answers 409 at each retry, with its text.
         def isConflict(reason: String): Boolean =
-          reason.toLowerCase(Locale.ROOT).contains("conflict")
+          reason.toLowerCase(Locale.ROOT).contains("conflict") ||
+            MergeDecision.retriesExhausted(reason)
         def landed(newSnapshot: Long): Answered =
           Answered(committedResponse(newSnapshot), keepFence = false)
         // Nothing can land: a statement failed before any COMMIT, or the catalog shows no commit of

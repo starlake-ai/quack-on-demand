@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.model.{PoolKey, TenantDb}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.branch.MergeDecision
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -564,7 +565,8 @@ final class CatalogUndropHandlers(
                     // broken stream). A definite failure keeps its own words unless the catalog
                     // shows this commit after all. `retryable`: the failure is one the router
                     // calls Unavailable, a write that never went out (a stamp that failed, no node
-                    // to take it): once the catalog shows none of this run's commit, it says
+                    // to take it), or a COMMIT the node itself refused because DuckLake gave up on
+                    // its retries: once the catalog shows none of this run's commit, it says
                     // nothing was committed and a retry is safe, with the cause.
                     def settled(
                         reason: String,
@@ -644,7 +646,8 @@ final class CatalogUndropHandlers(
                               settled(
                                 s"undrop failed: ${why.message}",
                                 lost = true,
-                                retryable = false
+                                retryable =
+                                  why.nodeRefused && MergeDecision.retriesExhausted(why.message)
                               )
                       }
 

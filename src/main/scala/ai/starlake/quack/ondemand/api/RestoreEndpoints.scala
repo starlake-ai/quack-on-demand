@@ -32,8 +32,10 @@ object RestoreEndpoints:
           "a new table id, so the per-table history timeline restarts at the restore). " +
           "dryRun returns the change summary that would be undone and performs no write. " +
           "Requires an ALL grant, or DDL plus RO/RW, on the table. 409 concurrent_write when " +
-          "expectedCurrentSnapshot no longer matches the table's latest snapshot; 410 " +
-          "snapshot_expired; 422 invalid_snapshot when the table does not resolve at the target; " +
+          "expectedCurrentSnapshot no longer matches the table's latest snapshot, or when other " +
+          "writers beat its commit (the commit fence refused it, or DuckLake gave up on its " +
+          "retries); 410 snapshot_expired; 422 invalid_snapshot when the table does not resolve " +
+          "at the target; " +
           "502 restore_outcome_unknown when it cannot be told whether the replace committed (its " +
           "COMMIT's answer was lost, or it answered and no commit of this restore is in the " +
           "catalog yet, or the catalog could not be read to settle it): the replace may still " +
