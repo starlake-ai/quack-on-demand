@@ -66,6 +66,11 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** A ref for what appears away from the click: a form below the list, which an expanded branch can
+  * push off the screen, and the lines above it that say what became of an action. Without it a click
+  * can seem to do nothing. Stable, so React calls it only when the element comes and goes. */
+const intoView = (el: HTMLElement | null) => { el?.scrollIntoView({ block: 'nearest' }); };
+
 /** Row-level diff of one table between the branch's fork and its head, in a modal.
   * Same rendering as the catalog compare tab (Spec 02), paginated by keyset cursor. */
 function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
@@ -535,9 +540,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         </div>
         {!formOpen && <button type="button" className="link-button" onClick={openForm}>Create branch</button>}
       </div>
-      {error && <div className="login-err">Error: {error}</div>}
-      {note && <div className="login-notice" role="status">{note}</div>}
-      {busy && <p className="subtle">Working on branch {busy}...</p>}
+      {error && <div ref={intoView} className="login-err">Error: {error}</div>}
+      {note && <div ref={intoView} className="login-notice" role="status">{note}</div>}
+      {busy && <p ref={intoView} className="subtle">Working on branch {busy}...</p>}
 
       {!rows && <p className="subtle">Loading branches...</p>}
       {rows && rows.length === 0 && (
@@ -609,7 +614,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         </table>
       )}
       {formOpen && (
-        <form onSubmit={create} className="cred-form">
+        <form ref={intoView} onSubmit={create} className="cred-form">
           <div className="cred-form-title">New branch</div>
           <div className="cred-grid">
             <label>
@@ -631,7 +636,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         </form>
       )}
       {proposeFor && (
-        <form onSubmit={submitPropose} className="cred-form">
+        <form ref={intoView} onSubmit={submitPropose} className="cred-form">
           <div className="cred-form-title">Propose branch {proposeFor.name}</div>
           <div className="cred-grid">
             <label>
@@ -648,7 +653,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                 placeholder="schema.table=column[,column...], one per line" />
             </label>
           </div>
-          {pError && <div className="login-err" style={{ marginTop: '.75rem' }}>{pError}</div>}
+          {pError && <div ref={intoView} className="login-err" style={{ marginTop: '.75rem' }}>{pError}</div>}
           <div className="cred-form-actions">
             <button type="submit" disabled={busy !== null}>Propose</button>
             <button type="button" className="secondary" onClick={() => setProposeFor(null)}
@@ -657,7 +662,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         </form>
       )}
       {mergeFor && mProposal && (
-        <form onSubmit={submitMerge} className="cred-form">
+        <form ref={intoView} onSubmit={submitMerge} className="cred-form">
           <div className="cred-form-title">Merge branch {mergeFor.name} into {tenantDb}</div>
           <p className="subtle">
             Main gains one snapshot with the branch's changes, the merge is tagged, and the branch is
