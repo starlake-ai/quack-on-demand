@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { ApiError } from './client';
 import {
+  actionErrorText,
   branchCount,
   conflictPolicyText,
   CountsUnavailableTitle,
@@ -187,5 +189,30 @@ describe('diffChangeType', () => {
   it('follows the filter on screen when the read names none, as Load more does', () => {
     expect(diffChangeType(undefined, 'insert')).toBe('insert');
     expect(diffChangeType(undefined, '')).toBeUndefined();
+  });
+});
+
+describe('actionErrorText', () => {
+  it('gives a refusal as the server wrote it, whatever its status', () => {
+    expect(actionErrorText(new ApiError(409, 'a merge is running', 'branch_busy'))).toBe('a merge is running');
+    expect(actionErrorText(new ApiError(502, 'the merge failed', 'merge_failed'))).toBe('the merge failed');
+  });
+
+  it('gives an answer with no code as it came, below the 5xx', () => {
+    expect(actionErrorText(new ApiError(401, 'Unauthorized'))).toBe('Unauthorized');
+  });
+
+  it('says an action with no answer may still be running, never only that a fetch failed', () => {
+    expect(actionErrorText(new TypeError('Failed to fetch'))).toBe(
+      'no answer from the server (Failed to fetch). It may still be running, or may have gone ' +
+        'through: Refresh shows where it stands.',
+    );
+  });
+
+  it("reads a gateway's own page the same way, and never shows its HTML", () => {
+    const text = actionErrorText(new ApiError(504, '<html><title>504 Gateway Time-out</title></html>'));
+    expect(text).toContain('no answer from the server (HTTP 504)');
+    expect(text).toContain('may still be running');
+    expect(text).not.toContain('<html>');
   });
 });

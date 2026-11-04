@@ -1,3 +1,4 @@
+import { ApiError } from './client';
 import type { BranchRowConflicts } from './types';
 
 /** A branch change-set count cell. The server flags `countsUnavailable` when the counts were asked
@@ -84,6 +85,18 @@ export function conflictPolicyText(onConflict?: string | null): string {
   * that names none (Load more) follows the filter on screen. */
 export function diffChangeType(named: string | undefined, onScreen: string): string | undefined {
   return (named ?? onScreen) || undefined;
+}
+
+/** What a failed branch action reads as. An answer is the server's own text. With no answer (the
+  * connection dropped, or a proxy or the browser gave up, which a merge of hours invites) the action
+  * may still be running or may have gone through, so a bare `Failed to fetch`, or a gateway's error
+  * page, would read as a failure that did not happen. A 5xx with no error code never came from the
+  * handlers. */
+export function actionErrorText(e: unknown): string {
+  if (e instanceof ApiError && (e.code !== undefined || e.status < 500)) return e.message;
+  const cause = e instanceof ApiError ? `HTTP ${e.status}` : e instanceof Error ? e.message : String(e);
+  return `no answer from the server (${cause}). It may still be running, or may have gone through: ` +
+    'Refresh shows where it stands.';
 }
 
 /** The note after a merge request's status chip, for a request that carries an error. On an open

@@ -1,7 +1,8 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import {
-  branchCount, conflictPolicyText, diffChangeType, proposalErrorNote, rowConflictsHint, rowConflictsText,
+  actionErrorText, branchCount, conflictPolicyText, diffChangeType, proposalErrorNote, rowConflictsHint,
+  rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import { BranchNamePattern } from '../api/branchName';
@@ -59,7 +60,8 @@ function fmtTs(s?: string | null): string {
   return s.replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 
-/** Error text from the API client: the handlers' `code: message` envelope when present. */
+/** Error text of a read: the server's message, or the browser's. An action reads through
+  * `actionErrorText`. */
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -415,7 +417,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         setFormOpen(false);
         reload();
       })
-      .catch(e => setCreateError(errText(e)))
+      .catch(e => setCreateError(actionErrorText(e)))
       .finally(() => setCreating(false));
   }
 
@@ -430,7 +432,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         // refusal closed, a merge that timed out and wrote only its merge row). The panel is read
         // again only if it is this branch's. `reload` clears the error, so it goes first.
         reload(expanded === b.name);
-        setError(`${label} '${b.name}': ${errText(e)}`);
+        setError(`${label} '${b.name}': ${actionErrorText(e)}`);
       })
       .finally(() => setBusy(null));
   }
@@ -472,7 +474,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
       })
       // A refusal reloads too: a long propose can still land after its answer is lost, and the
       // branch may have been ended by someone else. `reload` leaves `pError` alone.
-      .catch(e => { setPError(errText(e)); reload(); })
+      .catch(e => { setPError(actionErrorText(e)); reload(); })
       .finally(() => setBusy(null));
   };
 
