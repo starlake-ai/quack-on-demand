@@ -722,6 +722,7 @@ class BranchThreeWayE2ESpec
     val rows                  = setting("QOD_BENCH_NODE_ROWS").map(_.toLong)
     val changed               = setting("QOD_BENCH_NODE_CHANGES").map(_.toLong)
     val memory                = setting("QOD_BENCH_NODE_MEMORY")
+    val threads               = setting("QOD_BENCH_NODE_THREADS").map(_.toInt)
     assume(
       rows.nonEmpty && changed.nonEmpty,
       "QOD_BENCH_NODE_ROWS and QOD_BENCH_NODE_CHANGES are not set"
@@ -766,9 +767,9 @@ class BranchThreeWayE2ESpec
     }
 
     // A limit for the nodes that start from here on: a running node keeps its setup, and the writes
-    // above can need more (a single UPDATE of 105M rows fails at 16GB). Each of those nodes writes
-    // down what it runs with, in its own init statements, so that the merge node itself is read,
-    // and not what its spec should have copied from a serving pool.
+    // above can need more. Each of those nodes writes down what it runs with, in its own init
+    // statements, so that the merge node itself is read, and not what its spec should have copied
+    // from a serving pool. QOD_BENCH_NODE_THREADS comes with a limit only.
     val nodeSaw = root.resolve("large-node-settings.csv")
     memory.foreach { limit =>
       stack.post(
@@ -779,6 +780,7 @@ class BranchThreeWayE2ESpec
           "pool"     -> s("large"),
           "initSql"  -> s(
             s"SET memory_limit = '$limit';\n" +
+              threads.fold("")(t => s"SET threads = $t;\n") +
               s"COPY (SELECT $settings) TO '$nodeSaw' (FORMAT csv, HEADER false);"
           )
         )

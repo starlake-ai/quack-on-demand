@@ -2170,9 +2170,15 @@ limit when its container has one). It takes the init SQL of the database and of 
 pools (the manager picks which), the pool's after the database's, so a `memory_limit` in either bounds it
 and the pool's own wins; with no pool on the database, no init SQL reaches it. For example, this replaces
 the database's init SQL and restarts its nodes:
-`qod database update --tenant acme --name acme_tpch1 --init-sql "SET memory_limit = '16GB';"`.
+`qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit = '16GB';"`.
 It applies to every node of the database and wins over each pool's `--memory`: keep it within the
 smallest pool's, or restore the text after the merge (that restarts them again).
+At 1B rows and 100M changes per side, 16GB is the lowest limit that passed. Below it a propose or a merge
+is refused with "the merge node needs more memory", unpredictably (a merge can fail where its propose
+passed, and 12GB can fail where 8GB passed), so leave a margin rather than search for the floor.
+On object storage, weigh `QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS`: at that size and 16GB one UPDATE of 110M rows
+read 2GB where the ranges read 52GB, in 91 s against 156 s, and spilled 45GB against 33GB; about twice as
+many rows ran out of memory in it.
 Compact a table in very many small files before creating the branch, because maintenance skips
 compaction while the database has a live branch: on object storage those reads and writes are the cost.
 
