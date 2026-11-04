@@ -591,6 +591,13 @@ class BranchThreeWayE2ESpec
     sql("landed", s"INSERT INTO $td.main.fact VALUES (20000, 'bi', 1)", Some("feature"))
     val proposed = stack.post("/api/branch/propose", proposeBody(td, "feature"), tessToken)
     landWith(td, "landed", proposed, 20000L)
+    // A discard would record as abandoned a merge that is on main.
+    val (refusedCode, refused) =
+      stack.postStatus("/api/branch/discard", proposeBody(td, "feature"), tessToken)
+    withClue(refused) {
+      refusedCode shouldBe 409
+      refused should include("proposal_unsettled")
+    }
     val done = stack.post("/api/branch/merge", proposeBody(td, "feature", idOf(proposed)))
     done.hcursor.downField("merge").get[String]("status") shouldBe Right("merged")
     sql("landed", s"SELECT count(*) FROM $td.main.fact WHERE id = 20000") shouldBe List("1")

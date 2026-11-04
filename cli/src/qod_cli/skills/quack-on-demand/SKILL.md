@@ -2081,7 +2081,11 @@ qod branch propose --tenant acme --db acme_tpch1 --branch feature-x
 qod --profile reviewer branch show --tenant acme --db acme_tpch1 --branch feature-x
 qod --profile reviewer branch merge --tenant acme --db acme_tpch1 --branch feature-x --proposal <id>
 
-# Or discard (owner or a tenant admin). Expired branches are discarded by the manager.
+# Or discard (owner or a tenant admin). Refused while a propose or a merge of the branch runs (409
+# branch_busy), and when a merge of it landed on main and is not on record (409 proposal_unsettled):
+# merging it again records it, which needs an admin. Expired branches are discarded by the manager,
+# which skips a branch in either state. One whose merge landed stays, with an ERROR in the manager's
+# log at every sweep, and holds back snapshot expiry on its parent until someone acts.
 qod branch discard --tenant acme --db acme_tpch1 --branch feature-x
 qod branch list --tenant acme --db acme_tpch1 --all
 ```
@@ -2137,7 +2141,9 @@ What refuses a merge, and what to do:
 | `409 proposal_stale` | The branch changed since the proposal | Propose again |
 | `409 proposal_replaced` | Another proposal replaced the one you read | Read the new one, then merge it by its id |
 | `409 not_proposed` | The branch has no open proposal: a refusal that closes one (`merge_conflict`, `conflicts_changed`, `proposal_stale`, `history_gap`, and `merge_failed` when the node failed) leaves none | Propose again, unless the closing refusal's row says otherwise |
-| `409 proposal_unsettled` | On propose or merge: a merge may have landed on main | Merge again, which settles it, or, when it says another proposal landed, discard the branch |
+| `409 proposal_unsettled` | On propose or merge: a merge may have landed on main. On discard: a merge of the branch landed on main and is not on record | Merge again, which settles it and needs an admin other than its proposer, or, when it says another proposal landed, discard the branch |
+| `409 branch_busy` | On discard: a propose or a merge of the branch is running | Try again when it ends |
+| `502 catalog_unavailable` | On discard: main's catalog cannot be read to look for a merge that landed, so nothing changed | Try again |
 | `502 merge_failed` | The merge node failed, or a stage timed out | After a timeout or a manager restart mid-merge, merge again and never propose first; raise `QOD_BRANCH_MERGE_TIMEOUT_SEC` if a stage needs longer. Otherwise fix the cause and propose again; for "the merge node needs more memory" that is the node's memory limit (see Size below) |
 | `409 concurrent_write` | Main kept moving across `QOD_BRANCH_MERGE_MAX_ATTEMPTS` attempts, or is not at the snapshot `--expect-main` names | Merge again, with a current `--expect-main` or none, or `--hold-writers` if the writers are on the merged tables |
 | `409 history_gap` | A snapshot from the fork on is gone, on main or on the branch: expired by hand, by a maintenance run that started just before the branch was created, or, on a branch an earlier release created, by maintenance before the expiry floor existed | Discard the branch and create it again |

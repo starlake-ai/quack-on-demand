@@ -23,6 +23,7 @@ import ai.starlake.quack.ondemand.runtime.testkit.{LogCapture, StubQuackBackend}
 import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.spi.ManagerEvent
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import ch.qos.logback.classic.Level
@@ -195,6 +196,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     /** Runs as the files of a branch are purged, the teardown's last step. */
     var duringPurge = () => ()
     val auditStore  = new RecordingTelemetryStore
+    val emitted     = mutable.ListBuffer.empty[ManagerEvent]
 
     /** Each change count asked for: who it ran as, and of which table. */
     val countedAs = mutable.ListBuffer.empty[(String, String)]
@@ -287,6 +289,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         Right(())
       ,
       audit = new AuditRecorder(auditStore, _ => None),
+      events = e => emitted += e: Unit,
       now = () => Instant.parse("2026-09-20T12:00:00Z"),
       attemptWait = attemptWait,
       holdSettle = holdSettle
@@ -2902,12 +2905,15 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     hold.awaitRun()
     val before  = f.store.findBranch(f.parent.id, "x").get
     val rows    = f.store.listBranchMerges(before.id)
+    val looks   = f.mainReader.looks
     val refused = f.discard()
     refused.left.map(r => (r.status, r.code)) shouldBe Left((409, "branch_busy"))
     refused.left.toOption.get.message shouldBe
       "a propose or a merge of branch 'x' is running; try again when it ends"
     f.store.findBranch(f.parent.id, "x") shouldBe Some(before)
     f.store.listBranchMerges(before.id) shouldBe rows
+    // Its look for a landed merge runs under the lock, and it never got that far.
+    f.mainReader.looks shouldBe looks
     notTornDown(f, before)
     val audited = f.auditStore.events.filter(_.action == AuditActions.BranchDiscard).toList
     audited.map(e => (e.outcome, e.detail.get("error"))) shouldBe
@@ -3175,6 +3181,178 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       else f.discard().isRight shouldBe true
       seen shouldBe
         Some((if sweep then BranchStatus.Expired else BranchStatus.Discarded, true))
+  }
+
+  /** A proposal's commit on main with nothing on record, as a manager that died after the COMMIT
+    * leaves it: the row still carries the mark of a send with no answer. Answers its id.
+    */
+  private def landedUnrecorded(f: Fixture): String =
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.store.updateBranchMerge(f.row(id).copy(error = Some(BranchService.ApplySent)))
+    f.land(id)
+    id
+
+  private def stillUnrecorded(f: Fixture, id: String): Unit =
+    f.row(id).status shouldBe BranchMergeStatus.Proposed
+    f.status shouldBe BranchStatus.Proposed
+    f.purged shouldBe empty
+
+  /** A merge records it: merged, tagged, with its event, and nothing applied again. */
+  private def recordedByMerge(f: Fixture, id: String): Unit =
+    val (b, m, _) = f.merge().toOption.get
+    (b.status, m.id, m.status) shouldBe (BranchStatus.Merged, id, BranchMergeStatus.Merged)
+    m.mainSnapshotAfter shouldBe Some(11L)
+    f.store.findSnapshotTag("acme", f.parent.name, m.tagName.get).map(_.snapshotId) shouldBe
+      Some(11L)
+    f.emitted should contain(
+      ManagerEvent.BranchMerged("acme", f.parent.name, "x", "root", "boss", 11L)
+    )
+    f.mergeBatches shouldBe empty
+    f.purged shouldBe List(b.dataPath)
+
+  "a merge that landed and is not on record" should "refuse a discard, saying what to do, until a merge records it" in {
+    val f       = new Fixture
+    val id      = landedUnrecorded(f)
+    val refused = f.discard()
+    refused.left.map(r => (r.status, r.code)) shouldBe Left((409, "proposal_unsettled"))
+    val text = refused.left.toOption.get.message
+    text should include("landed on main")
+    text should include("merging it again records it")
+    text should include("admin")
+    stillUnrecorded(f, id)
+    f.auditStore.events
+      .filter(_.action == AuditActions.BranchDiscard)
+      .toList
+      .map(e => (e.outcome, e.detail.get("error"))) shouldBe
+      List(("denied", Some("proposal_unsettled")))
+    recordedByMerge(f, id)
+  }
+
+  it should "keep a sweep off it, with the way out at ERROR each time, until a merge records it" in {
+    val f  = new Fixture
+    val id = landedUnrecorded(f)
+    f.due()
+    for _ <- 1 to 2 do
+      val (swept, logs) = LogCapture.logged(ServiceLog)(f.sweep())
+      swept shouldBe Nil
+      val errors = logs.filter(_.getLevel == Level.ERROR).map(_.getFormattedMessage)
+      errors.size shouldBe 1
+      errors.head should include(s"acme/${f.parent.name}@x")
+      errors.head should include(s"qod branch merge --tenant acme --db ${f.parent.name} --branch x")
+      errors.head should include(id)
+      stillUnrecorded(f, id)
+    expiryAudits(f) shouldBe empty
+    recordedByMerge(f, id)
+    f.sweep() shouldBe Nil
+    f.statusOf("x") shouldBe BranchStatus.Merged
+  }
+
+  it should "stop nothing when the commit is another proposal's: a discard is its only way out" in {
+    for sweep <- List(false, true) do
+      val f                = new Fixture
+      val (replaced, open) = f.replacedAndOpen()
+      f.land(replaced)
+      f.due()
+      if sweep then f.sweep().map(_.name) shouldBe List("x")
+      else f.discard().isRight shouldBe true
+      f.statusOf("x") shouldBe (if sweep then BranchStatus.Expired else BranchStatus.Discarded)
+      f.row(open).status shouldBe BranchMergeStatus.Abandoned
+      f.purged.size shouldBe 1
+  }
+
+  it should "stop nothing when a send timed out and nothing landed, and the fence row stays" in {
+    for sweep <- List(false, true) do
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.propose().isRight shouldBe true
+      val id = f.openProposal()
+      f.mergeFails = Some(TimedOutSend)
+      f.merge().left.map(_.code) shouldBe Left("merge_failed")
+      f.row(id).error.get should startWith(MergeExecutor.TimedOut)
+      f.due()
+      if sweep then f.sweep().map(_.name) shouldBe List("x")
+      else f.discard().isRight shouldBe true
+      f.statusOf("x") shouldBe (if sweep then BranchStatus.Expired else BranchStatus.Discarded)
+      f.row(id).status shouldBe BranchMergeStatus.Abandoned
+      f.fenceDisarms shouldBe empty
+      f.purged.size shouldBe 1
+  }
+
+  it should "look for nothing on a branch with no open proposal" in {
+    for sweep <- List(false, true) do
+      val f = new Fixture
+      f.create("x")
+      f.touchBranch()
+      f.propose().isRight shouldBe true
+      f.row(f.openProposal()).status shouldBe BranchMergeStatus.Proposed
+      f.nodeFails = Some("merge node spawn failed: no free port")
+      f.merge().left.map(_.code) shouldBe Left("merge_failed")
+      f.openProposal() shouldBe "none"
+      f.due()
+      f.mainReader.lookFails = true
+      val looks = f.mainReader.looks
+      if sweep then f.sweep().map(_.name) shouldBe List("x")
+      else f.discard().isRight shouldBe true
+      f.mainReader.looks shouldBe looks
+      f.statusOf("x") shouldBe (if sweep then BranchStatus.Expired else BranchStatus.Discarded)
+  }
+
+  it should "stop nothing when the proposal closed before its commit showed: a discard is the way out" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.nodeFails = Some("merge node spawn failed: no free port")
+    f.merge().left.map(_.code) shouldBe Left("merge_failed")
+    f.row(id).status shouldBe BranchMergeStatus.Failed
+    f.land(id)
+    f.discard().map(_.status) shouldBe Right(BranchStatus.Discarded)
+  }
+
+  "a look that cannot be read" should "answer a discard 502, changing nothing, with the cause in the log only" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.mainReader.lookFails = true
+    val (refused, logs) = LogCapture.logged(ServiceLog)(f.discard())
+    refused.left.map(r => (r.status, r.code)) shouldBe Left((502, "catalog_unavailable"))
+    refused.left.toOption.get.message should not include "the catalog does not answer"
+    logs.count(e =>
+      e.getLevel == Level.WARN && e.getFormattedMessage.contains("the catalog does not answer")
+    ) shouldBe 1
+    stillUnrecorded(f, id)
+    f.mainReader.lookFails = false
+    f.discard().map(_.status) shouldBe Right(BranchStatus.Discarded)
+    f.row(id).status shouldBe BranchMergeStatus.Abandoned
+  }
+
+  it should "skip a sweep with a WARN, and the next sweep tries again" in {
+    val f = new Fixture
+    f.create("x")
+    f.touchBranch()
+    f.propose().isRight shouldBe true
+    val id = f.openProposal()
+    f.due()
+    f.mainReader.lookFails = true
+    val (swept, logs) = LogCapture.logged(ServiceLog)(f.sweep())
+    swept shouldBe Nil
+    logs.count(e =>
+      e.getLevel == Level.WARN && e.getFormattedMessage.contains("the catalog does not answer")
+    ) shouldBe 1
+    logs.filter(_.getLevel == Level.ERROR) shouldBe empty
+    stillUnrecorded(f, id)
+    expiryAudits(f) shouldBe empty
+    f.mainReader.lookFails = false
+    f.sweep().map(_.name) shouldBe List("x")
+    f.statusOf("x") shouldBe BranchStatus.Expired
+    f.row(id).status shouldBe BranchMergeStatus.Abandoned
   }
 
   "the parent" should "refuse deletion while a live branch exists, and pin the fork snapshot" in {

@@ -27,6 +27,7 @@ import io.circe.syntax._
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
+import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 /** Who is asking, on the tenant in hand, once the handlers' one gate has let them by: it decides
@@ -720,7 +721,8 @@ final class BranchService(
   private def unsettled(b: Branch): Option[BranchFailure] =
     def mergeAgain = BranchFailure.conflict(
       "proposal_unsettled",
-      s"the last merge of branch '${b.name}' may have landed on main; merge again, or discard it"
+      s"the last merge of branch '${b.name}' may have landed on main; merge again, which settles " +
+        "it (a discard is refused once it has landed)"
     )
     val timedOut = store
       .listBranchMerges(b.id)
@@ -1741,12 +1743,31 @@ final class BranchService(
                 s"a propose or a merge of branch '$name' is running; try again when it ends"
               )
             )
-          case BranchService.RetireEnd.Gone => denied(noSuchBranch(parent, name))
+          case BranchService.RetireEnd.Gone                => denied(noSuchBranch(parent, name))
+          case BranchService.RetireEnd.Landed(_, snapshot) =>
+            denied(
+              BranchFailure.conflict(
+                "proposal_unsettled",
+                s"a merge of branch '$name' landed on main as snapshot $snapshot and is not on " +
+                  "record; merging it again records it, which needs an admin other than its " +
+                  "proposer"
+              )
+            )
+          case BranchService.RetireEnd.LookFailed =>
+            denied(
+              BranchFailure.upstream(
+                "catalog_unavailable",
+                s"main's catalog cannot be read to look for a merge of branch '$name' that " +
+                  "landed, so nothing changed; try again"
+              )
+            )
         }
 
   /** Expire every live branch whose TTL has passed; returns the branch names discarded. Run by the
     * leader's sweep. A branch a run holds, or one gone since the listing, is left to the next
-    * sweep.
+    * sweep. So is one whose merge landed with nothing on record: it stays, and keeps holding back
+    * snapshot expiry on its parent, until someone acts, which is the point: only a merge records
+    * it.
     */
   def expireDue(): IO[List[Branch]] = IO.defer {
     val sweptAt = now()
@@ -1770,7 +1791,18 @@ final class BranchService(
             )
             done :+ x
           case Right(BranchService.RetireEnd.Busy | BranchService.RetireEnd.Gone) => done
-          case Left(e)                                                            =>
+          // Logged where the look failed.
+          case Right(BranchService.RetireEnd.LookFailed)      => done
+          case Right(BranchService.RetireEnd.Landed(m, snap)) =>
+            logger.error(
+              s"branch expiry: ${b.tenant}/${b.parentDbName}@${b.name} is past its TTL, but its " +
+                s"merge ${m.id} landed on main as snapshot $snap and is not on record. The " +
+                "branch stays, and keeps holding back snapshot expiry, until an admin other than " +
+                "its proposer merges it again, which records it: qod branch merge --tenant " +
+                s"${b.tenant} --db ${b.parentDbName} --branch ${b.name} --proposal ${m.id}"
+            )
+            done
+          case Left(e) =>
             logger.warn(
               s"branch expiry: ${b.tenant}/${b.parentDbName}@${b.name} failed: ${e.getMessage}"
             )
@@ -1785,6 +1817,12 @@ final class BranchService(
     * row read before the lock can be stale, and a sweep writing from it would put `Expired` over
     * `Merged`. The teardown runs with the lock released: the status has flipped, so nothing live
     * reads the branch any more, and a lock must not sit over a long purge.
+    *
+    * An open proposal is never abandoned over its own commit on main: the record would say the
+    * opposite of what main holds, and someone reading it may redo the work. So it looks first, and
+    * only for that commit. Another proposal's has only a discard as its way out, and a send that
+    * timed out with nothing on main leaves its fence row armed, a residual of its own: neither is
+    * this rule, whatever the row's `error` says.
     */
   private def retire(
       b: Branch,
@@ -1797,17 +1835,29 @@ final class BranchService(
           store.getBranch(b.id).filter(row => BranchStatus.Live(row.status)) match
             case None          => BranchService.RetireEnd.Gone
             case Some(current) =>
-              store
+              val open = store
                 .listBranchMerges(current.id)
                 .filter(_.status == BranchMergeStatus.Proposed)
-                .foreach { m =>
-                  store.updateBranchMerge(
-                    m.copy(status = BranchMergeStatus.Abandoned, decidedAt = Some(now()))
+              val look =
+                if open.isEmpty then Success(None)
+                else Try(landedCommit(current).filter(_._1.status == BranchMergeStatus.Proposed))
+              look match
+                case Failure(e) =>
+                  logger.warn(
+                    s"branch ${current.tenant}/${current.parentDbName}@${current.name} left as " +
+                      s"it is: cannot look for a merge of it that landed: ${e.getMessage}"
                   )
-                }
-              BranchService.RetireEnd.Retired(
-                store.updateBranch(current.copy(status = status)).getOrElse(current)
-              )
+                  BranchService.RetireEnd.LookFailed
+                case Success(Some((m, snapshot))) => BranchService.RetireEnd.Landed(m, snapshot)
+                case Success(None)                =>
+                  open.foreach { m =>
+                    store.updateBranchMerge(
+                      m.copy(status = BranchMergeStatus.Abandoned, decidedAt = Some(now()))
+                    )
+                  }
+                  BranchService.RetireEnd.Retired(
+                    store.updateBranch(current.copy(status = status)).getOrElse(current)
+                  )
         }
       )
       .flatMap {
@@ -1871,13 +1921,16 @@ object BranchService:
       t.tableId
     }.toSet
 
-  /** How a discard or an expiry ended: done, a run of the branch holds it, or it ended since the
-    * row that named it was read.
+  /** How a discard or an expiry ended: done; a run of the branch holds it; it ended since the row
+    * that named it was read; its open proposal's commit is on main, with nothing on record; or that
+    * could not be read. Only the first changed anything.
     */
   private[branch] enum RetireEnd:
     case Retired(branch: Branch)
     case Busy
     case Gone
+    case Landed(merge: BranchMerge, snapshot: Long)
+    case LookFailed
 
   /** How one merge attempt ended. */
   private[branch] enum AttemptEnd:

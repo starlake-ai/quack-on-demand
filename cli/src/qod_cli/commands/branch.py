@@ -278,5 +278,7 @@ def merge(
 @covers("POST", "/api/branch/discard", {"tenant": "--tenant", "tenantDb": "--db", "branch": "--branch"})
 def discard(ctx: typer.Context, tenant: str = TENANT, db: str = DB, branch: str = BRANCH):
     """Discard a live branch, its owner or an admin: its pool, catalog and branch-only files are
-    freed."""
+    freed. Refused while a propose or a merge of it runs (branch_busy), and when a merge of it
+    landed on main and is not on record (proposal_unsettled): merging it again records it, which
+    needs an admin."""
     call(ctx, "POST", "/api/branch/discard", body={"tenant": tenant, "tenantDb": db, "branch": branch})

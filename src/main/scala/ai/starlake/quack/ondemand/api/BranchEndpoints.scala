@@ -169,8 +169,9 @@ object BranchEndpoints:
           "row conflict: a cell, a row one side deleted and the other updated, rows matching a " +
           "key; keys names the columns that catch rows both sides inserted. Proposing " +
           "again replaces an open proposal, unless its last merge may have landed (409 " +
-          "proposal_unsettled: merge again, or discard; only a discard when another proposal's " +
-          "commit is on main). 400 invalid_on_conflict, invalid_key (a key on a table the " +
+          "proposal_unsettled: merge again, which settles it; a discard is refused once that " +
+          "commit is on main, and is the only way out when another proposal's commit is). 400 " +
+          "invalid_on_conflict, invalid_key (a key on a table the " +
           "caller holds no read grant on, unless they are an admin, reads as one not in the change " +
           "set); 409 history_gap."
       )
@@ -220,5 +221,9 @@ object BranchEndpoints:
       .out(jsonBody[BranchEntry])
       .description(
         "Discard a live branch (owner or tenant admin): its pool, catalog and branch-only files " +
-          "are freed; the row stays as history."
+          "are freed; the row stays as history. 409 branch_busy while a propose or a merge of it " +
+          "runs: try again when it ends. 409 proposal_unsettled when a merge of it landed on main " +
+          "and is not on record: merging it again records it, which needs an admin. 502 " +
+          "catalog_unavailable when main's catalog cannot be read to look for one. Each changes " +
+          "nothing."
       )

@@ -155,7 +155,7 @@ describe('conflictPolicyText', () => {
 describe('proposalErrorNote', () => {
   it('tells of a merge that may have landed when an open proposal has a send with no answer', () => {
     expect(proposalErrorNote('proposed', 'timeout: no answer from the merge node')).toBe(
-      '(a merge is running, or may have landed: merge again, or discard)',
+      '(a merge is running, or may have landed: merge again, which settles it)',
     );
   });
 

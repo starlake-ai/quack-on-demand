@@ -216,7 +216,10 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     name = "discard",
     description =
       "Discard a branch you own (or any branch, as an admin): its compute, catalog and " +
-        "branch-only files are freed. Irreversible; the live database is unaffected.",
+        "branch-only files are freed. Irreversible; the live database is unaffected. Refused " +
+        "with branch_busy while a propose or a merge of it runs, and with proposal_unsettled " +
+        "when a merge of it landed on main and is not on record: a human admin merges it again, " +
+        "which records it.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),

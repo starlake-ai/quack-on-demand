@@ -85,6 +85,6 @@ export function conflictPolicyText(onConflict?: string | null): string {
   * engine error can hold it too (a lock timeout). */
 export function proposalErrorNote(status: string, error: string): string {
   return status === 'proposed' && error.startsWith('timeout: ')
-    ? '(a merge is running, or may have landed: merge again, or discard)'
+    ? '(a merge is running, or may have landed: merge again, which settles it)'
     : '(error)';
 }

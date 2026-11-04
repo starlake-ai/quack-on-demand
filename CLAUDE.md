@@ -631,6 +631,14 @@ schema `qod_merge_fence`, refusing unless every later snapshot is row data or ma
 tables, because DuckLake's own conflict check misses main writes that land before the merge's first read
 or into a table the merge drops.
 
+**Discard and expiry** never run under a run of that branch: a propose or a merge holds the branch's own
+lock (`BranchService.runLock`, inside the parent's `__merge`) from start to end, and `retire`, the only
+path to `Discarded` or `Expired`, tries it around a fresh read of the row and the status writes, then tears
+down with it released. Busy, a discard answers `409 branch_busy` and a sweep skips the branch. An open
+proposal whose own commit is on main is never abandoned: a discard answers `409 proposal_unsettled` and a
+sweep skips the branch with an ERROR, so it stays, holding back expiry on the parent, until a merge records
+it; a look that cannot be read is `502 catalog_unavailable`, or a WARN and the next sweep.
+
 **Who may branch:** any principal who may connect to one of the parent's pools, over REST and MCP, in the
 tenant it belongs to (`BranchHandlers.gate`, the one gate of every endpoint; design 8.2). Own tenant only:
 `s.profile.tenant` for a session, `p.user.tenant` for a PAT, because the handshake resolves a user name
