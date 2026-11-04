@@ -1274,9 +1274,10 @@ final case class BranchingConfig(
       envVar = "QOD_BRANCH_MERGE_UPDATE_CHUNK_ROWS",
       description =
         "Rows one UPDATE may carry per table in a merge. Above it, or after an out-of-memory " +
-          "failure, the update splits into rowid ranges inside the same transaction."
+          "failure, the update splits into rowid ranges inside the same transaction, which read " +
+          "far more data: 26 times the bytes at 1B rows and 110M rows updated."
     )
-    mergeUpdateChunkRows: Long = 20000000L
+    mergeUpdateChunkRows: Long = 100000000L
 ):
   require(defaultTtlHours >= 0, "branching: defaultTtlHours must be >= 0")
   require(maxPerDatabase >= 1, "branching: maxPerDatabase must be >= 1")

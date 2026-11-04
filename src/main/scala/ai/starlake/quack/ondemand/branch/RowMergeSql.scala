@@ -472,6 +472,8 @@ object RowMergeSql:
 
   /** DELETE, then UPDATE, then INSERT: an UPDATE costs the table its statistics for the rest of the
     * transaction (design finding 3). A statement with an empty set is not rendered (finding 14).
+    * One UPDATE up to `updateChunkRows`, since ranges read far more: 26 times the bytes at 1B rows
+    * and 110M rows updated. Above it, or when `ranged` asks after an out-of-memory failure, ranges.
     */
   def applyStatements(
       parentAlias: String,

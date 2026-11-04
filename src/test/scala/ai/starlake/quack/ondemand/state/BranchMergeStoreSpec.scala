@@ -11,6 +11,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -121,7 +122,18 @@ class BranchMergeStoreSpec extends AnyFlatSpec with Matchers:
   "BranchingConfig" should "default the merge settings and refuse nonsense" in {
     val cfg = BranchingConfig()
     cfg.mergeMaxAttempts shouldBe 5
-    cfg.mergeUpdateChunkRows shouldBe 20000000L
+    cfg.mergeUpdateChunkRows shouldBe 100000000L
     an[IllegalArgumentException] should be thrownBy BranchingConfig(mergeMaxAttempts = 0)
     an[IllegalArgumentException] should be thrownBy BranchingConfig(mergeUpdateChunkRows = 0L)
+  }
+
+  // A boot reads application.conf, not the case class's defaults, so that is where a default holds.
+  it should "ship the same merge settings in the bundled configuration" in {
+    val shipped = ConfigFactory
+      .parseResources("application.conf")
+      .resolve(ConfigResolveOptions.noSystem())
+      .getConfig("quack-on-demand.branching")
+    shipped.getInt("mergeMaxAttempts") shouldBe BranchingConfig().mergeMaxAttempts
+    shipped.getLong("mergeUpdateChunkRows") shouldBe 100000000L
+    shipped.getLong("mergeUpdateChunkRows") shouldBe BranchingConfig().mergeUpdateChunkRows
   }
