@@ -28,12 +28,12 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     id should fullyMatch regex "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
   }
 
-  it should "leave already-hyphenated tenant-db names alone" in {
+  it should "hash a tenant-db name holding `-`, which no new create makes" in {
     val k = PoolKey("acme", "acme-default", "sales")
-    PoolSupervisor.nodeId(k, 7) shouldBe "quack--acme--acme-default--sales--7"
+    PoolSupervisor.nodeId(k, 7) shouldBe "quack--acme--acme-default--sales-cd5039d9bc7b72ba-7"
   }
 
-  it should "give pools that read alike under one `-` ids of their own, across fields and tenants" in {
+  it should "give pools that read alike under one `-` ids of their own, across fields" in {
     val a = PoolKey("acme", "acme_sales", "eu_west")
     val b = PoolKey("acme", "acme_sales_eu", "west")
     oldForm(a, 1) shouldBe oldForm(b, 1)
@@ -62,13 +62,27 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       PoolKey("t", "t_d_", "p"),
       PoolKey("t", "t_d", "_p"),
       PoolKey("t", "t_d", "p_"),
-      PoolKey("t", "t_d", "__merge")
+      PoolKey("t", "t_d", "__merge"),
+      // A pool made before the rule, which set it no bound.
+      PoolKey("t", "t_d", "1a"),
+      PoolKey("t", "t_d", "my pool"),
+      PoolKey("t", "t_d", "a.b"),
+      PoolKey("t", "t_d", "a/b"),
+      // A database a manifest brings, or a tenant.
+      PoolKey("t", "t-d", "p"),
+      PoolKey("t-t", "t-t_d", "p")
     ).foreach { key =>
       val id = PoolSupervisor.nodeId(key, 1)
       withClue(key)(id should fullyMatch regex "quack--.*[a-z0-9-]-[0-9a-f]{16}-1")
     }
     // A hash form never equals a plain one: only a plain id has `--` before its index.
     PoolSupervisor.nodeId(PoolKey("t", "t_d", "p"), 1) should fullyMatch regex ".*--1"
+    // Worked out by hand, outside this JVM.
+    PoolSupervisor.nodeId(PoolKey("acme", "acme_default", "1a"), 1) shouldBe
+      "quack--acme--acme-default--1a-30735006a2f69b76-1"
+    PoolSupervisor.nodeId(PoolKey("acme", "acme-x", "p"), 1) shouldBe
+      "quack--acme--acme-x--p-dad688a6e868154f-1"
+    PoolSupervisor.nodeId(PoolKey("acme", "acme_x", "p"), 1) shouldBe "quack--acme--acme-x--p--1"
   }
 
   it should "hash a branch's node, whose names hold `__` by design, and keep it in 63 characters" in {
@@ -158,7 +172,10 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       (PoolKey("acme", "acme_sales", "eu_west"), 1),
       (PoolKey("acme", "acme_sales_eu", "west"), 1),
       (PoolKey("x", "x_x_x_a", "b"), 1),
-      (PoolKey("x_x", "x_x_a", "b"), 1)
+      (PoolKey("x_x", "x_x_a", "b"), 1),
+      // They read the same, so the one no new create makes, which a manifest can bring, is hashed.
+      (PoolKey("acme", "acme-x", "p"), 1),
+      (PoolKey("acme", "acme_x", "p"), 1)
     )
     // The property must have run on both sides of the limit, on every width of an index, and on
     // names that really do shift across fields: some read alike under one `-`.
@@ -169,12 +186,12 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val keys = nodes.map(_._1).distinctBy(k => (k.tenant, k.tenantDb, Names.reading(k.pool)))
     keys.groupBy(oldForm(_, 1)).values.count(_.size > 1) should be > 10
     keys.groupBy(oldForm(_, 1)).values.count(_.map(_.tenant).distinct.size > 1) should be > 0
+    generated.foreach { (key, _) =>
+      withClue(key)(Names.newCreateCouldMake(key.tenant, key.tenantDb, key.pool) shouldBe true)
+    }
     nodes.foreach { (key, index) =>
       val id = PoolSupervisor.nodeId(key, index)
       withClue(s"$key at $index gave $id: ") {
-        List(key.tenant, key.tenantDb.stripPrefix(key.tenant + "_"))
-          .flatMap(Names.fieldRefusal(_, "name")) shouldBe Nil
-        Names.poolNameRefusal(key.pool) shouldBe None
         id.length should be <= 63
         ServiceNameRule.matches(id) shouldBe true
         LabelValueRule.matches(id) shouldBe true
@@ -185,9 +202,10 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
           RunningNode(id, key, Role.Dual, "h", 1, "t", None, None, Instant.EPOCH, maxConcurrent = 1)
         MissingSlots.nextIndexBase(List(running)) shouldBe index
         val whole = plainForm(key, index)
-        if whole.length <= 63 then id shouldBe whole
+        if whole.length <= 63 && Names.newCreateCouldMake(key.tenant, key.tenantDb, key.pool) then
+          id shouldBe whole
         else
-          id.length shouldBe 63
+          if whole.length > 63 then id.length shouldBe 63
           id should fullyMatch regex s".*-[0-9a-f]{16}-$index"
           whole should startWith(id.dropRight(s"-0123456789abcdef-$index".length))
       }
@@ -1087,6 +1105,42 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     b.liveIds = Some(Set(old1, old2, third))
     sup.reconcile().unsafeRunSync()
     b.specs.last.nodeId shouldBe "quack--acme--acme-default--sales--4"
+
+  it should "move no stored id for names a new create could not make: only a fresh slot is hashed" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None
+    val odd = PoolKey("acme", "acme_default", "1a")
+    st.upsertPool(
+      ai.starlake.quack.model.Pool(
+        id = "p-1a",
+        tenantId = "acme",
+        tenantDbId = sup.findTenantDb("acme", "acme_default").get.id,
+        name = "1a",
+        size = 1,
+        distribution = RoleDistribution(0, 0, 1)
+      )
+    )
+    val stored = oldForm(odd, 1)
+    st.upsertNode(
+      RunningNode(stored, odd, Role.Dual, "127.0.0.1", 21990, "tok", None, None, Instant.EPOCH,
+        maxConcurrent = 4),
+      "p-1a"
+    )
+    sup.restore()
+    b.liveIds = Some(Set(stored))
+    sup.reconcile().unsafeRunSync()
+    b.specs shouldBe empty
+    sup.get(odd).get.nodes.map(_.nodeId) shouldBe List(stored)
+    // It dies: it comes back under its own id.
+    b.liveIds = Some(Set.empty)
+    sup.reconcile().unsafeRunSync()
+    b.specs.map(_.nodeId).toList shouldBe List(stored)
+    // A new slot is numbered above it, hashed.
+    b.liveIds = Some(Set(stored))
+    sup.scale(odd, 2, RoleDistribution(0, 0, 2), force = false).unsafeRunSync()
+    val fresh = PoolSupervisor.nodeId(odd, 2)
+    fresh should fullyMatch regex "quack--acme--acme-default--1a-[0-9a-f]{16}-2"
+    sup.get(odd).get.nodes.map(_.nodeId) shouldBe List(stored, fresh)
 
   it should "part two pools that shared an id: a row keeps it, a pool with none starts in the new form" in:
     val (sup, b, st) = freshSupervisorWithStore()

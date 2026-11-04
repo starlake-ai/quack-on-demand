@@ -184,3 +184,79 @@ class NamesSpec extends AnyFlatSpec with Matchers:
         refusal.get should include("'--'")
       }
     }
+
+  "Names.tenantNameRefusal" should "take what a new tenant may be called, whatever its case" in:
+    List("acme", "acme_corp", "a1", "Acme").foreach { name =>
+      withClue(name)(Names.tenantNameRefusal(name) shouldBe None)
+    }
+
+  it should "refuse anything else" in:
+    List("", "_a", "a_", "a__b", "a-b", "1a", "a b", "a/b", "t" * (Names.MaxLength + 1)).foreach {
+      name => withClue(name)(Names.tenantNameRefusal(name) shouldBe defined)
+    }
+
+  "Names.databaseNameRefusal" should "judge where an underscore falls only past the tenant's prefix" in:
+    List(
+      "acme" -> "acme_sales",
+      "acme" -> "acme_sales_eu",
+      "acme" -> "acme_1st",
+      "acme" -> "sales",
+      "Acme" -> "ACME_sales",
+      // A tenant made before the rule goes on making databases of legal names.
+      "a__b" -> "a__b_sales",
+      "A__B" -> "a__b_sales",
+      "a__b" -> "A__B_sales",
+      "_t"   -> "_t_d"
+    ).foreach { (tenant, name) =>
+      withClue(s"$tenant $name")(Names.databaseNameRefusal(tenant, name) shouldBe None)
+    }
+
+  it should "refuse a name holding `-`, or an underscore out of place" in:
+    List(
+      "acme_",
+      "acme_x_",
+      "acme__x",
+      "acme_x__y",
+      "acme-x",
+      "acme_x-y",
+      "1db",
+      "_db",
+      "my db",
+      "a/b",
+      "acme_" + "x" * Names.MaxLength
+    ).foreach { name =>
+      withClue(name)(Names.databaseNameRefusal("acme", name) shouldBe defined)
+    }
+
+  "Names.newCreateCouldMake" should "hold when a new create could make all three names" in:
+    List(
+      ("acme", "acme_sales", "bi"),
+      ("acme", "acme_sales", "eu-west"),
+      ("acme", "acme_sales", "eu_west"),
+      ("acme", "acme_x", "p"),
+      ("acme", "sales", "p"),
+      ("a_b", "a_b_c", "p")
+    ).foreach { (tenant, db, pool) =>
+      withClue(s"$tenant $db $pool")(Names.newCreateCouldMake(tenant, db, pool) shouldBe true)
+    }
+
+  it should "not hold when one of them could not be made, whichever it is" in:
+    List(
+      ("a__b", "a__b_sales", "p"),
+      ("_t", "_t_d", "p"),
+      ("t_", "t__d", "p"),
+      ("a-b", "a-b_x", "p"),
+      ("acme", "acme-x", "p"),
+      ("acme", "acme_x__y", "p"),
+      ("acme", "acme_x_", "p"),
+      ("acme", "acme_x", "1a"),
+      ("acme", "acme_x", "my pool"),
+      ("acme", "acme_x", "a.b"),
+      ("acme", "acme_x", "a/b"),
+      ("acme", "acme_x", "a__b"),
+      ("acme", "acme_x", "a-"),
+      ("acme", "acme_x", "__merge"),
+      ("acme", "acme_x", "p" * (Names.MaxLength + 1))
+    ).foreach { (tenant, db, pool) =>
+      withClue(s"$tenant $db $pool")(Names.newCreateCouldMake(tenant, db, pool) shouldBe false)
+    }

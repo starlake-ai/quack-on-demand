@@ -497,10 +497,10 @@ qod tenant list
 # or one a manifest import brings, keeps its name.
 # A new database or pool name is letters, digits and single underscores, starts with a letter and
 # does not end with an underscore: __ and a leading or trailing _ are refused (400 invalid_name).
-# A pool name may also hold a hyphen (eu-west) and is at most 63 characters, but not beside another
-# pool of its database that reads the same once _ becomes - (eu_west): 409 pool_reads_alike, naming
-# it. A database or pool name made before this rule keeps working, and a manifest import keeps
-# importing one, with one ERROR per name.
+# A pool name may also hold a hyphen (eu-west) and is at most 63 characters, but may not end with -
+# nor hold --, _- or -_, nor stand beside another pool of its database that reads the same once _
+# becomes - (eu_west): 409 pool_reads_alike, naming it. A database or pool name made before this
+# rule keeps working, and a manifest import keeps importing one, with one ERROR per name.
 qod tenant create acme
 qod database create --tenant acme --name tpch \
   --metastore schemaName=tpch1

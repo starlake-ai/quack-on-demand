@@ -581,7 +581,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       (Status.ServiceUnavailable, DecideRoute.DecisionFailed, Some(MediaType.text.plain))
   }
 
-  it should "answer a node with the longest id an earlier release composed, and with today's" in {
+  it should "answer a node with a long id an earlier release composed, and with today's longest" in {
     val tenant = "t" * 61
     val key    = PoolKey(tenant, s"${tenant}_d", "p" * 63)
     // A node that started under such an id keeps it (a respawn reuses the stored id), so the signed

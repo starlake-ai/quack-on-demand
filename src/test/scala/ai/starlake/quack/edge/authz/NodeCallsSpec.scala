@@ -153,7 +153,7 @@ class NodeCallsSpec extends AnyFlatSpec with Matchers:
     answered.get() shouldBe 1
   }
 
-  "the node-id bound" should "admit the longest id an earlier release composed, and today's" in {
+  "the node-id bound" should "admit a long id an earlier release composed, and today's longest" in {
     val tenant = "t" * 61
     // The composed tenant-db name is at most 63 characters.
     s"${tenant}_d".length shouldBe 63

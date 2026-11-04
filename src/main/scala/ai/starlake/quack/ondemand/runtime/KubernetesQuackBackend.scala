@@ -733,10 +733,10 @@ final class KubernetesQuackBackend(
       .toSet
 
   /** Remove `key`'s per-pool Secrets under their old names ([[KubernetesQuackBackend
-    * .legacyPerPoolSecretName]]) once no pod reads them. They hold a catalog password, and no start
-    * writes them any more, so a pool restarted one node at a time would otherwise keep them for
-    * ever. A pod started by an earlier release reads them by name for as long as it lives, and
-    * never loses them here; two pools could share such a name, so a pod of either keeps it.
+    * .legacyPerPoolSecretName]]) once no pod reads them. No start writes them any more, so a pool
+    * restarted one node at a time would otherwise keep them for ever. A pod started by an earlier
+    * release reads them by name for as long as it lives, and never loses them here; two pools could
+    * share such a name, so a pod of either keeps it.
     */
   private def collectLegacySecrets(key: PoolKey, stopping: Option[String]): Unit =
     val present = KubernetesQuackBackend.PerPoolSecretPrefixes

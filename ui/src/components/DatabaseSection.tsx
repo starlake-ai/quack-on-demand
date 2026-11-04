@@ -10,6 +10,7 @@ import DataPathEditor, {
 } from './DataPathEditor';
 import FederationSection from './FederationSection';
 import { initSqlToSend } from '../api/initSql';
+import { databaseSuffixError } from '../api/databaseName';
 import { editableMetastore, metastoreToSend, superuserKeys } from '../api/metastoreForm';
 import { useAuth } from '../auth/AuthContext';
 
@@ -146,14 +147,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       setName(prefix);
       return;
     }
-    const suffix = next.slice(prefix.length);
-    if (suffix.length === 0) {
-      setNameError("Suffix is required (e.g. 'prod', 'eu', 'tpch1').");
-    } else if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(suffix)) {
-      setNameError('Suffix must start with a letter and contain only letters, digits and underscore.');
-    } else {
-      setNameError(null);
-    }
+    setNameError(databaseSuffixError(next.slice(prefix.length)));
     setName(next);
   }
 

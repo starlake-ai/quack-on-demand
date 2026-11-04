@@ -12,10 +12,11 @@ import java.util.Locale
   *   - First character: letter or underscore.
   *   - Length: 1..63 bytes (Postgres `NAMEDATALEN - 1`).
   *
-  * A NEW name also holds to [[readsAsOneField]], and a new pool name to [[poolNameRefusal]]: node
-  * ids and per-pool Secret names put `--` between names, and only that rule lets them be told
-  * apart. Names already stored are never judged by it, and the manager's own (`__merge`,
-  * `__br_<id8>`) are made by paths that do not ask.
+  * A NEW name also holds to [[tenantNameRefusal]], [[databaseNameRefusal]] or [[poolNameRefusal]]:
+  * node ids and per-pool Secret names put `--` between names, and only that rule lets them be told
+  * apart ([[newCreateCouldMake]]). A name already stored is never refused by it: a fresh node of it
+  * takes a hashed id. The manager's own (`__merge`, `__br_<id8>`) are made by paths that do not
+  * ask.
   */
 object Names:
 
@@ -100,15 +101,38 @@ object Names:
     val read = reading(name)
     read.nonEmpty && !read.contains("--") && !read.startsWith("-") && !read.endsWith("-")
 
-  /** Why a NEW tenant or tenant-db name cannot be made, None when it can. Nothing stored is judged
-    * by it: a name made before the rule stays, and internal names are made by paths that do not
-    * ask.
-    */
-  def fieldRefusal(name: String, label: String): Option[String] =
+  private[model] def fieldRefusal(name: String, label: String): Option[String] =
     Option.when(!readsAsOneField(name))(
       s"invalid $label '$name': a name may not start or end with '_' or hold '__', because node " +
         "ids and Secret names use '--' between names"
     )
+
+  /** Why a NEW tenant cannot be called this, None when it can. Nothing stored is refused by it: a
+    * name made before the rule stays, and internal names are made by paths that do not ask.
+    */
+  def tenantNameRefusal(name: String): Option[String] =
+    Option.when(!isValid(name))(reject(name, "tenant id")).orElse(fieldRefusal(name, "tenant id"))
+
+  /** Why a NEW database of `tenant` cannot be called this, None when it can: what the name holds is
+    * judged whole, and where an underscore falls only past the tenant's prefix, so that a tenant
+    * made before the rule goes on making databases of legal names.
+    */
+  def databaseNameRefusal(tenant: String, name: String): Option[String] =
+    val prefix = tenant.toLowerCase(Locale.ROOT) + "_"
+    Option
+      .when(!isValid(name))(reject(name, "database name"))
+      .orElse(fieldRefusal(name.toLowerCase(Locale.ROOT).stripPrefix(prefix), "database name"))
+
+  /** Whether a new create could make these three names, as far as `--` between them goes: then a
+    * plain node id or per-pool Secret name splits back into them. The one condition of both a plain
+    * id (`PoolSupervisor.nodeId`, which hashes any other key) and of what a manifest import reports
+    * (`ManifestImporter.namesANewCreateWouldRefuse`, through the three refusals), so the two cannot
+    * differ. A rule a create holds to for another reason does not belong in those refusals: it
+    * would hash names `--` splits perfectly well.
+    */
+  def newCreateCouldMake(tenant: String, tenantDb: String, pool: String): Boolean =
+    tenantNameRefusal(tenant).isEmpty && databaseNameRefusal(tenant, tenantDb).isEmpty &&
+      poolNameRefusal(pool).isEmpty
 
   private val PoolNamePattern = "[a-z][a-z0-9_-]*".r
 

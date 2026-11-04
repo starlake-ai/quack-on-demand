@@ -2557,7 +2557,7 @@ final class PoolSupervisor(
             // rule goes on making databases of legal names.
             val tn       = tenantName.toLowerCase(Locale.ROOT)
             val composed = Names.normalizeTenantDbName(tenantName, suffix).flatMap { full =>
-              Names.fieldRefusal(full.stripPrefix(s"${tn}_"), "database name").toLeft(full)
+              Names.databaseNameRefusal(tn, full).toLeft(full)
             }
             composed match
               case Left(err)   => Left(SupervisorError.InvalidName(err))
@@ -5419,11 +5419,11 @@ object PoolSupervisor:
     * `--` between fields makes two pools read alike only if a name holds it or an end of a name
     * touches it, which `Names`' rule refuses for a new name, so a plain id can be split back into
     * its key. `pool/create` refuses the one case left, two pools of a database with one reading
-    * (`eu-west`, `eu_west`). Past [[NodeIdMaxChars]], or with a name that breaks the rule (made
-    * before it, or by the manager, `__br_<id8>`), an id cannot be split, so it keeps its start and
-    * ends `-<hash>-<index>`. A plain id has `--` before its index and a hashed one a hex digit, so
-    * the two never meet. The index stays last, since [[MissingSlots]] and `placementForNodeId` read
-    * it.
+    * (`eu-west`, `eu_west`). Past [[NodeIdMaxChars]], or with a name no new create could make
+    * ([[Names.newCreateCouldMake]]: made before the rule, brought by a manifest, or by the manager,
+    * `__br_<id8>`), an id keeps its start and ends `-<hash>-<index>`. A plain id has `--` before
+    * its index and a hashed one a hex digit, so the two never meet. The index stays last, since
+    * [[MissingSlots]] and `placementForNodeId` read it.
     *
     * The hash covers the names as given, joined by a NUL, which no name can hold: a pool made
     * before the rule can hold anything else, but Postgres stores no NUL. Pure, on every runtime:
@@ -5435,7 +5435,7 @@ object PoolSupervisor:
     val stem  = s"quack--${poolReading(key)}"
     val whole = s"$stem--$index"
     val plain = whole.length <= NodeIdMaxChars &&
-      List(key.tenant, key.tenantDb, key.pool).forall(Names.readsAsOneField)
+      Names.newCreateCouldMake(key.tenant, key.tenantDb, key.pool)
     if plain then whole
     else
       val names  = List(key.tenant, key.tenantDb, key.pool, index.toString).mkString("\u0000")

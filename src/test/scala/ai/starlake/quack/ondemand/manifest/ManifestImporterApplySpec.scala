@@ -29,7 +29,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s
 
   "ManifestImporter.apply" should "import a name a new create would refuse, with one ERROR for it" in {
-    val s = new InMemoryControlPlaneStore()
+    val s                              = new InMemoryControlPlaneStore()
     def pool(name: String, db: String) =
       ManifestPool(name = name, tenantDb = db, roleDistribution = ManifestRoleDistribution(0, 0, 1))
     val m = base.copy(
@@ -44,6 +44,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
           tenantDbs = List(
             ManifestTenantDb(name = "acme_x_", kind = "memory"),
             ManifestTenantDb(name = "acme_ok", kind = "memory"),
+            ManifestTenantDb(name = "acme-x", kind = "memory"),
             // A branch's names hold `__` by design: nothing to report.
             ManifestTenantDb(
               name = "acme_ok__br_ab12cd34",
@@ -54,8 +55,12 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
           pools = List(
             pool("x__y", "acme_x_"),
             pool("my pool", "acme_ok"),
+            pool("1a", "acme_ok"),
+            pool("a.b", "acme_ok"),
+            pool("a/b", "acme_ok"),
             pool("eu-west", "acme_ok"),
             pool("eu_west", "acme_ok"),
+            pool("on_a_dash", "acme-x"),
             pool("__br_ab12cd34", "acme_ok__br_ab12cd34")
           )
         )
@@ -66,24 +71,43 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     )(ManifestImporter.apply(m, s, requireEncryption = false))
     result shouldBe Right(())
     s.snapshot().pools.map(_.name).toSet shouldBe
-      Set("clean", "x__y", "my pool", "eu-west", "eu_west", "__br_ab12cd34")
+      Set(
+        "clean",
+        "x__y",
+        "my pool",
+        "1a",
+        "a.b",
+        "a/b",
+        "eu-west",
+        "eu_west",
+        "on_a_dash",
+        "__br_ab12cd34"
+      )
     s.snapshot().tenantDbs.map(_.name).toSet shouldBe
-      Set("a__b_c__d", "acme_x_", "acme_ok", "acme_ok__br_ab12cd34")
-    val errors = logs.filter(_.getLevel.toString == "ERROR").map(_.getFormattedMessage)
+      Set("a__b_c__d", "acme_x_", "acme_ok", "acme-x", "acme_ok__br_ab12cd34")
+    val errors              = logs.filter(_.getLevel.toString == "ERROR").map(_.getFormattedMessage)
     def about(what: String) = errors.count(_.startsWith(what))
     withClue(errors.mkString("\n")) {
       about("tenant 'a__b'") shouldBe 1
       about("database 'a__b_c__d'") shouldBe 1
       about("database 'acme_x_'") shouldBe 1
+      about("database 'acme-x'") shouldBe 1
       about("pool 'x__y'") shouldBe 1
       about("pool 'my pool'") shouldBe 1
+      about("pool '1a'") shouldBe 1
+      about("pool 'a.b'") shouldBe 1
+      about("pool 'a/b'") shouldBe 1
       about("pools 'eu-west' and 'eu_west'") shouldBe 1
-      errors.size shouldBe 6
+      errors.size shouldBe 10
       errors.exists(_.contains("br_ab12cd34")) shouldBe false
     }
     // A backup of it restores: the export imports back.
     val again = ManifestExporter.build(s, Instant.EPOCH, "0.2.0", "test").toOption.get
-    ManifestImporter.apply(again, new InMemoryControlPlaneStore(), requireEncryption = false) shouldBe
+    ManifestImporter.apply(
+      again,
+      new InMemoryControlPlaneStore(),
+      requireEncryption = false
+    ) shouldBe
       Right(())
   }
 
@@ -1202,4 +1226,49 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     exported.tenants.find(_.name == "acme").get.authConfig shouldBe parkedConfig()
     ManifestImporter.apply(exported, s, requireEncryption = false) shouldBe Right(())
     storedAcme(s) shouldBe before
+  }
+
+  "ManifestImporter.namesANewCreateWouldRefuse" should "name a key's names exactly when a fresh node of it is hashed" in {
+    val tenants              = List("acme", "a_b", "a__b", "_t", "t_", "a-b")
+    def databases(t: String) =
+      List(
+        s"${t}_x",
+        s"${t}_x_y",
+        s"${t}_1",
+        s"${t}-x",
+        s"${t}_x-y",
+        s"${t}_x__y",
+        s"${t}_x_",
+        "x",
+        "1x"
+      )
+    val pools =
+      List("bi", "eu-west", "eu_west", "1a", "my pool", "a.b", "a/b", "x__y", "x_", "x-", "a_-b")
+    for
+      tenant <- tenants
+      db     <- databases(tenant)
+      pool   <- pools
+    do
+      val key = PoolKey(tenant, db, pool)
+      val m   = base.copy(tenants =
+        List(
+          ManifestTenant(
+            name = tenant,
+            tenantDbs = List(ManifestTenantDb(name = db, kind = "memory")),
+            pools = List(
+              ManifestPool(
+                name = pool,
+                tenantDb = db,
+                roleDistribution = ManifestRoleDistribution(0, 0, 1)
+              )
+            )
+          )
+        )
+      )
+      val id = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, 1)
+      withClue(s"$key gave $id: ") {
+        // All of these are short enough: only the names can make the id hashed.
+        id.length should be < 63
+        ManifestImporter.namesANewCreateWouldRefuse(m).isEmpty shouldBe id.endsWith("--1")
+      }
   }

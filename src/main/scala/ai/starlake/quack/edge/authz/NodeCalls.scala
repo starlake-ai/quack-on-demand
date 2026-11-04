@@ -22,8 +22,9 @@ object NodeCalls:
   /** The longest node id accepted. `PoolSupervisor.nodeId` now stops at 63 characters, but a node
     * an earlier release started keeps its id, since a respawn reuses the stored one. That id is
     * `quack-<tenant>-<tenantDb>-<pool>-<index>`: the composed tenant-db name `<tenant>_<db>` is at
-    * most `Names.MaxLength` (63) characters, so the tenant at most 61, the pool at most 63 and the
-    * index at most 10 digits, 206 characters in all. 255 leaves room for other composers.
+    * most `Names.MaxLength` (63) characters, so the tenant at most 61, and the index at most 10
+    * digits, 143 characters without the pool. Those releases set a pool's name no bound: 255 leaves
+    * it 112.
     */
   val MaxNodeIdLength: Int = 255
 

@@ -1198,7 +1198,7 @@ class KubernetesQuackBackendSpec
 
   it should "give two keys that read alike their own per-pool Secrets" in:
     // Both pods start. Under one Secret's name each would read what the other's start wrote last,
-    // the other database's password and federation SQL included.
+    // which can hold the other pool's values.
     val left    = PoolKey("acme", "acme_" + "x" * 50, "y_z")
     val right   = PoolKey("acme", "acme_" + "x" * 50 + "_y", "z")
     val backend = fedBackend
@@ -1408,7 +1408,7 @@ class KubernetesQuackBackendSpec
     files("pgPassword")._1 shouldBe NewEnv
     files("extraSetupSql")._1 shouldBe NewFed
     List(NewEnv, NewFed).foreach(n => withClue(n)(secretExists(n) shouldBe true))
-    // No pod reads them any more, and they hold a password.
+    // No pod reads them any more.
     List(OldEnv, OldFed).foreach(n => withClue(n)(secretExists(n) shouldBe false))
 
   it should "collect the old names when the last pod reading them stops, the pool running on" in:

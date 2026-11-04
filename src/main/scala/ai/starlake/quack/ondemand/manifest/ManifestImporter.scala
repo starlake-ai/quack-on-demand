@@ -389,19 +389,19 @@ object ManifestImporter extends LazyLogging:
       catch case ApplyRefused(errs) => Left(errs)
     }
 
-  /** One line per name of `m` a new create would refuse: a backup always restores, since these were
-    * legal in the release that exported it, and an operator hears about them. A branch's database
-    * and pool hold `__` by design, known by the row that says it is a branch, and are not reported.
-    * Nodes of such a pool take a hashed id, so the name itself breaks nothing.
+  /** One line per name of `m` a new create would refuse: a backup always restores, and an operator
+    * hears about them. A branch's database and pool hold `__` by design, known by the row that says
+    * it is a branch, and are not reported. Nodes of a key holding such a name take a hashed id, by
+    * the same refusals ([[Names.newCreateCouldMake]]), so the name itself breaks nothing.
     */
   private[manifest] def namesANewCreateWouldRefuse(m: ConfigManifest): List[String] =
     val Kept = "imported as it is, but a new create would refuse it"
     m.tenants.flatMap { t =>
-      val tenantLine = Names.fieldRefusal(t.name, "tenant").map(_ => s"tenant '${t.name}': $Kept")
+      val tenantLine = Names.tenantNameRefusal(t.name).map(_ => s"tenant '${t.name}': $Kept")
       val branchDbs  = t.tenantDbs.filter(_.branchOf.isDefined).map(_.name).toSet
       val dbLines    = t.tenantDbs.filterNot(d => branchDbs(d.name)).flatMap { d =>
         Names
-          .fieldRefusal(d.name.stripPrefix(s"${t.name}_"), "database")
+          .databaseNameRefusal(t.name, d.name)
           .map(_ => s"database '${d.name}' of tenant '${t.name}': $Kept")
       }
       val pools     = t.pools.filterNot(p => branchDbs(p.tenantDb))

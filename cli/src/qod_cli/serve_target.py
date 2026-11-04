@@ -24,6 +24,9 @@ from pathlib import Path
 # require_valid_name's tests.
 _NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9]*(_[a-zA-Z0-9]+)*$")
 _NAME_MAX = 63
+# What any release could have named a database: Names.isValid. A name the user passes
+# may be such a one, and only the server knows whether it exists.
+_ANY_RELEASE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 _REMOTE_SCHEMES = (
     "s3://", "s3a://", "r2://", "gs://", "gcs://", "az://", "azure://", "abfss://",
@@ -69,6 +72,21 @@ def require_valid_name(name: str, origin: str) -> str:
             "letter or a digit. Pass --name explicitly."
         )
     return name
+
+
+def _database_name(passed: str | None, derived: str, origin: str) -> str:
+    """The database a target serves. A name derived from a path must be one the server would
+    take for a new database. A passed one may name a database an earlier release made, whose
+    name a new create would refuse, so that rule is left to the server, which knows what exists;
+    only what no release could have made stops here, before anything is launched."""
+    if not passed:
+        return require_valid_name(derived, origin)
+    if len(passed) > _NAME_MAX or not _ANY_RELEASE_NAME_RE.match(passed):
+        raise TargetError(
+            f"--name {passed!r} cannot name a database: 1-63 characters, a letter or an "
+            "underscore, then letters, digits or underscores."
+        )
+    return passed
 
 
 def composed_db_name(tenant: str, suffix: str) -> str:
@@ -234,7 +252,7 @@ def _resolve_remote(
         target = "gs://" + target[len("gcs://") :]
     prefix = target.rstrip("/")
     last = prefix.rsplit("/", 1)[-1] or "remote"
-    db = require_valid_name(name or sanitize_name(last), target)
+    db = _database_name(name, sanitize_name(last), target)
     if kind == "ducklake":
         return _as_ducklake(prefix + "/", prefix + "/", db, object_store)
     if kind is not None and kind != "memory":
@@ -292,7 +310,7 @@ def _resolve_glob(target: str, name: str | None, object_store: dict) -> ServeTar
             "own pattern"
         )
     reader = _reader_for(matches[0])
-    db = require_valid_name(name or sanitize_name(_stem(Path(matches[0]).name)), target)
+    db = _database_name(name, sanitize_name(_stem(Path(matches[0]).name)), target)
     return ServeTarget(
         kind="memory",
         name=db,
@@ -311,7 +329,7 @@ def _resolve_local(
     if not path.exists():
         raise TargetError(f"{path} does not exist")
     if path.is_dir():
-        db = require_valid_name(name or sanitize_name(path.resolve().name), target)
+        db = _database_name(name, sanitize_name(path.resolve().name), target)
         if kind == "ducklake":
             resolved = path.resolve().as_posix()
             return _as_ducklake(str(path.resolve()), resolved, db, object_store)
@@ -335,7 +353,7 @@ def _resolve_local(
             f"single file like {path.name} is inferred from its extension."
         )
     if path.name.lower().endswith(_DUCKDB_SUFFIXES):
-        db = require_valid_name(name or sanitize_name(path.stem), target)
+        db = _database_name(name, sanitize_name(path.stem), target)
         return ServeTarget(
             kind="duckdb-file",
             name=db,
@@ -349,7 +367,7 @@ def _resolve_local(
             f"cannot serve {path}: expected a .duckdb file, a .parquet/.csv file, a "
             "directory of them, or a glob."
         )
-    db = require_valid_name(name or sanitize_name(_stem(path.name)), target)
+    db = _database_name(name, sanitize_name(_stem(path.name)), target)
     return ServeTarget(
         kind="memory",
         name=db,
@@ -382,7 +400,7 @@ def resolve(
     if kind is not None and kind not in _KINDS:
         raise TargetError(f"--kind must be one of {', '.join(_KINDS)}, got {kind!r}")
     if not target:
-        db = require_valid_name(name or "main", "--name")
+        db = _database_name(name, "main", "--name")
         root = Path(data_root) / "ducklake" / db
         return ServeTarget(
             kind="ducklake",

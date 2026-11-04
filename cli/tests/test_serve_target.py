@@ -260,6 +260,42 @@ def test_sanitize_name_never_ends_on_an_underscore_after_the_cut():
     assert require_valid_name(name, "x") == name
 
 
+@pytest.mark.parametrize("name", ["a__b", "_a", "a_"])
+def test_a_passed_name_an_earlier_release_could_make_is_left_to_the_server(tmp_path, name):
+    duckdb_file = tmp_path / "data.duckdb"
+    duckdb_file.write_bytes(b"")
+    parquet_file = tmp_path / "t.parquet"
+    parquet_file.write_bytes(b"")
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "t.parquet").write_bytes(b"")
+    # Every shape of target takes it, and so does no target at all.
+    for target in (
+        str(duckdb_file),
+        str(parquet_file),
+        str(folder),
+        str(tmp_path / "*.parquet"),
+        "s3://bucket/lake/",
+        None,
+    ):
+        assert resolve(target, name=name, data_root=tmp_path).name == name
+
+
+@pytest.mark.parametrize("name", ["9lives", "a b", "a-b", "../x", "a" * 64])
+def test_a_passed_name_no_release_could_make_stops_before_anything_is_launched(tmp_path, name):
+    with pytest.raises(TargetError, match="--name"):
+        resolve(None, name=name, data_root=tmp_path)
+
+
+def test_a_name_derived_from_a_path_is_still_held_to_the_rule_for_a_new_name(tmp_path, monkeypatch):
+    # What sanitize_name returns today always passes; the check is what keeps that true.
+    f = tmp_path / "data.duckdb"
+    f.write_bytes(b"")
+    monkeypatch.setattr("qod_cli.serve_target.sanitize_name", lambda raw: "a__b")
+    with pytest.raises(TargetError, match="--name"):
+        resolve(str(f), data_root=tmp_path)
+
+
 def test_composed_db_name_mirrors_the_server():
     # Names.normalizeTenantDbName: prefix unless the suffix already carries it.
     assert composed_db_name("acme", "sales") == "acme_sales"
