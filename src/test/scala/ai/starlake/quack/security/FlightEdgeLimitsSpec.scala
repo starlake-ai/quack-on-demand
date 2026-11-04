@@ -1050,6 +1050,28 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       h.shutdown()
   }
 
+  // ---- a password that could not be checked ---------------------------------------------------
+
+  "a password that could not be checked" should "read UNAVAILABLE on a real client, not UNAUTHENTICATED" in {
+    val down = new BasicAuthProvider:
+      val name                                                               = "down"
+      def authenticate(scope: AuthScope, username: String, password: String) =
+        Left(AuthFailure.Unavailable)
+    val h = FlightEdgeHarness.boot(
+      SecurityFixtures.freshStore().store,
+      wiring = wiring(),
+      authService = Some(InMemoryAuthService.realServiceWithBasicChain(List(down)))
+    )
+    val client = h.newClient()
+    try
+      val ex = intercept[FlightRuntimeException](client.getInfo(sqlInfo, basic, timed))
+      ex.status().code() shouldBe FlightStatusCode.UNAVAILABLE
+      ex.status().description() shouldBe AuthFailure.Unavailable.message
+    finally
+      client.close()
+      h.shutdown()
+  }
+
   // ---- TLS -----------------------------------------------------------------------------------
 
   private def tlsFlightClient(h: FlightEdgeHarness.Harness): FlightClient =

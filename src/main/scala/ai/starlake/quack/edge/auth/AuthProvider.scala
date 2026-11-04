@@ -33,11 +33,15 @@ object AuthScope:
   *     the password VERIFIED but is flagged `must_change_password` -- the caller must be told to
   *     rotate it, not that the credentials were wrong. Only reachable with a correct password on an
   *     enabled account, so surfacing it leaks nothing.
+  *   - [[ai.starlake.quack.edge.auth.AuthFailure.Unavailable Unavailable]]: the check itself could
+  *     not run, as its database is busy or down, so nothing is known about the credentials. The
+  *     caller should retry, not doubt its password.
   */
 enum AuthFailure:
   case InvalidCredentials(detail: String)
   case PasswordChangeRequired
   case AccountLocked
+  case Unavailable
 
   def message: String = this match
     case InvalidCredentials(d)  => d
@@ -45,6 +49,8 @@ enum AuthFailure:
       "password change required; use POST /api/auth/change-password"
     case AccountLocked =>
       "account locked - use forgot password to reset your credentials"
+    case Unavailable =>
+      "the password could not be checked right now; retry"
 
 /** Authenticates username/password credentials (database, ROPC).
   *

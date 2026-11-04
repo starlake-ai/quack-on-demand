@@ -66,6 +66,7 @@ class AuthenticationService(
         case AuthScope.Tenant(t) => t
       var passwordChangeRequired = false
       var accountLocked          = false
+      var unavailable            = false
       val errors                 = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
@@ -79,6 +80,7 @@ class AuthenticationService(
               )
               if err == AuthFailure.PasswordChangeRequired then passwordChangeRequired = true
               if err == AuthFailure.AccountLocked then accountLocked = true
+              if err == AuthFailure.Unavailable then unavailable = true
               errors += s"${provider.name}: ${err.message}"
               Left(err)
         }
@@ -87,9 +89,11 @@ class AuthenticationService(
           // An AccountLocked or PasswordChangeRequired from any provider is authoritative and must
           // not be buried under the other providers' generic noise. AccountLocked wins first: a
           // locked row is refused before bcrypt, so it can never co-occur with a verified
-          // PasswordChangeRequired on the same account.
+          // PasswordChangeRequired on the same account. Then a provider that could not check at all
+          // beats the others' refusals: the password may be right, so a retry can succeed.
           if accountLocked then Left(AuthFailure.AccountLocked)
           else if passwordChangeRequired then Left(AuthFailure.PasswordChangeRequired)
+          else if unavailable then Left(AuthFailure.Unavailable)
           else
             Left(
               AuthFailure.InvalidCredentials(

@@ -447,11 +447,14 @@ final class AuthHandlers(
                 tenant = req.tenant,
                 detail = Map("username" -> req.username)
               )
-              val code = err match
-                case AuthFailure.PasswordChangeRequired => "password_change_required"
-                case AuthFailure.AccountLocked          => "account_locked"
-                case _                                  => "invalid_credentials"
-              Left((StatusCode.Unauthorized, ErrorResponse(code, err.message)))
+              val (status, code) = err match
+                case AuthFailure.PasswordChangeRequired =>
+                  (StatusCode.Unauthorized, "password_change_required")
+                case AuthFailure.AccountLocked => (StatusCode.Unauthorized, "account_locked")
+                case AuthFailure.Unavailable   =>
+                  (StatusCode.ServiceUnavailable, "auth_unavailable")
+                case _ => (StatusCode.Unauthorized, "invalid_credentials")
+              Left((status, ErrorResponse(code, err.message)))
             case Right(profile) =>
               val required = scope match
                 case AuthScope.System    => RequiredScope.System

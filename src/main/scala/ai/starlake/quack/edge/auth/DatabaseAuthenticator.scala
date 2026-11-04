@@ -176,6 +176,13 @@ class DatabaseAuthenticator(
         finally ps.close()
       finally conn.close()
     catch
+      case e: java.sql.SQLException =>
+        // The check could not run: no connection came free within the pool's 5 s, as each check
+        // holds one through bcrypt so clients retrying a wrong password are enough, or the database
+        // failed. Nothing is known about this password, so the caller is told to retry and not that
+        // it is wrong. Full detail stays in the log: driver text can carry host/port or SQL.
+        logger.error(s"Database authentication error for '$username': ${e.getMessage}", e)
+        Left(AuthFailure.Unavailable)
       case e: Exception =>
         // Full detail stays in the log; the unauthenticated caller gets a generic message
         // (driver exception text can carry host/port or SQL fragments).
