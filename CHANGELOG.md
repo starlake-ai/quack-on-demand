@@ -176,13 +176,18 @@ What a client can now see, most of it only when it sends no working credential:
   for at most 16 MiB of data (`INVALID_ARGUMENT`, "bound parameters are not supported"). JDBC and ADBC
   half-close at once and are unaffected. Arrow Java's literal `FlightSqlClient.executeUpdate` reads
   its answer before it half-closes, so it gets `TIMED_OUT` after 30 s, where it used to wait for good.
+- **A password that could not be checked no longer reads as a failed login.** When the database behind
+  password logins is down, or clients retrying a wrong password keep its connections busy, a correct
+  login waits up to 5 s and is told to retry: `UNAVAILABLE`, "the password could not be checked right
+  now; retry" on FlightSQL, the same text on the native front door, and `503 auth_unavailable` on
+  REST. It used to read as a failed login (`UNAUTHENTICATED`, "Database error"; REST
+  `401 invalid_credentials`). A wrong password still gets its usual answer when the check can run.
 
 Known limits. A flood of wrong passwords, or of bearer tokens naming a tenant whose identity provider
 hangs, holds the edge's threads, so FlightSQL calls wait and new connections are refused for every
-tenant while it lasts. Clients retrying a wrong password can also make a correct login fail after 5 s
-with `UNAUTHENTICATED`, "Authentication failed: database: Database error", as on 0.11.0: retry, and
-look for the client sending the wrong password. A few silent connections a second keep new connections
-out; connections that have shown a credential go on working, though a flood can slow them. A client
+tenant while it lasts. Clients retrying a wrong password can also keep a correct login from being
+checked: retry, and look for the client sending the wrong password. A few silent connections a second
+keep new connections out; connections that have shown a credential go on working, though a flood can slow them. A client
 with a valid login is not held to any of these limits and can still fill the heap. Behind an HTTP/2
 proxy the connection limits apply per upstream connection. None of these refusals is logged or counted.
 Keep the port behind your network where that matters. On a network you do not trust, put a gRPC-aware

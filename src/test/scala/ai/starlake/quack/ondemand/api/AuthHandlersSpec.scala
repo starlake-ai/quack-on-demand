@@ -218,6 +218,20 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     calls.head._1 shouldBe AuthScope.Tenant("t-abc123")
   }
 
+  it should "return 503 auth_unavailable when the password could not be checked" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Left(AuthFailure.Unavailable), calls)
+
+    val out = h.login(LoginRequest("alice", "right", tenant = None)).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.ServiceUnavailable
+        err.error shouldBe "auth_unavailable"
+        err.message shouldBe AuthFailure.Unavailable.message
+      case Right(_) => fail("expected 503")
+  }
+
   it should "keep invalid_credentials for a plain bad password" in {
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h     = makeHandlers(Left(AuthFailure.InvalidCredentials("Invalid password")), calls)

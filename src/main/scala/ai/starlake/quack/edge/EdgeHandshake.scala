@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.{
+  AuthFailure,
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
@@ -12,9 +13,9 @@ import com.typesafe.scalalogging.LazyLogging
 
 /** Why a handshake was refused. `Unauthenticated` covers a bad or missing credential and an
   * unresolvable target; `Unauthorized` means the principal is real but holds no grant on the pool;
-  * `Unavailable` means the authorization service (OPA) could not be reached; retryable. The
-  * FlightSQL edge maps them to `CallStatus.UNAUTHENTICATED` / `UNAUTHORIZED` / `UNAVAILABLE`, the
-  * Quack front door to an `ERROR_RESPONSE`.
+  * `Unavailable` means the authorization service (OPA) could not be reached, or the password could
+  * not be checked; retryable. The FlightSQL edge maps them to `CallStatus.UNAUTHENTICATED` /
+  * `UNAUTHORIZED` / `UNAVAILABLE`, the Quack front door to an `ERROR_RESPONSE`.
   */
 enum HandshakeFailure(val message: String):
   case Unauthenticated(msg: String) extends HandshakeFailure(msg)
@@ -99,8 +100,9 @@ final class EdgeHandshake(
     // tenant-scoped authority. With no provider at all every connection is refused, superusers
     // included: nothing could check a credential. A booted manager never gets there, since
     // BootPreflight.checkEdgeAuthAvailable refuses an empty chain at boot.
-    val validation: Either[String, (Option[AuthenticatedProfile], Boolean)] =
-      if !authService.hasProviders then Left(EdgeHandshake.NoAuthenticator)
+    val validation: Either[HandshakeFailure, (Option[AuthenticatedProfile], Boolean)] =
+      if !authService.hasProviders then
+        Left(HandshakeFailure.Unauthenticated(EdgeHandshake.NoAuthenticator))
       else
         (bearer, basicPair) match
           case (Some(token), _) =>
@@ -116,6 +118,8 @@ final class EdgeHandshake(
             authService
               .authenticateBearer(bearerScope, token)
               .map(p => (Some(p), bearerScope == AuthScope.System))
+              .left
+              .map(HandshakeFailure.Unauthenticated(_))
           case (None, Some((_, p))) =>
             preResolved match
               case Right(r) =>
@@ -132,30 +136,40 @@ final class EdgeHandshake(
                   .authenticateBasic(scope, r.user, p)
                   .map(profile => (Some(profile), scope == AuthScope.System))
                   .left
-                  .map(_.message)
+                  .map {
+                    case AuthFailure.Unavailable =>
+                      HandshakeFailure.Unavailable(AuthFailure.Unavailable.message)
+                    case refused => HandshakeFailure.Unauthenticated(refused.message)
+                  }
               case Left(err) =>
-                Left(s"missing tenant scope for Basic auth: $err")
+                Left(
+                  HandshakeFailure.Unauthenticated(s"missing tenant scope for Basic auth: $err")
+                )
           case _ =>
-            Left("no credentials presented")
+            Left(HandshakeFailure.Unauthenticated("no credentials presented"))
 
     // The identity itself is refused, before any row is looked up or any JWT role or group is
     // resolved: an address its holder may have typed could name a superuser's row. The database
     // authenticator's profile carries no email claim, so it is never refused here.
-    val named: Either[String, (Option[AuthenticatedProfile], Boolean)] =
+    val named: Either[HandshakeFailure, (Option[AuthenticatedProfile], Boolean)] =
       validation.flatMap {
         case (Some(p), _) if IdentityNaming.namesNoUser(p) =>
-          Left("the token names no user: its user name claim is blank")
+          Left(
+            HandshakeFailure.Unauthenticated(
+              "the token names no user: its user name claim is blank"
+            )
+          )
         case (Some(p), _) if !IdentityNaming.userNameMayBindRow(p) =>
           logger.warn(
             s"handshake refused: ${p.authMethod} named the user '${p.username}' by an email " +
               "claim the identity provider does not mark verified"
           )
-          Left(IdentityNaming.UnverifiedEmailRefusal)
+          Left(HandshakeFailure.Unauthenticated(IdentityNaming.UnverifiedEmailRefusal))
         case v => Right(v)
       }
 
     named match
-      case Left(err)                                => Left(HandshakeFailure.Unauthenticated(err))
+      case Left(failure)                            => Left(failure)
       case Right((profileOpt, superuserAdmissible)) =>
         val resolvedUsername = profileOpt.map(_.username).orElse(basicUsername)
         TenantSelector.resolve(

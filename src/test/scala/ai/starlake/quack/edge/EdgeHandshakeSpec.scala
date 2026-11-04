@@ -1,8 +1,11 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.{
+  AuthFailure,
+  AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
+  BasicAuthProvider,
   DatabaseAuthenticator
 }
 import ai.starlake.quack.edge.config.AuthenticationConfig
@@ -59,6 +62,29 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
     val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false)
     out.map(b => (b.poolKey, b.user, b.grants.current(), b.profile)) shouldBe Right(
       (PoolKey("acme", "acme_db", "bi"), "alice", Right(eff), Some(profile("alice", "acme")))
+    )
+
+  /** A handshake whose password chain answers `failure`, as a database that cannot check would. */
+  private def refusing(failure: AuthFailure) =
+    val chain = new BasicAuthProvider:
+      val name                                                     = "stub"
+      def authenticate(scope: AuthScope, user: String, pw: String) = Left(failure)
+    new EdgeHandshake(
+      InMemoryAuthService.realServiceWithBasicChain(List(chain)),
+      lookupPool = (_, _) => Right("acme_db"),
+      resolveTenant = _ => Some(Tenant("acme", "Acme Corporation")),
+      authorize = _ => Left(HandshakeDenial.Denied("not reached")),
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero
+    )
+
+  it should "call a password that could not be checked unavailable, and a wrong one unauthenticated" in:
+    def attempt(failure: AuthFailure) =
+      refusing(failure).authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false)
+    attempt(AuthFailure.Unavailable) shouldBe Left(
+      HandshakeFailure.Unavailable(AuthFailure.Unavailable.message)
+    )
+    attempt(AuthFailure.InvalidCredentials("Invalid password")) shouldBe Left(
+      HandshakeFailure.Unauthenticated("Authentication failed: stub: Invalid password")
     )
 
   it should "route by the tenant id, never the display name" in:
