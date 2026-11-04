@@ -152,7 +152,8 @@ object TenantEndpoints:
           "gs, az, azure, abfss), not its root, with explicit keys of their own in objectStore, " +
           "complete for its scheme, and no metastore.dataPath: anything else is 403 " +
           "superuser_required, nothing written; a folder at, under or above one another database " +
-          "holds is 409 data_path_taken. So is any " +
+          "holds is 409 data_path_taken. An objectStore goes only with such a path: 403 " +
+          "superuser_required otherwise. So is any " +
           "of pgHost, pgPort, pgUser, pgPassword or dbName (dbName stays free on kind=duckdb-file): " +
           "a superuser names a Postgres server. A catalog on a server its tenant controls gives " +
           "that tenant the node's file access, so a superuser who creates one accepts that."
@@ -195,8 +196,9 @@ object TenantEndpoints:
       .description(
         "Update a database. metastore and objectStore replace the stored maps, except that a " +
           "secret they leave out is kept and one sent empty is removed. A caller who is not a " +
-          "superuser leaves metastore.dataPath as it is and keeps complete the keys of a row " +
-          "holding its own, and adds, changes or removes none of pgHost, pgPort, pgUser, pgPassword " +
+          "superuser leaves metastore.dataPath as it is, changes objectStore only on a row " +
+          "holding complete keys of its own, which stay complete and never on a managed-storage " +
+          "row, and adds, changes or removes none of pgHost, pgPort, pgUser, pgPassword " +
           "or dbName (dbName stays free on kind=duckdb-file): 403 superuser_required otherwise, " +
           "nothing written. They stay as stored when sent back as the row holds them, with a " +
           "password left out. An update that changes the metastore, objectStore or initSql " +

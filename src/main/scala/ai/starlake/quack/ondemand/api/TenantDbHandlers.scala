@@ -214,7 +214,9 @@ final class TenantDbHandlers(
                 req.dataPath,
                 req.metastore,
                 req.objectStore,
-                req.metastore
+                req.metastore,
+                req.objectStore,
+                managedRow = false
               )
             )
             .map(msg => (StatusCode.Forbidden, ErrorResponse("superuser_required", msg)))

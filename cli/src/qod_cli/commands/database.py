@@ -53,7 +53,12 @@ def create(
         help="Leave out of a DuckLake database and QoD places it. A path of your own: a folder of a "
         "remote store, not its root, with your own keys in --object-store, or a superuser's credential.",
     ),
-    object_store: list[str] = typer.Option(None, "--object-store", help="KEY=VALUE, repeatable."),
+    object_store: list[str] = typer.Option(
+        None,
+        "--object-store",
+        help="KEY=VALUE, repeatable. A tenant admin sends it only with a remote --data-path, "
+        "complete for its scheme.",
+    ),
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),
     init_sql: str = typer.Option("", "--init-sql", help=_INIT_SQL_HELP),
@@ -136,7 +141,12 @@ def update(
         "the row holds them (a password left out is kept). A change of pgHost or pgPort needs "
         "pgPassword again.",
     ),
-    object_store: list[str] = typer.Option(None, "--object-store"),
+    object_store: list[str] = typer.Option(
+        None,
+        "--object-store",
+        help="KEY=VALUE, repeatable; omit = unchanged, a secret left out is kept. A tenant admin "
+        "changes it only on a database holding complete keys of its own, which stay complete.",
+    ),
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),
     init_sql: str = typer.Option(None, "--init-sql", help=_INIT_SQL_HELP),

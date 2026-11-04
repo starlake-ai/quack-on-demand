@@ -2454,8 +2454,16 @@ final class PoolSupervisor(
                 // never reaches their initSql check.
                 val choice = Option
                   .when(!writerTrusted)(
-                    TenantDb
-                      .superuserChoiceError(None, kind, dataPath, metastore, objectStore, metastore)
+                    TenantDb.superuserChoiceError(
+                      None,
+                      kind,
+                      dataPath,
+                      metastore,
+                      objectStore,
+                      metastore,
+                      objectStore,
+                      managedRow = false
+                    )
                   )
                   .flatten
                 lazy val namedTaken = namedDataPathTaken(dataPath)
@@ -2741,10 +2749,17 @@ final class PoolSupervisor(
       dbName: String,
       patch: TenantDbPatch
   ): IO[Either[SupervisorError, TenantDbUpdateResult]] =
-    IO.blocking(findTenantDb(tenantName, dbName)).flatMap {
+    IO.blocking {
+      findTenantDb(tenantName, dbName).map { td =>
+        // A branch holds its parent's objectStore.
+        val managedRow = !patch.writerTrusted && patch.objectStore.isDefined &&
+          store.managedPrefix(td.branchOf.getOrElse(td.id)).isDefined
+        (td, managedRow)
+      }
+    }.flatMap {
       case None =>
         IO.pure(Left(SupervisorError.NotFound(s"tenant-db $tenantName/$dbName not found")))
-      case Some(td) =>
+      case Some((td, managedRow)) =>
         val merged = td.copy(
           metastore = patch.metastore.fold(td.metastore)(mergeSecretKeys(td.metastore, _)),
           objectStore = patch.objectStore.fold(td.objectStore)(mergeSecretKeys(td.objectStore, _)),
@@ -2768,7 +2783,9 @@ final class PoolSupervisor(
                 merged.dataPath,
                 merged.metastore,
                 merged.objectStore,
-                patch.metastore.getOrElse(Map.empty)
+                patch.metastore.getOrElse(Map.empty),
+                patch.objectStore.getOrElse(Map.empty),
+                managedRow
               )
             )
             .flatten
@@ -2962,13 +2979,12 @@ final class PoolSupervisor(
       stored: Map[String, String],
       incoming: Map[String, String]
   ): Map[String, String] =
-    val secretKeys =
-      stored.keys.filter(k => TenantDb.SecretKeys.exists(_.equalsIgnoreCase(k))).toList
-    val carried = secretKeys.collect {
+    val secretKeys = stored.keys.filter(TenantDb.isSecretKey).toList
+    val carried    = secretKeys.collect {
       case k if !incoming.keys.exists(_.equalsIgnoreCase(k)) => k -> stored(k)
     }
     val explicit = incoming.filter { case (k, v) =>
-      !(TenantDb.SecretKeys.exists(_.equalsIgnoreCase(k)) && v.isEmpty)
+      !(TenantDb.isSecretKey(k) && v.isEmpty)
     }
     explicit ++ carried
 

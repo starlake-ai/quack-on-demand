@@ -62,6 +62,9 @@ object TenantDb {
       EncryptionKeyName
     )
 
+  /** Whether a metastore or `objectStore` key is one of [[SecretKeys]], in any spelling. */
+  def isSecretKey(key: String): Boolean = SecretKeys.exists(_.equalsIgnoreCase(key))
+
   /** The metastore's own secrets, which every launcher delivers as files and never as an
     * environment variable (`NodeMetastore.secrets`: the spawn script's secrets directory, the
     * Kubernetes per-pool node-env Secret, a fleet assignment). Deliberately distinct from
@@ -391,10 +394,12 @@ object TenantDb {
     *
     * Which Postgres server it uses: [[serverChoiceError]].
     *
-    * Where its data lies, which is where the manager's keys and disk would point: a create names no
-    * path (QoD places a DuckLake database), or a remote one with own keys ([[holdsOwnKeys]]), and
-    * never a `metastore.dataPath`. An update leaves `metastore.dataPath` as it is and keeps the own
-    * keys a row holds, so that a node never signs that path with the manager's.
+    * Where its data lies, as a path is signed only with the keys the row holds, or a superuser's: a
+    * create names no path (QoD places a DuckLake database), or a remote one with own keys
+    * ([[holdsOwnKeys]]), and never a `metastore.dataPath`; an `objectStore` goes only with such a
+    * path. An update leaves `metastore.dataPath` as it is. An `objectStore` it changes (`sentStore`
+    * is what it sent) is a row's own keys: a row holding them complete may change them, and they
+    * stay complete; any other row, one of managed storage (`managedRow`) included, takes no change.
     */
   def superuserChoiceError(
       stored: Option[TenantDb],
@@ -402,7 +407,9 @@ object TenantDb {
       dataPath: String,
       metastore: Map[String, String],
       objectStore: Map[String, String],
-      sent: Map[String, String]
+      sent: Map[String, String],
+      sentStore: Map[String, String],
+      managedRow: Boolean
   ): Option[String] =
     val chooses =
       "a database's data path is QoD's or a superuser's to choose: leave dataPath out of a " +
@@ -414,13 +421,26 @@ object TenantDb {
         val named = metastore.contains("dataPath") ||
           (dataPath.nonEmpty &&
             !(holdsOwnKeys(dataPath, objectStore) && namesRemoteFolder(dataPath)))
-        Option.when(named)(chooses)
-      case Some(td) =>
-        val path =
-          if td.dataPath.nonEmpty then td.dataPath else td.metastore.getOrElse("dataPath", "")
-        if metastore.get("dataPath") != td.metastore.get("dataPath") then Some(chooses)
+        if named then Some(chooses)
         else
-          Option.when(holdsOwnKeys(path, td.objectStore) && !holdsOwnKeys(path, objectStore))(
+          Option.when(objectStore.nonEmpty && !holdsOwnKeys(dataPath, objectStore))(
+            "objectStore goes only with a remote dataPath it completes for its scheme: send both, " +
+              "or leave objectStore out"
+          )
+      case Some(td) =>
+        val path = if dataPath.nonEmpty then dataPath else td.metastore.getOrElse("dataPath", "")
+        // A secret sent is a change whatever it says, and is not compared with the stored one.
+        val changed = objectStore != td.objectStore ||
+          sentStore.exists((k, v) => isSecretKey(k) && v.nonEmpty)
+        if metastore.get("dataPath") != td.metastore.get("dataPath") then Some(chooses)
+        else if !changed then None
+        else if managedRow || !holdsOwnKeys(path, td.objectStore) then
+          Some(
+            "a superuser changes this database's objectStore, as it holds no keys of its own: " +
+              "leave objectStore out"
+          )
+        else
+          Option.when(!holdsOwnKeys(path, objectStore))(
             "this database's remote data path signs with its own keys in objectStore: they can " +
               "change, but stay complete for its scheme. Send them, or leave objectStore out."
           )

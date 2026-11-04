@@ -307,7 +307,16 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
         store: Map[String, String] = Map.empty,
         meta: Map[String, String] = Map.empty
     ) =
-      TenantDb.superuserChoiceError(None, TenantDbKind.DuckLake, path, meta, store, meta)
+      TenantDb.superuserChoiceError(
+        None,
+        TenantDbKind.DuckLake,
+        path,
+        meta,
+        store,
+        meta,
+        store,
+        false
+      )
     on("") shouldBe None
     on("s3://b/x", remoteRow.objectStore) shouldBe None
     on("s3://b/x").isDefined shouldBe true
@@ -328,17 +337,17 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
 
   it should "judge an update by what the row would hold" in {
     def on(td: TenantDb, meta: Map[String, String], store: Map[String, String]) =
-      TenantDb.superuserChoiceError(Some(td), td.kind, td.dataPath, meta, store, meta)
+      TenantDb.superuserChoiceError(Some(td), td.kind, td.dataPath, meta, store, meta, store, false)
     val keys = remoteRow.objectStore
     on(remoteRow, remoteRow.metastore, keys) shouldBe None
     on(remoteRow, remoteRow.metastore, keys.updated("s3_access_key_id", "k2")) shouldBe None
     on(remoteRow, remoteRow.metastore, Map.empty).isDefined shouldBe true
     on(remoteRow, remoteRow.metastore, keys - "s3_secret_access_key").isDefined shouldBe true
     on(remoteRow, remoteRow.metastore + ("dataPath" -> "/x"), keys).isDefined shouldBe true
-    // No own keys to weaken, whatever the path.
+    // No own keys: left as it is it is not judged, and it takes no change.
     val plain = remoteRow.copy(objectStore = Map.empty)
     on(plain, plain.metastore, Map.empty) shouldBe None
-    on(plain, plain.metastore, Map("s3_region" -> "r")) shouldBe None
+    on(plain, plain.metastore, Map("s3_region" -> "r")).isDefined shouldBe true
     // A path held in the metastore is judged the same, and sent back as it is, no change.
     val inMeta = remoteRow.copy(dataPath = "", metastore = Map("dataPath" -> "s3://b/y"))
     on(inMeta, inMeta.metastore, keys) shouldBe None
@@ -346,9 +355,87 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     on(inMeta, Map.empty, keys).isDefined shouldBe true
   }
 
+  it should "judge a tenant admin's objectStore: its own keys, complete, or nothing" in {
+    val keys                                             = remoteRow.objectStore
+    def create(path: String, store: Map[String, String]) =
+      TenantDb.superuserChoiceError(
+        None,
+        TenantDbKind.DuckLake,
+        path,
+        Map.empty,
+        store,
+        Map.empty,
+        store,
+        false
+      )
+    create("", Map.empty) shouldBe None
+    create("", keys).isDefined shouldBe true
+    create("", Map("s3_endpoint" -> "h")).isDefined shouldBe true
+    create("s3://b/x", Map("s3_endpoint" -> "h")).isDefined shouldBe true
+    create("s3://b/x", keys + ("s3_endpoint" -> "h")) shouldBe None
+
+    def update(
+        td: TenantDb,
+        store: Map[String, String],
+        managed: Boolean = false,
+        sentStore: Map[String, String] = Map.empty
+    ) =
+      TenantDb.superuserChoiceError(
+        Some(td),
+        td.kind,
+        td.dataPath,
+        td.metastore,
+        store,
+        Map.empty,
+        sentStore,
+        managed
+      )
+    // A row holding no complete own keys takes no change, whatever is sent.
+    val bare  = remoteRow.copy(objectStore = Map.empty)
+    val local = bare.copy(dataPath = "/data/x")
+    List(bare, local).foreach { row =>
+      update(row, Map.empty) shouldBe None
+      update(row, keys).isDefined shouldBe true
+      update(row, keys + ("s3_endpoint" -> "h")).isDefined shouldBe true
+      update(row, Map("s3_endpoint" -> "h")).isDefined shouldBe true
+    }
+    List(local, bare).map(_.copy(objectStore = Map("s3_endpoint" -> "h"))).foreach { old =>
+      update(old, old.objectStore) shouldBe None
+      update(old, Map.empty).isDefined shouldBe true
+      update(old, keys).isDefined shouldBe true
+      update(old, Map("s3_endpoint" -> "h2")).isDefined shouldBe true
+      // A secret sent is a change whatever it says, in any spelling.
+      update(
+        old,
+        old.objectStore,
+        sentStore = Map("S3_Secret_Access_Key" -> "x")
+      ).isDefined shouldBe true
+      update(old, old.objectStore, sentStore = Map("s3_secret_access_key" -> "")) shouldBe None
+    }
+    // A row holding them may change them, and they stay complete.
+    update(remoteRow, keys + ("s3_endpoint" -> "h")) shouldBe None
+    update(remoteRow, keys, sentStore = keys) shouldBe None
+    update(remoteRow, keys - "s3_secret_access_key").isDefined shouldBe true
+    update(remoteRow, Map.empty).isDefined shouldBe true
+    // A managed row's are QoD's: nothing changes them, complete or not.
+    update(remoteRow, keys, managed = true) shouldBe None
+    update(remoteRow, keys, managed = true, sentStore = keys).isDefined shouldBe true
+    update(remoteRow, keys + ("s3_endpoint" -> "h"), managed = true).isDefined shouldBe true
+    update(remoteRow, Map.empty, managed = true).isDefined shouldBe true
+  }
+
   it should "judge a create's server keys, in any spelling of the password" in {
     def on(kind: TenantDbKind, meta: (String, String)*) =
-      TenantDb.superuserChoiceError(None, kind, "", meta.toMap, Map.empty, meta.toMap)
+      TenantDb.superuserChoiceError(
+        None,
+        kind,
+        "",
+        meta.toMap,
+        Map.empty,
+        meta.toMap,
+        Map.empty,
+        false
+      )
     on(TenantDbKind.DuckLake) shouldBe None
     on(TenantDbKind.DuckLake, "schemaName" -> "main", "catalogAlias" -> "x") shouldBe None
     TenantDb.ServerKeys.foreach { k =>
@@ -379,7 +466,16 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
       ""
     )
     def on(result: Map[String, String], sent: Map[String, String]) =
-      TenantDb.superuserChoiceError(Some(row), row.kind, "", result, Map.empty, sent)
+      TenantDb.superuserChoiceError(
+        Some(row),
+        row.kind,
+        "",
+        result,
+        Map.empty,
+        sent,
+        Map.empty,
+        false
+      )
     val same = row.metastore
     val back = same - "pgPassword"
     on(same, back) shouldBe None
@@ -399,7 +495,16 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     // An own dbName left out comes back to the row's name.
     val own = row.copy(metastore = same.updated("dbName", "other"))
     TenantDb
-      .superuserChoiceError(Some(own), own.kind, "", same - "dbName", Map.empty, back - "dbName")
+      .superuserChoiceError(
+        Some(own),
+        own.kind,
+        "",
+        same - "dbName",
+        Map.empty,
+        back - "dbName",
+        Map.empty,
+        false
+      )
       .get should include("dbName")
     // None of it applies to a duckdb-file's dbName.
     val file = row.copy(kind = TenantDbKind.DuckDbFile, metastore = Map("dbName" -> "cat"))
@@ -409,7 +514,9 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
       "",
       Map("dbName" -> "cat2"),
       Map.empty,
-      Map("dbName" -> "cat2")
+      Map("dbName" -> "cat2"),
+      Map.empty,
+      false
     ) shouldBe None
   }
 

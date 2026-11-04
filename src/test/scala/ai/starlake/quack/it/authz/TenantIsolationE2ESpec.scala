@@ -1094,6 +1094,36 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         errorOf(b) shouldBe "superuser_required"
       }
     }
+    // An endpoint alone is not its own keys.
+    val (lone, _, loneBody) = createDb(
+      t,
+      "lone",
+      token,
+      "dataPath"    -> s("s3://qod-iso-no-bucket/f4lone/"),
+      "objectStore" -> Json.obj("s3_endpoint" -> s("elsewhere.example:9000"))
+    )
+    withClue(loneBody.take(300))(lone shouldBe 403)
+    // Nor does a row QoD places take any.
+    val (placed, placedName, _) = createDb(t, "placed", token)
+    placed shouldBe 200
+    val (noRoom, noRoomBody) = stack.postStatus(
+      "/api/database/update",
+      obj(
+        "tenant"      -> s(t),
+        "name"        -> s(placedName),
+        "objectStore" -> Json.obj("s3_endpoint" -> s("elsewhere.example:9000"))
+      ),
+      token
+    )
+    noRoom shouldBe 403
+    errorOf(noRoomBody) shouldBe "superuser_required"
+    val (noRoomCreate, _, _) = createDb(
+      t,
+      "placed2",
+      token,
+      "objectStore" -> Json.obj("s3_access_key_id" -> s("AK"), "s3_secret_access_key" -> s("SK"))
+    )
+    noRoomCreate shouldBe 403
     // Changed and complete, it stays: the secret left out is the stored one.
     updateKeys("s3_access_key_id" -> "AK2", "s3_region" -> "eu-west-1")._1 shouldBe 200
     updateKeys("s3_access_key_id" -> "AK3", "s3_secret_access_key" -> "SK3")._1 shouldBe 200

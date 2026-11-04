@@ -496,6 +496,13 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 onChange={ev => { setEditMetastore(ev.target.value); setMetastoreDirty(true); }} />
             </label>
             <label>Object store (key=value per line)
+              {!superuser && (
+                <p className="subtle" style={{ marginBottom: 4 }}>
+                  A superuser&rsquo;s to change, unless this database holds complete keys of its own
+                  for a remote data path: those may change and stay complete, and a secret left out
+                  is kept.
+                </p>
+              )}
               <textarea value={editObjectStore} rows={4}
                 onChange={ev => { setEditObjectStore(ev.target.value); setObjectStoreDirty(true); }} />
             </label>

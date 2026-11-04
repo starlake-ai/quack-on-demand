@@ -521,6 +521,20 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       true
   }
 
+  it should "take a tenant admin's object_store only as its remote path's own keys" in {
+    val f   = new Fixture
+    val out = f.call(
+      "create_database",
+      adminPat(),
+      "tenant"       -> Json.fromString(Tenant0),
+      "name"         -> Json.fromString("noroom"),
+      "kind"         -> Json.fromString("memory"),
+      "object_store" -> Json.obj("s3_endpoint" -> Json.fromString("elsewhere.example:9000"))
+    )
+    out.left.toOption.getOrElse(fail("admitted")) should include("objectStore")
+    f.store.snapshot().tenantDbs.map(_.name) should not contain s"${Tenant0}_noroom"
+  }
+
   "update_database" should "move no data path for a tenant admin" in {
     val f                                             = new Fixture
     def update(principal: McpPrincipal, path: String) = f.call(
@@ -609,6 +623,19 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       McpSuperuserPat.principal,
       stored + ("pgUser" -> "u2") + ("schemaName" -> "s2")
     ).isRight shouldBe true
+  }
+
+  it should "take no object_store for a tenant admin on a row with no remote path of its own" in {
+    val f   = new Fixture
+    val out = f.call(
+      "update_database",
+      adminPat(),
+      "tenant"       -> Json.fromString(Tenant0),
+      "name"         -> Json.fromString(TenantDb),
+      "object_store" -> Json.obj("s3_endpoint" -> Json.fromString("elsewhere.example:9000"))
+    )
+    out.left.toOption.getOrElse(fail("admitted")) should include("objectStore")
+    f.store.snapshot().tenantDbs.find(_.name == TenantDb).get.objectStore shouldBe Map.empty
   }
 
   "metastore_defaults" should "be a superuser's" in {

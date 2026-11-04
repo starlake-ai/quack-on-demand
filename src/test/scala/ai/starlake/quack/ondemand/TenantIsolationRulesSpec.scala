@@ -1010,8 +1010,9 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
         .isRight shouldBe true
       f.update(tenantAdmin, name, Map("schemaName" -> "main")) shouldBe Right(name)
     }
-    // No own keys to weaken: adding some, even half, is the row's own business.
-    f.updateStore(tenantAdmin, "acme_m", Map("s3_region" -> "eu-west-1")) shouldBe Right("acme_m")
+    // Half the keys are not its own keys.
+    codeOf(f.updateStore(tenantAdmin, "acme_m", Map("s3_region" -> "eu-west-1"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
     f.row("acme_m").dataPath shouldBe "s3://named-by-a-manifest/x/"
   }
 
@@ -1196,9 +1197,6 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
       .isRight shouldBe true
-    f.updateStore(tenantAdmin, "acme_byo", Map("s3_region" -> "eu-west-1")) shouldBe Right(
-      "acme_byo"
-    )
     // A row's own name, sent or left out, is no change: nothing else can read it otherwise.
     f.update(tenantAdmin, "acme_byo", shown - "dbName") shouldBe Right("acme_byo")
     f.update(tenantAdmin, "acme_byo", shown) shouldBe Right("acme_byo")
@@ -1559,6 +1557,293 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     // The deny set remembers a dropped database; a name placed again is the same database's.
     f.sup.dataFolderDenySet = () => Right(List("/data/acme_lake/"))
     f.rest(tenantAdmin, "lake") shouldBe Right("acme_lake")
+  }
+
+  // ---------- a tenant admin's objectStore ----------
+
+  private def rowWith(
+      f: Fixture,
+      name: String,
+      path: String,
+      objectStore: Map[String, String] = Map.empty
+  ): Unit =
+    f.store.upsertTenantDb(
+      TenantDb(
+        s"td-$name",
+        "acme",
+        name,
+        TenantDbKind.DuckLake,
+        Map("dbName" -> name),
+        path,
+        objectStore
+      )
+    )
+    f.sup.restore()
+
+  "A tenant admin's objectStore" should "take nothing on a create with no remote path of its own" in {
+    val f = new Fixture
+    List(
+      OwnKeys,
+      Map("s3_endpoint"      -> "elsewhere.example:9000"),
+      Map("s3_access_key_id" -> "AK"),
+      Map("s3_region"        -> "eu-west-1")
+    ).foreach { store =>
+      withClue(store.keySet.toString) {
+        codeOf(f.rest(tenantAdmin, "lake", objectStore = store)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+        codeOf(f.rest(tenantAdmin, "mem", objectStore = store, kind = "memory")) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+        f.untrusted("direct", objectStore = store).left.toOption.get shouldBe
+          a[SupervisorError.SuperuserChoice]
+      }
+    }
+    f.rows shouldBe empty
+    f.inits shouldBe empty
+  }
+
+  it should "be complete on a create naming a remote path, an endpoint alone being nothing" in {
+    val f = new Fixture
+    codeOf(
+      f.rest(tenantAdmin, "a", dataPath = Remote, objectStore = Map("s3_endpoint" -> "h:9000"))
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+    f.rest(
+      tenantAdmin,
+      "b",
+      dataPath = Remote,
+      objectStore = OwnKeys + ("s3_endpoint" -> "h:9000")
+    ) shouldBe Right("acme_b")
+  }
+
+  it should "take no change on a row holding no complete own keys, whatever is sent" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "placed") shouldBe Right("acme_placed")
+    rowWith(f, "acme_local", "/data/local")
+    rowWith(f, "acme_bare", "")
+    rowWith(f, "acme_remote", Remote)
+    for
+      name  <- List("acme_placed", "acme_local", "acme_bare", "acme_remote")
+      store <- List(
+        OwnKeys,
+        OwnKeys + ("s3_endpoint" -> "h:9000"),
+        Map("s3_endpoint"      -> "h:9000"),
+        Map("s3_region"        -> "eu-west-1"),
+        Map("s3_access_key_id" -> "AK")
+      )
+    do
+      withClue(s"$name ${store.keySet}") {
+        codeOf(f.updateStore(tenantAdmin, name, store)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+        f.row(name).objectStore shouldBe Map.empty
+      }
+    f.sup
+      .updateTenantDb("acme", "acme_remote", TenantDbPatch(objectStore = Some(OwnKeys)))
+      .unsafeRunSync()
+      .left
+      .toOption
+      .get shouldBe a[SupervisorError.SuperuserChoice]
+    // A superuser may.
+    f.updateStore(superuser, "acme_remote", OwnKeys) shouldBe Right("acme_remote")
+    f.updateStore(superuser, "acme_local", Map("s3_region" -> "eu-west-1")) shouldBe Right(
+      "acme_local"
+    )
+  }
+
+  it should "take no change on a row QoD placed under a remote default path" in {
+    val f = new Fixture(defaults = Defaults.updated("dataPath", "s3://warehouse/lakes/default/"))
+    f.rest(tenantAdmin, "placed") shouldBe Right("acme_placed")
+    f.row("acme_placed").dataPath should startWith("s3://warehouse/lakes/")
+    f.row("acme_placed").objectStore shouldBe Map.empty
+    val endpoint = Map("s3_endpoint" -> "elsewhere.example:9000")
+    List(endpoint, OwnKeys ++ endpoint, OwnKeys).foreach { store =>
+      withClue(store.keySet.toString) {
+        codeOf(f.updateStore(tenantAdmin, "acme_placed", store)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+        f.row("acme_placed").objectStore shouldBe Map.empty
+      }
+    }
+    // An empty map is what it holds, and an edit not touching it goes through.
+    f.updateStore(tenantAdmin, "acme_placed", Map.empty) shouldBe Right("acme_placed")
+    f.handlers
+      .update(
+        UpdateTenantDbRequest("acme", "acme_placed", initSql = Some("SET threads = 2;")),
+        None
+      )(
+        tenantAdmin
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+  }
+
+  it should "let a row holding complete own keys change them, the endpoint included" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "own", dataPath = Remote, objectStore = OwnKeys) shouldBe Right("acme_own")
+    // The secret left out is the stored one.
+    f.updateStore(
+      tenantAdmin,
+      "acme_own",
+      Map("s3_access_key_id" -> "AK2", "s3_endpoint" -> "h:9000")
+    ) shouldBe Right("acme_own")
+    f.row("acme_own").objectStore shouldBe Map(
+      "s3_access_key_id"     -> "AK2",
+      "s3_endpoint"          -> "h:9000",
+      "s3_secret_access_key" -> "SK"
+    )
+    // And they stay complete.
+    List(
+      Map("s3_endpoint"      -> "h:9000"),
+      Map("s3_access_key_id" -> "AK2", "s3_secret_access_key" -> ""),
+      Map("s3_access_key_id" -> " ", "s3_endpoint"            -> "h:9000"),
+      Map.empty[String, String]
+    ).foreach { store =>
+      withClue(store.keySet.toString) {
+        codeOf(f.updateStore(tenantAdmin, "acme_own", store)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+      }
+    }
+    f.row("acme_own").objectStore("s3_access_key_id") shouldBe "AK2"
+  }
+
+  it should "not judge a stored value it leaves as it is, and take no other change to one" in {
+    val f   = new Fixture
+    val old = Map("s3_endpoint" -> "h:9000", "s3_secret_access_key" -> "old-secret-sentinel")
+    rowWith(f, "acme_old", "/data/old", old)
+    rowWith(f, "acme_part", Remote, old)
+    List("acme_old", "acme_part").foreach { name =>
+      // What a client was shown of it, sent back: no change.
+      f.updateStore(tenantAdmin, name, Map("s3_endpoint" -> "h:9000")) shouldBe Right(name)
+      f.handlers
+        .update(UpdateTenantDbRequest("acme", name, initSql = Some("SET threads = 2;")), None)(
+          tenantAdmin
+        )
+        .unsafeRunSync()
+        .isRight shouldBe true
+      f.row(name).objectStore shouldBe old
+      // Adding, changing or clearing is a superuser's, and a secret sent is a change whatever it
+      // says, the one it holds included.
+      List(
+        Map("s3_endpoint" -> "other:9000"),
+        OwnKeys,
+        Map.empty[String, String],
+        Map("s3_secret_access_key" -> ""),
+        Map("s3_endpoint"          -> "h:9000", "s3_secret_access_key" -> ""),
+        Map("s3_endpoint"          -> "h:9000", "s3_secret_access_key" -> "old-secret-sentinel"),
+        Map("s3_endpoint"          -> "h:9000", "s3_secret_access_key" -> "another-guess")
+      ).foreach { store =>
+        withClue(s"$name ${store.keySet}") {
+          codeOf(f.updateStore(tenantAdmin, name, store)) shouldBe
+            (StatusCode.Forbidden, "superuser_required")
+          f.row(name).objectStore shouldBe old
+        }
+      }
+    }
+    f.updateStore(superuser, "acme_old", Map("s3_secret_access_key" -> "")) shouldBe Right(
+      "acme_old"
+    )
+    f.row("acme_old").objectStore shouldBe Map.empty
+  }
+
+  private val ManagedKeys = Map(
+    "s3_access_key_id"     -> "managed-key-id",
+    "s3_secret_access_key" -> "managed-secret-sentinel",
+    "s3_endpoint"          -> "managed.example:9000"
+  )
+
+  private def managedRow(f: Fixture): Unit =
+    rowWith(f, "acme_managed", "s3://managed/acme_managed-12345678/", ManagedKeys)
+    f.store.insertManagedPrefix(
+      "td-acme_managed",
+      "acme",
+      "acme_managed",
+      "s3://managed/acme_managed-12345678/",
+      java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+    )
+
+  "A managed row's objectStore" should "not change for an untrusted writer, the endpoint included" in {
+    val f = new Fixture
+    managedRow(f)
+    val shown = ManagedKeys - "s3_secret_access_key"
+    List(
+      shown.updated("s3_endpoint", "elsewhere.example:9000"),
+      shown.updated("s3_access_key_id", "own-id"),
+      shown + ("s3_secret_access_key" -> "own-secret"),
+      shown + ("s3_secret_access_key" -> ManagedKeys("s3_secret_access_key")),
+      shown + ("s3_secret_access_key" -> ""),
+      OwnKeys,
+      shown - "s3_endpoint",
+      Map.empty[String, String]
+    ).foreach { store =>
+      withClue(store.keySet.toString) {
+        codeOf(f.updateStore(tenantAdmin, "acme_managed", store)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+        f.sup
+          .updateTenantDb("acme", "acme_managed", TenantDbPatch(objectStore = Some(store)))
+          .unsafeRunSync()
+          .left
+          .toOption
+          .get shouldBe a[SupervisorError.SuperuserChoice]
+      }
+    }
+    f.row("acme_managed").objectStore shouldBe ManagedKeys
+  }
+
+  it should "stay editable elsewhere: what a client was shown, or an edit not touching it" in {
+    val f = new Fixture
+    managedRow(f)
+    val shown = ManagedKeys - "s3_secret_access_key"
+    f.updateStore(tenantAdmin, "acme_managed", shown) shouldBe Right("acme_managed")
+    f.handlers
+      .update(
+        UpdateTenantDbRequest("acme", "acme_managed", initSql = Some("SET threads = 2;")),
+        None
+      )(
+        tenantAdmin
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.update(
+      tenantAdmin,
+      "acme_managed",
+      Map("dbName" -> "acme_managed", "schemaName" -> "s2")
+    ) shouldBe
+      Right("acme_managed")
+    f.row("acme_managed").objectStore shouldBe ManagedKeys
+    // A superuser may change it.
+    f.updateStore(
+      superuser,
+      "acme_managed",
+      shown.updated("s3_endpoint", "new.example:9000")
+    ) shouldBe
+      Right("acme_managed")
+    f.row("acme_managed").objectStore("s3_endpoint") shouldBe "new.example:9000"
+  }
+
+  it should "bind a branch of such a row, which holds the same keys" in {
+    val f = new Fixture
+    managedRow(f)
+    f.store.upsertTenantDb(
+      TenantDb(
+        "td-acme_managed__br_12345678",
+        "acme",
+        "acme_managed__br_12345678",
+        TenantDbKind.DuckLake,
+        Map("dbName" -> "acme_managed__br_12345678"),
+        "s3://managed/acme_managed-12345678__br_12345678/",
+        ManagedKeys,
+        branchOf = Some("td-acme_managed")
+      )
+    )
+    f.sup.restore()
+    val shown = ManagedKeys - "s3_secret_access_key"
+    codeOf(
+      f.updateStore(
+        tenantAdmin,
+        "acme_managed__br_12345678",
+        shown.updated("s3_endpoint", "elsewhere.example:9000")
+      )
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+    f.updateStore(tenantAdmin, "acme_managed__br_12345678", shown) shouldBe
+      Right("acme_managed__br_12345678")
+    f.row("acme_managed__br_12345678").objectStore shouldBe ManagedKeys
   }
 
   // ---------- the tenant-name rule, at the handler's path ----------

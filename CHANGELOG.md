@@ -78,6 +78,14 @@ count. To keep counts from a user, refuse on the table.
   or a managed prefix within retention. A bucket's or a container's root, or a path with a `.` or `..`
   segment, a glob or an escape in it, answers `403 superuser_required`. A superuser, `qod serve`'s
   provisioning and a manifest import are not judged.
+- A tenant admin's `objectStore` goes only with a remote path, as that path's own keys. A create sends it
+  with a named remote path it completes, and with no path it answers `403 superuser_required`. An update
+  changes it only on a database holding complete keys of its own, which may change, the endpoint included,
+  and stay complete. Every other database takes no change from a tenant admin: adding, changing or clearing
+  answers `403 superuser_required`, nothing written. That covers a database QoD placed, a superuser's remote
+  database, a local one, a value that was never complete, and one of managed storage or a branch of it,
+  whose `objectStore` holds QoD's keys. A value left as stored is not judged, so an edit not touching it
+  still works, and a secret sent counts as a change whatever it says.
 - A DuckLake create naming no path no longer answers `400`, for any caller: the database gets a folder of
   its own beside the default data path, under its composed name, stored on the row so that it cannot
   move. With no default data path, or one that is a bucket's root, it answers `400 invalid_contract`

@@ -880,7 +880,10 @@ final class McpAdminTools(
           "remote store, not its root, with your own keys in object_store, or a superuser's " +
           "credential."
       ),
-      "object_store"     -> objProp("Object-store credentials config."),
+      "object_store" -> objProp(
+        "Object-store keys. Unless you are a superuser: only with a remote data_path, complete " +
+          "for its scheme."
+      ),
       "default_database" -> strProp("Default catalog name presented to clients."),
       "default_schema"   -> strProp("Default schema presented to clients."),
       "init_sql"         -> strProp(initSqlHelp("SQL run on each node at attach.")),
@@ -950,7 +953,10 @@ final class McpAdminTools(
           "pgUser, pgPassword and a DuckLake database's dbName: anyone else sends them back as " +
           "the row holds them, a password left out being kept."
       ),
-      "object_store"     -> objProp("Replacement object-store config (omit = unchanged)."),
+      "object_store" -> objProp(
+        "Replacement object-store config (omit = unchanged). Unless you are a superuser: only on a " +
+          "database holding complete keys of its own, which stay complete."
+      ),
       "default_database" -> strProp("New default catalog (omit = unchanged)."),
       "default_schema"   -> strProp("New default schema (omit = unchanged)."),
       "init_sql"         -> strProp(initSqlHelp("New init SQL (omit = unchanged).")),

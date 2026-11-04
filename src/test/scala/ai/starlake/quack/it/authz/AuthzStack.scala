@@ -66,7 +66,9 @@ final class AuthzStack(
     /** `quack-on-demand.stampWrites` (`QOD_STAMP_WRITES`), the manager's own default. */
     stampWrites: Boolean = true,
     /** `defaultMetastore.dataPath`, for a spec whose databases QoD places. */
-    defaultDataPath: Option[String] = None
+    defaultDataPath: Option[String] = None,
+    /** More of `quack-on-demand`, as HOCON. */
+    extraManagerConfig: String = ""
 ):
   import Main.given
 
@@ -109,6 +111,7 @@ final class AuthzStack(
          |  userS3.allowedEndpoints = "$userS3Endpoints"
          |  ${maintenanceTickSec.fold("")(sec => s"maintenance.tickSec = $sec")}
          |  stampWrites = $stampWrites
+         |  $extraManagerConfig
          |  defaultMetastore {
          |    pgHost = "${TestPostgres.pgHost}"
          |    pgPort = "${TestPostgres.pgPort}"
