@@ -4,6 +4,7 @@ import {
   branchCount, conflictPolicyText, proposalErrorNote, rowConflictsHint, rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
+import { BranchNamePattern } from '../api/branchName';
 import type {
   BranchChangesResponse,
   BranchDetailResponse,
@@ -612,7 +613,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
             <label>
               Name
               <input value={fName} onChange={ev => setFName(ev.target.value)} placeholder="feature-x"
-                pattern="[a-z][a-z0-9_-]{0,47}" title="Lowercase letter first, then letters, digits, _ or -" required autoFocus />
+                pattern={BranchNamePattern} title="Lowercase letter first, then letters, digits, _ or -" required autoFocus />
             </label>
             <label>
               Time to live, hours (optional)
