@@ -2546,8 +2546,9 @@ eviction are opt-in knobs.
   For a tenant user the gateway answers `DESCRIBE <t>`, `SHOW <t>`, `PRAGMA table_info('<t>')`,
   `SUMMARIZE <t>` and `SHOW TABLES` with equivalent SELECTs over the filtered listings plus a read of
   the object (so they need a read grant on it); `DESCRIBE (<query>)` and `SUMMARIZE (<query>)` stay
-  refused. DESCRIBE's `key` and table_info's `pk` come back NULL. On an OPA tenant these answers are
-  empty and SUMMARIZE is refused, since the listings are narrowed by QoD grants. Inside a native front
+  refused. DESCRIBE's `key` and table_info's `pk` come back NULL. On an OPA tenant, for a user with no
+  read-covering QoD grant, these answers are empty and SUMMARIZE is refused, since the listings follow
+  QoD grants, which OPA does not narrow. Inside a native front
   door transaction a refused DESCRIBE or SUMMARIZE aborts the transaction, like any statement the node
   refuses there.
 - **No per-pool switch** - the node enforces the rules above on every pool, so there is
