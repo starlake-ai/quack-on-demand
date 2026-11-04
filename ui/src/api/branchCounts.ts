@@ -1,5 +1,5 @@
 import { ApiError } from './client';
-import type { BranchRowConflicts } from './types';
+import type { BranchConflictEntry, BranchRowConflicts, BranchTableChange } from './types';
 
 /** A branch change-set count cell. The server flags `countsUnavailable` when the counts were asked
   * for and the node refused the viewer the table (no read grant) or the count failed: its zeros are
@@ -28,6 +28,19 @@ export function branchCount(
   return t.countsUnavailable
     ? { text: '-', title: CountsUnavailableTitle }
     : { text: String(t[field]) };
+}
+
+/** A change-set table's Merge cell. A table conflict is held apart from the table's own `mergeable`,
+  * so it must be looked up: the cell would otherwise say `ok` of a table the list below says conflicts
+  * with main. A table refused for itself keeps its reason, which already says it cannot merge. */
+export function branchMergeCell(
+  t: Pick<BranchTableChange, 'schema' | 'table' | 'mergeable' | 'reason' | 'threeWay'>,
+  conflicts: BranchConflictEntry[],
+): { text: string; refused: boolean } {
+  if (!t.mergeable) return { text: t.reason ?? 'refused', refused: true };
+  const conflict = conflicts.find(c => c.schema === t.schema && c.table === t.table);
+  if (conflict) return { text: `cannot be merged: ${conflict.reason}`, refused: true };
+  return { text: t.threeWay ? 'cell by cell, main changed it too' : 'ok', refused: false };
 }
 
 function plural(n: number, one: string, many: string): string {

@@ -4,6 +4,7 @@ import {
   actionErrorText,
   alreadyMergedNote,
   branchCount,
+  branchMergeCell,
   conflictPolicyText,
   CountsUnavailableTitle,
   diffChangeType,
@@ -260,5 +261,40 @@ describe('alreadyMergedNote', () => {
   it('leaves an action with no answer to the banner, whatever it says', () => {
     expect(alreadyMergedNote(new TypeError('Failed to fetch'))).toBeNull();
     expect(alreadyMergedNote(new TypeError('already_merged'))).toBeNull();
+  });
+});
+
+describe('branchMergeCell', () => {
+  const table = { schema: 'main', table: 't', mergeable: true };
+  const conflict = { schema: 'main', table: 't', reason: 'also created on main since the fork' };
+
+  it('says ok of a table with nothing against it', () => {
+    expect(branchMergeCell(table, [])).toEqual({ text: 'ok', refused: false });
+  });
+
+  it('says a table main changed too merges cell by cell', () => {
+    expect(branchMergeCell({ ...table, threeWay: true }, [])).toEqual({
+      text: 'cell by cell, main changed it too',
+      refused: false,
+    });
+  });
+
+  it('says what the list of table conflicts says, never ok', () => {
+    expect(branchMergeCell(table, [conflict])).toEqual({
+      text: 'cannot be merged: also created on main since the fork',
+      refused: true,
+    });
+  });
+
+  it('goes by the schema and the table of the conflict', () => {
+    expect(branchMergeCell(table, [{ ...conflict, table: 'other' }])).toEqual({ text: 'ok', refused: false });
+    expect(branchMergeCell(table, [{ ...conflict, schema: 'other' }])).toEqual({ text: 'ok', refused: false });
+  });
+
+  it('gives a table refused for itself its own reason, which already says it cannot merge', () => {
+    const altered = { ...table, mergeable: false, reason: 'schema change cannot be merged' };
+    expect(branchMergeCell(altered, [])).toEqual({ text: 'schema change cannot be merged', refused: true });
+    expect(branchMergeCell(altered, [conflict])).toEqual({ text: 'schema change cannot be merged', refused: true });
+    expect(branchMergeCell({ ...table, mergeable: false }, [])).toEqual({ text: 'refused', refused: true });
   });
 });

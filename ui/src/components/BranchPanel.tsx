@@ -1,13 +1,14 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import {
-  actionErrorText, alreadyMergedNote, branchCount, conflictPolicyText, diffChangeType, proposalErrorNote,
-  rowConflictsHint, rowConflictsText,
+  actionErrorText, alreadyMergedNote, branchCount, branchMergeCell, conflictPolicyText, diffChangeType,
+  proposalErrorNote, rowConflictsHint, rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import { BranchNamePattern } from '../api/branchName';
 import type {
   BranchChangesResponse,
+  BranchConflictEntry,
   BranchDetailResponse,
   BranchEntry,
   BranchMergeEntry,
@@ -53,6 +54,11 @@ function kindChip(t: BranchTableChange) {
       {t.kind}
     </span>
   );
+}
+
+function mergeCell(t: BranchTableChange, conflicts: BranchConflictEntry[]) {
+  const cell = branchMergeCell(t, conflicts);
+  return cell.refused ? <span style={{ color: '#b91c1c' }}>{cell.text}</span> : cell.text;
 }
 
 function fmtTs(s?: string | null): string {
@@ -267,11 +273,7 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
                         const c = branchCount(t, f);
                         return <td key={f} align="right" title={c.title}>{c.text}</td>;
                       })}
-                      <td>
-                        {!t.mergeable
-                          ? <span style={{ color: '#b91c1c' }}>{t.reason ?? 'refused'}</span>
-                          : t.threeWay ? 'cell by cell, main changed it too' : 'ok'}
-                      </td>
+                      <td>{mergeCell(t, changes.conflicts)}</td>
                       <td>
                         {(t.kind === 'modified' || t.kind === 'created' || t.kind === 'recreated') && (
                           <button type="button" style={chipBtn} onClick={() => onDiff(t.schema, t.table)}>rows</button>
