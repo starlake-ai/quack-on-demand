@@ -345,7 +345,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
         Postgres instance. Pools live inside a database; the bootstrap-default for this tenant is
         <code>{` ${tenant}_tpch1`}</code> when this is the seed tenant.
       </p>
-      {error && <div className="login-err">Error: {error}</div>}
+      {error && editingDb == null && <div className="login-err">Error: {error}</div>}
       {notice && <div className="subtle" role="status">Init SQL not checked: {notice}</div>}
       {dbs.length === 0 ? (
         <div className="empty">(none)</div>
@@ -507,6 +507,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <textarea value={editObjectStore} rows={4}
                 onChange={ev => { setEditObjectStore(ev.target.value); setObjectStoreDirty(true); }} />
             </label>
+            {error && <div className="login-err">Error: {error}</div>}
             <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'space-between' }}>
               <button type="button" className="danger"
                 onClick={() => void (async () => { const ok = await handleDelete(editingDb.name, editingDb.kind); if (ok) setEditingDb(null); })()}>
