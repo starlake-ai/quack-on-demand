@@ -7,9 +7,8 @@ import org.scalatest.matchers.should.Matchers
 import scala.sys.process.{Process, ProcessLogger}
 
 /** What the C++ and Go clients read when a call is refused while they are still writing it. A
-  * status alone ends such a call: a reset after it could replace it for a C++ client, so nothing
-  * but a stream past [[ai.starlake.quack.edge.AnonymousStreamLimit]] gets one. Cancelled without
-  * `uv`, which provisions the clients, as in [[SchemaProbeAdbcSpec]].
+  * status alone ends such a call: a reset after it could replace it for a C++ client, so none
+  * follows. Cancelled without `uv`, which provisions the clients, as in [[SchemaProbeAdbcSpec]].
   */
 class FlightRefusedRealClientSpec extends AnyFlatSpec with Matchers:
 
@@ -60,7 +59,7 @@ class FlightRefusedRealClientSpec extends AnyFlatSpec with Matchers:
            |])
            |descriptor = flight.FlightDescriptor.for_command(b"x")
            |outcomes = []
-           |for _ in range(20):
+           |for _ in range(16):
            |    try:
            |        writer, reader = client.do_put(descriptor, pa.schema([]), options=options)
            |        # The writer stays open until the server has answered: only closing it reads the status.
@@ -73,7 +72,59 @@ class FlightRefusedRealClientSpec extends AnyFlatSpec with Matchers:
            |""".stripMargin
       )
       withClue(err)(rc shouldBe 0)
-      out shouldBe "20 ['FlightUnauthenticatedError']"
+      out shouldBe "16 ['FlightUnauthenticatedError']"
+    }
+
+  it should "read a retryable error past 16 streams with no working credential, then go on" in:
+    assume(uvPresent, "uv not on PATH")
+    withEdge { h =>
+      // Its message follows its HEADERS at once, and Netty takes that message on a refused stream for
+      // a stream that never existed, which closes the connection: the client reconnects by itself.
+      val (rc, out, err) = python(
+        s"""import time
+           |import pyarrow as pa
+           |import pyarrow.flight as flight
+           |client = flight.connect("grpc://${h.host}:${h.port}")
+           |options = flight.FlightCallOptions(timeout=30, headers=[
+           |    (b"authorization", b"Bearer nope"),
+           |    (b"tenant", b"${SecurityFixtures.TenantName}"),
+           |    (b"pool", b"${SecurityFixtures.PoolName}"),
+           |])
+           |descriptor = flight.FlightDescriptor.for_command(b"x")
+           |def attempt():
+           |    try:
+           |        writer, reader = client.do_put(descriptor, pa.schema([]), options=options)
+           |        reader.read()
+           |        writer.close()
+           |        return "answered"
+           |    except Exception as e:
+           |        return type(e).__name__
+           |first = {attempt() for _ in range(16)}
+           |past = attempt()
+           |deadline = time.time() + 30
+           |back = attempt()
+           |while back != "FlightUnauthenticatedError" and time.time() < deadline:
+           |    time.sleep(0.05)
+           |    back = attempt()
+           |print(sorted(first), past, back)
+           |""".stripMargin
+      )
+      withClue(err)(rc shouldBe 0)
+      out shouldBe "['FlightUnauthenticatedError'] FlightUnavailableError FlightUnauthenticatedError"
+    }
+
+  it should "have wait_for_available() return with no credentials" in:
+    assume(uvPresent, "uv not on PATH")
+    withEdge { h =>
+      val (rc, out, err) = python(
+        s"""import pyarrow.flight as flight
+           |client = flight.connect("grpc://${h.host}:${h.port}")
+           |client.wait_for_available(timeout=30)
+           |print("available")
+           |""".stripMargin
+      )
+      withClue(err)(rc shouldBe 0)
+      out shouldBe "available"
     }
 
   "ADBC" should "read UNAUTHENTICATED each time from an update whose bearer fails" in:
@@ -93,7 +144,7 @@ class FlightRefusedRealClientSpec extends AnyFlatSpec with Matchers:
            |    autocommit=True,
            |)
            |outcomes = []
-           |for _ in range(20):
+           |for _ in range(12):
            |    cur = conn.cursor()
            |    try:
            |        cur.adbc_statement.set_sql_query("INSERT INTO t VALUES (1)")
@@ -105,5 +156,5 @@ class FlightRefusedRealClientSpec extends AnyFlatSpec with Matchers:
            |""".stripMargin
       )
       withClue(err)(rc shouldBe 0)
-      out shouldBe "20 ['UNAUTHENTICATED']"
+      out shouldBe "12 ['UNAUTHENTICATED']"
     }

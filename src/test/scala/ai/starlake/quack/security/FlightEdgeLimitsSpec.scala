@@ -2,7 +2,7 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.{FlightConfig, Main}
 import ai.starlake.quack.edge.{
-  AnonymousStreamLimit,
+  ConnectionBudget,
   ConnectionContext,
   ConnectionProbation,
   EdgeConfig,
@@ -11,6 +11,8 @@ import ai.starlake.quack.edge.{
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import com.google.protobuf.{Any => ProtoAny, ByteString}
 import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
+import io.netty.buffer.Unpooled
+import io.netty.handler.codec.http2.DefaultHttp2HeadersDecoder
 import org.apache.arrow.flight.{
   Action,
   AsyncPutListener,
@@ -34,7 +36,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import pureconfig.ConfigSource
 
-import java.io.{DataInputStream, EOFException}
+import java.io.{ByteArrayOutputStream, DataInputStream, EOFException}
 import java.net.{Socket, SocketTimeoutException}
 import java.security.cert.X509Certificate
 import java.util.{Base64, UUID}
@@ -64,12 +66,17 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   override def afterAll(): Unit = grpcLog.setLevel(grpcLevel)
 
-  private def boot(edgeConfig: EdgeConfig => EdgeConfig, tls: Boolean = false) =
+  private def boot(
+      edgeConfig: EdgeConfig => EdgeConfig,
+      tls: Boolean = false,
+      spawnNodes: Boolean = false
+  ) =
     FlightEdgeHarness.boot(
       SecurityFixtures.freshStore().store,
       enableProviders = true,
       tls = tls,
       wiring = FlightEdgeHarness.RouterWiring(
+        spawnNodes = spawnNodes,
         metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
         protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       ),
@@ -197,6 +204,8 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val client             = h.newClient()
     given ExecutionContext = ExecutionContext.global
     try
+      // A working credential first: past 16 streams, a connection without one is refused them.
+      client.getInfo(sqlInfo, basic) should not be null
       val calls = Future.sequence((1 to 64).map(_ => Future(client.getInfo(sqlInfo))))
       Await.result(calls, 60.seconds).size shouldBe 64
       edgeThreads(h.port) should (be > 0 and be <= 16)
@@ -227,7 +236,6 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val h      = boot(identity)
     val client = h.newClient()
     try
-      unauthenticated(client.listFlights(Criteria.ALL).iterator().hasNext)
       unauthenticated(client.listActions().iterator().hasNext)
       unauthenticated(client.doAction(new Action("x")).hasNext)
       unauthenticated(client.getSchema(sqlInfo))
@@ -241,6 +249,25 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         )
         unauthenticated(put.getResult())
       finally root.close()
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "be told ListFlights is unimplemented, as a client with a credential is" in {
+    // pyarrow's wait_for_available() calls it with no options, and any other error fails it.
+    val h      = boot(identity)
+    val client = h.newClient()
+    try
+      val refused = intercept[FlightRuntimeException](
+        client.listFlights(Criteria.ALL).iterator().hasNext
+      )
+      refused.status().code() shouldBe FlightStatusCode.UNIMPLEMENTED
+      val credentialed = intercept[FlightRuntimeException](
+        client.listFlights(Criteria.ALL, basic).iterator().hasNext
+      )
+      credentialed.status().code() shouldBe FlightStatusCode.UNIMPLEMENTED
+      refused.status().description() shouldBe credentialed.status().description()
     finally
       client.close()
       h.shutdown()
@@ -494,8 +521,8 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   /** The limit is gone: 16 more silent streams and no reset. A refusal comes at once. */
   private def noLimitLeft(client: RawClient, headers: Seq[(String, String)]) =
-    (1 to 16).foreach(_ => client.open("GetFlightInfo", headers))
-    client.await(500)(client.anyReset) shouldBe false
+    val more = (1 to 16).map(_ => client.open("GetFlightInfo", headers))
+    client.await(500)(more.exists(stream => client.resets(stream).nonEmpty)) shouldBe false
 
   it should "end at a working credential: no limit, and SETTINGS say so" in {
     val h      = boot(identity)
@@ -535,6 +562,164 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       ConnectionContext.bind(peer, key, UUID.randomUUID().toString, "alice", grants = None)
       client.open("GetFlightInfo", Seq("authorization" -> s"Bearer $peer"))
       client.await(10000)(client.lifted) shouldBe true
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "create at most 16 streams in all, whatever became of them, and stay open" in {
+    val h      = boot(identity)
+    val client = plain(h.port)
+    try
+      (1 to ConnectionProbation.MaxTotalStreams).foreach(_ => client.reset(client.open("DoPut")))
+      // Each was reset before the next: none of them was refused, and none is open.
+      client.ping(1)
+      client.await(5000)(client.pinged(1)) shouldBe true
+      client.anyReset shouldBe false
+      val next = client.open("DoPut")
+      client.await(5000)(client.resets(next).nonEmpty) shouldBe true
+      client.resets(next) shouldBe List(ErrorRefusedStream)
+      client.closedWithin(300) shouldBe false
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "be closed when a client follows a refused stream with its message" in {
+    // Not by anything here: Netty keeps no record of a refused stream, and takes its DATA for a stream
+    // that never existed. A real client's message follows its HEADERS at once.
+    val h      = boot(identity)
+    val client = plain(h.port)
+    try
+      (1 to ConnectionProbation.MaxTotalStreams).foreach(_ => client.reset(client.open("DoPut")))
+      val next = client.open("GetFlightInfo")
+      client.await(5000)(client.resets(next).nonEmpty) shouldBe true
+      client.closedWithin(300) shouldBe false
+      client.data(next, descriptorMessage(sqlInfoCommand), end = true)
+      client.closedWithin(5000) shouldBe true
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "take the ACK of its first SETTINGS for one stream more, and no more" in {
+    val h      = boot(identity)
+    val client = plain(h.port)
+    try
+      client.await(5000)(client.advertisedStreams.nonEmpty) shouldBe true
+      (1 to ConnectionProbation.MaxTotalStreams).foreach(_ => client.reset(client.open("DoPut")))
+      // Netty applies a SETTINGS value on its ACK, which sets the first one's 8 again.
+      client.acknowledgeSettings()
+      client.reset(client.open("DoPut"))
+      val next = client.open("DoPut")
+      client.await(5000)(client.resets(next).nonEmpty) shouldBe true
+      client.resets(next) shouldBe List(ErrorRefusedStream)
+      client.resets(next - 2) shouldBe empty
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "lose the total of streams at a working credential" in {
+    val h      = boot(identity)
+    val client = plain(h.port)
+    try
+      // In one write, so that the 17th arrives while the 16th's password is being checked.
+      val refused = client.inOneWrite {
+        (1 until ConnectionProbation.MaxTotalStreams).foreach { _ =>
+          client.reset(client.open("DoPut"))
+        }
+        client.open("GetFlightInfo", rightPassword)
+        client.open("DoPut")
+      }
+      client.await(5000)(client.resets(refused).nonEmpty) shouldBe true
+      client.resets(refused) shouldBe List(ErrorRefusedStream)
+      client.await(10000)(client.lifted) shouldBe true
+      noLimitLeft(client, rightPassword)
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  /** A PING is read before the budget is spent and not after, and the timer then closes the
+    * connection. `under` must leave the budget unspent, and `past` must spend it. The read that
+    * crosses the budget goes on to the end of its buffer, which may hold the second PING: the third
+    * is sent once that read is over.
+    */
+  private def notReadPastTheBudget(
+      client: RawClient
+  )(under: => Unit)(past: => Unit): org.scalatest.Assertion =
+    under
+    client.ping(1)
+    client.await(2000)(client.pinged(1)) shouldBe true
+    past
+    client.ping(2)
+    client.await(300)(client.pinged(2))
+    client.ping(3)
+    client.await(700)(client.pinged(3)) shouldBe false
+    client.closedWithin(10000) shouldBe true
+
+  /** 90,000 bytes against a budget of 81,920, on a stream that never says anything else. gRPC's
+    * deframer keeps about 80 B per frame.
+    */
+  private def emptyDataFrames(client: RawClient): org.scalatest.Assertion =
+    val stream = client.open("GetFlightInfo")
+    notReadPastTheBudget(client)(client.emptyData(stream, 5000))(client.emptyData(stream, 5000))
+
+  /** 88 KiB against a budget of 80 KiB. gRPC's `Method not found: <path>` enters a compression
+    * table that this client's SETTINGS sized.
+    */
+  private def longUniquePaths(client: RawClient): org.scalatest.Assertion =
+    def calls(count: Int): Unit =
+      (1 to count).foreach(_ => client.open(s"${UUID.randomUUID()}${"x" * 8192}", end = true))
+    client.settings(SettingHeaderTableSize, 1 << 30)
+    notReadPastTheBudget(client)(calls(5))(calls(6))
+
+  private val readBudgetTimeout = 3000L
+
+  it should "not be read past its budget: empty DATA frames" in {
+    val h      = boot(_.copy(probationTimeoutMs = readBudgetTimeout))
+    val client = plain(h.port)
+    try emptyDataFrames(client)
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "not be read past its budget: a large compression table and long unique paths" in {
+    val h      = boot(_.copy(probationTimeoutMs = readBudgetTimeout))
+    val client = plain(h.port)
+    try longUniquePaths(client)
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "resume reading at a working credential, past its budget" in {
+    val h      = boot(identity)
+    val client = plain(h.port)
+    try
+      val stream = client.open("GetFlightInfo", rightPassword)
+      client.emptyData(stream, 10000)
+      client.await(10000)(client.lifted) shouldBe true
+      client.ping(1)
+      client.await(5000)(client.pinged(1)) shouldBe true
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  private def largeStatement: FlightDescriptor =
+    val query = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery(s"SELECT '${"x" * (200 * 1024)}' AS v")
+      .build()
+    FlightDescriptor.command(ProtoAny.pack(query).toByteArray)
+
+  it should "take a large first statement: it waits at the budget for its own credential" in {
+    val h      = boot(identity, spawnNodes = true)
+    val client = h.newClient()
+    try client.getInfo(largeStatement, basic, timed) should not be null
     finally
       client.close()
       h.shutdown()
@@ -649,26 +834,7 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       .toByteArray
     grpcMessage(body.length, body)
 
-  private def pastTheLimit(client: RawClient, stream: Int): Unit =
-    client.data(stream, grpcMessage(1 << 20, new Array[Byte](4100)))
-    client.data(stream, new Array[Byte](4100))
-
-  "a stream with no credential" should "be reset past 8 KiB of message, in two DATA frames" in {
-    val h      = boot(identity)
-    val client = plain(h.port)
-    try
-      val stream = client.open("GetFlightInfo")
-      client.data(stream, grpcMessage(1 << 20, new Array[Byte](4100)))
-      client.await(300)(client.resets(stream).nonEmpty) shouldBe false
-      client.data(stream, new Array[Byte](4100))
-      client.await(5000)(client.resets(stream).nonEmpty) shouldBe true
-      client.resets(stream) shouldBe List(ErrorCancel)
-    finally
-      client.close()
-      h.shutdown()
-  }
-
-  it should "go on to its answer under it" in {
+  "a stream with no credential" should "go on to its answer" in {
     val h      = boot(identity)
     val client = plain(h.port)
     try
@@ -677,42 +843,43 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       client.await(10000)(client.answered(small)) shouldBe true
       // A FlightInfo: response headers, a message, then trailers.
       client.frames(small).map(_.typ) shouldBe List(Headers, 0, Headers)
-      // At the limit exactly: not reset, and refused by the limit on an anonymous command.
-      val limit = descriptorMessage(new Array[Byte](AnonymousStreamLimit.MaxBytes.toInt - 5))
-      limit.length shouldBe 5 + AnonymousStreamLimit.MaxBytes.toInt
-      val full = client.open("GetFlightInfo")
-      client.data(full, limit, end = true)
-      client.await(10000)(client.answered(full)) shouldBe true
-      client.resets(full) shouldBe empty
     finally
       client.close()
       h.shutdown()
   }
 
-  it should "be reset on a connection that showed a credential too, and a credentialed one not" in {
-    val h      = boot(identity)
+  it should "be refused a long message as it arrives, on a connection that showed a credential" in {
+    // What a proxy's shared connection looks like: its read budget is gone, and this call ends its
+    // message but not its stream, so nothing else would ever answer it.
+    val h      = boot(_.copy(maxAnonymousCalls = 1))
     val client = plain(h.port)
     try
-      val credentialed = client.open("GetFlightInfo", rightPassword)
+      client.open("GetFlightInfo", rightPassword)
       client.await(10000)(client.lifted) shouldBe true
-      pastTheLimit(client, credentialed)
-      client.await(500)(client.resets(credentialed).nonEmpty) shouldBe false
-      val anonymous = client.open("GetFlightInfo")
-      pastTheLimit(client, anonymous)
-      client.await(5000)(client.resets(anonymous).nonEmpty) shouldBe true
-      client.resets(credentialed) shouldBe empty
+      val long = client.open("GetFlightInfo")
+      client.data(long, descriptorMessage(new Array[Byte](5 * 1024)))
+      client.await(5000)(client.answered(long)) shouldBe true
+      client.status(long) shouldBe Some(GrpcUnauthenticated)
+      // Its place comes back, though its stream stays half open.
+      soon {
+        val next = client.open("GetFlightInfo")
+        client.data(next, descriptorMessage(sqlInfoCommand), end = true)
+        client.await(5000)(client.answered(next)) shouldBe true
+        client.frames(next).map(_.typ) shouldBe List(Headers, 0, Headers)
+      }
     finally
       client.close()
       h.shutdown()
   }
 
   it should "be refused a compressed message at its headers" in {
-    // The limit counts wire bytes, and 8 KiB of gzip inflates to 8 MiB.
+    // The read budget counts wire bytes, and 80 KiB of gzip inflates to 80 MiB.
     val h      = boot(identity)
     val client = plain(h.port)
     try
       val stream = client.open("GetFlightInfo", Seq("grpc-encoding" -> "gzip"))
       client.await(10000)(client.answered(stream)) shouldBe true
+      client.status(stream) shouldBe Some(GrpcUnauthenticated)
     finally
       client.close()
       h.shutdown()
@@ -727,21 +894,6 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       client.frames(stream).map(f => (f.typ, f.flags & EndStream)) shouldBe
         List((Headers, EndStream))
       client.await(300)(client.anyReset) shouldBe false
-    finally
-      client.close()
-      h.shutdown()
-  }
-
-  "a client's resets" should "close its connection past 1000 in a window" in {
-    val h      = boot(identity)
-    val client = plain(h.port)
-    try
-      (1 to ConnectionProbation.MaxResetsPerWindow).foreach { _ =>
-        client.reset(client.open("DoPut"))
-      }
-      client.closedWithin(500) shouldBe false
-      client.reset(client.open("DoPut"))
-      client.closedWithin(5000) shouldBe true
     finally
       client.close()
       h.shutdown()
@@ -780,6 +932,42 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         noLimitLeft(proven, rightPassword)
       finally proven.close()
     finally h.shutdown()
+  }
+
+  it should "not read a connection past its budget, whichever way it is spent" in {
+    // SslHandler asks for reads of its own, and the budget counts what it has not yet decrypted.
+    val h = boot(_.copy(probationTimeoutMs = readBudgetTimeout), tls = true)
+    try
+      List[RawClient => org.scalatest.Assertion](emptyDataFrames, longUniquePaths).foreach {
+        spend =>
+          val client = overTls(h.port)
+          try spend(client)
+          finally client.close()
+      }
+    finally h.shutdown()
+  }
+
+  it should "resume reading at a working credential, past the budget" in {
+    val h      = boot(identity, tls = true)
+    val client = overTls(h.port)
+    try
+      val stream = client.open("GetFlightInfo", rightPassword)
+      client.emptyData(stream, 10000)
+      client.await(10000)(client.lifted) shouldBe true
+      client.ping(1)
+      client.await(5000)(client.pinged(1)) shouldBe true
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  it should "take a large first statement" in {
+    val h      = boot(identity, tls = true, spawnNodes = true)
+    val client = tlsFlightClient(h)
+    try client.getInfo(largeStatement, basic, timed) should not be null
+    finally
+      client.close()
+      h.shutdown()
   }
 
   it should "close a connection past the limit before any TLS handshake" in {
@@ -896,6 +1084,22 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     line should include("against a tenth of this")
   }
 
+  it should "say nothing at boot at the default, whatever the heap takes" in {
+    // This header limit makes one connection outweigh a tenth of any heap this suite runs on.
+    val maxHeaderBytes = 1 << 28
+    val held           = ConnectionProbation.heldBytes(maxHeaderBytes, tls = false)
+    ConnectionBudget.fit(
+      ConnectionProbation.DefaultMaxConnections,
+      held,
+      Runtime.getRuntime.maxMemory,
+      ConnectionBudget.FlightHeapParts
+    ) should be < ConnectionProbation.DefaultMaxConnections
+    val printed = new java.io.ByteArrayOutputStream()
+    val h       = Console.withOut(printed)(boot(_.copy(maxHeaderBytes = maxHeaderBytes)))
+    h.shutdown()
+    printed.toString("UTF-8") should not include "The FlightSQL edge takes"
+  }
+
   // ---- a client that speaks HTTP/2 by hand ---------------------------------------------------
 
   private val Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes("US-ASCII")
@@ -935,12 +1139,16 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   private val Headers   = 1
   private val RstStream = 3
   private val Settings  = 4
+  private val Ping      = 6
 
   private val EndStream          = 0x1
+  private val Ack                = 0x1
   private val ErrorRefusedStream = 7
-  private val ErrorCancel        = 8
 
+  private val SettingHeaderTableSize      = 1
   private val SettingMaxConcurrentStreams = 3
+
+  private val GrpcUnauthenticated = "16"
 
   private final case class Frame(typ: Int, flags: Int, stream: Int, payload: Array[Byte])
 
@@ -971,34 +1179,74 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     private var nextId   = 1
     private var ended    = false
 
-    socket.setSoTimeout(50)
-    out.write(Preface)
-    out.write(frame(Settings, 0, 0, Array.empty))
-    out.flush()
+    private var gathering: ByteArrayOutputStream = null
 
-    /** Sends a call's HEADERS, with no END_STREAM, and returns its stream. */
+    /** HPACK is stateful, so every HEADERS is decoded as it arrives. A table size this decoder
+      * refuses ends that, which only a case that reads no status makes happen.
+      */
+    private val hpack    = new DefaultHttp2HeadersDecoder(false)
+    private val statuses = scala.collection.mutable.Map.empty[Int, String]
+
+    socket.setSoTimeout(50)
+    send(Preface ++ frame(Settings, 0, 0, Array.empty))
+
+    private def send(bytes: Array[Byte]): Unit =
+      if gathering != null then gathering.write(bytes)
+      else
+        out.write(bytes)
+        out.flush()
+
+    /** What `body` sends goes out in one write. */
+    def inOneWrite[A](body: => A): A =
+      gathering = new ByteArrayOutputStream()
+      val result = body
+      val bytes  = gathering.toByteArray
+      gathering = null
+      send(bytes)
+      result
+
+    /** Sends a call's HEADERS, with no END_STREAM unless told to, and returns its stream. */
     def open(
         method: String,
         headers: Seq[(String, String)] = Nil,
-        contentType: String = "application/grpc"
+        contentType: String = "application/grpc",
+        end: Boolean = false
     ): Int =
       val stream = nextId
       nextId += 2
-      out.write(frame(Headers, 0x4, stream, callHeaders(port, method, contentType, headers)))
-      out.flush()
+      val flags = 0x4 | (if end then EndStream else 0)
+      send(frame(Headers, flags, stream, callHeaders(port, method, contentType, headers)))
       stream
 
     def data(stream: Int, bytes: Array[Byte], end: Boolean = false): Unit =
-      out.write(frame(0, if end then EndStream else 0, stream, bytes))
-      out.flush()
+      send(frame(0, if end then EndStream else 0, stream, bytes))
+
+    /** `count` DATA frames with nothing in them, in one write: 9 bytes each. */
+    def emptyData(stream: Int, count: Int): Unit =
+      val one = frame(0, 0, stream, Array.empty)
+      send(Array.fill(count)(one).flatten)
 
     def reset(stream: Int): Unit =
-      out.write(frame(RstStream, 0, stream, java.nio.ByteBuffer.allocate(4).putInt(8).array()))
-      out.flush()
+      send(frame(RstStream, 0, stream, java.nio.ByteBuffer.allocate(4).putInt(8).array()))
 
     def acknowledgeSettings(): Unit =
-      out.write(frame(Settings, 0x1, 0, Array.empty))
-      out.flush()
+      send(frame(Settings, Ack, 0, Array.empty))
+
+    def settings(id: Int, value: Int): Unit =
+      val entry = java.nio.ByteBuffer.allocate(6).putShort(id.toShort).putInt(value).array()
+      send(frame(Settings, 0, 0, entry))
+
+    /** At most 2 of these before any stream is answered are forgiven by gRPC, which closes the
+      * connection at the third. Netty has acknowledged that one by then.
+      */
+    def ping(id: Byte): Unit =
+      send(frame(Ping, 0, 0, Array.fill[Byte](8)(id)))
+
+    def pinged(id: Byte): Boolean =
+      received.exists(f => f.typ == Ping && (f.flags & Ack) != 0 && f.payload.head == id)
+
+    /** The `grpc-status` the server has said on the stream. */
+    def status(stream: Int): Option[String] = statuses.get(stream)
 
     /** Reads what the server sends until `done` holds, the connection ends or `waitMs` passes, and
       * says whether `done` holds.
@@ -1029,7 +1277,7 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     /** Each MAX_CONCURRENT_STREAMS the server's SETTINGS have said, in order. */
     def advertisedStreams: List[Long] =
       received
-        .filter(f => f.typ == Settings && (f.flags & 0x1) == 0)
+        .filter(f => f.typ == Settings && (f.flags & Ack) == 0)
         .flatMap(_.payload.grouped(6))
         .map(java.nio.ByteBuffer.wrap)
         .collect {
@@ -1060,14 +1308,24 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         val len =
           ((unparsed(0) & 0xff) << 16) | ((unparsed(1) & 0xff) << 8) | (unparsed(2) & 0xff)
         if unparsed.length >= 9 + len then
-          received += Frame(
+          val next = Frame(
             unparsed(3) & 0xff,
             unparsed(4) & 0xff,
             java.nio.ByteBuffer.wrap(unparsed, 5, 4).getInt & 0x7fffffff,
             unparsed.slice(9, 9 + len)
           )
+          received += next
+          if next.typ == Headers then noteStatus(next)
           unparsed = unparsed.drop(9 + len)
           parse()
+
+    private def noteStatus(headers: Frame): Unit =
+      scala.util
+        .Try(hpack.decodeHeaders(headers.stream, Unpooled.wrappedBuffer(headers.payload)))
+        .foreach(decoded =>
+          Option(decoded.get("grpc-status"))
+            .foreach(status => statuses(headers.stream) = status.toString)
+        )
 
   private def plain(port: Int): RawClient = new RawClient(new Socket("127.0.0.1", port), port)
 

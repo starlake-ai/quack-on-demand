@@ -119,14 +119,17 @@ final class FlightEdgeServer(
           GrpcSslContexts.forServer(new File(cfg.tlsCertChain), new File(cfg.tlsPrivateKey)).build()
         )
       else InternalProtocolNegotiators.serverPlaintext(),
+      // The default is more than most heaps take: only an operator who asked for more hears of it.
       ConnectionBudget.slots(
         "The FlightSQL edge",
         "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
         cfg.maxUnauthenticatedConnections,
         ConnectionProbation.heldBytes(cfg.maxHeaderBytes, cfg.tlsEnabled),
-        heapParts = ConnectionBudget.FlightHeapParts
+        heapParts = ConnectionBudget.FlightHeapParts,
+        announce = cfg.maxUnauthenticatedConnections != ConnectionProbation.DefaultMaxConnections
       ),
-      cfg.probationTimeoutMs
+      cfg.probationTimeoutMs,
+      ConnectionProbation.readBudget(cfg.maxHeaderBytes)
     )
     // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
     // headerAuth runs before the guard: for a call with no header it only mints a peer id, and a
@@ -134,12 +137,7 @@ final class FlightEdgeServer(
     val tuneNetty: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
       nettyBuilder =>
         nettyBuilder.maxConcurrentCallsPerConnection(ConnectionProbation.MaxStreams)
-        nettyBuilder.maxRstFramesPerWindow(
-          ConnectionProbation.MaxResetsPerWindow,
-          ConnectionProbation.ResetWindowSec
-        )
         nettyBuilder.protocolNegotiator(probation)
-        nettyBuilder.addStreamTracerFactory(AnonymousStreamLimit.TracerFactory)
         nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove))
     executor = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
     // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with

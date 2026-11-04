@@ -28,8 +28,9 @@ final case class EdgeConfig(
     // a slot for this long and gets TIMED_OUT (it used to wait for good).
     putDrainTimeoutMs: Long = FlightProducerImpl.DefaultPutDrainTimeoutMs,
     // Connections that have shown no working credential, on the listener (ConnectionProbation).
-    maxUnauthenticatedConnections: Int = 1024,
-    // How long a connection may stay without showing one. Not a setting: a real client shows one
-    // within milliseconds, or reconnects when it next needs to.
+    maxUnauthenticatedConnections: Int = ConnectionProbation.DefaultMaxConnections,
+    // How long a connection may stay without showing one. Not a setting: a real client's first call
+    // shows one as soon as it is checked (a password takes bcrypt, 250 ms or more, and more under a
+    // queue), or the client reconnects when it next needs to.
     probationTimeoutMs: Long = 60000L
 )

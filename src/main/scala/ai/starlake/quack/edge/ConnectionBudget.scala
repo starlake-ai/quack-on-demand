@@ -75,8 +75,8 @@ object ConnectionBudget:
       (if limitsTunable then "Raise the heap (-Xmx) or lower the limits to take more"
        else "Raise the heap (-Xmx) to take more")
 
-  /** [[fit]] for this JVM's heap, saying so at boot when that is fewer than `configured` (println,
-    * as the logger's default level would swallow it).
+  /** [[fit]] for this JVM's heap, saying so at boot when that is fewer than `configured` and
+    * `announce` holds (println, as the logger's default level would swallow it).
     */
   def slots(
       listener: String,
@@ -84,11 +84,12 @@ object ConnectionBudget:
       configured: Int,
       heldBytes: Long,
       limitsTunable: Boolean = true,
-      heapParts: Long = HeapParts
+      heapParts: Long = HeapParts,
+      announce: Boolean = true
   ): Int =
     val maxHeap = Runtime.getRuntime.maxMemory
     val taken   = fit(configured, heldBytes, maxHeap, heapParts)
-    if taken < configured then
+    if announce && taken < configured then
       println(
         notice(listener, envVar, configured, taken, heldBytes, maxHeap, limitsTunable, heapParts)
       )

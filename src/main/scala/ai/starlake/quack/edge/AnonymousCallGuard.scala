@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import com.google.protobuf.MessageLite
 import io.grpc.{Attributes, Metadata, ServerCall, ServerCallHandler, ServerInterceptor, Status}
 import org.apache.arrow.flight.FlightMethod
 import org.apache.arrow.flight.grpc.MetadataAdapter
@@ -13,13 +14,16 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
   * server metadata travels on, as some FlightSQL clients (the Arrow Flight SQL ODBC driver behind
   * Power BI and Excel) ask for GetSqlInfo and GetXdbcTypeInfo before they replay the session
   * bearer. Which command such a call carries is only known once its message is read, so
-  * [[FlightProducerImpl]] judges that part.
+  * [[FlightProducerImpl]] judges that part. ListFlights answers UNIMPLEMENTED, as the producer does
+  * with a credential: pyarrow's `wait_for_available()` calls it with no options, and takes only an
+  * unavailable or a not implemented error for an answer.
   *
   * At most `maxCalls` of those run at once, each holding at most its headers
-  * (`PROXY_MAX_HEADER_BYTES`) and [[AnonymousStreamLimit.MaxBytes]] of message, whose command may
-  * only ask for little ([[FlightProducerImpl.MaxAnonymousCommandBytes]]). A flood can hold them
-  * all, which refuses only other calls with no credentials. A compressed one is refused too: the
-  * limit on its message counts wire bytes, and 8 KiB of gzip inflates to 8 MiB.
+  * (`PROXY_MAX_HEADER_BYTES`) and a message of at most
+  * [[FlightProducerImpl.MaxAnonymousCommandBytes]] and what wraps it. A longer one is refused as it
+  * arrives, parsed once on its way to being dropped and not held until half close. A flood can hold
+  * them all, which refuses only other calls with no credentials. A compressed one is refused too:
+  * [[ConnectionProbation]]'s read budget counts wire bytes, and 80 KiB of gzip inflates to 80 MiB.
   *
   * A refused call answers its status and its stream then stays half open, with its headers, until
   * its client ends it: [[ConnectionProbation]] bounds how many such streams a client with no
@@ -44,13 +48,18 @@ final class AnonymousCallGuard(maxCalls: Int, onCredential: Attributes => Unit)
     if FlightEdgeServer.authHeaderOf(new MetadataAdapter(headers)).isDefined then
       onCredential(call.getAttributes)
       next.startCall(call, headers)
-    else if !AnonymousCallGuard.isOpen(call.getMethodDescriptor.getFullMethodName) ||
-      AnonymousCallGuard.isCompressed(headers)
-    then refuse(call, Status.UNAUTHENTICATED.withDescription("credentials required"))
-    else if inFlight.incrementAndGet() > maxCalls then
-      inFlight.decrementAndGet()
-      refuse(call, Status.UNAVAILABLE.withDescription("too many calls with no credentials; retry"))
-    else counted(call, headers, next)
+    else
+      val method = FlightMethod.fromProtocol(call.getMethodDescriptor.getFullMethodName)
+      if method == FlightMethod.LIST_FLIGHTS then refuse(call, AnonymousCallGuard.NoListing)
+      else if !AnonymousCallGuard.Open(method) || AnonymousCallGuard.isCompressed(headers) then
+        refuse(call, AnonymousCallGuard.NoCredentials)
+      else if inFlight.incrementAndGet() > maxCalls then
+        inFlight.decrementAndGet()
+        refuse(
+          call,
+          Status.UNAVAILABLE.withDescription("too many calls with no credentials; retry")
+        )
+      else counted(call, headers, next)
 
   private def refuse[ReqT, RespT](
       call: ServerCall[ReqT, RespT],
@@ -75,10 +84,20 @@ final class AnonymousCallGuard(maxCalls: Int, onCredential: Attributes => Unit)
     // Forwarded by hand: from Scala, super.onCancel() of gRPC's SimpleForwardingServerCallListener
     // names its package-private parent and fails with an IllegalAccessError.
     new ServerCall.Listener[ReqT]:
-      override def onMessage(message: ReqT): Unit = listener.onMessage(message)
-      override def onHalfClose(): Unit            = listener.onHalfClose()
-      override def onReady(): Unit                = listener.onReady()
-      override def onCancel(): Unit               =
+      // gRPC calls a listener one event at a time. Past a refusal only a call's end still counts.
+      private var refused = false
+
+      override def onMessage(message: ReqT): Unit =
+        if !refused then
+          if AnonymousCallGuard.tooLong(message) then
+            refused = true
+            // A unary call's second message has already closed it, in gRPC's own listener.
+            try call.close(AnonymousCallGuard.NoCredentials, new Metadata())
+            catch case _: IllegalStateException => ()
+          else listener.onMessage(message)
+      override def onHalfClose(): Unit = if !refused then listener.onHalfClose()
+      override def onReady(): Unit     = if !refused then listener.onReady()
+      override def onCancel(): Unit    =
         release()
         listener.onCancel()
       override def onComplete(): Unit =
@@ -88,8 +107,18 @@ final class AnonymousCallGuard(maxCalls: Int, onCredential: Attributes => Unit)
 object AnonymousCallGuard:
   private val Open = Set(FlightMethod.GET_FLIGHT_INFO, FlightMethod.DO_GET)
 
-  private def isOpen(fullMethodName: String): Boolean =
-    Open(FlightMethod.fromProtocol(fullMethodName))
+  private val NoCredentials = Status.UNAUTHENTICATED.withDescription("credentials required")
+
+  /** What the producer answers ListFlights with, at no cost in places or threads. */
+  private val NoListing = Status.UNIMPLEMENTED.withDescription("Not implemented.")
+
+  /** What a FlightDescriptor or a Ticket adds to the command it carries. */
+  private val WrappingBytes = 16
+
+  private def tooLong(message: Any): Boolean = message match
+    case proto: MessageLite =>
+      proto.getSerializedSize > FlightProducerImpl.MaxAnonymousCommandBytes + WrappingBytes
+    case _ => false
 
   private val Encoding = Metadata.Key.of("grpc-encoding", Metadata.ASCII_STRING_MARSHALLER)
 

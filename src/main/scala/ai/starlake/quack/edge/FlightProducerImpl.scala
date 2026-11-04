@@ -229,9 +229,9 @@ final class FlightProducerImpl(
     )
 
   /** An anonymous peer ([[AnonymousCallGuard]]) gets server metadata only: GetSqlInfo and
-    * GetXdbcTypeInfo, what ODBC asks before it replays its bearer, in a command of at most
-    * [[FlightProducerImpl.MaxAnonymousCommandBytes]]. Anything else, static metadata included,
-    * needs a credential.
+    * GetXdbcTypeInfo, what ODBC asks before it replays its bearer, in a command the guard has
+    * limited to about [[FlightProducerImpl.MaxAnonymousCommandBytes]]. Anything else, static
+    * metadata included, needs a credential.
     */
   private def refuseAnonymous(
       context: FlightProducer.CallContext,
@@ -240,14 +240,13 @@ final class FlightProducerImpl(
     val peer = Option(context.peerIdentity()).getOrElse("")
     if peer.startsWith(FlightEdgeServer.AnonymousPeerPrefix) then
       val bytes   = command
-      val allowed = bytes.length <= FlightProducerImpl.MaxAnonymousCommandBytes &&
-        scala.util
-          .Try(ProtoAny.parseFrom(bytes))
-          .toOption
-          .exists(any =>
-            any.is(classOf[FlightSql.CommandGetSqlInfo]) ||
-              any.is(classOf[FlightSql.CommandGetXdbcTypeInfo])
-          )
+      val allowed = scala.util
+        .Try(ProtoAny.parseFrom(bytes))
+        .toOption
+        .exists(any =>
+          any.is(classOf[FlightSql.CommandGetSqlInfo]) ||
+            any.is(classOf[FlightSql.CommandGetXdbcTypeInfo])
+        )
       if !allowed then throw noContext(peer, _ => "no pool bound to session; authenticate first")
 
   override def getFlightInfo(
@@ -1775,11 +1774,12 @@ object FlightProducerImpl:
       }
       timer.complete(())
 
-  /** The largest command an anonymous peer may send: several times what every id GetSqlInfo defines
-    * takes. GetSqlInfo answers a row per id listed, repeats included, in Arrow memory that no limit
-    * covers, and goes on after its client left: one anonymous call listing 16 million ids, a 16 MiB
-    * message, took the JVM from 373 to 2295 MiB and held its thread for 4 s after the client left.
-    * Its place stays held while `send` runs, as the end of a call queues behind its handler, so
-    * what the limit on calls at once bounds is that many such calls.
+  /** The largest command an anonymous peer may send, which [[AnonymousCallGuard]] applies: several
+    * times what every id GetSqlInfo defines takes. GetSqlInfo answers a row per id listed, repeats
+    * included, in Arrow memory that no limit covers, and goes on after its client left: one
+    * anonymous call listing 16 million ids, a 16 MiB message, took the JVM from 373 to 2295 MiB and
+    * held its thread for 4 s after the client left. Its place stays held while `send` runs, as the
+    * end of a call queues behind its handler, so what the limit on calls at once bounds is that
+    * many such calls.
     */
   val MaxAnonymousCommandBytes: Int = 4096

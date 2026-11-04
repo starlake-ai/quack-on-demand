@@ -99,34 +99,53 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
 
   // The FlightSQL edge's connections on probation, in their own tenth of the heap.
 
-  "the FlightSQL edge" should "hold what ConnectionProbation can leave a connection with" in:
-    ConnectionProbation.heldBytes(65536, tls = false) shouldBe
-      8 * (65536L + 8192 + 3072 + 8192) + 102400
-    ConnectionProbation.heldBytes(65536, tls = true) -
-      ConnectionProbation.heldBytes(65536, tls = false) shouldBe ConnectionBudget.TlsBytes
+  private val flight    = ConnectionProbation.heldBytes(65536, tls = false)
+  private val flightTls = ConnectionProbation.heldBytes(65536, tls = true)
+
+  "the FlightSQL edge" should "read 80 KiB of a connection at the default header limit" in:
+    ConnectionProbation.readBudget(65536) shouldBe 81920L
+    ConnectionProbation.readBudget(1024) shouldBe 17408L
+
+  it should "hold what a connection on probation can leave at the default header limit" in:
+    flight shouldBe 1650688L
+    flightTls shouldBe 1819648L
+    ConnectionProbation.heldBytes(1024, tls = false) shouldBe 295936L
 
   it should "take a tenth of the heap, leaving the other listeners their fifths" in:
-    val held = ConnectionProbation.heldBytes(65536, tls = true)
-    ConnectionBudget.fit(1024, held, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 112
-    ConnectionBudget.fit(1024, held, chartHeap, ConnectionBudget.FlightHeapParts) shouldBe 225
-    ConnectionBudget.fit(16, held, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 16
+    ConnectionBudget.fit(1024, flight, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 65
+    ConnectionBudget.fit(1024, flightTls, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 59
+    ConnectionBudget.fit(1024, flight, chartHeap, ConnectionBudget.FlightHeapParts) shouldBe 130
+    ConnectionBudget.fit(1024, flightTls, chartHeap, ConnectionBudget.FlightHeapParts) shouldBe 118
+    ConnectionBudget.fit(16, flightTls, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 16
     // Leaving out the parts is a fifth, as the three HTTP listeners take.
-    ConnectionBudget.fit(1024, held, oneGiB) shouldBe 225
+    ConnectionBudget.fit(1024, flightTls, oneGiB) shouldBe 118
 
   it should "say a tenth at boot" in:
-    val held = ConnectionProbation.heldBytes(65536, tls = true)
     ConnectionBudget.notice(
       "The FlightSQL edge",
       "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
-      1024,
-      112,
-      held,
+      2048,
+      59,
+      flightTls,
       oneGiB,
       heapParts = ConnectionBudget.FlightHeapParts
     ) shouldBe
-      "The FlightSQL edge takes at most 112 of the 1024 connections of " +
-      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS: each can hold 929 KiB before any credential, against " +
+      "The FlightSQL edge takes at most 59 of the 2048 connections of " +
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS: each can hold 1777 KiB before any credential, against " +
       "a tenth of this 1024 MiB heap. Raise the heap (-Xmx) or lower the limits to take more"
+
+  "slots" should "say nothing when told not to, and take the same" in:
+    val printed = new java.io.ByteArrayOutputStream()
+    val taken   = Console.withOut(printed)(
+      ConnectionBudget.slots("A listener", "AN_ENV", Int.MaxValue, 1L << 20, announce = false)
+    )
+    printed.toString("UTF-8") shouldBe empty
+    taken shouldBe ConnectionBudget.fit(Int.MaxValue, 1L << 20, Runtime.getRuntime.maxMemory)
+
+  it should "say so otherwise" in:
+    val printed = new java.io.ByteArrayOutputStream()
+    Console.withOut(printed)(ConnectionBudget.slots("A listener", "AN_ENV", Int.MaxValue, 1L << 20))
+    printed.toString("UTF-8") should include("A listener takes at most")
 
   // What boot says when a listener takes fewer connections than it is configured to.
 
