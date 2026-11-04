@@ -2,7 +2,7 @@ import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import {
   actionErrorText, alreadyMergedNote, branchCount, branchMergeCell, conflictPolicyText, diffChangeType,
-  proposalErrorNote, rowConflictsHint, rowConflictsText,
+  noOpenProposal, proposalErrorNote, rowConflictsHint, rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import { BranchNamePattern } from '../api/branchName';
@@ -494,12 +494,20 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
     setProposeFor(null);
     setMergeFor(null);
     setError(null);
+    setNote(null);
     setMHold(false);
     reload(); // the expanded panel's numbers follow the listed row
     api.getBranch(tenant, tenantDb, b.name)
       .then(d => {
         const open = d.merges.find(m => m.status === 'proposed');
-        if (!open) { setError(`merge '${b.name}': it has no open proposal`); return; }
+        if (!open) {
+          const found = noOpenProposal(b.name, d.merges);
+          if ('note' in found) {
+            setNote(found.note);
+            reload(expanded === b.name); // the branch has left the live list
+          } else setError(found.error);
+          return;
+        }
         setMProposal(open);
         setMergeFor(b);
       })

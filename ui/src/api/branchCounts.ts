@@ -1,5 +1,5 @@
 import { ApiError } from './client';
-import type { BranchConflictEntry, BranchRowConflicts, BranchTableChange } from './types';
+import type { BranchConflictEntry, BranchMergeEntry, BranchRowConflicts, BranchTableChange } from './types';
 
 /** A branch change-set count cell. The server flags `countsUnavailable` when the counts were asked
   * for and the node refused the viewer the table (no read grant) or the count failed: its zeros are
@@ -124,6 +124,20 @@ export function actionErrorText(e: unknown): string {
   * reads: the merge is done, so it is no error. Decided by the code, never by the words. */
 export function alreadyMergedNote(e: unknown): string | null {
   return e instanceof ApiError && e.code === 'already_merged' ? e.message : null;
+}
+
+/** What the merge link says of a branch it finds with no open proposal, which only a stale row still
+  * offers: a retry after a lost answer, once the first run has ended, or a second approver. A merge
+  * row that merged is the record of it, written before the branch's own status, so it decides: the
+  * merge is done, and that is no error. Any other state keeps the message. */
+export function noOpenProposal(
+  name: string,
+  merges: Pick<BranchMergeEntry, 'status' | 'mainSnapshotAfter' | 'tagName'>[],
+): { note: string } | { error: string } {
+  const merged = merges.find(m => m.status === 'merged');
+  return merged
+    ? { note: `branch '${name}' is already merged: main snapshot ${merged.mainSnapshotAfter ?? '?'}, tag ${merged.tagName ?? '?'}` }
+    : { error: `merge '${name}': it has no open proposal` };
 }
 
 /** The note after a merge request's status chip, for a request that carries an error. On an open

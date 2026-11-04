@@ -8,6 +8,7 @@ import {
   conflictPolicyText,
   CountsUnavailableTitle,
   diffChangeType,
+  noOpenProposal,
   NotCountedTitle,
   proposalErrorNote,
   rowConflictsHint,
@@ -296,5 +297,34 @@ describe('branchMergeCell', () => {
     expect(branchMergeCell(altered, [])).toEqual({ text: 'schema change cannot be merged', refused: true });
     expect(branchMergeCell(altered, [conflict])).toEqual({ text: 'schema change cannot be merged', refused: true });
     expect(branchMergeCell({ ...table, mergeable: false }, [])).toEqual({ text: 'refused', refused: true });
+  });
+});
+
+describe('noOpenProposal', () => {
+  const merged = { status: 'merged', mainSnapshotAfter: 6, tagName: 'merge-b-1' };
+  const refused = "merge 'b': it has no open proposal";
+
+  it('says a branch that merged is already merged, as a note: the merge is done', () => {
+    expect(noOpenProposal('b', [merged])).toEqual({
+      note: "branch 'b' is already merged: main snapshot 6, tag merge-b-1",
+    });
+  });
+
+  it('finds the row that merged among the proposals before it', () => {
+    expect(noOpenProposal('b', [{ status: 'abandoned' }, merged, { status: 'failed' }])).toEqual({
+      note: "branch 'b' is already merged: main snapshot 6, tag merge-b-1",
+    });
+  });
+
+  it('keeps the message for any other state: a proposal a refusal closed, a discard, none at all', () => {
+    for (const merges of [[], [{ status: 'failed' }], [{ status: 'abandoned' }], [{ status: 'failed' }, { status: 'abandoned' }]]) {
+      expect(noOpenProposal('b', merges), JSON.stringify(merges)).toEqual({ error: refused });
+    }
+  });
+
+  it('says so all the same when the row holds no snapshot or tag', () => {
+    expect(noOpenProposal('b', [{ status: 'merged' }])).toEqual({
+      note: "branch 'b' is already merged: main snapshot ?, tag ?",
+    });
   });
 });

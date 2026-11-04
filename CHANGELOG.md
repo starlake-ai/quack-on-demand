@@ -117,10 +117,11 @@ count. To keep counts from a user, refuse on the table.
   where a merge read `Failed to fetch` as it ran on and landed and a gateway's 504 showed its HTML. A
   form, and what became of an action, now appear on screen, where a form could open below the fold and
   a click seem to do nothing. A failed read of the list keeps the list and what the action said, where
-  it read as no branches. A merge answered `409 already_merged` reads as a note, since the merge is
-  done, not as an error. A created, dropped, recreated or altered table shows dashes, where it read
-  `0 0 0` whatever it held, as rows are counted only for a table the branch modified. The Merge column
-  says `cannot be merged` of a table listed under table conflicts, where it said `ok`.
+  it read as no branches. A merge answered `409 already_merged`, and the `merge` link of a stale row on
+  a branch that has merged, read as a note, since the merge is done, not as an error. A created,
+  dropped, recreated or altered table shows dashes, where it read `0 0 0` whatever it held, as rows
+  are counted only for a table the branch modified. The Merge column says `cannot be merged` of a
+  table listed under table conflicts, where it said `ok`.
 
 ## 0.11.0
 
