@@ -193,6 +193,11 @@ proxy the connection limits apply per upstream connection. None of these refusal
 Keep the port behind your network where that matters. On a network you do not trust, put a gRPC-aware
 proxy with stream and per-address connection limits in front of it.
 
+### FlightSQL: metadata over ADBC
+
+ADBC's `adbc_get_objects` and `adbc_get_table_schema` work: a metadata call's stream now carries the
+schema its `FlightInfo` announces, and ADBC refused the difference with "inconsistent schema".
+
 ## 0.11.0
 
 ### Upgrading from 0.10.x (read first)
