@@ -14,6 +14,10 @@ On Kubernetes, read your maintenance policies first. No maintenance node has eve
 cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
 upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
 
+On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
+is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
+count. To keep counts from a user, refuse on the table.
+
 ### Breaking
 
 - Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
