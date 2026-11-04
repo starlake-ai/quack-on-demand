@@ -23,6 +23,13 @@ final case class EdgeConfig(
     // Threads of the edge's fixed executor, for gRPC callbacks and DoPut tasks alike.
     flightThreads: Int = 512,
     // How long a DoPut may wait for its first message and its data. Not a setting: bound parameters
-    // are never read, and a real client half-closes at once.
-    putDrainTimeoutMs: Long = FlightProducerImpl.DefaultPutDrainTimeoutMs
+    // are never read, and JDBC and ADBC half-close at once. Arrow Java's literal
+    // FlightSqlClient.executeUpdate does not: it reads its answer before it half-closes, so it holds
+    // a slot for this long and gets TIMED_OUT (it used to wait for good).
+    putDrainTimeoutMs: Long = FlightProducerImpl.DefaultPutDrainTimeoutMs,
+    // Connections that have shown no working credential, on the listener (ConnectionProbation).
+    maxUnauthenticatedConnections: Int = 1024,
+    // How long a connection may stay without showing one. Not a setting: a real client shows one
+    // within milliseconds, or reconnects when it next needs to.
+    probationTimeoutMs: Long = 60000L
 )

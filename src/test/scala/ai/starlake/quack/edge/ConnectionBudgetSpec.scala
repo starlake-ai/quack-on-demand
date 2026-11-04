@@ -97,6 +97,37 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
     ConnectionBudget.fit(Int.MaxValue, rest, oneGiB) should be >
       ConnectionBudget.fit(Int.MaxValue, listener, oneGiB)
 
+  // The FlightSQL edge's connections on probation, in their own tenth of the heap.
+
+  "the FlightSQL edge" should "hold what ConnectionProbation can leave a connection with" in:
+    ConnectionProbation.heldBytes(65536, tls = false) shouldBe
+      8 * (65536L + 8192 + 3072 + 8192) + 102400
+    ConnectionProbation.heldBytes(65536, tls = true) -
+      ConnectionProbation.heldBytes(65536, tls = false) shouldBe ConnectionBudget.TlsBytes
+
+  it should "take a tenth of the heap, leaving the other listeners their fifths" in:
+    val held = ConnectionProbation.heldBytes(65536, tls = true)
+    ConnectionBudget.fit(1024, held, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 112
+    ConnectionBudget.fit(1024, held, chartHeap, ConnectionBudget.FlightHeapParts) shouldBe 225
+    ConnectionBudget.fit(16, held, oneGiB, ConnectionBudget.FlightHeapParts) shouldBe 16
+    // Leaving out the parts is a fifth, as the three HTTP listeners take.
+    ConnectionBudget.fit(1024, held, oneGiB) shouldBe 225
+
+  it should "say a tenth at boot" in:
+    val held = ConnectionProbation.heldBytes(65536, tls = true)
+    ConnectionBudget.notice(
+      "The FlightSQL edge",
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+      1024,
+      112,
+      held,
+      oneGiB,
+      heapParts = ConnectionBudget.FlightHeapParts
+    ) shouldBe
+      "The FlightSQL edge takes at most 112 of the 1024 connections of " +
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS: each can hold 929 KiB before any credential, against " +
+      "a tenth of this 1024 MiB heap. Raise the heap (-Xmx) or lower the limits to take more"
+
   // What boot says when a listener takes fewer connections than it is configured to.
 
   "notice" should "say what the listener takes, why, and how to take more" in:

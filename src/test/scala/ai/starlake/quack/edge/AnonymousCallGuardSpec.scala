@@ -1,14 +1,6 @@
 package ai.starlake.quack.edge
 
-import io.grpc.{
-  Context,
-  InternalMetadata,
-  Metadata,
-  MethodDescriptor,
-  ServerCall,
-  ServerCallHandler,
-  Status
-}
+import io.grpc.{Attributes, Metadata, MethodDescriptor, ServerCall, ServerCallHandler, Status}
 import org.apache.arrow.flight.impl.FlightServiceGrpc
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -53,6 +45,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
     def close(status: Status, trailers: Metadata): Unit = closed = status :: closed
     def isCancelled(): Boolean                          = false
     def getMethodDescriptor(): MethodDescriptor[Array[Byte], Array[Byte]] = descriptor
+    override def getAttributes(): Attributes                              = connection
 
   /** Records the calls that reach it and what their listener hears. */
   private final class FakeHandler(fails: Boolean = false)
@@ -76,6 +69,13 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
         override def onCancel(): Unit                      = cancelled += 1
         override def onComplete(): Unit                    = completed += 1
 
+  /** What a fake call says of its connection. */
+  private val connection =
+    Attributes.newBuilder().set(Attributes.Key.create[String]("connection"), "a").build()
+
+  private def guardOf(maxCalls: Int, onCredential: Attributes => Unit = _ => ()) =
+    new AnonymousCallGuard(maxCalls, onCredential)
+
   private def header(name: String, value: String): Metadata =
     val headers = new Metadata()
     headers.put(Metadata.Key.of(name, Metadata.ASCII_STRING_MARSHALLER), value)
@@ -93,7 +93,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   private def codes(call: FakeCall) = call.closed.map(_.getCode)
 
   "the guard" should "refuse a call with no credentials on any other method, unheard by the handler" in {
-    val guard   = new AnonymousCallGuard(8)
+    val guard   = guardOf(8)
     val handler = new FakeHandler
     closedMethods.foreach { method =>
       val (call, _) = admit(guard, handler, method)
@@ -103,7 +103,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "pass a call with no credentials on GetFlightInfo and on DoGet" in {
-    val guard   = new AnonymousCallGuard(8)
+    val guard   = guardOf(8)
     val handler = new FakeHandler
     List(getFlightInfo, doGet).foreach { method =>
       val (call, _) = admit(guard, handler, method)
@@ -113,7 +113,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "take Authorization and x-qod-authorization alike as a credential" in {
-    val guard   = new AnonymousCallGuard(8)
+    val guard   = guardOf(8)
     val handler = new FakeHandler
     val doPut   = FlightServiceGrpc.getDoPutMethod.getFullMethodName
     List("Authorization", "x-qod-authorization").foreach { name =>
@@ -124,7 +124,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "not count a credentialed call, and pass it past the limit" in {
-    val guard    = new AnonymousCallGuard(1)
+    val guard    = guardOf(1)
     val handler  = new FakeHandler
     val (one, _) = admit(guard, handler)
     one.closed shouldBe empty
@@ -138,7 +138,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "refuse a call with no credentials past the limit, on either method" in {
-    val guard   = new AnonymousCallGuard(2)
+    val guard   = guardOf(2)
     val handler = new FakeHandler
     admit(guard, handler)._1.closed shouldBe empty
     admit(guard, handler, doGet)._1.closed shouldBe empty
@@ -148,57 +148,44 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
     handler.started shouldBe 2
   }
 
-  it should "reset the stream of a call it refuses, and only of such a call" in {
-    def startedOn(run: => Any): Context.CancellableContext =
-      val tracer = RefusedStream.TracerFactory.newServerStreamTracer(getFlightInfo, new Metadata())
-      val inCall = tracer.filterContext(Context.ROOT).withCancellation()
-      inCall.call(() => run)
-      inCall
-
-    val handler = new FakeHandler
-    val closed  = FlightServiceGrpc.getDoPutMethod.getFullMethodName
-
-    val unauthenticated = startedOn(admit(new AnonymousCallGuard(1), handler, closed))
-    unauthenticated.cancellationCause() shouldBe a[java.util.concurrent.TimeoutException]
-
-    val overLimit = startedOn(admit(new AnonymousCallGuard(0), handler))
-    overLimit.cancellationCause() shouldBe a[java.util.concurrent.TimeoutException]
-
-    startedOn(admit(new AnonymousCallGuard(1), handler)).isCancelled shouldBe false
-    startedOn(
-      admit(new AnonymousCallGuard(0), handler, closed, header("Authorization", "Bearer abc"))
-    ).isCancelled shouldBe false
-  }
-
-  it should "forget the headers of a call it refuses, and only of such a call" in {
-    val guard   = new AnonymousCallGuard(1)
+  it should "tell of a credentialed call, with its connection, and of no other" in {
+    val heard   = scala.collection.mutable.ListBuffer.empty[Attributes]
+    val guard   = guardOf(1, heard += _)
     val handler = new FakeHandler
     val doPut   = FlightServiceGrpc.getDoPutMethod.getFullMethodName
 
-    val refused = header("x-pad", "y" * 1024)
-    refused.put(Metadata.Key.of("x-pad-bin", Metadata.BINARY_BYTE_MARSHALLER), Array[Byte](1, 2))
-    admit(guard, handler, doPut, refused)
-    refused.keys() should have size 0
+    admit(guard, handler)._1.closed shouldBe empty
+    admit(guard, handler)._1.closed should have size 1
+    admit(guard, handler, doPut)._1.closed should have size 1
+    heard shouldBe empty
 
-    val admitted = header("x-pad", "y")
-    admit(guard, handler, getFlightInfo, admitted)
-    admitted.keys() should have size 1
-
-    val overLimit = header("x-pad", "y")
-    admit(guard, handler, getFlightInfo, overLimit)
-    overLimit.keys() should have size 0
+    List("Authorization", "x-qod-authorization").foreach(name =>
+      admit(guard, handler, doPut, header(name, "Basic eDp5"))
+    )
+    heard.toList shouldBe List(connection, connection)
   }
 
-  it should "refuse a call whose header name makes no key" in {
-    val guard = new AnonymousCallGuard(1)
-    val odd   = InternalMetadata.newMetadata("x y".getBytes("US-ASCII"), "z".getBytes("US-ASCII"))
-    val doPut = FlightServiceGrpc.getDoPutMethod.getFullMethodName
-    val (call, _) = admit(guard, new FakeHandler, doPut, odd)
+  it should "refuse a compressed call with no credentials, holding no place" in {
+    val guard     = guardOf(1)
+    val handler   = new FakeHandler
+    val (call, _) = admit(guard, handler, headers = header("grpc-encoding", "gzip"))
     codes(call) shouldBe List(Status.Code.UNAUTHENTICATED)
+    handler.started shouldBe 0
+
+    val (identity, listener) = admit(guard, handler, headers = header("grpc-encoding", "identity"))
+    identity.closed shouldBe empty
+    listener.onComplete()
+
+    val credentialed = header("grpc-encoding", "gzip")
+    credentialed.put(
+      Metadata.Key.of("Authorization", Metadata.ASCII_STRING_MARSHALLER),
+      "Basic eDp5"
+    )
+    admit(guard, handler, headers = credentialed)._1.closed shouldBe empty
   }
 
   it should "not hold a place for a refused call" in {
-    val guard    = new AnonymousCallGuard(1)
+    val guard    = guardOf(1)
     val handler  = new FakeHandler
     val (_, one) = admit(guard, handler)
     (1 to 5).foreach(_ => codes(admit(guard, handler)._1) shouldBe List(Status.Code.UNAVAILABLE))
@@ -207,7 +194,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "take a place back on onCancel and on onComplete, and forward both" in {
-    val guard   = new AnonymousCallGuard(1)
+    val guard   = guardOf(1)
     val handler = new FakeHandler
     val endings = List[ServerCall.Listener[Array[Byte]] => Unit](_.onCancel(), _.onComplete())
     endings.foreach { end =>
@@ -223,7 +210,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
 
   it should "pass a counted call's events on to the handler's listener" in {
     val handler       = new FakeHandler
-    val (_, listener) = admit(new AnonymousCallGuard(1), handler)
+    val (_, listener) = admit(guardOf(1), handler)
     listener.onMessage(Array.emptyByteArray)
     listener.onHalfClose()
     listener.onReady()
@@ -231,7 +218,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "give a place back once when a call ends twice" in {
-    val guard            = new AnonymousCallGuard(2)
+    val guard            = guardOf(2)
     val handler          = new FakeHandler
     val (_, listener)    = admit(guard, handler)
     val (_, stillInside) = admit(guard, handler)
@@ -245,7 +232,7 @@ class AnonymousCallGuardSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "give the place back when the handler throws, and let the exception through" in {
-    val guard   = new AnonymousCallGuard(1)
+    val guard   = guardOf(1)
     val failing = new FakeHandler(fails = true)
     (1 to 2).foreach(_ => an[IllegalStateException] should be thrownBy admit(guard, failing))
     val working = new FakeHandler

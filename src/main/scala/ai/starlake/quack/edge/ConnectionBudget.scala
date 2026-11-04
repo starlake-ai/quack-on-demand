@@ -12,6 +12,11 @@ object ConnectionBudget:
     */
   private val HeapParts: Long = 5L
 
+  /** The FlightSQL edge's connections on probation get one part in this many: with the three HTTP
+    * listeners flooded too, that leaves three tenths.
+    */
+  val FlightHeapParts: Long = 10L
+
   /** What an open connection holds whatever it sends: its read buffer and Ember's state (measured,
     * 69 KB).
     */
@@ -34,9 +39,21 @@ object ConnectionBudget:
     ConnectionBytes + 2L * maxHeaderBytes * HeapPerParsedByte + BoundedBody.ReadBufferBytes +
       maxBodyBytes + (if tls then TlsBytes else 0L)
 
-  /** At most `configured`, and no more than fit a fifth of `maxHeapBytes` at `heldBytes` each. */
-  def fit(configured: Int, heldBytes: Long, maxHeapBytes: Long): Int =
-    math.max(1L, math.min(configured.toLong, maxHeapBytes / HeapParts / heldBytes)).toInt
+  /** At most `configured`, and no more than fit one part in `heapParts` of `maxHeapBytes` at
+    * `heldBytes` each.
+    */
+  def fit(
+      configured: Int,
+      heldBytes: Long,
+      maxHeapBytes: Long,
+      heapParts: Long = HeapParts
+  ): Int =
+    math.max(1L, math.min(configured.toLong, maxHeapBytes / heapParts / heldBytes)).toInt
+
+  private def share(heapParts: Long): String =
+    if heapParts == 5L then "a fifth"
+    else if heapParts == 10L then "a tenth"
+    else s"one part in $heapParts"
 
   /** What boot says when a listener takes fewer connections than it is configured to.
     * `limitsTunable` is false for a listener whose header and body limits are constants: lowering
@@ -49,10 +66,11 @@ object ConnectionBudget:
       taken: Int,
       heldBytes: Long,
       maxHeapBytes: Long,
-      limitsTunable: Boolean = true
+      limitsTunable: Boolean = true,
+      heapParts: Long = HeapParts
   ): String =
     s"$listener takes at most $taken of the $configured connections of $envVar: each can hold " +
-      s"${heldBytes / 1024} KiB before any credential, against a fifth of this " +
+      s"${heldBytes / 1024} KiB before any credential, against ${share(heapParts)} of this " +
       s"${maxHeapBytes / (1024 * 1024)} MiB heap. " +
       (if limitsTunable then "Raise the heap (-Xmx) or lower the limits to take more"
        else "Raise the heap (-Xmx) to take more")
@@ -65,10 +83,13 @@ object ConnectionBudget:
       envVar: String,
       configured: Int,
       heldBytes: Long,
-      limitsTunable: Boolean = true
+      limitsTunable: Boolean = true,
+      heapParts: Long = HeapParts
   ): Int =
     val maxHeap = Runtime.getRuntime.maxMemory
-    val taken   = fit(configured, heldBytes, maxHeap)
+    val taken   = fit(configured, heldBytes, maxHeap, heapParts)
     if taken < configured then
-      println(notice(listener, envVar, configured, taken, heldBytes, maxHeap, limitsTunable))
+      println(
+        notice(listener, envVar, configured, taken, heldBytes, maxHeap, limitsTunable, heapParts)
+      )
     taken

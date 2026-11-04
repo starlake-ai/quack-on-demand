@@ -4,6 +4,7 @@ import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, AuthzRequest, HandshakeDenial}
 import com.typesafe.scalalogging.LazyLogging
+import io.grpc.netty.{GrpcSslContexts, InternalProtocolNegotiators}
 import org.apache.arrow.flight.*
 import org.apache.arrow.flight.auth2.CallHeaderAuthenticator
 import org.apache.arrow.memory.RootAllocator
@@ -107,32 +108,50 @@ final class FlightEdgeServer(
       FlightEdgeServer.SweepSec,
       TimeUnit.SECONDS
     )
-    val location =
-      if cfg.tlsEnabled then Location.forGrpcTls(cfg.host, cfg.port)
-      else Location.forGrpcInsecure(cfg.host, cfg.port)
+    // TLS is the negotiator's, below. Arrow refuses a TLS location with no certificate of its own,
+    // and only binds this address.
+    val location = Location.forGrpcInsecure(cfg.host, cfg.port)
 
+    val probation = new ConnectionProbation(
+      if cfg.tlsEnabled then
+        CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
+        InternalProtocolNegotiators.serverTls(
+          GrpcSslContexts.forServer(new File(cfg.tlsCertChain), new File(cfg.tlsPrivateKey)).build()
+        )
+      else InternalProtocolNegotiators.serverPlaintext(),
+      ConnectionBudget.slots(
+        "The FlightSQL edge",
+        "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+        cfg.maxUnauthenticatedConnections,
+        ConnectionProbation.heldBytes(cfg.maxHeaderBytes, cfg.tlsEnabled),
+        heapParts = ConnectionBudget.FlightHeapParts
+      ),
+      cfg.probationTimeoutMs
+    )
+    // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
+    // headerAuth runs before the guard: for a call with no header it only mints a peer id, and a
+    // credential that fails never reaches the guard.
+    val tuneNetty: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
+      nettyBuilder =>
+        nettyBuilder.maxConcurrentCallsPerConnection(ConnectionProbation.MaxStreams)
+        nettyBuilder.maxRstFramesPerWindow(
+          ConnectionProbation.MaxResetsPerWindow,
+          ConnectionProbation.ResetWindowSec
+        )
+        nettyBuilder.protocolNegotiator(probation)
+        nettyBuilder.addStreamTracerFactory(AnonymousStreamLimit.TracerFactory)
+        nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove))
+    executor = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
     // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with
     // RESOURCE_EXHAUSTED as soon as the length prefix arrives, before it holds any of it, and a
     // header list over its limit before any authentication runs.
-    //
-    // Arrow adds its own interceptor after this hint runs and gRPC runs the last one added first, so
-    // headerAuth runs before the guard: for a call with no header it only mints a peer id.
-    val installGuard: java.util.function.Consumer[io.grpc.netty.NettyServerBuilder] =
-      nettyBuilder =>
-        nettyBuilder.addStreamTracerFactory(RefusedStream.TracerFactory)
-        nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls))
-    executor = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
     val builder = FlightServer
       .builder(allocator, location, producer)
       .headerAuthenticator(headerAuth)
       .executor(executor)
       .maxInboundMessageSize(cfg.maxInboundMessageBytes)
       .setMaxHeaderListSize(cfg.maxHeaderBytes)
-      .transportHint("grpc.builderConsumer", installGuard)
-
-    if cfg.tlsEnabled then
-      CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
-      builder.useTls(new File(cfg.tlsCertChain), new File(cfg.tlsPrivateKey))
+      .transportHint("grpc.builderConsumer", tuneNetty)
 
     server = builder.build()
     server.start()
@@ -158,13 +177,6 @@ final class FlightEdgeServer(
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
-        try peerFor(headers)
-        catch
-          case refused: FlightRuntimeException =>
-            RefusedStream.reset()
-            throw refused
-
-      private def peerFor(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
         val authHeader    = FlightEdgeServer.authHeaderOf(headers)
         val bearer        = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
         val basicPair     = FlightEdgeServer.basicPairOf(authHeader)

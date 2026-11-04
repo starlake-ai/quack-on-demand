@@ -1455,12 +1455,23 @@ final case class FlightConfig(
         "Threads of the FlightSQL edge's fixed executor, at least 16. A call waits for a free one. " +
           "A quarter of them is the most DoPuts that may wait for their data at once."
     )
-    flightThreads: Int = 512
+    flightThreads: Int = 512,
+    @field @ConfigField(
+      envVar = "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS",
+      description =
+        "FlightSQL connections at once that have not yet shown a working credential; one past this " +
+          "is closed at once. The edge takes no more than fit a tenth of the heap. Connections that " +
+          "have shown one do not count and have no limit."
+    )
+    maxUnauthenticatedConnections: Int = 1024
 ):
   require(
-    maxInboundMessageBytes > 0 && maxHeaderBytes > 0 && maxAnonymousCalls > 0,
-    "PROXY_MAX_INBOUND_MESSAGE_BYTES, PROXY_MAX_HEADER_BYTES and PROXY_MAX_ANONYMOUS_CALLS must " +
-      s"be positive (got $maxInboundMessageBytes, $maxHeaderBytes and $maxAnonymousCalls)"
+    maxInboundMessageBytes > 0 && maxHeaderBytes > 0 && maxAnonymousCalls > 0 &&
+      maxUnauthenticatedConnections > 0,
+    "PROXY_MAX_INBOUND_MESSAGE_BYTES, PROXY_MAX_HEADER_BYTES, PROXY_MAX_ANONYMOUS_CALLS and " +
+      "PROXY_MAX_UNAUTHENTICATED_CONNECTIONS must be positive (got " +
+      s"$maxInboundMessageBytes, $maxHeaderBytes, $maxAnonymousCalls and " +
+      s"$maxUnauthenticatedConnections)"
   )
   require(flightThreads >= 16, s"PROXY_FLIGHT_THREADS must be at least 16 (got $flightThreads)")
 
