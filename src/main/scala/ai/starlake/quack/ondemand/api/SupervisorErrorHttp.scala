@@ -22,4 +22,8 @@ object SupervisorErrorHttp:
       Some(StatusCode.BadRequest -> ErrorResponse("db_name_fixed", m))
     case SupervisorError.CatalogDatabaseMissing(m) =>
       Some(StatusCode.BadRequest -> ErrorResponse("catalog_database_missing", m))
+    case SupervisorError.SuperuserChoice(m) =>
+      Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", m))
+    case SupervisorError.DataPathTaken(m) =>
+      Some(StatusCode.Conflict -> ErrorResponse("data_path_taken", m))
     case _ => None

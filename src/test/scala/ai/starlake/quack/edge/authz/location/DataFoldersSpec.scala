@@ -20,6 +20,38 @@ class DataFoldersSpec extends AnyFlatSpec with Matchers:
     remote("abfss://cont@acct.dfs.core.windows.net/p/q") shouldBe List("s3://cont/p/q/")
   }
 
+  "DataFolders.overlap" should "hold at, under and above a folder, by whole segments" in {
+    DataFolders.overlap("/data/acme_lake", "/data/acme_lake/") shouldBe true
+    DataFolders.overlap("/data/acme_lake", "/data/acme_lake/below") shouldBe true
+    DataFolders.overlap("/data/acme_lake/below", "/data/acme_lake") shouldBe true
+    DataFolders.overlap("/data/acme_lake", "/data") shouldBe true
+    DataFolders.overlap("/data/acme_lake", "/data/acme_lake2") shouldBe false
+    DataFolders.overlap("/data/acme_lake2", "/data/acme_lake") shouldBe false
+    DataFolders.overlap("/data/a", "/other/a") shouldBe false
+  }
+
+  it should "read object stores family-blind, a bucket's root over everything in it" in {
+    DataFolders.overlap("s3://b/acme_lake", "s3://b/acme_lake/x") shouldBe true
+    DataFolders.overlap("s3://b/acme_lake", "gs://b/acme_lake/") shouldBe true
+    DataFolders.overlap("s3://b/acme_lake", "s3://b") shouldBe true
+    DataFolders.overlap("s3://b/acme_lake", "s3://b/acme_lake2") shouldBe false
+    DataFolders.overlap("s3://b/acme_lake", "s3://c/acme_lake") shouldBe false
+    DataFolders.overlap("s3://b/acme_lake", "/b/acme_lake") shouldBe false
+  }
+
+  it should "cover a database file's own name, and every name that begins with it" in {
+    val file = "/data/x.duckdb" + DataFolders.NamePrefixMarker
+    DataFolders.overlap("/data/x.duckdb", file) shouldBe true
+    DataFolders.overlap("/data/x.duckdb/y", file) shouldBe true
+    DataFolders.overlap("/data/z.duckdb", file) shouldBe false
+  }
+
+  it should "see no folder in nothing, or in a path the manager cannot place" in {
+    DataFolders.overlap("/data/x", "") shouldBe false
+    DataFolders.overlap("", "/data/x") shouldBe false
+    DataFolders.overlap("/data/x", DataFolders.Unplaced) shouldBe false
+  }
+
   it should "yield both bucket readings of an http(s) URL" in {
     remote("https://lakeb.s3.amazonaws.com/acme/") shouldBe
       List("s3://lakeb/acme/", "s3://acme/")

@@ -199,6 +199,16 @@ final class TenantDbHandlers(
             .toOption
             .map(err => (StatusCode.BadRequest, ErrorResponse("invalid_kind", err)))
         )
+        .orElse(
+          // What the scope states: a superuser's, the manager's boot provisioning included, may
+          // choose. The supervisor judges an update, where the stored row is at hand.
+          Option
+            .when(!writerTrusted)(
+              TenantDb.superuserChoiceError(None, req.dataPath, req.metastore, req.objectStore)
+            )
+            .flatten
+            .map(msg => (StatusCode.Forbidden, ErrorResponse("superuser_required", msg)))
+        )
 
   private def createChecked(
       req: TenantDbRequest,

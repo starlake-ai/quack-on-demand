@@ -46,7 +46,12 @@ def create(
         "--metastore",
         help="KEY=VALUE, repeatable. Another server (pgHost, pgPort) needs its own pgUser and pgPassword.",
     ),
-    data_path: str = typer.Option("", "--data-path"),
+    data_path: str = typer.Option(
+        "",
+        "--data-path",
+        help="Leave out of a DuckLake database and QoD places it. A path of your own: a remote URL "
+        "with your own keys in --object-store, or a superuser's credential.",
+    ),
     object_store: list[str] = typer.Option(None, "--object-store", help="KEY=VALUE, repeatable."),
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),

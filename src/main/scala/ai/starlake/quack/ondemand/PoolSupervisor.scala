@@ -2318,6 +2318,35 @@ final class PoolSupervisor(
               s"$ctx: control-plane row removed but DROP DATABASE \"${td.name}\" failed: $err"
             )
 
+  /** Where a new DuckLake row that names no data path lies, stored on the row so that it cannot
+    * move: beside the manager's default data path, under its own composed name. A deployment with
+    * no default to place it by is refused, and so is a place another row's folder overlaps, naming
+    * no one.
+    */
+  private def derivedDataPath(name: String): Either[SupervisorError, String] =
+    defaultMetastore
+      .get("dataPath")
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .flatMap(PoolSupervisor.siblingDataPath(_, name)) match
+      case None =>
+        Left(
+          SupervisorError.InvalidArgument(
+            "no data path named, and this deployment has no default data path to place one by: " +
+              "use managed storage, or ask a superuser to name one"
+          )
+        )
+      case Some(path) =>
+        if dataPaths().exists(ai.starlake.quack.edge.authz.location.DataFolders.overlap(path, _))
+        then
+          Left(
+            SupervisorError.DataPathTaken(
+              s"the data folder of database name '$name' is taken on this server: choose another " +
+                "name"
+            )
+          )
+        else Right(path)
+
   /** The Postgres database of a new DuckLake row of QoD's own server. A create that may adopt keeps
     * whatever is there; any other refuses a database already held by another tenant's row, or
     * holding anything at all, and reuses an empty one: what a crash between the create and the
@@ -2393,6 +2422,11 @@ final class PoolSupervisor(
               case Left(err)   => Left(SupervisorError.InvalidName(err))
               case Right(full) =>
                 val tn = tenantName.toLowerCase(Locale.ROOT)
+                // A DuckLake row that names no path anywhere: QoD's to place, for every caller.
+                lazy val placed: Option[Either[SupervisorError, String]] = Option.when(
+                  kind == TenantDbKind.DuckLake && dataPath.isEmpty && !managedStorage &&
+                    !metastore.get("dataPath").exists(_.trim.nonEmpty)
+                )(derivedDataPath(full))
                 getTenant(tn) match
                   case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
                   case Some(_) if managedStorage && managedStore.forall(!_.enabled) =>
@@ -2409,6 +2443,8 @@ final class PoolSupervisor(
                         s"tenant-db '$full' already exists in tenant '$tn'"
                       )
                     )
+                  case Some(_) if placed.exists(_.isLeft) =>
+                    Left(placed.flatMap(_.left.toOption).get)
                   case Some(t) =>
                     // Per-kind prep. DuckLake auto-injects dbName and pre-provisions the Postgres
                     // database + metadata tables; DuckDbFile and InMemory skip both.
@@ -2435,7 +2471,9 @@ final class PoolSupervisor(
                     // (tenant, dbName) arguments with an underscore, so the db-name piece fed
                     // here is `full` minus its tenant prefix. Result: the spec's shape
                     // `s3://<bucket>/<tenant>_<dbname>-<id8>/`.
-                    val effectiveDataPath = managedCfg.fold(dataPath) { cfg =>
+                    val effectiveDataPath = managedCfg.fold(
+                      placed.flatMap(_.toOption).getOrElse(dataPath)
+                    ) { cfg =>
                       ManagedPrefix.dataPath(cfg.bucket, tn, full.stripPrefix(s"${tn}_"), id)
                     }
                     val effectiveObjectStore =
@@ -2680,6 +2718,19 @@ final class PoolSupervisor(
             patch.writerTrusted
           )
         )
+        // What only a superuser chooses comes first, whatever else the update holds.
+        val choice: Option[SupervisorError] =
+          Option
+            .when(!patch.writerTrusted)(
+              TenantDb.superuserChoiceError(
+                Some(td),
+                merged.dataPath,
+                merged.metastore,
+                merged.objectStore
+              )
+            )
+            .flatten
+            .map(SupervisorError.SuperuserChoice(_))
         // The stored row's result is what is judged: a secret the update leaves out is kept.
         val refused: Option[SupervisorError] =
           Option
@@ -2697,10 +2748,12 @@ final class PoolSupervisor(
                     .map(SupervisorError.OwnLoginRequired(_))
                 )
             }
-        (TenantDb.validateSafety(merged), refused) match
-          case (Some(msg), _) => IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
-          case (_, Some(err)) => IO.pure(Left(err))
-          case (None, None)   =>
+        (choice, TenantDb.validateSafety(merged), refused) match
+          case (Some(err), _, _) => IO.pure(Left(err))
+          case (_, Some(msg), _) =>
+            IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
+          case (_, _, Some(err))  => IO.pure(Left(err))
+          case (None, None, None) =>
             // Keys the manager config can stand in for: dropping one of these from a
             // ducklake row is "revert to default", not a contract violation. duckdb-file
             // has no default-merge contract on create, so it keeps the strict guard.
@@ -5068,6 +5121,15 @@ object PoolSupervisor:
     * Examples: ./ducklake/tpch + acme_tpch -> ./ducklake/acme_tpch; s3://qod-ducklake/tpch +
     * acme_tpch -> s3://qod-ducklake/acme_tpch.
     */
+  /** [[replaceLastSegment]] for a new database's own folder; None when `root` has no parent to
+    * share: a bucket's root, where the name would become a bucket.
+    */
+  private[ondemand] def siblingDataPath(root: String, name: String): Option[String] =
+    val schemeRe = """^[a-zA-Z][a-zA-Z0-9+\-.]*://(.*)$""".r
+    root match
+      case schemeRe(rest) if !rest.stripSuffix("/").contains('/') => None
+      case _ => Some(replaceLastSegment(root, name))
+
   private[ondemand] def replaceLastSegment(path: String, newSegment: String): String =
     // Strict URI scheme: a leading letter then letters/digits/+/-/. then `://`.
     val schemeRe = """^([a-zA-Z][a-zA-Z0-9+\-.]*://)(.*)$""".r

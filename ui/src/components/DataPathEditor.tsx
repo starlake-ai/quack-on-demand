@@ -144,10 +144,11 @@ export default function DataPathEditor(p: Props) {
     <fieldset>
       <legend>Data path</legend>
       <p className="subtle" style={{ marginTop: 0 }}>
-        Where the parquet files for this database live. Use a local filesystem path
-        (<code>/data/prod</code>), an <code>s3://</code> URL, <code>gs://</code>,
-        <code> azure://</code>, etc. Pick the backend on the left; the URL scheme
-        also auto-selects it.
+        Where the parquet files for this database live. Leave the path empty and QoD places
+        them. A path of your own is an <code>s3://</code> URL, <code>gs://</code>,
+        <code> azure://</code>, etc., with your own keys below; a local path
+        (<code>/data/prod</code>) or one with no keys takes a superuser. Pick the backend on the
+        left; the URL scheme also auto-selects it.
       </p>
       <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <label style={{ display: 'flex', flexDirection: 'column' }}>
@@ -173,7 +174,7 @@ export default function DataPathEditor(p: Props) {
           <input
             value={p.dataPath}
             onChange={ev => p.onDataPathChange(ev.target.value)}
-            placeholder={p.storeType === 'managed' ? 'resolved by the server at create' : '/data/prod or s3://bucket/path'}
+            placeholder={p.storeType === 'managed' ? 'resolved by the server at create' : 'empty: QoD places it, or s3://bucket/path'}
             disabled={p.storeType === 'managed'}
             style={{ width: '100%' }}
           />

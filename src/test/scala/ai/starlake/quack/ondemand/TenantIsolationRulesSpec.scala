@@ -63,7 +63,8 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
 
   private final class Fixture(
       holds: Either[String, Boolean] = Right(false),
-      init: (Map[String, String], Boolean, Boolean) => Unit = (_, _, _) => ()
+      init: (Map[String, String], Boolean, Boolean) => Unit = (_, _, _) => (),
+      defaults: Map[String, String] = Defaults
   ):
     val store = new InMemoryControlPlaneStore()
     val admin = new RecordingAdmin(holds)
@@ -72,7 +73,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       new StubQuackBackend(),
       new NodeLoadTracker,
       store,
-      defaultMetastore = Defaults,
+      defaultMetastore = defaults,
       dbAdmin = admin,
       duckLakeInitializer = (m, encrypted, createMissing) =>
         inits += ((m, createMissing))
@@ -104,16 +105,20 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     def rest(
         scope: SessionScope.Resolver,
         suffix: String,
-        metastore: Map[String, String] = Map.empty
+        metastore: Map[String, String] = Map.empty,
+        dataPath: String = "",
+        objectStore: Map[String, String] = Map.empty,
+        kind: String = "ducklake"
     ): Either[(StatusCode, ErrorResponse), String] =
       handlers
         .createTenantDb(
           TenantDbRequest(
             tenant = "acme",
             name = suffix,
-            kind = "ducklake",
+            kind = kind,
             metastore = metastore,
-            dataPath = "/data/x"
+            dataPath = dataPath,
+            objectStore = objectStore
           ),
           None
         )(scope)
@@ -163,7 +168,19 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
         .map(_.td)
 
+    def updateStore(
+        scope: SessionScope.Resolver,
+        name: String,
+        objectStore: Map[String, String]
+    ): Either[(StatusCode, ErrorResponse), String] =
+      handlers
+        .update(UpdateTenantDbRequest("acme", name, objectStore = Some(objectStore)), None)(scope)
+        .unsafeRunSync()
+        .map(_.db.name)
+
     def rows: List[String] = store.snapshot().tenantDbs.map(_.name).sorted
+
+    def row(name: String): TenantDb = store.snapshot().tenantDbs.find(_.name == name).get
 
   private val OwnLogin =
     Map("pgHost" -> "pg.other", "pgUser" -> "me", "pgPassword" -> OwnPassword)
@@ -769,6 +786,211 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       Map("pgHost" -> "pg.other", "pgUser" -> "qod", "pgPassword" -> "typed-by-hand")
     ) shouldBe Right("acme_lake")
     f.store.snapshot().tenantDbs.head.metastore("pgPassword") shouldBe "typed-by-hand"
+  }
+
+  // ---------- where a database's data lies ----------
+
+  private val OwnKeys = Map("s3_access_key_id" -> "AK", "s3_secret_access_key" -> "SK")
+  private val Remote  = "s3://own-bucket/lake/"
+
+  "A create that names no path" should "get a place beside the default, stored on the row" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "lake") shouldBe Right("acme_lake")
+    f.row("acme_lake").dataPath shouldBe "/data/acme_lake"
+    f.inits.head._1("dataPath") shouldBe "/data/acme_lake"
+    f.sup.effectiveMetastoreFor("acme", "acme_lake")("dataPath") shouldBe "/data/acme_lake"
+  }
+
+  it should "get it for a superuser and a direct caller too" in {
+    val f = new Fixture
+    f.rest(superuser, "su") shouldBe Right("acme_su")
+    f.row("acme_su").dataPath shouldBe "/data/acme_su"
+    f.create("direct", dataPath = "").map(_.dataPath) shouldBe Right("/data/acme_direct")
+  }
+
+  it should "follow a remote default, under its bucket" in {
+    val f = new Fixture(defaults = Defaults.updated("dataPath", "s3://qod-bucket/lakes/root/"))
+    f.create("lake", dataPath = "").map(_.dataPath) shouldBe Right(
+      "s3://qod-bucket/lakes/acme_lake"
+    )
+  }
+
+  it should "be refused 400 with no default to place it by, or only a bucket's root" in
+    List(
+      Defaults - "dataPath",
+      Defaults.updated("dataPath", " "),
+      Defaults.updated("dataPath", "s3://b/")
+    )
+      .foreach { defaults =>
+        val f             = new Fixture(defaults = defaults)
+        val (status, err) = f.rest(tenantAdmin, "lake").left.toOption.get
+        status shouldBe StatusCode.BadRequest
+        err.message should include("managed storage")
+        err.message should include("superuser")
+        f.rows shouldBe empty
+        f.admin.created shouldBe empty
+      }
+
+  it should "be refused 409 data_path_taken over a row's folder, by whole segments, naming no one" in {
+    val f = new Fixture
+    f.create("under", dataPath = "/data/acme_lake/below").isRight shouldBe true
+    val out = f.rest(tenantAdmin, "lake")
+    codeOf(out) shouldBe (StatusCode.Conflict, "data_path_taken")
+    out.left.toOption.get._2.message should not include "under"
+    f.admin.created.toList shouldBe List("acme_under")
+    f.rows shouldBe List("acme_under")
+
+    val above = new Fixture
+    above.create("up", dataPath = "/data").isRight shouldBe true
+    codeOf(above.rest(tenantAdmin, "lake")) shouldBe (StatusCode.Conflict, "data_path_taken")
+
+    // A folder whose name only begins the same is another folder.
+    val beside = new Fixture
+    beside.create("near", dataPath = "/data/acme_lake2").isRight shouldBe true
+    beside.rest(tenantAdmin, "lake") shouldBe Right("acme_lake")
+  }
+
+  it should "leave a metastore's dataPath to its own refusal, and the other kinds alone" in {
+    val f = new Fixture
+    codeOf(f.rest(superuser, "su", metastore = Map("dataPath" -> "/data/su"))) shouldBe
+      (StatusCode.BadRequest, "invalid_contract")
+    f.create("mem", kind = TenantDbKind.InMemory).map(_.dataPath) shouldBe Right("")
+    codeOf(f.rest(tenantAdmin, "file", kind = "duckdb-file")) shouldBe
+      (StatusCode.BadRequest, "invalid_contract")
+  }
+
+  "A tenant admin's create" should "name no path but a remote one with own keys" in {
+    val f     = new Fixture
+    val none  = Map.empty[String, String]
+    val cases = List[(String, String, Map[String, String], Map[String, String], String)](
+      ("a local path", "/data/own", none, none, "ducklake"),
+      ("remote, no keys", Remote, none, none, "ducklake"),
+      ("remote, half the keys", Remote, none, Map("s3_access_key_id" -> "AK"), "ducklake"),
+      (
+        "remote, blank secret",
+        Remote,
+        none,
+        OwnKeys.updated("s3_secret_access_key", " "),
+        "ducklake"
+      ),
+      ("remote, another scheme's keys", "gs://b/x/", none, OwnKeys, "ducklake"),
+      ("a local path with keys", "/data/own", none, OwnKeys, "ducklake"),
+      ("an unknown scheme with keys", "gcs://b/x/", none, OwnKeys, "ducklake"),
+      ("an upper-case scheme", "S3://b/x/", none, OwnKeys, "ducklake"),
+      ("the metastore's", "", Map("dataPath" -> "/data/own"), none, "ducklake"),
+      (
+        "a local file",
+        "/data/own.duckdb",
+        Map("dbName" -> "x", "schemaName" -> "main"),
+        none,
+        "duckdb-file"
+      ),
+      ("a memory scope", "/data/own", none, none, "memory")
+    )
+    cases.zipWithIndex.foreach { case ((what, path, meta, store, kind), i) =>
+      withClue(what) {
+        val out = f.rest(tenantAdmin, s"x$i", meta, path, store, kind)
+        codeOf(out) shouldBe (StatusCode.Forbidden, "superuser_required")
+        out.left.toOption.get._2.message should include("leave dataPath out")
+      }
+    }
+    f.rows shouldBe empty
+    f.inits shouldBe empty
+    f.admin.created shouldBe empty
+  }
+
+  it should "take a remote path with own keys, complete for the scheme" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "s3", dataPath = Remote, objectStore = OwnKeys) shouldBe Right("acme_s3")
+    f.row("acme_s3").dataPath shouldBe Remote
+    f.rest(
+      tenantAdmin,
+      "gs",
+      dataPath = "gs://b/x/",
+      objectStore = Map("gcs_hmac_key_id" -> "k", "gcs_hmac_secret" -> "s")
+    ) shouldBe Right("acme_gs")
+    f.rest(
+      tenantAdmin,
+      "az",
+      dataPath = "az://c/x/",
+      objectStore = Map("azure_account" -> "a", "azure_account_key" -> "k")
+    ) shouldBe Right("acme_az")
+  }
+
+  it should "leave a superuser, qod serve's provisioning and a direct caller to name any" in {
+    val f = new Fixture
+    f.rest(superuser, "su", dataPath = "/data/su") shouldBe Right("acme_su")
+    f.rest(superuser, "su3", dataPath = Remote) shouldBe Right("acme_su3")
+    f.serve("sv") shouldBe Right("acme_sv")
+    f.row("acme_sv").dataPath shouldBe "/data/x"
+    f.create("direct", dataPath = "/data/direct").map(_.dataPath) shouldBe Right("/data/direct")
+  }
+
+  "An update" should "move no metastore dataPath for a tenant admin, or a caller stating nothing" in {
+    val f = new Fixture
+    f.create("lake").isRight shouldBe true
+    codeOf(f.update(tenantAdmin, "acme_lake", Map("dataPath" -> "/data/other"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    f.patch("acme_lake", Map("dataPath" -> "/data/other")).left.toOption.get shouldBe
+      a[SupervisorError.SuperuserChoice]
+    f.row("acme_lake").metastore.contains("dataPath") shouldBe false
+    f.update(superuser, "acme_lake", Map("dataPath" -> "/data/other")) shouldBe Right("acme_lake")
+    // Sent back as it is, it is no change; left out of a row that holds it, it is one.
+    f.update(tenantAdmin, "acme_lake", Map("dataPath" -> "/data/other")) shouldBe Right("acme_lake")
+    codeOf(f.update(tenantAdmin, "acme_lake", Map("schemaName" -> "main"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+  }
+
+  it should "keep a remote path's own keys complete, for a tenant admin" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "s3", dataPath = Remote, objectStore = OwnKeys) shouldBe Right("acme_s3")
+    List(
+      Map.empty[String, String],
+      Map("s3_access_key_id" -> "AK", "s3_secret_access_key" -> ""),
+      Map("s3_access_key_id" -> " "),
+      Map("s3_region"        -> "eu-west-1")
+    ).foreach { store =>
+      withClue(store.keySet.toString) {
+        codeOf(f.updateStore(tenantAdmin, "acme_s3", store)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+      }
+    }
+    f.row("acme_s3").objectStore shouldBe OwnKeys
+    // Changed and complete, with the stored secret carried.
+    f.updateStore(tenantAdmin, "acme_s3", Map("s3_access_key_id" -> "AK2")) shouldBe Right(
+      "acme_s3"
+    )
+    f.row("acme_s3").objectStore("s3_secret_access_key") shouldBe "SK"
+    // A superuser may.
+    f.updateStore(superuser, "acme_s3", Map("s3_secret_access_key" -> "")) shouldBe Right("acme_s3")
+  }
+
+  it should "leave every other update alone, on a row with no keys or no path" in {
+    val f = new Fixture
+    f.store.upsertTenantDb(
+      TenantDb(
+        "td-m",
+        "acme",
+        "acme_m",
+        TenantDbKind.DuckLake,
+        Map.empty,
+        "s3://named-by-a-manifest/x/"
+      )
+    )
+    f.store.upsertTenantDb(TenantDb("td-b", "acme", "acme_b", TenantDbKind.DuckLake, Map.empty, ""))
+    f.sup.restore()
+    List("acme_m", "acme_b").foreach { name =>
+      f.handlers
+        .update(UpdateTenantDbRequest("acme", name, initSql = Some("SET threads = 2;")), None)(
+          tenantAdmin
+        )
+        .unsafeRunSync()
+        .isRight shouldBe true
+      f.update(tenantAdmin, name, Map("schemaName" -> "main")) shouldBe Right(name)
+    }
+    // No own keys to weaken: adding some, even half, is the row's own business.
+    f.updateStore(tenantAdmin, "acme_m", Map("s3_region" -> "eu-west-1")) shouldBe Right("acme_m")
+    f.row("acme_m").dataPath shouldBe "s3://named-by-a-manifest/x/"
   }
 
   // ---------- the tenant-name rule, at the handler's path ----------

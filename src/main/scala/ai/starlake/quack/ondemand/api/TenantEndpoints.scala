@@ -144,6 +144,14 @@ object TenantEndpoints:
   ] =
     base.post
       .in("database" / "create")
+      .description(
+        "Create a database in a tenant. A DuckLake database naming no dataPath is placed by QoD in " +
+          "a folder of its own beside the default data path, stored on the row: 400 with no default " +
+          "to place it by, 409 data_path_taken over a folder another database holds. A caller who " +
+          "is not a superuser names no other path than a remote one (s3, s3a, r2, gs, az, azure, " +
+          "abfss) with explicit keys of their own in objectStore, complete for its scheme, and no " +
+          "metastore.dataPath: anything else is 403 superuser_required, nothing written."
+      )
       .in(jsonBody[TenantDbRequest])
       .in(authToken)
       .out(jsonBody[TenantDbResponse])
@@ -179,6 +187,13 @@ object TenantEndpoints:
   ] =
     base.post
       .in("database" / "update")
+      .description(
+        "Update a database. metastore and objectStore replace the stored maps, except that a " +
+          "secret they leave out is kept and one sent empty is removed. A caller who is not a " +
+          "superuser leaves metastore.dataPath as it is and keeps complete the keys of a row " +
+          "holding its own: 403 superuser_required otherwise, nothing written. An update that " +
+          "changes the metastore, objectStore or initSql restarts the database's nodes."
+      )
       .in(jsonBody[UpdateTenantDbRequest])
       .in(authToken)
       .out(jsonBody[UpdateTenantDbResponse])

@@ -9,8 +9,11 @@ import org.scalatest.matchers.should.Matchers
 
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
 import java.net.{InetSocketAddress, ServerSocket, Socket}
+import java.nio.file.attribute.FileTime
 import java.nio.file.{Files, Path}
 import java.sql.DriverManager
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -43,6 +46,9 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
   private lazy val root: Path = Files.createTempDirectory("qod-iso").toRealPath()
 
+  /** Where QoD places a database that names no path: beside the default data path. */
+  private lazy val lakes: Path = Files.createDirectories(root.resolve("lakes"))
+
   private var stack: AuthzStack = null
 
   /** Every (tenant, tenantDb, pool) a case opened and did not close. */
@@ -63,7 +69,8 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         23360,
         23369,
         filesRoot = root,
-        stackPrefixes = List(Prefix)
+        stackPrefixes = List(Prefix),
+        defaultDataPath = Some(lakes.resolve("default").toString)
       )
       stack.boot()
 
@@ -257,10 +264,9 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       pool: String,
       user: String,
       password: String,
-      dataPath: String,
       rows: Int = 5
   ): String =
-    val (code, name, body) = createDb(tenantId, suffix, token, "dataPath" -> s(dataPath))
+    val (code, name, body) = createDb(tenantId, suffix, token)
     withClue(body.take(300))(code shouldBe 200)
     openPool(tenantId, name, pool, token)
     serving(tenantId, pool, user, password)
@@ -322,25 +328,45 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       tenant(other)
       val holderToken = adminOf(holder, "ha", HolderPw)
       val otherToken  = adminOf(other, "oa", OtherPw)
-      val path        = dataDir(s"a1_$run")
-      val name        = owned(holder, "sales", holderToken, "hpool", "ha", HolderPw, path)
+      val name        = owned(holder, "sales", holderToken, "hpool", "ha", HolderPw)
       name shouldBe s"${holder}_sales"
 
-      // The same composed name, the same data path, then another data path.
-      val (same, _, sameBody) = createDb(other, "corp_sales", otherToken, "dataPath" -> s(path))
+      // The same composed name places it in the same folder: refused by that, naming no one.
+      val (same, _, sameBody) = createDb(other, "corp_sales", otherToken)
       withClue(sameBody.take(300))(same shouldBe 409)
-      errorOf(sameBody) shouldBe "database_name_taken"
+      errorOf(sameBody) shouldBe "data_path_taken"
+      sameBody should not include lakes.toString
+      // A database of the holder's that a superuser placed elsewhere: refused by its name.
+      val elsewhere               = dataDir(s"a1w_$run")
+      val (placed, _, placedBody) = {
+        val (c, b) = stack.postStatus(
+          "/api/database/create",
+          obj(
+            "tenant"   -> s(holder),
+            "name"     -> s("named"),
+            "kind"     -> s("ducklake"),
+            "dataPath" -> s(elsewhere)
+          )
+        )
+        stack.catalogDatabases += s"${holder}_named"
+        (c, "", b)
+      }
+      withClue(placedBody.take(300))(placed shouldBe 200)
+      val (taken, _, takenBody) = createDb(other, "corp_named", otherToken)
+      taken shouldBe 409
+      errorOf(takenBody) shouldBe "database_name_taken"
       // Only the name the caller's own request composes: no one, and no path.
       io.circe.parser
-        .parse(sameBody)
+        .parse(takenBody)
         .toOption
         .flatMap(_.hcursor.get[String]("message").toOption) shouldBe
-        Some(s"database name '$name' is taken on this server: choose another name")
+        Some(s"database name '${holder}_named' is taken on this server: choose another name")
+      // Naming that path changes nothing: that is a superuser's.
       val (wrong, _, wrongBody) =
-        createDb(other, "corp_sales", otherToken, "dataPath" -> s(dataDir(s"a1w_$run")))
-      wrong shouldBe 409
-      errorOf(wrongBody) shouldBe "database_name_taken"
-      wrongBody should not include path.stripSuffix("/")
+        createDb(other, "corp_named", otherToken, "dataPath" -> s(elsewhere))
+      wrong shouldBe 403
+      errorOf(wrongBody) shouldBe "superuser_required"
+      wrongBody should not include elsewhere.stripSuffix("/")
 
       // No row came of it, so no delete can reach the database either.
       deleteDb(other, name, otherToken)._1 shouldBe 404
@@ -368,11 +394,10 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     importedTenant(other)
     val holderToken     = adminOf(holder, "hb", HolderPw)
     val otherToken      = adminOf(other, "ob", OtherPw)
-    val path            = dataDir(s"a2_$run")
-    val name            = owned(holder, "data_x", holderToken, "hpool2", "hb", HolderPw, path)
-    val (code, _, body) = createDb(other, "x", otherToken, "dataPath" -> s(path))
+    val name            = owned(holder, "data_x", holderToken, "hpool2", "hb", HolderPw)
+    val (code, _, body) = createDb(other, "x", otherToken)
     code shouldBe 409
-    errorOf(body) shouldBe "database_name_taken"
+    errorOf(body) shouldBe "data_path_taken"
     deleteDb(other, name, otherToken)._1 shouldBe 404
     dbExists(name) shouldBe true
     stack.flight(s"SELECT count(*) FROM $name.main.fact", "hb", HolderPw, holder, "hpool2") shouldBe
@@ -391,7 +416,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         tenant(t)
         val token = adminOf(t, "ba", OtherPw)
         val port  = listener.port.toString
-        val path  = dataDir(s"b1_$run")
         val cases = List(
           "host and port"     -> List("pgHost" -> "127.0.0.1", "pgPort" -> port),
           "port alone"        -> List("pgPort" -> port),
@@ -407,7 +431,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
             t,
             s"own$i",
             token,
-            "dataPath"  -> s(path),
             "metastore" -> Json.obj(keys.map((k, v) => k -> s(v))*)
           )
           withClue(s"$what: ${body.take(300)}") {
@@ -425,7 +448,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
               "tenant"    -> s(t),
               "name"      -> s("sup"),
               "kind"      -> s("ducklake"),
-              "dataPath"  -> s(path),
               "metastore" -> Json.obj("pgHost" -> s("127.0.0.1"), "pgPort" -> s(port))
             )
           )
@@ -445,7 +467,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       val t = s"${Prefix}b2$run"
       tenant(t)
       val token           = adminOf(t, "bb", OtherPw)
-      val (code, name, _) = createDb(t, "lake", token, "dataPath" -> s(dataDir(s"b2_$run")))
+      val (code, name, _) = createDb(t, "lake", token)
       code shouldBe 200
       val (up, body) =
         updateDb(t, name, token, "pgHost" -> "127.0.0.1", "pgPort" -> listener.port.toString)
@@ -469,7 +491,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         t,
         "byo",
         token,
-        "dataPath"  -> s(dataDir(s"b3_$run")),
         "metastore" -> Json.obj(
           "pgHost"     -> s("127.0.0.1"),
           "pgPort"     -> s(first.port.toString),
@@ -533,7 +554,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
         t,
         "lake",
         token,
-        "dataPath"  -> s(dataDir(s"b4_$run")),
         "metastore" -> Json.obj("pgUser" -> s(user))
       )
       // What such a row would do, had it been stored.
@@ -621,10 +641,9 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     tenant(other)
     val holderToken = adminOf(holder, "ca", HolderPw)
     val otherToken  = adminOf(other, "cb", OtherPw)
-    val path        = dataDir(s"c1_$run")
-    val target      = owned(holder, "secret", holderToken, "cpool", "ca", HolderPw, path)
+    val target      = owned(holder, "secret", holderToken, "cpool", "ca", HolderPw)
 
-    val (code, mine, _) = createDb(other, "mine", otherToken, "dataPath" -> s(path))
+    val (code, mine, _) = createDb(other, "mine", otherToken)
     code shouldBe 200
     openPool(other, mine, "cpool2", otherToken)
     serving(other, "cpool2", "cb", OtherPw)
@@ -674,7 +693,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     tenant(other)
     val holderToken = adminOf(holder, "cc", HolderPw)
     val otherToken  = adminOf(other, "cd", OtherPw)
-    val target = createDb(holder, "named", holderToken, "dataPath" -> s(dataDir(s"c4_$run")))._2
+    val target      = createDb(holder, "named", holderToken)._2
     openPool(holder, target, "cpool3", holderToken)
     serving(holder, "cpool3", "cc", HolderPw)
     stack
@@ -693,7 +712,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       other,
       "mine",
       otherToken,
-      "dataPath"  -> s(dataDir(s"c5_$run")),
       "metastore" -> Json.obj("catalogAlias" -> s(target))
     )
     withClue(body.take(300))(code shouldBe 200)
@@ -760,7 +778,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val token  = adminOf(t, "da", OtherPw)
     val target = s"${t}_target"
     foreignDb(target)
-    val (code, _, body) = createDb(t, "target", token, "dataPath" -> s(dataDir(s"d1_$run")))
+    val (code, _, body) = createDb(t, "target", token)
     withClue(body.take(300))(code shouldBe 409)
     errorOf(body) shouldBe "database_name_taken"
     deleteDb(t, target, token)._1 shouldBe 404
@@ -785,7 +803,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     tenant(t)
     val token = adminOf(t, "db", OtherPw)
     createEmptyDb(s"${t}_retry")
-    val (code, name, body) = createDb(t, "retry", token, "dataPath" -> s(dataDir(s"d2_$run")))
+    val (code, name, body) = createDb(t, "retry", token)
     withClue(body.take(300))(code shouldBe 200)
     name shouldBe s"${t}_retry"
   }
@@ -823,7 +841,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     // A name nothing holds stays free on the default server.
     val (fresh, freshName, freshBody) =
-      createDb(t, "fresh", token, "dataPath" -> s(dataDir(s"d4f_$run")), "metastore" -> login)
+      createDb(t, "fresh", token, "metastore" -> login)
     withClue(freshBody.take(300))(fresh shouldBe 200)
     dbExists(freshName) shouldBe false
     deleteDb(t, freshName, token)._1 shouldBe 200
@@ -832,7 +850,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val target = s"${t}_target"
     foreignDb(target)
     val (code, name, body) =
-      createDb(t, "target", token, "dataPath" -> s(dataDir(s"d4_$run")), "metastore" -> login)
+      createDb(t, "target", token, "metastore" -> login)
     withClue(body.take(300))(code shouldBe 200)
     name shouldBe target
     deleteDb(t, target, token)._1 shouldBe 200
@@ -852,14 +870,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     val target = s"${t}_target"
     foreignDb(target)
-    createDb(
-      t,
-      "target",
-      token,
-      "dataPath"  -> s(dataDir(s"d7_$run")),
-      "metastore" -> login
-    )._1 shouldBe
-      200
+    createDb(t, "target", token, "metastore" -> login)._1 shouldBe 200
     // Leaving the host out and removing the password would make it a row of QoD's own server.
     val (code, body) = updateDb(t, target, token, "pgPassword" -> "")
     withClue(body.take(300))(code shouldBe 409)
@@ -880,14 +891,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     val target = s"${t}_target"
     foreignDb(target)
-    createDb(
-      t,
-      "target",
-      token,
-      "dataPath"  -> s(dataDir(s"d5_$run")),
-      "metastore" -> login
-    )._1 shouldBe
-      200
+    createDb(t, "target", token, "metastore" -> login)._1 shouldBe 200
     stack.postStatus("/api/tenant/delete", obj("name" -> s(t)))._1 shouldBe 200
     markerKept(target) shouldBe true
   }
@@ -904,16 +908,313 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     createDb(t, "mem", token, "kind" -> s("memory"))._1 shouldBe 200
     deleteDb(t, mem, token)._1 shouldBe 200
     markerKept(mem) shouldBe true
+    // A local file is a superuser's to name.
     createDb(
       t,
       "file",
-      token,
+      stack.login(None, "admin", "admin"),
       "kind"      -> s("duckdb-file"),
       "dataPath"  -> s(root.resolve(s"d6_$run.duckdb").toString),
       "metastore" -> Json.obj("dbName" -> s(file), "schemaName" -> s("main"))
     )._1 shouldBe 200
     stack.postStatus("/api/tenant/delete", obj("name" -> s(t)))._1 shouldBe 200
     markerKept(file) shouldBe true
+  }
+
+  // ---------- where a database's data lies ----------
+
+  private def rowOf(tenantId: String, name: String, token: String): Option[Json] =
+    val (_, body) = stack.getStatus(s"/api/database/list?tenant=$tenantId", token)
+    io.circe.parser
+      .parse(body)
+      .toOption
+      .flatMap(_.hcursor.downField("tenantDbs").values)
+      .toList
+      .flatten
+      .find(_.hcursor.get[String]("name").contains(name))
+
+  private def filesUnder(p: Path): List[Path] =
+    if !Files.exists(p) then Nil
+    else Using.resource(Files.walk(p))(_.iterator().asScala.filter(Files.isRegularFile(_)).toList)
+
+  private val LongAgo = FileTime.from(Instant.now().minus(60, ChronoUnit.DAYS))
+
+  private def oldFile(p: Path): Path =
+    Files.createDirectories(p.getParent)
+    Files.writeString(p, "not really a data file")
+    Files.setLastModifiedTime(p, LongAgo)
+
+  /** A maintenance run of orphan cleanup, as `token`, to its end. */
+  private def sweep(tenantId: String, name: String, token: String): Unit =
+    val (code, body) = stack.postStatus(
+      "/api/maintenance/run",
+      obj("tenant" -> s(tenantId), "tenantDb" -> s(name), "operations" -> s("orphans")),
+      token
+    )
+    withClue(body.take(200))(code shouldBe 200)
+    val id = io.circe.parser.parse(body).toOption.get.hcursor.get[Long]("id").toOption.get
+    stack.await(s"maintenance run $id to end", 180.seconds) {
+      stack
+        .get(s"/api/maintenance/runs?tenant=$tenantId&tenantDb=$name")
+        .asArray
+        .toList
+        .flatten
+        .find(_.hcursor.get[Long]("id").contains(id))
+        .filter(_.hcursor.get[String]("finishedAt").isRight)
+    }
+    ()
+
+  "A tenant admin" should "name no data path of their own, with no row written" in {
+    ready()
+    val t = s"${Prefix}f1$run"
+    tenant(t)
+    val token = adminOf(t, "fa", OtherPw)
+    val keys  = Json.obj("s3_access_key_id" -> s("AK"), "s3_secret_access_key" -> s("SK"))
+    List(
+      "a local path"                     -> List("dataPath" -> s(dataDir(s"f1_$run"))),
+      "a remote path with no keys"       -> List("dataPath" -> s("s3://qod-iso-no-bucket/x/")),
+      "a remote path with half the keys" -> List(
+        "dataPath"    -> s("s3://qod-iso-no-bucket/x/"),
+        "objectStore" -> Json.obj("s3_access_key_id" -> s("AK"))
+      ),
+      "a local path with keys" -> List("dataPath" -> s(dataDir(s"f2_$run")), "objectStore" -> keys),
+      "the metastore's" -> List("metastore" -> Json.obj("dataPath" -> s(dataDir(s"f3_$run")))),
+      "a local file"    -> List(
+        "kind"      -> s("duckdb-file"),
+        "dataPath"  -> s(root.resolve(s"f4_$run.duckdb").toString),
+        "metastore" -> Json.obj("dbName" -> s(s"${t}_f"), "schemaName" -> s("main"))
+      ),
+      "a memory database's" -> List("kind" -> s("memory"), "dataPath" -> s(dataDir(s"f5_$run")))
+    ).zipWithIndex.foreach { case ((what, fields), i) =>
+      val (code, name, body) = createDb(t, s"named$i", token, fields*)
+      withClue(s"$what: ${body.take(300)}") {
+        code shouldBe 403
+        errorOf(body) shouldBe "superuser_required"
+        name shouldBe ""
+        body should include("leave dataPath out")
+      }
+      dbExists(s"${t}_named$i") shouldBe false
+    }
+    rowOf(t, s"${t}_named0", token) shouldBe None
+    stack.getStatus(s"/api/database/list?tenant=$t", token)._2 should not include "named"
+  }
+
+  it should "get a place of QoD's when naming none, which a sweep of that row stays inside" in {
+    ready()
+    val t = s"${Prefix}f2$run"
+    tenant(t)
+    val token  = adminOf(t, "fb", OtherPw)
+    val name   = owned(t, "placed", token, "fpool", "fb", OtherPw)
+    val folder = lakes.resolve(name)
+    val row    = rowOf(t, name, token).get
+    row.hcursor.get[String]("dataPath") shouldBe Right(folder.toString)
+    row.hcursor.get[String]("effectiveDataPath") shouldBe Right(folder.toString)
+    // The table's own files land under it, enough rows that none stays in the catalog.
+    stack
+      .flight(
+        s"INSERT INTO $name.main.fact SELECT i, 'more' FROM range(100000) r(i)",
+        "fb",
+        OtherPw,
+        t,
+        "fpool"
+      )
+      .isRight shouldBe true
+    val own = filesUnder(folder).filter(_.toString.endsWith(".parquet"))
+    own should not be empty
+
+    // Everything old: its own files stay (its catalog holds them), a stray of its folder goes, and
+    // the folder beside it, whose files its catalog does not hold either, is not its to sweep.
+    own.foreach(Files.setLastModifiedTime(_, LongAgo))
+    val stray  = oldFile(folder.resolve("stray.parquet"))
+    val beside = oldFile(lakes.resolve(s"${name}_beside").resolve("other.parquet"))
+    val above  = oldFile(lakes.resolve("above.parquet"))
+    sweep(t, name, token)
+    Files.exists(stray) shouldBe false
+    Files.exists(beside) shouldBe true
+    Files.exists(above) shouldBe true
+    own.forall(Files.exists(_)) shouldBe true
+    stack.flight(
+      s"SELECT count(*), sum(id) FROM $name.main.fact",
+      "fb",
+      OtherPw,
+      t,
+      "fpool"
+    ) shouldBe Right(List("100005,4999950010"))
+    closePool(t, name, "fpool")
+  }
+
+  it should "move no data path by an update, and keep every other update" in {
+    ready()
+    val t = s"${Prefix}f3$run"
+    tenant(t)
+    val token           = adminOf(t, "fc", OtherPw)
+    val (code, name, _) = createDb(t, "lake", token)
+    code shouldBe 200
+    val (up, body) = updateDb(t, name, token, "dataPath" -> dataDir(s"f3_$run"))
+    up shouldBe 403
+    errorOf(body) shouldBe "superuser_required"
+    rowOf(t, name, token).get.hcursor.downField("metastore").get[String]("dataPath").isLeft shouldBe
+      true
+    updateDb(t, name, token, "schemaName" -> "main")._1 shouldBe 200
+    stack
+      .postStatus(
+        "/api/database/update",
+        obj("tenant" -> s(t), "name" -> s(name), "initSql" -> s("SET threads = 2;")),
+        token
+      )
+      ._1 shouldBe 200
+  }
+
+  it should "keep a remote path's own keys complete: the node would sign it with QoD's otherwise" in {
+    ready()
+    val t = s"${Prefix}f4$run"
+    tenant(t)
+    val token = adminOf(t, "fd", OtherPw)
+    val keys  = Json.obj("s3_access_key_id" -> s("AK"), "s3_secret_access_key" -> s("SK"))
+    // Only the row: this stack has no object store for a node to reach.
+    val (code, name, body) =
+      createDb(
+        t,
+        "remote",
+        token,
+        "dataPath"    -> s("s3://qod-iso-no-bucket/f4/"),
+        "objectStore" -> keys
+      )
+    withClue(body.take(300))(code shouldBe 200)
+    def updateKeys(fields: (String, String)*) = stack.postStatus(
+      "/api/database/update",
+      obj(
+        "tenant"      -> s(t),
+        "name"        -> s(name),
+        "objectStore" -> Json.obj(fields.map((k, v) => k -> s(v))*)
+      ),
+      token
+    )
+    List(
+      "cleared"        -> List.empty[(String, String)],
+      "secret emptied" -> List("s3_access_key_id" -> "AK", "s3_secret_access_key" -> ""),
+      "id blank"       -> List("s3_access_key_id" -> " ")
+    ).foreach { (what, fields) =>
+      val (c, b) = updateKeys(fields*)
+      withClue(what) {
+        c shouldBe 403
+        errorOf(b) shouldBe "superuser_required"
+      }
+    }
+    // Changed and complete, it stays: the secret left out is the stored one.
+    updateKeys("s3_access_key_id" -> "AK2", "s3_region" -> "eu-west-1")._1 shouldBe 200
+    updateKeys("s3_access_key_id" -> "AK3", "s3_secret_access_key" -> "SK3")._1 shouldBe 200
+    // A superuser may clear them.
+    stack
+      .postStatus(
+        "/api/database/update",
+        obj(
+          "tenant"      -> s(t),
+          "name"        -> s(name),
+          "objectStore" -> Json.obj("s3_secret_access_key" -> s(""))
+        )
+      )
+      ._1 shouldBe 200
+  }
+
+  it should "reach no other tenant's database file, nor make a file at a path of their choosing" in {
+    ready()
+    val victim   = s"${Prefix}f7$run"
+    val attacker = s"${Prefix}f8$run"
+    tenant(victim)
+    tenant(attacker)
+    val token = adminOf(attacker, "ff", OtherPw)
+    // The other tenant's file, its row a superuser's to write.
+    val file = root.resolve(s"f7_$run.duckdb")
+    Using.resource(DriverManager.getConnection(s"jdbc:duckdb:$file")) { c =>
+      Using.resource(c.createStatement()) { st =>
+        st.execute("CREATE TABLE vrows (id BIGINT)")
+        st.execute("INSERT INTO vrows VALUES (1), (2)")
+      }
+    }
+    val before = (Files.readAllBytes(file).toList, Files.getLastModifiedTime(file))
+    createDb(
+      victim,
+      "vfile",
+      stack.login(None, "admin", "admin"),
+      "kind"      -> s("duckdb-file"),
+      "dataPath"  -> s(file.toString),
+      "metastore" -> Json.obj("dbName" -> s("viccat"), "schemaName" -> s("main"))
+    )._1 shouldBe 200
+
+    val absent = root.resolve(s"f8_$run.duckdb")
+    List("steal" -> file, "fresh" -> absent).foreach { (suffix, path) =>
+      val (code, name, body) = createDb(
+        attacker,
+        suffix,
+        token,
+        "kind"      -> s("duckdb-file"),
+        "dataPath"  -> s(path.toString),
+        "metastore" -> Json.obj("dbName" -> s(s"cat_$suffix"), "schemaName" -> s("main"))
+      )
+      withClue(s"$suffix: ${body.take(300)}") {
+        code shouldBe 403
+        errorOf(body) shouldBe "superuser_required"
+        name shouldBe ""
+      }
+    }
+    settle()
+    stack.getStatus(s"/api/database/list?tenant=$attacker", token)._2 should not include "steal"
+    stack.getStatus(s"/api/database/list?tenant=$attacker", token)._2 should not include "fresh"
+    Files.exists(absent) shouldBe false
+    (Files.readAllBytes(file).toList, Files.getLastModifiedTime(file)) shouldBe before
+  }
+
+  "A superuser" should "still name a data path" in {
+    ready()
+    val t = s"${Prefix}f5$run"
+    tenant(t)
+    val path         = dataDir(s"f5_$run")
+    val (code, body) = stack.postStatus(
+      "/api/database/create",
+      obj("tenant" -> s(t), "name" -> s("named"), "kind" -> s("ducklake"), "dataPath" -> s(path))
+    )
+    withClue(body.take(300))(code shouldBe 200)
+    stack.catalogDatabases += s"${t}_named"
+    rowOf(t, s"${t}_named", stack.login(None, "admin", "admin")).get.hcursor
+      .get[String]("dataPath") shouldBe Right(path)
+  }
+
+  "A row a manifest made" should "stay as it is, and take a tenant admin's other updates" in {
+    ready()
+    val t    = s"${Prefix}f6${run}_old"
+    val td   = s"${t}_lake"
+    val bare = s"${t}_bare"
+    val path = dataDir(s"f6_$run")
+    stack.catalogDatabases += td
+    stack.catalogDatabases += bare
+    stack.post(
+      "/api/manifest/import",
+      manifest(
+        Json.obj(
+          "name"        -> s(t),
+          "displayName" -> s(t),
+          "tenantDbs"   -> Json.arr(
+            Json.obj("name" -> s(td), "kind"   -> s("ducklake"), "dataPath" -> s(path)),
+            Json.obj("name" -> s(bare), "kind" -> s("ducklake"))
+          )
+        )
+      )
+    )
+    val token = adminOf(t, "fe", OtherPw)
+    rowOf(t, td, token).get.hcursor.get[String]("dataPath") shouldBe Right(path)
+    stack
+      .postStatus(
+        "/api/database/update",
+        obj("tenant" -> s(t), "name" -> s(td), "initSql" -> s("SET threads = 2;")),
+        token
+      )
+      ._1 shouldBe 200
+    rowOf(t, td, token).get.hcursor.get[String]("dataPath") shouldBe Right(path)
+    // One with no path of its own keeps deriving it, and no tenant admin gives it one.
+    val (up, body) = updateDb(t, bare, token, "dataPath" -> dataDir(s"f6b_$run"))
+    up shouldBe 403
+    errorOf(body) shouldBe "superuser_required"
   }
 
   // ---------- what must keep working ----------
@@ -923,13 +1224,13 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val t = s"${Prefix}e1$run"
     tenant(t)
     val token = adminOf(t, "ea", OtherPw)
-    val name  = owned(t, "lake", token, "epool", "ea", OtherPw, dataDir(s"e1_$run"))
+    val name  = owned(t, "lake", token, "epool", "ea", OtherPw)
     stack.flight(s"SELECT count(*) FROM $name.main.fact", "ea", OtherPw, t, "epool") shouldBe
       Right(List("5"))
     closePool(t, name, "epool")
     deleteDb(t, name, token)._1 shouldBe 200
     dbExists(name) shouldBe false
-    createDb(t, "lake", token, "dataPath" -> s(dataDir(s"e1b_$run")))._1 shouldBe 200
+    createDb(t, "lake", token)._1 shouldBe 200
     dbExists(name) shouldBe true
   }
 
@@ -949,12 +1250,10 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
           "pgUser"     -> s(TestPostgres.pgUser),
           "pgPassword" -> s(TestPostgres.pgPass)
         )
-        val path    = dataDir(s"e2_$run")
         val catalog = s"${t}_byo"
 
         // No catalog database on its server: refused, naming it, and nothing is created.
-        val (missingDb, _, missingBody) =
-          createDb(t, "byo", token, "dataPath" -> s(path), "metastore" -> login)
+        val (missingDb, _, missingBody) = createDb(t, "byo", token, "metastore" -> login)
         withClue(missingBody.take(300))(missingDb shouldBe 400)
         errorOf(missingBody) shouldBe "catalog_database_missing"
         missingBody should include(catalog)
@@ -962,8 +1261,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
         // Its owner makes it; it then serves end to end, reading and writing.
         createEmptyDb(catalog)
-        val (code, name, body) =
-          createDb(t, "byo", token, "dataPath" -> s(path), "metastore" -> login)
+        val (code, name, body) = createDb(t, "byo", token, "metastore" -> login)
         withClue(body.take(300))(code shouldBe 200)
         openPool(t, name, "e2p", token)
         serving(t, "e2p", "eb", OtherPw)

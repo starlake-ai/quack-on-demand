@@ -45,6 +45,12 @@ package ai.starlake.quack.ondemand
   *   - [[ai.starlake.quack.ondemand.SupervisorError.CatalogDatabaseMissing CatalogDatabaseMissing]]:
   *     a create on another server found no catalog database there; REST 400
   *     `catalog_database_missing`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.SuperuserChoice SuperuserChoice]]: a writer who
+  *     is not a superuser chose what only a superuser chooses for a database
+  *     (`TenantDb.superuserChoiceError`); REST 403 `superuser_required`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.DataPathTaken DataPathTaken]]: the data path
+  *     QoD would derive for a new database lies at, under or above another's; REST 409
+  *     `data_path_taken`.
   */
 enum SupervisorError(val message: String):
   case NotFound(msg: String)                        extends SupervisorError(msg)
@@ -62,3 +68,5 @@ enum SupervisorError(val message: String):
   case OwnLoginRequired(msg: String)                extends SupervisorError(msg)
   case DbNameFixed(msg: String)                     extends SupervisorError(msg)
   case CatalogDatabaseMissing(msg: String)          extends SupervisorError(msg)
+  case SuperuserChoice(msg: String)                 extends SupervisorError(msg)
+  case DataPathTaken(msg: String)                   extends SupervisorError(msg)

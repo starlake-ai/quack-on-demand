@@ -64,7 +64,9 @@ final class AuthzStack(
     /** How often the maintenance drain looks for a queued run, for a spec that waits on one. */
     maintenanceTickSec: Option[Int] = None,
     /** `quack-on-demand.stampWrites` (`QOD_STAMP_WRITES`), the manager's own default. */
-    stampWrites: Boolean = true
+    stampWrites: Boolean = true,
+    /** `defaultMetastore.dataPath`, for a spec whose databases QoD places. */
+    defaultDataPath: Option[String] = None
 ):
   import Main.given
 
@@ -113,6 +115,7 @@ final class AuthzStack(
          |    pgUser = "${TestPostgres.pgUser}"
          |    pgPassword = "${TestPostgres.pgPass}"
          |    dbName = "$dbName"
+         |    ${defaultDataPath.fold("")(p => s"""dataPath = "$p"""")}
          |  }
          |}
          |quack-flightsql {

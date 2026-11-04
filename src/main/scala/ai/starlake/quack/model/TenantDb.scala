@@ -294,6 +294,61 @@ object TenantDb {
         "it: send pgPassword again for the new server."
     )
 
+  /** The `objectStore` keys that make a remote data path sign with the database's own credentials,
+    * by scheme, the ones `ObjectStoreSecret` reads; None for any other path. The schemes are the
+    * spawn scripts', spelled as they match them.
+    */
+  private def ownKeyNames(dataPath: String): Option[List[String]] =
+    if List("s3://", "s3a://", "r2://").exists(dataPath.startsWith) then
+      Some(List("s3_access_key_id", "s3_secret_access_key"))
+    else if dataPath.startsWith("gs://") then Some(List("gcs_hmac_key_id", "gcs_hmac_secret"))
+    else if List("az://", "azure://", "abfss://").exists(dataPath.startsWith) then
+      Some(List("azure_account", "azure_account_key"))
+    else None
+
+  /** Whether a node signs `dataPath` with keys of the database's own: a remote path, and every key
+    * its scheme needs, explicit and not blank. Nothing else: with no `objectStore` a node signs a
+    * remote path with the manager's keys or the instance's credential chain.
+    */
+  def holdsOwnKeys(dataPath: String, objectStore: Map[String, String]): Boolean =
+    ownKeyNames(dataPath).exists(_.forall(k => objectStore.get(k).exists(_.trim.nonEmpty)))
+
+  /** The one check of what only a superuser chooses for a database, judged for any other writer;
+    * None when that writer may. `stored` is the row an update starts from, None on a create, and
+    * the rest is the row as it would then be. A superuser, a manifest import, `qod serve`'s
+    * provisioning and a branch's registration do not come here, nor does a row an update leaves
+    * alone.
+    *
+    * Where its data lies, which is where the manager's keys and disk would point: a create names no
+    * path (QoD places a DuckLake database), or a remote one with own keys ([[holdsOwnKeys]]), and
+    * never a `metastore.dataPath`. An update leaves `metastore.dataPath` as it is and keeps the own
+    * keys a row holds, so that a node never signs that path with the manager's.
+    */
+  def superuserChoiceError(
+      stored: Option[TenantDb],
+      dataPath: String,
+      metastore: Map[String, String],
+      objectStore: Map[String, String]
+  ): Option[String] =
+    val chooses =
+      "a database's data path is QoD's or a superuser's to choose: leave dataPath out of a " +
+        "DuckLake database and QoD places it, or name a remote path (s3://, s3a://, r2://, gs://, " +
+        "az://, azure://, abfss://) with your own keys in objectStore, complete for its scheme"
+    stored match
+      case None =>
+        val named = metastore.contains("dataPath") ||
+          (dataPath.nonEmpty && !holdsOwnKeys(dataPath, objectStore))
+        Option.when(named)(chooses)
+      case Some(td) =>
+        val path =
+          if td.dataPath.nonEmpty then td.dataPath else td.metastore.getOrElse("dataPath", "")
+        if metastore.get("dataPath") != td.metastore.get("dataPath") then Some(chooses)
+        else
+          Option.when(holdsOwnKeys(path, td.objectStore) && !holdsOwnKeys(path, objectStore))(
+            "this database's remote data path signs with its own keys in objectStore: they can " +
+              "change, but stay complete for its scheme. Send them, or leave objectStore out."
+          )
+
   /** The refusal of a change of a DuckLake row's `dbName`, which names its catalog database for
     * good once the row is made; a superuser's update skips this. Compared as the effective
     * metastore resolves it: a name left out means the row's own.

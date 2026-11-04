@@ -264,6 +264,81 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     errorOf("schemaName" -> "main host=pg.other").get should include("schemaName")
   }
 
+  "TenantDb.holdsOwnKeys" should "take explicit keys, complete for a remote path's scheme" in {
+    val s3    = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "s")
+    val gcs   = Map("gcs_hmac_key_id" -> "k", "gcs_hmac_secret" -> "s")
+    val azure = Map("azure_account" -> "a", "azure_account_key" -> "k")
+    List("s3://b/x", "s3a://b/x", "r2://b/x").foreach(TenantDb.holdsOwnKeys(_, s3) shouldBe true)
+    TenantDb.holdsOwnKeys("gs://b/x", gcs) shouldBe true
+    List("az://c/x", "azure://c/x", "abfss://c@a/x").foreach(
+      TenantDb.holdsOwnKeys(_, azure) shouldBe true
+    )
+  }
+
+  it should "refuse half the keys, blank ones, another scheme's, and any other path" in {
+    val s3 = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "s")
+    TenantDb.holdsOwnKeys("s3://b/x", Map.empty) shouldBe false
+    TenantDb.holdsOwnKeys("s3://b/x", s3 - "s3_access_key_id") shouldBe false
+    TenantDb.holdsOwnKeys("s3://b/x", s3 - "s3_secret_access_key") shouldBe false
+    TenantDb.holdsOwnKeys("s3://b/x", s3.updated("s3_secret_access_key", " ")) shouldBe false
+    TenantDb.holdsOwnKeys(
+      "s3://b/x",
+      Map("s3_region" -> "us-east-1", "s3_endpoint" -> "h")
+    ) shouldBe false
+    TenantDb.holdsOwnKeys("gs://b/x", s3) shouldBe false
+    List("/data/x", "./x", "file:///x", "http://h/x", "gcs://b/x", "S3://b/x", "").foreach {
+      TenantDb.holdsOwnKeys(_, s3) shouldBe false
+    }
+  }
+
+  private val remoteRow = TenantDb(
+    "td",
+    "acme",
+    "acme_x",
+    TenantDbKind.DuckLake,
+    Map("dbName" -> "acme_x"),
+    "s3://b/x",
+    objectStore = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "s")
+  )
+
+  "TenantDb.superuserChoiceError" should "take a create naming no path, or a remote one with keys" in {
+    def on(
+        path: String,
+        store: Map[String, String] = Map.empty,
+        meta: Map[String, String] = Map.empty
+    ) =
+      TenantDb.superuserChoiceError(None, path, meta, store)
+    on("") shouldBe None
+    on("s3://b/x", remoteRow.objectStore) shouldBe None
+    on("s3://b/x").isDefined shouldBe true
+    on("/data/x").isDefined shouldBe true
+    on("/data/x", remoteRow.objectStore).isDefined shouldBe true
+    on(" ").isDefined shouldBe true
+    on("", meta = Map("dataPath" -> "/data/x")).isDefined shouldBe true
+    on("", meta = Map("dataPath" -> "")).isDefined shouldBe true
+    on("s3://b/x", remoteRow.objectStore, Map("dataPath" -> "s3://b/x")).isDefined shouldBe true
+  }
+
+  it should "judge an update by what the row would hold" in {
+    def on(td: TenantDb, meta: Map[String, String], store: Map[String, String]) =
+      TenantDb.superuserChoiceError(Some(td), td.dataPath, meta, store)
+    val keys = remoteRow.objectStore
+    on(remoteRow, remoteRow.metastore, keys) shouldBe None
+    on(remoteRow, remoteRow.metastore, keys.updated("s3_access_key_id", "k2")) shouldBe None
+    on(remoteRow, remoteRow.metastore, Map.empty).isDefined shouldBe true
+    on(remoteRow, remoteRow.metastore, keys - "s3_secret_access_key").isDefined shouldBe true
+    on(remoteRow, remoteRow.metastore + ("dataPath" -> "/x"), keys).isDefined shouldBe true
+    // No own keys to weaken, whatever the path.
+    val plain = remoteRow.copy(objectStore = Map.empty)
+    on(plain, plain.metastore, Map.empty) shouldBe None
+    on(plain, plain.metastore, Map("s3_region" -> "r")) shouldBe None
+    // A path held in the metastore is judged the same, and sent back as it is, no change.
+    val inMeta = remoteRow.copy(dataPath = "", metastore = Map("dataPath" -> "s3://b/y"))
+    on(inMeta, inMeta.metastore, keys) shouldBe None
+    on(inMeta, inMeta.metastore, Map.empty).isDefined shouldBe true
+    on(inMeta, Map.empty, keys).isDefined shouldBe true
+  }
+
   "TenantDb.KnownMetastoreKeys" should "leave the manager's stamps to the manager" in {
     TenantDb.KnownMetastoreKeys should not contain TenantDb.EncryptedKey
     TenantDb.KnownMetastoreKeys should not contain TenantDb.CreateDatabaseKey

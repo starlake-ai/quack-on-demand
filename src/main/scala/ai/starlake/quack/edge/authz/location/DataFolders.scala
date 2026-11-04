@@ -79,6 +79,14 @@ object DataFolders:
           else if SchemeRe.matches(p) then Nil
           else local(p, sameHost, realPath)
 
+  /** Whether two data paths lie at, under or above one another, by whole segments. */
+  def overlap(a: String, b: String): Boolean =
+    def folders(p: String) =
+      of(p, sameHost = true, identity)
+        .filterNot(_ == Unplaced)
+        .map(_.stripSuffix(NamePrefixMarker).stripSuffix("/") + "/")
+    folders(a).exists(x => folders(b).exists(y => x.startsWith(y) || y.startsWith(x)))
+
   /** The local path a `file:` URL names (what follows `file:`): `///p` and `//localhost/p` are
     * `/p`, a Windows `/C:/p` drops its leading slash, `/p` and a relative `p` stand as written.
     * None for another host or nothing at all.

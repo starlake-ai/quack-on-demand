@@ -509,6 +509,13 @@ qod database create --tenant acme --name tpch \
 # is not dropped: its nodes still use it, but a manifest export leaves it out too (to
 # export a password, first store it as pgPassword: see "Update a database").
 #
+# Where its data lies: leave --data-path out of a DuckLake database and QoD places it in a folder of
+# its own beside the default data path, stored on the row (409 data_path_taken over a folder another
+# database holds: choose another name; 400 with no default data path, or one that is a bucket's root:
+# use --managed-storage, or ask a superuser). A tenant admin's own path is a remote one (s3://, s3a://,
+# r2://, gs://, az://, azure://, abfss://) with their own keys in --object-store, complete for its
+# scheme. Any other path, on any kind, is a superuser's to name: 403 superuser_required, nothing written.
+#
 # A database may use another Postgres server, with a login of its own: QoD's login goes only to
 # QoD's server, so a metastore whose pgHost or pgPort differ from the default's, compared as text
 # after normalizing (127.0.0.1 is not localhost), answers 400 own_login_required without its own
@@ -516,7 +523,7 @@ qod database create --tenant acme --name tpch \
 # owner's: QoD creates and drops no database there, so create one named <tenant>_<name> first
 # (400 catalog_database_missing names it); database delete and a tenant delete leave it, logged at
 # ERROR; it cannot be branched (400 branch_own_server).
-qod database create --tenant acme --name byo --data-path /data/acme_byo \
+qod database create --tenant acme --name byo \
   --metastore pgHost=pg.acme.example --metastore pgPort=5432 \
   --metastore pgUser=acme --metastore pgPassword=...
 # On QoD's own server, a tenant admin's create makes the database, reuses an empty one, and answers
@@ -1206,7 +1213,7 @@ qod database create --tenant acme --name fed --kind memory \
 qod database create --tenant acme --name warehouse --encrypted
 
 # duckdb-file: the .duckdb file, its WAL and its temp files (AES-256-GCM).
-# QoD mints the key unless you pass --encryption-key.
+# QoD mints the key unless you pass --encryption-key. A local path is a superuser's to name.
 qod database create --tenant acme --name ledger --kind duckdb-file \
   --data-path /srv/qod/ledger.duckdb --encrypted
 
@@ -1351,7 +1358,9 @@ qod database create --tenant acme --name coldstore --kind ducklake \
 ```
 
 An empty (or absent) `objectStore` falls back to the global env credentials -
-exact back-compat for every deployment that only ever used one set of keys.
+exact back-compat for every deployment that only ever used one set of keys. A
+path that falls back on them is a superuser's to name, and a tenant admin's update
+cannot remove or weaken the keys of a database holding them (`403 superuser_required`).
 On Kubernetes the resolved SQL is never inlined in the pod spec: it lands in a
 per-node Secret `qod-store-${nodeId}` injected via `env.valueFrom.secretKeyRef`
 (same pattern as the per-pod token and per-pool federation secrets); `kubectl
@@ -2701,6 +2710,9 @@ eviction are opt-in knobs.
 | `409 database_name_taken` on `database create` or `update` | The Postgres database `<tenant>_<name>` on QoD's server already holds something, and the caller is not a superuser | Choose another name, or have a superuser create it if the database is really this one's |
 | `400 own_login_required` on `database create` or `update` | The metastore names another server than QoD's own (host and port, compared as text) without its own `pgUser` and `pgPassword`, or an update moves the row with its stored password left out | Send the login for that server, or leave `pgHost` and `pgPort` out to use QoD's |
 | `400 catalog_database_missing` on `database create` | The database names another server, where QoD creates no database, and its catalog database is not there | Create the database the message names on that server, then create again |
+| `403 superuser_required` on `database create` or `update`, naming the data path | A tenant admin named a local path, a remote one without complete keys of their own, or `metastore.dataPath`, or an update removes such keys | Leave `--data-path` out and QoD places it, or name a remote path with `--object-store` keys for its scheme; any other path takes a superuser |
+| `409 data_path_taken` on `database create` | The folder QoD would place the database in overlaps one another database holds | Choose another name |
+| `400 invalid_contract` naming no default data path on `database create` | No path named, and the deployment has no default data path to place it by, or only a bucket's root | Use `--managed-storage`, or ask a superuser to name a path |
 | `400 db_name_fixed` on `database update` | A tenant admin sent another `dbName`; it names the database's catalog | Leave it out, or send the one it holds; a superuser may change it |
 | A database on another server stopped connecting after an upgrade, with no error before | Its row names another server and has no login of its own: QoD's login is no longer filled in there | `qod database update ... --metastore pgUser=... --metastore pgPassword=...` with the rest of the map |
 | `400 init_sql_refused` on `database create` / `update`, `pool create` / `set-init-sql` | A tenant admin's initSql holds a statement outside the allowlist ("Who may write what in initSql") | Keep only allowlisted SETs, read-only PRAGMAs and extension INSTALL/LOADs, or have a superuser write it |

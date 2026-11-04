@@ -462,6 +462,67 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     ok.toOption.get.hcursor.get[Boolean]("initSqlTrusted").toOption shouldBe Some(false)
   }
 
+  // The tools go through the REST handler, so a tenant admin meets the same rule on where data lies.
+  "create_database" should "leave a data path to a superuser, or a tenant admin's own keys" in {
+    val f                                                                      = new Fixture
+    def create(name: String, principal: McpPrincipal, fields: (String, Json)*) = f.call(
+      "create_database",
+      principal,
+      (Seq(
+        "tenant" -> Json.fromString(Tenant0),
+        "name"   -> Json.fromString(name),
+        "kind"   -> Json.fromString("memory")
+      ) ++ fields)*
+    )
+    val local = "data_path" -> Json.fromString("/tmp/qod-mcp-admin-test-own")
+    create("own", adminPat(), local).left.toOption.getOrElse(fail("admitted")) should include(
+      "leave dataPath out"
+    )
+    f.store.snapshot().tenantDbs.map(_.name) should not contain s"${Tenant0}_own"
+    val remote = "data_path" -> Json.fromString("s3://own-bucket/x/")
+    create("own", adminPat(), remote).isLeft shouldBe true
+    create(
+      "own",
+      adminPat(),
+      remote,
+      "object_store" -> Json.obj(
+        "s3_access_key_id"     -> Json.fromString("AK"),
+        "s3_secret_access_key" -> Json.fromString("SK")
+      )
+    ).isRight shouldBe true
+    create("su", McpSuperuserPat.principal, local).isRight shouldBe true
+  }
+
+  "update_database" should "move no data path for a tenant admin" in {
+    val f                                             = new Fixture
+    def update(principal: McpPrincipal, path: String) = f.call(
+      "update_database",
+      principal,
+      "tenant"    -> Json.fromString(Tenant0),
+      "name"      -> Json.fromString(TenantDb),
+      "metastore" -> Json.obj(
+        "pgHost"     -> Json.fromString("127.0.0.1"),
+        "pgPort"     -> Json.fromString("5432"),
+        "pgUser"     -> Json.fromString("u"),
+        "dbName"     -> Json.fromString(TenantDb),
+        "schemaName" -> Json.fromString("main"),
+        "dataPath"   -> Json.fromString(path)
+      )
+    )
+    update(adminPat(), "/tmp/elsewhere").left.toOption.getOrElse(fail("admitted")) should include(
+      "leave dataPath out"
+    )
+    f.store
+      .snapshot()
+      .tenantDbs
+      .find(_.name == TenantDb)
+      .get
+      .metastore
+      .contains("dataPath") shouldBe
+      false
+    update(McpSuperuserPat.principal, "/tmp/elsewhere").isRight shouldBe true
+  }
+
   "create_database" should "accept encrypted and encryption_key for kind=duckdb-file" in {
     val f       = new Fixture
     val created = f.call(

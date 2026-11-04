@@ -57,6 +57,18 @@ count. To keep counts from a user, refuse on the table.
   database.
 - `database/update` answers `400 db_name_fixed` to a tenant admin's change of a DuckLake database's
   `dbName`; a superuser may still make it.
+- Only a superuser chooses where a database's data lies on the manager's disk or under the manager's
+  keys. A tenant admin leaves `dataPath` out of a DuckLake database, and QoD places it, or names a remote
+  path (`s3://`, `s3a://`, `r2://`, `gs://`, `az://`, `azure://`, `abfss://`) with explicit keys of their
+  own in `objectStore`, complete for its scheme. Any other path, on any kind, and `metastore.dataPath` on
+  a create or an update, answers `403 superuser_required` with nothing written, and an update cannot
+  remove or weaken the keys of a row holding them. Existing rows are not judged and keep working. A
+  superuser, `qod serve`'s provisioning, a manifest import and a branch still name any path.
+- A DuckLake create naming no path no longer answers `400`, for any caller: the database gets a folder of
+  its own beside the default data path, under its composed name, stored on the row so that it cannot
+  move. With no default data path, or one that is a bucket's root, it answers `400 invalid_contract`
+  (use managed storage, or ask a superuser), and over a folder another database holds, whole segments,
+  `409 data_path_taken`, naming no one.
 - A metastore `pgUser` or `pgHost` holding whitespace, or a `pgHost` holding any of `? & = #`, is refused
   on every write, a manifest import included. No such value ever connected as intended.
 - The spawn scripts no longer fall back on a built-in password for a database that has none.

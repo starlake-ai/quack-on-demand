@@ -666,7 +666,8 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             <fieldset style={{ marginTop: '0.5rem' }}>
               <legend>Data path</legend>
               <p className="subtle" style={{ marginTop: 0 }}>
-                Local <code>.duckdb</code> file path attached as the default catalog.
+                Local <code>.duckdb</code> file path attached as the default catalog. A local
+                path takes a superuser; a remote one needs your own keys.
               </p>
               <label>
                 Path

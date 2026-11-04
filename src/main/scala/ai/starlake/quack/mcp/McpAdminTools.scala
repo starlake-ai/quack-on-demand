@@ -876,7 +876,10 @@ final class McpAdminTools(
         "DuckLake metastore config: pgHost, pgPort, pgUser, " +
           "pgPassword, dbName, schemaName."
       ),
-      "data_path"        -> strProp("Data directory / object-store path."),
+      "data_path" -> strProp(
+        "Leave out of a DuckLake database and QoD places it. A path of your own: a remote URL " +
+          "with your own keys in object_store, or a superuser's credential."
+      ),
       "object_store"     -> objProp("Object-store credentials config."),
       "default_database" -> strProp("Default catalog name presented to clients."),
       "default_schema"   -> strProp("Default schema presented to clients."),
