@@ -20,6 +20,7 @@ superuser give it its own `pgUser` and `pgPassword` with `qod database update`, 
 `pgPort` out to use QoD's server. Hosts are compared as text: with the default `localhost`, a row naming
 `127.0.0.1` counts as another server. A module calling `PoolSupervisor.createTenantDb` must recompile: it
 now states `writerTrusted`, and with `false` it names no server and no path of its own, as a tenant admin.
+Upgrade the node image and fleet servers with the manager, and restart every node.
 
 On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
 is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
@@ -48,8 +49,9 @@ count. To keep counts from a user, refuse on the table.
   password left out, and may then change anything else, on every row. There is no exception for rotating
   the password of a database on another server: a superuser does that. A password sent counts as a change
   whatever it says. `GET /api/database/metastore-defaults` and MCP `metastore_defaults` answer only a
-  superuser, and the console stops offering these fields to anyone else. A catalog on a server its tenant
-  controls gives that tenant the node's file access, so a superuser who creates one accepts that.
+  superuser, and the console stops offering these fields to anyone else. A database's Postgres server is
+  trusted as far as its nodes are: whoever controls it reaches what those nodes reach. A superuser who
+  names one accepts that.
   Existing such rows keep working and are not judged.
 - A database on another Postgres server than QoD's own needs its own login. `database/create` and
   `database/update` answer `400 own_login_required` to a superuser's metastore whose `pgHost` or `pgPort`
@@ -95,8 +97,11 @@ count. To keep counts from a user, refuse on the table.
   (use managed storage, or ask a superuser), and over a folder another database holds, whole segments,
   `409 data_path_taken`, naming no one.
 - A metastore `pgUser` or `pgHost` holding whitespace, or a `pgHost` holding any of `? & = #`, is refused
-  on every write, a manifest import included. No such value ever connected as intended.
-- The spawn scripts no longer fall back on a built-in password for a database that has none.
+  on every write, a manifest import included. No such value ever connected as intended. A stored row
+  holding whitespace in `pgHost`, `pgPort`, `pgUser`, `dbName` or `schemaName` now counts as another
+  server: it takes no login of QoD's and stops connecting.
+- A database whose row holds no `pgPassword` and lies on another server gets none from the spawn scripts
+  and fails to connect.
 
 ### Added
 
@@ -148,6 +153,10 @@ count. To keep counts from a user, refuse on the table.
 
 ### Fixed
 
+- The boot banner's PROBLEMS and `/api/pool/list`'s `statusDetail` print no secret of a database whose data
+  path is refused, in any spelling of the secret's name.
+- `QOD_FLEET_NODE_PG_HOST` / `_PORT` rewrite only a database on QoD's own server, host and port alike. A
+  database on another port of that host keeps its address in fleet assignments.
 - An undrop (REST, MCP, `UNDROP TABLE`) stamps its commit with its own message whatever
   `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
   that failed, it used to land with no message, and an answer lost afterwards could not be settled

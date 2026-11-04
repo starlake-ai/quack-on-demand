@@ -2,8 +2,8 @@ package ai.starlake.quack.ondemand.federation.iceberg
 
 import ai.starlake.quack.model.TenantDb
 
-/** What the manager prints about an `iceberg_rest` federated source, which stays open to tenant
-  * admins: when one is created or changed and at each boot, disabled ones included, never at node
+/** What the manager prints about an `iceberg_rest` federated source, which a tenant admin may
+  * create: when one is created or changed and at each boot, disabled ones included, never at node
   * spawn. On stdout and not through the logger, whose default level is ERROR. It names the source
   * and says nothing of its connection: no URI, token or secret.
   */
@@ -12,7 +12,8 @@ object IcebergSourceWarning:
   /** What to do about it, in one place. */
   private val Advice =
     "In production disable local file access on its nodes (a superuser's init SQL: " +
-      "SET disabled_filesystems = 'LocalFileSystem', on an object-store pool)."
+      "SET disabled_filesystems = 'LocalFileSystem', on an object-store pool, where a sort past " +
+      "memory_limit then fails instead of spilling)."
 
   /** A control character in a stored name cannot forge a line. */
   def line(tenant: String, database: String, alias: String): String =

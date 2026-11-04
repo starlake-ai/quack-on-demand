@@ -649,9 +649,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                     Only non-empty fields are sent; anything left blank falls back to the
                     manager default. On another host or port, give a user and a password
                     for that server: the manager's login is used only on its own, and its
-                    catalog database must already exist there, named as this database. A catalog
-                    on a server its tenant controls gives that tenant the node's file access:
-                    creating one accepts that.
+                    catalog database must already exist there, named as this database. A
+                    database's Postgres server is trusted as far as its nodes are: whoever controls
+                    it reaches what those nodes reach. A superuser who names one accepts that.
                   </p>
                   <label>
                     Host

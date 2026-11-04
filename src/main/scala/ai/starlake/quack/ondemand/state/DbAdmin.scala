@@ -24,7 +24,10 @@ trait DbAdmin:
 
   /** Whether the database exists with anything in it: a table, a view, a sequence, a function, a
     * type, a large object, an extension or a schema of its own. `Right(false)` when it does not
-    * exist or is as `CREATE DATABASE` leaves it. A database that cannot be read is a `Left`.
+    * exist or is as `CREATE DATABASE` leaves it. A database that cannot be read is a `Left`. What
+    * `template1` carries counts too: on a server whose `template1` holds an extension every fresh
+    * database reads as held, so what a crash between a create and its row's write leaves answers
+    * 409 and takes a superuser.
     */
   def holdsAnything(name: String): Either[String, Boolean]
 

@@ -57,7 +57,7 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     TenantDb.onDefaultServer(Map("pgHost" -> "Kube"), Map("pgHost" -> "kube")) shouldBe false
   }
 
-  it should "fail for a blank host or port: the launchers would fall back on their own" in {
+  it should "fail for a blank host or port" in {
     on("pgHost" -> "") shouldBe false
     on("pgPort" -> "") shouldBe false
   }
@@ -333,6 +333,19 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     on("s3://b/x%2f", remoteRow.objectStore).isDefined shouldBe true
     on("s3://b/x", remoteRow.objectStore) shouldBe None
     on("s3://b/x", remoteRow.objectStore, Map("dataPath" -> "s3://b/x")).isDefined shouldBe true
+  }
+
+  it should "read a blank stored password as none when a row moves to another server" in {
+    val defaults                = Map("pgHost" -> "pg", "pgPort" -> "5432")
+    def moved(password: String) =
+      TenantDb.movedPasswordError(
+        Map("pgHost" -> "a", "pgPassword" -> password),
+        Map("pgHost" -> "b", "pgPassword" -> password),
+        Map("pgHost" -> "b"),
+        defaults
+      )
+    moved("  ") shouldBe None
+    moved("held").isDefined shouldBe true
   }
 
   it should "judge an update by what the row would hold" in {

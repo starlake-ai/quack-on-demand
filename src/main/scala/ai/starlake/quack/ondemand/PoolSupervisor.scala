@@ -2377,7 +2377,8 @@ final class PoolSupervisor(
   /** The Postgres database of a new DuckLake row of QoD's own server. A create that may adopt keeps
     * whatever is there; any other refuses a database already held by another tenant's row, or
     * holding anything at all, and reuses an empty one: what a crash between the create and the
-    * row's write leaves. The refusal names no one.
+    * row's write leaves. The refusal names no one. Its reads are not atomic with the create: two
+    * creates composing one name, which only an older tenant holding `_` can do, may both pass.
     */
   private def provisionCatalogDatabase(
       name: String,
@@ -2797,6 +2798,8 @@ final class PoolSupervisor(
             .when(merged.kind == TenantDbKind.DuckLake)(patch.metastore)
             .flatten
             .flatMap { sent =>
+              // Not reached while `choice` above refuses an untrusted writer's change of dbName
+              // first, so REST and MCP never answer this: a second line under that rule.
               Option
                 .when(!patch.writerTrusted)(TenantDb.dbNameChangeError(td, merged.metastore))
                 .flatten

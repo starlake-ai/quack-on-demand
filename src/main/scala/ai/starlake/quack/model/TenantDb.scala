@@ -197,7 +197,7 @@ object TenantDb {
   val LoginKeys: Set[String] = Set("pgUser", "pgPassword")
 
   /** Whitespace ends a value in a libpq connection string, where the launchers write `host`,
-    * `port`, `dbname` and `user` unquoted, so a value holding any reads as further keywords.
+    * `port`, `dbname` and `user` unquoted: no connection string reads such a value as one value.
     */
   private def breaksConnString(value: String): Boolean =
     value.exists(c => c <= ' ' || Character.isWhitespace(c) || Character.isSpaceChar(c))
@@ -209,9 +209,8 @@ object TenantDb {
   private val ConnStringKeys: List[String] =
     List("pgHost", "pgPort", "pgUser", "dbName", "schemaName")
 
-  /** ASCII only, and no resolving: a name that folds to the default's through Unicode, or that a
-    * resolver answers with the default's address today, may reach another host tomorrow. So
-    * `127.0.0.1` is not `localhost`: such a row names no host, or brings its own login.
+  /** ASCII only, and no resolving: `127.0.0.1` is not `localhost`, so such a row names no host, or
+    * brings its own login.
     */
   def normalizedHost(host: String): String =
     val trimmed = host.trim
@@ -240,8 +239,8 @@ object TenantDb {
     (normalizedHost(resolved("pgHost", "localhost")), normalizedPort(resolved("pgPort", "5432")))
 
   /** Whether `metastore` uses QoD's own Postgres server: the host and the port of `defaults`, once
-    * normalized. A row holding a [[ConnStringKeys]] value that could read as further connection
-    * keywords does not, whatever its host says.
+    * normalized. A row holding a [[ConnStringKeys]] value no connection string reads as one value
+    * does not, whatever its host says.
     */
   def onDefaultServer(metastore: Map[String, String], defaults: Map[String, String]): Boolean =
     serverOf(metastore, defaults) == serverOf(Map.empty, defaults) &&
@@ -293,9 +292,9 @@ object TenantDb {
       defaults: Map[String, String]
   ): Option[String] =
     def holdsPassword(m: Map[String, String]) =
-      m.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.nonEmpty)
+      m.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.trim.nonEmpty)
     val moved = serverOf(stored, defaults) != serverOf(merged, defaults)
-    Option.when(moved && holdsPassword(merged) && !sent.get("pgPassword").exists(_.nonEmpty))(
+    Option.when(moved && holdsPassword(merged) && !sent.get("pgPassword").exists(_.trim.nonEmpty))(
       "this update changes the database's Postgres server, and its stored password does not follow " +
         "it: send pgPassword again for the new server."
     )
@@ -313,8 +312,8 @@ object TenantDb {
     else None
 
   /** Whether a node signs `dataPath` with keys of the database's own: a remote path, and every key
-    * its scheme needs, explicit and not blank. Nothing else: with no `objectStore` a node signs a
-    * remote path with the manager's keys or the instance's credential chain.
+    * its scheme needs, explicit and not blank. A path is signed only with the keys the row holds,
+    * or a superuser's. It reads presence, so a key that does not work counts.
     */
   def holdsOwnKeys(dataPath: String, objectStore: Map[String, String]): Boolean =
     ownKeyNames(dataPath).exists(_.forall(k => objectStore.get(k).exists(_.trim.nonEmpty)))
@@ -332,10 +331,9 @@ object TenantDb {
   val ServerKeys: List[String] = List("pgHost", "pgPort", "pgUser", "pgPassword", "dbName")
 
   /** What a metastore holds of [[ServerKeys]], as [[superuserChoiceError]] compares it. A password
-    * is held or not, in any spelling, as the launchers read it, and never compared by value: an
-    * answer would tell whether a guess is right. A `dbName` equal to the row's own name reads as
-    * none, as `effectiveMetastoreFor` resolves it, and on a `duckdb-file` row it names a catalog in
-    * the file, no Postgres database.
+    * is held or not, in any spelling, as the launchers read it, and never compared by value. A
+    * `dbName` equal to the row's own name reads as none, as `effectiveMetastoreFor` resolves it,
+    * and on a `duckdb-file` row it names a catalog in the file, no Postgres database.
     */
   private def heldServerKeys(
       kind: TenantDbKind,
@@ -370,8 +368,9 @@ object TenantDb {
     val passwordSent = sent.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.nonEmpty)
     ServerKeys.filter(k => before.get(k) != after.get(k) || (k == "pgPassword" && passwordSent))
 
-  /** Where a row connects, which only a superuser names: a catalog on a server its tenant controls
-    * gives that tenant the node's file access.
+  /** Where a row connects, which only a superuser names. A database's Postgres server is trusted as
+    * far as its nodes are: whoever controls it reaches what those nodes reach. A superuser who
+    * names one accepts that.
     */
   private def serverChoiceError(
       stored: Option[TenantDb],
@@ -540,8 +539,8 @@ object TenantDb {
       case _ => None
 
   /** `pgHost` and `pgUser` are written unquoted into a node's connection string, and `pgHost` into
-    * the manager's JDBC URL: whitespace would start another libpq keyword, and `?`, `&`, `=` or `#`
-    * another URL parameter.
+    * the manager's JDBC URL: no connection string reads a value holding whitespace as one value,
+    * nor a JDBC URL a host holding `?`, `&`, `=` or `#`.
     */
   private def connStringError(metastore: Map[String, String]): Option[String] =
     if metastore.get("pgUser").exists(breaksConnString) then

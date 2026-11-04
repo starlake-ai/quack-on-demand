@@ -180,7 +180,8 @@ modes" for a refused step). If a manager is already running locally (loopback
 only), `qod serve` provisions straight into it instead of booting a second JVM,
 with your own credential: `QOD_TOKEN`, the session that `qod login` saved, else a
 password prompt on a terminal; with none it refuses ("run qod login, set
-QOD_TOKEN, or run qod serve in a terminal"). A manager at a non-loopback URL is
+QOD_TOKEN, or run qod serve in a terminal"). As a tenant admin, naming a local
+target there is refused (`403 superuser_required`). A manager at a non-loopback URL is
 refused rather than attached to. Credentials for a
 remote prefix come from `--access-key-id` /
 `--secret-access-key`, plus `--region` and (s3 only) `--endpoint` (flag-only,
@@ -528,8 +529,8 @@ qod database create --tenant acme --name tpch \
 # and pgPort out to use QoD's server). Its catalog is its owner's: QoD creates and drops no database
 # there, so create one named <tenant>_<name> first (400 catalog_database_missing names it); database
 # delete and a tenant delete leave it, logged at ERROR; it cannot be branched (400 branch_own_server).
-# A catalog on a server its tenant controls gives that tenant the node's file access: a superuser who
-# creates one accepts that.
+# A database's Postgres server is trusted as far as its nodes are: whoever controls it reaches what
+# those nodes reach. A superuser who names one accepts that.
 qod database create --tenant acme --name byo \
   --metastore pgHost=pg.acme.example --metastore pgPort=5432 \
   --metastore pgUser=acme --metastore pgPassword=...
@@ -1635,7 +1636,7 @@ Rules worth knowing before the first create:
   manager prints a `WARN:` line on its stdout when such a source is created or
   changed and at each boot. In production disable local file access on its nodes
   (a superuser's init SQL: `SET disabled_filesystems = 'LocalFileSystem'`, on an
-  object-store pool).
+  object-store pool, where a sort past `memory_limit` then fails instead of spilling).
 - **Credentials must be placeholders.** `--client-secret` / `--token` holding a
   literal is a `400`: they must match `{{secret.NAME}}` exactly, and the value
   lives in `qod federation secret set`. That is what keeps the config safe to

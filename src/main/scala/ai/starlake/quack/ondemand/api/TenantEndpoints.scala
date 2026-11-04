@@ -155,8 +155,9 @@ object TenantEndpoints:
           "holds is 409 data_path_taken. An objectStore goes only with such a path: 403 " +
           "superuser_required otherwise. So is any " +
           "of pgHost, pgPort, pgUser, pgPassword or dbName (dbName stays free on kind=duckdb-file): " +
-          "a superuser names a Postgres server. A catalog on a server its tenant controls gives " +
-          "that tenant the node's file access, so a superuser who creates one accepts that."
+          "a superuser names a Postgres server. A database's Postgres server is trusted as far " +
+          "as its nodes are: whoever controls it reaches what those nodes reach. A superuser who " +
+          "names one accepts that."
       )
       .in(jsonBody[TenantDbRequest])
       .in(authToken)

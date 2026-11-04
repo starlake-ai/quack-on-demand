@@ -679,7 +679,8 @@ def serve(
     instead. --s3 or --s3-path keeps the demo's data on S3 instead of a temp folder.
     If a manager is already running at the configured URL (loopback
     only), serve provisions straight into it instead of booting a second JVM;
-    `qod stop` still stops it.
+    `qod stop` still stops it. As a tenant admin, naming a local target there is
+    refused: only a superuser names a local path.
 
     With --with-starflow, Starflow (the Starlake API + UI) runs next to the
     manager in a `starlake` database on the embedded Postgres, paired for SSO,
