@@ -403,7 +403,9 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
         setRows(r.branches);
         if (readAgain) setRefresh(n => n + 1);
       })
-      .catch(e => { setRows([]); setError(errText(e)); });
+      // A failed read says nothing about the list: the last one stays rather than read as no branch
+      // at all, and what an action just said of itself is not replaced.
+      .catch(e => setError(cur => cur ?? errText(e)));
   }
 
   useEffect(() => { setRows(null); setExpanded(null); reload(); /* eslint-disable-next-line */ }, [tenant, tenantDb, showAll]);
@@ -544,7 +546,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
       {note && <div ref={intoView} className="login-notice" role="status">{note}</div>}
       {busy && <p ref={intoView} className="subtle">Working on branch {busy}...</p>}
 
-      {!rows && <p className="subtle">Loading branches...</p>}
+      {!rows && !error && <p className="subtle">Loading branches...</p>}
       {rows && rows.length === 0 && (
         <em style={{ color: '#888' }}>
           {showAll ? 'no branches' : 'no live branches; agents create them with create_branch or `qod branch create`'}
