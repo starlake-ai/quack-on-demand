@@ -155,7 +155,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
         TenantDbKind.DuckDbFile,
         Map("dbName" -> "acme_db", "schemaName" -> "tpch1"),
         s"$dir/acme.duckdb",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()

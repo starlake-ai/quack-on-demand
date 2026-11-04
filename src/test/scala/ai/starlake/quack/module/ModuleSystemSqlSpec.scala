@@ -66,7 +66,7 @@ class ModuleSystemSqlSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-module-system-sql-spec",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     val key = PoolKey("acme", "acme_default", "default")

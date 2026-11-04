@@ -66,7 +66,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, nodeCount)).unsafeRunSync()
     val store   = new RecordingTelemetryStore

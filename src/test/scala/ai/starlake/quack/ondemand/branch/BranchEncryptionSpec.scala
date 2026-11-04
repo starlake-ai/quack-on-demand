@@ -35,7 +35,7 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         lakeMeta,
         dataPath = "/var/lake",
         encrypted = true,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup
@@ -46,7 +46,7 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         lakeMeta,
         dataPath = "/var/plain",
         encrypted = false,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup
@@ -108,7 +108,7 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         lakeMeta,
         dataPath = "/var/a_b_c",
         encrypted = false,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     // tenant "a_b", tenant-db "c" -> composed name ALSO "a_b_c", but for an unrelated tenant, and
@@ -121,7 +121,7 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
         lakeMeta,
         dataPath = "/var/other_a_b_c",
         encrypted = true,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
 

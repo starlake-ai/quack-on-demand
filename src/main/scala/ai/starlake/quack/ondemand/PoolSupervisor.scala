@@ -2405,11 +2405,12 @@ final class PoolSupervisor(
         */
       encrypted: Boolean = false,
       gateBypass: Boolean = false,
-      /** Whether this create may take over a Postgres database that already holds something: a
-        * superuser's or the manager's, never a tenant admin's. No default: every caller states it.
-        * A manifest import does not come here, and adopts by writing its rows.
+      /** Whether a superuser or the manager writes this row: it may then take over a Postgres
+        * database that already holds something, and choose what [[TenantDb.superuserChoiceError]]
+        * guards, as `TenantDbPatch.writerTrusted` says on an update. No default: every caller
+        * states it. A manifest import does not come here, and adopts by writing its rows.
         */
-      adoptExistingDatabase: Boolean
+      writerTrusted: Boolean
   ): IO[Either[SupervisorError, TenantDb]] =
     gateCheck(
       ai.starlake.quack.spi.StructureMutation.CreateTenantDb(tenantName.toLowerCase(Locale.ROOT)),
@@ -2423,6 +2424,15 @@ final class PoolSupervisor(
               case Left(err)   => Left(SupervisorError.InvalidName(err))
               case Right(full) =>
                 val tn = tenantName.toLowerCase(Locale.ROOT)
+                // What only a superuser chooses, for a writer stating it is not one. REST and MCP
+                // have asked already (TenantDbHandlers.createRefusal), so that a refused write
+                // never reaches their initSql check.
+                val choice = Option
+                  .when(!writerTrusted)(
+                    TenantDb
+                      .superuserChoiceError(None, kind, dataPath, metastore, objectStore, metastore)
+                  )
+                  .flatten
                 // A DuckLake row that names no path anywhere: QoD's to place, for every caller.
                 lazy val placed: Option[Either[SupervisorError, String]] = Option.when(
                   kind == TenantDbKind.DuckLake && dataPath.isEmpty && !managedStorage &&
@@ -2444,6 +2454,8 @@ final class PoolSupervisor(
                         s"tenant-db '$full' already exists in tenant '$tn'"
                       )
                     )
+                  case Some(_) if choice.isDefined =>
+                    Left(SupervisorError.SuperuserChoice(choice.get))
                   case Some(_) if placed.exists(_.isLeft) =>
                     Left(placed.flatMap(_.left.toOption).get)
                   case Some(t) =>
@@ -2535,8 +2547,7 @@ final class PoolSupervisor(
                       case None      =>
                         kind match
                           case TenantDbKind.DuckLake =>
-                            (if onDefault then
-                               provisionCatalogDatabase(full, t.id, adoptExistingDatabase)
+                            (if onDefault then provisionCatalogDatabase(full, t.id, writerTrusted)
                              else Right(())) match
                               case Left(err) => Left(err)
                               case Right(_)  =>

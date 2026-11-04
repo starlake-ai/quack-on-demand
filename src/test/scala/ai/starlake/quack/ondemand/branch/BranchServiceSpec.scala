@@ -149,7 +149,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         ),
         "/tmp/qod-branch-spec/acme_tpch/",
         encrypted = parentEncrypted,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .toOption
@@ -481,7 +481,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.DuckLake,
         Map("pgHost" -> "pg.other", "pgUser" -> "me", "pgPassword" -> "mine", "schemaName" -> "main"),
         "/tmp/qod-branch-spec/acme_byo/",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .toOption
@@ -3675,7 +3675,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
           TenantDbKind.DuckLake,
           f.parent.metastore,
           s"/tmp/qod-$suffix/",
-          adoptExistingDatabase = false
+          writerTrusted = true
         )
         .unsafeRunSync()
         .toOption

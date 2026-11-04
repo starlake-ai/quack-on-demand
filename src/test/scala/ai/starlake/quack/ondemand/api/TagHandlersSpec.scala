@@ -43,7 +43,7 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-tag-test",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .toOption

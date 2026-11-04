@@ -19,7 +19,7 @@ stops connecting at the next node start or restart: QoD's login is no longer fil
 superuser give it its own `pgUser` and `pgPassword` with `qod database update`, or leave `pgHost` and
 `pgPort` out to use QoD's server. Hosts are compared as text: with the default `localhost`, a row naming
 `127.0.0.1` counts as another server. A module calling `PoolSupervisor.createTenantDb` must recompile: it
-now states `adoptExistingDatabase`.
+now states `writerTrusted`, and with `false` it names no server and no path of its own, as a tenant admin.
 
 On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
 is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a

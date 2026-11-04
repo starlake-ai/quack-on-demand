@@ -103,7 +103,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // Pre-register the tenant so createPool succeeds under the new contract.
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
@@ -800,7 +800,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         dataPath = "",
         defaultDatabase = Some("fedpg"),
         defaultSchema = Some("public"),
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
@@ -817,7 +817,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         kind = TenantDbKind.InMemory,
         metastore = Map.empty,
         dataPath = "",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
@@ -854,7 +854,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val key     = PoolKey("acme", "acme_default", "sales")
     sup.createTenant(Tenant(key.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(key.tenant, key.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(key.tenant, key.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup
       .createPool(key, RoleDistribution(0, 0, replicas), maxConcurrentPerNode = maxConcurrent)
@@ -987,7 +987,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "myschema"
         ),
         dataPath = "/tmp/delta_lake",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     // DuckLake createTenantDb attempts a Postgres connect; since we have no
@@ -1059,7 +1059,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         ),
         dataPath = "/tmp/qod-schema-skew-test",
         defaultSchema = Some("tpch1"),
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
@@ -1112,7 +1112,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "curated"
         ),
         dataPath = "/tmp/qod-schema-fallback-test",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     val key2 = PoolKey("epsilon", "epsilon_plain", "p5")
@@ -1185,7 +1185,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     )
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, readers)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
@@ -1958,7 +1958,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val pk2  = PoolKey("acme", "acme_default", "sales")
     sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
     sup2
-      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
 
@@ -2035,7 +2035,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val pk2  = PoolKey("acme", "acme_default", "sales")
     sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
     sup2
-      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
     val client2 =
@@ -2140,7 +2140,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-stamp-test",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, nodes)).unsafeRunSync()
@@ -2480,7 +2480,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-stamp-retry-test",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     // Two dual-role nodes so retryOnce has a fallback.
@@ -2675,7 +2675,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     if failResumeStarts then failStart.set(true)
@@ -2834,7 +2834,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         dataPath,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
@@ -3555,7 +3555,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false)
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
     val sent   = TrieMap.empty[String, Int]

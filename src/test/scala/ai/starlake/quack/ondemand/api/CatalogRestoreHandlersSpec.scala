@@ -87,7 +87,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-restore-test",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     if withPool then

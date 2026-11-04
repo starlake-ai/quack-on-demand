@@ -61,7 +61,7 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     val sup   = new PoolSupervisor(TestBackends.fake(), new NodeLoadTracker, store)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
-      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", adoptExistingDatabase = false)
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     (sup, store, new AdminStatementExecutor(sup))

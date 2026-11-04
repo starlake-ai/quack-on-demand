@@ -83,11 +83,10 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     val handlers = new TenantDbHandlers(sup, requireEncryption = false)
     val tenants  = new TenantHandlers(sup, onAuthChanged = _ => ())
 
-    /** A direct supervisor call, as a module makes one. */
+    /** A direct supervisor call stating a trusted writer, as the manager makes one. */
     def create(
         suffix: String,
         metastore: Map[String, String] = Map.empty,
-        adopt: Boolean = false,
         kind: TenantDbKind = TenantDbKind.DuckLake,
         dataPath: String = "/data/x"
     ): Either[SupervisorError, TenantDb] =
@@ -98,7 +97,27 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
           kind,
           metastore,
           if kind == TenantDbKind.InMemory then "" else dataPath,
-          adoptExistingDatabase = adopt
+          writerTrusted = true
+        )
+        .unsafeRunSync()
+
+    /** A direct supervisor call stating no trusted writer, as a module makes one. */
+    def untrusted(
+        suffix: String,
+        metastore: Map[String, String] = Map.empty,
+        dataPath: String = "",
+        objectStore: Map[String, String] = Map.empty,
+        kind: TenantDbKind = TenantDbKind.DuckLake
+    ): Either[SupervisorError, TenantDb] =
+      sup
+        .createTenantDb(
+          "acme",
+          suffix,
+          kind,
+          metastore,
+          dataPath,
+          objectStore,
+          writerTrusted = false
         )
         .unsafeRunSync()
 
@@ -193,7 +212,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
 
   "A create that may not adopt" should "refuse a database holding anything, touching nothing" in {
     val f   = new Fixture(holds = Right(true))
-    val out = f.create("lake")
+    val out = f.untrusted("lake")
     out.left.toOption.get shouldBe a[SupervisorError.DatabaseNameTaken]
     out.left.toOption.get.message shouldBe
       "database name 'acme_lake' is taken on this server: choose another name"
@@ -229,12 +248,12 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.DuckLake,
         Map.empty,
         "/data/held",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .isRight shouldBe true
     f.admin.created.clear()
-    f.create("corp_sales").left.toOption.get shouldBe a[SupervisorError.DatabaseNameTaken]
+    f.untrusted("corp_sales").left.toOption.get shouldBe a[SupervisorError.DatabaseNameTaken]
     f.admin.created shouldBe empty
   }
 
@@ -249,7 +268,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
 
   "A create that may adopt" should "keep a database holding anything, stated by the caller" in {
     val f = new Fixture(holds = Right(true))
-    f.create("lake", adopt = true).map(_.name) shouldBe Right("acme_lake")
+    f.create("lake").map(_.name) shouldBe Right("acme_lake")
     f.admin.created.toList shouldBe List("acme_lake")
   }
 
@@ -1262,34 +1281,101 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       a[SupervisorError.SuperuserChoice]
   }
 
-  // As qod-hosted's signup calls it: QoD's own defaults, as a module reads them from the config.
-  "A module's direct create" should "keep working with QoD's own defaults, placed or named" in {
-    val f                                    = new Fixture
-    def create(suffix: String, path: String) =
-      f.sup
-        .createTenantDb(
-          "acme",
-          suffix,
-          TenantDbKind.DuckLake,
-          Map(
-            "pgHost"     -> "pg.internal",
-            "pgPort"     -> "5432",
-            "pgUser"     -> "qod",
-            "pgPassword" -> DefaultPassword,
-            "schemaName" -> "main"
-          ),
-          path,
-          adoptExistingDatabase = false
-        )
-        .unsafeRunSync()
-    val placed = create("default", "").toOption.get
+  private val QoDsOwnKeys = Map(
+    "pgHost"     -> "pg.internal",
+    "pgPort"     -> "5432",
+    "pgUser"     -> "qod",
+    "pgPassword" -> DefaultPassword,
+    "schemaName" -> "main"
+  )
+
+  "A module's direct create" should "state who writes it: untrusted, it names no server or path" in {
+    val f                                                             = new Fixture
+    def refused(what: String, out: Either[SupervisorError, TenantDb]) =
+      withClue(what)(out.left.toOption.get shouldBe a[SupervisorError.SuperuserChoice])
+    refused("QoD's keys", f.untrusted("a", QoDsOwnKeys))
+    TenantDb.ServerKeys.foreach(k => refused(k, f.untrusted("a", Map(k -> "x"))))
+    refused("a path", f.untrusted("a", dataPath = "/data/shared"))
+    refused("a remote path", f.untrusted("a", dataPath = "s3://b/x/"))
+    f.rows shouldBe empty
+    f.inits shouldBe empty
+    f.admin.created shouldBe empty
+  }
+
+  it should "work with those, stating a trusted writer" in {
+    val f = new Fixture
+    f.sup
+      .createTenantDb(
+        "acme",
+        "named",
+        TenantDbKind.DuckLake,
+        QoDsOwnKeys,
+        "/data/shared",
+        writerTrusted = true
+      )
+      .unsafeRunSync()
+      .map(_.dataPath) shouldBe Right("/data/shared")
+    f.row("acme_named").metastore("pgPassword") shouldBe DefaultPassword
+  }
+
+  // As qod-hosted's signup should call it: a schema only, and the row holds no login of QoD's.
+  it should "be placed untrusted, with no path and no server keys, its row holding no login" in {
+    val f      = new Fixture
+    val placed = f.untrusted("default", Map("schemaName" -> "main")).toOption.get
     placed.dataPath shouldBe "/data/acme_default"
+    placed.metastore shouldBe Map("schemaName" -> "main", "dbName" -> "acme_default")
     f.admin.created.toList shouldBe List("acme_default")
     f.inits.head._2 shouldBe true
-    create("named", "/data/shared").map(_.dataPath) shouldBe Right("/data/shared")
+    // The login still fills in where it is read.
+    f.inits.head._1("pgPassword") shouldBe DefaultPassword
+    f.sup.effectiveMetastoreFor("acme", "acme_default")("pgPassword") shouldBe DefaultPassword
+  }
 
-    // Its enrolled tenant admin, shown everything but the password, may send that back.
-    val shown = placed.metastore - "pgPassword"
+  "A tenant admin's refused create" should "keep its answer, ahead of initSql's check" in {
+    val f       = new Fixture
+    val asked   = new java.util.concurrent.atomic.AtomicInteger(0)
+    val checker = new ai.starlake.quack.ondemand.initsql.InitSqlChecker:
+      def check(sql: String) =
+        asked.incrementAndGet()
+        cats.effect.IO.pure(
+          ai.starlake.quack.ondemand.initsql.InitSqlVerdict.Checked(
+            1,
+            List(ai.starlake.quack.ondemand.initsql.InitSqlRefusal(1, "refused"))
+          )
+        )
+    val handlers = new TenantDbHandlers(f.sup, requireEncryption = false, initSqlChecker = checker)
+    val out      = handlers
+      .createTenantDb(
+        TenantDbRequest(
+          tenant = "acme",
+          name = "lake",
+          kind = "ducklake",
+          metastore = Map("pgHost" -> "pg.other"),
+          initSql = "SET threads = 2;"
+        ),
+        None
+      )(tenantAdmin)
+      .unsafeRunSync()
+    codeOf(out) shouldBe (StatusCode.Forbidden, "superuser_required")
+    asked.get shouldBe 0
+    f.rows shouldBe empty
+  }
+
+  "A trusted module's row holding QoD's own keys" should "stay as stored for its tenant admin" in {
+    val f = new Fixture
+    f.sup
+      .createTenantDb(
+        "acme",
+        "default",
+        TenantDbKind.DuckLake,
+        QoDsOwnKeys,
+        "",
+        writerTrusted = true
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    // Shown everything but the password, they may send that back.
+    val shown = f.row("acme_default").metastore - "pgPassword"
     f.update(tenantAdmin, "acme_default", shown + ("schemaName" -> "s2")) shouldBe
       Right("acme_default")
     f.row("acme_default").metastore("pgPassword") shouldBe DefaultPassword

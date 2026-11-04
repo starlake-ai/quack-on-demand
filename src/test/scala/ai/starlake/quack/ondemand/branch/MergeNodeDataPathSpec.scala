@@ -32,7 +32,7 @@ class MergeNodeDataPathSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         dataPath = dataPath,
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     withClue(created)(created.isRight shouldBe true)

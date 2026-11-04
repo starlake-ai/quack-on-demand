@@ -77,7 +77,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-branch-handlers-spec/acme_tpch/",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .toOption

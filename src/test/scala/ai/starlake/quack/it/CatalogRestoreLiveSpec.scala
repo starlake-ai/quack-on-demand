@@ -134,7 +134,7 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
             "schemaName" -> "tpch1"
           ),
           s"$dir/data",
-          adoptExistingDatabase = false
+          writerTrusted = true
         )
         .unsafeRunSync()
       sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()

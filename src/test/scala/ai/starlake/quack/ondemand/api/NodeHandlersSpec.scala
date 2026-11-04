@@ -33,7 +33,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     // Tenants are first-class - must exist before a pool can be created.
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
     sup
       .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 1, 1))
       .unsafeRunSync()
@@ -105,7 +105,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
     sup
       .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 0, 1))
       .unsafeRunSync()
@@ -135,7 +135,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
     sup
       .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 0, 1))
       .unsafeRunSync()
@@ -172,7 +172,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val failingStore = new FailingUpsertStore
     val sup          = new PoolSupervisor(backend, tracker, failingStore)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", adoptExistingDatabase = false).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true).unsafeRunSync()
     sup
       .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 0, 1))
       .unsafeRunSync()

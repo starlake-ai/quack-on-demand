@@ -94,7 +94,7 @@ class PoolSupervisorPolicyVersionSpec extends AnyFlatSpec with Matchers:
       val acme   = peer.policyVersions.current("acme")
       val globex = peer.policyVersions.current("globex")
       writer
-        .createTenantDb("acme", "lake", TenantDbKind.InMemory, Map.empty, dataPath = "", adoptExistingDatabase = false)
+        .createTenantDb("acme", "lake", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
         .unsafeRunSync()
         .isRight shouldBe true
       writer.policyVersions.current("acme") shouldBe stored(store, "acme")

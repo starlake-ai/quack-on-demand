@@ -57,7 +57,7 @@ class CrossReplicaPropagationSpec extends AnyFlatSpec with Matchers:
         coordB.tickNow() // connect + LISTEN before A mutates
         supA.createTenant(Tenant("acme")).unsafeRunSync()
         supA
-          .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", adoptExistingDatabase = false)
+          .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
           .unsafeRunSync()
         // createTenantDb("acme", "default", ...) composes to "acme_default"
         val key = PoolKey("acme", "acme_default", "bi")

@@ -131,7 +131,7 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
           "pgPassword" -> "p"
         ),
         dataPath = "s3://lake/root/salesdb",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .left

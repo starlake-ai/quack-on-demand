@@ -46,7 +46,7 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-routed-executor-spec",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     val key = PoolKey("acme", "acme_tpch1", "bi")

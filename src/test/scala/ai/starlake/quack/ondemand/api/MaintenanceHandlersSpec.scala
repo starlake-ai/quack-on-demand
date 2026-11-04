@@ -43,7 +43,7 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-maint-test",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .toOption
@@ -57,7 +57,7 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
         TenantDbKind.InMemory,
         Map.empty,
         "",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
     val handlers = new MaintenanceHandlers(sup, store)

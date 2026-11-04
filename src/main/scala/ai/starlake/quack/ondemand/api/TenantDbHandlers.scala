@@ -201,7 +201,8 @@ final class TenantDbHandlers(
         )
         .orElse(
           // What the scope states: a superuser's, the manager's boot provisioning included, may
-          // choose. The supervisor judges an update, where the stored row is at hand.
+          // choose. The supervisor asks too, for whoever calls it directly: here it comes before
+          // initSql's check, which starts a process, so the refused write never reaches that.
           TenantDbKind
             .fromWire(req.kind)
             .toOption
@@ -238,9 +239,6 @@ final class TenantDbHandlers(
                 IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
               case Right(kind) =>
                 val gateBypass = SuperuserCheck.forScope(scope).isEmpty
-                // Who may take over a Postgres database that already holds something: a superuser,
-                // on REST or as the manager (`qod serve`'s boot provisioning), never a tenant admin.
-                val adoptExistingDatabase = gateBypass
                 sup
                   .createTenantDb(
                     tenantName = req.tenant,
@@ -258,7 +256,9 @@ final class TenantDbHandlers(
                     managedStorage = req.managedStorage,
                     encrypted = req.encrypted,
                     gateBypass = gateBypass,
-                    adoptExistingDatabase = adoptExistingDatabase
+                    // What the scope states: a superuser, on REST or as the manager (`qod
+                    // serve`'s boot provisioning), never a tenant admin.
+                    writerTrusted = gateBypass
                   )
                   .flatMap {
                     case Right(td) =>

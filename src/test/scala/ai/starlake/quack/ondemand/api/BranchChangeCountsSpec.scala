@@ -174,7 +174,7 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
           "schemaName" -> "main"
         ),
         "/tmp/qod-branch-counts-spec/acme_tpch/",
-        adoptExistingDatabase = false
+        writerTrusted = true
       )
       .unsafeRunSync()
       .toOption
