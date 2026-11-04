@@ -2901,7 +2901,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val before = backend.stopped.size
     // Send the full required-key set; pgPassword empty removes it explicitly.
     val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
-      metastore = Some(Map("dbName" -> "acme_secret", "schemaName" -> "s2", "pgPassword" -> ""))
+      metastore = Some(Map("dbName" -> "acme_secret", "schemaName" -> "s2", "pgPassword" -> "")),
+      writerTrusted = true
     )).unsafeRunSync().toOption.get
     out.td.metastore.contains("pgPassword") shouldBe false
     out.restartedNodes.size shouldBe 2            // both nodes of the db's pool restarted
@@ -2947,7 +2948,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     // DuckDbFile requires dbName and schemaName; sending only pgPassword loses both.
     val (sup, _, dbName) = updateTenantDbFixture()
     val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
-      metastore = Some(Map("pgPassword" -> "x"))
+      metastore = Some(Map("pgPassword" -> "x")),
+      writerTrusted = true
     )).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get.message should include("drops required")
@@ -3064,7 +3066,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     // refused as a dropped required key.
     val out = sup
       .updateTenantDb("acme", "acme_prod", TenantDbPatch(
-        metastore = Some(Map("dbName" -> "acme_prod", "pgPassword" -> ""))
+        metastore = Some(Map("dbName" -> "acme_prod", "pgPassword" -> "")),
+        writerTrusted = true
       ))
       .unsafeRunSync()
     out.isRight shouldBe true
@@ -3087,7 +3090,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       .isRight shouldBe true
     val out = sup
       .updateTenantDb("acme", "acme_prod", TenantDbPatch(
-        metastore = Some(Map("dbName" -> "acme_prod", "pgPassword" -> ""))
+        metastore = Some(Map("dbName" -> "acme_prod", "pgPassword" -> "")),
+        writerTrusted = true
       ))
       .unsafeRunSync()
     out.isRight shouldBe true

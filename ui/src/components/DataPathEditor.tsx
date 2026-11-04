@@ -113,6 +113,8 @@ export function buildObjectStore(
 }
 
 interface Props {
+  /** A superuser names any path. Anyone else leaves it to QoD, or names a remote one with their own keys. */
+  superuser:   boolean;
   dataPath:    string;
   onDataPathChange: (v: string) => void;
   storeType:   StoreType;
@@ -139,16 +141,26 @@ export default function DataPathEditor(p: Props) {
   }, [p.dataPath]);
 
   const spec = STORE_SPECS[p.storeType];
+  const pathLeftToQod = p.storeType === 'none' && !p.superuser;
 
   return (
     <fieldset>
       <legend>Data path</legend>
       <p className="subtle" style={{ marginTop: 0 }}>
         Where the parquet files for this database live. Leave the path empty and QoD places
-        them. A path of your own is an <code>s3://</code> URL, <code>gs://</code>,
-        <code> azure://</code>, etc., with your own keys below; a local path
-        (<code>/data/prod</code>) or one with no keys takes a superuser. Pick the backend on the
-        left; the URL scheme also auto-selects it.
+        them.{' '}
+        {p.superuser ? (
+          <>
+            Or use a local filesystem path (<code>/data/prod</code>), an <code>s3://</code> URL,{' '}
+            <code>gs://</code>, <code>azure://</code>, etc.
+          </>
+        ) : (
+          <>
+            A path of your own is an <code>s3://</code> URL, <code>gs://</code>,{' '}
+            <code>azure://</code>, etc., with your own keys below: any other takes a superuser.
+          </>
+        )}{' '}
+        Pick the backend on the left; the URL scheme also auto-selects it.
       </p>
       <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <label style={{ display: 'flex', flexDirection: 'column' }}>
@@ -161,11 +173,14 @@ export default function DataPathEditor(p: Props) {
               // path typed under a previous backend selection so the
               // disabled field doesn't show stale, unsent text.
               if (next === 'managed' && p.dataPath !== '') p.onDataPathChange('');
+              if (next === 'none' && !p.superuser && p.dataPath !== '') p.onDataPathChange('');
               p.onStoreTypeChange(next);
             }}
           >
             {(Object.keys(STORE_SPECS) as StoreType[]).map(t => (
-              <option key={t} value={t}>{STORE_SPECS[t].label}</option>
+              <option key={t} value={t}>
+                {t === 'none' && !p.superuser ? 'QoD places it' : STORE_SPECS[t].label}
+              </option>
             ))}
           </select>
         </label>
@@ -174,8 +189,13 @@ export default function DataPathEditor(p: Props) {
           <input
             value={p.dataPath}
             onChange={ev => p.onDataPathChange(ev.target.value)}
-            placeholder={p.storeType === 'managed' ? 'resolved by the server at create' : 'empty: QoD places it, or s3://bucket/path'}
-            disabled={p.storeType === 'managed'}
+            placeholder={
+              p.storeType === 'managed' ? 'resolved by the server at create'
+              : pathLeftToQod ? 'QoD places it'
+              : p.superuser ? 'empty: QoD places it, or /data/prod or s3://bucket/path'
+              : 's3://bucket/path'
+            }
+            disabled={p.storeType === 'managed' || pathLeftToQod}
             style={{ width: '100%' }}
           />
         </label>

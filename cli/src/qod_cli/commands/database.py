@@ -44,7 +44,8 @@ def create(
     metastore: list[str] = typer.Option(
         None,
         "--metastore",
-        help="KEY=VALUE, repeatable. Another server (pgHost, pgPort) needs its own pgUser and pgPassword.",
+        help="KEY=VALUE, repeatable. pgHost, pgPort, pgUser, pgPassword and a DuckLake database's "
+        "dbName are a superuser's to set; another server needs its own pgUser and pgPassword.",
     ),
     data_path: str = typer.Option(
         "",
@@ -130,7 +131,10 @@ def update(
     metastore: list[str] = typer.Option(
         None,
         "--metastore",
-        help="KEY=VALUE; omit = unchanged. A change of pgHost or pgPort needs pgPassword again.",
+        help="KEY=VALUE; omit = unchanged, else it replaces the stored map. pgHost, pgPort, pgUser, "
+        "pgPassword and a DuckLake database's dbName are a superuser's to change: send them back as "
+        "the row holds them (a password left out is kept). A change of pgHost or pgPort needs "
+        "pgPassword again.",
     ),
     object_store: list[str] = typer.Option(None, "--object-store"),
     default_database: str = typer.Option(None, "--default-database"),

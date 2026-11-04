@@ -866,15 +866,14 @@ final class McpAdminTools(
   private val createDatabaseTool = McpToolDef(
     name = "create_database",
     description = "Register a database (tenant-db) in a tenant: a DuckLake catalog " +
-      "(kind=ducklake, needs metastore config), a DuckDB file (duckdb-file), or in-memory " +
-      "(memory).",
+      "(kind=ducklake), a DuckDB file (duckdb-file), or in-memory (memory).",
     inputSchema = objectSchema(
       required = List("name"),
       props = "name" -> strProp("Database (tenant-db) name."),
       "kind"      -> strProp("ducklake | duckdb-file | memory (default ducklake)."),
       "metastore" -> objProp(
-        "DuckLake metastore config: pgHost, pgPort, pgUser, " +
-          "pgPassword, dbName, schemaName."
+        "Metastore config: schemaName, catalogAlias, and dbName for a duckdb-file. A superuser " +
+          "sets pgHost, pgPort, pgUser, pgPassword and a DuckLake database's dbName."
       ),
       "data_path" -> strProp(
         "Leave out of a DuckLake database and QoD places it. A path of your own: a remote URL " +
@@ -945,7 +944,11 @@ final class McpAdminTools(
     inputSchema = objectSchema(
       required = List("name"),
       props = "name" -> strProp("Database (tenant-db) name."),
-      "metastore"        -> objProp("Replacement metastore config (omit = unchanged)."),
+      "metastore" -> objProp(
+        "Replacement metastore config (omit = unchanged). A superuser changes pgHost, pgPort, " +
+          "pgUser, pgPassword and a DuckLake database's dbName: anyone else sends them back as " +
+          "the row holds them, a password left out being kept."
+      ),
       "object_store"     -> objProp("Replacement object-store config (omit = unchanged)."),
       "default_database" -> strProp("New default catalog (omit = unchanged)."),
       "default_schema"   -> strProp("New default schema (omit = unchanged)."),
@@ -1009,7 +1012,7 @@ final class McpAdminTools(
   private val metastoreDefaultsTool = McpToolDef(
     name = "metastore_defaults",
     description = "The manager's default Postgres metastore connection values, for " +
-      "prefilling create_database.",
+      "prefilling create_database. Superuser only.",
     inputSchema = objectSchema(required = Nil),
     adminOnly = true,
     run = (principal, _) =>

@@ -269,7 +269,10 @@ object TenantDb {
   ): Option[String] =
     if onDefaultServer(metastore, defaults) then None
     else
-      Option.when(!LoginKeys.forall(k => metastore.get(k).exists(_.trim.nonEmpty)))(
+      // The password in any spelling, as the launchers read it.
+      val holdsLogin = metastore.get("pgUser").exists(_.trim.nonEmpty) &&
+        metastore.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.trim.nonEmpty)
+      Option.when(!holdsLogin)(
         "this database names another Postgres server than QoD's own: provide a pgUser and a " +
           "pgPassword for that server, or leave pgHost and pgPort out to use QoD's own. QoD's " +
           "login is used only on its own server."
@@ -313,11 +316,71 @@ object TenantDb {
   def holdsOwnKeys(dataPath: String, objectStore: Map[String, String]): Boolean =
     ownKeyNames(dataPath).exists(_.forall(k => objectStore.get(k).exists(_.trim.nonEmpty)))
 
+  /** The metastore keys that name a Postgres server, a login on it and a database there. */
+  val ServerKeys: List[String] = List("pgHost", "pgPort", "pgUser", "pgPassword", "dbName")
+
+  /** What a metastore holds of [[ServerKeys]], as [[superuserChoiceError]] compares it. A password
+    * is held or not, in any spelling, as the launchers read it, and never compared by value: an
+    * answer would tell whether a guess is right. A `dbName` equal to the row's own name reads as
+    * none, as `effectiveMetastoreFor` resolves it, and on a `duckdb-file` row it names a catalog in
+    * the file, no Postgres database.
+    */
+  private def heldServerKeys(
+      kind: TenantDbKind,
+      rowName: Option[String],
+      metastore: Map[String, String]
+  ): Map[String, String] =
+    val named    = List("pgHost", "pgPort", "pgUser").flatMap(k => metastore.get(k).map(k -> _))
+    val password =
+      Option.when(metastore.keys.exists(_.equalsIgnoreCase("pgPassword")))("pgPassword" -> "")
+    val database = Option
+      .when(kind != TenantDbKind.DuckDbFile)(metastore.get("dbName"))
+      .flatten
+      .filterNot(rowName.contains)
+      .map("dbName" -> _)
+    (named ++ password ++ database).toMap
+
+  /** Which of [[ServerKeys]] a write adds, changes or removes: the row it would leave (`metastore`)
+    * compared with the stored one, since an update's map can drop a key, and a password sent
+    * (`sent`) counting as a change whatever it says.
+    */
+  def changedServerKeys(
+      stored: Option[TenantDb],
+      kind: TenantDbKind,
+      metastore: Map[String, String],
+      sent: Map[String, String]
+  ): List[String] =
+    val before =
+      stored.fold(Map.empty[String, String])(td =>
+        heldServerKeys(td.kind, Some(td.name), td.metastore)
+      )
+    val after        = heldServerKeys(kind, stored.map(_.name), metastore)
+    val passwordSent = sent.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.nonEmpty)
+    ServerKeys.filter(k => before.get(k) != after.get(k) || (k == "pgPassword" && passwordSent))
+
+  /** Where a row connects, which only a superuser names: a catalog on a server its tenant controls
+    * gives that tenant the node's file access.
+    */
+  private def serverChoiceError(
+      stored: Option[TenantDb],
+      kind: TenantDbKind,
+      metastore: Map[String, String],
+      sent: Map[String, String]
+  ): Option[String] =
+    val changed = changedServerKeys(stored, kind, metastore, sent)
+    Option.when(changed.nonEmpty)(
+      s"a superuser sets a database's Postgres server, and this would change ${changed.mkString(", ")}: " +
+        s"leave ${ServerKeys.mkString(", ")} out of a create. An update's metastore replaces the " +
+        "stored one, so send them back as the row holds them; a password left out is kept."
+    )
+
   /** The one check of what only a superuser chooses for a database, judged for any other writer;
-    * None when that writer may. `stored` is the row an update starts from, None on a create, and
-    * the rest is the row as it would then be. A superuser, a manifest import, `qod serve`'s
-    * provisioning and a branch's registration do not come here, nor does a row an update leaves
-    * alone.
+    * None when that writer may. `stored` is the row an update starts from, None on a create, the
+    * next three are the row as it would then be, and `sent` is the metastore the writer sent. A
+    * superuser, a manifest import, `qod serve`'s provisioning and a branch's registration do not
+    * come here, nor does a row an update leaves alone.
+    *
+    * Which Postgres server it uses: [[serverChoiceError]].
     *
     * Where its data lies, which is where the manager's keys and disk would point: a create names no
     * path (QoD places a DuckLake database), or a remote one with own keys ([[holdsOwnKeys]]), and
@@ -326,15 +389,17 @@ object TenantDb {
     */
   def superuserChoiceError(
       stored: Option[TenantDb],
+      kind: TenantDbKind,
       dataPath: String,
       metastore: Map[String, String],
-      objectStore: Map[String, String]
+      objectStore: Map[String, String],
+      sent: Map[String, String]
   ): Option[String] =
     val chooses =
       "a database's data path is QoD's or a superuser's to choose: leave dataPath out of a " +
         "DuckLake database and QoD places it, or name a remote path (s3://, s3a://, r2://, gs://, " +
         "az://, azure://, abfss://) with your own keys in objectStore, complete for its scheme"
-    stored match
+    val storage = stored match
       case None =>
         val named = metastore.contains("dataPath") ||
           (dataPath.nonEmpty && !holdsOwnKeys(dataPath, objectStore))
@@ -348,10 +413,12 @@ object TenantDb {
             "this database's remote data path signs with its own keys in objectStore: they can " +
               "change, but stay complete for its scheme. Send them, or leave objectStore out."
           )
+    storage.orElse(serverChoiceError(stored, kind, metastore, sent))
 
   /** The refusal of a change of a DuckLake row's `dbName`, which names its catalog database for
-    * good once the row is made; a superuser's update skips this. Compared as the effective
-    * metastore resolves it: a name left out means the row's own.
+    * good once the row is made; a superuser's update skips this, and for any other writer
+    * [[superuserChoiceError]] answers first. Compared as the effective metastore resolves it: a
+    * name left out means the row's own.
     */
   def dbNameChangeError(td: TenantDb, metastore: Map[String, String]): Option[String] =
     val held = td.metastore.getOrElse("dbName", td.name)

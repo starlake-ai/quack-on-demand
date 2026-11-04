@@ -286,7 +286,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     )
     f.create("lake", OwnLogin).left.toOption.get shouldBe a[SupervisorError.CatalogDatabaseMissing]
     f.rows shouldBe empty
-    codeOf(f.rest(tenantAdmin, "lake", OwnLogin)) shouldBe
+    codeOf(f.rest(superuser, "lake", OwnLogin)) shouldBe
       (StatusCode.BadRequest, "catalog_database_missing")
     f.rows shouldBe empty
   }
@@ -404,7 +404,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("lake").isRight shouldBe true
     codeOf(f.update(tenantAdmin, "acme_lake", Map("dbName" -> "globex_secret"))) shouldBe
-      (StatusCode.BadRequest, "db_name_fixed")
+      (StatusCode.Forbidden, "superuser_required")
     f.sup.effectiveMetastoreFor("acme", "acme_lake")("dbName") shouldBe "acme_lake"
   }
 
@@ -412,7 +412,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("lake").isRight shouldBe true
     f.patch("acme_lake", Map("dbName" -> "globex_secret")).left.toOption.get shouldBe
-      a[SupervisorError.DbNameFixed]
+      a[SupervisorError.SuperuserChoice]
     f.store.snapshot().tenantDbs.head.metastore("dbName") shouldBe "acme_lake"
   }
 
@@ -520,10 +520,9 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.rows shouldBe empty
   }
 
-  it should "answer own_login_required on REST, to a superuser too, and on qod serve's path" in {
+  it should "answer own_login_required to a superuser on REST, and on qod serve's path" in {
     val f = new Fixture
     val m = Map("pgHost" -> "pg.other")
-    codeOf(f.rest(tenantAdmin, "lake", m)) shouldBe (StatusCode.BadRequest, "own_login_required")
     codeOf(f.rest(superuser, "lake", m)) shouldBe (StatusCode.BadRequest, "own_login_required")
     codeOf(f.serve("lake", m)) shouldBe (StatusCode.BadRequest, "own_login_required")
     f.inits shouldBe empty
@@ -605,7 +604,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.sup.effectiveMetastoreFor("acme", "acme_odd").contains("pgPassword") shouldBe false
     // Nor may a writer store one again.
     f.create("odd2", Map("pgUser" -> "qod host=pg.other")).isLeft shouldBe true
-    codeOf(f.rest(tenantAdmin, "odd3", Map("pgUser" -> "qod host=pg.other"))) shouldBe
+    codeOf(f.rest(superuser, "odd3", Map("pgUser" -> "qod host=pg.other"))) shouldBe
       (StatusCode.BadRequest, "invalid_contract")
     f.inits.map(_._1("dbName")).toList should not contain "acme_odd3"
   }
@@ -625,12 +624,14 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       withClue(k) {
         // A create replaces the dbName it is sent with the composed name.
         if k != "dbName" then
-          codeOf(f.rest(tenantAdmin, s"odd$i", Map(k -> v))) shouldBe
+          codeOf(f.rest(superuser, s"odd$i", Map(k -> v))) shouldBe
             (StatusCode.BadRequest, "invalid_contract")
-        codeOf(f.update(tenantAdmin, "acme_lake", Map(k -> v))) shouldBe
+        codeOf(f.update(superuser, "acme_lake", Map(k -> v))) shouldBe
           (StatusCode.BadRequest, "invalid")
       }
     }
+    codeOf(f.update(tenantAdmin, "acme_lake", Map("schemaName" -> "main host=pg.other"))) shouldBe
+      (StatusCode.BadRequest, "invalid")
     f.inits shouldBe empty
     f.rows shouldBe List("acme_lake")
     f.store.snapshot().tenantDbs.head.metastore shouldBe Map("dbName" -> "acme_lake")
@@ -647,9 +648,12 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
   "An update" should "be refused a move to another server with no login of its own" in {
     val f = new Fixture
     f.create("lake").isRight shouldBe true
-    f.patch("acme_lake", Map("pgHost" -> "pg.other")).left.toOption.get shouldBe
+    f.patch("acme_lake", Map("pgHost" -> "pg.other"), writerTrusted = true)
+      .left
+      .toOption
+      .get shouldBe
       a[SupervisorError.OwnLoginRequired]
-    codeOf(f.update(tenantAdmin, "acme_lake", Map("pgPort" -> "6000"))) shouldBe
+    codeOf(f.update(superuser, "acme_lake", Map("pgPort" -> "6000"))) shouldBe
       (StatusCode.BadRequest, "own_login_required")
     codeOf(f.update(superuser, "acme_lake", Map("pgHost" -> "pg.other"))) shouldBe
       (StatusCode.BadRequest, "own_login_required")
@@ -660,13 +664,12 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("lake", OwnLogin).isRight shouldBe true
     val moved = Map("pgHost" -> "pg.third", "pgUser" -> "me")
-    f.patch("acme_lake", moved).left.toOption.get shouldBe a[SupervisorError.OwnLoginRequired]
-    codeOf(f.update(tenantAdmin, "acme_lake", moved)) shouldBe
-      (StatusCode.BadRequest, "own_login_required")
+    f.patch("acme_lake", moved, writerTrusted = true).left.toOption.get shouldBe
+      a[SupervisorError.OwnLoginRequired]
     codeOf(f.update(superuser, "acme_lake", moved)) shouldBe
       (StatusCode.BadRequest, "own_login_required")
     // Back to QoD's own server, the password left out.
-    codeOf(f.update(tenantAdmin, "acme_lake", Map("schemaName" -> "main"))) shouldBe
+    codeOf(f.update(superuser, "acme_lake", Map("schemaName" -> "main"))) shouldBe
       (StatusCode.BadRequest, "own_login_required")
     f.store.snapshot().tenantDbs.head.metastore("pgHost") shouldBe "pg.other"
     f.store.snapshot().tenantDbs.head.metastore("pgPassword") shouldBe OwnPassword
@@ -676,7 +679,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.create("lake", OwnLogin).isRight shouldBe true
     f.update(
-      tenantAdmin,
+      superuser,
       "acme_lake",
       Map("pgHost" -> "pg.third", "pgUser" -> "me", "pgPassword" -> "again")
     ) shouldBe Right("acme_lake")
@@ -688,11 +691,11 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
   it should "keep a stored password when the server stays, spelled otherwise or left as it is" in {
     val f = new Fixture
     f.create("lake", OwnLogin).isRight shouldBe true
-    f.update(tenantAdmin, "acme_lake", Map("pgHost" -> "PG.Other", "pgUser" -> "me")) shouldBe
+    f.update(superuser, "acme_lake", Map("pgHost" -> "PG.Other", "pgUser" -> "me")) shouldBe
       Right("acme_lake")
     f.store.snapshot().tenantDbs.head.metastore("pgPassword") shouldBe OwnPassword
     f.update(
-      tenantAdmin,
+      superuser,
       "acme_lake",
       Map("pgHost" -> "PG.Other", "pgUser" -> "you")
     ) shouldBe Right("acme_lake")
@@ -704,7 +707,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.create("lake", OwnLogin).isRight shouldBe true
     f.admin.holds = Left("must not be asked")
     f.update(
-      tenantAdmin,
+      superuser,
       "acme_lake",
       Map("pgHost" -> "pg.third", "pgUser" -> "me", "pgPassword" -> "again")
     ) shouldBe Right("acme_lake")
@@ -714,7 +717,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
   it should "go back to QoD's server with the password removed, QoD's login filling in" in {
     val f = new Fixture
     f.create("lake", OwnLogin).isRight shouldBe true
-    f.update(tenantAdmin, "acme_lake", Map("pgPassword" -> "")) shouldBe Right("acme_lake")
+    f.update(superuser, "acme_lake", Map("pgPassword" -> "")) shouldBe Right("acme_lake")
     f.store.snapshot().tenantDbs.head.metastore.contains("pgPassword") shouldBe false
     f.sup.effectiveMetastoreFor("acme", "acme_lake")("pgPassword") shouldBe DefaultPassword
   }
@@ -724,20 +727,20 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     taken.create("lake", OwnLogin).isRight shouldBe true
     taken.admin.holds = Right(true)
     codeOf(taken.update(tenantAdmin, "acme_lake", Map("pgPassword" -> ""))) shouldBe
-      (StatusCode.Conflict, "database_name_taken")
+      (StatusCode.Forbidden, "superuser_required")
     taken.admin.created shouldBe empty
     taken.store.snapshot().tenantDbs.head.metastore("pgHost") shouldBe "pg.other"
     taken.store.snapshot().tenantDbs.head.metastore("pgPassword") shouldBe OwnPassword
     // On a direct call that does not state a trusted writer, too.
     taken.patch("acme_lake", Map("pgPassword" -> "")).left.toOption.get shouldBe
-      a[SupervisorError.DatabaseNameTaken]
+      a[SupervisorError.SuperuserChoice]
     // A superuser may adopt it.
     taken.update(superuser, "acme_lake", Map("pgPassword" -> "")) shouldBe Right("acme_lake")
     taken.admin.created.toList shouldBe List("acme_lake")
     // A database nothing holds is created for the row, which a delete then drops.
     val free = new Fixture
     free.create("lake", OwnLogin).isRight shouldBe true
-    free.update(tenantAdmin, "acme_lake", Map("pgPassword" -> "")) shouldBe Right("acme_lake")
+    free.update(superuser, "acme_lake", Map("pgPassword" -> "")) shouldBe Right("acme_lake")
     free.admin.created.toList shouldBe List("acme_lake")
     free.sup.deleteTenantDb("acme", "acme_lake").unsafeRunSync() shouldBe Right(())
     free.admin.dropped.toList shouldBe List("acme_lake")
@@ -746,11 +749,11 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
   it should "not drop a required key to the default's login on another server" in {
     val f = new Fixture
     f.create("lake", OwnLogin).isRight shouldBe true
-    codeOf(f.update(tenantAdmin, "acme_lake", Map("pgHost" -> "pg.other"))) shouldBe
+    codeOf(f.update(superuser, "acme_lake", Map("pgHost" -> "pg.other"))) shouldBe
       (StatusCode.BadRequest, "own_login_required")
     codeOf(
       f.update(
-        tenantAdmin,
+        superuser,
         "acme_lake",
         Map("pgHost" -> "pg.other", "pgUser" -> "me", "pgPassword" -> "")
       )
@@ -991,6 +994,321 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     // No own keys to weaken: adding some, even half, is the row's own business.
     f.updateStore(tenantAdmin, "acme_m", Map("s3_region" -> "eu-west-1")) shouldBe Right("acme_m")
     f.row("acme_m").dataPath shouldBe "s3://named-by-a-manifest/x/"
+  }
+
+  // ---------- only a superuser names a Postgres server ----------
+
+  private val ServerValues = List(
+    "pgHost"     -> "pg.other",
+    "pgPort"     -> "6000",
+    "pgUser"     -> "me",
+    "pgPassword" -> OwnPassword,
+    "dbName"     -> "elsewhere"
+  )
+
+  "A tenant admin's create" should "add no key of a Postgres server, nothing written" in {
+    val f = new Fixture
+    ServerValues.foreach { (k, v) =>
+      withClue(k) {
+        val out = f.rest(tenantAdmin, "lake", Map(k -> v))
+        codeOf(out) shouldBe (StatusCode.Forbidden, "superuser_required")
+        out.left.toOption.get._2.message should include("a superuser sets")
+        out.left.toOption.get._2.message should include(k)
+      }
+    }
+    codeOf(f.rest(tenantAdmin, "lake", ServerValues.toMap)) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    // An empty value is a value: it would replace the default's.
+    codeOf(f.rest(tenantAdmin, "lake", Map("pgHost" -> ""))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    codeOf(f.rest(tenantAdmin, "lake", Map("pgPassword" -> ""))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    f.rows shouldBe empty
+    f.inits shouldBe empty
+    f.admin.created shouldBe empty
+  }
+
+  it should "refuse them on every kind, but for a duckdb-file's dbName, which names its catalog" in {
+    val f = new Fixture
+    ServerValues.foreach { (k, v) =>
+      withClue(k) {
+        codeOf(f.rest(tenantAdmin, "mem", Map(k -> v), kind = "memory")) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+      }
+    }
+    val file = Map("dbName" -> "cat", "schemaName" -> "main")
+    ServerValues.filterNot(_._1 == "dbName").foreach { (k, v) =>
+      withClue(k) {
+        codeOf(
+          f.rest(tenantAdmin, "file", file + (k -> v), Remote, OwnKeys, "duckdb-file")
+        ) shouldBe (StatusCode.Forbidden, "superuser_required")
+      }
+    }
+    f.rows shouldBe empty
+    f.rest(tenantAdmin, "file", file, Remote, OwnKeys, "duckdb-file") shouldBe Right("acme_file")
+    f.row("acme_file").metastore("dbName") shouldBe "cat"
+  }
+
+  it should "leave schemaName and catalogAlias free, which name things inside its catalog" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "lake", Map("schemaName" -> "s2", "catalogAlias" -> "lake2")) shouldBe
+      Right("acme_lake")
+  }
+
+  "A tenant admin's update" should "add no key of a Postgres server to a row" in {
+    val f = new Fixture
+    f.create("lake").isRight shouldBe true
+    val before = f.row("acme_lake")
+    ServerValues.foreach { (k, v) =>
+      withClue(k) {
+        val out = f.update(tenantAdmin, "acme_lake", Map("dbName" -> "acme_lake") ++ Map(k -> v))
+        codeOf(out) shouldBe (StatusCode.Forbidden, "superuser_required")
+        out.left.toOption.get._2.message should include(k)
+        // A direct call stating no trusted writer gets the same.
+        f.patch("acme_lake", Map("dbName" -> "acme_lake") ++ Map(k -> v)).left.toOption.get shouldBe
+          a[SupervisorError.SuperuserChoice]
+      }
+    }
+    f.row("acme_lake") shouldBe before
+    f.admin.created.toList shouldBe List("acme_lake")
+  }
+
+  it should "change or remove no key of a row on another server, a removal being a change" in {
+    val f = new Fixture
+    f.create("lake", OwnLogin + ("pgPort" -> "6000")).isRight shouldBe true
+    val before                                                = f.row("acme_lake")
+    val shown                                                 = before.metastore - "pgPassword"
+    def refused(what: String, map: Map[String, String]): Unit =
+      withClue(what) {
+        codeOf(f.update(tenantAdmin, "acme_lake", map)) shouldBe
+          (StatusCode.Forbidden, "superuser_required")
+        f.patch("acme_lake", map).left.toOption.get shouldBe a[SupervisorError.SuperuserChoice]
+      }
+    refused("pgHost", shown + ("pgHost"                   -> "pg.third"))
+    refused("pgHost spelled otherwise", shown + ("pgHost" -> "PG.OTHER"))
+    refused("pgPort", shown + ("pgPort"                   -> "6001"))
+    refused("pgUser", shown + ("pgUser"                   -> "you"))
+    refused("pgPassword", shown + ("pgPassword"           -> "new"))
+    refused("dbName", shown + ("dbName"                   -> "elsewhere"))
+    refused("no pgHost", shown - "pgHost")
+    refused("no pgPort", shown - "pgPort")
+    refused("no pgUser", shown - "pgUser")
+    refused("no pgPassword", shown + ("pgPassword" -> ""))
+    refused("nothing", Map("schemaName" -> "main"))
+    f.row("acme_lake") shouldBe before
+  }
+
+  it should "not aim a row's own dbName at QoD's server by a drop of its host" in {
+    val f = new Fixture
+    f.store.upsertTenantDb(
+      TenantDb(
+        id = "td-own",
+        tenantId = "acme",
+        name = "acme_own",
+        kind = TenantDbKind.DuckLake,
+        metastore = OwnLogin + ("dbName" -> "another_tenants_catalog"),
+        dataPath = "/data/own"
+      )
+    )
+    f.sup.restore()
+    val named = Map("dbName" -> "another_tenants_catalog")
+    codeOf(f.update(tenantAdmin, "acme_own", named)) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    codeOf(f.update(tenantAdmin, "acme_own", named + ("pgPassword" -> ""))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    // Its own dbName left out would come back to the row's name: a change, unlike the row's name.
+    codeOf(
+      f.update(tenantAdmin, "acme_own", OwnLogin - "pgPassword")
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+    f.row("acme_own").metastore shouldBe (OwnLogin + ("dbName" -> "another_tenants_catalog"))
+    f.admin.created shouldBe empty
+    f.sup.effectiveMetastoreFor("acme", "acme_own")("pgHost") shouldBe "pg.other"
+  }
+
+  it should "answer no guess of a stored password: one sent is a change, whatever it says" in {
+    val f = new Fixture
+    f.create("lake", OwnLogin).isRight shouldBe true
+    val shown = f.row("acme_lake").metastore - "pgPassword"
+    codeOf(f.update(tenantAdmin, "acme_lake", shown + ("pgPassword" -> OwnPassword))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    codeOf(f.update(tenantAdmin, "acme_lake", shown + ("pgPassword" -> "a wrong guess"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    // Sent empty to a row holding none, it changes nothing and says nothing.
+    val plain = new Fixture
+    plain.create("lake").isRight shouldBe true
+    plain.update(tenantAdmin, "acme_lake", Map("pgPassword" -> "")) shouldBe Right("acme_lake")
+  }
+
+  it should "read a stored password in any spelling, as the launchers do" in {
+    val f      = new Fixture
+    val stored = Map("pgHost" -> "pg.other", "pgUser" -> "me", "PgPassword" -> OwnPassword)
+    f.store.upsertTenantDb(
+      TenantDb("td-sp", "acme", "acme_sp", TenantDbKind.DuckLake, stored, "/data/sp")
+    )
+    f.sup.restore()
+    f.update(tenantAdmin, "acme_sp", Map("pgHost" -> "pg.other", "pgUser" -> "me")) shouldBe
+      Right("acme_sp")
+    f.row("acme_sp").metastore("PgPassword") shouldBe OwnPassword
+    // A superuser's change of user keeps it, and that spelling is a login of its own.
+    f.update(superuser, "acme_sp", Map("pgHost" -> "pg.other", "pgUser" -> "you")) shouldBe
+      Right("acme_sp")
+    f.update(superuser, "acme_sp", Map("pgHost" -> "pg.other", "pgUser" -> "me")) shouldBe
+      Right("acme_sp")
+    codeOf(
+      f.update(
+        tenantAdmin,
+        "acme_sp",
+        Map("pgHost" -> "pg.other", "pgUser" -> "me", "pgPassword" -> "")
+      )
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+    f.row("acme_sp").metastore("PgPassword") shouldBe OwnPassword
+  }
+
+  it should "stay allowed when these five stay as stored, on every row" in {
+    val f = new Fixture
+    f.create("byo", OwnLogin + ("pgPort" -> "6000")).isRight shouldBe true
+    val shown = f.row("acme_byo").metastore - "pgPassword"
+    f.update(tenantAdmin, "acme_byo", shown + ("schemaName" -> "s2")) shouldBe Right("acme_byo")
+    f.row("acme_byo").metastore("pgPassword") shouldBe OwnPassword
+    f.row("acme_byo").metastore("schemaName") shouldBe "s2"
+    f.handlers
+      .update(UpdateTenantDbRequest("acme", "acme_byo", initSql = Some("SET threads = 2;")), None)(
+        tenantAdmin
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    f.updateStore(tenantAdmin, "acme_byo", Map("s3_region" -> "eu-west-1")) shouldBe Right(
+      "acme_byo"
+    )
+    // A row's own name, sent or left out, is no change: nothing else can read it otherwise.
+    f.update(tenantAdmin, "acme_byo", shown - "dbName") shouldBe Right("acme_byo")
+    f.update(tenantAdmin, "acme_byo", shown) shouldBe Right("acme_byo")
+    // A duckdb-file's dbName names its catalog.
+    f.create(
+      "file",
+      Map("dbName" -> "cat", "schemaName" -> "main"),
+      kind = TenantDbKind.DuckDbFile
+    ).isRight shouldBe true
+    f.update(tenantAdmin, "acme_file", Map("dbName" -> "cat2", "schemaName" -> "main")) shouldBe
+      Right("acme_file")
+    codeOf(
+      f.update(
+        tenantAdmin,
+        "acme_file",
+        Map("dbName" -> "cat2", "schemaName" -> "main", "pgHost" -> "pg.other")
+      )
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+  }
+
+  it should "stay allowed on an old row with no login, which the update leaves as it is" in {
+    val f = new Fixture
+    f.store.upsertTenantDb(
+      TenantDb(
+        "td-old",
+        "acme",
+        "acme_old",
+        TenantDbKind.DuckLake,
+        Map("pgHost" -> "pg.other", "pgPort" -> "6000"),
+        "/data/old"
+      )
+    )
+    f.sup.restore()
+    val same = Map("pgHost" -> "pg.other", "pgPort" -> "6000")
+    f.update(tenantAdmin, "acme_old", same + ("schemaName" -> "s2")) shouldBe Right("acme_old")
+    f.row("acme_old").metastore("schemaName") shouldBe "s2"
+    // A superuser's too; and a change of its server meets the login rule.
+    f.update(superuser, "acme_old", same + ("schemaName" -> "s3")) shouldBe Right("acme_old")
+    codeOf(f.update(superuser, "acme_old", same + ("pgPort" -> "6001"))) shouldBe
+      (StatusCode.BadRequest, "own_login_required")
+    codeOf(f.update(superuser, "acme_old", same + ("pgUser" -> "me"))) shouldBe
+      (StatusCode.BadRequest, "own_login_required")
+    f.update(
+      superuser,
+      "acme_old",
+      same + ("pgUser" -> "me") + ("pgPassword" -> OwnPassword)
+    ) shouldBe
+      Right("acme_old")
+    // Nothing of QoD's filled in meanwhile.
+    f.inits shouldBe empty
+  }
+
+  it should "come before every other refusal: a tenant admin learns nothing else of the row" in {
+    val f = new Fixture
+    f.create("lake").isRight shouldBe true
+    codeOf(f.update(tenantAdmin, "acme_lake", Map("pgUser" -> "qod host=pg.other"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    codeOf(f.update(tenantAdmin, "acme_lake", Map("pgHost" -> "pg.other"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+  }
+
+  "Exempt from the server rule" should "be a superuser, stating it by being one" in {
+    val f = new Fixture
+    f.rest(superuser, "byo", OwnLogin) shouldBe Right("acme_byo")
+    f.update(superuser, "acme_byo", OwnLogin + ("pgUser" -> "you")) shouldBe Right("acme_byo")
+    f.row("acme_byo").metastore("pgUser") shouldBe "you"
+  }
+
+  it should "be qod serve's provisioning, whose scope states it" in {
+    val f = new Fixture
+    f.serve("sv", OwnLogin) shouldBe Right("acme_sv")
+  }
+
+  it should "be a direct call stating a trusted writer, and no patch by default" in {
+    val f = new Fixture
+    f.create("lake", OwnLogin).isRight shouldBe true
+    f.patch("acme_lake", OwnLogin + ("pgUser" -> "you"), writerTrusted = true).isRight shouldBe true
+    TenantDbPatch().writerTrusted shouldBe false
+    f.patch("acme_lake", OwnLogin + ("pgUser" -> "she")).left.toOption.get shouldBe
+      a[SupervisorError.SuperuserChoice]
+  }
+
+  // As qod-hosted's signup calls it: QoD's own defaults, as a module reads them from the config.
+  "A module's direct create" should "keep working with QoD's own defaults, placed or named" in {
+    val f                                    = new Fixture
+    def create(suffix: String, path: String) =
+      f.sup
+        .createTenantDb(
+          "acme",
+          suffix,
+          TenantDbKind.DuckLake,
+          Map(
+            "pgHost"     -> "pg.internal",
+            "pgPort"     -> "5432",
+            "pgUser"     -> "qod",
+            "pgPassword" -> DefaultPassword,
+            "schemaName" -> "main"
+          ),
+          path,
+          adoptExistingDatabase = false
+        )
+        .unsafeRunSync()
+    val placed = create("default", "").toOption.get
+    placed.dataPath shouldBe "/data/acme_default"
+    f.admin.created.toList shouldBe List("acme_default")
+    f.inits.head._2 shouldBe true
+    create("named", "/data/shared").map(_.dataPath) shouldBe Right("/data/shared")
+
+    // Its enrolled tenant admin, shown everything but the password, may send that back.
+    val shown = placed.metastore - "pgPassword"
+    f.update(tenantAdmin, "acme_default", shown + ("schemaName" -> "s2")) shouldBe
+      Right("acme_default")
+    f.row("acme_default").metastore("pgPassword") shouldBe DefaultPassword
+    codeOf(f.update(tenantAdmin, "acme_default", Map("schemaName" -> "s2"))) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    codeOf(
+      f.update(tenantAdmin, "acme_default", shown + ("pgPassword" -> DefaultPassword))
+    ) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+  }
+
+  "metastore-defaults" should "tell a superuser QoD's server, and anyone else nothing" in {
+    val f = new Fixture
+    f.handlers.metastoreDefaults(None)(superuser).unsafeRunSync().map(_.pgHost) shouldBe
+      Right("pg.internal")
+    codeOf(f.handlers.metastoreDefaults(None)(tenantAdmin).unsafeRunSync()) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
+    codeOf(f.handlers.metastoreDefaults(None)(_ => SessionScope.NoAccess).unsafeRunSync()) shouldBe
+      (StatusCode.Forbidden, "superuser_required")
   }
 
   // ---------- the tenant-name rule, at the handler's path ----------

@@ -10,12 +10,15 @@ import DataPathEditor, {
 } from './DataPathEditor';
 import FederationSection from './FederationSection';
 import { initSqlToSend } from '../api/initSql';
+import { editableMetastore, metastoreToSend, superuserKeys } from '../api/metastoreForm';
+import { useAuth } from '../auth/AuthContext';
 
 /** Databases page for one tenant (`/t/:tenant/databases`). Lists tenant databases,
   * lets you add a new one (name + dataPath + structured metastore +
   * structured object-store inputs) or delete an existing one. */
 export default function DatabaseSection({ tenant }: { tenant: string }) {
   const prefix = `${tenant}_`;
+  const { superuser } = useAuth();
 
   const [dbs, setDbs]         = useState<TenantDbResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
@@ -45,7 +48,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [storeKeys, setStoreKeys]     = useState<Record<string, string>>({});
   const [storeExtras, setStoreExtras] = useState('');
 
-  // Catalog Postgres (metastore) section: 'default' sends no pg keys (server
+  // Catalog Postgres (metastore) section, a superuser's: 'default' sends no pg keys (server
   // resolves them from defaultMetastore); 'custom' sends only non-empty fields.
   const [msMode, setMsMode]         = useState<'default' | 'custom'>('default');
   const [msKeys, setMsKeys]         = useState<Record<string, string>>({});
@@ -131,7 +134,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   function openForm() {
     resetForm();
     setAdding(true);
-    api.metastoreDefaults().then(setMsDefaults).catch(() => setMsDefaults(null));
+    if (superuser) api.metastoreDefaults().then(setMsDefaults).catch(() => setMsDefaults(null));
   }
 
   // Locked-prefix UX: input always shows `${tenant}_` followed by
@@ -157,13 +160,14 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   function collectMetastore(): Record<string, string> {
     const m: Record<string, string> = {};
     if (schemaName.trim()) m.schemaName = schemaName.trim();
-    if (kind === 'ducklake' && msMode === 'custom') {
+    if (superuser && kind === 'ducklake' && msMode === 'custom') {
       for (const k of ['pgHost', 'pgPort', 'pgUser', 'pgPassword'] as const) {
         const v = (msKeys[k] ?? '').trim();
         if (v) m[k] = v;
       }
     }
-    Object.assign(m, parseStoreExtras(extrasText, new Set(['schemaName', 'dataPath'])));
+    const forbid = new Set(['schemaName', 'dataPath', ...(superuser ? [] : superuserKeys(kind))]);
+    Object.assign(m, parseStoreExtras(extrasText, forbid));
     return m;
   }
 
@@ -237,7 +241,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setEditDefaultSchema(d.defaultSchema ?? '');
     setEditInitSql(d.initSql ?? '');
     setEditInitSqlDirty(false);
-    setEditMetastore(Object.entries(d.metastore).map(([k, v]) => `${k}=${v}`).join('\n'));
+    setEditMetastore(
+      Object.entries(editableMetastore(d.metastore, d.kind, superuser)).map(([k, v]) => `${k}=${v}`).join('\n'),
+    );
     setEditObjectStore(Object.entries(d.objectStore).map(([k, v]) => `${k}=${v}`).join('\n'));
     setMetastoreDirty(false);
     setObjectStoreDirty(false);
@@ -266,7 +272,11 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       if (editDefaultDb.trim() !== (editingDb.defaultDatabase ?? '')) req.defaultDatabase = editDefaultDb.trim();
       if (editDefaultSchema.trim() !== (editingDb.defaultSchema ?? '')) req.defaultSchema = editDefaultSchema.trim();
       if (initSqlChanged()) req.initSql = editInitSql;
-      if (metastoreDirty) req.metastore = parseStoreExtras(editMetastore, new Set());
+      if (metastoreDirty) {
+        req.metastore = metastoreToSend(
+          editingDb.metastore, parseStoreExtras(editMetastore, new Set()), editingDb.kind, superuser,
+        );
+      }
       if (objectStoreDirty) req.objectStore = parseStoreExtras(editObjectStore, new Set());
       const out = await api.updateTenantDb(req);
       setNotice(out.db.initSqlWarning ?? null);
@@ -468,10 +478,19 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             </label>
             <label>Metastore (key=value per line)
               <p className="subtle" style={{ marginBottom: 4 }}>
-                pgPassword is hidden and kept unless you set it: add pgPassword=newvalue to rotate.
-                A change of host or port needs pgPassword again, and another server its own pgUser.
-                Removing a key this database's kind requires is rejected. Editing this section
-                restarts the database's nodes.
+                {superuser ? (
+                  <>
+                    pgPassword is hidden and kept unless you set it: add pgPassword=newvalue to rotate.
+                    A change of host or port needs pgPassword again, and another server its own pgUser.
+                    Removing a key this database's kind requires is rejected.
+                  </>
+                ) : (
+                  <>
+                    Its Postgres server is a superuser&rsquo;s to set, and stays as it is whatever you
+                    send here.
+                  </>
+                )}{' '}
+                Editing this section restarts the database's nodes.
               </p>
               <textarea value={editMetastore} rows={4}
                 onChange={ev => { setEditMetastore(ev.target.value); setMetastoreDirty(true); }} />
@@ -499,8 +518,14 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           <fieldset>
             <legend>Identity</legend>
             <p className="subtle" style={{ marginTop: 0 }}>
-              The catalog's Postgres connection defaults to the manager's configured
-              server (override it per-database in the Catalog Postgres section below).
+              {superuser ? (
+                <>
+                  The catalog's Postgres connection defaults to the manager's configured
+                  server (override it per-database in the Catalog Postgres section below).
+                </>
+              ) : (
+                <>The catalog lives on the manager's configured Postgres server.</>
+              )}{' '}
               The Postgres database itself is created automatically as{' '}
               <code>{`${tenant}_<suffix>`}</code>.
             </p>
@@ -526,7 +551,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               Kind
               <select value={kind} onChange={e => onKindChange(e.target.value as TenantDbKind)}>
                 <option value="ducklake">ducklake</option>
-                <option value="duckdb-file">duckdb-file</option>
+                {superuser && <option value="duckdb-file">duckdb-file</option>}
                 <option value="memory">memory (federation-only sources)</option>
               </select>
             </label>
@@ -576,6 +601,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                   Extra <code>key=value</code> pairs, one per line, for metastore keys the form does not
                   set, such as <code>dbName</code> (required for a DuckDB file) or{' '}
                   <code>catalogAlias</code>. A key a metastore does not hold is refused.
+                  {!superuser && <> The keys of a Postgres server are a superuser&rsquo;s, and are not sent.</>}
                 </p>
                 <textarea
                   value={extrasText}
@@ -587,7 +613,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             )}
           </fieldset>
 
-          {kind === 'ducklake' && (
+          {superuser && kind === 'ducklake' && (
             <fieldset style={{ marginTop: '0.5rem' }}>
               <legend>Catalog Postgres (metastore)</legend>
               <label>
@@ -616,7 +642,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                     Only non-empty fields are sent; anything left blank falls back to the
                     manager default. On another host or port, give a user and a password
                     for that server: the manager's login is used only on its own, and its
-                    catalog database must already exist there, named as this database.
+                    catalog database must already exist there, named as this database. A catalog
+                    on a server its tenant controls gives that tenant the node's file access:
+                    creating one accepts that.
                   </p>
                   <label>
                     Host
@@ -651,6 +679,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           {kind === 'ducklake' && (
             <div style={{ marginTop: '0.5rem' }}>
               <DataPathEditor
+                superuser={superuser}
                 dataPath={dataPath}
                 onDataPathChange={setDataPath}
                 storeType={storeType}
@@ -666,8 +695,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             <fieldset style={{ marginTop: '0.5rem' }}>
               <legend>Data path</legend>
               <p className="subtle" style={{ marginTop: 0 }}>
-                Local <code>.duckdb</code> file path attached as the default catalog. A local
-                path takes a superuser; a remote one needs your own keys.
+                Local <code>.duckdb</code> file path attached as the default catalog.
               </p>
               <label>
                 Path

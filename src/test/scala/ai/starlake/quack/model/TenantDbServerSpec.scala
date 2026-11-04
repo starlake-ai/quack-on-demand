@@ -307,7 +307,7 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
         store: Map[String, String] = Map.empty,
         meta: Map[String, String] = Map.empty
     ) =
-      TenantDb.superuserChoiceError(None, path, meta, store)
+      TenantDb.superuserChoiceError(None, TenantDbKind.DuckLake, path, meta, store, meta)
     on("") shouldBe None
     on("s3://b/x", remoteRow.objectStore) shouldBe None
     on("s3://b/x").isDefined shouldBe true
@@ -321,7 +321,7 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
 
   it should "judge an update by what the row would hold" in {
     def on(td: TenantDb, meta: Map[String, String], store: Map[String, String]) =
-      TenantDb.superuserChoiceError(Some(td), td.dataPath, meta, store)
+      TenantDb.superuserChoiceError(Some(td), td.kind, td.dataPath, meta, store, meta)
     val keys = remoteRow.objectStore
     on(remoteRow, remoteRow.metastore, keys) shouldBe None
     on(remoteRow, remoteRow.metastore, keys.updated("s3_access_key_id", "k2")) shouldBe None
@@ -337,6 +337,89 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     on(inMeta, inMeta.metastore, keys) shouldBe None
     on(inMeta, inMeta.metastore, Map.empty).isDefined shouldBe true
     on(inMeta, Map.empty, keys).isDefined shouldBe true
+  }
+
+  it should "judge a create's server keys, in any spelling of the password" in {
+    def on(kind: TenantDbKind, meta: (String, String)*) =
+      TenantDb.superuserChoiceError(None, kind, "", meta.toMap, Map.empty, meta.toMap)
+    on(TenantDbKind.DuckLake) shouldBe None
+    on(TenantDbKind.DuckLake, "schemaName" -> "main", "catalogAlias" -> "x") shouldBe None
+    TenantDb.ServerKeys.foreach { k =>
+      on(TenantDbKind.DuckLake, k -> "v").get should include(k)
+      on(TenantDbKind.DuckLake, k -> "").get should include(k)
+      on(TenantDbKind.InMemory, k -> "v").get should include(k)
+    }
+    on(TenantDbKind.DuckLake, "PGPASSWORD" -> "v").get should include("pgPassword")
+    TenantDb.ServerKeys.filterNot(_ == "dbName").foreach { k =>
+      on(TenantDbKind.DuckDbFile, k -> "v").get should include(k)
+    }
+    on(TenantDbKind.DuckDbFile, "dbName" -> "cat") shouldBe None
+  }
+
+  it should "judge an update's server keys by what the row would hold" in {
+    val row = TenantDb(
+      "td",
+      "acme",
+      "acme_x",
+      TenantDbKind.DuckLake,
+      Map(
+        "pgHost"     -> "h",
+        "pgPort"     -> "1",
+        "pgUser"     -> "u",
+        "pgPassword" -> "p",
+        "dbName"     -> "acme_x"
+      ),
+      ""
+    )
+    def on(result: Map[String, String], sent: Map[String, String]) =
+      TenantDb.superuserChoiceError(Some(row), row.kind, "", result, Map.empty, sent)
+    val same = row.metastore
+    val back = same - "pgPassword"
+    on(same, back) shouldBe None
+    on(same + ("schemaName" -> "main"), back + ("schemaName" -> "main")) shouldBe None
+    on(same - "dbName", back - "dbName") shouldBe None
+    on(same.updated("pgHost", "h2"), back).get should include("pgHost")
+    on(same - "pgHost", back - "pgHost").get should include("pgHost")
+    on(same - "pgPort", back - "pgPort").get should include("pgPort")
+    on(same - "pgUser", back - "pgUser").get should include("pgUser")
+    on(same - "pgPassword", back + ("pgPassword" -> "")).get should include("pgPassword")
+    on(same.updated("dbName", "other"), back).get should include("dbName")
+    // A password sent is a change, the stored one too.
+    on(same, back + ("pgPassword" -> "p")).get should include("pgPassword")
+    on(same.updated("pgPassword", "q"), back + ("pgPassword" -> "q")).get should include(
+      "pgPassword"
+    )
+    // An own dbName left out comes back to the row's name.
+    val own = row.copy(metastore = same.updated("dbName", "other"))
+    TenantDb
+      .superuserChoiceError(Some(own), own.kind, "", same - "dbName", Map.empty, back - "dbName")
+      .get should include("dbName")
+    // None of it applies to a duckdb-file's dbName.
+    val file = row.copy(kind = TenantDbKind.DuckDbFile, metastore = Map("dbName" -> "cat"))
+    TenantDb.superuserChoiceError(
+      Some(file),
+      file.kind,
+      "",
+      Map("dbName" -> "cat2"),
+      Map.empty,
+      Map("dbName" -> "cat2")
+    ) shouldBe None
+  }
+
+  "TenantDb.dbNameChangeError" should "read a change as the effective metastore resolves it" in {
+    val row = TenantDb("td", "acme", "acme_x", TenantDbKind.DuckLake, Map("dbName" -> "acme_x"), "")
+    TenantDb.dbNameChangeError(row, Map("dbName" -> "acme_x")) shouldBe None
+    TenantDb.dbNameChangeError(row, Map.empty) shouldBe None
+    TenantDb.dbNameChangeError(row, Map("dbName" -> "other")).isDefined shouldBe true
+    val bare = row.copy(metastore = Map.empty)
+    TenantDb.dbNameChangeError(bare, Map("dbName" -> "acme_x")) shouldBe None
+    TenantDb.dbNameChangeError(bare, Map("dbName" -> "other")).isDefined shouldBe true
+    val own = row.copy(metastore = Map("dbName" -> "other"))
+    TenantDb.dbNameChangeError(own, Map("dbName" -> "other")) shouldBe None
+    TenantDb.dbNameChangeError(own, Map.empty).isDefined shouldBe true
+    // A DuckDB file's names a catalog in the file.
+    val file = row.copy(kind = TenantDbKind.DuckDbFile)
+    TenantDb.dbNameChangeError(file, Map("dbName" -> "other")) shouldBe None
   }
 
   "TenantDb.KnownMetastoreKeys" should "leave the manager's stamps to the manager" in {

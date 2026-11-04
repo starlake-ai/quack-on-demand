@@ -523,6 +523,73 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     update(McpSuperuserPat.principal, "/tmp/elsewhere").isRight shouldBe true
   }
 
+  private val serverValues = List(
+    "pgHost"     -> "pg.other",
+    "pgPort"     -> "6000",
+    "pgUser"     -> "me",
+    "pgPassword" -> "own-login-sentinel",
+    "dbName"     -> "elsewhere"
+  )
+
+  "create_database" should "name no Postgres server for a tenant admin" in {
+    val f = new Fixture
+    serverValues.foreach { (k, v) =>
+      val out = f.call(
+        "create_database",
+        adminPat(),
+        "tenant"    -> Json.fromString(Tenant0),
+        "name"      -> Json.fromString("own"),
+        "kind"      -> Json.fromString("memory"),
+        "metastore" -> Json.obj(k -> Json.fromString(v))
+      )
+      withClue(k)(out.left.toOption.getOrElse(fail("admitted")) should include("a superuser sets"))
+    }
+    f.store.snapshot().tenantDbs.map(_.name) should not contain s"${Tenant0}_own"
+  }
+
+  "update_database" should "change or remove no part of a Postgres server for a tenant admin" in {
+    val f      = new Fixture
+    val stored =
+      Map("pgHost" -> "127.0.0.1", "pgPort" -> "5432", "pgUser" -> "u", "dbName" -> TenantDb)
+    def update(principal: McpPrincipal, map: Map[String, String]) = f.call(
+      "update_database",
+      principal,
+      "tenant"    -> Json.fromString(Tenant0),
+      "name"      -> Json.fromString(TenantDb),
+      "metastore" -> Json.obj(map.toSeq.map((k, v) => k -> Json.fromString(v))*)
+    )
+    val before = f.store.snapshot().tenantDbs.find(_.name == TenantDb).get
+    serverValues.foreach { (k, v) =>
+      withClue(k) {
+        update(adminPat(), stored + (k -> v)).left.toOption.getOrElse(fail("admitted")) should
+          include("a superuser sets")
+      }
+    }
+    List("pgHost", "pgPort", "pgUser").foreach { k =>
+      withClue(s"no $k") {
+        update(adminPat(), stored - k).left.toOption.getOrElse(fail("admitted")) should
+          include("a superuser sets")
+      }
+    }
+    update(adminPat(), stored + ("pgPassword" -> "")).isLeft shouldBe true
+    f.store.snapshot().tenantDbs.find(_.name == TenantDb).get shouldBe before
+    // As stored, the password left out: allowed.
+    update(adminPat(), stored + ("schemaName" -> "s2")).isRight shouldBe true
+    f.store.snapshot().tenantDbs.find(_.name == TenantDb).get.metastore("pgPassword") shouldBe "p"
+    // A superuser may.
+    update(
+      McpSuperuserPat.principal,
+      stored + ("pgUser" -> "u2") + ("schemaName" -> "s2")
+    ).isRight shouldBe true
+  }
+
+  "metastore_defaults" should "be a superuser's" in {
+    val f = new Fixture
+    f.call("metastore_defaults", adminPat()).left.toOption.getOrElse(fail("admitted")) should
+      include("superuser")
+    f.call("metastore_defaults", McpSuperuserPat.principal).isRight shouldBe true
+  }
+
   "create_database" should "accept encrypted and encryption_key for kind=duckdb-file" in {
     val f       = new Fixture
     val created = f.call(

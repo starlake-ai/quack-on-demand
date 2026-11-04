@@ -19,12 +19,13 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.{Try, Using}
 
-/** What one tenant's database may reach, on a real manager and real nodes, as a real tenant admin:
-  * a database name composes for one tenant only, QoD's login reaches QoD's server only, a catalog
-  * name is fixed once made, and a create or a delete acts only on a database the row owns. Each
-  * case checks the owner's rows afterwards, through the owner's own pool. Manager on 20944 (REST) /
-  * 31364 (FlightSQL) / 29564 (front door), relay 20946, nodes 23360-23369, its own control plane;
-  * every database is named after a per-run hex and dropped by exact name at the end.
+/** What one tenant's database may reach, on a real manager and real nodes, as a real tenant admin
+  * and as a superuser: a database name composes for one tenant only, only a superuser names a
+  * Postgres server, QoD's login reaches QoD's server only, a catalog name is fixed once made, a
+  * create or a delete acts only on a database the row owns, and only a superuser names a data path.
+  * Each case checks the owner's rows afterwards, through the owner's own pool. Manager on 20944
+  * (REST) / 31364 (FlightSQL) / 29564 (front door), relay 20946, nodes 23360-23369, its own control
+  * plane; every database is named after a per-run hex and dropped by exact name at the end.
   *
   * The listener records whether a connection or a password arrived and whether that password equals
   * a known value, as booleans: no password is kept, logged or printed.
@@ -50,6 +51,12 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private lazy val lakes: Path = Files.createDirectories(root.resolve("lakes"))
 
   private var stack: AuthzStack = null
+
+  /** Roles a case created on the test Postgres, dropped once their databases are. */
+  private val roles = ListBuffer.empty[String]
+
+  /** A superuser's session. */
+  private lazy val su: String = stack.login(None, "admin", "admin")
 
   /** Every (tenant, tenantDb, pool) a case opened and did not close. */
   private val opened = ListBuffer.empty[(String, String, String)]
@@ -86,6 +93,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
           )
         }
         stack.stop()
+        roles.foreach(r => Try(TestPostgres.psql("postgres", s"""DROP ROLE IF EXISTS "$r"""")))
     finally
       Try {
         val tree = Files.walk(root)
@@ -414,7 +422,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       try
         val t = s"${Prefix}b1$run"
         tenant(t)
-        val token = adminOf(t, "ba", OtherPw)
         val port  = listener.port.toString
         val cases = List(
           "host and port"     -> List("pgHost" -> "127.0.0.1", "pgPort" -> port),
@@ -430,7 +437,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
           val (code, name, body) = createDb(
             t,
             s"own$i",
-            token,
+            su,
             "metastore" -> Json.obj(keys.map((k, v) => k -> s(v))*)
           )
           withClue(s"$what: ${body.take(300)}") {
@@ -440,21 +447,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
             name shouldBe ""
           }
         }
-        // A superuser gets the same rule.
-        val (su, _, suBody) = {
-          val (c, b) = stack.postStatus(
-            "/api/database/create",
-            obj(
-              "tenant"    -> s(t),
-              "name"      -> s("sup"),
-              "kind"      -> s("ducklake"),
-              "metastore" -> Json.obj("pgHost" -> s("127.0.0.1"), "pgPort" -> s(port))
-            )
-          )
-          (c, "", b)
-        }
-        su shouldBe 400
-        errorOf(suBody) shouldBe "own_login_required"
         settle()
         listener.connections shouldBe 0
       finally listener.stop()
@@ -466,11 +458,10 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     try
       val t = s"${Prefix}b2$run"
       tenant(t)
-      val token           = adminOf(t, "bb", OtherPw)
-      val (code, name, _) = createDb(t, "lake", token)
+      val (code, name, _) = createDb(t, "lake", su)
       code shouldBe 200
       val (up, body) =
-        updateDb(t, name, token, "pgHost" -> "127.0.0.1", "pgPort" -> listener.port.toString)
+        updateDb(t, name, su, "pgHost" -> "127.0.0.1", "pgPort" -> listener.port.toString)
       up shouldBe 400
       errorOf(body) shouldBe "own_login_required"
       settle()
@@ -485,12 +476,11 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     try
       val t = s"${Prefix}b3$run"
       tenant(t)
-      val token = adminOf(t, "bc", OtherPw)
       // The control: its own user and password go to its own server, and the default login does not.
       val (code, name, created) = createDb(
         t,
         "byo",
-        token,
+        su,
         "metastore" -> Json.obj(
           "pgHost"     -> s("127.0.0.1"),
           "pgPort"     -> s(first.port.toString),
@@ -507,7 +497,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       val (moved, movedBody) = updateDb(
         t,
         name,
-        token,
+        su,
         "pgHost" -> "127.0.0.1",
         "pgPort" -> second.port.toString,
         "pgUser" -> OwnUser
@@ -515,7 +505,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       moved shouldBe 400
       errorOf(movedBody) shouldBe "own_login_required"
       // Back to QoD's own server with the password left out: the same.
-      val (home, homeBody) = updateDb(t, name, token, "schemaName" -> "main")
+      val (home, homeBody) = updateDb(t, name, su, "schemaName" -> "main")
       home shouldBe 400
       errorOf(homeBody) shouldBe "own_login_required"
       settle()
@@ -525,14 +515,14 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       val (again, againBody) = updateDb(
         t,
         name,
-        token,
+        su,
         "pgHost"     -> "127.0.0.1",
         "pgPort"     -> second.port.toString,
         "pgUser"     -> OwnUser,
         "pgPassword" -> OwnSentinel2
       )
       withClue(againBody.take(300))(again shouldBe 200)
-      openPool(t, name, "b3p", token)
+      openPool(t, name, "b3p", su)
       second.await(1, 60.seconds)
       second.seen.exists(c => c.user == OwnUser && c.matchesOwn) shouldBe true
       second.seen.exists(_.matchesDefault) shouldBe false
@@ -548,21 +538,21 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     try
       val t = s"${Prefix}b4$run"
       tenant(t)
-      val token              = adminOf(t, "bd", OtherPw)
       val user               = s"${TestPostgres.pgUser} host=127.0.0.1 port=${listener.port}"
       val (code, name, body) = createDb(
         t,
         "lake",
-        token,
+        su,
         "metastore" -> Json.obj("pgUser" -> s(user))
       )
       // What such a row would do, had it been stored.
       if code == 200 then
-        openPool(t, name, "b4p", token)
+        openPool(t, name, "b4p", su)
         listener.await(1, 60.seconds)
         closePool(t, name, "b4p")
       listener.seen.exists(_.matchesDefault) shouldBe false
       code shouldBe 400
+      errorOf(body) shouldBe "invalid_contract"
       listener.connections shouldBe 0
       body should include("pgUser")
     finally listener.stop()
@@ -619,16 +609,21 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       finally listener.stop()
     }
 
-  "GET database/metastore-defaults" should "show no password" in {
+  "GET database/metastore-defaults" should "show a superuser no password, and anyone else nothing" in {
     ready()
-    val (code, body) = stack.getStatus(
-      "/api/database/metastore-defaults",
-      stack.login(None, "admin", "admin")
-    )
+    val (code, body) = stack.getStatus("/api/database/metastore-defaults", su)
     code shouldBe 200
     body.toLowerCase(java.util.Locale.ROOT).contains("password") shouldBe false
     body.contains(TestPostgres.pgPass) shouldBe false
     body should include("pgHost")
+
+    val t = s"${Prefix}b6$run"
+    tenant(t)
+    val (refused, refusal) =
+      stack.getStatus("/api/database/metastore-defaults", adminOf(t, "be", OtherPw))
+    refused shouldBe 403
+    errorOf(refusal) shouldBe "superuser_required"
+    refusal should not include "pgHost"
   }
 
   // ---------- a catalog name is fixed ----------
@@ -649,14 +644,14 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     serving(other, "cpool2", "cb", OtherPw)
 
     val (up, body) = updateDb(other, mine, otherToken, "dbName" -> target)
-    withClue(body.take(300))(up shouldBe 400)
-    errorOf(body) shouldBe "db_name_fixed"
+    withClue(body.take(300))(up shouldBe 403)
+    errorOf(body) shouldBe "superuser_required"
     // A throwaway database of the shape of a control plane: the same answer.
     val plain = s"${Prefix}c3$run"
     createEmptyDb(plain)
     val (up2, body2) = updateDb(other, mine, otherToken, "dbName" -> plain)
-    up2 shouldBe 400
-    errorOf(body2) shouldBe "db_name_fixed"
+    up2 shouldBe 403
+    errorOf(body2) shouldBe "superuser_required"
 
     // Its node stays on its own catalog, and the owner's rows are the owner's.
     settle()
@@ -680,9 +675,8 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     updateDb(other, mine, otherToken, "dbName" -> mine, "schemaName" -> "main")._1 shouldBe 200
     updateDb(other, mine, otherToken, "schemaName" -> "main")._1 shouldBe 200
     // A superuser may.
-    val superuser = stack.login(None, "admin", "admin")
-    updateDb(other, mine, superuser, "dbName" -> plain)._1 shouldBe 200
-    updateDb(other, mine, superuser, "dbName" -> mine)._1 shouldBe 200
+    updateDb(other, mine, su, "dbName" -> plain)._1 shouldBe 200
+    updateDb(other, mine, su, "dbName" -> mine)._1 shouldBe 200
   }
 
   "A column policy naming another tenant's catalog" should "read nothing of that catalog" in {
@@ -841,7 +835,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     // A name nothing holds stays free on the default server.
     val (fresh, freshName, freshBody) =
-      createDb(t, "fresh", token, "metastore" -> login)
+      createDb(t, "fresh", su, "metastore" -> login)
     withClue(freshBody.take(300))(fresh shouldBe 200)
     dbExists(freshName) shouldBe false
     deleteDb(t, freshName, token)._1 shouldBe 200
@@ -850,7 +844,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val target = s"${t}_target"
     foreignDb(target)
     val (code, name, body) =
-      createDb(t, "target", token, "metastore" -> login)
+      createDb(t, "target", su, "metastore" -> login)
     withClue(body.take(300))(code shouldBe 200)
     name shouldBe target
     deleteDb(t, target, token)._1 shouldBe 200
@@ -870,11 +864,11 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     val target = s"${t}_target"
     foreignDb(target)
-    createDb(t, "target", token, "metastore" -> login)._1 shouldBe 200
+    createDb(t, "target", su, "metastore" -> login)._1 shouldBe 200
     // Leaving the host out and removing the password would make it a row of QoD's own server.
     val (code, body) = updateDb(t, target, token, "pgPassword" -> "")
-    withClue(body.take(300))(code shouldBe 409)
-    errorOf(body) shouldBe "database_name_taken"
+    withClue(body.take(300))(code shouldBe 403)
+    errorOf(body) shouldBe "superuser_required"
     markerKept(target) shouldBe true
   }
 
@@ -882,7 +876,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     ready()
     val t = s"${Prefix}d5$run"
     tenant(t)
-    val token = adminOf(t, "dd", OtherPw)
     val login = Json.obj(
       "pgHost"     -> s("127.0.0.1"),
       "pgPort"     -> s(closedPort().toString),
@@ -891,7 +884,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     val target = s"${t}_target"
     foreignDb(target)
-    createDb(t, "target", token, "metastore" -> login)._1 shouldBe 200
+    createDb(t, "target", su, "metastore" -> login)._1 shouldBe 200
     stack.postStatus("/api/tenant/delete", obj("name" -> s(t)))._1 shouldBe 200
     markerKept(target) shouldBe true
   }
@@ -912,7 +905,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     createDb(
       t,
       "file",
-      stack.login(None, "admin", "admin"),
+      su,
       "kind"      -> s("duckdb-file"),
       "dataPath"  -> s(root.resolve(s"d6_$run.duckdb").toString),
       "metastore" -> Json.obj("dbName" -> s(file), "schemaName" -> s("main"))
@@ -1136,7 +1129,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     createDb(
       victim,
       "vfile",
-      stack.login(None, "admin", "admin"),
+      su,
       "kind"      -> s("duckdb-file"),
       "dataPath"  -> s(file.toString),
       "metastore" -> Json.obj("dbName" -> s("viccat"), "schemaName" -> s("main"))
@@ -1176,7 +1169,7 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     withClue(body.take(300))(code shouldBe 200)
     stack.catalogDatabases += s"${t}_named"
-    rowOf(t, s"${t}_named", stack.login(None, "admin", "admin")).get.hcursor
+    rowOf(t, s"${t}_named", su).get.hcursor
       .get[String]("dataPath") shouldBe Right(path)
   }
 
@@ -1217,6 +1210,296 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     errorOf(body) shouldBe "superuser_required"
   }
 
+  // ---------- only a superuser names a Postgres server ----------
+
+  "A tenant admin's create" should "name no part of a Postgres server, reaching nothing" in {
+    ready()
+    val listener = new PgListener(TestPostgres.pgPass)
+    try
+      val t = s"${Prefix}f9$run"
+      tenant(t)
+      val token = adminOf(t, "ga", OtherPw)
+      val login = List(
+        "pgHost"     -> "127.0.0.1",
+        "pgPort"     -> listener.port.toString,
+        "pgUser"     -> OwnUser,
+        "pgPassword" -> OwnSentinel
+      )
+      val cases =
+        login
+          .map(List(_)) ++ List(List("dbName" -> s"${t}_other"), login, login :+ ("dbName" -> "x"))
+      cases.zipWithIndex.foreach { case (keys, i) =>
+        val (code, name, body) = createDb(
+          t,
+          s"own$i",
+          token,
+          "metastore" -> Json.obj(keys.map((k, v) => k -> s(v))*)
+        )
+        withClue(s"${keys.map(_._1)}: ${body.take(300)}") {
+          code shouldBe 403
+          errorOf(body) shouldBe "superuser_required"
+          body should include("a superuser sets")
+          name shouldBe ""
+        }
+        dbExists(s"${t}_own$i") shouldBe false
+      }
+      // No row, so nothing a pool could attach and no catalog of the tenant's making to read from.
+      stack.getStatus(s"/api/database/list?tenant=$t", token)._2 should not include "own"
+      val (pool, _) = stack.postStatus(
+        "/api/pool/create",
+        s"""{"tenant":"$t","tenantDb":"${t}_own5","pool":"g1p","size":1,
+           |"roleDistribution":{"writeonly":0,"readonly":0,"dual":1}}""".stripMargin,
+        token
+      )
+      pool should not be 200
+      settle()
+      listener.connections shouldBe 0
+    finally listener.stop()
+  }
+
+  "A tenant admin's update" should "add no part of a Postgres server to a row, reaching nothing" in {
+    ready()
+    val listener = new PgListener(TestPostgres.pgPass)
+    try
+      val t = s"${Prefix}fa$run"
+      tenant(t)
+      val token           = adminOf(t, "gb", OtherPw)
+      val (code, name, _) = createDb(t, "lake", token)
+      code shouldBe 200
+      openPool(t, name, "g2p", token)
+      serving(t, "g2p", "gb", OtherPw)
+      List(
+        "pgHost"     -> "127.0.0.1",
+        "pgPort"     -> listener.port.toString,
+        "pgUser"     -> OwnUser,
+        "pgPassword" -> OwnSentinel,
+        "dbName"     -> s"${t}_other"
+      ).foreach { (k, v) =>
+        val (up, body) = updateDb(t, name, token, k -> v)
+        withClue(k) {
+          up shouldBe 403
+          errorOf(body) shouldBe "superuser_required"
+          body should include(k)
+        }
+      }
+      settle()
+      listener.connections shouldBe 0
+      // Nothing moved, and its node stayed up.
+      stack.flight("SELECT 1", "gb", OtherPw, t, "g2p").isRight shouldBe true
+      closePool(t, name, "g2p")
+    finally listener.stop()
+  }
+
+  it should "change or remove no part of a superuser's row on another server, its other fields free" in {
+    ready()
+    val server = new PgListener(TestPostgres.pgPass)
+    val other  = new PgListener(TestPostgres.pgPass)
+    try
+      val t = s"${Prefix}fb$run"
+      tenant(t)
+      val token              = adminOf(t, "gc", OtherPw)
+      val (c, name, created) = createDb(
+        t,
+        "byo",
+        su,
+        "metastore" -> Json.obj(
+          "pgHost"     -> s("127.0.0.1"),
+          "pgPort"     -> s(server.port.toString),
+          "pgUser"     -> s(OwnUser),
+          "pgPassword" -> s(OwnSentinel)
+        )
+      )
+      withClue(created.take(300))(c shouldBe 200)
+      // What the row shows anyone: everything but its password.
+      val shown = Map(
+        "pgHost" -> "127.0.0.1",
+        "pgPort" -> server.port.toString,
+        "pgUser" -> OwnUser,
+        "dbName" -> name
+      )
+      def refused(what: String, map: Map[String, String]): Unit =
+        val (up, body) = updateDb(t, name, token, map.toSeq*)
+        withClue(what) {
+          up shouldBe 403
+          errorOf(body) shouldBe "superuser_required"
+        }
+      // Changed.
+      refused("pgHost", shown + ("pgHost"             -> "127.0.0.2"))
+      refused("pgPort", shown + ("pgPort"             -> other.port.toString))
+      refused("pgUser", shown + ("pgUser"             -> "someone"))
+      refused("dbName", shown + ("dbName"             -> s"${t}_elsewhere"))
+      refused("a new password", shown + ("pgPassword" -> OwnSentinel2))
+      // The stored password itself: what a right guess would be told, were it compared.
+      refused("the same password", shown + ("pgPassword" -> OwnSentinel))
+      // Removed.
+      refused("no pgHost", shown - "pgHost")
+      refused("no pgPort", shown - "pgPort")
+      refused("no pgUser", shown - "pgUser")
+      refused("no password", shown + ("pgPassword" -> ""))
+      // All of them: the row would come to QoD's server under QoD's login.
+      refused("none of them", Map("schemaName" -> "main"))
+      settle()
+      other.connections shouldBe 0
+
+      // As stored, with the password left out: allowed, and the row stays where it was.
+      updateDb(t, name, token, (shown + ("schemaName" -> "main")).toSeq*)._1 shouldBe 200
+      stack
+        .postStatus(
+          "/api/database/update",
+          obj("tenant" -> s(t), "name" -> s(name), "initSql" -> s("SET threads = 2;")),
+          token
+        )
+        ._1 shouldBe 200
+      val seen = server.seen.size
+      openPool(t, name, "g3p", token)
+      server.await(seen + 1, 60.seconds)
+      val later = server.seen.drop(seen)
+      later should not be empty
+      later.forall(a => a.user == OwnUser && a.matchesOwn) shouldBe true
+      server.seen.exists(_.matchesDefault) shouldBe false
+      other.connections shouldBe 0
+      closePool(t, name, "g3p")
+    finally
+      server.stop()
+      other.stop()
+  }
+
+  it should "not aim a row's own dbName at QoD's server by dropping the rest" in {
+    ready()
+    val t = s"${Prefix}fc$run"
+    tenant(t)
+    val token = adminOf(t, "gd", OtherPw)
+    val login = Map(
+      "pgHost"     -> "127.0.0.1",
+      "pgPort"     -> closedPort().toString,
+      "pgUser"     -> OwnUser,
+      "pgPassword" -> OwnSentinel
+    )
+    val (c, name, created) =
+      createDb(t, "byo", su, "metastore" -> Json.obj(login.toSeq.map((k, v) => k -> s(v))*))
+    withClue(created.take(300))(c shouldBe 200)
+    // Another tenant's database, on QoD's server; a superuser's row naming it as its own.
+    val foreign = s"${Prefix}fd$run"
+    foreignDb(foreign)
+    val own = (login - "pgPassword") + ("dbName" -> foreign)
+    updateDb(t, name, su, own.toSeq*)._1 shouldBe 200
+
+    List(
+      Map("dbName" -> foreign),
+      Map("dbName" -> foreign, "pgPassword" -> ""),
+      own - "pgHost",
+      own - "dbName"
+    ).foreach { map =>
+      val (up, body) = updateDb(t, name, token, map.toSeq*)
+      withClue(map.keySet.toString) {
+        up shouldBe 403
+        errorOf(body) shouldBe "superuser_required"
+      }
+    }
+    val row = rowOf(t, name, su).get.hcursor.downField("metastore")
+    row.get[String]("pgHost") shouldBe Right("127.0.0.1")
+    row.get[String]("dbName") shouldBe Right(foreign)
+    markerKept(foreign) shouldBe true
+  }
+
+  "A superuser" should "name a server, with a login of its own, for a tenant's plain user" in {
+    ready()
+    val server = new RecordingPgRelay(TestPostgres.pgPort)
+    try
+      val t = s"${Prefix}fe$run"
+      tenant(t)
+      val token = adminOf(t, "ge", OtherPw)
+      stack.post(
+        "/api/user/create",
+        obj(
+          "tenant"   -> s(t),
+          "username" -> s("gu"),
+          "password" -> s(OtherPw),
+          "kind"     -> s("user"),
+          "roles"    -> Json.arr(s("qod_all_tables")),
+          "groups"   -> Json.arr(s("qod_all_pools"))
+        )
+      )
+      // That server's own login: a role of its own, owning the catalog's database.
+      val role = s"${Prefix}role$run"
+      roles += role
+      TestPostgres.psql("postgres", s"""CREATE ROLE "$role" LOGIN PASSWORD '$OwnRolePw'""")
+      val login = Json.obj(
+        "pgHost"     -> s("127.0.0.1"),
+        "pgPort"     -> s(server.port.toString),
+        "pgUser"     -> s(role),
+        "pgPassword" -> s(OwnRolePw)
+      )
+      val catalog = s"${t}_byo"
+
+      // With no login of its own: refused, and nothing reaches it.
+      val (bare, _, bareBody) = createDb(
+        t,
+        "bare",
+        su,
+        "metastore" -> Json.obj("pgHost" -> s("127.0.0.1"), "pgPort" -> s(server.port.toString))
+      )
+      withClue(bareBody.take(300))(bare shouldBe 400)
+      errorOf(bareBody) shouldBe "own_login_required"
+      settle()
+      server.connections shouldBe 0
+
+      // No catalog database on its server: refused, naming it, and nothing is created.
+      val (missingDb, _, missingBody) = createDb(t, "byo", su, "metastore" -> login)
+      withClue(missingBody.take(300))(missingDb shouldBe 400)
+      errorOf(missingBody) shouldBe "catalog_database_missing"
+      missingBody should include(catalog)
+      dbExists(catalog) shouldBe false
+
+      // Its owner makes it; it then serves a plain user end to end, reading and writing.
+      stack.catalogDatabases += catalog
+      TestPostgres.psql("postgres", s"""CREATE DATABASE "$catalog" OWNER "$role"""")
+      val (code, name, body) = createDb(t, "byo", su, "metastore" -> login)
+      withClue(body.take(300))(code shouldBe 200)
+      openPool(t, name, "g6p", su)
+      serving(t, "g6p", "gu", OtherPw)
+      stack
+        .flight(s"CREATE TABLE $name.main.fact (id BIGINT)", "gu", OtherPw, t, "g6p")
+        .isRight shouldBe true
+      stack
+        .flight(s"INSERT INTO $name.main.fact VALUES (1), (2)", "gu", OtherPw, t, "g6p")
+        .isRight shouldBe true
+      stack.flight(s"SELECT count(*) FROM $name.main.fact", "gu", OtherPw, t, "g6p") shouldBe
+        Right(List("2"))
+
+      // Every login that server saw is the row's: the manager's reads and the node's alike.
+      assume(
+        server.encrypted == 0,
+        "the test Postgres takes TLS: its startup messages cannot be read"
+      )
+      server.users should not be empty
+      server.users.toSet shouldBe Set(role)
+
+      // A branch needs a database QoD can create next to it.
+      val (branch, branchBody) = stack.postStatus(
+        "/api/branch/create",
+        obj("tenant" -> s(t), "tenantDb" -> s(name), "name" -> s("feature")),
+        token
+      )
+      branch shouldBe 400
+      errorOf(branchBody) shouldBe "branch_own_server"
+      dbExists(s"${name}__br_") shouldBe false
+
+      // Its catalog is its owner's: a tenant admin's delete leaves it.
+      closePool(t, name, "g6p")
+      deleteDb(t, name, token)._1 shouldBe 200
+      dbExists(catalog) shouldBe true
+      Using.resource(
+        DriverManager
+          .getConnection(TestPostgres.dbUrl(catalog), TestPostgres.pgUser, TestPostgres.pgPass)
+      ) { c =>
+        Using.resource(c.createStatement()) { st =>
+          st.executeQuery("SELECT count(*) FROM ducklake_table").next() shouldBe true
+        }
+      }
+    finally server.stop()
+  }
+
   // ---------- what must keep working ----------
 
   "A tenant admin on the default server" should "create, serve, delete and create again" in {
@@ -1233,71 +1516,6 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     createDb(t, "lake", token)._1 shouldBe 200
     dbExists(name) shouldBe true
   }
-
-  "A database on its own server" should
-    "need its catalog there, serve with its own login and leave the catalog on delete" in {
-      ready()
-      val relayPort = closedPort()
-      val server    = new TcpRelay(relayPort, TestPostgres.pgPort)
-      server.start()
-      try
-        val t = s"${Prefix}e2$run"
-        tenant(t)
-        val token = adminOf(t, "eb", OtherPw)
-        val login = Json.obj(
-          "pgHost"     -> s("127.0.0.1"),
-          "pgPort"     -> s(relayPort.toString),
-          "pgUser"     -> s(TestPostgres.pgUser),
-          "pgPassword" -> s(TestPostgres.pgPass)
-        )
-        val catalog = s"${t}_byo"
-
-        // No catalog database on its server: refused, naming it, and nothing is created.
-        val (missingDb, _, missingBody) = createDb(t, "byo", token, "metastore" -> login)
-        withClue(missingBody.take(300))(missingDb shouldBe 400)
-        errorOf(missingBody) shouldBe "catalog_database_missing"
-        missingBody should include(catalog)
-        dbExists(catalog) shouldBe false
-
-        // Its owner makes it; it then serves end to end, reading and writing.
-        createEmptyDb(catalog)
-        val (code, name, body) = createDb(t, "byo", token, "metastore" -> login)
-        withClue(body.take(300))(code shouldBe 200)
-        openPool(t, name, "e2p", token)
-        serving(t, "e2p", "eb", OtherPw)
-        stack
-          .flight(s"CREATE TABLE $name.main.fact (id BIGINT)", "eb", OtherPw, t, "e2p")
-          .isRight shouldBe true
-        stack
-          .flight(s"INSERT INTO $name.main.fact VALUES (1), (2)", "eb", OtherPw, t, "e2p")
-          .isRight shouldBe true
-        stack.flight(s"SELECT count(*) FROM $name.main.fact", "eb", OtherPw, t, "e2p") shouldBe
-          Right(List("2"))
-
-        // A branch needs a database QoD can create next to it.
-        val (branch, branchBody) = stack.postStatus(
-          "/api/branch/create",
-          obj("tenant" -> s(t), "tenantDb" -> s(name), "name" -> s("feature")),
-          token
-        )
-        branch shouldBe 400
-        errorOf(branchBody) shouldBe "branch_own_server"
-        dbExists(s"${name}__br_") shouldBe false
-
-        // Its catalog is its owner's: the delete leaves it.
-        closePool(t, name, "e2p")
-        deleteDb(t, name, token)._1 shouldBe 200
-        dbExists(catalog) shouldBe true
-        Using.resource(
-          DriverManager
-            .getConnection(TestPostgres.dbUrl(catalog), TestPostgres.pgUser, TestPostgres.pgPass)
-        ) { c =>
-          Using.resource(c.createStatement()) { st =>
-            st.executeQuery("SELECT count(*) FROM ducklake_table").next() shouldBe true
-          }
-        }
-      finally Try(server.stop())
-    }
 
   "A manifest import" should "make a missing database on QoD's own server, through its node" in {
     ready()
@@ -1394,6 +1612,7 @@ object TenantIsolationE2ESpec:
   private val OwnUser      = "own_user_7731"
   private val OwnSentinel  = "OWN-LOGIN-SENTINEL-7731"
   private val OwnSentinel2 = "OWN-LOGIN-SENTINEL-7732"
+  private val OwnRolePw    = "own-role-sentinel-7733"
 
   /** What one connection brought: never the password itself. */
   final case class Arrival(
@@ -1403,6 +1622,98 @@ object TenantIsolationE2ESpec:
       matchesDefault: Boolean,
       matchesOwn: Boolean
   )
+
+  /** A byte relay to a real Postgres, recording the user each connection's startup message names:
+    * never a password, which that protocol does not send in the clear here.
+    */
+  final class RecordingPgRelay(targetPort: Int):
+    private val server = new ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new InetSocketAddress("127.0.0.1", 0))
+
+    val port: Int = server.getLocalPort
+
+    private val accepted = new java.util.concurrent.atomic.AtomicInteger(0)
+    private val tls      = new java.util.concurrent.atomic.AtomicInteger(0)
+    private val named    = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+    @volatile private var running = true
+    private val acceptor          = new Thread(() => loop())
+    acceptor.setDaemon(true)
+    acceptor.start()
+
+    def connections: Int = accepted.get()
+
+    /** Connections that took TLS, whose user cannot be read. */
+    def encrypted: Int = tls.get()
+
+    def users: List[String] = named.asScala.toList
+
+    def stop(): Unit =
+      running = false
+      Try(server.close())
+      ()
+
+    private def loop(): Unit =
+      while running do
+        Try(server.accept()).toOption.foreach { client =>
+          accepted.incrementAndGet()
+          val t = new Thread(() => {
+            Try(relay(client))
+            Try(client.close())
+            ()
+          })
+          t.setDaemon(true)
+          t.start()
+        }
+
+    private def relay(client: Socket): Unit =
+      val upstream = new Socket("127.0.0.1", targetPort)
+      try
+        val fromClient = new DataInputStream(new BufferedInputStream(client.getInputStream))
+        val toServer   = new DataOutputStream(new BufferedOutputStream(upstream.getOutputStream))
+        val fromServer = upstream.getInputStream
+        val toClient   = client.getOutputStream
+        var len        = fromClient.readInt()
+        var code       = fromClient.readInt()
+        var clear      = true
+        // An encryption request, answered with one byte: 'S' means TLS follows.
+        while clear && (code == 80877103 || code == 80877104) do
+          toServer.writeInt(len)
+          toServer.writeInt(code)
+          toServer.flush()
+          val answer = fromServer.read()
+          toClient.write(answer)
+          toClient.flush()
+          if answer == 'S' || answer == 'G' then
+            tls.incrementAndGet()
+            clear = false
+          else
+            len = fromClient.readInt()
+            code = fromClient.readInt()
+        if clear then
+          val body = new Array[Byte](math.max(0, len - 8))
+          fromClient.readFully(body)
+          // 3.x's major version; anything else (a cancel request) names no user.
+          if (code >> 16) == 3 then
+            val pairs = new String(body, "UTF-8").split('\u0000').grouped(2).collect {
+              case Array(k, v) => k -> v
+            }
+            pairs.toMap.get("user").foreach(named.add)
+          toServer.writeInt(len)
+          toServer.writeInt(code)
+          toServer.write(body)
+          toServer.flush()
+        val back = new Thread(() => {
+          Try(fromServer.transferTo(toClient))
+          Try(client.close())
+          ()
+        })
+        back.setDaemon(true)
+        back.start()
+        // The raw stream: a buffered one would hold what the client sent until it filled.
+        fromClient.transferTo(upstream.getOutputStream)
+      finally Try(upstream.close())
 
   /** A Postgres wire listener that declines TLS, asks for a cleartext password and records how each
     * connection went, then closes it. `defaultPassword` and `ownPassword` are only compared with.

@@ -202,11 +202,20 @@ final class TenantDbHandlers(
         .orElse(
           // What the scope states: a superuser's, the manager's boot provisioning included, may
           // choose. The supervisor judges an update, where the stored row is at hand.
-          Option
-            .when(!writerTrusted)(
-              TenantDb.superuserChoiceError(None, req.dataPath, req.metastore, req.objectStore)
+          TenantDbKind
+            .fromWire(req.kind)
+            .toOption
+            .filter(_ => !writerTrusted)
+            .flatMap(kind =>
+              TenantDb.superuserChoiceError(
+                None,
+                kind,
+                req.dataPath,
+                req.metastore,
+                req.objectStore,
+                req.metastore
+              )
             )
-            .flatten
             .map(msg => (StatusCode.Forbidden, ErrorResponse("superuser_required", msg)))
         )
 
@@ -331,25 +340,25 @@ final class TenantDbHandlers(
           )
         }
 
-  /** Resolved defaultMetastore connection values for the admin UI's create form. Any admin caller
-    * (tenant or system, session or PAT) may read it: `ManagerServer.apiKeyGuard` already rejects
-    * unauthenticated callers and demotes profile sessions, and the values are deployment-wide
-    * (tenant admins already see pgHost/pgUser on redacted database/list rows). `pgPassword` is
-    * absent from the response type by construction.
+  /** Resolved defaultMetastore connection values for a superuser's create form, the only one that
+    * names a server. Anyone else gets `403 superuser_required`: they are the address and the user
+    * of QoD's own Postgres. `pgPassword` is absent from the response type by construction.
     */
   def metastoreDefaults(apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[MetastoreDefaultsResponse] =
     IO.pure {
       val d = sup.metastoreDefaults
-      Right(
-        MetastoreDefaultsResponse(
-          pgHost = d.getOrElse("pgHost", ""),
-          pgPort = d.getOrElse("pgPort", ""),
-          pgUser = d.getOrElse("pgUser", ""),
-          schemaName = d.getOrElse("schemaName", "")
+      SuperuserCheck
+        .reject(apiKey)(scopeOf)
+        .toLeft(
+          MetastoreDefaultsResponse(
+            pgHost = d.getOrElse("pgHost", ""),
+            pgPort = d.getOrElse("pgPort", ""),
+            pgUser = d.getOrElse("pgUser", ""),
+            schemaName = d.getOrElse("schemaName", "")
+          )
         )
-      )
     }
 
   def deleteTenantDb(req: TenantDbOpRequest, apiKey: Option[String])(

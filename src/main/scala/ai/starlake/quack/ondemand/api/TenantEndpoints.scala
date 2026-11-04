@@ -150,7 +150,10 @@ object TenantEndpoints:
           "to place it by, 409 data_path_taken over a folder another database holds. A caller who " +
           "is not a superuser names no other path than a remote one (s3, s3a, r2, gs, az, azure, " +
           "abfss) with explicit keys of their own in objectStore, complete for its scheme, and no " +
-          "metastore.dataPath: anything else is 403 superuser_required, nothing written."
+          "metastore.dataPath: anything else is 403 superuser_required, nothing written. So is any " +
+          "of pgHost, pgPort, pgUser, pgPassword or dbName (dbName stays free on kind=duckdb-file): " +
+          "a superuser names a Postgres server. A catalog on a server its tenant controls gives " +
+          "that tenant the node's file access, so a superuser who creates one accepts that."
       )
       .in(jsonBody[TenantDbRequest])
       .in(authToken)
@@ -191,8 +194,11 @@ object TenantEndpoints:
         "Update a database. metastore and objectStore replace the stored maps, except that a " +
           "secret they leave out is kept and one sent empty is removed. A caller who is not a " +
           "superuser leaves metastore.dataPath as it is and keeps complete the keys of a row " +
-          "holding its own: 403 superuser_required otherwise, nothing written. An update that " +
-          "changes the metastore, objectStore or initSql restarts the database's nodes."
+          "holding its own, and adds, changes or removes none of pgHost, pgPort, pgUser, pgPassword " +
+          "or dbName (dbName stays free on kind=duckdb-file): 403 superuser_required otherwise, " +
+          "nothing written. They stay as stored when sent back as the row holds them, with a " +
+          "password left out. An update that changes the metastore, objectStore or initSql " +
+          "restarts the database's nodes."
       )
       .in(jsonBody[UpdateTenantDbRequest])
       .in(authToken)
@@ -206,5 +212,9 @@ object TenantEndpoints:
   ] =
     base.get
       .in("database" / "metastore-defaults")
+      .description(
+        "The manager's default Postgres connection values, never its password, for a superuser's " +
+          "create form. Anyone else: 403 superuser_required."
+      )
       .in(authToken)
       .out(jsonBody[MetastoreDefaultsResponse])

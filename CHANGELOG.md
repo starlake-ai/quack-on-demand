@@ -15,11 +15,11 @@ cluster (see Fixed), so a database with maintenance enabled runs it for the firs
 upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
 
 A database whose metastore names another Postgres server than QoD's own, with no login of its own,
-stops connecting at the next node start or restart: QoD's login is no longer filled in there. Give it
-its own `pgUser` and `pgPassword` with `qod database update`, or leave `pgHost` and `pgPort` out to use
-QoD's server. Hosts are compared as text: with the default `localhost`, a row naming `127.0.0.1` counts
-as another server. A module calling `PoolSupervisor.createTenantDb` must recompile: it now states
-`adoptExistingDatabase`.
+stops connecting at the next node start or restart: QoD's login is no longer filled in there. Have a
+superuser give it its own `pgUser` and `pgPassword` with `qod database update`, or leave `pgHost` and
+`pgPort` out to use QoD's server. Hosts are compared as text: with the default `localhost`, a row naming
+`127.0.0.1` counts as another server. A module calling `PoolSupervisor.createTenantDb` must recompile: it
+now states `adoptExistingDatabase`.
 
 On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
 is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
@@ -40,11 +40,22 @@ count. To keep counts from a user, refuse on the table.
   `400 invalid_id` to any other, an underscore included, for a superuser too. So does every path that
   creates a tenant through the supervisor: MCP, `qod serve`'s boot provisioning and a module's direct
   call. An existing tenant keeps its name and a manifest import brings any.
+- Only a superuser names a Postgres server. A tenant admin's `database/create` and `database/update`, on
+  REST and MCP, answer `403 superuser_required` with nothing written when they would add, change or
+  remove `pgHost`, `pgPort`, `pgUser`, `pgPassword` or `dbName` on any row (the `dbName` of a
+  `duckdb-file` database names a catalog in its file and stays free). The row is what is judged: an
+  update's metastore replaces the stored one, so it sends these back as the row holds them, with a
+  password left out, and may then change anything else, on every row. There is no exception for rotating
+  the password of a database on another server: a superuser does that. A password sent counts as a change
+  whatever it says. `GET /api/database/metastore-defaults` and MCP `metastore_defaults` answer only a
+  superuser, and the console stops offering these fields to anyone else. A catalog on a server its tenant
+  controls gives that tenant the node's file access, so a superuser who creates one accepts that.
+  Existing such rows keep working and are not judged.
 - A database on another Postgres server than QoD's own needs its own login. `database/create` and
-  `database/update` answer `400 own_login_required` to a metastore whose `pgHost` or `pgPort` differ
-  from the default's without its own `pgUser` and `pgPassword`, for a superuser too, and QoD's login is
-  no longer filled in there, whoever wrote the row. A stored password does not follow a change of host
-  or port: send it again.
+  `database/update` answer `400 own_login_required` to a superuser's metastore whose `pgHost` or `pgPort`
+  differ from the default's without its own `pgUser` and `pgPassword`, and QoD's login is no longer filled
+  in there, whoever wrote the row. A stored password does not follow a change of host or port: send it
+  again.
 - QoD creates and drops no Postgres database on another server than its own. A database there needs its
   catalog database to exist first (`400 catalog_database_missing` names it), `database/delete` and a
   tenant delete leave it, logged at ERROR, and it cannot be branched (`400 branch_own_server`).
@@ -55,8 +66,6 @@ count. To keep counts from a user, refuse on the table.
 - `database/delete` and a tenant delete drop a Postgres database only for a DuckLake row. Deleting a
   `memory` or `duckdb-file` database no longer drops one, and no row's delete drops the control-plane
   database.
-- `database/update` answers `400 db_name_fixed` to a tenant admin's change of a DuckLake database's
-  `dbName`; a superuser may still make it.
 - Only a superuser chooses where a database's data lies on the manager's disk or under the manager's
   keys. A tenant admin leaves `dataPath` out of a DuckLake database, and QoD places it, or names a remote
   path (`s3://`, `s3a://`, `r2://`, `gs://`, `az://`, `azure://`, `abfss://`) with explicit keys of their

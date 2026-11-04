@@ -488,15 +488,15 @@ Semantics worth knowing: `userName` and a group's `displayName` are immutable (a
 # List tenants
 qod tenant list
 
-# Create a tenant, then its database (metastore keys omitted here resolve from
-# the manager's defaultMetastore at spawn time; --metastore KEY=VALUE overrides).
+# Create a tenant, then its database (Postgres connection keys are left out: they resolve
+# from the manager's defaultMetastore at spawn time, and only a superuser sets them).
 # A new tenant's name holds letters and digits only and starts with a letter (400 invalid_id
 # otherwise, for a superuser too): its databases are named <tenant>_<database>, and this keeps two
 # tenants from ever composing the same database name. A tenant that already holds an underscore,
 # or one a manifest import brings, keeps its name.
 qod tenant create acme
 qod database create --tenant acme --name tpch \
-  --metastore dbName=tpch --metastore schemaName=tpch1
+  --metastore schemaName=tpch1
 # A metastore holds only pgHost, pgPort, pgUser, pgPassword, dbName, schemaName,
 # dataPath, catalogAlias and encryptionKey. Only the non-secret ones become a node's
 # environment variables; pgPassword and encryptionKey reach the node only as files.
@@ -516,13 +516,17 @@ qod database create --tenant acme --name tpch \
 # r2://, gs://, az://, azure://, abfss://) with their own keys in --object-store, complete for its
 # scheme. Any other path, on any kind, is a superuser's to name: 403 superuser_required, nothing written.
 #
-# A database may use another Postgres server, with a login of its own: QoD's login goes only to
-# QoD's server, so a metastore whose pgHost or pgPort differ from the default's, compared as text
-# after normalizing (127.0.0.1 is not localhost), answers 400 own_login_required without its own
-# pgUser and pgPassword (leave both pgHost and pgPort out to use QoD's server). Its catalog is its
-# owner's: QoD creates and drops no database there, so create one named <tenant>_<name> first
-# (400 catalog_database_missing names it); database delete and a tenant delete leave it, logged at
-# ERROR; it cannot be branched (400 branch_own_server).
+# Only a superuser names a Postgres server: pgHost, pgPort, pgUser, pgPassword and a DuckLake
+# database's dbName answer anyone else 403 superuser_required, nothing written (the dbName of a
+# duckdb-file database names a catalog in its file and stays free). A superuser may put a database on
+# another server, with a login of its own: QoD's login goes only to QoD's server, so a metastore whose
+# pgHost or pgPort differ from the default's, compared as text after normalizing (127.0.0.1 is not
+# localhost), answers 400 own_login_required without its own pgUser and pgPassword (leave both pgHost
+# and pgPort out to use QoD's server). Its catalog is its owner's: QoD creates and drops no database
+# there, so create one named <tenant>_<name> first (400 catalog_database_missing names it); database
+# delete and a tenant delete leave it, logged at ERROR; it cannot be branched (400 branch_own_server).
+# A catalog on a server its tenant controls gives that tenant the node's file access: a superuser who
+# creates one accepts that.
 qod database create --tenant acme --name byo \
   --metastore pgHost=pg.acme.example --metastore pgPort=5432 \
   --metastore pgUser=acme --metastore pgPassword=...
@@ -1194,7 +1198,7 @@ When creating a tenant-db, pick a `kind`:
 - `duckdb-file` - Local `.duckdb` file at `dataPath`. Single-node only (file must exist on every node).
 - `memory` - No persistent default catalog. Use with `defaultDatabase` pointing at a federated alias.
 
-For `ducklake` creates, Postgres connection keys are optional: anything omitted resolves from the manager's `defaultMetastore` (`QOD_PG_*`) at spawn time, and the row follows later config changes.
+For `ducklake` creates, Postgres connection keys are a superuser's to send: anything omitted resolves from the manager's `defaultMetastore` (`QOD_PG_*`) at spawn time, and the row follows later config changes.
 
 Example: create an in-memory tenant-db that only serves federated sources.
 
@@ -1271,13 +1275,13 @@ place. Restart every node after upgrading, for example by scaling each pool down
 # defaultSchema, initSql. Absent fields stay unchanged; empty clears. Editing
 # metastore/objectStore/initSql restarts ALL the database's nodes immediately
 # (in-flight statements on them fail); default database/schema edits do not.
-# pgPassword is preserved unless you send it: pgPassword=new rotates. Removing a key
+# pgPassword is preserved unless a superuser sends it: pgPassword=new rotates. Removing a key
 # the database's kind requires (incl. pgPassword on ducklake) is rejected.
 # Engine defaults only in initSql, never credentials: the value is stored
 # unredacted and inlined in pod specs; secrets belong in federation sources.
 qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit = '8GB';"
 
-# Rotate the metastore password (restarts the db's nodes):
+# Rotate the metastore password, a superuser's to do (restarts the db's nodes):
 # Send the FULL metastore map when editing it (minus pgPassword to keep it): the map is replaced, and dropping a required key is rejected.
 # A database stored with another key (from an older release) keeps running without it: the key
 # never reaches its nodes (the manager logs it at ERROR once per pool), and an update that sends
@@ -1291,12 +1295,15 @@ qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit 
 qod database update --tenant acme --name acme_tpch \
   --metastore dbName=acme_tpch --metastore pgHost=localhost --metastore pgPort=5432 \
   --metastore pgUser=postgres --metastore schemaName=main --metastore pgPassword=newpass
-# An update answers 400 own_login_required when the result names another server with no login of
-# its own, and when pgHost or pgPort change with the stored password left out: the password does not
-# follow the row, so send it again (or send it empty to go back to QoD's server, where QoD's login
-# fills in; a database holding anything there answers 409 database_name_taken). dbName names the
-# catalog for good: a tenant admin's change answers 400 db_name_fixed (a superuser may). catalogAlias
-# and schemaName name things inside the database's own catalog and stay free.
+# Anyone but a superuser gets 403 superuser_required when the result would add, change or remove any
+# of pgHost, pgPort, pgUser, pgPassword or a DuckLake database's dbName, on any database: send them back
+# as the row holds them, with the password left out, and change the rest. A password sent counts as a
+# change whatever it says. catalogAlias and schemaName name things inside the database's own catalog
+# and stay free.
+# A superuser's update answers 400 own_login_required when the result names another server with no
+# login of its own, and when pgHost or pgPort change with the stored password left out: the password
+# does not follow the row, so send it again (or send it empty to go back to QoD's server, where QoD's
+# login fills in).
 
 # A pool's own initSql (runs after the catalog ATTACH, on the next node spawn):
 qod pool set-init-sql --tenant acme --db acme_tpch --pool bi --init-sql "SET threads = 4;"
@@ -2713,8 +2720,9 @@ eviction are opt-in knobs.
 | `403 superuser_required` on `database create` or `update`, naming the data path | A tenant admin named a local path, a remote one without complete keys of their own, or `metastore.dataPath`, or an update removes such keys | Leave `--data-path` out and QoD places it, or name a remote path with `--object-store` keys for its scheme; any other path takes a superuser |
 | `409 data_path_taken` on `database create` | The folder QoD would place the database in overlaps one another database holds | Choose another name |
 | `400 invalid_contract` naming no default data path on `database create` | No path named, and the deployment has no default data path to place it by, or only a bucket's root | Use `--managed-storage`, or ask a superuser to name a path |
-| `400 db_name_fixed` on `database update` | A tenant admin sent another `dbName`; it names the database's catalog | Leave it out, or send the one it holds; a superuser may change it |
-| A database on another server stopped connecting after an upgrade, with no error before | Its row names another server and has no login of its own: QoD's login is no longer filled in there | `qod database update ... --metastore pgUser=... --metastore pgPassword=...` with the rest of the map |
+| `403 superuser_required` on `database create` or `update`, naming `pgHost`, `pgPort`, `pgUser`, `pgPassword` or `dbName` | Only a superuser sets a database's Postgres server, and the request would add, change or remove one of these | Leave them out of a create; on an update, send them back as the database holds them, with the password left out; or ask a superuser. A database's own password is rotated by a superuser |
+| `403 superuser_required` on `GET /api/database/metastore-defaults` or MCP `metastore_defaults` | They tell QoD's own Postgres address and user, for a superuser's create form | Nothing to do: anyone else's create leaves these keys out |
+| A database on another server stopped connecting after an upgrade, with no error before | Its row names another server and has no login of its own: QoD's login is no longer filled in there | A superuser's `qod database update ... --metastore pgUser=... --metastore pgPassword=...` with the rest of the map |
 | `400 init_sql_refused` on `database create` / `update`, `pool create` / `set-init-sql` | A tenant admin's initSql holds a statement outside the allowlist ("Who may write what in initSql") | Keep only allowlisted SETs, read-only PRAGMAs and extension INSTALL/LOADs, or have a superuser write it |
 | An `INSERT` into an Iceberg table on S3 fails with an HTTP 403 at commit | DuckDB's Iceberg extension commits without connection secrets, and the nodes hold every registered S3 credential as one | Iceberg tables on S3 are read-only through QoD for every principal, superusers included, until upstream duckdb-iceberg signs its commits with connection secrets; write with the warehouse's own tooling |
 | A FlightSQL call fails `UNAUTHENTICATED` with `No bearer auth providers configured` or `Bearer authentication failed: ...` | The client replayed a session bearer the manager no longer holds (it restarted between calls), or sent a token no configured provider accepts | Reconnect with username and password (Basic) |

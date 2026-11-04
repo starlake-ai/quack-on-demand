@@ -68,7 +68,8 @@ final case class TenantDbPatch(
     defaultSchema: Option[String] = None,
     initSql: Option[String] = None,
     // The writer is a superuser or the manager: a carried initSql is then trusted
-    // (InitSqlTrust.afterWrite), and only such a writer may change a DuckLake row's dbName.
+    // (InitSqlTrust.afterWrite), and only such a writer may choose what
+    // TenantDb.superuserChoiceError guards.
     writerTrusted: Boolean = false
 )
 
@@ -2694,7 +2695,7 @@ final class PoolSupervisor(
     * `pgPassword` reverts that key to the manager default at runtime. A metastore naming another
     * server brings its own login, a preserved password does not follow a change of server, a row
     * moving onto QoD's own server meets the rule of a create there, and only a trusted writer
-    * changes `dbName`.
+    * chooses what [[TenantDb.superuserChoiceError]] guards.
     */
   def updateTenantDb(
       tenantName: String,
@@ -2724,9 +2725,11 @@ final class PoolSupervisor(
             .when(!patch.writerTrusted)(
               TenantDb.superuserChoiceError(
                 Some(td),
+                td.kind,
                 merged.dataPath,
                 merged.metastore,
-                merged.objectStore
+                merged.objectStore,
+                patch.metastore.getOrElse(Map.empty)
               )
             )
             .flatten
@@ -2742,9 +2745,19 @@ final class PoolSupervisor(
                 .flatten
                 .map(SupervisorError.DbNameFixed(_))
                 .orElse(
+                  // A row whose server this update leaves as it is stays as it was, an old row
+                  // with no login included.
                   TenantDb
                     .movedPasswordError(td.metastore, merged.metastore, sent, defaultMetastore)
-                    .orElse(TenantDb.ownLoginError(merged.metastore, defaultMetastore))
+                    .orElse(
+                      Option
+                        .when(
+                          TenantDb
+                            .changedServerKeys(Some(td), td.kind, merged.metastore, sent)
+                            .nonEmpty
+                        )(TenantDb.ownLoginError(merged.metastore, defaultMetastore))
+                        .flatten
+                    )
                     .map(SupervisorError.OwnLoginRequired(_))
                 )
             }
