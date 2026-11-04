@@ -9,7 +9,7 @@ import ai.starlake.quack.model.{
 }
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.federation.FederatedSourceRules
-import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
+import ai.starlake.quack.ondemand.federation.iceberg.{IcebergRestConfig, IcebergSourceWarning}
 import ai.starlake.quack.ondemand.federation.rdbms.RdbmsConfig
 import ai.starlake.quack.ondemand.state.FederatedSourceOps
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -347,6 +347,12 @@ final class FederatedSourceHandlers(
                 case Right(source) =>
                   fedStore.upsertSource(source)
                   sourcesChanged(tenantDbId)
+                  if source.sourceType == FederatedSourceType.IcebergRest then
+                    IcebergSourceWarning.print(
+                      tenantIdResolver(tenantName).getOrElse(tenantName),
+                      tenantDbName,
+                      source.alias
+                    )
                   // NEVER include setupSql or config in the audit detail.
                   audit.rest(
                     apiKey,

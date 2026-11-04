@@ -6,6 +6,7 @@ import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig, NodeAuthzConfig, 
 import ai.starlake.quack.edge.auth.{AuthQueryPreconditions, AuthenticationService}
 import ai.starlake.quack.edge.config.{AuthenticationConfig, DatabaseAuthConfig}
 import ai.starlake.quack.model.{FederatedAlias, Names}
+import ai.starlake.quack.ondemand.federation.iceberg.IcebergSourceWarning
 import ai.starlake.quack.ondemand.state.{
   EmailFormat,
   FederatedSourceOps,
@@ -728,6 +729,16 @@ object BootPreflight extends LazyLogging:
       case e: Exception =>
         logger.error(s"checkFederatedAliases: scan failed, skipping: ${e.getMessage}")
         Nil
+
+  /** One stdout line per stored `iceberg_rest` source ([[IcebergSourceWarning]]), `sources` holding
+    * (tenant, database, alias). MUST NOT fail boot and MUST NOT throw, like
+    * [[checkFederatedAliases]].
+    */
+  def warnIcebergSources(sources: => List[(String, String, String)]): Unit =
+    try sources.foreach(IcebergSourceWarning.print)
+    catch
+      case e: Exception =>
+        logger.error(s"warnIcebergSources: scan failed, skipping: ${e.getMessage}")
 
   /** Boot-time check reporting [[invalidFederatedAliases]]: an alias created before every federated
     * alias was normalized falls into one of two cases.

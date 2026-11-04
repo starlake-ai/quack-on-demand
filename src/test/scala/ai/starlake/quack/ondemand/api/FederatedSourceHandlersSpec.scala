@@ -1206,3 +1206,184 @@ class FederatedSourceHandlersSpec
       ).unsafeRunSync()
         .isRight shouldBe true
     }
+
+  // ---------- what the manager prints about an Iceberg source ----------
+
+  /** What `body` prints on stdout about an Iceberg source. */
+  private def printedBy[A](body: => A): (A, List[String]) =
+    val out      = new java.io.ByteArrayOutputStream()
+    val previous = System.out
+    System.setOut(new java.io.PrintStream(out, true, "UTF-8"))
+    try
+      val a = body
+      (a, out.toString("UTF-8").linesIterator.filter(_.startsWith("WARN: Iceberg")).toList)
+    finally System.setOut(previous)
+
+  private def lineOf(alias: String) =
+    s"WARN: Iceberg source acme/acme_prod/$alias: a node reads whatever files its catalog lists, " +
+      "local files included. In production disable local file access on its nodes (a superuser's " +
+      "init SQL: SET disabled_filesystems = 'LocalFileSystem', on an object-store pool)."
+
+  private val tenantAdminScope: SessionScope.Resolver =
+    _ => SessionScope(superuser = false, manageableTenants = Set("acme"))
+
+  private def asTenantAdmin(
+      fs: FederatedSourceStore,
+      resolver: (String, String) => Option[String]
+  ) =
+    new FederatedSourceHandlers(
+      fs,
+      resolver,
+      scopeOf = tenantAdminScope,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+      catalogAliasOf = _ => None
+    )
+
+  "An iceberg_rest source" should "print one line when created and one when changed" in
+    withHandlers { (h, _) =>
+      val (created, first) =
+        printedBy(h.createSource("acme", "acme_prod", iceReq("lake_a"), None).unsafeRunSync())
+      created.isRight shouldBe true
+      first shouldBe List(lineOf("lake_a"))
+      val (changed, second) = printedBy(
+        h.createSource(
+          "acme",
+          "acme_prod",
+          iceReq("lake_a").copy(description = Some("the lake")),
+          None
+        ).unsafeRunSync()
+      )
+      changed.isRight shouldBe true
+      second shouldBe List(lineOf("lake_a"))
+    }
+
+  it should "print for a tenant admin, whose write it does not refuse" in
+    withEnv { (fs, resolver, _) =>
+      val h                = asTenantAdmin(fs, resolver)
+      val (created, first) =
+        printedBy(h.createSource("acme", "acme_prod", iceReq("lake_b"), None).unsafeRunSync())
+      withClue(created)(created.isRight shouldBe true)
+      first shouldBe List(lineOf("lake_b"))
+      val (changed, second) = printedBy(
+        h.createSource(
+          "acme",
+          "acme_prod",
+          iceReq("lake_b", readOnly = Some(false)),
+          None
+        ).unsafeRunSync()
+      )
+      changed.isRight shouldBe true
+      second shouldBe List(lineOf("lake_b"))
+    }
+
+  it should "print for a disabled source, and name it as it is stored" in withHandlers { (h, _) =>
+    val (_, lines) = printedBy(
+      h.createSource(
+        "acme",
+        "acme_prod",
+        iceReq("Lake_C").copy(disabled = true),
+        None
+      ).unsafeRunSync()
+    )
+    lines shouldBe List(lineOf("lake_c"))
+  }
+
+  it should "print nothing for a write it refuses" in withHandlers { (h, _) =>
+    val (out, lines) =
+      printedBy(h.createSource("acme", "acme_prod", iceReq("not-an-alias"), None).unsafeRunSync())
+    out.isLeft shouldBe true
+    lines shouldBe Nil
+  }
+
+  it should "say nothing of its connection" in withHandlers { (h, _) =>
+    val cfg = IcebergRestConfig(
+      uri = "https://catalog.example.com/api/catalog",
+      warehouse = "wh_sentinel",
+      authType = Some(IcebergAuthType.OAuth2),
+      clientId = Some("client_sentinel"),
+      clientSecret = Some("{{secret.CSEC}}")
+    )
+    val (_, lines) = printedBy(
+      h.createSource(
+        "acme",
+        "acme_prod",
+        iceReq("lake_d", cfg = cfg).copy(description = Some("desc_sentinel")),
+        None
+      ).unsafeRunSync()
+    )
+    lines should have size 1
+    List(
+      "catalog.example.com",
+      "wh_sentinel",
+      "client_sentinel",
+      "CSEC",
+      "secret.",
+      "desc_sentinel"
+    )
+      .foreach(lines.head should not include _)
+  }
+
+  "A source of another type" should "print nothing, on create or change" in withHandlers { (h, _) =>
+    val requests = List(
+      pgReq("shop_pg"),
+      pgReq("shop_my", sourceType = "mysql"),
+      FederatedSourceCreateRequest(alias = "fedsql", setupSql = Some("INSTALL postgres;"))
+    )
+    val (out, lines) = printedBy(
+      requests.flatMap(r =>
+        List(
+          h.createSource("acme", "acme_prod", r, None).unsafeRunSync(),
+          h.createSource("acme", "acme_prod", r, None).unsafeRunSync()
+        )
+      )
+    )
+    out.foreach(r => withClue(r)(r.isRight shouldBe true))
+    lines shouldBe Nil
+  }
+
+  "BootPreflight.warnIcebergSources" should
+    "print one line per stored iceberg_rest source, disabled or not, and none for another type" in
+    withEnv { (fs, _, tdId) =>
+      def source(alias: String, kind: FederatedSourceType, disabled: Boolean = false) =
+        fs.upsertSource(
+          FederatedSource(
+            id = s"fs-$alias",
+            tenantDbId = tdId,
+            alias = alias,
+            setupSql = "",
+            disabled = disabled,
+            sourceType = kind,
+            config = Some("""{"uri":"https://catalog.example.com","token":"sentinel"}""")
+          )
+        )
+      source("lake_a", FederatedSourceType.IcebergRest)
+      source("lake_b", FederatedSourceType.IcebergRest, disabled = true)
+      source("shop_pg", FederatedSourceType.Postgres)
+      source("shop_my", FederatedSourceType.Mysql)
+      source("fedsql", FederatedSourceType.Sql)
+      val (_, lines) = printedBy(
+        ai.starlake.quack.boot.BootPreflight
+          .warnIcebergSources(fs.sourceNames(FederatedSourceType.IcebergRest))
+      )
+      lines shouldBe List(lineOf("lake_a"), lineOf("lake_b"))
+      lines.foreach { l =>
+        l should not include "catalog.example.com"
+        l should not include "sentinel"
+      }
+    }
+
+  it should "never fail a boot" in {
+    val (_, lines) =
+      printedBy(
+        ai.starlake.quack.boot.BootPreflight.warnIcebergSources(throw new RuntimeException("boom"))
+      )
+    lines shouldBe Nil
+  }
+
+  "IcebergSourceWarning.line" should "stay one line, whatever a stored name holds" in {
+    val line = ai.starlake.quack.ondemand.federation.iceberg.IcebergSourceWarning
+      .line("acme", "acme_prod", "old\nWARN: forged")
+    line.linesIterator.size shouldBe 1
+    line should startWith("WARN: Iceberg source acme/acme_prod/old\\u000aWARN: forged: ")
+  }

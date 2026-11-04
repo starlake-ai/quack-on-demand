@@ -351,7 +351,8 @@ with `OVERWRITE` deletes files under its target. A data path the checker cannot 
 on the node (a relative one off the local runtime, or `DataFolders.Unplaced`: a DuckLake or
 duckdb-file row with no data path while the default metastore has none) denies every local location
 to every tenant. Every other scheme (`http(s)`, `gs`, `az`, `r2`) is refused to non-superusers. Not
-covered: an attached Iceberg catalog's raw warehouse files (decision 21). An Iceberg catalog that
+covered: an attached Iceberg catalog's raw warehouse files (decision 21); a node reads whatever files
+its catalog lists, so the manager prints one stdout `WARN:` line per `iceberg_rest` source (`IcebergSourceWarning`: disabled ones too, from `FederatedSourceHandlers.createSource` on a create or a change, and from `BootPreflight.warnIcebergSources` at each boot, never at node spawn), naming the source and nothing of its connection. An Iceberg catalog that
 neither vends credentials nor has `awsCredentials` reads its table data with each reading user's own
 keys. Iceberg tables on S3 are read-only through QoD for every principal, superusers included, until
 upstream duckdb-iceberg signs its commits with connection secrets (DuckDB v2.0.0 commits manifests

@@ -84,6 +84,9 @@ count. To keep counts from a user, refuse on the table.
 
 ### Added
 
+- The manager prints a `WARN:` line on stdout for each `iceberg_rest` federated source, when one is
+  created or changed and at each boot: a node reads whatever files its catalog lists, local files
+  included. It names the source and nothing of its connection, and refuses nothing.
 - **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
   (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
   proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,

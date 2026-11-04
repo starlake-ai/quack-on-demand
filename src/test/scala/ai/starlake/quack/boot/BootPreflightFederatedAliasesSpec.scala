@@ -29,6 +29,14 @@ class BootPreflightFederatedAliasesSpec extends AnyFlatSpec with Matchers:
     def listSecrets(sourceId: String): List[FederatedSecret]                  = Nil
     def tenantDbIdsWithSources(): Set[String] = throw new RuntimeException("boom")
 
+  "Main" should "print the Iceberg warnings at boot, beside the aliases' check" in {
+    val main =
+      java.nio.file.Files
+        .readString(java.nio.file.Paths.get("src/main/scala/ai/starlake/quack/Main.scala"))
+    main should include("BootPreflight.warnIcebergSources")
+    main should include("fs.sourceNames(FederatedSourceType.IcebergRest)")
+  }
+
   "invalidFederatedAliases" should
     "return exactly the invalid pair when a store has one invalid and one valid alias" in {
       val store = new InMemoryFederatedSourceStore

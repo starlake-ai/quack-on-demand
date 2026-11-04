@@ -154,6 +154,26 @@ class FederatedSourceStore(
     )
   }
 
+  /** (tenant, database, alias) of every stored source of `sourceType`, disabled ones included. */
+  def sourceNames(sourceType: FederatedSourceType): List[(String, String, String)] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT d.tenant_id, d.name, s.alias
+        |FROM qodstate_federated_source s
+        |JOIN qodstate_tenant_db d ON d.id = s.tenant_db_id
+        |WHERE s.source_type = ?
+        |ORDER BY d.tenant_id, d.name, s.alias""".stripMargin
+    )
+    try
+      ps.setString(1, sourceType.wire)
+      val rs = ps.executeQuery()
+      try
+        val buf = ListBuffer.empty[(String, String, String)]
+        while rs.next() do buf += ((rs.getString(1), rs.getString(2), rs.getString(3)))
+        buf.toList
+      finally rs.close()
+    finally ps.close()
+  }
+
   def tenantDbIdsWithSources(): Set[String] = withConn { c =>
     val ps = c.prepareStatement(
       "SELECT DISTINCT tenant_db_id FROM qodstate_federated_source WHERE disabled = false"

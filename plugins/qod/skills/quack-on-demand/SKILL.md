@@ -1625,6 +1625,11 @@ Flags:
 
 Rules worth knowing before the first create:
 
+- **A node reads whatever files the catalog lists, local files included.** The
+  manager prints a `WARN:` line on its stdout when such a source is created or
+  changed and at each boot. In production disable local file access on its nodes
+  (a superuser's init SQL: `SET disabled_filesystems = 'LocalFileSystem'`, on an
+  object-store pool).
 - **Credentials must be placeholders.** `--client-secret` / `--token` holding a
   literal is a `400`: they must match `{{secret.NAME}}` exactly, and the value
   lives in `qod federation secret set`. That is what keeps the config safe to

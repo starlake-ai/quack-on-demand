@@ -24,7 +24,7 @@ import ai.starlake.quack.boot.{
   NettyMemory
 }
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
-import ai.starlake.quack.model.{RunningNode, TenantDb}
+import ai.starlake.quack.model.{FederatedSourceType, RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
   MetricsBindings,
@@ -608,6 +608,9 @@ object Main extends IOApp with LazyLogging:
     // Best-effort: reports (never fails boot on) a federated alias the naming rule now rejects,
     // so an operator learns about it on restart rather than on their next edit attempt.
     manifestFedStore.foreach(BootPreflight.checkFederatedAliases)
+    manifestFedStore.foreach(fs =>
+      BootPreflight.warnIcebergSources(fs.sourceNames(FederatedSourceType.IcebergRest))
+    )
 
     // Declared here (rather than just above catalogReaders below) so federationBlobOf can also
     // close over it: both need the supervisor's tenant-db resolution but are themselves inputs to

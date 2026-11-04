@@ -446,6 +446,24 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
     * fails here rather than silently storing a mixed-case alias DuckDB then treats as a duplicate
     * of its lowercase twin.
     */
+  it should "print the Iceberg warning on the MCP path, for a tenant admin too" in
+    withTools(withFederation = true) { (tools, _) =>
+      def printedBy(principal: McpPrincipal, alias: String) =
+        val out      = new java.io.ByteArrayOutputStream()
+        val previous = System.out
+        System.setOut(new java.io.PrintStream(out, true, "UTF-8"))
+        try
+          val answer = call(tools, "upsert_federated_source", principal, icebergArgs(alias)*)
+          withClue(answer)(answer.isRight shouldBe true)
+        finally System.setOut(previous)
+        out.toString("UTF-8").linesIterator.filter(_.startsWith("WARN: Iceberg")).toList
+      val lines = printedBy(McpSuperuserPat.principal, "lake_one")
+      lines should have size 1
+      lines.head should include(s"$Tenant0/")
+      lines.head should include("/lake_one: a node reads whatever files its catalog lists")
+      printedBy(tenantPat, "lake_two").map(_.contains("/lake_two: ")) shouldBe List(true)
+    }
+
   it should "normalize a mixed-case alias on the MCP path" in
     withTools(withFederation = true) { (tools, _) =>
       val created =
