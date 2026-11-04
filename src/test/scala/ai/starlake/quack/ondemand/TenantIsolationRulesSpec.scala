@@ -983,11 +983,9 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       }
     }
     f.row("acme_s3").objectStore shouldBe OwnKeys
-    // Changed and complete, with the stored secret carried.
-    f.updateStore(tenantAdmin, "acme_s3", Map("s3_access_key_id" -> "AK2")) shouldBe Right(
-      "acme_s3"
-    )
-    f.row("acme_s3").objectStore("s3_secret_access_key") shouldBe "SK"
+    // What it was shown, sent back: no change, the stored secret kept.
+    f.updateStore(tenantAdmin, "acme_s3", Map("s3_access_key_id" -> "AK")) shouldBe Right("acme_s3")
+    f.row("acme_s3").objectStore shouldBe OwnKeys
     // A superuser may.
     f.updateStore(superuser, "acme_s3", Map("s3_secret_access_key" -> "")) shouldBe Right("acme_s3")
   }
@@ -1679,33 +1677,123 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       .isRight shouldBe true
   }
 
-  it should "let a row holding complete own keys change them, the endpoint included" in {
-    val f = new Fixture
-    f.rest(tenantAdmin, "own", dataPath = Remote, objectStore = OwnKeys) shouldBe Right("acme_own")
-    // The secret left out is the stored one.
-    f.updateStore(
-      tenantAdmin,
-      "acme_own",
-      Map("s3_access_key_id" -> "AK2", "s3_endpoint" -> "h:9000")
-    ) shouldBe Right("acme_own")
-    f.row("acme_own").objectStore shouldBe Map(
-      "s3_access_key_id"     -> "AK2",
-      "s3_endpoint"          -> "h:9000",
-      "s3_secret_access_key" -> "SK"
+  /** Each scheme: its data path, the keys a row holds and what a response shows of them. */
+  private val OwnKeysByScheme = List(
+    (
+      Remote,
+      OwnKeys ++ Map("s3_endpoint" -> "h:9000", "s3_region" -> "eu-west-1"),
+      "s3_secret_access_key"
+    ),
+    (
+      "gs://own-bucket/lake/",
+      Map("gcs_hmac_key_id" -> "GK", "gcs_hmac_secret" -> "GS"),
+      "gcs_hmac_secret"
+    ),
+    (
+      "az://own/lake/",
+      Map("azure_account" -> "acct", "azure_account_key" -> "AS"),
+      "azure_account_key"
     )
-    // And they stay complete.
+  )
+
+  it should "need a row's secret sent with any other change of its own keys" in {
+    val f = new Fixture
+    OwnKeysByScheme.zipWithIndex.foreach { case ((path, stored, secret), i) =>
+      val name = s"acme_own$i"
+      rowWith(f, name, path, stored)
+      val shown = stored - secret
+      shown.keys.foreach { key =>
+        withClue(key) {
+          val out = f.updateStore(tenantAdmin, name, shown.updated(key, "a-new-value"))
+          codeOf(out) shouldBe (StatusCode.Forbidden, "superuser_required")
+          val said = out.left.toOption.get._2.message
+          said should include(secret)
+          said should include("leave objectStore out")
+          stored.values.foreach(v => said should not include v)
+          f.row(name).objectStore shouldBe stored
+        }
+      }
+      // A key the row did not hold is a change too.
+      codeOf(f.updateStore(tenantAdmin, name, shown + ("s3_url_style" -> "path"))) shouldBe
+        (StatusCode.Forbidden, "superuser_required")
+      f.row(name).objectStore shouldBe stored
+    }
+    // A key it leaves out, where the rest stay complete, as well.
+    f.updateStore(superuser, "acme_own0", OwnKeysByScheme.head._2) shouldBe Right("acme_own0")
+    codeOf(
+      f.updateStore(
+        tenantAdmin,
+        "acme_own0",
+        OwnKeysByScheme.head._2 - "s3_secret_access_key" - "s3_endpoint"
+      )
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+    f.sup
+      .updateTenantDb(
+        "acme",
+        "acme_own0",
+        TenantDbPatch(objectStore = Some(Map("s3_access_key_id" -> "AK2")))
+      )
+      .unsafeRunSync()
+      .left
+      .toOption
+      .get shouldBe a[SupervisorError.SuperuserChoice]
+  }
+
+  it should "take a change of a row's own keys with the secret sent, or the secret alone" in {
+    val f = new Fixture
+    OwnKeysByScheme.zipWithIndex.foreach { case ((path, stored, secret), i) =>
+      val name = s"acme_own$i"
+      rowWith(f, name, path, stored)
+      val shown = stored - secret
+      val key   = shown.keys.head
+      f.updateStore(
+        tenantAdmin,
+        name,
+        shown.updated(key, "a-new-value") + (secret -> "own-secret")
+      ) shouldBe
+        Right(name)
+      f.row(name)
+        .objectStore shouldBe stored.updated(key, "a-new-value").updated(secret, "own-secret")
+      // The secret alone: what was shown, sent back with it.
+      val now = f.row(name).objectStore - secret
+      f.updateStore(tenantAdmin, name, now + (secret -> "own-secret-2")) shouldBe Right(name)
+      f.row(name).objectStore shouldBe now.updated(secret, "own-secret-2")
+      // A value left as stored: what was shown, sent back, the secret kept.
+      f.updateStore(tenantAdmin, name, now) shouldBe Right(name)
+      f.row(name).objectStore shouldBe now.updated(secret, "own-secret-2")
+    }
+    // And they stay complete, the secret sent or not.
     List(
-      Map("s3_endpoint"      -> "h:9000"),
-      Map("s3_access_key_id" -> "AK2", "s3_secret_access_key" -> ""),
-      Map("s3_access_key_id" -> " ", "s3_endpoint"            -> "h:9000"),
+      Map("s3_secret_access_key" -> "own-secret-3"),
+      Map("s3_access_key_id"     -> "a-new-value", "s3_secret_access_key" -> ""),
+      Map("s3_access_key_id"     -> " ", "s3_secret_access_key"           -> "own-secret-3"),
+      Map("s3_access_key_id"     -> "a-new-value", "s3_secret_access_key" -> " "),
+      Map("s3_endpoint"          -> "h:9000"),
       Map.empty[String, String]
     ).foreach { store =>
       withClue(store.keySet.toString) {
-        codeOf(f.updateStore(tenantAdmin, "acme_own", store)) shouldBe
+        codeOf(f.updateStore(tenantAdmin, "acme_own0", store)) shouldBe
           (StatusCode.Forbidden, "superuser_required")
       }
     }
-    f.row("acme_own").objectStore("s3_access_key_id") shouldBe "AK2"
+    f.row("acme_own0").objectStore("s3_secret_access_key") shouldBe "own-secret-2"
+  }
+
+  it should "not judge a superuser, whose secret stays where it is" in {
+    val f      = new Fixture
+    val stored = OwnKeys + ("s3_endpoint" -> "h:9000")
+    rowWith(f, "acme_su", Remote, stored)
+    f.updateStore(
+      superuser,
+      "acme_su",
+      Map("s3_access_key_id" -> "AK2", "s3_endpoint" -> "h2:9000")
+    ) shouldBe
+      Right("acme_su")
+    f.row("acme_su").objectStore shouldBe Map(
+      "s3_access_key_id"     -> "AK2",
+      "s3_endpoint"          -> "h2:9000",
+      "s3_secret_access_key" -> "SK"
+    )
   }
 
   it should "not judge a stored value it leaves as it is, and take no other change to one" in {

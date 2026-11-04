@@ -1154,8 +1154,11 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
       "objectStore" -> Json.obj("s3_access_key_id" -> s("AK"), "s3_secret_access_key" -> s("SK"))
     )
     noRoomCreate shouldBe 403
-    // Changed and complete, it stays: the secret left out is the stored one.
-    updateKeys("s3_access_key_id" -> "AK2", "s3_region" -> "eu-west-1")._1 shouldBe 200
+    // Changed and complete, it needs the secret sent with it.
+    val (noSecret, noSecretBody) =
+      updateKeys("s3_access_key_id" -> "AK2", "s3_region" -> "eu-west-1")
+    noSecret shouldBe 403
+    errorOf(noSecretBody) shouldBe "superuser_required"
     updateKeys("s3_access_key_id" -> "AK3", "s3_secret_access_key" -> "SK3")._1 shouldBe 200
     // A superuser may clear them.
     stack

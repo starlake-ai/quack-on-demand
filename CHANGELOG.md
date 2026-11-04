@@ -82,8 +82,10 @@ count. To keep counts from a user, refuse on the table.
   provisioning and a manifest import are not judged.
 - A tenant admin's `objectStore` goes only with a remote path, as that path's own keys. A create sends it
   with a named remote path it completes, and with no path it answers `403 superuser_required`. An update
-  changes it only on a database holding complete keys of its own, which may change, the endpoint included,
-  and stay complete. Every other database takes no change from a tenant admin: adding, changing or clearing
+  changes it only on a database holding complete keys of its own, which stay complete, and any change to
+  them needs the scheme's secret sent in the same request: an endpoint, a region or a key id alone answers
+  `403 superuser_required`, so a stored secret goes only with what it was saved with. Every other database
+  takes no change from a tenant admin: adding, changing or clearing
   answers `403 superuser_required`, nothing written. That covers a database QoD placed, a superuser's remote
   database, a local one, a value that was never complete, and one of managed storage or a branch of it,
   whose `objectStore` holds QoD's keys. A value left as stored is not judged, so an edit not touching it

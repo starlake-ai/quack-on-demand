@@ -1372,9 +1372,10 @@ scoped to that database's data path and its branches: exact back-compat for
 every deployment that only ever used one set of keys. A
 path that falls back on them is a superuser's to name. A tenant admin sends `objectStore`
 on a create only with a remote path it completes, and changes it only on a database holding
-complete keys of its own, which may change, the endpoint included, and stay complete. Every
-other database's, one QoD placed or of managed storage included, is a superuser's to add,
-change or clear (`403 superuser_required`); an edit leaving it as stored still works.
+complete keys of its own, which stay complete, sending the scheme's secret with any change: an
+endpoint, a region or a key id alone answers `403 superuser_required`. Every other database's,
+one QoD placed or of managed storage included, is a superuser's to add, change or clear (`403
+superuser_required`); an edit leaving it as stored still works.
 On Kubernetes the resolved SQL is never inlined in the pod spec: it lands in a
 per-node Secret `qod-store-${nodeId}` injected via `env.valueFrom.secretKeyRef`
 (same pattern as the per-pod token and per-pool federation secrets); `kubectl
@@ -2730,7 +2731,7 @@ eviction are opt-in knobs.
 | `400 own_login_required` on `database create` or `update` | The metastore names another server than QoD's own (host and port, compared as text) without its own `pgUser` and `pgPassword`, or an update moves the row with its stored password left out | Send the login for that server, or leave `pgHost` and `pgPort` out to use QoD's |
 | `400 catalog_database_missing` on `database create` | The database names another server, where QoD creates no database, and its catalog database is not there | Create the database the message names on that server, then create again |
 | `403 superuser_required` on `database create` or `update`, naming the data path | A tenant admin named a local path, a remote one without complete keys of their own, or `metastore.dataPath`, or an update removes such keys | Leave `--data-path` out and QoD places it, or name a remote path with `--object-store` keys for its scheme; any other path takes a superuser |
-| `403 superuser_required` on `database create` or `update`, naming `objectStore` | A create sent it with no remote path it completes, or the database holds no complete keys of its own: one QoD placed, of managed storage, or a value that was never complete | Leave `--object-store` out, or on a create send it with a remote `--data-path` and every key of its scheme; a superuser may set anything else |
+| `403 superuser_required` on `database create` or `update`, naming `objectStore` | A create sent it with no remote path it completes, the database holds no complete keys of its own (one QoD placed, of managed storage, or a value that was never complete), or a change to its own keys came without the secret | Leave `--object-store` out, on a create send it with a remote `--data-path` and every key of its scheme, or on a change of a database's own keys send its secret too; a superuser may set anything else |
 | `409 data_path_taken` on `database create` | The folder QoD would place the database in, or the remote path a tenant admin named, overlaps one another database holds, held within the last ten minutes, or a managed prefix within retention | Choose another name, or another path |
 | `400 invalid_contract` naming no default data path on `database create` | No path named, and the deployment has no default data path to place it by, or only a bucket's root | Use `--managed-storage`, or ask a superuser to name a path |
 | `403 superuser_required` on `database create` or `update`, naming `pgHost`, `pgPort`, `pgUser`, `pgPassword` or `dbName` | Only a superuser sets a database's Postgres server, and the request would add, change or remove one of these | Leave them out of a create; on an update, send them back as the database holds them, with the password left out; or ask a superuser. A database's own password is rotated by a superuser |

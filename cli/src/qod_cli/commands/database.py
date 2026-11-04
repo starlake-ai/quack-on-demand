@@ -145,7 +145,8 @@ def update(
         None,
         "--object-store",
         help="KEY=VALUE, repeatable; omit = unchanged, a secret left out is kept. A tenant admin "
-        "changes it only on a database holding complete keys of its own, which stay complete.",
+        "changes it only on a database holding complete keys of its own, which stay complete, "
+        "and sends the secret with any change.",
     ),
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),

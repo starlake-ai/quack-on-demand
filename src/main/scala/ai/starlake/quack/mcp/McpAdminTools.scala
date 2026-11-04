@@ -955,7 +955,7 @@ final class McpAdminTools(
       ),
       "object_store" -> objProp(
         "Replacement object-store config (omit = unchanged). Unless you are a superuser: only on a " +
-          "database holding complete keys of its own, which stay complete."
+          "database holding complete keys of its own, which stay complete, with the secret sent."
       ),
       "default_database" -> strProp("New default catalog (omit = unchanged)."),
       "default_schema"   -> strProp("New default schema (omit = unchanged)."),

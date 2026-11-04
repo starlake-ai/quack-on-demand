@@ -425,9 +425,23 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
       ).isDefined shouldBe true
       update(old, old.objectStore, sentStore = Map("s3_secret_access_key" -> "")) shouldBe None
     }
-    // A row holding them may change them, and they stay complete.
-    update(remoteRow, keys + ("s3_endpoint" -> "h")) shouldBe None
+    // A row holding them may change them with the secret sent, and they stay complete.
+    update(remoteRow, keys + ("s3_endpoint" -> "h")).isDefined shouldBe true
+    update(remoteRow, keys.updated("s3_access_key_id", "k2")).isDefined shouldBe true
+    update(remoteRow, keys + ("s3_endpoint" -> "h"), sentStore = keys) shouldBe None
     update(remoteRow, keys, sentStore = keys) shouldBe None
+    update(remoteRow, keys.updated("s3_secret_access_key", "s2"), sentStore = keys) shouldBe None
+    // Blank, or in another spelling, it is not sent.
+    update(
+      remoteRow,
+      keys + ("s3_endpoint" -> "h"),
+      sentStore = Map("s3_secret_access_key" -> " ")
+    ).isDefined shouldBe true
+    update(
+      remoteRow,
+      keys + ("s3_endpoint" -> "h"),
+      sentStore = Map("S3_Secret_Access_Key" -> "s2")
+    ).isDefined shouldBe true
     update(remoteRow, keys - "s3_secret_access_key").isDefined shouldBe true
     update(remoteRow, Map.empty).isDefined shouldBe true
     // A managed row's are QoD's: nothing changes them, complete or not.

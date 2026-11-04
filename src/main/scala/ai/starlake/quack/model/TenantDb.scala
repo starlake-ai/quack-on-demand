@@ -397,8 +397,11 @@ object TenantDb {
     * create names no path (QoD places a DuckLake database), or a remote one with own keys
     * ([[holdsOwnKeys]]), and never a `metastore.dataPath`; an `objectStore` goes only with such a
     * path. An update leaves `metastore.dataPath` as it is. An `objectStore` it changes (`sentStore`
-    * is what it sent) is a row's own keys: a row holding them complete may change them, and they
-    * stay complete; any other row, one of managed storage (`managedRow`) included, takes no change.
+    * is what it sent) is a row's own keys: a row holding them complete keeps them complete, and any
+    * other value of it changes only with the scheme's secret sent in the same request, so a stored
+    * secret goes only with what it was saved with, as a tenant's client secret goes only to its
+    * issuer (`TenantSignInWrite`). Any other row, one of managed storage (`managedRow`) included,
+    * takes no change.
     */
   def superuserChoiceError(
       stored: Option[TenantDb],
@@ -438,10 +441,16 @@ object TenantDb {
             "a superuser changes this database's objectStore, as it holds no keys of its own: " +
               "leave objectStore out"
           )
-        else
-          Option.when(!holdsOwnKeys(path, objectStore))(
+        else if !holdsOwnKeys(path, objectStore) then
+          Some(
             "this database's remote data path signs with its own keys in objectStore: they can " +
               "change, but stay complete for its scheme. Send them, or leave objectStore out."
+          )
+        else
+          val secret = ownKeyNames(path).toList.flatten.filter(isSecretKey)
+          Option.when(!secret.exists(k => sentStore.get(k).exists(_.trim.nonEmpty)))(
+            s"a change to this database's objectStore needs its secret, ${secret.mkString(", ")}, " +
+              "sent in the same request: send it with the change, or leave objectStore out"
           )
     storage.orElse(serverChoiceError(stored, kind, metastore, sent))
 

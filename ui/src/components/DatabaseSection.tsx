@@ -499,8 +499,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               {!superuser && (
                 <p className="subtle" style={{ marginBottom: 4 }}>
                   A superuser&rsquo;s to change, unless this database holds complete keys of its own
-                  for a remote data path: those may change and stay complete, and a secret left out
-                  is kept.
+                  for a remote data path: a change to those needs the secret sent with it, on a line
+                  of its own (s3_secret_access_key, gcs_hmac_secret or azure_account_key), and they
+                  stay complete. Left as shown, the stored secret is kept.
                 </p>
               )}
               <textarea value={editObjectStore} rows={4}

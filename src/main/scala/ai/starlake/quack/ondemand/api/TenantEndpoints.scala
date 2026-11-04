@@ -198,8 +198,9 @@ object TenantEndpoints:
         "Update a database. metastore and objectStore replace the stored maps, except that a " +
           "secret they leave out is kept and one sent empty is removed. A caller who is not a " +
           "superuser leaves metastore.dataPath as it is, changes objectStore only on a row " +
-          "holding complete keys of its own, which stay complete and never on a managed-storage " +
-          "row, and adds, changes or removes none of pgHost, pgPort, pgUser, pgPassword " +
+          "holding complete keys of its own, which stay complete, with the scheme's secret sent " +
+          "in the same request and never on a managed-storage row, and adds, changes or removes " +
+          "none of pgHost, pgPort, pgUser, pgPassword " +
           "or dbName (dbName stays free on kind=duckdb-file): 403 superuser_required otherwise, " +
           "nothing written. They stay as stored when sent back as the row holds them, with a " +
           "password left out. An update that changes the metastore, objectStore or initSql " +

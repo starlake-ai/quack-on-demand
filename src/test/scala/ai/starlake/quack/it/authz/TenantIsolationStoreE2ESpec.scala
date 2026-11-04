@@ -284,6 +284,64 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
       }
     }
 
+  "A superuser's database holding its own keys" should
+    "keep them for a tenant admin who does not send the secret" in {
+      ready()
+      val t     = s"${Prefix}a3$run"
+      val token = tenantWithAdmin(t, "pc")
+      val path  = s"s3://$Bucket/$Prefix$run/own/$t/"
+      val keys  = Map(
+        "s3_access_key_id"     -> sys.env("QOD_S3_ACCESS_KEY_ID"),
+        "s3_secret_access_key" -> sys.env.getOrElse("QOD_S3_SECRET_ACCESS_KEY", ""),
+        "s3_endpoint"          -> s"http://$endpoint",
+        "s3_url_style"         -> "path",
+        "s3_region"            -> "us-east-1"
+      )
+      val name = createDb(
+        t,
+        "owned",
+        su,
+        "dataPath"    -> s(path),
+        "objectStore" -> Json.obj(keys.toList.map((k, v) => k -> s(v))*)
+      )
+      openPool(t, name, "pc", su)
+      serving(t, "pc", "pc")
+      writeRows(t, name, "pc", "pc", path)
+      val before = secrets(t, "pc")
+      withClue(before.toString) {
+        before.exists(l => l.startsWith("qod_db_store") && l.endsWith(endpoint)) shouldBe true
+      }
+      val shown = objectStoreOf(t, name, token)
+      shown.keySet should not contain "s3_secret_access_key"
+
+      val moved = shown.updated("s3_endpoint", "http://127.0.0.1:1")
+      refused(updateStore(t, name, token, moved))
+      objectStoreOf(t, name, token) shouldBe shown
+      secrets(t, "pc") shouldBe before
+
+      // What it was shown, sent back, is no change, and an edit not touching it goes through.
+      updateStore(t, name, token, shown)._1 shouldBe 200
+      val (code, body) = stack.postStatus(
+        "/api/database/update",
+        obj("tenant" -> s(t), "name" -> s(name), "initSql" -> s("SET threads = 2;")),
+        token
+      )
+      withClue(body.take(300))(code shouldBe 200)
+      serving(t, "pc", "pc")
+      secrets(t, "pc") shouldBe before
+      rowsRead(t, name, "pc", "pc") shouldBe Right(List("20000"))
+
+      // What these reads tell apart: with the secret sent, the same change goes through.
+      val (own, ownBody) =
+        updateStore(t, name, token, moved + ("s3_secret_access_key" -> "own-secret-sentinel"))
+      withClue(ownBody.take(300))(own shouldBe 200)
+      serving(t, "pc", "pc")
+      val after = secrets(t, "pc")
+      withClue(after.toString) {
+        after.exists(l => l.startsWith("qod_db_store") && l.endsWith("127.0.0.1:1")) shouldBe true
+      }
+    }
+
   "A database of managed storage" should
     "keep QoD's keys, whatever a tenant admin sends, and stay editable otherwise" in {
       ready()
