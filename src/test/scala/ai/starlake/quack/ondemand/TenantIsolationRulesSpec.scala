@@ -593,6 +593,32 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.inits.map(_._1("dbName")).toList should not contain "acme_odd3"
   }
 
+  it should "refuse whitespace in every value around the connection, on each write" in {
+    val f = new Fixture
+    f.create("lake").isRight shouldBe true
+    f.inits.clear()
+    val values = List(
+      "pgHost"     -> "pg.internal port=1",
+      "pgPort"     -> "5432 host=pg.other",
+      "pgUser"     -> "qod host=pg.other",
+      "dbName"     -> "x host=pg.other",
+      "schemaName" -> "main host=pg.other"
+    )
+    values.zipWithIndex.foreach { case ((k, v), i) =>
+      withClue(k) {
+        // A create replaces the dbName it is sent with the composed name.
+        if k != "dbName" then
+          codeOf(f.rest(tenantAdmin, s"odd$i", Map(k -> v))) shouldBe
+            (StatusCode.BadRequest, "invalid_contract")
+        codeOf(f.update(tenantAdmin, "acme_lake", Map(k -> v))) shouldBe
+          (StatusCode.BadRequest, "invalid")
+      }
+    }
+    f.inits shouldBe empty
+    f.rows shouldBe List("acme_lake")
+    f.store.snapshot().tenantDbs.head.metastore shouldBe Map("dbName" -> "acme_lake")
+  }
+
   it should "keep QoD's login on its own server" in {
     val f = new Fixture
     f.create("lake").isRight shouldBe true

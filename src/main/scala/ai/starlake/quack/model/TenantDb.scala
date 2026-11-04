@@ -199,6 +199,13 @@ object TenantDb {
   private def breaksConnString(value: String): Boolean =
     value.exists(c => c <= ' ' || Character.isWhitespace(c) || Character.isSpaceChar(c))
 
+  /** The metastore values a node's bootstrap writes around its connection: the connection string's
+    * four, and the schema it then creates and uses. [[validateSafety]] refuses whitespace in each
+    * on every write; [[onDefaultServer]] reads a stored one holding any as another server.
+    */
+  private val ConnStringKeys: List[String] =
+    List("pgHost", "pgPort", "pgUser", "dbName", "schemaName")
+
   /** ASCII only, and no resolving: a name that folds to the default's through Unicode, or that a
     * resolver answers with the default's address today, may reach another host tomorrow. So
     * `127.0.0.1` is not `localhost`: such a row names no host, or brings its own login.
@@ -230,13 +237,12 @@ object TenantDb {
     (normalizedHost(resolved("pgHost", "localhost")), normalizedPort(resolved("pgPort", "5432")))
 
   /** Whether `metastore` uses QoD's own Postgres server: the host and the port of `defaults`, once
-    * normalized. A row whose `pgUser` or `dbName` could read as further connection keywords does
-    * not, whatever its host says.
+    * normalized. A row holding a [[ConnStringKeys]] value that could read as further connection
+    * keywords does not, whatever its host says.
     */
   def onDefaultServer(metastore: Map[String, String], defaults: Map[String, String]): Boolean =
     serverOf(metastore, defaults) == serverOf(Map.empty, defaults) &&
-      !metastore.get("pgUser").exists(breaksConnString) &&
-      !metastore.get("dbName").exists(breaksConnString)
+      !ConnStringKeys.exists(k => metastore.get(k).exists(breaksConnString))
 
   /** What of the manager's defaults a row inherits: all of them on QoD's own server, every one but
     * [[LoginKeys]] on another, whoever wrote the row.
@@ -498,12 +504,15 @@ object TenantDb {
   def validate(td: TenantDb, defaults: Map[String, String] = Map.empty): Option[String] =
     td.kind match {
       case TenantDbKind.DuckLake =>
-        val defaulted = defaultedMetastoreKeys(inheritedDefaults(td.metastore, defaults))
-        val missing   = requiredMetastoreKeys(td.kind) -- td.metastore.keySet -- defaulted
-        if missing.nonEmpty then
-          Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")
-        else if td.dataPath.isEmpty then Some("kind=ducklake requires non-empty dataPath")
-        else validateSafety(td)
+        // A value that breaks a connection string reads as another server, whose login would then
+        // be missing: it says what it is first.
+        validateSafety(td).orElse {
+          val defaulted = defaultedMetastoreKeys(inheritedDefaults(td.metastore, defaults))
+          val missing   = requiredMetastoreKeys(td.kind) -- td.metastore.keySet -- defaulted
+          if missing.nonEmpty then
+            Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")
+          else Option.when(td.dataPath.isEmpty)("kind=ducklake requires non-empty dataPath")
+        }
 
       case TenantDbKind.DuckDbFile =>
         val missing = requiredMetastoreKeys(td.kind) -- td.metastore.keySet

@@ -31,10 +31,9 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     on("pgPort" -> "5432") shouldBe true
   }
 
-  it should "compare after normalizing case, a trailing dot, spaces, brackets and leading zeros" in {
+  it should "compare after normalizing case, a trailing dot, brackets and leading zeros" in {
     on("pgHost" -> "PG.Internal") shouldBe true
     on("pgHost" -> "pg.internal.") shouldBe true
-    on("pgHost" -> " pg.internal ") shouldBe true
     on("pgPort" -> "05432") shouldBe true
     TenantDb.onDefaultServer(Map("pgHost" -> "[::1]"), Map("pgHost" -> "::1")) shouldBe true
   }
@@ -67,6 +66,15 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     on("pgHost" -> "pg.internal port=1") shouldBe false
     on("pgHost" -> "pg.internal,pg.other") shouldBe false
     on("pgPort" -> "5432 host=pg.other") shouldBe false
+  }
+
+  it should "fail for any value holding whitespace, even at its edge" in {
+    on("pgHost" -> " pg.internal ") shouldBe false
+    on("pgHost" -> "pg.internal\t") shouldBe false
+    on("pgPort" -> " 5432") shouldBe false
+    on("pgPort" -> "5432\n") shouldBe false
+    on("schemaName" -> "main host=pg.other") shouldBe false
+    on("schemaName" -> "main") shouldBe true
   }
 
   it should "fail for a user or a database name that reads as more connection settings" in {
@@ -250,6 +258,10 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     errorOf("pgHost" -> "[::1]", "pgUser" -> "me@corp.example") shouldBe None
     errorOf("pgHost" -> "pg.a,pg.b") shouldBe None
     errorOf("pgPassword" -> "a password with spaces") shouldBe None
+    errorOf("pgPort" -> "5432 host=pg.other").get should include("pgPort")
+    errorOf("pgPort" -> " 5432").get should include("pgPort")
+    errorOf("dbName" -> "x host=pg.other").get should include("dbName")
+    errorOf("schemaName" -> "main host=pg.other").get should include("schemaName")
   }
 
   "TenantDb.KnownMetastoreKeys" should "leave the manager's stamps to the manager" in {
