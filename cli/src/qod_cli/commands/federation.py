@@ -293,6 +293,11 @@ def create(
         "mysql: disabled | preferred | required | verify_ca | verify_identity.",
     ),
 ):
+    """Create a federated source, or change it: every field left out is reset.
+
+    Once a source holds a secret, only a superuser changes its connection or config; anyone else
+    deletes the source and creates it again with its secrets.
+    """
     wire = _TYPE_WIRE.get(source_type)
     if wire is None:
         raise typer.BadParameter(
@@ -369,17 +374,17 @@ def create(
     _create_with_secret(ctx, tenant, db, body, password_secret, secret_value)
 
 
-def _source_exists(ctx: typer.Context, tenant: str, db: str, alias: str) -> bool:
-    """Whether source `alias` exists: its secret listing answers 200, a new source 404s. Any
-    other failure stops the command rather than being read as "new"."""
+def _source_secrets(ctx: typer.Context, tenant: str, db: str, alias: str) -> list[str] | None:
+    """The names of the secrets source `alias` holds; None when it does not exist, as a new source
+    404s. Any other failure stops the command rather than being read as "new"."""
     try:
-        RestClient(ctx.obj.settings).request("GET", f"{_base(tenant, db)}/{alias}/secrets")
+        listing = RestClient(ctx.obj.settings).request("GET", f"{_base(tenant, db)}/{alias}/secrets")
     except ApiError as exc:
         if exc.status == 404:
-            return False
+            return None
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
-    return True
+    return [s["name"] for s in listing.get("secrets", [])]
 
 
 def _create_with_secret(
@@ -389,20 +394,26 @@ def _create_with_secret(
     source that references a missing secret: a pool spawning then would fail to resolve it, which
     fails the whole tenant-db's federation blob.
 
-    An existing source already holds the secret endpoint, so the secret is written FIRST and the
-    source saved after it: its placeholder resolves at every instant and it is never disabled (a
-    rotation, or a move to a new secret name). A new source has no secret endpoint yet, so it is
-    saved disabled (disabled sources are in no blob), the secret written, and the source saved
-    again as asked.
+    An existing source is never disabled. A secret it holds, or the first one, is written after the
+    source: the manager may refuse the source (only a superuser changes the connection of one
+    holding secrets), and then nothing is written. A secret new to a source holding others is
+    written first, so its placeholder resolves at every instant. A new source has no secret endpoint
+    yet, so it is saved disabled (disabled sources are in no blob), the secret written, and the
+    source saved again as asked.
     """
     alias = body["alias"].strip().lower()
     secret_path = f"{_base(tenant, db)}/{alias}/secrets"
     fix = (
         f"`qod federation secret set {tenant} {db} {alias} --name {secret} --value ...`"
     )
-    if _source_exists(ctx, tenant, db, alias):
-        call(ctx, "PUT", secret_path, body={"name": secret, "value": value}, quiet=True)
-        call(ctx, "POST", _base(tenant, db), body=body)
+    held = _source_secrets(ctx, tenant, db, alias)
+    if held is not None:
+        if secret in held or not held:
+            call(ctx, "POST", _base(tenant, db), body=body)
+            call(ctx, "PUT", secret_path, body={"name": secret, "value": value}, quiet=True)
+        else:
+            call(ctx, "PUT", secret_path, body={"name": secret, "value": value}, quiet=True)
+            call(ctx, "POST", _base(tenant, db), body=body)
         return
 
     call(ctx, "POST", _base(tenant, db), body={**body, "disabled": True}, quiet=True)

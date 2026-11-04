@@ -1146,6 +1146,202 @@ class FederatedSourceHandlersSpec
         true
     }
 
+  // --- a source's connection, and the secrets stored for it ------------------
+
+  /** A superuser's handler and a tenant admin's, over one store. */
+  private def bothHandlers(
+      fs: FederatedSourceStore,
+      resolver: (String, String) => Option[String],
+      audit: ai.starlake.quack.ondemand.telemetry.AuditRecorder =
+        ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
+  ) =
+    def handlers(scope: SessionScope.Resolver) = new FederatedSourceHandlers(
+      fs,
+      resolver,
+      audit = audit,
+      scopeOf = scope,
+      invalidateSources = _ => (),
+      publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+      catalogAliasOf = _ => None
+    )
+    (handlers(_ => SessionScope.Superuser), handlers(tenantAdminScope))
+
+  private def create(h: FederatedSourceHandlers, req: FederatedSourceCreateRequest) =
+    h.createSource("acme", "acme_prod", req, None).unsafeRunSync()
+
+  private def withSecret(h: FederatedSourceHandlers, alias: String, name: String) =
+    h.upsertSecret(
+      "acme",
+      "acme_prod",
+      alias,
+      FederatedSecretUpsertRequest(name = name, value = Some("stored-secret-sentinel")),
+      None
+    ).unsafeRunSync()
+      .isRight shouldBe true
+
+  private val StoredConn = ai.starlake.quack.ondemand.federation.rdbms.RdbmsConfig(
+    host = "pg.example.com",
+    port = Some(5432),
+    database = "shop",
+    user = "reader",
+    password = "{{secret.PG_PWD}}",
+    schema = Some("sales"),
+    sslMode = Some("require")
+  )
+
+  "A source holding a secret" should "take no other connection from a tenant admin" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      for t <- List("postgres", "mysql") do
+        val alias  = s"held_$t"
+        val stored =
+          if t == "postgres" then StoredConn else StoredConn.copy(schema = None, sslMode = None)
+        create(su, pgReq(alias, t, stored)).isRight shouldBe true
+        withSecret(su, alias, "PG_PWD")
+        val before = fs.getSource(tdId, alias).value
+        List(
+          stored.copy(host = "elsewhere.example.com"),
+          stored.copy(port = Some(5433)),
+          stored.copy(database = "other"),
+          stored.copy(user = "another"),
+          stored.copy(password = "{{secret.OTHER}}"),
+          stored.copy(sslMode = Some(if t == "postgres" then "disable" else "disabled"))
+        ).foreach { moved =>
+          withClue(moved) {
+            val (status, err) = create(admin, pgReq(alias, t, moved)).left.value
+            status shouldBe StatusCode.Forbidden
+            err.error shouldBe "superuser_required"
+            err.message should include("a superuser changes it")
+            err.message should include("delete the source and create it again")
+            err.message should not include "pg.example.com"
+            err.message should not include "stored-secret-sentinel"
+            fs.getSource(tdId, alias).value shouldBe before
+          }
+        }
+        // A superuser's is not judged.
+        create(su, pgReq(alias, t, stored.copy(host = "new.example.com"))).isRight shouldBe true
+        fs.getSource(tdId, alias).value.config.value should include("new.example.com")
+    }
+
+  it should "take no other config from a tenant admin" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      val stored      = iceReq("held_ice").config.value
+      create(su, iceReq("held_ice")).isRight shouldBe true
+      withSecret(su, "held_ice", "CSEC")
+      val before = fs.getSource(tdId, "held_ice").value
+      List(
+        stored.copy(uri = "https://elsewhere.example.com/api"),
+        stored.copy(warehouse = "other"),
+        stored.copy(clientId = Some("{{secret.OTHER}}")),
+        stored.copy(clientSecret = Some("{{secret.OTHER}}")),
+        stored.copy(oauth2ServerUri = Some("https://elsewhere.example.com/token")),
+        stored.copy(oauth2Scope = Some("PRINCIPAL_ROLE:ALL"))
+      ).foreach { moved =>
+        withClue(moved) {
+          val (status, err) = create(admin, iceReq("held_ice", moved)).left.value
+          status shouldBe StatusCode.Forbidden
+          err.error shouldBe "superuser_required"
+          fs.getSource(tdId, "held_ice").value shouldBe before
+        }
+      }
+    }
+
+  it should "read the same values sent again as no change, however they are spelled" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      val bare        = StoredConn.copy(port = None, schema = None, sslMode = None)
+      create(su, pgReq("spelled", "postgres", bare)).isRight shouldBe true
+      withSecret(su, "spelled", "PG_PWD")
+      List(
+        bare,
+        // The default port, written out: what a form sends for a row that left it out.
+        bare.copy(port = Some(5432)),
+        // Blank optionals and surrounding spaces render as nothing.
+        bare.copy(schema = Some(""), sslMode = Some(" ")),
+        bare.copy(host = " pg.example.com ", database = "shop ", user = " reader")
+      ).foreach { same =>
+        withClue(same) {
+          create(admin, pgReq("spelled", "postgres", same)).isRight shouldBe true
+        }
+      }
+      // Stored by an earlier writer: nulls, absent fields and another key order.
+      fs.upsertSource(
+        fs.getSource(tdId, "spelled")
+          .value
+          .copy(config =
+            Some(
+              """{"user":"reader","password":"{{secret.PG_PWD}}","schema":null,"host":"pg.example.com","database":"shop"}"""
+            )
+          )
+      )
+      create(admin, pgReq("spelled", "postgres", bare)).isRight shouldBe true
+
+      create(su, iceReq("spelled_ice")).isRight shouldBe true
+      withSecret(su, "spelled_ice", "CSEC")
+      val stored = iceReq("spelled_ice").config.value
+      create(admin, iceReq("spelled_ice", stored)).isRight shouldBe true
+      // Blank optionals and an empty list, as a form may send them.
+      create(
+        admin,
+        iceReq("spelled_ice", stored.copy(oauth2Scope = Some(" "), awsScope = Nil))
+      ).isRight shouldBe true
+    }
+
+  it should "stay open to a tenant admin for its other fields" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, pgReq("others", "postgres", StoredConn)).isRight shouldBe true
+      withSecret(su, "others", "PG_PWD")
+      val same = pgReq("others", "postgres", StoredConn)
+      create(admin, same.copy(description = Some("described"))).isRight shouldBe true
+      fs.getSource(tdId, "others").value.description shouldBe Some("described")
+      create(admin, same.copy(disabled = true)).isRight shouldBe true
+      fs.getSource(tdId, "others").value.disabled shouldBe true
+      create(admin, same.copy(readOnly = Some(false))).isRight shouldBe true
+      fs.getSource(tdId, "others").value.readOnly shouldBe false
+      fs.getSource(tdId, "others").value.config.value should include("pg.example.com")
+    }
+
+  it should "take another connection once a tenant admin has deleted and recreated it" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, pgReq("again", "postgres", StoredConn)).isRight shouldBe true
+      withSecret(su, "again", "PG_PWD")
+      admin.deleteSource("acme", "acme_prod", "again", None).unsafeRunSync().isRight shouldBe true
+      val moved = StoredConn.copy(host = "elsewhere.example.com")
+      create(admin, pgReq("again", "postgres", moved)).isRight shouldBe true
+      // Nothing stored came along.
+      val row = fs.getSource(tdId, "again").value
+      row.config.value should include("elsewhere.example.com")
+      fs.listSecrets(row.id) shouldBe empty
+      // Holding none, it takes another connection; holding its own again, it does not.
+      create(
+        admin,
+        pgReq("again", "postgres", moved.copy(host = "third.example.com"))
+      ).isRight shouldBe true
+      withSecret(admin, "again", "PG_PWD")
+      create(admin, pgReq("again", "postgres", moved)).left.value._2.error shouldBe
+        "superuser_required"
+    }
+
+  it should "be audited as denied when refused, with nothing of its connection" in
+    withEnv { (fs, resolver, _) =>
+      val events      = new ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+      val recorder    = new ai.starlake.quack.ondemand.telemetry.AuditRecorder(events, _ => None)
+      val (su, admin) = bothHandlers(fs, resolver, recorder)
+      create(su, pgReq("audited", "postgres", StoredConn)).isRight shouldBe true
+      withSecret(su, "audited", "PG_PWD")
+      events.events.clear()
+      val moved = StoredConn.copy(host = "elsewhere.example.com")
+      create(admin, pgReq("audited", "postgres", moved)).isLeft shouldBe true
+      val denied = events.events.toList.filter(_.outcome == "denied")
+      denied.map(_.action) shouldBe
+        List(ai.starlake.quack.ondemand.telemetry.AuditActions.FederationSourceUpsert)
+      denied.head.target shouldBe Some("audited")
+      denied.head.toString should not include "elsewhere.example.com"
+    }
+
   "the boot report" should "name each sql source with no known author, never its SQL" in
     withEnv { (fs, _, tdId) =>
       fs.upsertSource(

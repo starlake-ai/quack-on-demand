@@ -251,6 +251,49 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
     tool.adminOnly shouldBe true
     tool.run(principal, JsonObject(args*)).unsafeRunSync()
 
+  "upsert_federated_source" should "take no other connection on a source holding a secret" in
+    withTools(withFederation = true) { (tools, _) =>
+      def args(host: String) = Seq(
+        "tenant"      -> Json.fromString(Tenant0),
+        "database"    -> Json.fromString(TenantDb),
+        "alias"       -> Json.fromString("held"),
+        "source_type" -> Json.fromString("postgres"),
+        "connection"  -> Json.obj(
+          "host"     -> Json.fromString(host),
+          "database" -> Json.fromString("shop"),
+          "user"     -> Json.fromString("reader"),
+          "password" -> Json.fromString("{{secret.PW}}")
+        )
+      )
+      call(
+        tools,
+        "upsert_federated_source",
+        McpSuperuserPat.principal,
+        args("pg.example.com")*
+      ).isRight shouldBe true
+      call(
+        tools,
+        "set_federated_secret",
+        McpSuperuserPat.principal,
+        "tenant"   -> Json.fromString(Tenant0),
+        "database" -> Json.fromString(TenantDb),
+        "alias"    -> Json.fromString("held"),
+        "name"     -> Json.fromString("PW"),
+        "value"    -> Json.fromString("stored-secret-sentinel")
+      ).isRight shouldBe true
+      val refused =
+        call(tools, "upsert_federated_source", tenantPat, args("elsewhere.example.com")*)
+      refused.left.toOption.getOrElse(fail("admitted")) should include("superuser_required")
+      // The same values sent again are no change.
+      call(
+        tools,
+        "upsert_federated_source",
+        tenantPat,
+        args("pg.example.com")*
+      ).isRight shouldBe true
+      onlySource(tools).downField("connection").get[String]("host") shouldBe Right("pg.example.com")
+    }
+
   "upsert_federated_source and secrets" should "round-trip a source with a secret" in
     withTools(withFederation = true) { (tools, _) =>
       val created = call(

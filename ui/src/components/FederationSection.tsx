@@ -10,6 +10,7 @@ import type {
   IcebergRestConfig,
   RdbmsConnection,
 } from '../api/types';
+import { useAuth } from '../auth/AuthContext';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
 
@@ -893,6 +894,7 @@ export default function FederationSection({
   tenantDb: string;
   onClose: () => void;
 }) {
+  const { superuser } = useAuth();
   const [sources, setSources] = useState<FederatedSourceResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
@@ -1039,10 +1041,17 @@ export default function FederationSection({
             );
             return;
           }
-          // An existing source: write the secret FIRST, then the source, so its placeholder
-          // resolves at every instant and a live source is never disabled.
-          await api.upsertFederatedSecret(tenant, tenantDb, normAlias, target);
-          await api.createFederatedSource(tenant, tenantDb, request);
+          // An existing source. The manager may refuse the source: a tenant admin's change of
+          // the connection of one holding secrets. So a secret it holds is written after the source
+          // took, and nothing is written on a refusal. A secret new to a source holding others goes
+          // first, so its placeholder resolves at every instant and a live source is never disabled.
+          if (stored != null || secrets.length === 0) {
+            await api.createFederatedSource(tenant, tenantDb, request);
+            await api.upsertFederatedSecret(tenant, tenantDb, normAlias, target);
+          } else {
+            await api.upsertFederatedSecret(tenant, tenantDb, normAlias, target);
+            await api.createFederatedSource(tenant, tenantDb, request);
+          }
         } else {
           // A new source: an ENABLED source naming a missing secret fails the whole tenant-db's
           // federation at the next spawn, so it is saved disabled first (disabled sources are in
@@ -1102,13 +1111,14 @@ export default function FederationSection({
         manager renders the <code>ATTACH</code> itself.
       </p>
 
-      {error && <div className="login-err">Error: {error}</div>}
+      {error && !adding && <div className="login-err">Error: {error}</div>}
 
       {adding && (
         <Modal maxWidth={800} height="85vh" onClose={closeForm}>
             <div className="card-title">
               {editingAlias ? <>Edit federated source <code>{editingAlias}</code></> : 'New federated source'}
             </div>
+            {error && <div className="login-err">Error: {error}</div>}
             <form onSubmit={handleCreate} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
             {/* The alias is lowercased as it is typed rather than silently on
@@ -1148,6 +1158,12 @@ export default function FederationSection({
                 The type is fixed for an existing alias: the manager refuses a flip between types
                 rather than replacing your setup SQL with a rendered config unseen. Delete the
                 source and recreate it to change type.
+                {!superuser && (isIceberg || isRdbms) && (
+                  <>
+                    {' '}Once a source holds a secret, its connection stays as it is: a superuser
+                    changes it, or delete the source and create it again with its secrets.
+                  </>
+                )}
               </div>
             )}
             <label>

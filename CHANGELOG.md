@@ -93,6 +93,11 @@ count. To keep counts from a user, refuse on the table.
 - A node's `quack_azure` secret, the manager's `QOD_AZURE_CONNECTION_STRING`, exists only for a database
   with no `objectStore` and is scoped to its data path and its branches' prefix, as `qod_data_s3` is. Any
   other `az://` path no longer signs with it: a superuser reading one creates a secret of their own.
+- A federated source's stored secrets go only where they were saved for. On a source holding a secret, a
+  tenant admin's `POST .../federated-sources` (REST, MCP, CLI, console) with another `connection` or `config`
+  answers `403 superuser_required`, nothing written: a superuser changes it, or delete the source and create
+  it again with its secrets. The same values sent again are no change, however they are spelled, and
+  `description`, `disabled` and `readOnly` stay open, as does a source holding none.
 - A DuckLake create naming no path no longer answers `400`, for any caller: the database gets a folder of
   its own beside the default data path, under its composed name, stored on the row so that it cannot
   move. With no default data path, or one that is a bucket's root, it answers `400 invalid_contract`

@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.federation
 import ai.starlake.quack.model.{FederatedSource, FederatedSourceType}
 import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind}
+import io.circe.Json
 
 import java.util.Locale
 
@@ -42,6 +43,38 @@ object FederatedSourceRules:
             "'...', where its value stays a value (and no escape string E'...', dollar quoting " +
             "or $ parameter may appear outside a literal)"
         )
+
+  /** Whether two `config` values of a `t` source say the same, every field included: each read as
+    * its type reads it (a connection normalized as it renders), so a key's order, a null, an absent
+    * field, blank text, an empty list and surrounding spaces read alike, and a client sending the
+    * stored values back changes nothing. A value that does not read stands for itself.
+    */
+  def sameConfig(t: FederatedSourceType, a: Option[String], b: Option[String]): Boolean =
+    configValue(t, a) == configValue(t, b)
+
+  private def configValue(t: FederatedSourceType, config: Option[String]): Json =
+    config.map(_.trim).filter(_.nonEmpty).fold(Json.Null) { raw =>
+      val typed = t match
+        case FederatedSourceType.IcebergRest => IcebergRestConfig.fromJson(raw).map(_.toJson)
+        case FederatedSourceType.Postgres | FederatedSourceType.Mysql =>
+          RdbmsConfig.fromJson(raw).map(_.normalized(RdbmsKind.of(t).get).toJson)
+        case FederatedSourceType.Sql => Right(raw)
+      typed.toOption.flatMap(io.circe.parser.parse(_).toOption).fold(Json.fromString(raw))(settled)
+    }
+
+  /** `j` with text trimmed, and with whatever reads as nothing left out. */
+  private def settled(j: Json): Json =
+    def nothing(v: Json) =
+      v.isNull || v.asString.exists(_.isEmpty) || v.asArray.exists(_.isEmpty) ||
+        v.asObject.exists(_.isEmpty)
+    j.fold(
+      Json.Null,
+      Json.fromBoolean,
+      Json.fromJsonNumber,
+      s => Json.fromString(s.trim),
+      values => Json.fromValues(values.map(settled).filterNot(nothing)),
+      fields => Json.fromJsonObject(fields.mapValues(settled).filter((_, v) => !nothing(v)))
+    )
 
   /** Empty when `source` may be stored. `reserved` is the tenant-db's own catalog alias plus every
     * OTHER source's alias in it, as the blob builder reserves them at spawn.

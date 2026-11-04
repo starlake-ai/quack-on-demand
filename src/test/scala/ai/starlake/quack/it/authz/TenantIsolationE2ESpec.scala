@@ -1618,6 +1618,95 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     finally server.stop()
   }
 
+  // ---------- a source's connection, and the secrets stored for it ----------
+
+  "A federated source holding a secret" should "send it nowhere a tenant admin names" in {
+    ready()
+    val fromValue = new PgListener(TestPostgres.pgPass, ownPassword = FedSentinel)
+    val fromRef   =
+      new PgListener(TestPostgres.pgPass, ownPassword = sys.env.getOrElse("HOME", "unset"))
+    val fromToken = new BearerListener(FedSentinel)
+    val ofTheirs  = new PgListener(TestPostgres.pgPass, ownPassword = FedOwnSentinel)
+    try
+      val t = s"${Prefix}ad$run"
+      tenant(t)
+      val token              = adminOf(t, "ha", OtherPw)
+      val (code, name, body) = createDb(t, "lake", token)
+      withClue(body.take(300))(code shouldBe 200)
+      val base                               = s"/api/tenants/$t/tenant-dbs/$name/federated-sources"
+      def postgres(alias: String, port: Int) = obj(
+        "alias"      -> s(alias),
+        "sourceType" -> s("postgres"),
+        "connection" -> Json.obj(
+          "host"     -> s("127.0.0.1"),
+          "port"     -> Json.fromInt(port),
+          "database" -> s("shop"),
+          "user"     -> s("reader"),
+          "password" -> s("{{secret.pw}}")
+        )
+      )
+      def iceberg(port: Int) = obj(
+        "alias"      -> s("exticeberg"),
+        "sourceType" -> s("iceberg_rest"),
+        "config"     -> Json.obj(
+          "uri"       -> s(s"http://127.0.0.1:$port"),
+          "warehouse" -> s("w"),
+          "authType"  -> s("token"),
+          "token"     -> s("{{secret.tok}}")
+        )
+      )
+      // A superuser's sources, on a port nothing answers.
+      stack.postStatus(base, postgres("extvalue", 1), su)._1 shouldBe 200
+      stack.postStatus(base, postgres("extref", 1), su)._1 shouldBe 200
+      stack.postStatus(base, iceberg(1), su)._1 shouldBe 200
+      stack.put(s"$base/extvalue/secrets", obj("name" -> s("pw"), "value" -> s(FedSentinel)))
+      stack.put(s"$base/extref/secrets", obj("name" -> s("pw"), "externalRef" -> s("env:HOME")))
+      stack.put(s"$base/exticeberg/secrets", obj("name" -> s("tok"), "value" -> s(FedSentinel)))
+
+      List(
+        "by value"     -> postgres("extvalue", fromValue.port),
+        "by reference" -> postgres("extref", fromRef.port),
+        "a catalog"    -> iceberg(fromToken.port)
+      ).foreach { (what, moved) =>
+        val (refused, refusal) = stack.postStatus(base, moved, token)
+        withClue(what) {
+          refused shouldBe 403
+          errorOf(refusal) shouldBe "superuser_required"
+        }
+      }
+      // A source of their own, with a secret of their own: what the node does tell apart.
+      stack.postStatus(base, postgres("extown", ofTheirs.port), token)._1 shouldBe 200
+      stack.put(s"$base/extown/secrets", obj("name" -> s("pw"), "value" -> s(FedOwnSentinel)))
+
+      // A node runs every block before it serves.
+      openPool(t, name, "hp", token)
+      serving(t, "hp", "ha", OtherPw)
+      ofTheirs.await(1, 30.seconds)
+      ofTheirs.seen.exists(_.matchesOwn) shouldBe true
+      settle()
+      fromValue.connections shouldBe 0
+      fromRef.connections shouldBe 0
+      fromToken.connections shouldBe 0
+      fromToken.arrived shouldBe false
+      closePool(t, name, "hp")
+
+      // Deleted and made again, it holds nothing of what was stored.
+      stack.delete(s"$base/extvalue", token)._1 shouldBe 200
+      stack.postStatus(base, postgres("extvalue", fromValue.port), token)._1 shouldBe 200
+      stack.put(s"$base/extvalue/secrets", obj("name" -> s("pw"), "value" -> s(FedOwnSentinel)))
+      openPool(t, name, "hq", token)
+      serving(t, "hq", "ha", OtherPw)
+      fromValue.await(1, 30.seconds)
+      fromValue.seen.exists(_.passwordArrived) shouldBe true
+      fromValue.seen.exists(_.matchesOwn) shouldBe false
+      closePool(t, name, "hq")
+    finally
+      fromValue.stop()
+      fromRef.stop()
+      fromToken.stop()
+      ofTheirs.stop()
+  }
+
   // ---------- what must keep working ----------
 
   "A tenant admin on the default server" should "create, serve, delete and create again" in {
@@ -1725,12 +1814,14 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
   }
 
 object TenantIsolationE2ESpec:
-  private val HolderPw     = "Holder-Pw-7731"
-  private val OtherPw      = "Other-Pw-7731"
-  private val OwnUser      = "own_user_7731"
-  private val OwnSentinel  = "OWN-LOGIN-SENTINEL-7731"
-  private val OwnSentinel2 = "OWN-LOGIN-SENTINEL-7732"
-  private val OwnRolePw    = "own-role-sentinel-7733"
+  private val HolderPw       = "Holder-Pw-7731"
+  private val OtherPw        = "Other-Pw-7731"
+  private val OwnUser        = "own_user_7731"
+  private val OwnSentinel    = "OWN-LOGIN-SENTINEL-7731"
+  private val OwnSentinel2   = "OWN-LOGIN-SENTINEL-7732"
+  private val OwnRolePw      = "own-role-sentinel-7733"
+  private val FedSentinel    = "fed-secret-sentinel-7741"
+  private val FedOwnSentinel = "fed-own-sentinel-7742"
 
   /** What one connection brought: never the password itself. */
   final case class Arrival(
@@ -1740,6 +1831,50 @@ object TenantIsolationE2ESpec:
       matchesDefault: Boolean,
       matchesOwn: Boolean
   )
+
+  /** An HTTP listener that records whether a request arrived and whether one carried `bearer` in
+    * its `Authorization` header, as booleans, then answers 500. The bearer is only compared with.
+    */
+  final class BearerListener(bearer: String):
+    private val server = new ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new InetSocketAddress("127.0.0.1", 0))
+
+    val port: Int = server.getLocalPort
+
+    private val accepted           = new java.util.concurrent.atomic.AtomicInteger(0)
+    @volatile var arrived: Boolean = false
+
+    @volatile private var running = true
+    private val acceptor          = new Thread(() => loop())
+    acceptor.setDaemon(true)
+    acceptor.start()
+
+    def connections: Int = accepted.get()
+
+    def stop(): Unit =
+      running = false
+      Try(server.close())
+      ()
+
+    private def loop(): Unit =
+      while running do
+        Try(server.accept()).toOption.foreach { socket =>
+          accepted.incrementAndGet()
+          Try {
+            val in =
+              new java.io.BufferedReader(new java.io.InputStreamReader(socket.getInputStream))
+            var line = in.readLine()
+            while line != null && line.nonEmpty do
+              if line.toLowerCase.startsWith("authorization:") && line.contains(bearer) then
+                arrived = true
+              line = in.readLine()
+            socket.getOutputStream.write(
+              "HTTP/1.1 500 Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes
+            )
+          }
+          Try(socket.close())
+        }
 
   /** A byte relay to a real Postgres, recording the user each connection's startup message names:
     * never a password, which that protocol does not send in the clear here.

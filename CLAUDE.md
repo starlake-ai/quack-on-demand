@@ -418,7 +418,12 @@ boot WARN per such row), and every `{{secret.NAME}}` in a `sql` template must si
 single-quoted literal (`SecretPlaceholderScan`, `400 invalid_federated_source` naming the
 placeholder); a stored template's unquoted placeholder is substituted only for a plain-token value
 next to no quote, `-`, `/`, `*`, `$` or letter, else that source's block is left out
-with a WARN. Manifests carry `initSqlTrusted` and `setupSqlTrusted`.
+with a WARN. Manifests carry `initSqlTrusted` and `setupSqlTrusted`. A source's stored secrets, an
+`externalRef`'s included, go only where they were saved for, the rule `TenantSignInWrite` holds for a client
+secret: on a source holding any, `FederatedSourceHandlers.createSource` refuses a writer who is not a superuser
+another `connection` or `config` (`403 superuser_required`, nothing written, audited denied), compared by
+`FederatedSourceRules.sameConfig` on the whole value as its type reads it, so a client sending the stored values
+back changes nothing; its other fields stay open, as do a source holding none and a delete and recreate.
 
 **Read-only federated catalogs bind every principal (decision 24).** A federated source's `readOnly`
 flag is enforced on the node, superusers and the system principal included: since the node never asks

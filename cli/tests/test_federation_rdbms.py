@@ -100,10 +100,15 @@ def test_a_new_source_is_saved_disabled_until_its_secret_exists(runner, respx_mo
     assert order == [("POST", True), ("PUT", None), ("POST", False)]
 
 
-def test_an_existing_source_gets_its_secret_first_and_is_never_disabled(runner, respx_mock):
-    """Rotation, or a move to a secret name the source does not hold yet: the secret is written
-    first, so the placeholder resolves at every instant and the live source is never disabled."""
-    for secrets, name in ((["PASSWORD"], "PASSWORD"), (["OLD"], "NEW")):
+def test_an_existing_source_keeps_a_resolving_placeholder_and_is_never_disabled(runner, respx_mock):
+    """A move to a secret name the source does not hold yet writes the secret first, so its
+    placeholder resolves at every instant. A secret it holds, or a source holding none, goes after
+    the source, which the manager may refuse. The live source is never disabled."""
+    for secrets, name, expected in (
+        (["PASSWORD"], "PASSWORD", [("POST", False), ("PUT", "PASSWORD")]),
+        ([], "PASSWORD", [("POST", False), ("PUT", "PASSWORD")]),
+        (["OLD"], "NEW", [("PUT", "NEW"), ("POST", False)]),
+    ):
         respx_mock.reset()
         create, secret = _routes(respx_mock, existing_secrets=secrets)
         order = []
@@ -115,7 +120,18 @@ def test_an_existing_source_gets_its_secret_first_and_is_never_disabled(runner, 
         result = _invoke(runner, *PG, "--password-stdin", "--password-secret", name,
                          input="new-pw\n")
         assert result.exit_code == 0, result.output
-        assert order == [("PUT", name), ("POST", False)], (secrets, name)
+        assert order == expected, (secrets, name)
+
+
+def test_a_source_the_manager_refuses_keeps_the_secret_it_holds(runner, respx_mock):
+    create, secret = _routes(respx_mock, existing_secrets=["PASSWORD"])
+    create.mock(return_value=httpx.Response(
+        403, json={"error": "superuser_required", "message": "a superuser changes it"}
+    ))
+    result = _invoke(runner, *PG, "--password-stdin", input="new-pw\n")
+    assert result.exit_code != 0
+    assert "superuser_required" in result.output or "a superuser changes it" in result.output
+    assert create.called and not secret.called
 
 
 def test_a_failing_source_lookup_stops_instead_of_guessing(runner, respx_mock):

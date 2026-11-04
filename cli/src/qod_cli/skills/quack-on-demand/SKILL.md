@@ -1745,6 +1745,11 @@ Then recycle the pool's nodes, as for any new source.
   `qod_ice_`: those secret-name prefixes belong to the typed sources, whose
   blocks create and drop them.
 - A manifest import validates typed sources exactly as `create` does.
+- Once a source holds a secret, a tenant admin changes neither its connection
+  nor its config: `403 superuser_required`, nothing written. A superuser changes
+  it, or delete the source and create it again with its secrets. The same values
+  sent again are no change, and `--description`, `--disabled` and `--read-only`
+  stay open.
 - `create` upserts, so re-running it edits the source, and every field it
   leaves out is RESET (see "Register a federated source"). A re-run that
   repeats only the required flags puts `--port`, `--schema`, `--ssl-mode` and

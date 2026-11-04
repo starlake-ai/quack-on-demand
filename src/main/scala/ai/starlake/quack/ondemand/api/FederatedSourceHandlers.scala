@@ -238,26 +238,7 @@ final class FederatedSourceHandlers(
               if sourceType.rdbms && req.connection.isEmpty then
                 fieldErrors :+ s"connection is required for sourceType '${sourceType.wire}'"
               else (fieldErrors ++ FederatedSourceRules.errors(source, reserved)).distinct
-            if all.nonEmpty then Left(badRequest(all.mkString("; ")))
-            else
-              // This endpoint is a create-request-as-upsert: every field is replaced by what the
-              // request carries, so an OMITTED readOnly falls back to the type default rather
-              // than to the stored value -- and for a `sql` source explicitly marked read-only
-              // that default is false, i.e. a re-POST that only meant to edit `setupSql` silently
-              // unlocks the catalog. The CLI and the MCP tool both omit the field unless
-              // `--read-only`/`--no-read-only` was passed, so this is reachable without anyone
-              // typing the word. Declarative replacement is this endpoint's contract and is not
-              // being changed here, but it must not be SILENT: `ManifestImporter` WARNs on
-              // exactly this class of downgrade (a sourceType flip carrying readOnly with it) and
-              // this is the matching line for the REST path. Logged only on the true -> false
-              // direction, and only once the upsert is actually going to be written.
-              if existing.exists(_.readOnly) && !source.readOnly && req.readOnly.isEmpty then
-                logger.warn(
-                  s"federated source '$alias' (tenant-db $tenantDbId) was read-only and this " +
-                    "upsert omitted readOnly, so it becomes WRITABLE; pass readOnly=true to " +
-                    "keep it read-only"
-                )
-              Right(source)
+            if all.nonEmpty then Left(badRequest(all.mkString("; "))) else Right(source)
       }
     }
 
@@ -285,6 +266,12 @@ final class FederatedSourceHandlers(
   private def sourcesChanged(tenantDbId: String): Unit =
     invalidateSources(tenantDbId)
     publish.topologyChanged()
+
+  /** Whether writing `source` over `stored` would change the connection of a row holding secrets.
+    */
+  private def takesElsewhere(stored: FederatedSource, source: FederatedSource): Boolean =
+    !FederatedSourceRules.sameConfig(source.sourceType, stored.config, source.config) &&
+      fedStore.listSecrets(stored.id).nonEmpty
 
   /** Whether `req` writes a `sql` source: no sourceType (the default) or one naming `sql`. */
   private def writesSqlSource(req: FederatedSourceCreateRequest): Boolean =
@@ -343,8 +330,46 @@ final class FederatedSourceHandlers(
               val id =
                 existing.map(_.id).getOrElse(Names.newSurrogateId("fs"))
               toSource(id, tenantDbId, req, existing) match
-                case Left(e)       => Left(e)
+                case Left(e) => Left(e)
+                // A stored secret, an externalRef's included, goes only where it was saved for,
+                // the rule TenantSignInWrite holds for a tenant's client secret.
+                case Right(source)
+                    if superuserDenied(apiKey) && existing.exists(takesElsewhere(_, source)) =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.FederationSourceUpsert,
+                    "denied",
+                    tenant = tenantIdResolver(tenantName),
+                    target = Some(source.alias)
+                  )
+                  Left(
+                    StatusCode.Forbidden -> ErrorResponse(
+                      "superuser_required",
+                      "this federated source holds secrets, so its connection or config stays as " +
+                        "it is: a superuser changes it, or delete the source and create it again " +
+                        "with its secrets"
+                    )
+                  )
                 case Right(source) =>
+                  // This endpoint is a create-request-as-upsert: every field is replaced by what
+                  // the request carries, so an OMITTED readOnly falls back to the type default
+                  // rather than to the stored value -- and for a `sql` source explicitly marked
+                  // read-only that default is false, i.e. a re-POST that only meant to edit
+                  // `setupSql` silently unlocks the catalog. The CLI and the MCP tool both omit the
+                  // field unless `--read-only`/`--no-read-only` was passed, so this is reachable
+                  // without anyone typing the word. Declarative replacement is this endpoint's
+                  // contract and is not being changed here, but it must not be SILENT:
+                  // `ManifestImporter` WARNs on exactly this class of downgrade (a sourceType flip
+                  // carrying readOnly with it) and this is the matching line for the REST path.
+                  // Logged only on the true -> false direction, and only once the upsert is
+                  // actually going to be written.
+                  if existing.exists(_.readOnly) && !source.readOnly && req.readOnly.isEmpty then
+                    logger.warn(
+                      s"federated source '${source.alias}' (tenant-db $tenantDbId) was read-only " +
+                        "and this upsert omitted readOnly, so it becomes WRITABLE; pass " +
+                        "readOnly=true to keep it read-only"
+                    )
                   fedStore.upsertSource(source)
                   sourcesChanged(tenantDbId)
                   if source.sourceType == FederatedSourceType.IcebergRest then

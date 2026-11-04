@@ -274,6 +274,19 @@ final class AuthzStack(
     )
     (r.statusCode(), r.body())
 
+  /** A DELETE with the session `token`: (status, body). */
+  def delete(path: String, token: String): (Int, String) =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$restPort$path"))
+        .timeout(Duration.ofSeconds(30))
+        .header("X-API-Key", token)
+        .DELETE()
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    (r.statusCode(), r.body())
+
   /** A PUT as the seeded admin (the federated-secret upsert); throws on a non-2xx answer. */
   def put(path: String, json: String): Unit =
     val r = http.send(
