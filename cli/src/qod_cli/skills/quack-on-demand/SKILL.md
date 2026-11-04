@@ -489,7 +489,11 @@ Semantics worth knowing: `userName` and a group's `displayName` are immutable (a
 qod tenant list
 
 # Create a tenant, then its database (metastore keys omitted here resolve from
-# the manager's defaultMetastore at spawn time; --metastore KEY=VALUE overrides)
+# the manager's defaultMetastore at spawn time; --metastore KEY=VALUE overrides).
+# A new tenant's name holds letters and digits only and starts with a letter (400 invalid_id
+# otherwise, for a superuser too): its databases are named <tenant>_<database>, and this keeps two
+# tenants from ever composing the same database name. A tenant that already holds an underscore,
+# or one a manifest import brings, keeps its name.
 qod tenant create acme
 qod database create --tenant acme --name tpch \
   --metastore dbName=tpch --metastore schemaName=tpch1
@@ -504,6 +508,20 @@ qod database create --tenant acme --name tpch \
 # A password or encryption key stored under another spelling (PgPassword, EncryptionKey)
 # is not dropped: its nodes still use it, but a manifest export leaves it out too (to
 # export a password, first store it as pgPassword: see "Update a database").
+#
+# A database may use another Postgres server, with a login of its own: QoD's login goes only to
+# QoD's server, so a metastore whose pgHost or pgPort differ from the default's, compared as text
+# after normalizing (127.0.0.1 is not localhost), answers 400 own_login_required without its own
+# pgUser and pgPassword (leave both pgHost and pgPort out to use QoD's server). Its catalog is its
+# owner's: QoD creates and drops no database there, so create one named <tenant>_<name> first
+# (400 catalog_database_missing names it); database delete and a tenant delete leave it, logged at
+# ERROR; it cannot be branched (400 branch_own_server).
+qod database create --tenant acme --name byo --data-path /data/acme_byo \
+  --metastore pgHost=pg.acme.example --metastore pgPort=5432 \
+  --metastore pgUser=acme --metastore pgPassword=...
+# On QoD's own server, a tenant admin's create makes the database, reuses an empty one, and answers
+# 409 database_name_taken for one holding anything, touching nothing (choose another name). A
+# superuser's create, qod serve's provisioning and a manifest import take over what is there.
 
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 qod pool create --tenant acme --db acme_tpch --pool bi --size 3 \
@@ -1266,6 +1284,12 @@ qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit 
 qod database update --tenant acme --name acme_tpch \
   --metastore dbName=acme_tpch --metastore pgHost=localhost --metastore pgPort=5432 \
   --metastore pgUser=postgres --metastore schemaName=main --metastore pgPassword=newpass
+# An update answers 400 own_login_required when the result names another server with no login of
+# its own, and when pgHost or pgPort change with the stored password left out: the password does not
+# follow the row, so send it again (or send it empty to go back to QoD's server, where QoD's login
+# fills in; a database holding anything there answers 409 database_name_taken). dbName names the
+# catalog for good: a tenant admin's change answers 400 db_name_fixed (a superuser may). catalogAlias
+# and schemaName name things inside the database's own catalog and stay free.
 
 # A pool's own initSql (runs after the catalog ATTACH, on the next node spawn):
 qod pool set-init-sql --tenant acme --db acme_tpch --pool bi --init-sql "SET threads = 4;"
@@ -2056,8 +2080,8 @@ Branch names: lowercase letter first, then letters, digits, `_` or `-`, at most
 48 characters. Only DuckLake databases can be branched, and never a branch.
 On Kubernetes a branch's node id is 36 characters plus the tenant's and the parent
 database's names, and it must fit a Service name and a label value, 63 characters
-each, so a create past that answers `502 branch_create_failed` (`wayne_corp` and
-`wayne_corp_sales_2026` make 67); a merge node's id holds neither name and stays
+each, so a create past that answers `502 branch_create_failed` (`waynecorp` and
+`waynecorp_sales_2026` make 65); a merge node's id holds neither name and stays
 within 35 characters, so `propose` and `merge` have no such limit.
 
 ```bash
@@ -2673,6 +2697,12 @@ eviction are opt-in knobs.
 | An SSO login or OIDC start fails while an identity provider is slow, or `authorization unavailable` for an OPA tenant under load | At most 128 identity provider exchanges (256 for OPA) run at once, and the rest fail at once. On Linux each exchange also leaves a TIME_WAIT socket on the manager's host, so sustained exchanges to one identity provider or OPA server above about 470 a second run out of local ports | Retry. Look for an issuer that hangs, or a flood of anonymous starts, and limit them in front of the manager. For the local ports, set `net.ipv4.tcp_tw_reuse=1` on the manager's host or container |
 | An SSO sign-in fails with `discovery_failed` | The issuer's discovery document could not be read (unreachable, over 256 KiB, or no answer within 15 s), or was refused: its `jwks_uri`, `token_endpoint` or `authorization_endpoint` is not an absolute http(s) URL, or one of its fields is over 2048 characters. A failure is remembered for 10 s | Check the issuer URL and what it serves, then retry after 10 s |
 | Boot prints `WARNING: this JDK has no HttpClient.shutdownNow ...` | The manager runs on a JDK older than 21, which cannot close the connection of an identity provider's or OPA server's refused answer | Run the manager on JDK 21 or later |
+| `400 invalid_id` on `tenant create` | The name holds something other than letters and digits, an underscore included, or does not start with a letter | Choose a name of letters and digits; a tenant that already holds an underscore keeps it, and a manifest import brings any name |
+| `409 database_name_taken` on `database create` or `update` | The Postgres database `<tenant>_<name>` on QoD's server already holds something, and the caller is not a superuser | Choose another name, or have a superuser create it if the database is really this one's |
+| `400 own_login_required` on `database create` or `update` | The metastore names another server than QoD's own (host and port, compared as text) without its own `pgUser` and `pgPassword`, or an update moves the row with its stored password left out | Send the login for that server, or leave `pgHost` and `pgPort` out to use QoD's |
+| `400 catalog_database_missing` on `database create` | The database names another server, where QoD creates no database, and its catalog database is not there | Create the database the message names on that server, then create again |
+| `400 db_name_fixed` on `database update` | A tenant admin sent another `dbName`; it names the database's catalog | Leave it out, or send the one it holds; a superuser may change it |
+| A database on another server stopped connecting after an upgrade, with no error before | Its row names another server and has no login of its own: QoD's login is no longer filled in there | `qod database update ... --metastore pgUser=... --metastore pgPassword=...` with the rest of the map |
 | `400 init_sql_refused` on `database create` / `update`, `pool create` / `set-init-sql` | A tenant admin's initSql holds a statement outside the allowlist ("Who may write what in initSql") | Keep only allowlisted SETs, read-only PRAGMAs and extension INSTALL/LOADs, or have a superuser write it |
 | An `INSERT` into an Iceberg table on S3 fails with an HTTP 403 at commit | DuckDB's Iceberg extension commits without connection secrets, and the nodes hold every registered S3 credential as one | Iceberg tables on S3 are read-only through QoD for every principal, superusers included, until upstream duckdb-iceberg signs its commits with connection secrets; write with the warehouse's own tooling |
 | A FlightSQL call fails `UNAUTHENTICATED` with `No bearer auth providers configured` or `Bearer authentication failed: ...` | The client replayed a session bearer the manager no longer holds (it restarted between calls), or sent a token no configured provider accepts | Reconnect with username and password (Basic) |

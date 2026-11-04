@@ -469,6 +469,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             <label>Metastore (key=value per line)
               <p className="subtle" style={{ marginBottom: 4 }}>
                 pgPassword is hidden and kept unless you set it: add pgPassword=newvalue to rotate.
+                A change of host or port needs pgPassword again, and another server its own pgUser.
                 Removing a key this database's kind requires is rejected. Editing this section
                 restarts the database's nodes.
               </p>
@@ -613,7 +614,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 <>
                   <p className="subtle" style={{ marginTop: 0 }}>
                     Only non-empty fields are sent; anything left blank falls back to the
-                    manager default.
+                    manager default. On another host or port, give a user and a password
+                    for that server: the manager's login is used only on its own, and its
+                    catalog database must already exist there, named as this database.
                   </p>
                   <label>
                     Host

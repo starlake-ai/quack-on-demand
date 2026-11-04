@@ -14,6 +14,13 @@ On Kubernetes, read your maintenance policies first. No maintenance node has eve
 cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
 upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
 
+A database whose metastore names another Postgres server than QoD's own, with no login of its own,
+stops connecting at the next node start or restart: QoD's login is no longer filled in there. Give it
+its own `pgUser` and `pgPassword` with `qod database update`, or leave `pgHost` and `pgPort` out to use
+QoD's server. Hosts are compared as text: with the default `localhost`, a row naming `127.0.0.1` counts
+as another server. A module calling `PoolSupervisor.createTenantDb` must recompile: it now states
+`adoptExistingDatabase`.
+
 On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
 is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
 count. To keep counts from a user, refuse on the table.
@@ -29,6 +36,30 @@ count. To keep counts from a user, refuse on the table.
   proposal, and `409 already_proposed` is gone.
 - Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
   rename the column), as one named `rowid` already did not.
+- A new tenant's name holds letters and digits only and starts with a letter: `tenant/create` answers
+  `400 invalid_id` to any other, an underscore included, for a superuser too. So does every path that
+  creates a tenant through the supervisor: MCP, `qod serve`'s boot provisioning and a module's direct
+  call. An existing tenant keeps its name and a manifest import brings any.
+- A database on another Postgres server than QoD's own needs its own login. `database/create` and
+  `database/update` answer `400 own_login_required` to a metastore whose `pgHost` or `pgPort` differ
+  from the default's without its own `pgUser` and `pgPassword`, for a superuser too, and QoD's login is
+  no longer filled in there, whoever wrote the row. A stored password does not follow a change of host
+  or port: send it again.
+- QoD creates and drops no Postgres database on another server than its own. A database there needs its
+  catalog database to exist first (`400 catalog_database_missing` names it), `database/delete` and a
+  tenant delete leave it, logged at ERROR, and it cannot be branched (`400 branch_own_server`).
+- `database/create` no longer takes over a Postgres database on QoD's server for a tenant admin: one
+  holding anything answers `409 database_name_taken` and stays untouched, an empty one is reused. A
+  superuser's create, `qod serve`'s provisioning and a manifest import still take over what is there.
+  An update moving a row onto QoD's server meets the same rule.
+- `database/delete` and a tenant delete drop a Postgres database only for a DuckLake row. Deleting a
+  `memory` or `duckdb-file` database no longer drops one, and no row's delete drops the control-plane
+  database.
+- `database/update` answers `400 db_name_fixed` to a tenant admin's change of a DuckLake database's
+  `dbName`; a superuser may still make it.
+- A metastore `pgUser` or `pgHost` holding whitespace, or a `pgHost` holding any of `? & = #`, is refused
+  on every write, a manifest import included. No such value ever connected as intended.
+- The spawn scripts no longer fall back on a built-in password for a database that has none.
 
 ### Added
 

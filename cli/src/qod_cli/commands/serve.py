@@ -595,7 +595,9 @@ def serve(
         help="What to serve: a .duckdb file, a parquet/csv file, a directory or glob of them, "
         "an s3://, gs:// or az:// prefix, or nothing for a fresh empty DuckLake.",
     ),
-    tenant: str = typer.Option("default", "--tenant", help="Tenant to provision under."),
+    tenant: str = typer.Option(
+        "default", "--tenant", help="Tenant to provision under: a new one's name holds letters and digits only."
+    ),
     name: str = typer.Option(None, "--name", help="Database name; default is derived from TARGET."),
     pool: str = typer.Option("bi", "--pool", help="Pool name."),
     schema: str = typer.Option("main", "--schema", help="Schema inside a .duckdb file."),
