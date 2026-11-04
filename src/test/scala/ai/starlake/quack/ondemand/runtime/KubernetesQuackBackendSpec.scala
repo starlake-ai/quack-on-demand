@@ -1102,7 +1102,7 @@ class KubernetesQuackBackendSpec
     // A real API server's rule for a Secret's name. No two pools share one: `x_` is not `x_0`.
     val secretName = "[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
     val backend    = fedBackend
-    val pools      = List("x_", "x_0", "x__", "_x_", "__merge", "sales")
+    val pools      = List("x_", "x_0", "x__", "_x_", "__merge", "sales", "a.b", "1a")
     pools.zipWithIndex.foreach { (pool, i) =>
       backend.start(nodeOf(PoolKey("acme", "acme_default", pool), s"named-n$i")).unsafeRunSync()
     }
@@ -1116,6 +1116,17 @@ class KubernetesQuackBackendSpec
     names.foreach(name => withClue(name)(name should fullyMatch regex secretName))
     names.count(_.startsWith("qod-fedsql--")) shouldBe pools.size
     names.count(_.startsWith("qod-nodeenv--")) shouldBe pools.size
+    // A pool whose name a label value cannot hold has Secret names the API accepts all the same.
+    for
+      pool   <- List("my pool", "a/b")
+      prefix <- List(
+        KubernetesQuackBackend.NodeEnvSecretPrefix,
+        KubernetesQuackBackend.FederationSecretPrefix
+      )
+    do
+      val name =
+        KubernetesQuackBackend.perPoolSecretName(prefix, PoolKey("acme", "acme_default", pool))
+      withClue(name)(name should fullyMatch regex secretName)
     // A name that holds to the rule reads as it is.
     names should contain("qod-fedsql--acme--acme-default--sales")
     names should contain("qod-fedsql--acme--acme-default--x-0")

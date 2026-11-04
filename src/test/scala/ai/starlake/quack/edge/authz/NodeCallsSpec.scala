@@ -170,6 +170,12 @@ class NodeCallsSpec extends AnyFlatSpec with Matchers:
     NodeCalls.NodeIdText.matches("q" * (NodeCalls.MaxNodeIdLength + 1)) shouldBe false
   }
 
+  it should "admit a fresh id of a pool made before the rule, whatever its name holds" in
+    List("my pool", "a/b", "a.b", "1a", "café").foreach { pool =>
+      val id = PoolSupervisor.nodeId(PoolKey("acme", "acme_default", pool), 1)
+      withClue(s"$pool gave $id: ")(NodeCalls.NodeIdText.matches(id) shouldBe true)
+    }
+
   "RefusalLog" should "warn on a node's first refusal and debug its repeats, within a cap" in {
     val name        = "ai.starlake.quack.edge.authz.NodeCallsSpec.refusals"
     val clock       = new AtomicLong(0L)

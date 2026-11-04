@@ -85,6 +85,45 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     PoolSupervisor.nodeId(PoolKey("acme", "acme_x", "p"), 1) shouldBe "quack--acme--acme-x--p--1"
   }
 
+  it should "read anything outside `[a-z0-9-]` as `-` in a hashed id's start, and nowhere else" in {
+    // Worked out by hand, outside this JVM. The hash tells apart what now reads alike.
+    val start = "quack--acme--acme-default--"
+    List(
+      "my pool" -> s"${start}my-pool-97f5329d057a9684-1",
+      "a/b"     -> s"${start}a-b-03f94c68ae126e43-1",
+      "a.b"     -> s"${start}a-b-75faa581e786a3e6-1",
+      "1a"      -> s"${start}1a-30735006a2f69b76-1"
+    ).foreach { (pool, expected) =>
+      val id = PoolSupervisor.nodeId(PoolKey("acme", "acme_default", pool), 1)
+      withClue(pool)(id shouldBe expected)
+    }
+    // Whichever name holds it, whatever it is, and past the limit.
+    List(
+      PoolKey("acme", "acme_default", "my pool"),
+      PoolKey("acme", "acme_default", "a/b"),
+      PoolKey("acme", "acme_default", "a.b"),
+      PoolKey("acme", "acme_default", "1a"),
+      PoolKey("acme", "acme_default", "café"),
+      PoolKey("acme", "acme_default", "a\tb"),
+      PoolKey("acme", "acme_default", "𝐀"),
+      PoolKey("acme", "my db", "p"),
+      PoolKey("acme", "a.b/c", "p"),
+      PoolKey("acme", "acme_default", "a b" * 30)
+    ).foreach { key =>
+      val id = PoolSupervisor.nodeId(key, 1)
+      withClue(s"$key gave $id: ") {
+        id.length should be <= 63
+        ServiceNameRule.matches(id) shouldBe true
+        LabelValueRule.matches(id) shouldBe true
+        id should fullyMatch regex "quack--[a-z0-9-]+-[0-9a-f]{16}-1"
+      }
+    }
+    // The cut falls on what the start reads as: past the limit, an id is 63 characters.
+    PoolSupervisor.nodeId(PoolKey("acme", "acme_default", "𝐀" * 40), 1).length shouldBe 63
+    // The plain form is what it was, and a name it holds never meets one this mapping makes.
+    PoolSupervisor.nodeId(PoolKey("acme", "acme_default", "a-b"), 1) shouldBe s"${start}a-b--1"
+  }
+
   it should "hash a branch's node, whose names hold `__` by design, and keep it in 63 characters" in {
     val branch = BranchNames.newId()
     val names  = List("acme" -> "acme_tpch", "wayne_corp" -> "wayne_corp_sales_2026")

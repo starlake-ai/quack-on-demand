@@ -5426,10 +5426,11 @@ object PoolSupervisor:
     * [[MissingSlots]] and `placementForNodeId` read it.
     *
     * The hash covers the names as given, joined by a NUL, which no name can hold: a pool made
-    * before the rule can hold anything else, but Postgres stores no NUL. Pure, on every runtime:
-    * each replica composes the same id. Only a fresh slot is composed: a node with a row keeps the
-    * id in it, so one an earlier release started keeps its form, `-` between fields and possibly
-    * past the limit.
+    * before the rule can hold anything else, but Postgres stores no NUL. So a hashed id's start
+    * need only be readable, and it reads anything outside `[a-z0-9-]` as `-`, which a Service name
+    * and `NodeCalls.NodeIdText` both take. Pure, on every runtime: each replica composes the same
+    * id. Only a fresh slot is composed: a node with a row keeps the id in it, so one an earlier
+    * release started keeps its form, `-` between fields and possibly past the limit.
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
     val stem  = s"quack--${poolReading(key)}"
@@ -5443,7 +5444,7 @@ object PoolSupervisor:
         .getInstance("SHA-256")
         .digest(names.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       val tail = s"-${java.util.HexFormat.of().formatHex(digest).take(NodeIdHashChars)}-$index"
-      stem.take(NodeIdMaxChars - tail.length) + tail
+      stem.replaceAll("[^a-z0-9-]", "-").take(NodeIdMaxChars - tail.length) + tail
 
   /** Replace the last segment of a dataPath with `newSegment`, to derive a per-tenant-db dataPath
     * alongside the root. URI-style paths (`<scheme>://...`) are string-handled so `Paths.get`
