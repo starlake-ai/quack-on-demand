@@ -68,7 +68,13 @@ final class AuthzStack(
     /** `defaultMetastore.dataPath`, for a spec whose databases QoD places. */
     defaultDataPath: Option[String] = None,
     /** More of `quack-on-demand`, as HOCON. */
-    extraManagerConfig: String = ""
+    extraManagerConfig: String = "",
+    /** `quack-on-demand.nodeFiles.allowLocal`. Off, the stack sets no `tenantFiles.root`, which the
+      * manager refuses beside it.
+      */
+    allowLocalFiles: Boolean = true,
+    /** The spawn script, for a spec that wraps the real one. */
+    spawnScript: Option[Path] = None
 ):
   import Main.given
 
@@ -90,8 +96,11 @@ final class AuthzStack(
     dropStrayCatalogs()
     if relayed then relay.start()
     val replicaPort = if relayed then relayPort else restPort + 1
-    val script      = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath
-    val overlay     = ConfigSource.string(
+    val script      = spawnScript.getOrElse(Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath)
+    val filesConfig =
+      if allowLocalFiles then s"""tenantFiles.root = "$filesRoot""""
+      else "nodeFiles.allowLocal = false"
+    val overlay = ConfigSource.string(
       s"""
          |quack-on-demand {
          |  host = "127.0.0.1"
@@ -107,7 +116,7 @@ final class AuthzStack(
          |  admin { username = "admin", password = "admin", kind = "admin" }
          |  auth.management.sessionJwtSecret = "authz-e2e-session-secret-0123456789abcdef"
          |  nodeAuthz.internalUrl = "http://127.0.0.1:$replicaPort"
-         |  tenantFiles.root = "$filesRoot"
+         |  $filesConfig
          |  userS3.allowedEndpoints = "$userS3Endpoints"
          |  ${maintenanceTickSec.fold("")(sec => s"maintenance.tickSec = $sec")}
          |  stampWrites = $stampWrites

@@ -257,6 +257,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       onEvent: ManagerEvent => Unit = _ => ()
   ): Fixture =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       private val spawns     = new AtomicInteger(0)
       def start(s: NodeSpec) = IO {

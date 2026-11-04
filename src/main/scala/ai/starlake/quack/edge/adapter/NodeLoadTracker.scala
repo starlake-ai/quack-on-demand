@@ -101,6 +101,10 @@ final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
   def setHealthy(nodeId: String, healthy: Boolean): Unit =
     update(nodeId)(_.copy(healthy = healthy))
 
+  /** The health probe's hold on a node that did not show local files off, or None to lift it. */
+  def setLocalFilesNotOff(nodeId: String, reason: Option[String]): Unit =
+    update(nodeId)(_.copy(localFilesNotOff = reason))
+
   def setDraining(nodeId: String, draining: Boolean): Unit =
     update(nodeId)(_.copy(draining = draining))
 

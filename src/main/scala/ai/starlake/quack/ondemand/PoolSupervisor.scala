@@ -624,12 +624,45 @@ final class PoolSupervisor(
     then stamped.updated(TenantDb.CreateDatabaseKey, "true")
     else stamped.removed(TenantDb.CreateDatabaseKey)
 
-  /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
-    * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a
-    * boot-time DuckLakeInitializer failure.
+  /** Why `td` cannot run while nodes have their local file system off
+    * (`quack-on-demand.nodeFiles.allowLocal`): its resolved data path is local. None while nodes
+    * may open local files. Read from the row each time, so every replica agrees, and an update
+    * moving the row to object storage ends it.
+    */
+  private def localFilesBlock(td: TenantDb): Option[PoolSupervisor.BlockReason] =
+    if backend.allowsLocalFiles then None
+    else
+      ai.starlake.quack.NodeFilesConfig
+        .localDataPath(
+          td.kind == TenantDbKind.InMemory,
+          effectiveMetastoreFor(td).getOrElse("dataPath", "")
+        )
+        .map(PoolSupervisor.localFilesBlockReason)
+
+  /** Why a database cannot run on this manager's nodes, as [[localFilesBlock]] reads it, for a
+    * lifecycle path that starts nodes of its own (a branch's).
+    */
+  def localFilesBlockOf(td: TenantDb): Option[String] = localFilesBlock(td).map(_.sentence)
+
+  /** [[localFilesBlock]] of `key`'s database, as a sentence. */
+  private def localFilesRefusal(key: PoolKey): Option[String] =
+    if backend.allowsLocalFiles then None
+    else findTenantDb(key.tenant, key.tenantDb).flatMap(localFilesBlockOf)
+
+  /** What blocks `td`: its local data path, else a pre-init guard's refusal. */
+  private def blockOf(td: TenantDb): Option[PoolSupervisor.BlockReason] =
+    localFilesBlock(td).orElse(dataPathBlocked.get(td.id))
+
+  /** True when `key`'s tenant-db is blocked ([[blockOf]]). False when the pool has no persisted row
+    * (InMemory-only test pools): such a pool never wrote to the store, so it can't race a boot-time
+    * DuckLakeInitializer failure.
     */
   private def isDataPathBlocked(key: PoolKey): Boolean =
-    poolIdByKey.get(key).flatMap(poolRows.get).exists(p => dataPathBlocked.contains(p.tenantDbId))
+    poolIdByKey
+      .get(key)
+      .flatMap(poolRows.get)
+      .flatMap(p => tenantDbs.get(p.tenantDbId))
+      .exists(blockOf(_).isDefined)
 
   /** Test-only seam: seed [[dataPathBlocked]] directly so specs can assert reconcile()'s skip. */
   private[ondemand] def blockDataPathForTest(tenantDbId: String, message: String): Unit =
@@ -642,14 +675,16 @@ final class PoolSupervisor(
     poolIdByKey
       .get(key)
       .flatMap(poolRows.get)
-      .flatMap(p => dataPathBlocked.get(p.tenantDbId))
+      .flatMap(p => tenantDbs.get(p.tenantDbId))
+      .flatMap(blockOf)
       .map(_.sentence)
 
   /** What this replica found wrong while restoring and initializing its databases, for the boot
     * banner: every blocked tenant-db (its pools are never started) and every tenant-db whose
     * federation blob failed to resolve (its nodes lack federation aliases), both for a database
     * that has both, so fixing one never uncovers the other later. Sorted by tenant and database,
-    * blocked ones first. Empty on an HA follower until it leads (it runs no DuckLake init).
+    * blocked ones first. An HA follower lists only what it reads from the rows, a local data path
+    * with local files off ([[localFilesBlock]]), until it leads: it runs no DuckLake init.
     */
   def startupProblems(): List[PoolSupervisor.StartupProblem] =
     import PoolSupervisor.StartupProblem
@@ -658,10 +693,12 @@ final class PoolSupervisor(
         (tenants.get(td.tenantId).map(_.id).getOrElse(td.tenantId), td.name)
       }
     def poolsOf(id: String) = poolRows.values.filter(_.tenantDbId == id).map(_.name).toList.sorted
-    val blocked             = dataPathBlocked.toList.flatMap { case (id, b) =>
-      named(id).map { case (t, db) =>
-        StartupProblem(t, db, StartupProblem.Kind.Blocked, b.reason, b.fixes, poolsOf(id))
-      }
+    val blocked             = tenantDbs.values.toList.flatMap { td =>
+      blockOf(td).flatMap(b =>
+        named(td.id).map { case (t, db) =>
+          StartupProblem(t, db, StartupProblem.Kind.Blocked, b.reason, b.fixes, poolsOf(td.id))
+        }
+      )
     }
     val federation =
       federationFailed.toList.flatMap { case (id, msg) =>
@@ -1017,7 +1054,9 @@ final class PoolSupervisor(
     */
   def ensureDuckLakeInitialized(): IO[Unit] = IO.blocking {
     tenantDbs.values.toList.foreach { td =>
-      if td.kind == TenantDbKind.DuckLake then initDuckLake(td, "ensureDuckLakeInitialized")
+      // Not a row no node may serve: a new catalog would record its local path for good.
+      if td.kind == TenantDbKind.DuckLake && localFilesBlock(td).isEmpty then
+        initDuckLake(td, "ensureDuckLakeInitialized")
     }
   }
 
@@ -1089,7 +1128,7 @@ final class PoolSupervisor(
         acc *> IO.delay(
           logger.warn(
             s"reconcile: skipping ${ps.size} pool(s) of tenant-db '$tenantDbName': " +
-              "dataPath mismatch; see boot ERROR"
+              "its database is blocked; see the boot banner or the pool's statusDetail"
           )
         )
       }
@@ -1407,9 +1446,12 @@ final class PoolSupervisor(
     * donor's federation aliases are decoration there - being one commit behind on them changes
     * nothing it does. Staying synchronous also keeps the branch-merge and maintenance-scheduler
     * callers unchanged.
+    *
+    * None for a database whose data path a node cannot open ([[localFilesBlock]]), and so for its
+    * merge node too: such a node could only start and fail.
     */
   def maintenanceNodeSpec(tenantName: String, tenantDbName: String): Option[NodeSpec] =
-    findTenantDb(tenantName, tenantDbName).map { td =>
+    findTenantDb(tenantName, tenantDbName).filter(localFilesBlock(_).isEmpty).map { td =>
       val key = PoolKey(tenantName, td.name, "__maint")
       // A pod and Service name on Kubernetes, as nodeId below: no underscore, 63 characters at most.
       val nodeId = s"maint-${td.name.replace('_', '-').take(36)}-${System.nanoTime()}"
@@ -2580,6 +2622,7 @@ final class PoolSupervisor(
                             .map(SupervisorError.OwnLoginRequired(_))
                         )
                         .orElse(TenantDb.validate(td, defaultMetastore).map(invalid))
+                        .orElse(localFilesCreateRefusal(td))
                     refused match
                       case Some(err) => Left(err)
                       case None      =>
@@ -2646,6 +2689,15 @@ final class PoolSupervisor(
           }
         }
     }
+
+  /** The refusal of a write that would leave a row [[localFilesBlock]] blocks: for every caller, on
+    * a path the row names or one QoD derives. A manifest import does not come here: it writes the
+    * row, and the row is blocked, so a backup always restores.
+    */
+  private def localFilesCreateRefusal(td: TenantDb): Option[SupervisorError] =
+    localFilesBlock(td).map(b =>
+      SupervisorError.LocalFilesOff(s"this database cannot run: ${b.sentence}")
+    )
 
   /** Stamp the deleted tenant-db's managed-prefix tombstone: `deletedAt` now, `purgeEligibleAt`
     * `retainDays` later (or now when the caller asked for an immediate purge). The retention window
@@ -2821,7 +2873,10 @@ final class PoolSupervisor(
                     .map(SupervisorError.OwnLoginRequired(_))
                 )
             }
-        (choice, TenantDb.validateSafety(merged), refused) match
+        // An update that leaves a row as blocked as it found it stays open: it may be the fix.
+        val blockedByUpdate =
+          if localFilesBlock(td).isDefined then None else localFilesCreateRefusal(merged)
+        (choice, TenantDb.validateSafety(merged), refused.orElse(blockedByUpdate)) match
           case (Some(err), _, _) => IO.pure(Left(err))
           case (_, Some(msg), _) =>
             IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
@@ -3074,6 +3129,10 @@ final class PoolSupervisor(
                 new IllegalStateException(
                   s"tenant-db '${key.tenant}/${key.tenantDb}' not found; create it first"
                 )
+              )
+            case Some(td) if localFilesBlock(td).isDefined =>
+              IO.raiseError(
+                new PoolSupervisor.LocalFilesOff(localFilesBlockOf(td).getOrElse(""))
               )
             case Some(td)
                 if pools.keys.exists(k =>
@@ -3438,8 +3497,13 @@ final class PoolSupervisor(
         val rolesToAdd: List[Role] = RoleDistribution.spawnOrder.flatMap { role =>
           List.fill((newDist.countFor(role) - state.nodes.count(_.role == role)).max(0))(role)
         }
+        // A new node could only start and fail: refused before any node stops, nothing written. A
+        // scale that starts none still goes through.
+        val localFilesOff = if rolesToAdd.isEmpty then None else localFilesRefusal(key)
 
-        if toRemove.isEmpty && rolesToAdd.isEmpty then
+        if localFilesOff.isDefined then
+          IO.raiseError(new PoolSupervisor.LocalFilesOff(localFilesOff.getOrElse("")))
+        else if toRemove.isEmpty && rolesToAdd.isEmpty then
           if newDist == state.distribution then IO.pure(state.nodes)
           else
             // No node moves, but the target changed: pending slots (fleet) were added or dropped.
@@ -3595,7 +3659,10 @@ final class PoolSupervisor(
   def resumePool(key: PoolKey, reason: String): IO[Either[SupervisorError, Pool]] =
     locks.withLock(key)(withCacheRecoveryIO("resumePool")(IO.defer {
       pools.get(key) match
-        case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
+        case None => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
+        // It stays suspended: a node of it could only start and fail.
+        case Some(_) if localFilesRefusal(key).isDefined =>
+          IO.pure(Left(SupervisorError.LocalFilesOff(localFilesRefusal(key).getOrElse(""))))
         case Some(state) =>
           poolIdByKey.get(key).flatMap(poolRows.get) match
             case None =>
@@ -3744,7 +3811,10 @@ final class PoolSupervisor(
     locks.withLock(key) {
       withCacheRecoveryIO("restartNode") {
         IO.delay(pools.get(key)).flatMap {
-          case None        => IO.pure(Left(SupervisorError.NotFound(s"pool $key not found")))
+          case None => IO.pure(Left(SupervisorError.NotFound(s"pool $key not found")))
+          // Before the stop: its replacement could only start and fail.
+          case Some(_) if localFilesRefusal(key).isDefined =>
+            IO.pure(Left(SupervisorError.LocalFilesOff(localFilesRefusal(key).getOrElse(""))))
           case Some(state) =>
             state.nodes.find(_.nodeId == nodeId) match
               case None =>
@@ -5032,6 +5102,31 @@ object PoolSupervisor:
   final case class BlockReason(reason: String, fixes: List[String]):
     def sentence: String =
       if fixes.isEmpty then reason else s"$reason. Fix: ${fixes.mkString("; or ")}"
+
+  /** The REST code of a database whose data path is local while nodes have local files off. */
+  val LocalFilesOffCode: String = "local_files_off"
+
+  /** A node of a database whose data path is local would have to start with local files off
+    * (`quack-on-demand.nodeFiles.allowLocal`), and could only fail: no node was started. `reason`
+    * is [[localFilesBlockReason]]'s sentence.
+    */
+  final class LocalFilesOff(reason: String) extends RuntimeException(reason)
+
+  /** Why a database on a local data path is blocked while nodes have local files off, with the two
+    * ways out. `path` empty: a row that names none and has no default to derive one from.
+    */
+  def localFilesBlockReason(path: String): BlockReason =
+    val where =
+      if path.isEmpty then "it has no data path, which leaves it on the local file system"
+      else s"its data path $path is on the local file system"
+    BlockReason(
+      s"$where, and ${ai.starlake.quack.NodeFilesConfig.AllowLocalEnv}=false turns local files off " +
+        "on every node",
+      List(
+        "move its data to object storage and point the database there",
+        s"unset ${ai.starlake.quack.NodeFilesConfig.AllowLocalEnv} and restart the manager"
+      )
+    )
 
   /** Something boot found wrong that leaves the manager up but a database degraded, as the boot
     * banner reports it: `Blocked` (its pools are never started) or `Federation` (its nodes start

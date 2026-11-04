@@ -40,6 +40,8 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       putDrainTimeoutMs: Long = 30000L
   ) =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",

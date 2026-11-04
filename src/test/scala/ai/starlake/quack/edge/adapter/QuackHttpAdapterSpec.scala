@@ -619,6 +619,154 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     // The probe statement never ran, so there was nothing for the canary to tell.
     client.canaries shouldBe 0
 
+  // ---- the health probe with local files off: the read of enable_external_access ----
+
+  /** A node that passes the probe and refuses the canary, answering `read` to the setting's read.
+    */
+  private final class FilesClient(var read: () => QuackResponse)
+      extends QuackHttpClient(TestArrow.sharedAllocator):
+    val statements = scala.collection.mutable.ListBuffer.empty[String]
+    val preludes   = scala.collection.mutable.ListBuffer.empty[String]
+    override def query(
+        endpoint: String,
+        token: String,
+        sql: String,
+        session: Option[String],
+        authorize: () => String
+    ): IO[QuackResponse] =
+      IO {
+        statements += sql
+        if sql == QuackHttpAdapter.ExternalAccessSql then
+          preludes += authorize()
+          read()
+        else TestArrow.okResponse(1L)
+      }
+    override def queryWithoutHandle(endpoint: String, token: String, sql: String) =
+      IO {
+        statements += "canary"
+        QuackResponse.Failed(
+          QuackError.Permanent("qod-node: this connection has no verified principal"),
+          1
+        )
+      }
+
+  private def answering(value: String): () => QuackResponse =
+    () => QuackResponse.Ok(TestArrow.readerFor(s"SELECT '$value'"), 1L, () => ())
+
+  private def filesAdapter(client: FilesClient, tracker: NodeLoadTracker) =
+    new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+
+  "healthProbe" should "send nothing more than the probe with local files on" in:
+    val client  = new FilesClient(() => fail("the setting's read was sent"))
+    val tracker = new NodeLoadTracker
+    filesAdapter(client, tracker)
+      .healthProbe(node("on"), "SELECT 1", allowsLocalFiles = true)
+      .unsafeRunSync() shouldBe ProbeVerdict.Ok
+    client.statements.toList shouldBe List("SELECT 1", "canary")
+    tracker.snapshot("on") shouldBe ai.starlake.quack.route.NodeLoad.empty
+
+  it should "pass a node that answers exactly false, read as the system principal" in:
+    val client  = new FilesClient(answering("false"))
+    val tracker = new NodeLoadTracker
+    filesAdapter(client, tracker)
+      .healthProbe(node("off"), "SELECT 1", allowsLocalFiles = false)
+      .unsafeRunSync() shouldBe ProbeVerdict.Ok
+    client.statements.toList shouldBe List("SELECT 1", "canary", QuackHttpAdapter.ExternalAccessSql)
+    ai.starlake.quack.edge.authz.HandleInspector
+      .payload(client.preludes.head)
+      .hcursor
+      .downField("principal")
+      .get[Boolean]("system") shouldBe Right(true)
+    tracker.snapshot("off").routable shouldBe true
+    tracker.snapshot("off").localFilesNotOff shouldBe None
+
+  it should "hold out of routing a node that answers anything else, and say why and what to do" in:
+    val cases = List(
+      "true"  -> "its enable_external_access reads true",
+      "FALSE" -> "reads neither true nor false",
+      ""      -> "reads neither true nor false"
+    )
+    for (value, says) <- cases do
+      val tracker = new NodeLoadTracker
+      val verdict = filesAdapter(new FilesClient(answering(value)), tracker)
+        .healthProbe(node("on"), "SELECT 1", allowsLocalFiles = false)
+        .unsafeRunSync()
+      withClue(s"answering '$value': ") {
+        verdict.healthy shouldBe false
+        val reason = verdict match
+          case ProbeVerdict.LocalFilesNotOff(r) => r
+          case other                            => fail(s"got $other")
+        reason should include("node on ")
+        reason should include(says)
+        reason should include("QOD_NODE_ALLOW_LOCAL_FILES=false")
+        reason should include("restart the node")
+        reason should include("upgrade its image or fleet server")
+        tracker.snapshot("on").routable shouldBe false
+        tracker.snapshot("on").localFilesNotOff shouldBe Some(reason)
+      }
+
+  it should "hold a node whose read fails, with no threshold, and let it go at the next false" in:
+    val client  = new FilesClient(() => QuackResponse.Failed(QuackError.Transient("HTTP 503"), 1))
+    val tracker = new NodeLoadTracker
+    val adapter = filesAdapter(client, tracker)
+    def tick()  =
+      adapter.healthProbe(node("n"), "SELECT 1", allowsLocalFiles = false).unsafeRunSync()
+    // Not the canary's rule: a read that fails shows nothing, so the first one holds the node.
+    val failed = tick()
+    failed.healthy shouldBe false
+    failed.toString should include("could not be read")
+    // The transport's words stay in the log: what the node answered is not the listing's.
+    failed.toString should not include "503"
+    tracker.snapshot("n").routable shouldBe false
+    client.read = answering("false")
+    tick() shouldBe ProbeVerdict.Ok
+    tracker.snapshot("n").routable shouldBe true
+    tracker.snapshot("n").localFilesNotOff shouldBe None
+
+  it should "hold a node whose read raises, or answers no cell, as one whose read fails" in:
+    val cases = List[() => QuackResponse](
+      () => throw new RuntimeException("connection reset"),
+      () => QuackResponse.Ok(TestArrow.emptyReader(), 1L, () => ()),
+      () => QuackResponse.Ok(TestArrow.readerFor("SELECT 'false', 'false'"), 1L, () => ())
+    )
+    for read <- cases do
+      val tracker = new NodeLoadTracker
+      filesAdapter(new FilesClient(read), tracker)
+        .healthProbe(node("n"), "SELECT 1", allowsLocalFiles = false)
+        .unsafeRunSync() should matchPattern { case ProbeVerdict.LocalFilesNotOff(_) => }
+      tracker.snapshot("n").routable shouldBe false
+
+  it should "keep the node held when a statement that ran on it marks it healthy" in:
+    val tracker = new NodeLoadTracker
+    filesAdapter(new FilesClient(answering("true")), tracker)
+      .healthProbe(node("n"), "SELECT 1", allowsLocalFiles = false)
+      .unsafeRunSync()
+    tracker.setHealthy("n", true)
+    tracker.snapshot("n").healthy shouldBe true
+    tracker.snapshot("n").routable shouldBe false
+
+  it should "not read the setting on a node that failed the probe, and leave its hold as it is" in:
+    val tracker = new NodeLoadTracker
+    tracker.setLocalFilesNotOff("n", Some("held"))
+    val calls  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val client = new QuackHttpClient(TestArrow.sharedAllocator):
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ): IO[QuackResponse] =
+        IO {
+          calls.incrementAndGet()
+          QuackResponse.Failed(QuackError.Transient("connection refused"), 1)
+        }
+    new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      .healthProbe(node("n"), "SELECT 1", allowsLocalFiles = false)
+      .unsafeRunSync() should matchPattern { case ProbeVerdict.Failed(_) => }
+    calls.get() shouldBe 1
+    tracker.snapshot("n").localFilesNotOff shouldBe Some("held")
+
   "HandleRefusalWarnings" should "name another node-key secret once, until the node passes again" in:
     val warnings = new HandleRefusalWarnings
     val refused  =

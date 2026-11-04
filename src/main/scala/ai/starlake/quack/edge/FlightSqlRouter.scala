@@ -5,7 +5,7 @@ import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.authz.DecidePurpose
 import ai.starlake.quack.edge.sql.{ComputedLocations, RefusedForms}
 import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind, TenantDb}
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
 import ai.starlake.quack.route.{PoolSnapshot, Router, RoutingDecision, StatementClassifier}
@@ -1321,6 +1321,9 @@ final class FlightSqlRouter(
               if s.txOpen then sessions.invalidatePin(connectionId)
               maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
               IO.pure(Left(f))
+            case Left(f: RouterFailure.BadRequest) =>
+              maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(f.reason))
+              IO.pure(Left(f))
             case Left(f) =>
               maybeRecord(
                 nodeId = "-",
@@ -1631,8 +1634,10 @@ final class FlightSqlRouter(
     * default before its process listens, so routability alone sent the waking statement to a closed
     * port), bounded by resumeHoldTimeout; expiry yields the retryable "pool is resuming"
     * UNAVAILABLE. resumePool errors are swallowed (.attempt): reconcile retries the spawn and the
-    * poll either sees a node or times out. With `wake` false (the OPA dry run) a suspended pool is
-    * answered [[FlightSqlRouter.PoolNotWoken]] instead.
+    * poll either sees a node or times out. All but one: a pool no node of its database could serve
+    * (local files off, a local data path) stays suspended and nothing retries, so it is answered
+    * [[FlightSqlRouter.CannotWakeLocalFilesOff]] at once. With `wake` false (the OPA dry run) a
+    * suspended pool is answered [[FlightSqlRouter.PoolNotWoken]] instead.
     */
   private def answers(n: ai.starlake.quack.model.RunningNode): IO[Boolean] =
     nodeAnswers.fold(adapter.answers(n))(_(n))
@@ -1670,8 +1675,11 @@ final class FlightSqlRouter(
                 }
             }
           }
-        supervisor.resumePool(poolKey, "query").attempt *>
-          IO.monotonic.flatMap(now => poll(now + resumeHoldTimeout))
+        supervisor.resumePool(poolKey, "query").attempt.flatMap {
+          case Right(Left(SupervisorError.LocalFilesOff(_))) =>
+            IO.pure(Left(RouterFailure.BadRequest(FlightSqlRouter.CannotWakeLocalFilesOff)))
+          case _ => IO.monotonic.flatMap(now => poll(now + resumeHoldTimeout))
+        }
       case Some(_) =>
         supervisor.snapshot(poolKey) match
           case None       => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
@@ -1956,6 +1964,15 @@ object FlightSqlRouter:
     * pool is suspended.
     */
   val PoolNotWoken: String = "pool is suspended; a dry run never wakes it"
+
+  /** What a statement reads when it would wake a pool no node of its database could serve: it holds
+    * for nothing, as only an operator ends this. Any user of the pool reads it, so it names no
+    * path.
+    */
+  val CannotWakeLocalFilesOff: String =
+    "this pool cannot wake: its database's data path is on the local file system, and " +
+      s"${ai.starlake.quack.NodeFilesConfig.AllowLocalEnv}=false turns local files off on every " +
+      "node. An administrator can move its data to object storage or unset the setting"
 
   /** Why a dry run for a superuser, the system or no principal was refused: a node admits the first
     * two without asking the decision endpoint, so the statement would run.

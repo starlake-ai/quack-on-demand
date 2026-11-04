@@ -51,6 +51,9 @@ package ai.starlake.quack.ondemand
   *   - [[ai.starlake.quack.ondemand.SupervisorError.DataPathTaken DataPathTaken]]: the data path
   *     QoD would derive for a new database lies at, under or above another's; REST 409
   *     `data_path_taken`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.LocalFilesOff LocalFilesOff]]: the database's
+  *     data path is local and nodes have local files off (`QOD_NODE_ALLOW_LOCAL_FILES=false`); REST
+  *     400 `local_files_off`.
   */
 enum SupervisorError(val message: String):
   case NotFound(msg: String)                        extends SupervisorError(msg)
@@ -70,3 +73,4 @@ enum SupervisorError(val message: String):
   case CatalogDatabaseMissing(msg: String)          extends SupervisorError(msg)
   case SuperuserChoice(msg: String)                 extends SupervisorError(msg)
   case DataPathTaken(msg: String)                   extends SupervisorError(msg)
+  case LocalFilesOff(msg: String)                   extends SupervisorError(msg)

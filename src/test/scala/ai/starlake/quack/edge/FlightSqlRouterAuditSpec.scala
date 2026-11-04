@@ -37,6 +37,8 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
 
   private def buildSupervisor(): PoolSupervisor =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(

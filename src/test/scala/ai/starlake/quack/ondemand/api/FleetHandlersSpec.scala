@@ -35,7 +35,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   private def addr(s: String): Option[InetAddress]               = Some(InetAddress.getByName(s))
   private def fixture(nodeKeys: NodeKeys = NodeKeys.ephemeral()) =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
-    val backend = new FleetQuackBackend(store, hbCfg, clock = () => t0)
+    val backend = new FleetQuackBackend(
+      store,
+      hbCfg,
+      clock = () => t0,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
     (
       store,
       new FleetHandlers(
@@ -43,7 +48,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         hbCfg,
         backend = Some(backend),
         nodeKeys = nodeKeys,
-        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
     )
   private def req(name: String = "srv-1", host: String = "10.0.0.1") =
@@ -148,12 +154,64 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val on      = new FleetHandlers(
       onStore,
       hbCfg,
-      backend = Some(new FleetQuackBackend(onStore, hbCfg, clock = () => t0)),
+      backend = Some(
+        new FleetQuackBackend(
+          onStore,
+          hbCfg,
+          clock = () => t0,
+          nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        )
+      ),
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
+  }
+
+  it should "carry the manager's local files setting in the assignment" in {
+    def assigned(allowLocal: Boolean): Option[FleetNodeFilesDto] =
+      val store = new InMemoryFleetServerStore(clock = () => t0)
+      val h     = new FleetHandlers(
+        store,
+        hbCfg,
+        backend = Some(
+          new FleetQuackBackend(
+            store,
+            hbCfg,
+            clock = () => t0,
+            nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal)
+          )
+        ),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+      store.claim(
+        FleetAssignment(
+          0,
+          "n1",
+          PoolKey("acme", "db", "bi"),
+          21900,
+          "tok",
+          "memory",
+          Map("pgHost" -> "h"),
+          "",
+          "",
+          ""
+        ),
+        30,
+        None
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None)
+        .unsafeRunSync()
+        .toOption
+        .flatMap(_.assignment)
+        .map(_.nodeFiles)
+    assigned(allowLocal = true) shouldBe Some(FleetNodeFilesDto(true))
+    assigned(allowLocal = false) shouldBe Some(FleetNodeFilesDto(false))
   }
 
   it should "carry the manager's decide limits in the assignment" in {
@@ -185,9 +243,17 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val set      = new FleetHandlers(
       setStore,
       hbCfg,
-      backend = Some(new FleetQuackBackend(setStore, hbCfg, clock = () => t0)),
+      backend = Some(
+        new FleetQuackBackend(
+          setStore,
+          hbCfg,
+          clock = () => t0,
+          nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        )
+      ),
       nodeKeys = NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0)
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     limits(set, setStore) shouldBe Some(FleetNodeAuthzLimitsDto(750, 0))
   }
@@ -262,9 +328,17 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val h = new FleetHandlers(
       failing,
       hbCfg,
-      backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0)),
+      backend = Some(
+        new FleetQuackBackend(
+          failing,
+          hbCfg,
+          clock = () => t0,
+          nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        )
+      ),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val e = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().left.toOption.get
     (e._1, e._2.error) shouldBe (StatusCode.BadGateway, "backend_error")
@@ -281,7 +355,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       hbCfg,
       backend = None,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     h.heartbeat(req(), Some("secret"), loopback, None)
       .unsafeRunSync()
@@ -303,7 +378,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       trustedProxies = trustedProxies
     )
     val store   = new InMemoryFleetServerStore(clock = () => t0)
-    val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
+    val backend = new FleetQuackBackend(
+      store,
+      cfg,
+      clock = () => t0,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
     (
       store,
       new FleetHandlers(
@@ -311,7 +391,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         cfg,
         backend = Some(backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
     )
 
@@ -368,9 +449,17 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val widened = new FleetHandlers(
       store,
       FleetConfig(joinToken = "secret", heartbeatSec = 7),
-      backend = Some(new FleetQuackBackend(store, hbCfg, clock = () => t0)),
+      backend = Some(
+        new FleetQuackBackend(
+          store,
+          hbCfg,
+          clock = () => t0,
+          nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        )
+      ),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     widened
       .heartbeat(req(), Some("secret"), addr("192.168.1.5"), None)
@@ -505,15 +594,21 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   private def adminFixture() =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
-    val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
-    val h       = new FleetHandlers(
+    val backend = new FleetQuackBackend(
+      store,
+      cfg,
+      clock = () => t0,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    val h = new FleetHandlers(
       store,
       cfg,
       backend = Some(backend),
       publish = StateChangePublisher.noop,
       audit = rootAudit,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     (store, h)
   private def beat(store: InMemoryFleetServerStore, name: String, host: String) =
@@ -675,7 +770,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       backend = None,
       publish = StateChangePublisher.noop,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
       Left("fleet_disabled")
@@ -824,15 +920,21 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val inner   = new InMemoryFleetServerStore(clock = () => t0)
     val probe   = new ProbeStore(inner)
     val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
-    val backend = new FleetQuackBackend(probe, cfg, clock = () => t0)
-    val pub     = new CountingPublisher
-    val h       = new FleetHandlers(
+    val backend = new FleetQuackBackend(
+      probe,
+      cfg,
+      clock = () => t0,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    val pub = new CountingPublisher
+    val h   = new FleetHandlers(
       probe,
       cfg,
       backend = Some(backend),
       publish = pub,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     (inner, probe, pub, h)
 
@@ -889,7 +991,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   "livenessByName" should "map every server to its liveness in one listing" in {
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val cfg     = FleetConfig(joinToken = "secret", heartbeatTimeoutSec = 15, reassignAfterSec = 60)
-    val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
+    val backend = new FleetQuackBackend(
+      store,
+      cfg,
+      clock = () => t0,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
     beat(store, "up", "10.0.0.1")
     beat(store, "late", "10.0.0.2"); store.backdate("late", 30)
     beat(store, "gone", "10.0.0.3"); store.backdate("gone", 100)
@@ -936,6 +1043,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       a,
       "ab" * 32,
       ai.starlake.quack.NodeExtensionsConfig(),
+      ai.starlake.quack.NodeFilesConfig(),
       ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     io.circe

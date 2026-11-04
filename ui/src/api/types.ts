@@ -64,7 +64,7 @@ export interface PoolResponse {
   // disagrees with the control plane), so its nodes are never started; see statusDetail.
   status: string;
   // When status is "blocked": why, and the fix. Any node listed is a stale record of an earlier
-  // run.
+  // run. With any other status: each node the health probe holds out of routing, and the fix.
   statusDetail?: string | null;
   // Effective metastore for this pool (inherited from the tenant-db).
   // pgPassword is redacted.

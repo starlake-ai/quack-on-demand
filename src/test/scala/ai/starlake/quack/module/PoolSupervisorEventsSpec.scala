@@ -31,6 +31,8 @@ class PoolSupervisorEventsSpec extends AnyFlatSpec with Matchers:
     * without spawning a real process.
     */
   private final class StubQuackBackend extends QuackBackend:
+    def allowsLocalFiles = true
+
     private val nodes                          = TrieMap.empty[String, RunningNode]
     def start(spec: NodeSpec): IO[RunningNode] = IO {
       val n = RunningNode(

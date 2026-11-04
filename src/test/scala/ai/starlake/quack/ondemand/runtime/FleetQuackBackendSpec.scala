@@ -94,7 +94,13 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     clockNow = Instant.parse("2026-09-25T10:00:00Z")
     val store   = new InMemoryFleetServerStore(clock = () => clockNow)
     val backend =
-      new FleetQuackBackend(store, cfg, clock = () => clockNow, pollInterval = 20.millis)
+      new FleetQuackBackend(
+        store,
+        cfg,
+        clock = () => clockNow,
+        pollInterval = 20.millis,
+        nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      )
     (store, backend, (t: Instant) => clockNow = t, () => clockNow)
 
   /** Advances the shared clock one second every 50ms while it runs. */
@@ -176,7 +182,8 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       clock = () => clockNow,
       pollInterval = 20.millis,
       defaultPgHost = "postgres",
-      defaultPgPort = "5432"
+      defaultPgPort = "5432",
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val agent   = new FakeAgent(store, "srv-1"); agent.beat()
     val managed =
@@ -431,7 +438,8 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       store,
       FleetConfig(joinToken = "j", startupTimeoutSec = 2, stopTimeoutSec = 1),
       clock = () => now().plusSeconds(3600),
-      pollInterval = 20.millis
+      pollInterval = 20.millis,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     ahead.nodeRowExists = _ => false
     setNow(now().plusSeconds(1))
@@ -495,7 +503,8 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       new ThrowingGet(inner),
       FleetConfig(joinToken = "j", startupTimeoutSec = 2, stopTimeoutSec = 1),
       clock = () => clockNow,
-      pollInterval = 20.millis
+      pollInterval = 20.millis,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     new FakeAgent(inner, "srv-1").beat()
     (the[RuntimeException] thrownBy backend.start(spec("n1")).unsafeRunSync()).getMessage shouldBe
@@ -517,6 +526,10 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     final class ThrowingRelease(underlying: InMemoryFleetServerStore) extends FleetServerStore:
       export underlying.{release as _, *}
       def release(nodeId: String): Option[String] = throw new RuntimeException("pg down")
-    val backend = new FleetQuackBackend(new ThrowingRelease(inner), FleetConfig(joinToken = "j"))
+    val backend = new FleetQuackBackend(
+      new ThrowingRelease(inner),
+      FleetConfig(joinToken = "j"),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
     noException should be thrownBy backend.stop(pk, "n1").unsafeRunSync()
   }

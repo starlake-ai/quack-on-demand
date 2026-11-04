@@ -653,6 +653,7 @@ final case class ManagerConfig(
     restLimits: RestLimitsConfig = RestLimitsConfig(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
+    nodeFiles: NodeFilesConfig = NodeFilesConfig(),
     nodeAuthzLimits: NodeAuthzLimitsConfig = NodeAuthzLimitsConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
@@ -893,6 +894,88 @@ object NodeExtensionsConfig:
   val AllowUnsignedEnv: String    = "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"
   val AutoinstallKnownEnv: String = "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
   val EnvNames: Set[String]       = Set(AllowCommunityEnv, AllowUnsignedEnv, AutoinstallKnownEnv)
+
+/** Whether a node may open local files. `allowLocal = false` turns DuckDB's external access off as
+  * the last statements of every node's init SQL, so that nothing on the node opens a local path
+  * outside DuckDB's own temp directory, whatever a catalog lists and whoever asks. A row whose data
+  * path is local then cannot run: [[NodeFilesConfig.localDataPath]] says which, and the supervisor
+  * blocks such a row and refuses a create that would make one. Every backend hands the variable to
+  * the spawn script ([[env]]). A change applies at each node's next start.
+  */
+final case class NodeFilesConfig(
+    @field @ConfigField(
+      envVar = "QOD_NODE_ALLOW_LOCAL_FILES",
+      description =
+        "false starts every node with DuckDB's local file access off: no statement and no catalog " +
+          "file list reaches a local path outside DuckDB's own temp directory, for anyone. Spills " +
+          "keep working. A database on a local data path is blocked and cannot be created, data " +
+          "must lie on object storage, and extensions a node did not load at start stay out. " +
+          "Refused together with QOD_TENANT_FILES_ROOT. Applies at each node's next start."
+    )
+    allowLocal: Boolean = true
+):
+  /** The spawn environment carrying this to the script: the name, always, `true` or `false`, so
+    * neither a variable the launcher inherited nor a node's metastore decides it.
+    */
+  def env: Map[String, String] = Map(NodeFilesConfig.AllowLocalEnv -> allowLocal.toString)
+
+object NodeFilesConfig:
+  val AllowLocalEnv: String = "QOD_NODE_ALLOW_LOCAL_FILES"
+  val EnvNames: Set[String] = Set(AllowLocalEnv)
+
+  /** The remote schemes of [[allowedDirectories]], httpfs's file systems: what a data path, a
+    * user's S3 scope and a superuser's read may name, on every node.
+    */
+  val HttpfsSchemes: List[String] =
+    List("s3://", "s3a://", "s3n://", "r2://", "gs://", "gcs://", "hf://", "http://", "https://")
+
+  /** The azure extension's: allowed only where the node's init SQL loaded azure, since DuckDB
+    * stores a scheme with no file system of its own loaded as a local path (`az:///`).
+    */
+  val AzureSchemes: List[String] = List("az://", "azure://", "abfs://", "abfss://")
+
+  /** The CA bundles httpfs looks for (`CERT_FILE_LOCATIONS`), which it reads through DuckDB's file
+    * system: with external access off, and not one of them allowed, every HTTPS request is refused.
+    * Compare with the httpfs of a new DuckDB pin.
+    */
+  val CaBundles: List[String] = List(
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ssl/cert.pem"
+  )
+
+  private def sqlList(values: List[String]): String =
+    values.map(v => s"'$v'").mkString("[", ", ", "]")
+
+  /** What both spawn scripts add as the last statements of a node's init SQL when the setting is
+    * `false`, one line per statement. The scripts write it out themselves (they run where no
+    * manager does); NodeFilesScriptsSpec pins them to this.
+    */
+  val InitStatements: List[String] = List(
+    "LOAD httpfs;",
+    s"SET VARIABLE qod_remote_schemes = ${sqlList(HttpfsSchemes)} || (SELECT CASE WHEN " +
+      s"bool_or(loaded) THEN ${sqlList(AzureSchemes)} ELSE [] END FROM duckdb_extensions() WHERE " +
+      "extension_name = 'azure');",
+    "SET allowed_directories = getvariable('qod_remote_schemes');",
+    "RESET VARIABLE qod_remote_schemes;",
+    s"SET allowed_paths = ${sqlList(CaBundles)};",
+    "SET enable_external_access = false;"
+  )
+
+  /** Whether a node reaches `path` through a file system of its own rather than the local one, as
+    * DuckDB compares `allowed_directories`: exact prefixes, case included.
+    */
+  def isRemote(path: String): Boolean =
+    (HttpfsSchemes ++ AzureSchemes).exists(path.startsWith)
+
+  /** `path` when a node with local files off cannot use it: a local path. An empty one counts for a
+    * kind that needs a path (no node of it starts) and not for `memory`, which needs none.
+    */
+  def localDataPath(pathOptional: Boolean, path: String): Option[String] =
+    if path.isEmpty then Option.when(!pathOptional)(path)
+    else Option.when(!isRemote(path))(path)
 
 /** The decide limits qod-node reads from its environment at start (in-engine authorization): how
   * long one decide call may take, and how many plan verdicts a node keeps. Every backend hands both

@@ -736,6 +736,34 @@ append_tenant_init_sql pool "${tenantPoolInitSqlTrusted:-}" trusted
 append_tenant_init_sql pool "${tenantPoolInitSql:-}" untrusted
 append_closed_sql "${extraSetupSql:-}"
 
+# quack-on-demand.nodeFiles.allowLocal, set by every launcher: only the exact string "false" turns
+# DuckDB's external access off. Then nothing on this node opens a local path outside DuckDB's own
+# temp directory (spills keep working), whatever a catalog lists, for anyone, and DuckDB refuses to
+# turn it back on while the node runs. Last in the stream, after every legitimate INSTALL, LOAD and
+# ATTACH, since none of those runs past the switch; qod-node loads quack right before the first of
+# these SETs (RestrictsNodeAccess). Kept equal to NodeFilesConfig.InitStatements and the PowerShell
+# script (NodeFilesScriptsSpec).
+#   LOAD httpfs: nothing autoloads past the switch. quack_serve needs its crypto module on a node
+#     that has not loaded it, a user's S3 credential needs its secret type, and DuckDB stores a
+#     scheme as a local path (s3:///) unless the extension of its file system is loaded.
+#   allowed_directories: every remote scheme a node may use, no local path. Azure's only where
+#     something above loaded azure, for that same reason (a read of them is refused elsewhere anyway:
+#     azure cannot autoload).
+#   allowed_paths: httpfs reads the system's CA bundle through DuckDB's file system, and refuses every
+#     HTTPS request when it may not look at any of these five (its own list).
+# The two marker lines hold no statement: qod-node cuts the stream at them before it tokenizes
+# anything, so a trusted text above that never closes a quote or a comment cannot swallow what follows.
+if [[ "${QOD_NODE_ALLOW_LOCAL_FILES:-}" == "false" ]]; then
+  INIT_SQL+="-- qod:untrusted-begin $INIT_NONCE"$'\n'
+  INIT_SQL+="-- qod:untrusted-end $INIT_NONCE"$'\n'
+  INIT_SQL+=$'LOAD httpfs;\n'
+  INIT_SQL+="SET VARIABLE qod_remote_schemes = ['s3://', 's3a://', 's3n://', 'r2://', 'gs://', 'gcs://', 'hf://', 'http://', 'https://'] || (SELECT CASE WHEN bool_or(loaded) THEN ['az://', 'azure://', 'abfs://', 'abfss://'] ELSE [] END FROM duckdb_extensions() WHERE extension_name = 'azure');"$'\n'
+  INIT_SQL+="SET allowed_directories = getvariable('qod_remote_schemes');"$'\n'
+  INIT_SQL+=$'RESET VARIABLE qod_remote_schemes;\n'
+  INIT_SQL+="SET allowed_paths = ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/ca-bundle.pem', '/etc/ssl/cert.pem'];"$'\n'
+  INIT_SQL+=$'SET enable_external_access = false;\n'
+fi
+
 # Test seam: print the assembled init SQL and exit without launching qod-node.
 # Used by SpawnScriptEncryptionSpec to assert the emitted SQL, which is the only
 # testable surface of a script the manager shells out to.

@@ -714,6 +714,23 @@ foreach ($section in @((Format-TenantInitSql 'pool' $tenantPoolInitSqlTrusted $t
 }
 Add-ClosedSql $sb $extraSetupSql
 
+# quack-on-demand.nodeFiles.allowLocal, set by every launcher: only the exact string "false" (-ceq is
+# case-sensitive like bash's ==) turns DuckDB's external access off, as the last init statements.
+# Mirrors spawn-quack-node.sh, whose comment says why each statement is there; kept equal to
+# NodeFilesConfig.InitStatements, NodeFilesScriptsSpec pins it. On Windows the five paths name no
+# file: httpfs asks for each, and with an answer for all five uses the system's own certificates; it
+# refuses every HTTPS request when it may not ask.
+if ([Environment]::GetEnvironmentVariable('QOD_NODE_ALLOW_LOCAL_FILES') -ceq 'false') {
+  [void]$sb.AppendLine("-- qod:untrusted-begin $initNonce")
+  [void]$sb.AppendLine("-- qod:untrusted-end $initNonce")
+  [void]$sb.AppendLine("LOAD httpfs;")
+  [void]$sb.AppendLine("SET VARIABLE qod_remote_schemes = ['s3://', 's3a://', 's3n://', 'r2://', 'gs://', 'gcs://', 'hf://', 'http://', 'https://'] || (SELECT CASE WHEN bool_or(loaded) THEN ['az://', 'azure://', 'abfs://', 'abfss://'] ELSE [] END FROM duckdb_extensions() WHERE extension_name = 'azure');")
+  [void]$sb.AppendLine("SET allowed_directories = getvariable('qod_remote_schemes');")
+  [void]$sb.AppendLine("RESET VARIABLE qod_remote_schemes;")
+  [void]$sb.AppendLine("SET allowed_paths = ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/ca-bundle.pem', '/etc/ssl/cert.pem'];")
+  [void]$sb.AppendLine("SET enable_external_access = false;")
+}
+
 $initSql = $sb.ToString()
 
 # Test seam, mirror of QOD_SPAWN_DRY_RUN in spawn-quack-node.sh: print the init SQL and exit without

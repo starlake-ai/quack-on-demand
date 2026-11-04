@@ -115,7 +115,10 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       def createDatabase(name: String): Either[String, Unit]   = { created += name; Right(()) }
       def dropDatabase(name: String): Either[String, Unit]     = { dropped += name; Right(()) }
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
-    val backend = new StubQuackBackend()
+
+    /** Whether nodes may open local files. A row made while they may outlives turning it off. */
+    var localFilesAllowed = true
+    val backend           = new StubQuackBackend(localFilesAllowed = () => localFilesAllowed)
 
     /** Runs when a `withLock` is asked for, before it waits. */
     var onLockAsked: PoolKey => Unit = _ => ()
@@ -470,6 +473,19 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       .find(_.branchOf.contains(f.parent.id))
       .get
       .encrypted shouldBe true
+  }
+
+  it should "refuse a parent no node can open, with local files off, creating nothing anywhere" in {
+    val f = new Fixture()
+    f.localFilesAllowed = false
+    f.created.clear()
+    val refused = f.create("feature-x", ttl = Some(24)).swap.toOption.get
+    refused.status shouldBe 400
+    refused.code shouldBe "local_files_off"
+    refused.message should include("QOD_NODE_ALLOW_LOCAL_FILES")
+    f.created shouldBe empty
+    f.cloneCalls shouldBe empty
+    f.store.findBranch(f.parent.id, "feature-x") shouldBe None
   }
 
   it should "refuse a parent on its own server, creating nothing anywhere" in {

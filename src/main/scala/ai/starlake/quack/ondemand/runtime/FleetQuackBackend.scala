@@ -58,11 +58,16 @@ final class FleetQuackBackend(
     clock: () => Instant = () => Instant.now(),
     pollInterval: FiniteDuration = 1.second,
     defaultPgHost: String = "",
-    defaultPgPort: String = ""
+    defaultPgPort: String = "",
+    // The setting FleetHandlers hands each assignment, for the supervisor's block of a local data
+    // path. Required: a default would have the supervisor start nodes that cannot serve.
+    nodeFiles: ai.starlake.quack.NodeFilesConfig
 ) extends QuackBackend
     with LazyLogging:
 
   override val isFleet: Boolean = true
+
+  override val allowsLocalFiles: Boolean = nodeFiles.allowLocal
 
   def livenessOf(row: FleetServerRow): ServerLiveness =
     FleetLiveness.classify(row.silentSeconds, cfg.heartbeatTimeoutSec, cfg.reassignAfterSec)

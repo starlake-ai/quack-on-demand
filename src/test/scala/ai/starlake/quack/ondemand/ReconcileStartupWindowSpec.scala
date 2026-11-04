@@ -47,12 +47,15 @@ class ReconcileStartupWindowSpec extends AnyFlatSpec with Matchers:
 
   /** The real local backend, recording every node it starts. */
   private final class RecordingLocal(min: Int, max: Int, cmd: List[String]) extends QuackBackend:
+    def allowsLocalFiles = true
+
     private val inner = new LocalQuackBackend(
       min,
       max,
       commandFor = (_, _, _) => cmd,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val started                                = new ConcurrentLinkedQueue[Started]()
     def start(spec: NodeSpec): IO[RunningNode] =

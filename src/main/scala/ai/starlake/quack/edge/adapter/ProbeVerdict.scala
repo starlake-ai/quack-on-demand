@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.adapter
 
+import ai.starlake.quack.NodeFilesConfig
 import ai.starlake.quack.edge.authz.NodeHandles
 
 import scala.collection.concurrent.TrieMap
@@ -25,9 +26,28 @@ enum ProbeVerdict:
   /** The probe statement failed for any other reason: the node is down, the statement errored. */
   case Failed(reason: String)
 
+  /** This manager runs its nodes with local files off and the node did not show that it does.
+    * `reason` is what the pool listing says of it ([[ProbeVerdict.localFilesNotOffReason]]).
+    */
+  case LocalFilesNotOff(reason: String)
+
   def healthy: Boolean = this == Ok
 
 object ProbeVerdict:
+
+  /** Why node `nodeId` is held out of routing, as the pool's `statusDetail` and the log read it:
+    * what its `enable_external_access` answered (`reading`, the cell, None when the read failed or
+    * answered no cell), and the ways out. It quotes nothing else of the node's.
+    */
+  def localFilesNotOffReason(nodeId: String, reading: Option[String]): String =
+    val answer = reading match
+      case Some("true") => "its enable_external_access reads true"
+      case Some(_)      => "its enable_external_access reads neither true nor false"
+      case None         => "its enable_external_access could not be read"
+    s"node $nodeId does not show local files off: $answer, though " +
+      s"${NodeFilesConfig.AllowLocalEnv}=false turns them off on every node. It is unhealthy and " +
+      "not routed to. Fix: restart the node; or upgrade its image or fleet server, as an older " +
+      "release does not apply the setting"
 
   /** The warning for node `nodeId` refusing the manager's session handles: the node's answer and,
     * when the answer says which, the likely cause and the fix. `nodeText` holds no handle (qod-node

@@ -42,6 +42,9 @@ final class FleetHandlers(
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig(),
+    // Required (Main passes the manager's): a default would leave a node's local files on whatever
+    // the manager was told.
+    nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // Required (Main passes the manager's): a default would silently run qod-node's own limits.
     nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
 ) extends LazyLogging:
@@ -177,7 +180,13 @@ final class FleetHandlers(
                     .flatMap(_.assignment)
                     .map(a =>
                       FleetHandlers
-                        .toDto(a, nodeKeys.keyHex(a.nodeId), nodeExtensions, nodeAuthzLimits)
+                        .toDto(
+                          a,
+                          nodeKeys.keyHex(a.nodeId),
+                          nodeExtensions,
+                          nodeFiles,
+                          nodeAuthzLimits
+                        )
                     ),
                   approval
                 )
@@ -335,12 +344,13 @@ object FleetHandlers:
     case ServerLiveness.Dead           => "dead"
 
   /** The heartbeat's assignment, with the node key derived for its node id, the manager's extension
-    * policy and its decide limits (none stored).
+    * policy, whether its nodes may open local files and its decide limits (none stored).
     */
   def toDto(
       a: FleetAssignment,
       authzKey: String,
       extensions: ai.starlake.quack.NodeExtensionsConfig,
+      files: ai.starlake.quack.NodeFilesConfig,
       limits: ai.starlake.quack.NodeAuthzLimitsConfig
   ): FleetAssignmentDto =
     FleetAssignmentDto(
@@ -360,6 +370,7 @@ object FleetHandlers:
         extensions.allowUnsigned,
         extensions.autoinstallKnown
       ),
+      FleetNodeFilesDto(files.allowLocal),
       FleetNodeAuthzLimitsDto(limits.decideTimeoutMs, limits.cacheEntries),
       a.tenantDbInitSql,
       a.tenantDbInitTrusted,

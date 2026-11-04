@@ -95,7 +95,8 @@ class PreviewEndToEndSpec
       min = 24900,
       max = 24999,
       nodeKeys = keys,
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val sup      = new PoolSupervisor(backend, tracker, store)
     val tenant   = "pvtenant"

@@ -171,7 +171,10 @@ final case class PoolResponse(
     initSqlWarning: Option[String] = None,
     // When `status` is `blocked`: why the pool's database is blocked and the fix. Its nodes are
     // never started, so any node listed is a stale record of an earlier run. Replica-local: an HA
-    // follower runs no DuckLake init and reports `ready`.
+    // follower runs no DuckLake init, so it reports `ready` for a block only that init finds, and a
+    // local data path with local files off as `blocked`, as it reads that from the row.
+    // With any other `status`: each node the health probe holds out of routing, as it did not show
+    // local files off (QOD_NODE_ALLOW_LOCAL_FILES=false), and the fix. Replica-local too.
     statusDetail: Option[String] = None
 )
 
@@ -350,6 +353,11 @@ final case class FleetNodeExtensionsDto(
     autoinstallKnown: Boolean
 )
 
+/** Whether the node may open local files, as the join process hands it to the spawn script. Derived
+  * per heartbeat from `quack-on-demand.nodeFiles`, never stored.
+  */
+final case class FleetNodeFilesDto(allowLocal: Boolean)
+
 /** The manager's decide limits for the node, as the join process hands them to qod-node. Derived
   * per heartbeat from `quack-on-demand.nodeAuthzLimits`, never stored.
   */
@@ -367,6 +375,7 @@ final case class FleetAssignmentDto(
     objectStoreSql: String,
     extraSetupSql: String,
     nodeExtensions: FleetNodeExtensionsDto,
+    nodeFiles: FleetNodeFilesDto,
     authzLimits: FleetNodeAuthzLimitsDto,
     tenantDbInitSql: String,
     tenantDbInitTrusted: Boolean,
@@ -1863,6 +1872,7 @@ object Dtos:
   given Codec[FleetHeartbeatRequest]        = deriveCodec
   given Codec[FleetPoolKeyDto]              = deriveCodec
   given Codec[FleetNodeExtensionsDto]       = deriveCodec
+  given Codec[FleetNodeFilesDto]            = deriveCodec
   given Codec[FleetNodeAuthzLimitsDto]      = deriveCodec
   given Codec[FleetAssignmentDto]           = deriveCodec
   given Codec[FleetHeartbeatResponse]       = deriveCodec

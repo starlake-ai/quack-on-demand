@@ -395,6 +395,26 @@ object BootPreflight extends LazyLogging:
       )
     else Right(())
 
+  /** A tenant's local folders ([[ai.starlake.quack.TenantFilesConfig]]) could never be read by
+    * nodes with local files off.
+    */
+  val TenantFilesWithLocalFilesOffMessage: String =
+    "QOD_TENANT_FILES_ROOT (quack-on-demand.tenantFiles.root) is set while " +
+      "QOD_NODE_ALLOW_LOCAL_FILES=false (quack-on-demand.nodeFiles.allowLocal) turns local files " +
+      "off on every node: no node could read a tenant's local folder. Unset one of the two."
+
+  /** Refuses settings that contradict each other about a node's local files. Reads the
+    * configuration alone, before any socket opens. The default data path is not judged: rows may
+    * all name their own.
+    */
+  def checkNodeFiles(
+      nodeFiles: ai.starlake.quack.NodeFilesConfig,
+      tenantFiles: ai.starlake.quack.TenantFilesConfig
+  ): Either[String, Unit] =
+    if !nodeFiles.allowLocal && tenantFiles.root.trim.nonEmpty then
+      Left(TenantFilesWithLocalFilesOffMessage)
+    else Right(())
+
   val InternalUrlFormatMessage: String =
     "QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl) is not a plain http:// URL with " +
       "a host and no user info, query or fragment: nodes call this replica's decision endpoint " +

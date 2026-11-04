@@ -306,6 +306,10 @@ final class BranchService(
           .left
           .map(BranchFailure.badRequest("invalid_name", _))
         _ <- validTtl(ttlHours, actor)
+        _ <- sup
+          .localFilesBlockOf(parent)
+          .map(BranchFailure.badRequest(PoolSupervisor.LocalFilesOffCode, _))
+          .toLeft(())
         _ <- onQodServer(parent)
         _ <- noDuplicate(parent, name)
         _ <- underLimit(parent)

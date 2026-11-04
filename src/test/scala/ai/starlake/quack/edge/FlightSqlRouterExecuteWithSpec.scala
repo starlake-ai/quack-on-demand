@@ -42,6 +42,8 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       nodeCount: Int = 1
   ): Fixture =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(

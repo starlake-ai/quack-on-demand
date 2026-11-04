@@ -157,7 +157,9 @@ object TenantEndpoints:
           "of pgHost, pgPort, pgUser, pgPassword or dbName (dbName stays free on kind=duckdb-file): " +
           "a superuser names a Postgres server. A database's Postgres server is trusted as far " +
           "as its nodes are: whoever controls it reaches what those nodes reach. A superuser who " +
-          "names one accepts that."
+          "names one accepts that. With QOD_NODE_ALLOW_LOCAL_FILES=false a superuser naming a " +
+          "local data path, and anyone on the one QoD would place, is 400 local_files_off, " +
+          "nothing written."
       )
       .in(jsonBody[TenantDbRequest])
       .in(authToken)
@@ -204,7 +206,8 @@ object TenantEndpoints:
           "or dbName (dbName stays free on kind=duckdb-file): 403 superuser_required otherwise, " +
           "nothing written. They stay as stored when sent back as the row holds them, with a " +
           "password left out. An update that changes the metastore, objectStore or initSql " +
-          "restarts the database's nodes."
+          "restarts the database's nodes. With QOD_NODE_ALLOW_LOCAL_FILES=false an update moving a " +
+          "database onto a local data path is 400 local_files_off, nothing written."
       )
       .in(jsonBody[UpdateTenantDbRequest])
       .in(authToken)

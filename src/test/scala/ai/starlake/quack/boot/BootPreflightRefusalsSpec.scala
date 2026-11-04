@@ -302,6 +302,50 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
     * Postgres: Kubernetes with neither QOD_INTERNAL_URL nor QOD_POD_IP stops there, and so does
     * fleet mode without QOD_INTERNAL_URL.
     */
+  "checkNodeFiles" should "refuse tenant folders with nodes that cannot read them, naming both" in {
+    val off = ai.starlake.quack.NodeFilesConfig(allowLocal = false)
+    val on  = ai.starlake.quack.NodeFilesConfig(allowLocal = true)
+    val set = ai.starlake.quack.TenantFilesConfig(root = "/srv/qod")
+    val not = ai.starlake.quack.TenantFilesConfig()
+    BootPreflight.checkNodeFiles(off, set) shouldBe
+      Left(BootPreflight.TenantFilesWithLocalFilesOffMessage)
+    BootPreflight.TenantFilesWithLocalFilesOffMessage should include("QOD_TENANT_FILES_ROOT")
+    BootPreflight.TenantFilesWithLocalFilesOffMessage should include("QOD_NODE_ALLOW_LOCAL_FILES")
+    BootPreflight.checkNodeFiles(off, not) shouldBe Right(())
+    BootPreflight.checkNodeFiles(off, ai.starlake.quack.TenantFilesConfig(root = "  ")) shouldBe
+      Right(())
+    BootPreflight.checkNodeFiles(on, set) shouldBe Right(())
+    BootPreflight.checkNodeFiles(on, not) shouldBe Right(())
+  }
+
+  "Main.bootManager" should "refuse both together, before any socket opens" in {
+    val err = intercept[RuntimeException](
+      boot(
+        noEnv,
+        "quack-on-demand { nodeFiles.allowLocal = false, tenantFiles.root = \"/srv/qod\", " +
+          "embeddedPostgres.enabled = false }"
+      )
+    )
+    err.getMessage shouldBe BootPreflight.TenantFilesWithLocalFilesOffMessage
+  }
+
+  it should "not judge the default data path: rows may all name their own" in {
+    BootPreflight.checkNodeFiles(
+      ai.starlake.quack.NodeFilesConfig(allowLocal = false),
+      ai.starlake.quack.TenantFilesConfig()
+    ) shouldBe Right(())
+    // The shipped default data path is local: a boot with nodes' local files off goes past the
+    // check, and stops at the next refusal of this overlay.
+    val err = intercept[RuntimeException](
+      boot(
+        noEnv,
+        "quack-on-demand { nodeFiles.allowLocal = false, embeddedPostgres.enabled = false, " +
+          "ha.enabled = true, runtimeType = local, auth.lockout.enabled = false }"
+      )
+    )
+    err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
+  }
+
   "Main.bootManager" should "refuse a decide URL the runtime's nodes cannot reach, before reaching Postgres" in {
     val urls =
       "nodeAuthz { internalUrl = \"\", podIp = \"\" }, host = \"0.0.0.0\", auth.lockout.enabled = false"

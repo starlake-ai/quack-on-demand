@@ -98,6 +98,8 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
   "restartNode" should "map a raised backend error to 502, not a bodyless 500" in:
     val inner   = new StubQuackBackend()
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       def start(spec: NodeSpec): IO[RunningNode]   = inner.start(spec)
       def stop(key: PoolKey, id: String): IO[Unit] =
         IO.raiseError(new RuntimeException("409: object is being deleted"))

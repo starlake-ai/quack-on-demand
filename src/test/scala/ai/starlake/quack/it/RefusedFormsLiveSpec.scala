@@ -150,6 +150,8 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
            |""".stripMargin
       val nodePort = freePort()
       val backend  = new QuackBackend:
+        def allowsLocalFiles = true
+
         private val n          = TrieMap.empty[String, RunningNode]
         def start(s: NodeSpec) = IO {
           live = LiveQodNode.start(dir, init, nodeId = s.nodeId, keys = keys, port = nodePort)

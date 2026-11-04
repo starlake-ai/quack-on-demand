@@ -1583,9 +1583,8 @@ class FederatedSourceHandlersSpec
 
   private def lineOf(alias: String) =
     s"WARN: Iceberg source acme/acme_prod/$alias: a node reads whatever files its catalog lists, " +
-      "local files included. In production disable local file access on its nodes (a superuser's " +
-      "init SQL: SET disabled_filesystems = 'LocalFileSystem', on an object-store pool, where a " +
-      "sort past memory_limit then fails instead of spilling)."
+      "local files included. In production set QOD_NODE_ALLOW_LOCAL_FILES=false, with data on " +
+      "object storage."
 
   private val tenantAdminScope: SessionScope.Resolver =
     _ => SessionScope(superuser = false, manageableTenants = Set("acme"))

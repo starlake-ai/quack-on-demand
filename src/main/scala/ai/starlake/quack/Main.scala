@@ -97,6 +97,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[RestLimitsConfig]          = ProductHint[RestLimitsConfig](camelMapping)
   given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
   given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
+  given ProductHint[NodeFilesConfig]           = ProductHint[NodeFilesConfig](camelMapping)
   given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
@@ -136,6 +137,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[RestLimitsConfig]         = deriveReader[RestLimitsConfig]
   given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
   given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
+  given ConfigReader[NodeFilesConfig]          = deriveReader[NodeFilesConfig]
   given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
@@ -299,6 +301,8 @@ object Main extends IOApp with LazyLogging:
     // Netty counting its direct buffers in the JDK's budget lets a flood of FlightSQL calls starve a
     // socket read on another listener, which halts the manager: said on stderr as well.
     NettyMemory.warning().foreach(w => System.err.println(w))
+    // Tenant folders with nodes that cannot read them.
+    BootPreflight.checkNodeFiles(mgrCfg0.nodeFiles, mgrCfg0.tenantFiles).left.foreach(sys.error)
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
@@ -1182,7 +1186,7 @@ object Main extends IOApp with LazyLogging:
         // now is a transition check (was healthy, now failing) without restructuring HealthProbe
         // to expose one itself.
         val wasHealthy = tracker.snapshot(n.nodeId).healthy
-        adapter.probe(n, probeSql).map { verdict =>
+        adapter.healthProbe(n, probeSql, backend.allowsLocalFiles).map { verdict =>
           val ok = verdict.healthy
           if ok && initSql.isDefined then schemaInited.markDone(n.nodeId)
           handleRefusals.warning(n.nodeId, verdict).foreach(w => logger.warn(w))
@@ -2127,6 +2131,7 @@ object Main extends IOApp with LazyLogging:
             audit = auditRecorder,
             nodeKeys = nodeKeys,
             nodeExtensions = mgrCfg.nodeExtensions,
+            nodeFiles = mgrCfg.nodeFiles,
             nodeAuthzLimits = mgrCfg.nodeAuthzLimits
           )
         ),

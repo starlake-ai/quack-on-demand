@@ -236,6 +236,15 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                       blocked: nodes not started
                     </span>
                   )}
+                  {p.status !== 'blocked' && p.statusDetail && (
+                    <span
+                      className="badge bad"
+                      style={{ marginLeft: 6 }}
+                      title={p.statusDetail}
+                    >
+                      node not routed to
+                    </span>
+                  )}
                 </td>
                 <td align="right">
                   {p.nodes.length}

@@ -108,6 +108,73 @@ def test_the_powershell_twin_scopes_the_azure_connection_alike():
     assert "CONNECTION_STRING '$(Sql-Quote $azConn)'" in arm
 
 
+# What QOD_NODE_ALLOW_LOCAL_FILES=false adds, pinned equal to NodeFilesConfig.InitStatements by
+# NodeFilesScriptsSpec.
+LOCAL_FILES_OFF = [
+    "LOAD httpfs;",
+    "SET VARIABLE qod_remote_schemes = ['s3://', 's3a://', 's3n://', 'r2://', 'gs://', 'gcs://', "
+    "'hf://', 'http://', 'https://'] || (SELECT CASE WHEN bool_or(loaded) THEN ['az://', 'azure://', "
+    "'abfs://', 'abfss://'] ELSE [] END FROM duckdb_extensions() WHERE extension_name = 'azure');",
+    "SET allowed_directories = getvariable('qod_remote_schemes');",
+    "RESET VARIABLE qod_remote_schemes;",
+    "SET allowed_paths = ['/etc/ssl/certs/ca-certificates.crt', "
+    "'/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem', '/etc/pki/tls/certs/ca-bundle.crt', "
+    "'/etc/ssl/ca-bundle.pem', '/etc/ssl/cert.pem'];",
+    "SET enable_external_access = false;",
+]
+
+
+def _without_spill_line(text):
+    """The init SQL without its one line naming this run's spill directory."""
+    return [line for line in text.splitlines() if not line.startswith("SET temp_directory")]
+
+
+def test_local_files_off_ends_the_init_sql_after_every_attach_and_the_federation(tmp_path):
+    res = _dry_run(
+        tmp_path,
+        secrets={"extraSetupSql": "ATTACH 'x' AS federated;", "tenantPoolInitSqlTrusted": "SET threads = 3;"},
+        kind="ducklake", dataPath="s3://b/lake/", pgHost="h", pgPort="5432", pgUser="u",
+        QOD_NODE_ALLOW_LOCAL_FILES="false",
+    )
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert lines[-len(LOCAL_FILES_OFF):] == LOCAL_FILES_OFF
+    # Fenced: qod-node cuts the stream at these, so a text above that never closes a quote stops there.
+    nonce = "0f" * 16
+    assert lines[-len(LOCAL_FILES_OFF) - 2:-len(LOCAL_FILES_OFF)] == [
+        f"-- qod:untrusted-begin {nonce}", f"-- qod:untrusted-end {nonce}"]
+    head = "\n".join(lines[:-len(LOCAL_FILES_OFF)])
+    for earlier in ("ATTACH 'ducklake:postgres:", "ATTACH 'x' AS federated;", "SET threads = 3;",
+                    "LOAD ducklake;", "LOAD postgres;"):
+        assert earlier in head
+    assert "enable_external_access" not in head
+
+
+@pytest.mark.parametrize("value", ["true", "FALSE", "False", "0", "no", "off", " false", ""])
+def test_only_the_exact_value_false_turns_local_files_off(tmp_path, value):
+    (tmp_path / "unset").mkdir()
+    (tmp_path / "set").mkdir()
+    base = _dry_run(tmp_path / "unset")
+    other = _dry_run(tmp_path / "set", QOD_NODE_ALLOW_LOCAL_FILES=value)
+    assert base.returncode == 0 and other.returncode == 0
+    # Nothing added, byte for byte but for the directory this run made.
+    assert _without_spill_line(other.stdout) == _without_spill_line(base.stdout)
+    for word in ("enable_external_access", "allowed_directories", "allowed_paths", "LOAD httpfs"):
+        assert word not in other.stdout
+
+
+@pytest.mark.parametrize(
+    "kind,extra",
+    [("memory", {}),
+     ("duckdb-file", {"dataPath": "s3://b/x.duckdb", "dbName": "d", "schemaName": "main"}),
+     ("ducklake", {"dataPath": "az://c/lake/", "pgHost": "h", "pgPort": "5432", "pgUser": "u"})],
+)
+def test_local_files_off_holds_on_every_kind(tmp_path, kind, extra):
+    res = _dry_run(tmp_path, kind=kind, QOD_NODE_ALLOW_LOCAL_FILES="false", **extra)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines()[-len(LOCAL_FILES_OFF):] == LOCAL_FILES_OFF
+
+
 def test_the_sweep_never_follows_a_symlinked_node_directory(tmp_path):
     victim = tmp_path / "victim"
     victim.mkdir()

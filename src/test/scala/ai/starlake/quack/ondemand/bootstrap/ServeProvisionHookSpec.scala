@@ -126,7 +126,38 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     def files: Set[String] =
       Using.resource(Files.list(dir))(_.iterator().asScala.map(_.getFileName.toString).toSet)
 
-  "ServeProvisionHook" should "create the tenant, database and pool it is missing, as the manager" in {
+  "ServeProvisionHook" should "carry the local files refusal in its outcome, naming the setting" in {
+    val off = new QuackBackend:
+      private val inner                = StubQuackBackend.noop()
+      override def allowsLocalFiles    = false
+      def start(s: NodeSpec)           = inner.start(s)
+      def stop(k: PoolKey, id: String) = inner.stop(k, id)
+      def isAlive(id: String)          = inner.isAlive(id)
+      def discoverExisting()           = inner.discoverExisting()
+      def cleanup()                    = inner.cleanup()
+    // A local directory, and the data path QoD would derive from the default: both local.
+    for database <- List(
+        TenantDbRequest(
+          tenant = "acme",
+          name = "shop",
+          kind = "ducklake",
+          dataPath = "/data/shop/"
+        ),
+        TenantDbRequest(tenant = "acme", name = "shop", kind = "ducklake")
+      )
+    do
+      val f = new Fixture(backend = off)
+      f.write(database = database)
+      f.run() shouldBe Right(())
+      val out = f.outcomeJson.hcursor
+      out.get[String]("status") shouldBe Right("failed")
+      out.get[String]("step") shouldBe Right("database")
+      out.get[String]("reason").toOption.get should include("QOD_NODE_ALLOW_LOCAL_FILES")
+      f.sup.findTenantDb("acme", "acme_shop") shouldBe None
+      f.sup.get(PoolKey("acme", "acme_shop", "main")) shouldBe None
+  }
+
+  it should "create the tenant, database and pool it is missing, as the manager" in {
     val f = new Fixture
     f.write()
     val (result, logs) = LogCapture.logged(HookLogger)(f.run())
@@ -372,6 +403,8 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     // A pool create persists and spawns in one call: a node failure's message can quote the
     // pool's boot SQL or a row. Here it carries the marker.
     val spawnFails = new QuackBackend:
+      def allowsLocalFiles = true
+
       def start(spec: NodeSpec): IO[RunningNode] =
         IO.raiseError(new IllegalStateException(s"node failed running: $Marker"))
       def stop(key: PoolKey, nodeId: String): IO[Unit] = IO.unit

@@ -838,6 +838,9 @@ export default function PoolDetailBody({
           record of an earlier run. {data.statusDetail}
         </div>
       )}
+      {data.status !== 'blocked' && data.statusDetail && (
+        <div className="login-err" style={{ marginTop: 8 }}>{data.statusDetail}</div>
+      )}
       {suspendErr && <div className="login-err" style={{ marginTop: 8 }}>{suspendErr}</div>}
 
       <Tabs

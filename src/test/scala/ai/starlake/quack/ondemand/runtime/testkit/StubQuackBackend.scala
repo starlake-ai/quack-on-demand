@@ -25,9 +25,12 @@ final class StubQuackBackend(
     portBase: Int = 21000,
     tokenFor: String => String = StubQuackBackend.DefaultToken,
     startedAt: Instant = Instant.EPOCH,
-    serverName: Option[String] = None // fleet mode: the server every node reports
+    serverName: Option[String] = None,            // fleet mode: the server every node reports
+    localFilesAllowed: () => Boolean = () => true // asked each time: a spec may turn it off
 ) extends QuackBackend:
   private val nodes = TrieMap.empty[String, RunningNode]
+
+  override def allowsLocalFiles: Boolean = localFilesAllowed()
 
   def start(spec: NodeSpec): IO[RunningNode] = IO {
     val n = RunningNode(
@@ -67,6 +70,8 @@ object StubQuackBackend:
     */
   def noop(portBase: Int = 21000, countingPorts: Boolean = false): QuackBackend =
     new QuackBackend:
+      def allowsLocalFiles = true
+
       private val counter                     = new AtomicInteger(portBase)
       def start(s: NodeSpec): IO[RunningNode] =
         IO.pure(

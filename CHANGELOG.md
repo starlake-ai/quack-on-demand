@@ -116,9 +116,32 @@ count. To keep counts from a user, refuse on the table.
 
 ### Added
 
+- **`QOD_NODE_ALLOW_LOCAL_FILES=false` starts every node with its local file system off**
+  (`quack-on-demand.nodeFiles.allowLocal`, default `true`, no change for anyone who does not set it; no
+  Helm value, set it in the chart's `env`; it applies at each node's next start, and a node that does
+  not show it, an older image or `qod fleet join`, a node started before the setting or a switch that
+  failed at init, is unhealthy and not routed to, and the pool's `statusDetail` says so and what to
+  do). The last init
+  statements turn DuckDB's external access off: nothing on the node opens a local path outside DuckDB's
+  own temp directory and the system's CA bundle, for anyone, superusers included, a catalog's file list,
+  deletion schedule or Iceberg manifest included, and nothing turns it back on while the node runs.
+  Spills keep working, and so do DuckLake, merges, maintenance, users' S3 credentials and Iceberg over
+  REST on object storage. A database on a local data path is blocked: its pools start no node, and the
+  boot banner and `/api/pool/list` say why. A create or an update that would make one answers
+  `400 local_files_off`, for a superuser, and for anyone on the path QoD derives (a tenant admin naming
+  a path reads `403 superuser_required` first), and a statement that would wake a suspended pool of one
+  is refused at once, naming the setting; a manifest still imports one.
+  `QOD_TENANT_FILES_ROOT` set with it refuses boot. What it costs: extensions the init SQL did not load
+  stay out (`icu`, `json`, `parquet` and `httpfs` always work, `ducklake`, `postgres`, `iceberg`, `avro`
+  only where the node's setup loaded them, any other through an initSql); a federated source that failed
+  at a node's start needs a node restart to attach, as does one added to a running node; a private CA
+  goes in the system bundle, since `ca_cert_file` at a path of its own is refused; views over local
+  files (`qod serve <local file>`) read nothing. It covers local files only, nothing about what a node's
+  own keys reach on object storage.
 - The manager prints a `WARN:` line on stdout for each `iceberg_rest` federated source, when one is
   created or changed and at each boot: a node reads whatever files its catalog lists, local files
-  included. It names the source and nothing of its connection, and refuses nothing.
+  included. It names the source and nothing of its connection, refuses nothing, and advises
+  `QOD_NODE_ALLOW_LOCAL_FILES=false` with data on object storage.
 - **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
   (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
   proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,

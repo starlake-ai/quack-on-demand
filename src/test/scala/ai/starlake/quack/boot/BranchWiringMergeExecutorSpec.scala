@@ -80,6 +80,8 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
       stopFails: Option[String] = None,
       onStart: () => Unit = () => ()
   ) extends QuackBackend:
+    def allowsLocalFiles = true
+
     val starts = new AtomicInteger(0)
     val stops  = new AtomicInteger(0)
 

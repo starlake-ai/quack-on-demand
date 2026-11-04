@@ -421,6 +421,35 @@ def test_an_extension_setting_is_on_only_for_a_json_true(tmp_path):
     assert _extension_env(tmp_path, odd) == ["false", "false", "false"]
 
 
+def _local_files_env(tmp_path, a):
+    """The local-files variable the node of assignment `a` is started with."""
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return seen[0].get("QOD_NODE_ALLOW_LOCAL_FILES")
+
+
+def test_local_files_come_from_the_assignment_only(tmp_path, monkeypatch):
+    # Neither this process's own environment nor the metastore (tenant-admin input) decides it; it is
+    # always set, so nothing the join process inherited reaches the spawn script.
+    monkeypatch.setenv("QOD_NODE_ALLOW_LOCAL_FILES", "false")
+    carried = dict(assignment(1), env={"pgHost": "h", "QOD_NODE_ALLOW_LOCAL_FILES": "false"},
+                   nodeFiles={"allowLocal": True})
+    assert _local_files_env(tmp_path / "on", carried) == "true"
+    monkeypatch.setenv("QOD_NODE_ALLOW_LOCAL_FILES", "true")
+    off = dict(assignment(1), nodeFiles={"allowLocal": False})
+    assert _local_files_env(tmp_path / "off", off) == "false"
+
+
+def test_local_files_stay_on_without_a_json_false(tmp_path):
+    # An older manager sends no key; only a JSON false turns them off.
+    assert _local_files_env(tmp_path / "none", assignment(1)) == "true"
+    for i, odd in enumerate(({"allowLocal": "false"}, {"allowLocal": 0}, {"allowLocal": None}, ["x"])):
+        assert _local_files_env(tmp_path / f"odd{i}", dict(assignment(1), nodeFiles=odd)) == "true"
+
+
 LIMIT_ENV = ("QOD_AUTHZ_DECIDE_TIMEOUT_MS", "QOD_AUTHZ_CACHE_ENTRIES")
 
 

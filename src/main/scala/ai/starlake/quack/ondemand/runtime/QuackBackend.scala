@@ -22,6 +22,13 @@ trait QuackBackend:
     */
   def supportsPlacement: Boolean = false
 
+  /** Whether the nodes this backend starts may open local files
+    * (`quack-on-demand.nodeFiles.allowLocal`). The supervisor reads it to block a database whose
+    * data path is local and to refuse a create that would make one, and the health probe to check
+    * that a node has them off. No default: a backend that forgot it would read as "on".
+    */
+  def allowsLocalFiles: Boolean
+
   /** True for the fleet backend (bare servers joined via `qod fleet join`). Surfaced to the UI so
     * it shows the Fleet servers page only where servers can exist.
     */

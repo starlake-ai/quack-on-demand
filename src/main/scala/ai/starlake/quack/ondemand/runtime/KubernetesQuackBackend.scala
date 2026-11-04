@@ -71,6 +71,9 @@ final class KubernetesQuackBackend(
     // The extension policy every pod's qod-node fixes before its database opens (spec decision 17).
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig(),
+    // Whether every pod's node may open local files. Required: a default would leave a pod's local
+    // files on whatever the manager was told.
+    nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // The decide limits every pod's qod-node reads at start. Required (Main passes the manager's): a
     // default would silently run qod-node's own limits.
     nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
@@ -86,6 +89,8 @@ final class KubernetesQuackBackend(
 
   // Metastore keys that reach no pod, named once per pool and key.
   private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
+
+  override val allowsLocalFiles: Boolean = nodeFiles.allowLocal
 
   override val supportsPlacement: Boolean = true
 
@@ -173,11 +178,12 @@ final class KubernetesQuackBackend(
     nodeIdEnv.setValue(spec.nodeId)
     envs.add(nodeIdEnv)
     // Plain env like the node id: the policy and the limits are the manager's, not secrets.
-    (nodeExtensions.env ++ nodeAuthzLimits.env).toList.sorted.foreach { case (k, v) =>
-      val e = new EnvVar()
-      e.setName(k)
-      e.setValue(v)
-      envs.add(e)
+    (nodeExtensions.env ++ nodeFiles.env ++ nodeAuthzLimits.env).toList.sorted.foreach {
+      case (k, v) =>
+        val e = new EnvVar()
+        e.setName(k)
+        e.setValue(v)
+        envs.add(e)
     }
 
     val containerPort = new ContainerPort()

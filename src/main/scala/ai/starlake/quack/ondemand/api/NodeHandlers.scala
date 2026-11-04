@@ -134,6 +134,11 @@ final class NodeHandlers(
                 target = Some(req.nodeId)
               )
               Right(())
-            case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+            case Left(err) =>
+              Left(
+                SupervisorErrorHttp
+                  .special(err)
+                  .getOrElse((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+              )
           }
         }

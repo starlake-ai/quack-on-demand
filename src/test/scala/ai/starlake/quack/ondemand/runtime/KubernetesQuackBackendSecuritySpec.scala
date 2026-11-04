@@ -43,7 +43,8 @@ class KubernetesQuackBackendSecuritySpec
       readEnv = _ => None,
       podTemplateEnabled = podTemplateEnabled,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
 
   private val baseSpec = NodeSpec(
@@ -83,7 +84,8 @@ class KubernetesQuackBackendSecuritySpec
       readPodReady = _ => true,
       runAsUser = 5000L,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     backend.start(baseSpec.copy(nodeId = "quack-sec-runasuser")).unsafeRunSync()
     val pod = server.getClient.pods.inNamespace(ns).withName("quack-sec-runasuser").get()
@@ -358,6 +360,7 @@ class KubernetesQuackBackendSecuritySpec
     names.toSet shouldBe allowed.keySet ++
       Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
       ai.starlake.quack.NodeExtensionsConfig.EnvNames ++
+      ai.starlake.quack.NodeFilesConfig.EnvNames ++
       ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
     val values = env.map(e => e.getName -> e.getValue).toMap
     allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
@@ -443,7 +446,8 @@ class KubernetesQuackBackendSecuritySpec
       readPodReady = _ => true,
       readEnv = _ => None,
       nodeKeys = keys,
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // A metastore entry named like the id env var must not give the pod a second one: kubelet
     // lets the last duplicate win, and a reader taking the first would see the spoofed value.
@@ -492,7 +496,8 @@ class KubernetesQuackBackendSecuritySpec
       readEnv = _ => None,
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // A metastore entry spelled like one of them is not a TenantDb.NodeEnvKeys key: it reaches no
     // pod, so the pod has each name once, from the config.
@@ -509,6 +514,35 @@ class KubernetesQuackBackendSecuritySpec
       "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "false",
       "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "true"
     )
+
+  it should "carry the manager's local files setting as plain env, once" in:
+    def filesEnv(nodeId: String): List[(String, String)] =
+      podEnv(nodeId)
+        .filter(_.getName == ai.starlake.quack.NodeFilesConfig.AllowLocalEnv)
+        .map(e => e.getName -> e.getValue)
+    makeBackend().start(nodeEnvSpec("quack-nodeenv-files-def", lakeMeta)).unsafeRunSync()
+    filesEnv("quack-nodeenv-files-def") shouldBe List("QOD_NODE_ALLOW_LOCAL_FILES" -> "true")
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal = false),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    backend.allowsLocalFiles shouldBe false
+    // A metastore entry spelled like it reaches no pod: the pod has the name once, from the config.
+    backend
+      .start(
+        nodeEnvSpec("quack-nodeenv-files-off", lakeMeta + ("QOD_NODE_ALLOW_LOCAL_FILES" -> "true"))
+      )
+      .unsafeRunSync()
+    filesEnv("quack-nodeenv-files-off") shouldBe List("QOD_NODE_ALLOW_LOCAL_FILES" -> "false")
 
   it should "carry the manager's decide limits as plain env, once each" in:
     val names = ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
@@ -529,7 +563,8 @@ class KubernetesQuackBackendSecuritySpec
       readPodReady = _ => true,
       readEnv = _ => None,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0)
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // A metastore entry spelled like one reaches no pod: the pod has each name once, from config.
     backend

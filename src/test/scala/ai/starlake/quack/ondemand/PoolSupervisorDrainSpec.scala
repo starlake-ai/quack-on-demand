@@ -30,6 +30,8 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
     for
       stopped <- Deferred[IO, String]
       backend = new QuackBackend:
+        def allowsLocalFiles = true
+
         def start(spec: NodeSpec): IO[RunningNode] = IO.pure(
           RunningNode(
             spec.nodeId,
@@ -176,6 +178,8 @@ class PoolSupervisorDrainSpec extends AnyFlatSpec with Matchers:
     for
       stops <- Ref.of[IO, List[String]](Nil)
       backend = new QuackBackend:
+        def allowsLocalFiles = true
+
         def start(spec: NodeSpec): IO[RunningNode] = IO.pure(
           RunningNode(
             spec.nodeId,

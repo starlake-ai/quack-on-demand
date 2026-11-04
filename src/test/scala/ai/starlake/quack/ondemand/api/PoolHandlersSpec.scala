@@ -804,7 +804,12 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val t0       = Instant.parse("2026-09-25T10:00:00Z")
     val fleet    = new InMemoryFleetServerStore(clock = () => t0)
     val cfg      = FleetConfig(joinToken = "s", reassignAfterSec = 60)
-    val backend  = new FleetQuackBackend(fleet, cfg, clock = () => t0)
+    val backend  = new FleetQuackBackend(
+      fleet,
+      cfg,
+      clock = () => t0,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
     fleet.recordHeartbeat(
       Heartbeat(
         "srv-1",

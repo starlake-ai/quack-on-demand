@@ -116,6 +116,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
   private def startFrontDoor(init: String): Unit =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         // The node's id is the one the router mints its handles for.

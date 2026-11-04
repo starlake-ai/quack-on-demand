@@ -54,10 +54,12 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
   private final class Fixture(
       auditRecorder: AuditRecorder = AuditRecorder.noop,
       initSqlChecker: ai.starlake.quack.ondemand.initsql.InitSqlChecker =
-        ai.starlake.quack.ondemand.initsql.InitSqlChecker.unavailable
+        ai.starlake.quack.ondemand.initsql.InitSqlChecker.unavailable,
+      backend: ai.starlake.quack.ondemand.runtime.QuackBackend =
+        ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop(),
+      dataPath: String = "/tmp/qod-mcp-admin-test"
   ):
     val store    = new InMemoryControlPlaneStore()
-    val backend  = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
     val tracker  = new ai.starlake.quack.edge.adapter.NodeLoadTracker
     val sup      = new PoolSupervisor(backend, tracker, store)
     val registry = new ActiveStatementRegistry()
@@ -79,7 +81,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> TenantDb,
           "schemaName" -> "main"
         ),
-        dataPath = "/tmp/qod-mcp-admin-test"
+        dataPath = dataPath
       )
     )
     sup.restore()
@@ -463,6 +465,32 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
   }
 
   // The tools go through the REST handler, so a tenant admin meets the same rule on where data lies.
+  "create_database" should "be refused on a local path with nodes' local files off" in {
+    val f = new Fixture(
+      backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
+        private val inner = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
+        override def allowsLocalFiles                  = false
+        def start(s: ai.starlake.quack.model.NodeSpec) = inner.start(s)
+        def stop(k: PoolKey, id: String)               = inner.stop(k, id)
+        def isAlive(id: String)                        = inner.isAlive(id)
+        def discoverExisting()                         = inner.discoverExisting()
+        def cleanup()                                  = inner.cleanup()
+      ,
+      dataPath = "s3://bucket/qod-mcp-admin-test/"
+    )
+    val out = f.call(
+      "create_database",
+      McpSuperuserPat.principal,
+      "tenant"    -> Json.fromString(Tenant0),
+      "name"      -> Json.fromString("onlocal"),
+      "kind"      -> Json.fromString("memory"),
+      "data_path" -> Json.fromString("/tmp/qod-mcp-admin-test-local")
+    )
+    val message = out.left.toOption.getOrElse(fail("admitted"))
+    message should include("QOD_NODE_ALLOW_LOCAL_FILES")
+    f.store.snapshot().tenantDbs.map(_.name) should not contain s"${Tenant0}_onlocal"
+  }
+
   "create_database" should "leave a data path to a superuser, or a tenant admin's own keys" in {
     val f                                                                      = new Fixture
     def create(name: String, principal: McpPrincipal, fields: (String, Json)*) = f.call(

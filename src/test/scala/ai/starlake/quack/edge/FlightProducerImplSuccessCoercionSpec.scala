@@ -48,6 +48,8 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
       queryResponse: String => IO[QuackResponse]
   ): (FlightProducerImpl, String) =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(

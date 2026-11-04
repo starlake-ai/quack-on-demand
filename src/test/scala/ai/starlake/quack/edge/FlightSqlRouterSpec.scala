@@ -77,6 +77,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
   ) =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -764,6 +766,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   private def freshSupervisorAndBackend(): PoolSupervisor =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -828,6 +832,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   /** Spin up a pool with N dual-role nodes so we have routing choices to make. */
   private def setupMultiNode(replicas: Int, maxConcurrent: Int = 0) =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -1018,6 +1024,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // stampedSetup() above) - DuckLake pre-init against pgPort 0 fails fast
     // and is swallowed with a warning by design, so no live Postgres needed.
     val backend2 = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -1157,6 +1165,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -1932,6 +1942,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       else TestArrow.okResponse()
 
     val bknd = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -2010,6 +2022,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           1L
         )
     val bknd = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -2093,6 +2107,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       requiredAnswer: List[() => QuackResponse] = List(() => TestArrow.okResponse())
   ): StampedFixture =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -2438,6 +2454,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val calls     = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
 
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -2639,14 +2657,20 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       failResumeStarts: Boolean = false,
       resumeHoldTimeout: FiniteDuration = 60.seconds,
       resumePollInterval: FiniteDuration = 250.millis,
-      refusedQueries: Int = 0
+      refusedQueries: Int = 0,
+      dataPath: String = "",
+      localFilesOff: Boolean = false
   ) =
     // The first `refusedQueries` node calls fail as a connect refusal would: a respawned node whose
     // process does not listen yet.
     val refusals  = new java.util.concurrent.atomic.AtomicInteger(refusedQueries)
     val queries   = new java.util.concurrent.atomic.AtomicInteger(0)
     val failStart = new java.util.concurrent.atomic.AtomicBoolean(false)
-    val backend   = new QuackBackend:
+    // Asked each time: the row is made while local files are on, and outlives turning them off.
+    val filesOff = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val backend  = new QuackBackend:
+      def allowsLocalFiles = !filesOff.get()
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) =
         if failStart.get() then IO.raiseError(new RuntimeException("spawn refused (test)"))
@@ -2675,10 +2699,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, dataPath, writerTrusted = true)
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     if failResumeStarts then failStart.set(true)
+    if localFilesOff then filesOff.set(true)
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
       override def query(
@@ -2757,6 +2782,34 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case Left(RouterFailure.Unavailable(msg)) => msg should include("resuming")
       case other => fail(s"expected Unavailable('pool is resuming...'), got $other")
 
+  it should "answer at once, naming the setting, when no node of its database could serve" in:
+    val (router, sup, queries) = setupWithSupervisor(
+      dataPath = "/data/local/somewhere/",
+      localFilesOff = true,
+      resumeHoldTimeout = 60.seconds
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val before = queries.get()
+    val t0     = System.nanoTime()
+    val r      = router
+      .execute("wake-7", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    // Well inside the hold it would otherwise wait out, and no retry would end.
+    (System.nanoTime() - t0) should be < 10_000_000_000L
+    r match
+      case Left(RouterFailure.BadRequest(msg)) =>
+        msg should include("QOD_NODE_ALLOW_LOCAL_FILES=false")
+        msg should include("cannot wake")
+        // Any user of the pool reads this.
+        msg should not include "/data/local"
+      case other => fail(s"expected the refusal, got $other")
+    queries.get() shouldBe before
+    sup.get(poolKey).get.suspended shouldBe true
+    sup.get(poolKey).get.nodes shouldBe empty
+    val journaled = router.history.snapshot(1).head
+    journaled.status shouldBe "no-node"
+    journaled.error.get should include("QOD_NODE_ALLOW_LOCAL_FILES=false")
+
   it should "not wake a disabled pool" in:
     val (router, sup, _) = setupWithSupervisor()
     sup.suspendPool(poolKey, "rest").unsafeRunSync()
@@ -2793,6 +2846,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       dataPath: String = "s3://bucket/data"
   ) =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -3532,6 +3587,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   "a statement routed to a node that starts draining" should "be refused there, nothing sent, and run once on the surviving node" in:
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(

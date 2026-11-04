@@ -24,6 +24,8 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
 
   private def setupProducer(): FlightProducerImpl =
     val backend = new QuackBackend:
+      def allowsLocalFiles = true
+
       private val n = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",

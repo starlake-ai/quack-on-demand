@@ -44,6 +44,8 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
   TestPostgres.dropStrayTestDatabases("qodmw")
 
   private val stubBackend: QuackBackend = new QuackBackend:
+    def allowsLocalFiles = true
+
     def start(spec: NodeSpec): IO[RunningNode]       = IO.raiseError(new RuntimeException("unused"))
     def stop(key: PoolKey, nodeId: String): IO[Unit] = IO.unit
     def isAlive(nodeId: String): Boolean             = false

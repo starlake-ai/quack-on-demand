@@ -183,6 +183,60 @@ final class QuackHttpAdapter(
       case QuackResponse.Failed(err, _) => IO.pure(ProbeVerdict.Failed(err.toString))
     }
 
+  /** The health loop's probe of `node`: [[probe]], then, where this manager runs its nodes with
+    * local files off (`allowsLocalFiles` false, as `QuackBackend.allowsLocalFiles` says), a read of
+    * the node's `enable_external_access`, as the system principal. With them on it sends nothing
+    * more than [[probe]].
+    *
+    * Only an answer of exactly `false` shows the node off. Anything else, a failed read included,
+    * is [[ProbeVerdict.LocalFilesNotOff]]: unhealthy like a node that runs the canary, reported
+    * once (ERROR), and held out of routing on the tracker, where the pool listing reads why. The
+    * hold lasts until a read shows the node off, with no threshold either way, as the probe has
+    * none: a read that fails holds the node for one tick. Reconcile goes by whether the process
+    * lives, so it never restarts such a node: it stays as it is until someone restarts it.
+    */
+  def healthProbe(node: RunningNode, sql: String, allowsLocalFiles: Boolean): IO[ProbeVerdict] =
+    probe(node, sql).flatMap {
+      case ProbeVerdict.Ok if !allowsLocalFiles => externalAccess(node)
+      case verdict                              => IO.pure(verdict)
+    }
+
+  /** Node ids reported as not showing local files off: once, until a read shows them off. */
+  private val localFilesNotOff = scala.collection.concurrent.TrieMap.empty[String, Unit]
+
+  private def externalAccess(node: RunningNode): IO[ProbeVerdict] =
+    client
+      .query(
+        s"quack:${node.host}:${node.port}",
+        node.token,
+        QuackHttpAdapter.ExternalAccessSql,
+        None,
+        authorizer(node, NodePrincipal.System)
+      )
+      .map {
+        case QuackResponse.Ok(rows, _, close) =>
+          try QuackHttpAdapter.firstCell(rows)
+          finally close()
+        case QuackResponse.Failed(err, _) =>
+          logger.debug(s"enable_external_access on ${node.nodeId}: read failed: $err")
+          None
+      }
+      .handleError { t =>
+        logger.debug(s"enable_external_access on ${node.nodeId}: read raised ${t.getClass.getName}")
+        None
+      }
+      .map {
+        case Some("false") =>
+          localFilesNotOff.remove(node.nodeId)
+          tracker.setLocalFilesNotOff(node.nodeId, None)
+          ProbeVerdict.Ok
+        case reading =>
+          val reason = ProbeVerdict.localFilesNotOffReason(node.nodeId, reading)
+          if localFilesNotOff.putIfAbsent(node.nodeId, ()).isEmpty then logger.error(reason)
+          tracker.setLocalFilesNotOff(node.nodeId, Some(reason))
+          ProbeVerdict.LocalFilesNotOff(reason)
+      }
+
   /** Whether the node answers a statement right now: the wake hold's readiness check
     * ([[ai.starlake.quack.edge.FlightSqlRouter]]). A node the supervisor just respawned is routable
     * by default ([[ai.starlake.quack.route.NodeLoad]] starts healthy) before its process listens,
@@ -280,6 +334,25 @@ final class QuackHttpAdapter(
       }
 
 object QuackHttpAdapter:
+
+  /** The health probe's read of what `QOD_NODE_ALLOW_LOCAL_FILES=false` sets on a node. */
+  val ExternalAccessSql: String = "SELECT current_setting('enable_external_access')::VARCHAR"
+
+  /** The first cell of a one-column result, batches advanced until one carries a row (as
+    * [[EngineStats.fromReader]]: the quack wire can send a schema-only first batch). None on an
+    * empty result, another shape or a read that fails.
+    */
+  private[adapter] def firstCell(reader: org.apache.arrow.vector.ipc.ArrowReader): Option[String] =
+    def firstRow(): Option[String] =
+      if !reader.loadNextBatch() then None
+      else
+        val root = reader.getVectorSchemaRoot
+        if root.getRowCount >= 1 && root.getFieldVectors.size == 1 then
+          Option(root.getFieldVectors.get(0).getObject(0)).map(_.toString)
+        else if root.getRowCount == 0 then firstRow()
+        else None
+    try firstRow()
+    catch case _: Throwable => None
 
   /** Why a call to a draining node was refused before anything was sent: Transient, so the router
     * tries another node.

@@ -45,8 +45,8 @@ object BootFactories extends LazyLogging:
     *   the manager's node keys: every node the local and Kubernetes backends start gets the key
     *   derived for its id. The fleet backend does not use them: a fleet node's key is derived per
     *   heartbeat by `FleetHandlers`, which Main builds with the same keys. The local and Kubernetes
-    *   backends hand every node `mgrCfg.nodeExtensions` (spec decision 17); fleet nodes get it from
-    *   `FleetHandlers`, per heartbeat.
+    *   backends hand every node `mgrCfg.nodeExtensions` (spec decision 17) and `mgrCfg.nodeFiles`;
+    *   fleet nodes get both from `FleetHandlers`, per heartbeat.
     */
   def quackBackend(
       mgrCfg: ManagerConfig,
@@ -67,6 +67,7 @@ object BootFactories extends LazyLogging:
           nodeBin = nodeBin,
           nodeKeys = nodeKeys,
           nodeExtensions = mgrCfg.nodeExtensions,
+          nodeFiles = mgrCfg.nodeFiles,
           nodeAuthzLimits = mgrCfg.nodeAuthzLimits
         )
       case rt if RuntimeType.isKubernetes(rt) =>
@@ -85,6 +86,7 @@ object BootFactories extends LazyLogging:
           stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec,
           nodeKeys = nodeKeys,
           nodeExtensions = mgrCfg.nodeExtensions,
+          nodeFiles = mgrCfg.nodeFiles,
           nodeAuthzLimits = mgrCfg.nodeAuthzLimits
         )
       case rt if RuntimeType.isFleet(rt) =>
@@ -105,7 +107,8 @@ object BootFactories extends LazyLogging:
           fleetStore,
           mgrCfg.fleet,
           defaultPgHost = mgrCfg.defaultMetastore.pgHost,
-          defaultPgPort = mgrCfg.defaultMetastore.pgPort
+          defaultPgPort = mgrCfg.defaultMetastore.pgPort,
+          nodeFiles = mgrCfg.nodeFiles
         )
       case other => sys.error(s"unknown runtime: $other")
 
@@ -133,6 +136,7 @@ object BootFactories extends LazyLogging:
         nodeBin = nodeBin,
         nodeKeys = nodeKeys,
         nodeExtensions = mgrCfg.nodeExtensions,
+        nodeFiles = mgrCfg.nodeFiles,
         nodeAuthzLimits = mgrCfg.nodeAuthzLimits
       )
     else main

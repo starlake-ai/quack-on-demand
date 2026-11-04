@@ -1635,9 +1635,8 @@ Rules worth knowing before the first create:
 
 - **A node reads whatever files the catalog lists, local files included.** The
   manager prints a `WARN:` line on its stdout when such a source is created or
-  changed and at each boot. In production disable local file access on its nodes
-  (a superuser's init SQL: `SET disabled_filesystems = 'LocalFileSystem'`, on an
-  object-store pool, where a sort past `memory_limit` then fails instead of spilling).
+  changed and at each boot. In production set `QOD_NODE_ALLOW_LOCAL_FILES=false` on
+  the manager, with data on object storage (see "Local files off").
 - **Credentials must be placeholders.** `--client-secret` / `--token` holding a
   literal is a `400`: they must match `{{secret.NAME}}` exactly, and the value
   lives in `qod federation secret set`. That is what keeps the config safe to
@@ -2609,6 +2608,49 @@ eviction are opt-in knobs.
   `file_search_path`, `home_directory`, `allow_asterisks_in_http_paths`, `ca_cert_file`
   or the server certificate verification settings. `shell_history()` does not exist on a node
   (qod-node is not the DuckDB CLI).
+- **Local files off, an operator's choice** - `QOD_NODE_ALLOW_LOCAL_FILES=false` on the
+  manager (default `true`; the Helm chart has no value for it, set it in its `env`) ends
+  every node's init SQL by turning DuckDB's external access off. Nothing on the node then
+  opens a local path outside DuckDB's own temp directory and the system's CA bundle, for
+  anyone, superusers included, whatever a catalog's file list, deletion schedule or Iceberg
+  manifest names ("Permission Error: Cannot access file ... file system operations are
+  disabled by configuration"), and nothing turns it back on while the node runs. Spills
+  keep working, and so do DuckLake, merges, maintenance, users' S3 credentials and Iceberg
+  over REST on object storage. It applies at each node's next start: restart the nodes
+  after setting it. The health probe then reads it on every node: one that does not show it
+  off (an older image or `qod fleet join`, a node started before the setting, a switch that
+  failed at init) is unhealthy and not routed to, a statement reads as for no routable
+  node, and `qod pool list` names the node and the setting in the pool's `statusDetail`.
+  Restart that node, or upgrade its image or fleet server. It stays as it is until then:
+  nothing restarts it on its own. Verify as a superuser with
+  `SELECT current_setting('enable_external_access')`.
+  - **Data must lie on object storage.** A database on a local data path is blocked: its
+    pools start no node, the boot banner reads `is up, with N problem(s)`, and `qod pool
+    list` shows `blocked` with why and the way out (move the data to object storage, or
+    unset the setting). Creating one answers `400 local_files_off`, for a superuser and on
+    the path QoD would derive too; `qod serve` reports it as its failed step, and a
+    statement that would wake a suspended pool of one is refused at once. A manifest still
+    imports one, so a backup always restores. `QOD_TENANT_FILES_ROOT` set with it refuses
+    boot.
+  - **What it costs.** Extensions a node did not load at start stay out, for superusers
+    too: `icu`, `json`, `parquet` and `httpfs` always work, `ducklake` and `postgres` on a
+    DuckLake node, `iceberg` and `avro` with an Iceberg source; load any other in a
+    database or pool `initSql`. `duckdb_extensions()` reads a permission error. A federated
+    source that failed at a node's start, or was added to a running node, attaches at the
+    node's next restart and not before. A private CA goes in the system bundle:
+    `ca_cert_file` at a path of its own is refused. Views over local files (`qod serve
+    <local file>`) start and read nothing.
+  - **What it does not cover.** Local files only: nothing about what a node's own keys
+    reach on object storage. DuckDB keeps its temp directory open, to a superuser and to a
+    file list naming a file there (spill files read as nothing); the location rules still
+    refuse a tenant user. A superuser's init SQL that moves `temp_directory` moves that with
+    it. A local file a superuser's init SQL attached stays reachable. The system's CA files
+    stay open to DuckDB, for reading and writing, as far as the node's OS user may: a
+    deletion schedule naming one removes it when that user may, so keep nodes off root (the
+    images run as uid 1000). Keep `qod fleet join` on the manager's release: a node of an
+    older one stays unhealthy. A node is routable from its start until the probe's first
+    read of it, a few seconds, and no probe visits a maintenance or merge node.
+    `enable_logging` to a local path aborts the node, which then restarts.
 - **Node-state introspection, superuser-only** - a tenant user cannot read
   `duckdb_secrets()`, `which_secret()`, `whoami()`, `duckdb_settings()` / `pg_settings`,
   `current_setting(..)` of any setting (a node cannot tell which one a call reads), the

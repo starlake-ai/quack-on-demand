@@ -352,7 +352,7 @@ on the node (a relative one off the local runtime, or `DataFolders.Unplaced`: a 
 duckdb-file row with no data path while the default metastore has none) denies every local location
 to every tenant. Every other scheme (`http(s)`, `gs`, `az`, `r2`) is refused to non-superusers. Not
 covered: an attached Iceberg catalog's raw warehouse files (decision 21); a node reads whatever files
-its catalog lists, so the manager prints one stdout `WARN:` line per `iceberg_rest` source (`IcebergSourceWarning`: disabled ones too, from `FederatedSourceHandlers.createSource` on a create or a change, and from `BootPreflight.warnIcebergSources` at each boot, never at node spawn), naming the source and nothing of its connection. An Iceberg catalog that
+its catalog lists, so the manager prints one stdout `WARN:` line per `iceberg_rest` source (`IcebergSourceWarning`, whose advice is `QOD_NODE_ALLOW_LOCAL_FILES=false`: disabled ones too, from `FederatedSourceHandlers.createSource` on a create or a change, and from `BootPreflight.warnIcebergSources` at each boot, never at node spawn), naming the source and nothing of its connection. An Iceberg catalog that
 neither vends credentials nor has `awsCredentials` reads its table data with each reading user's own
 keys. Iceberg tables on S3 are read-only through QoD for every principal, superusers included, until
 upstream duckdb-iceberg signs its commits with connection secrets (DuckDB v2.0.0 commits manifests
@@ -391,6 +391,66 @@ community or unsigned code either. Only superusers change them at runtime, and D
 `INSTALL avro` before the tenant's initSql (an `extension_directory` or
 `custom_extension_repository` a database's initSql sets does not apply to those two), and any other
 statement that relied on autoinstall fails unless its extension is installed explicitly.
+
+**Local files off (`QOD_NODE_ALLOW_LOCAL_FILES=false`, `quack-on-demand.nodeFiles.allowLocal`, default
+`true`; no Helm value: set it in the chart's `env`).** Every launcher hands the variable to the spawn
+script (local spawn env, Kubernetes pod env, the fleet assignment's `nodeFiles`, `qod fleet join`), and
+only the exact value `false` makes the script end the init SQL, after every INSTALL, LOAD and ATTACH, the
+federation SQL included, with `NodeFilesConfig.InitStatements` (written out in both scripts, pinned by
+`NodeFilesScriptsSpec`, and fenced from the text above by two empty marker lines, so that a trusted text
+that never closes a quote cannot swallow them): `LOAD httpfs`; `allowed_directories` set to the remote
+schemes, azure's only where the init SQL loaded azure, since DuckDB stores a scheme with no file system
+loaded as a local path; `allowed_paths` set to the five CA bundles httpfs looks for (`CaBundles`, re-check
+the list at every DuckDB pin bump), since it reads them through DuckDB's file system and refuses every
+HTTPS request when it may not ask; `enable_external_access` false. Then nothing on the node opens a local
+path outside DuckDB's own temp directory and those five files, for anyone, a catalog's file list,
+deletion schedule or Iceberg manifest included (`Permission Error: Cannot access file ...`), and DuckDB
+refuses SET or RESET of `enable_external_access`, `allowed_directories`, `allowed_paths` and
+`temp_directory` while it runs. Spills keep working. It applies at each node's next start, and the health
+probe checks it: with `false` it also reads `current_setting('enable_external_access')` on each node, as
+the system principal (`QuackHttpAdapter.healthProbe`, `QuackBackend.allowsLocalFiles`), and only an answer
+of exactly `false` passes. Anything else, a failed read included, holds the node out of routing like a node
+that runs the canary (`ProbeVerdict.LocalFilesNotOff`, `NodeLoad.localFilesNotOff`, which a statement's
+success does not clear): it is unhealthy, a statement answers as for no routable node, one ERROR line says
+so, and the pool's `statusDetail` names the node and the setting and says to restart it or to upgrade its
+image or fleet server (`status` does not move, as node health is not what it says). So an older node image
+or `qod fleet join`, a node started before the setting and a switch statement that failed at init all
+show. The probe has no threshold, so neither has this: a read that fails holds the node for one tick, and
+the next read answering `false` lets it go. Reconcile goes by whether the process lives, so it never
+restarts such a node: it stays as it is until someone restarts it, with no loop on a server whose release
+will never apply the setting. With `true` the probe sends nothing more. A row whose resolved data path is
+local (or a DuckLake or duckdb-file row with none) is blocked (`PoolSupervisor.localFilesBlock`, read from
+the row, so on every replica), a `memory` row naming a local path included, though no node opens that path
+(it is only the scope of the row's object-store secret): reconcile starts none of its
+pools, no maintenance or merge node starts, no DuckLake init runs, `startupProblems` and the banner list
+it, `/api/pool/list` says `blocked` with `statusDetail`. A create or an update that would make one, on a
+derived path too (a tenant admin naming a path reads `403 superuser_required` first), and a pool create,
+scale-up, resume or node restart of one,
+answer `400 local_files_off`; a statement that would wake a suspended pool of one is refused at once, Flight
+`INVALID_ARGUMENT`, naming the setting and no path (`FlightSqlRouter.CannotWakeLocalFilesOff`, no wait for
+`resumeHoldTimeoutSec`); a manifest still imports one, and it is then blocked, so a backup always restores. `QOD_TENANT_FILES_ROOT` set with it refuses boot (`BootPreflight.checkNodeFiles`); the shipped
+default data path is not judged, only rows and creates. The costs: what the init SQL did not load stays
+out, `INSTALL` and `LOAD` being refused to superusers too, so of the extensions only `icu`, `json`,
+`parquet` (built in) and `httpfs` always work, `ducklake` and `postgres` on a DuckLake node, `iceberg` and
+`avro` where an Iceberg source loaded them, anything else only through a database's or pool's initSql;
+`duckdb_extensions()` reads a `Permission Error`; a federated source that failed at a node's start no
+longer heals on its own, nor does one added to a running node attach (`IcebergAttachVerifier`'s re-attach
+starts with INSTALL, and a late Postgres ATTACH is refused anyway): restart the node; a `ca_cert_file` at a
+path of its own is refused, so a private CA goes in the system bundle; views over local files (`qod serve
+<local file>`, whose `memory` row names no path, so it is not blocked) start and refuse every read.
+Residuals: it covers local files only and says nothing about what the node's own keys reach on object
+storage. DuckDB leaves the temp directory allowed: a superuser reads and writes it, a non-superuser is
+refused by the location rules, and a file list naming a file there reads it, which holds only spill files
+(no Parquet: they read as nothing) and what a superuser put there; a superuser's init SQL that moves
+`temp_directory` moves that allowance with it, and a tenant admin's cannot (it is not on the initSql
+allowlist). The five CA files stay open to DuckDB, for reading and for writing: a superuser's statement
+reads them, and writes them as far as the node's OS user may, and a deletion schedule naming one of them
+removes it when the node's OS user may (root; the node images run as uid 1000). A local file a superuser's
+init SQL attached before the switch stays reachable (DuckDB adds attached paths to `allowed_paths`). A
+superuser's `enable_logging` with file storage at a local path aborts the node (DuckDB's log writer throws
+past the switch), and reconcile starts it again. A node is routable from its start until the probe's first
+read of it, about `healthCheckIntervalSec`, as with the canary, a statement that wakes a pool included, and
+no probe visits a maintenance or merge node. Windows has not run it: `.ps1` is pinned by its dry run only.
 
 **Tenant initSql runs under an allowlist.** `initSqlTrusted` on `qodstate_tenant_db` and
 `qodstate_pool` (Liquibase `0053`, read-only on responses) records who wrote the text: a superuser,

@@ -14,9 +14,13 @@ final case class NodeLoad(
     // Node connections the native front door holds open on this node: a statement whose result
     // the client still reads, an open client transaction. Not load: routing ignores it. A drain
     // waits for it as for `inFlight` (see `idle`).
-    held: Int = 0
+    held: Int = 0,
+    // Why the health probe holds this node out of routing: the manager runs its nodes with local
+    // files off and this one did not show it (`QuackHttpAdapter.healthProbe`). Only the probe writes
+    // it, so a statement that succeeds, which sets `healthy`, does not let the node back.
+    localFilesNotOff: Option[String] = None
 ):
-  def routable: Boolean = healthy && !draining && !quarantined
+  def routable: Boolean = healthy && !draining && !quarantined && localFilesNotOff.isEmpty
 
   /** Nothing in flight and no front-door connection held: what a non-force drain waits for. */
   def idle: Boolean = inFlight == 0 && held == 0

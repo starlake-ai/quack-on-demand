@@ -71,6 +71,8 @@ final class PoolHandlers(
       val band = sup.autoscaleBand(key)
       // Set when the pool's database is blocked: reconcile never starts its nodes.
       val block = sup.poolBlockReason(key)
+      // Set for a node the health probe holds out of routing, which `status` does not say.
+      val held = p.nodes.flatMap(n => tracker.snapshot(n.nodeId).localFilesNotOff)
       PoolResponse(
         tenant = key.tenant,
         tenantDb = key.tenantDb,
@@ -104,7 +106,7 @@ final class PoolHandlers(
           )
         },
         status = PoolHandlers.statusOf(p, blocked = block.isDefined),
-        statusDetail = block,
+        statusDetail = block.orElse(Option.when(held.nonEmpty)(held.mkString(" "))),
         metastore = redact(p.metastore),
         disabled = p.disabled,
         suspended = p.suspended,
@@ -338,6 +340,13 @@ final class PoolHandlers(
                               ErrorResponse("quota_exceeded", q.reason)
                             )
                           )
+                        case off: PoolSupervisor.LocalFilesOff =>
+                          Left(
+                            (
+                              StatusCode.BadRequest,
+                              ErrorResponse(PoolSupervisor.LocalFilesOffCode, off.getMessage)
+                            )
+                          )
                         case t =>
                           // The supervisor logs nothing when the first node fails to start.
                           logger.error(s"pool create for $key failed", t)
@@ -425,6 +434,15 @@ final class PoolHandlers(
                         IO.pure(
                           Left(
                             (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason))
+                          )
+                        )
+                      case Left(off: PoolSupervisor.LocalFilesOff) =>
+                        IO.pure(
+                          Left(
+                            (
+                              StatusCode.BadRequest,
+                              ErrorResponse(PoolSupervisor.LocalFilesOffCode, off.getMessage)
+                            )
                           )
                         )
                       case Left(t)  => IO.raiseError(t)
@@ -554,7 +572,11 @@ final class PoolHandlers(
           case Some(_) =>
             run(key).map {
               case Left(e) =>
-                Left((StatusCode.InternalServerError, ErrorResponse("error", e.toString)))
+                Left(
+                  SupervisorErrorHttp
+                    .special(e)
+                    .getOrElse((StatusCode.InternalServerError, ErrorResponse("error", e.toString)))
+                )
               case Right(_) =>
                 audit.rest(
                   apiKey,

@@ -13,6 +13,8 @@ import scala.collection.concurrent.TrieMap
 object TestBackends:
 
   def fake(): QuackBackend = new QuackBackend:
+    def allowsLocalFiles = true
+
     private val n          = TrieMap.empty[String, RunningNode]
     def start(s: NodeSpec) = IO {
       val r = RunningNode(

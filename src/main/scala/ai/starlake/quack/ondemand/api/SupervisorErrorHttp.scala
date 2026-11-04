@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.SupervisorError
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import sttp.model.StatusCode
 
 /** REST status + code for the supervisor errors that carry a fixed public code, so every handler
@@ -26,4 +26,6 @@ object SupervisorErrorHttp:
       Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", m))
     case SupervisorError.DataPathTaken(m) =>
       Some(StatusCode.Conflict -> ErrorResponse("data_path_taken", m))
+    case SupervisorError.LocalFilesOff(m) =>
+      Some(StatusCode.BadRequest -> ErrorResponse(PoolSupervisor.LocalFilesOffCode, m))
     case _ => None

@@ -93,6 +93,8 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
            |CREATE SCHEMA $Catalog.tpch1;
            |""".stripMargin
       val backend = new QuackBackend:
+        def allowsLocalFiles = true
+
         private val n          = TrieMap.empty[String, RunningNode]
         def start(s: NodeSpec) = IO {
           live = LiveQodNode.start(dir, init, nodeId = s.nodeId, keys = keys)

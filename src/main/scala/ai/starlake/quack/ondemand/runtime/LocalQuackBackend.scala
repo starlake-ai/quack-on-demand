@@ -25,6 +25,9 @@ import scala.jdk.CollectionConverters.*
   *   handles verify. Required: keys of another secret would have the node refuse every handle
   * @param nodeExtensions
   *   the extension policy every spawn hands qod-node (spec decision 17); Main passes the manager's
+  * @param nodeFiles
+  *   whether every spawn's node may open local files; Main passes the manager's. Required: a
+  *   default would leave a node's local files on whatever the manager was told
   * @param nodeAuthzLimits
   *   the decide limits every spawn hands qod-node; Main passes the manager's
   */
@@ -37,10 +40,13 @@ final class LocalQuackBackend(
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig(),
+    nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // Required (Main passes the manager's): a default would silently run qod-node's own limits.
     nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
 ) extends QuackBackend
     with LazyLogging:
+
+  override val allowsLocalFiles: Boolean = nodeFiles.allowLocal
 
   private val ports     = new PortAllocator(min, max)
   private val processes = TrieMap.empty[String, Process]
@@ -123,6 +129,8 @@ final class LocalQuackBackend(
     // always, after the metastore overlay, so neither a variable this process inherited (they are
     // also the manager's own config variables) nor a metastore entry decides one.
     nodeExtensions.env.foreach { case (k, v) => env.put(k, v) }
+    // Whether the node may open local files, always, after the overlay, for the same reason.
+    nodeFiles.env.foreach { case (k, v) => env.put(k, v) }
     // The decide limits, both, always, after the metastore overlay, for the same reason.
     nodeAuthzLimits.env.foreach { case (k, v) => env.put(k, v) }
     val secretsDir =

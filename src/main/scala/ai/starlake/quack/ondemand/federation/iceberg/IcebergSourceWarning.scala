@@ -11,9 +11,7 @@ object IcebergSourceWarning:
 
   /** What to do about it, in one place. */
   private val Advice =
-    "In production disable local file access on its nodes (a superuser's init SQL: " +
-      "SET disabled_filesystems = 'LocalFileSystem', on an object-store pool, where a sort past " +
-      "memory_limit then fails instead of spilling)."
+    "In production set QOD_NODE_ALLOW_LOCAL_FILES=false, with data on object storage."
 
   /** A control character in a stored name cannot forge a line. */
   def line(tenant: String, database: String, alias: String): String =

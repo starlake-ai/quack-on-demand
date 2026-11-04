@@ -72,6 +72,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   /** Captures NodeSpecs as the backend sees them - used to assert the
     * metastore that PoolSupervisor passes through. */
   private final class CapturingBackend extends QuackBackend:
+    def allowsLocalFiles = true
+
     private val nodes = TrieMap.empty[String, RunningNode]
     val specs     = scala.collection.mutable.ListBuffer.empty[NodeSpec]
     val stopped   = scala.collection.mutable.Set.empty[String]
