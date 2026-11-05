@@ -44,14 +44,20 @@ final case class DemoS3(
       urlStyle = urlStyle
     )
 
+  /** Mask both keys. An empty key is skipped: replacing "" would insert the mask everywhere. */
   def redact(text: String): String =
-    text.replace(secretAccessKey, "***").replace(accessKeyId, "***")
+    List(secretAccessKey, accessKeyId)
+      .filter(_.nonEmpty)
+      .foldLeft(text)((acc, k) => acc.replace(k, "***"))
 
   /** What `DemoSeed` runs before the ATTACH. Not `DuckLakeInitializer.storageSqlFor`, whose
     * `loadSql` puts two statements on one line: the CLI skips the rest of a line after a failure.
+    * The secret has no ENDPOINT clause when [[endpoint]] is empty (AWS): an empty `ENDPOINT ''`
+    * breaks seeding there, and without the clause DuckDB uses AWS's default endpoint.
     */
   def seedStorageSql: List[String] =
     def q(s: String) = "'" + s.replace("'", "''") + "'"
+    val endpointLine = if endpoint.isEmpty then "" else s"  ENDPOINT ${q(endpoint)},\n"
     List(
       "INSTALL httpfs",
       "LOAD httpfs",
@@ -61,8 +67,7 @@ final case class DemoS3(
          |  SECRET ${q(secretAccessKey)},
          |  SESSION_TOKEN '',
          |  REGION ${q(region)},
-         |  ENDPOINT ${q(endpoint)},
-         |  URL_STYLE ${q(urlStyle)},
+         |$endpointLine  URL_STYLE ${q(urlStyle)},
          |  USE_SSL $useSsl,
          |  SCOPE ${q(s"$runFolder/")}
          |)""".stripMargin
@@ -94,7 +99,7 @@ final case class DemoS3(
         client.ensureBucket() match
           case Right(())                       => Right(())
           case Left(err) if nowMs() > deadline =>
-            Left(s"could not create bucket $bucket on the local store: $err")
+            Left(redact(s"could not create bucket $bucket on the local store: $err"))
           case Left(_) =>
             sleep(DemoS3.BucketRetryMs)
             attempt()
@@ -105,7 +110,9 @@ final case class DemoS3(
         .flatMap(_ => client.deleteBatch(List(marker)))
         .left
         .map(err =>
-          s"cannot use s3://$bucket: $err. Check that the bucket exists, and the keys and region."
+          redact(
+            s"cannot use s3://$bucket: $err. Check that the bucket exists, and the keys and region."
+          )
         )
 
   /** Delete the run folder's objects: list, check, delete, until a listing comes back empty,
@@ -148,6 +155,12 @@ object DemoS3:
   private val RunFolder =
     """^s3://([a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])/((?:[A-Za-z0-9._\-]+/)*)(qod-demo-[0-9a-f]{8})/?$""".r
 
+  /** The spawn scripts' reading of `QOD_S3_ENDPOINT`: a leading `http://` or `https://` and one
+    * trailing `/` dropped, leaving `host[:port]`.
+    */
+  private def bareEndpoint(raw: String): String =
+    raw.stripPrefix("http://").stripPrefix("https://").stripSuffix("/")
+
   def fromEnv(env: String => Option[String]): Either[String, Option[DemoS3]] =
     def value(k: String) = env(k).map(_.trim).filter(_.nonEmpty)
     value(PathVar) match
@@ -181,7 +194,7 @@ object DemoS3:
               bucket = bucket,
               runKeyPrefix = s"$prefix$leaf/",
               local = env(LocalVar).contains("1"),
-              endpoint = value("QOD_S3_ENDPOINT").getOrElse(""),
+              endpoint = value("QOD_S3_ENDPOINT").map(bareEndpoint).getOrElse(""),
               region = value("QOD_S3_REGION").getOrElse("us-east-1"),
               accessKeyId = key,
               secretAccessKey = secret,

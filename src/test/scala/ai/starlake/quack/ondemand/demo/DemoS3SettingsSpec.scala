@@ -90,6 +90,14 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     parsed("QOD_S3_ENDPOINT" -> "").storeConfig.endpoint shouldBe ""
   }
 
+  it should "take the endpoint the way the spawn scripts do, scheme and trailing slash dropped" in {
+    val s = parsed("QOD_S3_ENDPOINT" -> "http://127.0.0.1:8333/")
+    s.endpoint shouldBe "127.0.0.1:8333"
+    s.storeConfig.endpoint shouldBe "http://127.0.0.1:8333"
+    s.seedStorageSql(2) should include("ENDPOINT '127.0.0.1:8333'")
+    parsed("QOD_S3_ENDPOINT" -> "https://s3.example.com").endpoint shouldBe "s3.example.com"
+  }
+
   "toString" should "hold no key" in {
     val s = parsed().toString
     s should not include "AKIDVALUE"
@@ -98,6 +106,10 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
 
   "redact" should "mask both keys" in {
     parsed().redact("x AKIDVALUE y SECRETVALUE z") shouldBe "x *** y *** z"
+  }
+
+  it should "leave the text alone for an empty key" in {
+    parsed().copy(accessKeyId = "", secretAccessKey = "").redact("abc") shouldBe "abc"
   }
 
   "seedStorageSql" should "keep one statement to a line start and scope the secret to the run folder" in {
@@ -109,6 +121,14 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     secret should include("ENDPOINT '127.0.0.1:8333'")
     secret should include("USE_SSL false")
     secret should not include ";"
+  }
+
+  it should "omit the ENDPOINT clause when there is no endpoint, so AWS's default applies" in {
+    val secret = parsed("QOD_S3_ENDPOINT" -> "").seedStorageSql(2)
+    secret should not include "ENDPOINT"
+    secret should include("URL_STYLE 'path'")
+    secret should include("SCOPE")
+    parsed().seedStorageSql(2) should include("ENDPOINT '127.0.0.1:8333'")
   }
 
   it should "quote a key holding a single quote" in {
@@ -129,6 +149,7 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     var ensured: Int                              = 0
     var ensureAnswers: List[Either[String, Unit]] = Nil
     var deleteError: Option[String]               = None
+    var deleted: List[String]                     = Nil
     def ensureBucket(): Either[String, Unit]      =
       ensured += 1
       ensureAnswers match
@@ -142,6 +163,7 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
       deleteError match
         case Some(e) => Left(e)
         case None    =>
+          deleted = deleted ++ batch
           keys = keys.diff(batch)
           Right(())
 
@@ -159,6 +181,25 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     out.isLeft shouldBe true
     out.left.getOrElse("") should include("some/where/other/b")
     store.keys should have size 2
+  }
+
+  it should "refuse a stray key that shows up in a later listing and not delete it" in {
+    val stray    = "some/where/other/b"
+    val listings = scala.collection.mutable.Queue[List[String]](
+      List(s"${Prefix}a"),
+      List(s"${Prefix}b", stray)
+    )
+    val deleted = scala.collection.mutable.ListBuffer.empty[String]
+    val store   = new ManagedStoreClient:
+      def ensureBucket(): Either[String, Unit]                        = Right(())
+      def listPrefix(p: String, m: Int): Either[String, List[String]] = Right(listings.dequeue())
+      def deleteBatch(k: List[String]): Either[String, Unit]          =
+        deleted ++= k
+        Right(())
+    val out = parsed().deleteRun(store)
+    out.isLeft shouldBe true
+    out.left.getOrElse("") should include(stray)
+    deleted.toList shouldBe List(s"${Prefix}a")
   }
 
   it should "report a failed delete" in {
@@ -213,7 +254,40 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     parsed().prepare(store, k => { put = k :: put; Right(()) }) shouldBe Right(())
     put should have size 1
     put.head should startWith(Prefix)
+    store.deleted shouldBe put
     store.ensured shouldBe 0
+  }
+
+  it should "name the bucket when the marker cannot be deleted" in {
+    val store = new FakeStore(Nil)
+    store.deleteError = Some("delete denied")
+    val out = parsed().prepare(store, _ => Right(()))
+    out.left.getOrElse("") should include("my-bucket")
+    out.left.getOrElse("") should include("delete denied")
+  }
+
+  it should "redact the keys from a local bucket failure" in {
+    val store = new FakeStore(Nil)
+    store.ensureAnswers = List.fill(100)(Left("bad AKIDVALUE and SECRETVALUE"))
+    var t   = 0L
+    val out = parsed("QOD_DEMO_S3_LOCAL" -> "1").prepare(
+      store,
+      _ => Right(()),
+      nowMs = () => { t += 10000L; t },
+      sleep = _ => ()
+    )
+    val msg = out.left.getOrElse("")
+    msg should include("my-bucket")
+    msg should not include "AKIDVALUE"
+    msg should not include "SECRETVALUE"
+  }
+
+  it should "redact the keys from an own-bucket write failure" in {
+    val out = parsed().prepare(new FakeStore(Nil), _ => Left("bad AKIDVALUE and SECRETVALUE"))
+    val msg = out.left.getOrElse("")
+    msg should include("my-bucket")
+    msg should not include "AKIDVALUE"
+    msg should not include "SECRETVALUE"
   }
 
   it should "name the bucket and the cause when the write check fails" in {
