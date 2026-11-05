@@ -106,14 +106,23 @@ final case class DemoS3(
       attempt()
     else
       val marker = s"$runKeyPrefix.qod-demo-write-check"
-      put(marker)
-        .flatMap(_ => client.deleteBatch(List(marker)))
-        .left
-        .map(err =>
-          redact(
-            s"cannot use s3://$bucket: $err. Check that the bucket exists, and the keys and region."
+      put(marker) match
+        case Left(err) =>
+          Left(
+            redact(
+              s"cannot use s3://$bucket: $err. Check that the bucket exists, and the keys and region."
+            )
           )
-        )
+        case Right(()) =>
+          // The marker is in the user's bucket now: a failed delete leaves it there.
+          client
+            .deleteBatch(List(marker))
+            .left
+            .map(err =>
+              redact(
+                s"cannot use s3://$bucket: $err. The check object s3://$bucket/$marker may be left: remove it by hand."
+              )
+            )
 
   /** Delete the run folder's objects: list, check, delete, until a listing comes back empty,
     * bounded by a time budget. A listed key outside the run folder aborts before anything is

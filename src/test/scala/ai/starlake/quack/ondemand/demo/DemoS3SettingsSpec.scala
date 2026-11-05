@@ -264,6 +264,10 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     val out = parsed().prepare(store, _ => Right(()))
     out.left.getOrElse("") should include("my-bucket")
     out.left.getOrElse("") should include("delete denied")
+    // The put went through, so the marker is in the user's bucket: name it in full.
+    out.left.getOrElse("") should include(
+      s"The check object s3://my-bucket/${Prefix}.qod-demo-write-check may be left: remove it by hand."
+    )
   }
 
   it should "redact the keys from a local bucket failure" in {
@@ -294,4 +298,6 @@ class DemoS3SettingsSpec extends AnyFlatSpec with Matchers:
     val out = parsed().prepare(new FakeStore(Nil), _ => Left("AccessDenied"))
     out.left.getOrElse("") should include("my-bucket")
     out.left.getOrElse("") should include("AccessDenied")
+    out.left.getOrElse("") should include("Check that the bucket exists")
+    out.left.getOrElse("") should not include "may be left" // nothing was written
   }

@@ -105,6 +105,17 @@ class DemoBannerSpec extends AnyFlatSpec with Matchers:
     render(Nil) should include("TPC-H rows)\n\n  Admin UI:")
   }
 
+  it should "name the host the demo listens on in the admin UI url" in {
+    def render(host: Option[String]) =
+      val args = (20900, 31338, "/demo", "~150K", Seq("admin"), "admin")
+      host.fold(DemoBanner.render(args._1, args._2, args._3, args._4, args._5, args._6))(h =>
+        DemoBanner.render(args._1, args._2, args._3, args._4, args._5, args._6, uiHost = h)
+      )
+    render(None) should include("Admin UI: http://localhost:20900/ui/")
+    render(Some("127.0.0.1")) should include("Admin UI: http://127.0.0.1:20900/ui/")
+    render(Some("127.0.0.1")) should not include "localhost:20900"
+  }
+
   "DemoBanner.awaitPort" should "return true once the port accepts and false on timeout" in {
     val srv = new java.net.ServerSocket(0)
     try

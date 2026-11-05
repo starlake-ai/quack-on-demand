@@ -824,7 +824,9 @@ the demo before it can delete the folder (`subprocess.call` terminates the jar a
 the user removes it by hand (the `--s3-path` help says so); and a `qod stop` run from another terminal
 uses its usual 10 s `FORCE_AFTER`, where the demo's own Ctrl-C waits up to 90 s
 (`demo.BUCKET_FORCE_AFTER`, unless `FORCE_AFTER` is set), so it can stop the demo mid-delete: give that
-command `FORCE_AFTER=90`.
+command `FORCE_AFTER=90`. After a Ctrl-C teardown, `_run_supervised` waits `FORCE_AFTER`
+(`config.force_after_seconds`) for the manager to exit before killing it, as `perform_stop` returns once
+the ports close while the JVM is still deleting the run folder.
 
 ### Edge config + catalog ([quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/), [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/))
 

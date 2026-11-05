@@ -33,7 +33,12 @@ PORT_NAMES = (
 _S3_PATH = re.compile(r"^s3://[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9](/[A-Za-z0-9._\-]+)*/?$")
 _ENDPOINT = re.compile(r"^(https?://)?[A-Za-z0-9.\-]+(:[0-9]+)?/?$")
 # All the store is given. WEED_* would reconfigure it, and it has no use for anyone's keys.
-_STORE_ENV_KEYS = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot")
+# HOME is not inherited: the store's home is its own folder, so no ~/.seaweedfs/*.toml applies.
+_STORE_ENV_KEYS = ("PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot")
+# Answered for a live Windows process whose command line cannot be read (an elevated one).
+_UNREADABLE = "<unreadable>"
+# Recent AWS SDK v2 reads these when no endpoint override is set, so the jar must not see them.
+_AMBIENT_ENDPOINT_KEYS = ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3")
 # `_command_line`'s answer when the query itself failed: neither alive nor gone.
 UNKNOWN = object()
 
@@ -131,7 +136,11 @@ def plain_env(base: dict) -> dict:
 
 def _s3_env(base, path, local, key, secret, endpoint, region, url_style, use_ssl) -> dict:
     # Every variable, every time, so nothing ambient leaks in.
-    env = {k: v for k, v in plain_env(base).items() if k != "QOD_S3_ENDPOINT"}
+    env = {
+        k: v
+        for k, v in plain_env(base).items()
+        if k != "QOD_S3_ENDPOINT" and k not in _AMBIENT_ENDPOINT_KEYS
+    }
     env["QOD_DEMO_S3_PATH"] = path
     if local:
         env["QOD_DEMO_S3_LOCAL"] = "1"
@@ -307,6 +316,9 @@ class LocalStore:
             )
             ports = _free_ports()
             env = {k: os.environ[k] for k in _STORE_ENV_KEYS if k in os.environ}
+            env["HOME"] = str(folder)
+            if sys.platform == "win32":
+                env["USERPROFILE"] = str(folder)
             # Its own session, so a Ctrl-C at the terminal reaches the CLI and not the store: the
             # store outlives the jar, which still needs it while it shuts down.
             isolate = (
@@ -362,11 +374,17 @@ def store_record_path() -> Path:
 
 def _command_line(pid: int):
     """The process's command line; None when the query answered that there is no such process;
-    UNKNOWN when it could not answer (the caller must not read that as gone)."""
+    UNKNOWN when it could not answer (the caller must not read that as gone). On Windows a live
+    process whose CommandLine reads empty (an elevated one) prints `<unreadable>`, so that only a
+    missing process prints nothing."""
     windows = sys.platform == "win32"
     try:
         if windows:
-            query = f'(Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CommandLine'
+            query = (
+                f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ "
+                f'$c = (Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CommandLine; '
+                f"if ($c) {{ $c }} else {{ '{_UNREADABLE}' }} }}"
+            )
             cmd = ["powershell", "-NoProfile", "-Command", query]
         else:
             cmd = ["ps", "-o", "command=", "-p", str(pid)]
@@ -374,6 +392,8 @@ def _command_line(pid: int):
     except (OSError, subprocess.SubprocessError):
         return UNKNOWN
     out = (done.stdout or "").strip()
+    if windows and out == _UNREADABLE:
+        return UNKNOWN
     if done.returncode == 0 and out:
         return out
     # `ps` exits 1 with nothing for a pid it does not know; PowerShell exits 0 with nothing.

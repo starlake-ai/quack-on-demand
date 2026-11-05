@@ -176,6 +176,13 @@ def load_start_env() -> dict[str, str]:
     return {str(k): str(v) for k, v in _read_file().get("start", {}).items()}
 
 
+def force_after_seconds() -> int:
+    """How long a stop waits for the manager to exit before it kills it: `FORCE_AFTER`, a real
+    env var over a value `qod setup` persisted, else 10. One reading for `qod stop` and for the
+    Ctrl-C supervisor, so both give the manager the same time to finish its own cleanup."""
+    return int({**load_start_env(), **os.environ}.get("FORCE_AFTER") or "10")
+
+
 def save_start_env(values: dict[str, str], remove: list[str] | None = None) -> None:
     data = _read_file()
     start = data.setdefault("start", {})

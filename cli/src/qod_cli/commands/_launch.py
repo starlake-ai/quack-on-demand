@@ -12,7 +12,7 @@ import typer
 
 from .. import launcher
 from .._manager_version import MANAGER_VERSION
-from ..config import REMOVED_API_KEY, config_path, load_start_env
+from ..config import REMOVED_API_KEY, config_path, force_after_seconds, load_start_env
 
 
 def _is_win32() -> bool:
@@ -131,20 +131,37 @@ def _run_supervised(cmd: list[str], env: dict, teardown=None) -> int:
         return proc.wait()
     except KeyboardInterrupt:
         typer.echo("\ninterrupted; stopping the manager and its nodes (qod stop)...", err=True)
+        interrupted_again = False
         try:
             teardown()
         except KeyboardInterrupt:
+            interrupted_again = True
             typer.echo("second interrupt; killing the manager directly.", err=True)
         finally:
-            # Safety net only: a completed teardown has already reaped the child.
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
+            _reap(proc, grace=None if interrupted_again else force_after_seconds())
         return 130
     finally:
         signal.signal(signal.SIGTERM, old_term)
         if old_hup is not None:
             signal.signal(signal.SIGHUP, old_hup)
+
+
+def _reap(proc: subprocess.Popen, grace: int | None) -> None:
+    """End the supervised manager after a teardown. `qod stop` returns once the manager's ports
+    and spawn scripts are gone, but the JVM still runs its own cleanup after its ports close (with
+    `--s3-path` it deletes the demo's run folder), so a completed teardown waits `grace` seconds
+    for it to exit on its own and kills it only past that. `grace=None` (a second interrupt)
+    kills at once, and so does an interrupt during the wait."""
+    if grace is not None and proc.poll() is None:
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        except KeyboardInterrupt:
+            typer.echo("second interrupt; killing the manager directly.", err=True)
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
 
 
 def resolve_java() -> str:

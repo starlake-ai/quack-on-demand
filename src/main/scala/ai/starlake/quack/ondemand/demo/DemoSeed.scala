@@ -4,6 +4,7 @@ import ai.starlake.quack.ondemand.{CatalogPgSecret, InProcessDuckDb}
 import com.typesafe.scalalogging.LazyLogging
 
 import java.nio.file.Files
+import scala.jdk.CollectionConverters.*
 
 /** Seeds the demo tenant-db with a small TPC-H dataset via DuckDB's built-in `dbgen()`. Mirrors
   * `scripts/load-tpch-dbgen.sh`: ATTACH the DuckLake-over-Postgres catalog, create the schema, then
@@ -85,6 +86,15 @@ object DemoSeed extends LazyLogging:
     val dir = InProcessDuckDb.secretDirectory.toString.replace("'", "''")
     s".bail on\nSET secret_directory = '$dir';\nSELECT count(*) FROM duckdb_secrets();\n.bail off\n"
 
+  /** The environment a seed run gets: `base` without any `AWS_*` or `DUCKDB_S3_*` variable. httpfs
+    * copies those into session settings, which fill any key the seed's secret lacks (it names no
+    * `ENDPOINT` when there is none), so an ambient `AWS_ENDPOINT_URL` or `DUCKDB_S3_ENDPOINT` could
+    * redirect the seed. The seed needs none of them, in either mode: its S3 secret names its own
+    * keys.
+    */
+  private[demo] def seedEnvironment(base: Map[String, String]): Map[String, String] =
+    base.filterNot((k, _) => k.startsWith("AWS_") || k.startsWith("DUCKDB_S3_"))
+
   /** Run the `duckdb` CLI against `sql` once. Returns the process exit code and captured stderr.
     *
     * Uses `java.lang.ProcessBuilder` with stdin/stderr fully redirected to/from files rather than
@@ -100,7 +110,10 @@ object DemoSeed extends LazyLogging:
     try
       Files.writeString(sqlFile, secretPrelude + sql)
       // -no-init: never the OS user's ~/.duckdbrc.
-      val pb = new java.lang.ProcessBuilder(duckdb, "-no-init")
+      val pb        = new java.lang.ProcessBuilder(duckdb, "-no-init")
+      val inherited = pb.environment()
+      val kept      = seedEnvironment(inherited.asScala.toMap)
+      inherited.keySet().removeIf(k => !kept.contains(k))
       // DuckDB 2.0's CLI turns errors into JSON under an agent env var (AI_AGENT, CLAUDECODE)
       // when stdout is not a terminal; keep the plain stderr this seeder reports.
       pb.environment().put("DUCKDB_AGENT_MODE", "0")

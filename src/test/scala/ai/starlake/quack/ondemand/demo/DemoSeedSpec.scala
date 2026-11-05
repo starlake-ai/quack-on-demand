@@ -151,3 +151,22 @@ class DemoSeedSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.getOrElse("") should not include "THEKEY"
     out.left.toOption.getOrElse("") should not include "wrong-path"
   }
+
+  "DemoSeed.seedEnvironment" should "drop every AWS_ and DUCKDB_S3_ variable and keep the rest" in {
+    // httpfs copies these into session settings, which fill any key the seed's secret lacks
+    // (an ambient endpoint would redirect the seed).
+    val base = Map(
+      "AWS_ENDPOINT_URL"   -> "http://elsewhere:9000",
+      "AWS_ACCESS_KEY_ID"  -> "ambient-id",
+      "DUCKDB_S3_ENDPOINT" -> "elsewhere:9000",
+      "DUCKDB_S3_REGION"   -> "eu-west-3",
+      "PATH"               -> "/usr/bin:/bin",
+      "HOME"               -> "/home/demo",
+      "DUCKDB_AGENT_MODE"  -> "0"
+    )
+    DemoSeed.seedEnvironment(base) shouldBe Map(
+      "PATH"              -> "/usr/bin:/bin",
+      "HOME"              -> "/home/demo",
+      "DUCKDB_AGENT_MODE" -> "0"
+    )
+  }

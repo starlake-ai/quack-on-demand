@@ -340,9 +340,13 @@ def test_a_request_prints_no_secret():
 def test_bucket_env_sets_every_variable_and_drops_ambient_values():
     base = {
         "QOD_S3_ENDPOINT": "stale:1", "QOD_DEMO_S3_LOCAL": "1", "QOD_S3_ACCESS_KEY_ID": "stale",
-        "PATH": "/bin",
+        "PATH": "/bin", "AWS_ENDPOINT_URL": "http://elsewhere:9000",
+        "AWS_ENDPOINT_URL_S3": "http://elsewhere:9001",
     }
     env = demo_s3.bucket_env(base, _own(), run_id="1a2b3c4d")
+    # The jar's AWS SDK reads these when no endpoint override is set.
+    assert "AWS_ENDPOINT_URL" not in env
+    assert "AWS_ENDPOINT_URL_S3" not in env
     assert env["QOD_DEMO_S3_PATH"] == "s3://my-bucket/qod/qod-demo-1a2b3c4d"
     assert "QOD_DEMO_S3_LOCAL" not in env
     assert "QOD_S3_ENDPOINT" not in env
@@ -371,8 +375,15 @@ class _FakeStore:
 
 def test_local_env_points_at_the_store_and_exempts_it_from_a_proxy():
     env = demo_s3.local_env(
-        {"QOD_S3_ENDPOINT": "stale:1", "NO_PROXY": "corp"}, _FakeStore(), run_id="1a2b3c4d"
+        {
+            "QOD_S3_ENDPOINT": "stale:1", "NO_PROXY": "corp",
+            "AWS_ENDPOINT_URL": "http://elsewhere:9000", "AWS_ENDPOINT_URL_S3": "http://e:9001",
+        },
+        _FakeStore(),
+        run_id="1a2b3c4d",
     )
+    assert "AWS_ENDPOINT_URL" not in env
+    assert "AWS_ENDPOINT_URL_S3" not in env
     assert env["QOD_DEMO_S3_PATH"] == "s3://qod-demo/qod-demo-1a2b3c4d"
     assert env["QOD_DEMO_S3_LOCAL"] == "1"
     assert env["QOD_S3_ENDPOINT"] == "127.0.0.1:18333"
@@ -462,6 +473,8 @@ def _folders(tmp_path):
 def test_store_start_writes_private_credentials_and_a_record(tmp_path, monkeypatch):
     for name in ("AWS_ACCESS_KEY_ID", "QOD_X", "WEED_X"):
         monkeypatch.setenv(name, "ambient")
+    monkeypatch.setenv("HOME", str(tmp_path / "someone"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "someone"))
     store, captured = _start(tmp_path, monkeypatch, _FakeProc(), lambda port: True)
     folder = _folders(tmp_path)[0]
     assert stat.S_IMODE(folder.stat().st_mode) == 0o700 or sys.platform == "win32"
@@ -479,6 +492,12 @@ def test_store_start_writes_private_credentials_and_a_record(tmp_path, monkeypat
     assert "PATH" in captured["kw"]["env"]
     # Its own folder, so it never reads a security.toml or master.toml from the caller's.
     assert captured["kw"]["cwd"] == folder
+    # Nor a ~/.seaweedfs/*.toml from the caller's home: its home is its own folder.
+    assert captured["kw"]["env"]["HOME"] == str(folder)
+    if sys.platform == "win32":
+        assert captured["kw"]["env"]["USERPROFILE"] == str(folder)
+    else:
+        assert "USERPROFILE" not in captured["kw"]["env"]
     assert captured["kw"].get("start_new_session") is True or sys.platform == "win32"
     assert store.secret_access_key not in repr(store)
 
@@ -643,6 +662,28 @@ def test_command_line_is_none_when_ps_finds_no_such_process(monkeypatch):
 def test_command_line_is_none_when_powershell_finds_no_such_process(monkeypatch):
     _ps(monkeypatch, "win32", (0, ""))
     assert demo_s3._command_line(1) is None
+
+
+def test_command_line_is_unknown_when_powershell_cannot_read_a_live_process(monkeypatch):
+    # An elevated process exists but its CommandLine reads empty: that is not "gone".
+    _ps(monkeypatch, "win32", (0, "<unreadable>\r\n"))
+    assert demo_s3._command_line(1) is demo_s3.UNKNOWN
+
+
+def test_command_line_asks_powershell_whether_the_process_exists_first(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(demo_s3.sys, "platform", "win32")
+
+    def run(cmd, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(demo_s3.subprocess, "run", run)
+    assert demo_s3._command_line(77) is None
+    query = seen["cmd"][-1]
+    assert "Get-Process -Id 77 -ErrorAction SilentlyContinue" in query
+    assert 'Win32_Process -Filter "ProcessId=77"' in query
+    assert "<unreadable>" in query
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])

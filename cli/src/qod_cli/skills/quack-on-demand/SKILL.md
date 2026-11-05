@@ -239,7 +239,9 @@ qod serve --demo
 The demo can keep its data on S3: `qod serve --demo --s3` runs a throwaway local store, and
 `qod serve --demo --s3-path s3://bucket/prefix` uses your bucket (a long-lived key pair from
 `--access-key-id` / `--secret-access-key` or `AWS_*`, both halves required; `--endpoint` for an
-S3-compatible store). Without `--s3-path` the object-store flags are refused, and `--s3` is refused at
+S3-compatible store). Prefer `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` over
+`--secret-access-key`, which other users of the machine can see in the process list. Without
+`--s3-path` the object-store flags are refused, and `--s3` is refused at
 once on a platform with no SeaweedFS build (Windows on ARM). With a bucket the demo listens on
 `127.0.0.1` only and deletes its `qod-demo-<id>` folder on exit, so use a dedicated bucket and key.
 `AWS_SESSION_TOKEN` set with `AWS_*` keys is refused: temporary credentials are not supported. On

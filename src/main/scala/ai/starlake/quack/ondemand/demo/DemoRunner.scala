@@ -217,6 +217,7 @@ object DemoRunner extends LazyLogging:
       rows = "~150K",
       adminNames = configs.manager.admin.usernameList,
       adminPasswordLabel = configs.adminPasswordLabel,
+      uiHost = if s3.exists(!_.local) then "127.0.0.1" else "localhost",
       storageNotes = s3.fold[List[String]](Nil)(_.bannerNotes)
     )
     // Print the banner once the manager REST port actually accepts connections, so the

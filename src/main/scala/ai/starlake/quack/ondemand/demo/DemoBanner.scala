@@ -21,7 +21,9 @@ object DemoBanner:
   /** `adminNames` are the seeded bootstrap admins (QOD_ADMIN_USERNAME) and `adminPasswordLabel`
     * what to print as their password (see [[DemoConfigs.adminPasswordLabel]]). Both are required:
     * the admins are not manifest identities, so a hardcoded row goes stale the moment an operator
-    * picks their own password or names.
+    * picks their own password or names. `uiHost` is the host the admin UI url names: the address
+    * the demo listens on when it binds one (own-bucket mode: 127.0.0.1, where a client trying `::1`
+    * for `localhost` first could fail).
     */
   def render(
       restPort: Int,
@@ -30,7 +32,8 @@ object DemoBanner:
       rows: String,
       adminNames: Seq[String],
       adminPasswordLabel: String,
-      storageNotes: Seq[String] = Nil
+      storageNotes: Seq[String] = Nil,
+      uiHost: String = "localhost"
   ): String =
     val notesBlock   = storageNotes.map(n => s"\n  $n").mkString
     val adminUiTable = table(
@@ -58,7 +61,7 @@ object DemoBanner:
         |
         |  DuckLake: $dataPath (tenant acme, $rows TPC-H rows)$notesBlock
         |
-        |  Admin UI: http://localhost:$restPort/ui/
+        |  Admin UI: http://$uiHost:$restPort/ui/
         |
         |$adminUiTable
         |

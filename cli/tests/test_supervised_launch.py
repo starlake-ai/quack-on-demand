@@ -116,7 +116,8 @@ def test_child_output_is_relayed_promptly(monkeypatch):
     assert b"BANNER" in relayed, "child output was not relayed while it was still running"
 
 
-def test_sigint_runs_teardown_and_reaps_child():
+def test_sigint_runs_teardown_and_reaps_child(monkeypatch):
+    monkeypatch.setenv("FORCE_AFTER", "1")
     called = threading.Event()
     marker = f"qod-supervise-test-{os.getpid()}"
 
@@ -139,11 +140,78 @@ def test_sigint_runs_teardown_and_reaps_child():
     assert leftovers == []
 
 
+class _Capture:
+    """Records the Popen the supervisor makes, so a test can read the child's own exit code."""
+
+    def __init__(self, monkeypatch):
+        self.procs = []
+        real = subprocess.Popen
+        outer = self
+
+        class Recording(real):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                outer.procs.append(self)
+
+        monkeypatch.setattr(subprocess, "Popen", Recording)
+
+
+def _interrupt_after(seconds):
+    def fire():
+        time.sleep(seconds)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=fire, daemon=True).start()
+
+
+def test_completed_teardown_lets_the_manager_finish_its_cleanup(tmp_path, monkeypatch):
+    # The JVM keeps cleaning up after its ports close (in --s3-path mode it deletes the run
+    # folder), and `qod stop` returns once the ports are free. A kill right after the teardown
+    # would cut that cleanup off, so the supervisor waits FORCE_AFTER for the child to exit.
+    monkeypatch.setenv("FORCE_AFTER", "10")
+    capture = _Capture(monkeypatch)
+    flag = tmp_path / "teardown-done"
+    child = [
+        sys.executable,
+        "-c",
+        "import os, sys, time\n"
+        "while not os.path.exists(sys.argv[1]): time.sleep(0.05)\n"
+        "time.sleep(2)\n"
+        "sys.exit(0)",
+        str(flag),
+    ]
+    _interrupt_after(0.5)
+    code = _launch._run_supervised(child, dict(os.environ), teardown=flag.touch)
+    assert code == 130
+    assert capture.procs[0].returncode == 0  # exited on its own, not -9
+
+
+def test_a_manager_that_never_exits_is_killed_after_force_after(monkeypatch):
+    monkeypatch.setenv("FORCE_AFTER", "1")
+    capture = _Capture(monkeypatch)
+    returned = []
+
+    def teardown():
+        returned.append(time.monotonic())
+
+    _interrupt_after(0.5)
+    code = _launch._run_supervised(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        dict(os.environ),
+        teardown=teardown,
+    )
+    waited = time.monotonic() - returned[0]
+    assert code == 130
+    assert capture.procs[0].returncode == -signal.SIGKILL
+    assert 0.8 <= waited < 5, waited
+
+
 def test_default_teardown_is_qod_stop(monkeypatch):
     from qod_cli.commands import stop as stop_cmd
 
     called = threading.Event()
     monkeypatch.setattr(stop_cmd, "perform_stop", called.set)
+    monkeypatch.setenv("FORCE_AFTER", "1")
 
     def interrupt_soon():
         time.sleep(0.5)

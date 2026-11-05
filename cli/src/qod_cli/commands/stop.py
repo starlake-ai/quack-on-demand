@@ -30,7 +30,7 @@ from pathlib import Path
 
 import typer
 
-from ..config import load_start_env
+from ..config import force_after_seconds, load_start_env
 from ..launcher import default_data_dir
 
 
@@ -273,7 +273,7 @@ def _stop_manager_and_nodes():
     merged = {**load_start_env(), **os.environ}
     mgr_port = int(merged.get("QOD_ON_DEMAND_PORT") or "20900")
     edge_port = int(merged.get("PROXY_PORT") or "31338")
-    force_after = int(merged.get("FORCE_AFTER") or "10")
+    force_after = force_after_seconds()
 
     # Only this manager's nodes: each wrapper's argv and node directory carry the manager's marker
     # `<rest-port>-<boot id>` (LocalQuackBackend.managerMarker), so another manager on this host
