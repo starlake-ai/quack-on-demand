@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import java.util.Locale
 import ai.starlake.quack.model.TenantDb
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 
 /** Small helpers shared verbatim across several `api` handler classes. Kept as free functions
   * (rather than a trait mixed into each handler) so construction stays simple and the call sites
@@ -28,3 +29,16 @@ object HandlerResolvers:
     */
   def redactPassword(m: Map[String, String]): Map[String, String] =
     m.filterNot { case (k, _) => TenantDb.isSecretKey(k) }
+
+  /** `shown`, a metastore that `stored` resolved to, as `viewer` may read it: no secret for anyone,
+    * and for a caller who is not a superuser nothing of QoD's own Postgres server
+    * ([[TenantDb.metastoreShownToTenant]]).
+    */
+  def metastoreFor(
+      viewer: SessionScope,
+      shown: Map[String, String],
+      stored: Map[String, String],
+      defaults: Map[String, String]
+  ): Map[String, String] =
+    val plain = redactPassword(shown)
+    if viewer.superuser then plain else TenantDb.metastoreShownToTenant(plain, stored, defaults)

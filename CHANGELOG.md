@@ -28,6 +28,17 @@ count. To keep counts from a user, refuse on the table.
 
 ### Breaking
 
+- Only a superuser is shown QoD's own Postgres server. `/api/pool/list`,
+  `GET /api/pool/{tenant}/{tenantDb}/{pool}/status` (which now reads its caller's credential),
+  `/api/database/list`, the answers of `database create` and `update`, and MCP `get_pool_status`,
+  `list_pools` and `list_databases` show anyone else no `pgHost`, `pgPort` or `pgUser` of a database on
+  QoD's server, and nothing else the manager's defaults filled in, such as an inherited `schemaName`.
+  A PAT follows its owner. A database on another server still shows its own. A superuser's answer is
+  unchanged. A blocked pool's `statusDetail` tells them why it is blocked and leaves the fix out. A
+  server failure or a conflict whose text names that host, port or user reads a fixed text instead,
+  with the same code, and the text goes to the manager's log. A tenant admin's `database update`
+  leaves those keys out and they stay as stored; naming any of them is `403 superuser_required`
+  whatever the value says, where sending them back unchanged was the way before.
 - Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
   `--proposal`: the approver names the proposal they read, and another one in its place is
   `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and

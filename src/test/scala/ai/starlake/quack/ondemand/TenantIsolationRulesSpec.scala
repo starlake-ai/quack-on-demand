@@ -1375,17 +1375,152 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
       .isRight shouldBe true
-    // Shown everything but the password, they may send that back.
-    val shown = f.row("acme_default").metastore - "pgPassword"
-    f.update(tenantAdmin, "acme_default", shown + ("schemaName" -> "s2")) shouldBe
-      Right("acme_default")
-    f.row("acme_default").metastore("pgPassword") shouldBe DefaultPassword
-    codeOf(f.update(tenantAdmin, "acme_default", Map("schemaName" -> "s2"))) shouldBe
-      (StatusCode.Forbidden, "superuser_required")
+    val stored = f.row("acme_default").metastore
+    // Shown none of its server, what they send leaves it as stored.
+    f.update(tenantAdmin, "acme_default", Map("schemaName" -> "s2")) shouldBe Right("acme_default")
+    f.row("acme_default").metastore - "dbName" shouldBe (stored - "dbName").updated(
+      "schemaName",
+      "s2"
+    )
+    // Naming any of it is refused alike, whether the value is right or not.
+    val answers = List("pg.internal", "guess.example").map { host =>
+      f.update(tenantAdmin, "acme_default", Map("pgHost" -> host)).left.toOption.get
+    }
+    answers.map(_._1) shouldBe List(StatusCode.Forbidden, StatusCode.Forbidden)
+    answers.map(_._2.error).distinct shouldBe List("superuser_required")
+    answers.map(_._2.message).distinct should have size 1
+    answers.head._2.message should include("a superuser sets")
+    f.row("acme_default").metastore - "dbName" shouldBe (stored - "dbName").updated(
+      "schemaName",
+      "s2"
+    )
     codeOf(
-      f.update(tenantAdmin, "acme_default", shown + ("pgPassword" -> DefaultPassword))
-    ) shouldBe
-      (StatusCode.Forbidden, "superuser_required")
+      f.update(tenantAdmin, "acme_default", Map("pgPassword" -> DefaultPassword))
+    ) shouldBe (StatusCode.Forbidden, "superuser_required")
+    // A superuser's update replaces the map, as ever.
+    f.update(superuser, "acme_default", stored - "pgPassword") shouldBe Right("acme_default")
+    f.row("acme_default").metastore("pgHost") shouldBe "pg.internal"
+  }
+
+  "A database's answer" should "show a tenant admin none of QoD's server, and a superuser all" in {
+    val f = new Fixture
+    f.rest(tenantAdmin, "placed", Map("catalogAlias" -> "own")) shouldBe Right("acme_placed")
+    f.sup
+      .createTenantDb("acme", "held", TenantDbKind.DuckLake, QoDsOwnKeys, "", writerTrusted = true)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val pools = new ai.starlake.quack.ondemand.api.PoolHandlers(f.sup, new NodeLoadTracker)
+    List("acme_placed" -> "p", "acme_held" -> "h").foreach { (db, pool) =>
+      pools
+        .createPool(
+          ai.starlake.quack.ondemand.api.CreatePoolRequest(
+            "acme",
+            db,
+            pool,
+            1,
+            ai.starlake.quack.model.RoleDistribution(0, 0, 1)
+          ),
+          None
+        )(superuser)
+        .unsafeRunSync()
+        .isRight shouldBe true
+    }
+    def named(m: Map[String, String]) = m.keySet.intersect(Set("pgHost", "pgPort", "pgUser"))
+    val all                           = Set("pgHost", "pgPort", "pgUser")
+    def status(db: String, pool: String, scope: SessionScope.Resolver) =
+      pools.poolStatus("acme", db, pool, None)(scope).unsafeRunSync().toOption.get.metastore
+    def listed(scope: SessionScope.Resolver) =
+      pools.listPools(None)(scope).unsafeRunSync().toOption.get.pools.map(_.metastore)
+    def rows(scope: SessionScope.Resolver) =
+      f.handlers
+        .listTenantDbs("acme", None)(scope)
+        .unsafeRunSync()
+        .toOption
+        .get
+        .tenantDbs
+        .map(d => d.name -> d.metastore)
+        .toMap
+
+    List("acme_placed" -> "p", "acme_held" -> "h").foreach { (db, pool) =>
+      named(status(db, pool, tenantAdmin)) shouldBe empty
+      status(db, pool, tenantAdmin)("dbName") shouldBe db
+      named(status(db, pool, superuser)) shouldBe all
+    }
+    status("acme_placed", "p", tenantAdmin).get("catalogAlias") shouldBe Some("own")
+    // Nothing the defaults filled in, a schema included; a superuser reads it as before.
+    status("acme_placed", "p", tenantAdmin).contains("schemaName") shouldBe false
+    status("acme_placed", "p", superuser)("schemaName") shouldBe "main"
+    // No credential is no superuser.
+    named(status("acme_placed", "p", _ => SessionScope.NoAccess)) shouldBe empty
+    listed(tenantAdmin).foreach(m => named(m) shouldBe empty)
+    listed(superuser).foreach(m => named(m) shouldBe all)
+    rows(tenantAdmin).values.foreach(m => named(m) shouldBe empty)
+    named(rows(superuser)("acme_held")) shouldBe all
+    // Create and update answer the same way.
+    f.handlers
+      .update(
+        UpdateTenantDbRequest("acme", "acme_held", metastore = Some(Map("schemaName" -> "s2"))),
+        None
+      )(
+        tenantAdmin
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+      .db
+      .metastore
+      .keySet
+      .intersect(all) shouldBe empty
+
+    // A row on another server shows its own.
+    f.create("byo", OwnLogin).isRight shouldBe true
+    rows(tenantAdmin)("acme_byo").get("pgHost") shouldBe Some("pg.other")
+    rows(tenantAdmin)("acme_byo").get("pgUser") shouldBe Some("me")
+    pools
+      .createPool(
+        ai.starlake.quack.ondemand.api.CreatePoolRequest(
+          "acme",
+          "acme_byo",
+          "b",
+          1,
+          ai.starlake.quack.model.RoleDistribution(0, 0, 1)
+        ),
+        None
+      )(superuser)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    status("acme_byo", "b", tenantAdmin).get("pgHost") shouldBe Some("pg.other")
+    // The port it inherits is QoD's, and stays out.
+    status("acme_byo", "b", tenantAdmin).contains("pgPort") shouldBe false
+    status("acme_byo", "b", superuser).get("pgPort") shouldBe Some("5432")
+
+    // A block says why, not how, to a tenant admin.
+    val row = f.row("acme_held")
+    f.sup.blockDataPathForTest(
+      row.id,
+      "connection to server at \"pg.internal\", port 5432 failed",
+      List("pin it: qod database update --metastore pgHost=pg.internal")
+    )
+    def detail(scope: SessionScope.Resolver) =
+      pools
+        .poolStatus("acme", "acme_held", "h", None)(scope)
+        .unsafeRunSync()
+        .toOption
+        .get
+        .statusDetail
+        .get
+    detail(tenantAdmin) shouldBe TenantDb.ServerTextWithheld
+    detail(superuser) should include("Fix: pin it")
+    // Why it is blocked still reads, when it names none of them.
+    f.sup.blockDataPathForTest(row.id, "its dataPath moved", List("pin it: pgHost=pg.internal"))
+    detail(tenantAdmin) shouldBe "its dataPath moved"
+    pools
+      .poolStatus("acme", "acme_held", "h", None)(tenantAdmin)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .status shouldBe
+      "blocked"
   }
 
   "metastore-defaults" should "tell a superuser QoD's server, and anyone else nothing" in {

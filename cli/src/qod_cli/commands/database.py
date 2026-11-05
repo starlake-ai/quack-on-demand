@@ -137,9 +137,10 @@ def update(
         None,
         "--metastore",
         help="KEY=VALUE; omit = unchanged, else it replaces the stored map. pgHost, pgPort, pgUser, "
-        "pgPassword and a DuckLake database's dbName are a superuser's to change: send them back as "
-        "the row holds them (a password left out is kept). A change of pgHost or pgPort needs "
-        "pgPassword again.",
+        "pgPassword and a DuckLake database's dbName are a superuser's to change. On QoD's own server "
+        "anyone else leaves pgHost, pgPort and pgUser out and they stay; elsewhere they send them "
+        "back as the row holds them (a password left out is kept). A change of pgHost or pgPort "
+        "needs pgPassword again.",
     ),
     object_store: list[str] = typer.Option(
         None,

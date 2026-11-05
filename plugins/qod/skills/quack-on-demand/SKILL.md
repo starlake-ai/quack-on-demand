@@ -1300,10 +1300,11 @@ qod database update --tenant acme --name acme_tpch \
   --metastore dbName=acme_tpch --metastore pgHost=localhost --metastore pgPort=5432 \
   --metastore pgUser=postgres --metastore schemaName=main --metastore pgPassword=newpass
 # Anyone but a superuser gets 403 superuser_required when the result would add, change or remove any
-# of pgHost, pgPort, pgUser, pgPassword or a DuckLake database's dbName, on any database: send them back
-# as the row holds them, with the password left out, and change the rest. A password sent counts as a
-# change whatever it says. catalogAlias and schemaName name things inside the database's own catalog
-# and stay free.
+# of pgHost, pgPort, pgUser, pgPassword or a DuckLake database's dbName, on any database. On QoD's own
+# server they are shown no host, port or user: leave those out and they stay as stored, as naming one
+# is refused whatever it says. On another server, send them back as the row holds them. Leave the
+# password out either way. A password sent counts as a change whatever it says. catalogAlias and
+# schemaName name things inside the database's own catalog and stay free.
 # A superuser's update answers 400 own_login_required when the result names another server with no
 # login of its own, and when pgHost or pgPort change with the stored password left out: the password
 # does not follow the row, so send it again (or send it empty to go back to QoD's server, where QoD's
@@ -2781,7 +2782,9 @@ eviction are opt-in knobs.
 | `403 superuser_required` on `database create` or `update`, naming `objectStore` | A create sent it with no remote path it completes, the database holds no complete keys of its own (one QoD placed, of managed storage, or a value that was never complete), or a change to its own keys came without the secret | Leave `--object-store` out, on a create send it with a remote `--data-path` and every key of its scheme, or on a change of a database's own keys send its secret too; a superuser may set anything else |
 | `409 data_path_taken` on `database create` | The folder QoD would place the database in, or the remote path a tenant admin named, overlaps one another database holds, held within the last ten minutes, or a managed prefix within retention | Choose another name, or another path |
 | `400 invalid_contract` naming no default data path on `database create` | No path named, and the deployment has no default data path to place it by, or only a bucket's root | Use `--managed-storage`, or ask a superuser to name a path |
-| `403 superuser_required` on `database create` or `update`, naming `pgHost`, `pgPort`, `pgUser`, `pgPassword` or `dbName` | Only a superuser sets a database's Postgres server, and the request would add, change or remove one of these | Leave them out of a create; on an update, send them back as the database holds them, with the password left out; or ask a superuser. A database's own password is rotated by a superuser |
+| `database list`, `pool status` or `pool list` show no `pgHost`, `pgPort` or `pgUser` | Only a superuser is shown QoD's own Postgres server; a database on another server shows its own | Ask a superuser. Nothing needs them: a client connects through QoD |
+| An error reads `this error names QoD's Postgres server, which only a superuser is shown` | The failure's text named that host, port or user | Ask a superuser: the manager's log holds the text |
+| `403 superuser_required` on `database create` or `update`, naming `pgHost`, `pgPort`, `pgUser`, `pgPassword` or `dbName` | Only a superuser sets a database's Postgres server, and the request would add, change or remove one of these | Leave them out of a create; on an update, leave them out on QoD's own server (they stay as stored), and on another server send them back as the database holds them, with the password left out; or ask a superuser. A database's own password is rotated by a superuser |
 | `403 superuser_required` on `GET /api/database/metastore-defaults` or MCP `metastore_defaults` | They tell QoD's own Postgres address and user, for a superuser's create form | Nothing to do: anyone else's create leaves these keys out |
 | A database on another server stopped connecting after an upgrade, with no error before | Its row names another server and has no login of its own: QoD's login is no longer filled in there | A superuser's `qod database update ... --metastore pgUser=... --metastore pgPassword=...` with the rest of the map |
 | `400 init_sql_refused` on `database create` / `update`, `pool create` / `set-init-sql` | A tenant admin's initSql holds a statement outside the allowlist ("Who may write what in initSql") | Keep only allowlisted SETs, read-only PRAGMAs and extension INSTALL/LOADs, or have a superuser write it |

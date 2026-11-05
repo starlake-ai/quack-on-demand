@@ -326,6 +326,10 @@ object ManagerServerHarness:
       // Mount POST /mcp wired over the harness handlers, mirroring Main's
       // mcp.enabled gate. Off by default so pre-existing specs see no new route.
       mcpEnabled: Boolean = false,
+      // The supervisor's metastore defaults and database admin.
+      supervisorDefaults: Map[String, String] = Map.empty,
+      dbAdmin: ai.starlake.quack.ondemand.state.DbAdmin =
+        ai.starlake.quack.ondemand.state.NoopDbAdmin,
       // Env overrides the harness reads itself, mirroring the QOD_* -> application.conf
       // convention without pulling pureconfig into the harness boot path. Currently
       // backs only QOD_PAT_MAX_DEPTH (PatHandlers.maxDepth); extend here, not with a
@@ -383,7 +387,13 @@ object ManagerServerHarness:
     val edgeCfg = minimalFlightConfig
     val tracker = new NodeLoadTracker
     val backend = stubBackend
-    val sup     = new PoolSupervisor(backend, tracker, store)
+    val sup     = new PoolSupervisor(
+      backend,
+      tracker,
+      store,
+      defaultMetastore = supervisorDefaults,
+      dbAdmin = dbAdmin
+    )
 
     // Restore the in-memory store into the supervisor's caches.
     sup.restore()
@@ -702,7 +712,8 @@ object ManagerServerHarness:
               accessTools.tools ++ platformTools.tools ++
               new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
             serverVersion = "test-harness",
-            limits = mgrCfg.restLimits
+            limits = mgrCfg.restLimits,
+            textForTenant = pools.textForTenant
           ).routes
 
     val mgr = new ManagerServer(

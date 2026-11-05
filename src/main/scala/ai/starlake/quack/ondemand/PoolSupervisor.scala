@@ -665,8 +665,12 @@ final class PoolSupervisor(
       .exists(blockOf(_).isDefined)
 
   /** Test-only seam: seed [[dataPathBlocked]] directly so specs can assert reconcile()'s skip. */
-  private[ondemand] def blockDataPathForTest(tenantDbId: String, message: String): Unit =
-    dataPathBlocked.put(tenantDbId, PoolSupervisor.BlockReason(message, Nil))
+  private[ondemand] def blockDataPathForTest(
+      tenantDbId: String,
+      message: String,
+      fixes: List[String] = Nil
+  ): Unit =
+    dataPathBlocked.put(tenantDbId, PoolSupervisor.BlockReason(message, fixes))
 
   /** Why `key`'s pools are not started, when its tenant-db is blocked: the reason, then the fix
     * when one is known. None for a pool whose tenant-db is not blocked.
@@ -678,6 +682,17 @@ final class PoolSupervisor(
       .flatMap(p => tenantDbs.get(p.tenantDbId))
       .flatMap(blockOf)
       .map(_.sentence)
+
+  /** [[poolBlockReason]] for a caller who is not a superuser: why it is blocked, and not the fix, a
+    * superuser's, which can carry the row's whole metastore.
+    */
+  def poolBlockReasonForTenant(key: PoolKey): Option[String] =
+    poolIdByKey
+      .get(key)
+      .flatMap(poolRows.get)
+      .flatMap(p => tenantDbs.get(p.tenantDbId))
+      .flatMap(blockOf)
+      .map(b => TenantDb.textShownToTenant(b.reason, defaultMetastore))
 
   /** What this replica found wrong while restoring and initializing its databases, for the boot
     * banner: every blocked tenant-db (its pools are never started) and every tenant-db whose
@@ -2814,8 +2829,14 @@ final class PoolSupervisor(
       case None =>
         IO.pure(Left(SupervisorError.NotFound(s"tenant-db $tenantName/$dbName not found")))
       case Some((td, managedRow)) =>
+        // What a writer who is not a superuser is not shown of QoD's own server, left out, stays.
+        val unshown =
+          if !patch.writerTrusted && TenantDb.onDefaultServer(td.metastore, defaultMetastore) then
+            td.metastore.filter((k, _) => TenantDb.isServerAddressKey(k))
+          else Map.empty[String, String]
         val merged = td.copy(
-          metastore = patch.metastore.fold(td.metastore)(mergeSecretKeys(td.metastore, _)),
+          metastore = patch.metastore
+            .fold(td.metastore)(sent => unshown ++ mergeSecretKeys(td.metastore, sent)),
           objectStore = patch.objectStore.fold(td.objectStore)(mergeSecretKeys(td.objectStore, _)),
           defaultDatabase = patch.defaultDatabase.fold(td.defaultDatabase)(nonBlank),
           defaultSchema = patch.defaultSchema.fold(td.defaultSchema)(nonBlank),
@@ -2831,16 +2852,23 @@ final class PoolSupervisor(
         val choice: Option[SupervisorError] =
           Option
             .when(!patch.writerTrusted)(
-              TenantDb.superuserChoiceError(
-                Some(td),
-                td.kind,
-                merged.dataPath,
-                merged.metastore,
-                merged.objectStore,
-                patch.metastore.getOrElse(Map.empty),
-                patch.objectStore.getOrElse(Map.empty),
-                managedRow
-              )
+              Option
+                .when(TenantDb.onDefaultServer(td.metastore, defaultMetastore))(
+                  TenantDb.unshownServerKeyError(patch.metastore.getOrElse(Map.empty))
+                )
+                .flatten
+                .orElse(
+                  TenantDb.superuserChoiceError(
+                    Some(td),
+                    td.kind,
+                    merged.dataPath,
+                    merged.metastore,
+                    merged.objectStore,
+                    patch.metastore.getOrElse(Map.empty),
+                    patch.objectStore.getOrElse(Map.empty),
+                    managedRow
+                  )
+                )
             )
             .flatten
             .map(SupervisorError.SuperuserChoice(_))

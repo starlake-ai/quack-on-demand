@@ -36,9 +36,10 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     )
 
   private val resolvePat: String => Option[PatPrincipal] =
-    case AdminPat => Some(principal("admin", admin = true))
-    case UserPat  => Some(principal("user", admin = false))
-    case _        => None
+    case AdminPat              => Some(principal("admin", admin = true))
+    case UserPat               => Some(principal("user", admin = false))
+    case McpSuperuserPat.Token => Some(McpSuperuserPat.Principal)
+    case _                     => None
 
   private val echoTool = McpToolDef(
     name = "echo",
@@ -56,6 +57,14 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     run = (_, _) => IO.pure(Left("the pool is waking from suspend; retry in a few seconds"))
   )
 
+  private val namingTool = McpToolDef(
+    name = "names_the_server",
+    description = "returns an error naming QoD's Postgres",
+    inputSchema = Json.obj("type" -> Json.fromString("object")),
+    adminOnly = false,
+    run = (_, _) => IO.pure(Left("names-the-server"))
+  )
+
   private val adminTool = McpToolDef(
     name = "scale_pool",
     description = "admin only",
@@ -68,9 +77,10 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     new McpRoutes(
       cfg = McpConfig(),
       resolvePat = resolvePat,
-      tools = List(echoTool, failTool, adminTool),
+      tools = List(echoTool, failTool, namingTool, adminTool),
       serverVersion = "test",
-      limits = RestLimitsConfig()
+      limits = RestLimitsConfig(),
+      textForTenant = t => if t.contains("names-the-server") then "withheld" else t
     ).routes.orNotFound
 
   private def postWith(body: String, authorization: Option[String]): Response[IO] =
@@ -219,6 +229,19 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     parse(text).toOption.flatMap(_.hcursor.get[Int]("x").toOption) shouldBe Some(7)
   }
 
+  it should "withhold a tool's error naming QoD's Postgres from who is not a superuser" in {
+    val params = Json.obj("name" -> Json.fromString("names_the_server"), "arguments" -> Json.obj())
+    def text(token: String) =
+      bodyJson(post(rpc("tools/call", params = params), bearer = Some(token))).hcursor
+        .downField("result")
+        .downField("content")
+        .downN(0)
+        .get[String]("text")
+        .toOption
+    text(UserPat) shouldBe Some("withheld")
+    text(McpSuperuserPat.Token) shouldBe Some("names-the-server")
+  }
+
   it should "wrap Left as isError text content" in {
     val params = Json.obj("name" -> Json.fromString("always_fails"), "arguments" -> Json.obj())
     val resp   = post(rpc("tools/call", params = params), bearer = Some(UserPat))
@@ -241,7 +264,8 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
       resolvePat = resolve,
       tools = List(echoTool),
       serverVersion = "test",
-      limits = limits
+      limits = limits,
+      textForTenant = identity
     ).routes.orNotFound
 
   private def mcpRequest(bearer: String): Request[IO] =

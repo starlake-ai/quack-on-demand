@@ -2068,7 +2068,8 @@ object Main extends IOApp with LazyLogging:
                 identityTools.tools ++ accessTools.tools ++ platformTools.tools ++
                 new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
               serverVersion = "dev",
-              limits = mgrCfg.restLimits
+              limits = mgrCfg.restLimits,
+              textForTenant = TenantDb.textShownToTenant(_, sup.metastoreDefaults)
             ).routes
       if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
         logger.warn("mcp: enabled but a required handler is unwired; POST /mcp not mounted")

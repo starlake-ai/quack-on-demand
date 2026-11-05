@@ -301,6 +301,87 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     objectStore = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "s")
   )
 
+  private val qodServer = Map(
+    "pgHost"     -> "pg.internal",
+    "pgPort"     -> "5432",
+    "pgUser"     -> "qod",
+    "pgPassword" -> "x",
+    "dbName"     -> "qod",
+    "schemaName" -> "main",
+    "dataPath"   -> "/data/ducklake"
+  )
+
+  "TenantDb.metastoreShownToTenant" should "leave out what the defaults filled in, and QoD's server" in {
+    def shown(effective: Map[String, String], stored: Map[String, String]) =
+      TenantDb.metastoreShownToTenant(effective, stored, qodServer)
+    // A sparse row, as the supervisor resolves it.
+    shown(
+      Map(
+        "pgHost"       -> "pg.internal",
+        "pgPort"       -> "5432",
+        "pgUser"       -> "qod",
+        "dbName"       -> "acme_x",
+        "schemaName"   -> "main",
+        "dataPath"     -> "/data/acme_x",
+        "catalogAlias" -> "own"
+      ),
+      Map("catalogAlias" -> "own")
+    ) shouldBe Map("dbName" -> "acme_x", "dataPath" -> "/data/acme_x", "catalogAlias" -> "own")
+    // A row holding them itself, on QoD's server, in any spelling.
+    val held =
+      Map("pgHost" -> "PG.internal.", "pgPort" -> "05432", "pgUser" -> "qod", "PgUser" -> "qod")
+    shown(held + ("schemaName" -> "s2"), held + ("schemaName" -> "s2")) shouldBe Map(
+      "schemaName" -> "s2"
+    )
+    // A row on another server shows its own, and not what the defaults filled in.
+    val other = Map("pgHost" -> "pg.other", "pgUser" -> "me")
+    shown(other + ("pgPort" -> "5432"), other) shouldBe other
+    shown(
+      other + ("pgPort" -> "5432"),
+      other + ("pgPort" -> "5432")
+    ) shouldBe other + ("pgPort" -> "5432")
+    // Its own schema, equal to the default's, is its own.
+    shown(Map("schemaName" -> "main"), Map("schemaName" -> "main")) shouldBe Map(
+      "schemaName" -> "main"
+    )
+  }
+
+  "TenantDb.textShownToTenant" should "withhold a text naming QoD's host, port or user" in {
+    def read(text: String) = TenantDb.textShownToTenant(text, qodServer)
+    List(
+      "Connection to pg.internal:5432 refused. Check that the hostname and port are correct",
+      "connection to server at \"pg.internal\" (10.0.0.5), port 5432 failed: FATAL",
+      "connection to server at \"10.0.0.5\", port 5432 failed",
+      "FATAL: password authentication failed for user \"qod\"",
+      "FATAL: role \"qod\" does not exist",
+      "ducklake:postgres:host=pg.internal port=5432 dbname=x user=qod",
+      "could not translate host name \"pg.internal\" to address",
+      "java.net.UnknownHostException: pg.internal",
+      "no pg_hba.conf entry for host \"10.0.0.5\", user \"qod\", database \"x\"",
+      "jdbc:postgresql://pg.internal/qod",
+      "at host=pg.internal",
+      "user=qod",
+      "port 5432 failed"
+    ).foreach(t => withClue(t)(read(t) shouldBe TenantDb.ServerTextWithheld))
+    // What names none of them stays, the words that only look alike included.
+    List(
+      "a superuser sets a database's Postgres server",
+      "setupSql is for sourceType 'sql', not 'qod'",
+      "not.pg.internal.example refused",
+      "port 54321 is taken",
+      "user \"qodder\" holds no grant",
+      // A name the caller sent, quoted back: the answer says nothing on whether it is QoD's.
+      "pool pg.internal is taken",
+      "user qod already exists",
+      "database qod has pools"
+    ).foreach(t => withClue(t)(read(t) shouldBe t))
+    // Nothing to name: nothing withheld.
+    TenantDb.textShownToTenant(
+      "user \"qod\" at h:5432",
+      Map.empty
+    ) shouldBe "user \"qod\" at h:5432"
+  }
+
   "TenantDb.superuserChoiceError" should "take a create naming no path, or a remote one with keys" in {
     def on(
         path: String,

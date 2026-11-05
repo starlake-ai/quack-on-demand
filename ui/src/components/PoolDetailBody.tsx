@@ -739,7 +739,7 @@ export default function PoolDetailBody({
             )}
             {data.metastore.pgHost && (
               <tr><th align="left">Postgres</th>
-                <td><code>{data.metastore.pgUser || '?'}@{data.metastore.pgHost}:{data.metastore.pgPort || '5432'}</code></td>
+                <td><code>{data.metastore.pgUser || '?'}@{data.metastore.pgHost}{data.metastore.pgPort ? `:${data.metastore.pgPort}` : ''}</code></td>
               </tr>
             )}
             {Object.entries(data.metastore)

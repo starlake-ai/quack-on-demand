@@ -1823,6 +1823,153 @@ class TenantIsolationE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAft
     closePool(t, name, "hs")
   }
 
+  // ---------- what a caller is shown of QoD's Postgres ----------
+
+  /** Whether `m` names QoD's host, port or user, each compared with the value the stack runs on. */
+  private def namesQodServer(m: Map[String, String]): (Boolean, Boolean, Boolean) =
+    (
+      m.get("pgHost").contains(TestPostgres.pgHost),
+      m.get("pgPort").contains(TestPostgres.pgPort.toString),
+      m.get("pgUser").contains(TestPostgres.pgUser)
+    )
+
+  private val NoneOfThem = (false, false, false)
+  private val AllOfThem  = (true, true, true)
+
+  private def poolMetastore(t: String, db: String, pool: String, token: String) =
+    val (code, body) = stack.getStatus(s"/api/pool/$t/$db/$pool/status", token)
+    withClue(body.take(200))(code shouldBe 200)
+    metastoreIn(io.circe.parser.parse(body).fold(e => throw e, identity))
+
+  private def metastoreIn(json: Json): Map[String, String] =
+    json.hcursor.get[Map[String, String]]("metastore").fold(e => throw e, identity)
+
+  "What a tenant admin reads" should "name no host, port or user of QoD's Postgres" in {
+    ready()
+    val t = s"${Prefix}af$run"
+    tenant(t)
+    val token              = adminOf(t, "hc", OtherPw)
+    val (code, name, body) = createDb(t, "lake", token)
+    withClue(body.take(300))(code shouldBe 200)
+    // A row a manifest wrote holding those keys itself, on QoD's server.
+    val held = s"${t}_held"
+    stack.catalogDatabases += held
+    stack.post(
+      s"/api/manifest/import",
+      manifest(
+        Json.obj(
+          "name"        -> s(t),
+          "displayName" -> s(t),
+          "tenantDbs"   -> Json.arr(
+            Json.obj("name" -> s(name), "kind" -> s("ducklake")),
+            Json.obj(
+              "name"      -> s(held),
+              "kind"      -> s("ducklake"),
+              "metastore" -> Json.obj(
+                "pgHost"     -> s(TestPostgres.pgHost),
+                "pgPort"     -> s(TestPostgres.pgPort.toString),
+                "pgUser"     -> s(TestPostgres.pgUser),
+                "pgPassword" -> s(TestPostgres.pgPass)
+              )
+            )
+          )
+        )
+      )
+    )
+    openPool(t, name, "hd", token)
+    openPool(t, held, "he", token)
+    serving(t, "hd", "hc", OtherPw)
+
+    def pat(session: String, label: String) = stack
+      .post("/api/auth/pat/create", obj("name" -> s(s"e2e-$label-$run")), token = session)
+      .hcursor
+      .get[String]("token")
+      .fold(e => throw e, identity)
+    val tenantPat = pat(token, "tenant")
+    val superPat  = pat(su, "super")
+
+    // A tenant admin, by session and by a PAT of theirs.
+    List("session" -> token, "PAT" -> tenantPat).foreach { (how, who) =>
+      withClue(how) {
+        List(name -> "hd", held -> "he").foreach { (db, pool) =>
+          val shown = poolMetastore(t, db, pool, who)
+          namesQodServer(shown) shouldBe NoneOfThem
+          shown.get("dbName") shouldBe Some(db)
+        }
+        val (listCode, listed) = stack.getStatus("/api/pool/list", who)
+        listCode shouldBe 200
+        val pools = io.circe.parser
+          .parse(listed)
+          .fold(e => throw e, identity)
+          .hcursor
+          .downField("pools")
+          .values
+          .toList
+          .flatten
+        pools.map(_.hcursor.get[String]("pool").getOrElse("")).toSet shouldBe Set("hd", "he")
+        pools.foreach(p => namesQodServer(metastoreIn(p)) shouldBe NoneOfThem)
+        List(name, held).foreach { db =>
+          namesQodServer(metastoreIn(rowOf(t, db, who).get)) shouldBe NoneOfThem
+        }
+        val (_, rows) = stack.getStatus(s"/api/database/list?tenant=$t", who)
+        List("pgHost", "pgPort", "pgUser", "pgPassword").foreach(k => rows should not include k)
+      }
+    }
+    // MCP, by the same PAT.
+    val mcp = stack.mcpTool(
+      tenantPat,
+      "get_pool_status",
+      Json.obj("database" -> s(name), "pool" -> s("hd"))
+    )
+    withClue(mcp.toString.take(200)) {
+      List("pgHost", "pgPort", "pgUser").foreach(k => mcp.toOption.get should not include k)
+    }
+    List("list_pools", "list_databases").foreach { tool =>
+      val read = stack.mcpTool(tenantPat, tool, Json.obj())
+      withClue(s"$tool ${read.toString.take(200)}") {
+        read.isRight shouldBe true
+        List("pgHost", "pgPort", "pgUser").foreach(k => read.toOption.get should not include k)
+      }
+    }
+    // A superuser's tool answers as before.
+    val full = stack.mcpTool(
+      superPat,
+      "get_pool_status",
+      Json.obj("tenant" -> s(t), "database" -> s(name), "pool" -> s("hd"))
+    )
+    withClue(full.toString.take(200))(full.toOption.get should include("pgHost"))
+    // Nor does a statement of theirs read them from the node.
+    val listing = stack.flight("SELECT path FROM duckdb_databases()", "hc", OtherPw, t, "hd")
+    listing.fold(identity, _.mkString) should not include s"host=${TestPostgres.pgHost}"
+    // Nothing else a tenant admin may read names them.
+    List("/api/config/client", "/api/config/server", s"/api/tenant/list").foreach { path =>
+      val (_, read) = stack.getStatus(path, token)
+      withClue(path) {
+        List("pgHost", "pgPort", "pgUser", TestPostgres.pgPass).foreach(k =>
+          read should not include k
+        )
+      }
+    }
+
+    // A superuser's answer, by session and by PAT, is what it was.
+    List("session" -> su, "PAT" -> superPat).foreach { (how, who) =>
+      withClue(how) {
+        namesQodServer(poolMetastore(t, name, "hd", who)) shouldBe AllOfThem
+        namesQodServer(poolMetastore(t, held, "he", who)) shouldBe AllOfThem
+        namesQodServer(metastoreIn(rowOf(t, held, who).get)) shouldBe AllOfThem
+      }
+    }
+    // A tenant admin's edit leaves what they are not shown as stored.
+    stack.post(
+      "/api/database/update",
+      obj("tenant" -> s(t), "name" -> s(held), "metastore" -> Json.obj("schemaName" -> s("main"))),
+      token
+    )
+    namesQodServer(metastoreIn(rowOf(t, held, su).get)) shouldBe AllOfThem
+    closePool(t, name, "hd")
+    closePool(t, held, "he")
+  }
+
   // ---------- what must keep working ----------
 
   "A tenant admin on the default server" should "create, serve, delete and create again" in {

@@ -43,12 +43,9 @@ final class PoolHandlers(
     */
   def fleetEnabled: Boolean = sup.fleetEnabled
 
-  /** Hide secret-like keys from the API response: see
-    * [[ai.starlake.quack.model.TenantDb.SecretKeys]] (`pgPassword` plus the object-store secret
-    * keys).
-    */
-  private def redact(metastore: Map[String, String]): Map[String, String] =
-    HandlerResolvers.redactPassword(metastore)
+  /** An error's text as a caller who is not a superuser reads it. */
+  def textForTenant(text: String): String =
+    ai.starlake.quack.model.TenantDb.textShownToTenant(text, sup.metastoreDefaults)
 
   /** Fleet server liveness by name, read ONCE per listing request off the compute pool. Any error
     * degrades to empty (serverState None): server state is decoration, the listing must not fail
@@ -62,15 +59,21 @@ final class PoolHandlers(
 
   /** Build the response for an existing pool by looking up its supervisor state. `liveness` is the
     * fleet server liveness by name (from [[serverLiveness]]); pass `Map.empty` where the response
-    * does not need server state (mutation replies).
+    * does not need server state (mutation replies). `viewer` decides what it shows of QoD's own
+    * Postgres server and what it says of a block.
     */
-  private def respond(key: PoolKey, liveness: Map[String, String]): Option[PoolResponse] =
+  private def respond(
+      key: PoolKey,
+      liveness: Map[String, String],
+      viewer: SessionScope
+  ): Option[PoolResponse] =
     sup.get(key).map { p =>
       val poolEntityCohorts = sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
       // From the pool row; None on a fixed-size pool.
       val band = sup.autoscaleBand(key)
       // Set when the pool's database is blocked: reconcile never starts its nodes.
-      val block = sup.poolBlockReason(key)
+      val block =
+        if viewer.superuser then sup.poolBlockReason(key) else sup.poolBlockReasonForTenant(key)
       // Set for a node the health probe holds out of routing, which `status` does not say.
       val held = p.nodes.flatMap(n => tracker.snapshot(n.nodeId).localFilesNotOff)
       PoolResponse(
@@ -107,7 +110,12 @@ final class PoolHandlers(
         },
         status = PoolHandlers.statusOf(p, blocked = block.isDefined),
         statusDetail = block.orElse(Option.when(held.nonEmpty)(held.mkString(" "))),
-        metastore = redact(p.metastore),
+        metastore = HandlerResolvers.metastoreFor(
+          viewer,
+          p.metastore,
+          sup.findTenantDb(key.tenant, key.tenantDb).fold(Map.empty[String, String])(_.metastore),
+          sup.metastoreDefaults
+        ),
         disabled = p.disabled,
         suspended = p.suspended,
         id = sup.poolId(key).getOrElse(""),
@@ -176,13 +184,14 @@ final class PoolHandlers(
                 QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
                   case Left(msg) =>
                     IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg))))
-                  case Right(()) => createPoolInner(req, actor, gateBypass)
-        else createPoolInner(req, actor, gateBypass)
+                  case Right(()) => createPoolInner(req, actor, gateBypass, scope)
+        else createPoolInner(req, actor, gateBypass, scope)
 
   private def createPoolInner(
       req: CreatePoolRequest,
       actor: AuditActor,
-      gateBypass: Boolean
+      gateBypass: Boolean,
+      viewer: SessionScope
   ): Out[PoolResponse] =
     // Band shape (one-sided, min >= max, hardCap, write-capable floor, size inside
     // the band) plus the cohort conflict: autoscaling rewrites the role
@@ -320,7 +329,7 @@ final class PoolHandlers(
                           detail = Map("size" -> req.size.toString)
                         )
                         Right(
-                          respond(key, Map.empty).getOrElse(
+                          respond(key, Map.empty, viewer).getOrElse(
                             PoolResponse(
                               req.tenant,
                               req.tenantDb,
@@ -458,7 +467,7 @@ final class PoolHandlers(
                         )
                         IO.pure(
                           Right(
-                            respond(key, Map.empty).getOrElse(
+                            respond(key, Map.empty, scopeOf(apiKey)).getOrElse(
                               PoolResponse(
                                 req.tenant,
                                 req.tenantDb,
@@ -592,8 +601,8 @@ final class PoolHandlers(
   def listPools(apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[PoolListResponse] = serverLiveness.map { liveness =>
-    val all      = sup.list().flatMap(p => respond(p.key, liveness))
     val scope    = scopeOf(apiKey)
+    val all      = sup.list().flatMap(p => respond(p.key, liveness, scope))
     val filtered =
       if scope.superuser then all
       else
@@ -604,10 +613,12 @@ final class PoolHandlers(
     Right(PoolListResponse(filtered))
   }
 
-  def poolStatus(tenant: String, tenantDb: String, pool: String): Out[PoolResponse] =
+  def poolStatus(tenant: String, tenantDb: String, pool: String, apiKey: Option[String])(
+      scopeOf: SessionScope.Resolver
+  ): Out[PoolResponse] =
     val key = PoolKey(tenant, tenantDb, pool)
     serverLiveness.map { liveness =>
-      respond(key, liveness) match
+      respond(key, liveness, scopeOf(apiKey)) match
         case Some(r) => Right(r)
         case None => Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found")))
     }
@@ -638,7 +649,7 @@ final class PoolHandlers(
               target = Some(key.toString),
               detail = Map("disabled" -> req.disabled.toString)
             )
-            respond(key, Map.empty) match
+            respond(key, Map.empty, scopeOf(apiKey)) match
               case Some(r) => Right(r)
               case None    =>
                 Left(
@@ -702,7 +713,7 @@ final class PoolHandlers(
                         tenant = Some(req.tenant),
                         target = Some(key.toString)
                       )
-                      respond(key, Map.empty) match
+                      respond(key, Map.empty, scopeOf(apiKey)) match
                         case Some(r) => Right(r.copy(initSqlWarning = warning))
                         case None    =>
                           Left(
@@ -767,7 +778,7 @@ final class PoolHandlers(
                 target = Some(key.toString),
                 detail = cpuDetail ++ memoryDetail
               )
-              respond(key, Map.empty) match
+              respond(key, Map.empty, scopeOf(apiKey)) match
                 case Some(r) => Right(r)
                 case None    =>
                   Left(
@@ -828,7 +839,7 @@ final class PoolHandlers(
                     tenant = Some(req.tenant),
                     target = Some(key.toString)
                   )
-                  respond(key, Map.empty) match
+                  respond(key, Map.empty, scopeOf(apiKey)) match
                     case Some(r) => Right(r)
                     case None    =>
                       Left(
@@ -903,7 +914,7 @@ final class PoolHandlers(
                       .getOrElse("cleared")
                   )
                 )
-                respond(key, Map.empty) match
+                respond(key, Map.empty, scopeOf(apiKey)) match
                   case Some(r) => Right(r)
                   case None    =>
                     Left(

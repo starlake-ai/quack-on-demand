@@ -3096,6 +3096,16 @@ paths:
         required: true
         schema:
           type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
       responses:
         '200':
           description: ''
@@ -3103,6 +3113,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
         default:
           description: ''
           content:

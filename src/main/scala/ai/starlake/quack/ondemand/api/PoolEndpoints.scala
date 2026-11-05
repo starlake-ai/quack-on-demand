@@ -97,7 +97,7 @@ object PoolEndpoints:
       .out(jsonBody[PoolListResponse])
 
   val poolStatus: PublicEndpoint[
-    (String, String, String),
+    (String, String, String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -106,6 +106,7 @@ object PoolEndpoints:
       .in(
         "pool" / path[String]("tenant") / path[String]("tenantDb") / path[String]("pool") / "status"
       )
+      .in(authToken)
       .out(jsonBody[PoolResponse])
 
   val setPoolDisabled: PublicEndpoint[

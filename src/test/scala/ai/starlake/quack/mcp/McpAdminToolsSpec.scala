@@ -57,11 +57,12 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
         ai.starlake.quack.ondemand.initsql.InitSqlChecker.unavailable,
       backend: ai.starlake.quack.ondemand.runtime.QuackBackend =
         ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop(),
-      dataPath: String = "/tmp/qod-mcp-admin-test"
+      dataPath: String = "/tmp/qod-mcp-admin-test",
+      defaults: Map[String, String] = Map.empty
   ):
     val store    = new InMemoryControlPlaneStore()
     val tracker  = new ai.starlake.quack.edge.adapter.NodeLoadTracker
-    val sup      = new PoolSupervisor(backend, tracker, store)
+    val sup      = new PoolSupervisor(backend, tracker, store, defaultMetastore = defaults)
     val registry = new ActiveStatementRegistry()
 
     // DuckLake kind via direct store upsert (the supervisor's create path would probe a real
@@ -666,6 +667,30 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     )
     out.left.toOption.getOrElse(fail("admitted")) should include("objectStore")
     f.store.snapshot().tenantDbs.find(_.name == TenantDb).get.objectStore shouldBe Map.empty
+  }
+
+  "get_pool_status" should "show a tenant admin none of QoD's Postgres, and a superuser all" in {
+    val f = new Fixture(
+      defaults = Map("pgHost" -> "127.0.0.1", "pgPort" -> "5432", "pgUser" -> "u")
+    )
+    def status(who: McpPrincipal) =
+      f.call(
+        "get_pool_status",
+        who,
+        "tenant"   -> Json.fromString(Tenant0),
+        "database" -> Json.fromString(TenantDb),
+        "pool"     -> Json.fromString(Pool)
+      )
+    val tenantAdmin = status(adminPat())
+    withClue(tenantAdmin)(tenantAdmin.isRight shouldBe true)
+    val metastore =
+      tenantAdmin.toOption.get.hcursor.get[Map[String, String]]("metastore").toOption.get
+    metastore.keySet.intersect(Set("pgHost", "pgPort", "pgUser")) shouldBe empty
+    val full = status(McpSuperuserPat.principal).toOption.get.hcursor
+      .get[Map[String, String]]("metastore")
+      .toOption
+      .get
+    full.keySet should contain allOf ("pgHost", "pgPort", "pgUser")
   }
 
   "metastore_defaults" should "be a superuser's" in {

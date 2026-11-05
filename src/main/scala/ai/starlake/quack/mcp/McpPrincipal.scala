@@ -8,6 +8,9 @@ import ai.starlake.quack.ondemand.auth.{PatPrincipal, TokenRestriction}
 sealed trait McpPrincipal:
   def isAdmin: Boolean
 
+  /** Whether the token's owner is a superuser. */
+  def superuser: Boolean
+
   /** The raw bearer, for currying into the REST handlers' `apiKey` seam so their scope gates
     * resolve the same principal this route did. Always `Some`: the seam is an `Option` because a
     * REST request may arrive without a credential.
@@ -27,6 +30,7 @@ object McpPrincipal:
     */
   final class Pat(val p: PatPrincipal, raw: String) extends McpPrincipal:
     def isAdmin: Boolean              = p.isAdmin
+    def superuser: Boolean            = p.scope.superuser
     def rawToken: Option[String]      = Some(raw)
     def restriction: TokenRestriction = p.restriction
     override def toString: String     = s"Pat(${p.user.username}, pat=${p.patId})"

@@ -40,7 +40,8 @@ class McpScopeSpec extends AnyFlatSpec with Matchers:
       resolvePat = t => if t == token then Some(principal) else None,
       tools = List(tool("run_sql"), tool("list_databases")),
       serverVersion = "test",
-      limits = RestLimitsConfig()
+      limits = RestLimitsConfig(),
+      textForTenant = identity
     )
 
   private def rpc(r: McpRoutes, body: String): String =

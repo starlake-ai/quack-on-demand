@@ -136,7 +136,9 @@ final class McpAdminTools(
       yield (tenant, database, pool)) match
         case Left(err)                       => IO.pure(Left(err))
         case Right((tenant, database, pool)) =>
-          pools.poolStatus(tenant, database, pool).map(res => bridge(res).map(_.asJson))
+          pools
+            .poolStatus(tenant, database, pool, keyOf(principal))(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
   )
 
   private val scalePoolTool = McpToolDef(

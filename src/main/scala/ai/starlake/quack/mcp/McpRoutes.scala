@@ -51,7 +51,10 @@ final class McpRoutes(
     resolvePat: String => Option[PatPrincipal],
     tools: List[McpToolDef],
     serverVersion: String,
-    limits: RestLimitsConfig
+    limits: RestLimitsConfig,
+    /** A tool's error as a caller who is not a superuser reads it (`TenantDb.textShownToTenant`).
+      */
+    textForTenant: String => String
 ) extends LazyLogging:
 
   import McpJsonRpc._
@@ -171,7 +174,10 @@ final class McpRoutes(
               .run(principal, args)
               .map {
                 case Right(json) => toolResult(rpc.id, json.noSpaces, isError = false)
-                case Left(msg)   => toolResult(rpc.id, msg, isError = true)
+                case Left(msg)   =>
+                  val read = if principal.superuser then msg else textForTenant(msg)
+                  if read != msg then logger.error(s"mcp tools/call $name: $msg")
+                  toolResult(rpc.id, read, isError = true)
               }
               .handleError { t =>
                 val correlationId = java.util.UUID.randomUUID().toString.take(8)

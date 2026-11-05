@@ -255,6 +255,48 @@ object TenantDb {
   ): Map[String, String] =
     if onDefaultServer(metastore, defaults) then defaults else defaults -- LoginKeys
 
+  /** Whether `key` names the host, the port or the user of a Postgres server, in any spelling. */
+  def isServerAddressKey(key: String): Boolean =
+    List("pgHost", "pgPort", "pgUser").exists(_.equalsIgnoreCase(key))
+
+  /** What a caller who is not a superuser is shown of `shown`, a metastore that `stored` resolved
+    * to: nothing the manager's defaults filled in and, on QoD's own server, neither its host, its
+    * port nor its user, whoever stored them. A row on another server shows its own.
+    */
+  def metastoreShownToTenant(
+      shown: Map[String, String],
+      stored: Map[String, String],
+      defaults: Map[String, String]
+  ): Map[String, String] =
+    val ownServer = onDefaultServer(stored, defaults)
+    shown.filterNot { (k, v) =>
+      (ownServer && isServerAddressKey(k)) || (!stored.contains(k) && defaults.get(k).contains(v))
+    }
+
+  /** What a caller who is not a superuser reads in place of an error naming QoD's Postgres server.
+    */
+  val ServerTextWithheld: String =
+    "this error names QoD's Postgres server, which only a superuser is shown: see the manager log"
+
+  /** `text`, or [[ServerTextWithheld]] when it names the host, the port or the user of QoD's
+    * Postgres server as a connection's error does (`host=`, `host name "`, `server at "`,
+    * `connection to `, `user "`, `role "`, `port `, `:<port>`). The whole text goes, as a client
+    * library's wording around them says more than the values. A bare value is left: a refusal can
+    * quote a name the caller sent, and withholding that would answer whether it is QoD's.
+    */
+  def textShownToTenant(text: String, defaults: Map[String, String]): String =
+    def value(key: String) = defaults.get(key).map(_.trim).filter(_.nonEmpty)
+    def quoted(v: String)  = java.util.regex.Pattern.quote(v)
+    val named              = List(
+      value("pgHost").map(h =>
+        "(?i)(host[a-z ]*[=:\" ]+|server at \"?|connection to \"?|//|@)" +
+          s"${quoted(h)}(?![A-Za-z0-9_-])"
+      ),
+      value("pgPort").map(p => s"(?i)(port[= ]+|:)${quoted(p)}(?![0-9])"),
+      value("pgUser").map(u => s"(?i)((user|role)[= ]+\"|user=|//)${quoted(u)}(?![A-Za-z0-9_-])")
+    ).flatten
+    if named.exists(_.r.findFirstIn(text).isDefined) then ServerTextWithheld else text
+
   /** The one place a row's blanks are filled from the manager's defaults. */
   def withDefaults(
       metastore: Map[String, String],
@@ -367,6 +409,15 @@ object TenantDb {
     val after        = heldServerKeys(kind, stored.map(_.name), metastore)
     val passwordSent = sent.exists((k, v) => k.equalsIgnoreCase("pgPassword") && v.nonEmpty)
     ServerKeys.filter(k => before.get(k) != after.get(k) || (k == "pgPassword" && passwordSent))
+
+  /** The refusal of an update naming a server key that a row on QoD's own server does not show its
+    * writer, whatever the value says: such a key left out stays as stored.
+    */
+  def unshownServerKeyError(sent: Map[String, String]): Option[String] =
+    Option.when(sent.keys.exists(isServerAddressKey))(
+      "a superuser sets a database's Postgres server: leave pgHost, pgPort and pgUser out of this " +
+        "update, and they stay as they are"
+    )
 
   /** Where a row connects, which only a superuser names. A database's Postgres server is trusted as
     * far as its nodes are: whoever controls it reaches what those nodes reach. A superuser who

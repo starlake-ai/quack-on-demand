@@ -509,7 +509,13 @@ final class ManagerServer(
                       org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
                     )
                 )
-              case _ => withBoundedBody(req, limits.maxBodyBytes)(routes)
+              case _ =>
+                val answer = withBoundedBody(req, limits.maxBodyBytes)(routes)
+                if tokenScope.exists(_.superuser) then answer
+                else
+                  answer.semiflatMap(
+                    ManagerServer.withServerTextWithheld(pools.textForTenant, safePath)
+                  )
         }
     }
 
@@ -1143,7 +1149,9 @@ final class ManagerServer(
         pools.resumePool(req, token)(scopeOfToken)
       },
       PoolEndpoints.listPools.serverLogic(token => pools.listPools(token)(scopeOfToken)),
-      PoolEndpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
+      PoolEndpoints.poolStatus.serverLogic((t, td, p, k) =>
+        pools.poolStatus(t, td, p, k)(scopeOfToken)
+      ),
       PoolEndpoints.setPoolDisabled.serverLogic { case (req, token) =>
         pools.setPoolDisabled(req, token)(scopeOfToken)
       },
@@ -1408,3 +1416,36 @@ final class ManagerServer(
           moduleStatic <+> rootRedirect).orNotFound
       )
       .build
+
+object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
+
+  /** `resp` as a caller who is not a superuser reads it. A server failure or a conflict can carry a
+    * client library's text on QoD's Postgres server, and `shown` keeps what it does not name. Only
+    * those: a refusal of the caller's own request quotes what it sent. The code stays; the text
+    * goes to the log.
+    */
+  private[ondemand] def withServerTextWithheld(shown: String => String, path: String)(
+      resp: Response[IO]
+  ): IO[Response[IO]] =
+    if resp.status.code < 500 && resp.status != Status.Conflict then IO.pure(resp)
+    else
+      resp.as[String].map { body =>
+        val json    = io.circe.parser.parse(body).toOption
+        val message = json.flatMap(_.hcursor.get[String]("message").toOption).getOrElse(body)
+        val read    = shown(message)
+        val answer  =
+          if read == message then body
+          else
+            logger.error(s"$path answered ${resp.status.code}: $message")
+            val code = json.flatMap(_.hcursor.get[String]("error").toOption).getOrElse("internal")
+            io.circe.Json
+              .obj(
+                "error"   -> io.circe.Json.fromString(code),
+                "message" -> io.circe.Json.fromString(read)
+              )
+              .noSpaces
+        val bytes = answer.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+        resp
+          .withBodyStream(fs2.Stream.emits(bytes).covary[IO])
+          .putHeaders(org.http4s.headers.`Content-Length`.unsafeFromLong(bytes.length.toLong))
+      }

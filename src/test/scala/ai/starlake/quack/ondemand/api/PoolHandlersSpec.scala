@@ -178,7 +178,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       SessionScope.Superuser
     ).unsafeRunSync() shouldBe Right(())
     // Pool still exists, just with no nodes.
-    h.poolStatus("acme", "acme_default", "sales")
+    h.poolStatus("acme", "acme_default", "sales", None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .map(_.nodes) shouldBe Some(Nil)
@@ -190,7 +190,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     h.deletePool(DeletePoolRequest("acme", "acme_default", "sales", force = true), None)(_ =>
       SessionScope.Superuser
     ).unsafeRunSync() shouldBe Right(())
-    h.poolStatus("acme", "acme_default", "sales")
+    h.poolStatus("acme", "acme_default", "sales", None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .left
       .toOption
@@ -237,7 +237,9 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "poolStatus" should "return 404 for unknown pool" in:
     val h   = freshHandlers
-    val out = h.poolStatus("acme", "acme_default", "missing").unsafeRunSync()
+    val out = h
+      .poolStatus("acme", "acme_default", "missing", None)(_ => SessionScope.Superuser)
+      .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   "setResources" should "update cpu/memory and return the pool" in:
@@ -836,7 +838,9 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     list.pools.flatMap(_.nodes).map(n => (n.serverName, n.serverState)) shouldBe
       List.fill(2)((Some("srv-1"), Some("dead")))
     calls shouldBe 1
-    val Right(status) = h.poolStatus("acme", "acme_default", "sales").unsafeRunSync(): @unchecked
+    val Right(status) = h
+      .poolStatus("acme", "acme_default", "sales", None)(_ => SessionScope.Superuser)
+      .unsafeRunSync(): @unchecked
     status.nodes.map(_.serverState) shouldBe List.fill(2)(Some("dead"))
 
   it should "degrade to no server state, never fail, when the lookup throws" in:
@@ -845,5 +849,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val Right(list) = h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync(): @unchecked
     list.pools.flatMap(_.nodes).map(n => (n.serverName, n.serverState)) shouldBe
       List.fill(2)((Some("srv-1"), None))
-    h.poolStatus("acme", "acme_default", "sales").unsafeRunSync().map(_.nodes.size) shouldBe
+    h.poolStatus("acme", "acme_default", "sales", None)(_ => SessionScope.Superuser)
+      .unsafeRunSync()
+      .map(_.nodes.size) shouldBe
       Right(2)

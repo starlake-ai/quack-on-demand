@@ -115,13 +115,14 @@ final class TenantDbHandlers(
         scala.util.Try(c.listSchemasUnscoped(tenantName, td.name).map(_.tableCount).sum).toOption
       }
 
-  private def toResponse(tenantName: String, td: TenantDb): TenantDbResponse =
+  private def toResponse(tenantName: String, td: TenantDb, viewer: SessionScope): TenantDbResponse =
     TenantDbResponse(
       id = td.id,
       tenant = tenantName,
       name = td.name,
       kind = td.kind.wireValue,
-      metastore = redact(td.metastore),
+      metastore =
+        HandlerResolvers.metastoreFor(viewer, td.metastore, td.metastore, sup.metastoreDefaults),
       dataPath = td.dataPath,
       objectStore = redact(td.objectStore),
       defaultDatabase = td.defaultDatabase,
@@ -278,7 +279,7 @@ final class TenantDbHandlers(
                         target = Some(td.name),
                         detail = Map("kind" -> kind.wireValue)
                       )
-                      IO.blocking(Right(toResponse(req.tenant, td)))
+                      IO.blocking(Right(toResponse(req.tenant, td, scope)))
                     case Left(err: SupervisorError.NotFound) =>
                       IO.pure(
                         Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
@@ -337,7 +338,7 @@ final class TenantDbHandlers(
         IO.blocking {
           Right(
             TenantDbListResponse(
-              sup.listTenantDbsByTenant(tenant).map(td => toResponse(tenant, td))
+              sup.listTenantDbsByTenant(tenant).map(td => toResponse(tenant, td, scopeOf(apiKey)))
             )
           )
         }
@@ -483,7 +484,7 @@ final class TenantDbHandlers(
                 IO.blocking(
                   Right(
                     UpdateTenantDbResponse(
-                      db = toResponse(req.tenant, r.td),
+                      db = toResponse(req.tenant, r.td, scopeOf(apiKey)),
                       restartedNodes = r.restartedNodes,
                       failedRestarts = r.failedRestarts.map(FailedRestart.apply.tupled)
                     )
