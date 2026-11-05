@@ -800,6 +800,32 @@ still provisions over REST, with the caller's own credential. `DemoBootstrapHook
 (`QOD_BOOTSTRAP_YAML`) is unrelated: its manifest import replaces rows wholesale and runs only on
 an empty store.
 
+### The demo on S3 (`qod serve --demo --s3` / `--s3-path`)
+
+The manager reads S3 keys only from its environment, so the CLI settles everything (`demo_s3.py`) and
+hands it to the jar as `QOD_S3_*` plus `QOD_DEMO_S3_PATH` and `QOD_DEMO_S3_LOCAL`, an internal contract
+not documented for `docker run`. `DemoS3` is the jar's half. The path's last segment must be
+`qod-demo-<8 hex>`, the only folder `DemoS3.deleteRun` can delete, and the default data path is
+`<run folder>/data`, since a row with no path derives its folder by replacing the last segment
+(`replaceLastSegment`): the run folder itself would put the data beside it. Whenever a path is set and
+`QOD_DEMO_S3_LOCAL` is not `1`, every client listener binds `127.0.0.1`, as the demo's superuser logins
+are public and the environment holds real keys. `QOD_DUCKLAKE_DATA_PATH` is deliberately ignored by the
+demo. The local store is a pinned SeaweedFS (`launcher.WEED_VERSION`, a sha256 per asset in
+`_WEED_ASSETS`, hashed again at each bump), on loopback, with random keys. `weed_command` must keep
+`-ip`, `-ip.bind`, `-logdir` and the `=0` flags (else a LAN bind, fixed ports 8181 and 9101, and logs in
+the system temp folder). It is stopped with a hard kill, as it can take many seconds to honor SIGTERM.
+`sweep_orphan` removes a store whose `qod` died, and does nothing while the CLI named `owner` in
+`store.json` lives. Temporary AWS credentials are refused, as `QOD_S3_*` has no session token.
+`DemoS3Spec` needs a real `weed` (`QOD_DEMO_WEED_BIN` or PATH) and is cancelled without one.
+`--s3` is refused before any download on a platform with no SeaweedFS build (Windows on ARM); with
+`--demo` and no `--s3-path` the object-store flags are refused, not ignored; a half key pair given as
+flags is refused. Two limits on deleting the run folder in the user's bucket: on Windows, Ctrl-C stops
+the demo before it can delete the folder (`subprocess.call` terminates the jar about 0.25 s later), so
+the user removes it by hand (the `--s3-path` help says so); and a `qod stop` run from another terminal
+uses its usual 10 s `FORCE_AFTER`, where the demo's own Ctrl-C waits up to 90 s
+(`demo.BUCKET_FORCE_AFTER`, unless `FORCE_AFTER` is set), so it can stop the demo mid-delete: give that
+command `FORCE_AFTER=90`.
+
 ### Edge config + catalog ([quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/), [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/))
 
 The auth/ACL/session config types and the DuckLake catalog resolver live under [quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/) and [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/). The pureconfig `ProductHint`s in [Main.scala](src/main/scala/ai/starlake/quack/Main.scala) override the `derives ConfigReader` defaults to use camelCase (matching `application.conf`) instead of pureconfig's kebab-case.

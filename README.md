@@ -98,6 +98,15 @@ uvx qod@latest serve --demo   # the full gateway on your laptop: no install, no 
 
 `pip install qod && qod serve --demo` is equivalent. The `@latest` matters: uvx otherwise freezes on the first version it ever resolved.
 
+To run the same demo on S3:
+
+```bash
+uvx qod@latest serve --demo --s3                          # a throwaway local store, no account needed
+uvx qod@latest serve --demo --s3-path s3://my-bucket/qod  # your own bucket
+```
+
+`--s3` downloads SeaweedFS on first use (about 45 MB) and deletes the store on exit; it is refused at once on a platform with no SeaweedFS build (Windows on ARM). `--s3-path` takes a long-lived key pair from `--access-key-id` and `--secret-access-key` or `AWS_*` (both halves of the pair are required; temporary credentials are refused), plus `--region` and, for an S3-compatible store, `--endpoint`. Without `--s3-path`, the object-store flags are refused, not ignored. It writes under a new `qod-demo-<id>` folder and deletes that folder on exit; a demo killed outright leaves it behind, and the banner prints its path. On Windows, Ctrl-C stops the demo before it can delete that folder: remove it by hand. A `qod stop` run from another terminal may stop the demo before it finishes deleting the folder, as it waits 10 s where the demo's own Ctrl-C waits up to 90 s: run it as `FORCE_AFTER=90 qod stop`, or stop the demo with Ctrl-C. Because the demo's logins are public, it then listens on `127.0.0.1` only. Use a dedicated bucket and key.
+
 ### Docker
 
 ```bash

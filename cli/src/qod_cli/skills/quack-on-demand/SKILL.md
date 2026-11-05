@@ -236,6 +236,17 @@ still works too, as a deprecated alias:
 qod serve --demo
 ```
 
+The demo can keep its data on S3: `qod serve --demo --s3` runs a throwaway local store, and
+`qod serve --demo --s3-path s3://bucket/prefix` uses your bucket (a long-lived key pair from
+`--access-key-id` / `--secret-access-key` or `AWS_*`, both halves required; `--endpoint` for an
+S3-compatible store). Without `--s3-path` the object-store flags are refused, and `--s3` is refused at
+once on a platform with no SeaweedFS build (Windows on ARM). With a bucket the demo listens on
+`127.0.0.1` only and deletes its `qod-demo-<id>` folder on exit, so use a dedicated bucket and key.
+`AWS_SESSION_TOKEN` set with `AWS_*` keys is refused: temporary credentials are not supported. On
+Windows, Ctrl-C stops the demo before it can delete that folder: remove it by hand. A `qod stop` from
+another terminal may stop the demo before the delete finishes (it waits 10 s, where the demo's own
+Ctrl-C waits up to 90 s): run it as `FORCE_AFTER=90 qod stop`, or stop the demo with Ctrl-C.
+
 It creates a demo home under `/tmp/qod-demo` (override `QOD_DEMO_HOME`) holding the embedded PG data dir + the DuckLake data path, runs the whole demo config overlay (FlightSQL TLS on with a self-signed cert, so the banner's snippets skip verification; ACL/RLS/CLS on) - a posture produced ONLY on this code path, never on a normal `qod start` boot - seeds tenant `acme` (`acme_tpch.tpch1`) with TPC-H at SF 0.1, and prints a connect banner. Seeded principals: `alice`/`demo-alice` (analyst - sees `c_phone` masked + only `BUILDING` rows), `acme-admin`/`demo-acme-admin` (full), and any ungranted table is denied. Ctrl-C stops the manager, stops the embedded PG, and deletes the demo home. Insecure by design; not for production.
 
 Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. Bootstrap runs only when you request demo data: pass `LOAD_TPCH=1` or `LOAD_TPCDS=1` (or `LOAD_SSB=1`, or `LOAD_TPC=1` for all) in the environment of `qod start`, which seeds the benchmark in the background and sets `QOD_BOOTSTRAP_YAML` to the bundled demo manifest (`classpath:bootstrap-demo.yaml`). A bare `qod start` does NOT bootstrap. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe. (`LOAD_*` seeding is not yet supported on Windows through `qod start` - the bundled loaders are bash.)

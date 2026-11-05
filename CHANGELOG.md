@@ -60,6 +60,20 @@ count. To keep counts from a user, refuse on the table.
   `BranchChangesResponse`), and row numbers show only where their own count succeeded, never to a holder
   of a column or row policy. `BranchActor.isAdmin` is now decided for the tenant in hand: an admin of
   another tenant is a plain member here.
+- **The demo on S3.** `qod serve --demo --s3` keeps the demo's data on a throwaway local SeaweedFS
+  (downloaded on first use, checksum pinned, deleted on exit; refused at once on a platform with no
+  SeaweedFS build, Windows on ARM), and `qod serve --demo --s3-path s3://bucket/prefix` on your own
+  bucket, under a new `qod-demo-<id>` folder deleted on exit. On your own bucket the demo listens on
+  `127.0.0.1` only, as its logins are public. The Docker demo stays on a folder; on Docker, use the
+  compose `seaweedfs` profile. On Windows, Ctrl-C stops the demo before it can delete its folder in your
+  bucket: remove it by hand. A `qod stop` run from another terminal may stop a `--s3-path` demo before it
+  finishes deleting that folder (it waits 10 s, where the demo's own Ctrl-C waits up to 90 s): give it
+  `FORCE_AFTER=90`, or stop the demo with Ctrl-C.
+
+### Changed
+
+- `qod serve --demo` refuses `--endpoint`, `--region`, `--access-key-id` and `--secret-access-key`
+  without `--s3-path`, which it used to ignore. A half key pair given as flags is refused too.
 
 ### Fixed
 
