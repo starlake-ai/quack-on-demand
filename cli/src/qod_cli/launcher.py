@@ -11,6 +11,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -578,23 +580,34 @@ def ensure_weed(
         return exe
     folder.mkdir(parents=True, exist_ok=True)
     archive = folder / name
+    # Unpack into a scratch folder and move the finished binary into place, so the final
+    # path only ever holds a complete, executable file (an interrupted unpack leaves none).
+    scratch = Path(tempfile.mkdtemp(dir=folder, prefix=".partial-"))
     try:
         actual = _download(f"{_WEED_BASE_URL}/{name}", archive, f"SeaweedFS {WEED_VERSION}")
         if actual != sha256:
             raise IntegrityError(f"{name}: sha256 {actual} is not the pinned {sha256}")
         if name.endswith(".zip"):
-            _extract_zip(archive, folder)
+            _extract_zip(archive, scratch)
         else:
-            _extract_tar_gz(archive, folder)
+            try:
+                _extract_tar_gz(archive, scratch)
+            except tarfile.TarError as e:
+                # The extraction filter (3.12+, backported) refuses a member leaving the folder.
+                member = getattr(getattr(e, "tarinfo", None), "name", "?")
+                raise RuntimeError(f"unexpected member {member!r} in {name}") from e
+        unpacked = scratch / exe.name
+        if not unpacked.is_file():
+            raise RuntimeError(f"no {exe.name} found after extracting {name}")
+        unpacked.chmod(0o755)
+        os.replace(unpacked, exe)
     finally:
+        shutil.rmtree(scratch, ignore_errors=True)
         archive.unlink(missing_ok=True)
-    if not exe.is_file():
-        raise RuntimeError(f"no {exe.name} found after extracting {name} in {folder}")
-    exe.chmod(0o755)
     return exe
 
 
-_WINDOWS_ARCH ={"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
+_WINDOWS_ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
 
 
 def node_release(jar: Path) -> str:

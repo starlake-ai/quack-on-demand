@@ -130,3 +130,70 @@ def test_ensure_weed_refuses_an_override_that_is_not_a_file(monkeypatch, tmp_pat
     monkeypatch.setenv("QOD_DEMO_WEED_BIN", str(tmp_path / "missing"))
     with pytest.raises(launcher.WeedUnavailable, match="QOD_DEMO_WEED_BIN"):
         launcher.ensure_weed(tmp_path)
+
+
+def test_ensure_weed_leaves_no_binary_behind_when_the_unpack_fails(monkeypatch, tmp_path):
+    body = _tar_with("weed", b"#!/bin/sh\n")
+    _pin(monkeypatch, "linux", "x86_64", "linux_amd64.tar.gz", body)
+    real_extract = launcher._extract_tar_gz
+
+    def partial(archive, dest):
+        (dest / "weed").write_bytes(b"trunc")
+        raise OSError("disk full")
+
+    folder = tmp_path / "weed" / launcher.WEED_VERSION
+    with respx.mock:
+        route = respx.get(f"{launcher._WEED_BASE_URL}/linux_amd64.tar.gz").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        monkeypatch.setattr(launcher, "_extract_tar_gz", partial)
+        with pytest.raises(OSError, match="disk full"):
+            launcher.ensure_weed(tmp_path, os_name="linux", arch="x86_64")
+        assert not (folder / "weed").exists()
+        assert not list(folder.glob(".partial-*"))
+        assert list(folder.iterdir()) == []
+        # A later call starts over instead of reusing the truncated file.
+        monkeypatch.setattr(launcher, "_extract_tar_gz", real_extract)
+        exe = launcher.ensure_weed(tmp_path, os_name="linux", arch="x86_64")
+        assert route.call_count == 2
+    assert exe == folder / "weed"
+    assert exe.read_bytes() == b"#!/bin/sh\n"
+    assert os.access(exe, os.X_OK)
+    assert not list(folder.glob(".partial-*"))
+
+
+def test_ensure_weed_names_the_missing_binary_and_keeps_nothing(monkeypatch, tmp_path):
+    body = _tar_with("bin/weed", b"#!/bin/sh\n")
+    _pin(monkeypatch, "linux", "x86_64", "linux_amd64.tar.gz", body)
+    with respx.mock:
+        respx.get(f"{launcher._WEED_BASE_URL}/linux_amd64.tar.gz").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        with pytest.raises(RuntimeError, match="weed"):
+            launcher.ensure_weed(tmp_path, os_name="linux", arch="x86_64")
+    folder = tmp_path / "weed" / launcher.WEED_VERSION
+    assert not (folder / "weed").exists()
+    assert list(folder.iterdir()) == []
+
+
+def test_ensure_weed_refuses_a_tar_member_leaving_the_folder(monkeypatch, tmp_path):
+    body = _tar_with("../evil", b"x")
+    _pin(monkeypatch, "linux", "x86_64", "linux_amd64.tar.gz", body)
+    with respx.mock:
+        respx.get(f"{launcher._WEED_BASE_URL}/linux_amd64.tar.gz").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        with pytest.raises(RuntimeError, match="unexpected member"):
+            launcher.ensure_weed(tmp_path, os_name="linux", arch="x86_64")
+    assert not list(tmp_path.rglob("evil"))
+
+
+def test_ensure_weed_lowercases_the_machine_name(monkeypatch, tmp_path):
+    body = _zip_with("weed.exe", b"MZ")
+    _pin(monkeypatch, "win32", "amd64", "windows_amd64.zip", body)
+    with respx.mock:
+        respx.get(f"{launcher._WEED_BASE_URL}/windows_amd64.zip").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        exe = launcher.ensure_weed(tmp_path, os_name="win32", arch="AMD64")
+    assert exe.name == "weed.exe"
