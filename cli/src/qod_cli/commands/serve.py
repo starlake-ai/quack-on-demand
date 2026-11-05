@@ -56,6 +56,7 @@ from ..serve_target import TargetError, composed_db_name
 from ..serve_target import resolve as resolve_target
 from ._launch import _exec, warn_on_static_api_key, resolve_jar, resolve_java
 from . import _starflow
+from .. import demo_s3
 from .demo import run_demo
 
 # The seeded superuser. QOD_ADMIN_USERNAME defaults to "admin@localhost.local,admin",
@@ -639,8 +640,22 @@ def serve(
         "--demo",
         help="Run the self-contained demo instead: embedded ephemeral Postgres, seeded "
         "TPC-H, RLS/CLS showcase. Takes no TARGET; all state is deleted on exit. Other "
-        "serve flags (--tenant, --size, object-store credentials, ...) are ignored in "
-        "demo mode.",
+        "serve flags (--tenant, --size, ...) are ignored in demo mode; the object-store "
+        "flags apply only with --s3-path.",
+    ),
+    s3: bool = typer.Option(
+        False,
+        "--s3",
+        help="With --demo: keep the demo's data on a throwaway local S3 store (SeaweedFS, "
+        "downloaded on first use, about 45 MB), deleted on exit.",
+    ),
+    s3_path: str = typer.Option(
+        None,
+        "--s3-path",
+        help="With --demo: keep the demo's data on your own bucket, s3://bucket[/prefix], under "
+        "a new qod-demo-<id> folder deleted on exit. Takes --endpoint, --region and a key pair "
+        "(--access-key-id and --secret-access-key, or AWS_*). The demo then listens on 127.0.0.1 "
+        "only. Use a dedicated bucket and key.",
     ),
     with_starflow: bool = _starflow.WITH_STARFLOW,
     starflow_home: str = _starflow.STARFLOW_HOME,
@@ -656,7 +671,8 @@ def serve(
     is missing, so `qod serve ./other.duckdb` adds a second database beside the
     first. Ctrl-C tears the manager and its nodes down gracefully. With --demo,
     runs the self-contained throwaway demo (sample data, insecure by design)
-    instead. If a manager is already running at the configured URL (loopback
+    instead. --s3 or --s3-path keeps the demo's data on S3 instead of a temp folder.
+    If a manager is already running at the configured URL (loopback
     only), serve provisions straight into it instead of booting a second JVM;
     `qod stop` still stops it.
 
@@ -679,6 +695,14 @@ def serve(
 
     # Before anything launches: the boot path, attach mode and --demo alike.
     warn_on_static_api_key()
+
+    try:
+        s3_request = demo_s3.request(
+            demo, s3, s3_path, endpoint, region, access_key_id, secret_access_key, os.environ
+        )
+    except demo_s3.DemoS3Error as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1)
 
     manager_url = ctx.obj.settings.manager_url
 
@@ -712,7 +736,7 @@ def serve(
                 err=True,
             )
             raise typer.Exit(1)
-        run_demo(ctx, version, jar)
+        run_demo(ctx, version, jar, s3=s3_request)
         return
 
     # F4: the server stores tenants lowercase (HandlerResolvers.resolveTenantId), so

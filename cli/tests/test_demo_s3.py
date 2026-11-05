@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+import typer
 
 from qod_cli import demo_s3, launcher
 
@@ -433,6 +434,8 @@ class _FakeProc:
 
 def _start(tmp_path, monkeypatch, proc, answers):
     monkeypatch.setattr(demo_s3.tempfile, "tempdir", str(tmp_path))
+    # On win32 _discard and stop() taskkill the proc's pid: no test may signal a real process.
+    monkeypatch.setattr(demo_s3, "_kill_tree", lambda pid: None)
     captured = {}
 
     def popen(cmd, **kw):
@@ -681,3 +684,147 @@ def test_live_store_starts_refuses_anonymous_and_stops_clean(tmp_path, monkeypat
         store.stop()
     assert _folders(tmp_path) == []
     assert not (tmp_path / "store.json").exists()
+
+
+class _RecordingStore:
+    s3_port = 18333
+    access_key_id = "LK"
+    secret_access_key = "LS"
+
+    def __init__(self):
+        self.stopped = 0
+
+    def stop(self):
+        self.stopped += 1
+
+
+@pytest.fixture
+def demo_world(monkeypatch, tmp_path):
+    """The real run_demo with provisioning stubbed and the jar launch captured."""
+    from qod_cli.commands import demo as demo_cmd
+
+    # run_demo may set FORCE_AFTER in os.environ. A bare delenv of an absent variable records
+    # nothing to restore, so set it first: teardown then removes whatever the test left.
+    monkeypatch.setenv("FORCE_AFTER", "placeholder")
+    monkeypatch.delenv("FORCE_AFTER")
+    monkeypatch.setattr(demo_cmd, "resolve_java", lambda: "/usr/bin/java")
+    monkeypatch.setattr(launcher, "default_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(launcher, "ensure_duckdb_cli", lambda c: tmp_path / "b")
+    monkeypatch.setattr(launcher, "ensure_libduckdb", lambda c: tmp_path / "v" / "lib")
+    monkeypatch.setattr(launcher, "node_binary", lambda *a, **k: None)
+    monkeypatch.setattr(
+        launcher, "materialize_spawn_scripts", lambda d: (tmp_path / "s.sh", tmp_path / "s.ps1")
+    )
+    world = {"tmp": tmp_path, "store": _RecordingStore(), "events": []}
+
+    def fake_exec(cmd, env):
+        world["cmd"], world["env"] = cmd, env
+        world["events"].append("jar")
+
+    monkeypatch.setattr(demo_cmd, "_exec", fake_exec)
+    monkeypatch.setattr(launcher, "ensure_weed", lambda c: tmp_path / "weed")
+    monkeypatch.setattr(demo_s3, "sweep_orphan", lambda: world["events"].append("sweep"))
+
+    def fake_start(weed):
+        world["events"].append("start")
+        return world["store"]
+
+    monkeypatch.setattr(demo_s3.LocalStore, "start", staticmethod(fake_start))
+    return world
+
+
+class _Ctx:
+    args: list = []
+
+
+def _run_demo(world, s3):
+    from qod_cli.commands import demo as demo_cmd
+
+    jar = world["tmp"] / "qod.jar"
+    jar.write_text("")
+    demo_cmd.run_demo(_Ctx(), None, jar, s3=s3)
+
+
+def test_local_demo_sweeps_starts_runs_the_jar_and_stops_the_store(demo_world):
+    _run_demo(demo_world, demo_s3.LocalRequest())
+    assert demo_world["events"] == ["sweep", "start", "jar"]
+    assert demo_world["store"].stopped == 1
+    env = demo_world["env"]
+    assert env["QOD_DEMO_S3_LOCAL"] == "1"
+    assert env["QOD_S3_ENDPOINT"] == "127.0.0.1:18333"
+
+
+def test_local_store_is_stopped_when_the_jar_fails(demo_world, monkeypatch):
+    from qod_cli.commands import demo as demo_cmd
+
+    def failing_exec(cmd, env):
+        raise typer.Exit(1)
+
+    monkeypatch.setattr(demo_cmd, "_exec", failing_exec)
+    with pytest.raises(typer.Exit):
+        _run_demo(demo_world, demo_s3.LocalRequest())
+    assert demo_world["store"].stopped == 1
+
+
+def test_own_bucket_demo_starts_no_store(demo_world):
+    _run_demo(demo_world, _own())
+    assert demo_world["events"] == ["jar"]
+    env = demo_world["env"]
+    assert env["QOD_DEMO_S3_PATH"].startswith("s3://my-bucket/qod/qod-demo-")
+    assert "QOD_DEMO_S3_LOCAL" not in env
+
+
+def test_plain_demo_drops_a_stale_path_and_starts_no_store(demo_world, monkeypatch):
+    monkeypatch.setenv("QOD_DEMO_S3_PATH", "s3://stale/qod-demo-1a2b3c4d")
+    _run_demo(demo_world, None)
+    assert demo_world["events"] == ["jar"]
+    assert "QOD_DEMO_S3_PATH" not in demo_world["env"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        launcher.WeedUnavailable("no build; use --s3-path"),
+        launcher.IntegrityError("bad sha256"),
+        demo_s3.DemoS3Error("store did not answer"),
+        httpx.ConnectError("offline"),
+    ],
+)
+def test_a_failed_store_stops_the_demo_before_the_jar(demo_world, monkeypatch, capsys, error):
+    def failing(c):
+        raise error
+
+    monkeypatch.setattr(launcher, "ensure_weed", failing)
+    with pytest.raises(typer.Exit) as e:
+        _run_demo(demo_world, demo_s3.LocalRequest())
+    assert e.value.exit_code == 1
+    assert "jar" not in demo_world["events"]
+    assert str(error) in capsys.readouterr().err
+
+
+def test_own_bucket_demo_raises_the_stop_grace_to_90s(demo_world, monkeypatch):
+    monkeypatch.delenv("FORCE_AFTER", raising=False)
+    _run_demo(demo_world, _own())
+    assert os.environ["FORCE_AFTER"] == "90"
+
+
+def test_own_bucket_demo_keeps_a_grace_the_user_set_in_the_shell(demo_world, monkeypatch):
+    monkeypatch.setenv("FORCE_AFTER", "7")
+    _run_demo(demo_world, _own())
+    assert os.environ["FORCE_AFTER"] == "7"
+
+
+def test_own_bucket_demo_keeps_a_grace_the_user_set_in_qod_setup(demo_world, monkeypatch):
+    from qod_cli.commands import demo as demo_cmd
+
+    monkeypatch.delenv("FORCE_AFTER", raising=False)
+    monkeypatch.setattr(demo_cmd, "load_start_env", lambda: {"FORCE_AFTER": "15"})
+    _run_demo(demo_world, _own())
+    assert "FORCE_AFTER" not in os.environ
+
+
+@pytest.mark.parametrize("request_", [demo_s3.LocalRequest(), None])
+def test_local_and_plain_demos_leave_the_grace_alone(demo_world, monkeypatch, request_):
+    monkeypatch.delenv("FORCE_AFTER", raising=False)
+    _run_demo(demo_world, request_)
+    assert "FORCE_AFTER" not in os.environ

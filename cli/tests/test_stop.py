@@ -506,3 +506,21 @@ def test_interrupt_during_starflow_begin_still_stops_the_manager(monkeypatch, tm
     with pytest.raises(KeyboardInterrupt):
         stop_cmd.perform_stop()
     assert order == ["begin", "manager", "pg"]
+
+
+def test_perform_stop_sweeps_the_demo_store_last_and_survives_its_failure(monkeypatch, tmp_path):
+    from qod_cli import demo_s3
+    from qod_cli.commands import stop as stop_cmd
+
+    log = []
+    monkeypatch.setattr(stop_cmd, "_begin_starflow_stop", lambda: None)
+    monkeypatch.setattr(stop_cmd, "_stop_manager_and_nodes", lambda: log.append("manager"))
+    monkeypatch.setattr(stop_cmd, "sweep_orphaned_embedded_postgres", lambda: log.append("pg"))
+
+    def sweep():
+        log.append("store")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(demo_s3, "sweep_orphan", sweep)
+    stop_cmd.perform_stop()
+    assert log == ["manager", "pg", "store"]

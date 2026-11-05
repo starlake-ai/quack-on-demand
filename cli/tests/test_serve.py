@@ -1159,7 +1159,8 @@ def test_serve_demo_delegates_to_the_demo_runner(runner, wired, monkeypatch):
 
     called = {}
     monkeypatch.setattr(
-        serve_cmd, "run_demo", lambda ctx, version, jar: called.setdefault("args", (version, jar)),
+        serve_cmd, "run_demo",
+        lambda ctx, version, jar, s3=None: called.setdefault("args", (version, jar, s3)),
         raising=False,
     )
     result = _invoke(runner, wired, "--demo")
@@ -1674,3 +1675,54 @@ def test_serve_attach_mode_warns_on_a_static_api_key_and_provisions(
     result = _invoke(runner, wired, str(f))
     assert "unset QOD_API_KEY" in result.output
     assert called == [1]
+
+
+@pytest.mark.parametrize(
+    "args,message",
+    [
+        (["--s3"], "--demo"),
+        (["--s3-path", "s3://b12/x"], "--demo"),
+        (["--demo", "--s3", "--s3-path", "s3://b12/x"], "pick one"),
+        (["--demo", "--endpoint", "http://x:1"], "--s3-path"),
+        (["--demo", "--s3", "--region", "r"], "--s3-path"),
+        (["--demo", "--s3-path", "gs://b12/x"], "s3://"),
+        (["--demo", "--s3-path", "s3://b12/x"], "key pair"),
+    ],
+)
+def test_serve_refuses_bad_s3_flags_before_anything_starts(runner, wired, monkeypatch, args, message):
+    from qod_cli.commands import serve as serve_cmd
+
+    ran = []
+    monkeypatch.setattr(serve_cmd, "run_demo", lambda *a, **kw: ran.append(1))
+    result = _invoke(runner, wired, *args)
+    assert result.exit_code == 1
+    assert message in result.output
+    assert ran == [] and "cmd" not in wired
+
+
+def test_serve_passes_the_s3_request_to_the_demo(runner, wired, monkeypatch):
+    from qod_cli import demo_s3
+    from qod_cli.commands import serve as serve_cmd
+
+    got = {}
+    monkeypatch.setattr(
+        serve_cmd, "run_demo", lambda ctx, version, jar, s3=None: got.setdefault("s3", s3)
+    )
+    assert _invoke(runner, wired, "--demo", "--s3").exit_code == 0
+    assert isinstance(got["s3"], demo_s3.LocalRequest)
+    got.clear()
+    result = _invoke(
+        runner, wired, "--demo", "--s3-path", "s3://b12/x",
+        "--access-key-id", "K", "--secret-access-key", "S",
+    )
+    assert result.exit_code == 0
+    assert got["s3"].path == "s3://b12/x"
+
+
+def test_serve_with_a_target_keeps_its_store_flags(runner, wired):
+    # --endpoint and friends still mean what they meant for a served target.
+    result = _invoke(
+        runner, wired, "s3://b12/x/", "--endpoint", "http://x:1",
+        "--access-key-id", "K", "--secret-access-key", "S",
+    )
+    assert result.exit_code == 0, result.output

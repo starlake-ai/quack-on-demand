@@ -219,10 +219,23 @@ def perform_stop():
             try:
                 _stop_manager_and_nodes()
             finally:
-                sweep_orphaned_embedded_postgres()
+                try:
+                    sweep_orphaned_embedded_postgres()
+                finally:
+                    _sweep_demo_store()
         finally:
             if pgid is not None:
                 _finish_starflow_stop(pgid)
+
+
+def _sweep_demo_store() -> None:
+    """A demo S3 store whose `qod` was killed outright. A failure here must not fail the stop."""
+    from .. import demo_s3
+
+    try:
+        demo_s3.sweep_orphan()
+    except Exception as exc:
+        typer.echo(f"WARN: could not sweep the demo S3 store: {exc}", err=True)
 
 
 def _starflow_state_dir() -> Path:
