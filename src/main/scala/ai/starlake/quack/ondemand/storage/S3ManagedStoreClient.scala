@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.storage
 
 import ai.starlake.quack.ManagedObjectStoreConfig
 import software.amazon.awssdk.auth.credentials.{AwsBasicCredentials, StaticCredentialsProvider}
+import software.amazon.awssdk.core.sync.RequestBody
 import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.s3.S3Client
 import software.amazon.awssdk.services.s3.model.{
@@ -12,6 +13,7 @@ import software.amazon.awssdk.services.s3.model.{
   ListObjectsV2Request,
   NoSuchBucketException,
   ObjectIdentifier,
+  PutObjectRequest,
   S3Error
 }
 
@@ -74,6 +76,18 @@ final class S3ManagedStoreClient(cfg: ManagedObjectStoreConfig) extends ManagedS
         val resp = client.deleteObjects(req)
         S3ManagedStoreClient.deleteOutcome(resp.errors().asScala.toList)
       catch case NonFatal(e) => Left(s"deleteBatch: ${e.getMessage}")
+
+  /** One object, for the demo's write check. On this class and not on [[ManagedStoreClient]]: the
+    * managed storage seam never writes.
+    */
+  def putObject(key: String, bytes: Array[Byte]): Either[String, Unit] =
+    try
+      client.putObject(
+        PutObjectRequest.builder().bucket(cfg.bucket).key(key).build(),
+        RequestBody.fromBytes(bytes)
+      )
+      Right(())
+    catch case NonFatal(e) => Left(s"putObject: ${e.getMessage}")
 
 object S3ManagedStoreClient:
 
