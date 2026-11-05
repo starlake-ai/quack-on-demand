@@ -3,9 +3,53 @@ package ai.starlake.quack.ondemand.demo
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.nio.file.Files
+import java.io.UncheckedIOException
+import java.nio.file.{Files, NoSuchFileException, Path}
+import java.util.concurrent.atomic.AtomicInteger
 
 class DemoHomeSpec extends AnyFlatSpec with Matchers:
+
+  private def populatedTree(prefix: String): Path =
+    val dir = Files.createTempDirectory(prefix).resolve("pg")
+    Files.createDirectories(dir.resolve("pgdata").resolve("base").resolve("14127"))
+    Files.writeString(dir.resolve("pgdata").resolve("PG_VERSION"), "16")
+    Files.writeString(dir.resolve("pgdata").resolve("base").resolve("14127").resolve("2610"), "x")
+    Files.writeString(dir.resolve("pgdata").resolve("base").resolve("14127").resolve("2611"), "y")
+    dir
+
+  // A file that vanishes during the walk (Postgres finishing its own shutdown under a Ctrl-C of
+  // `qod serve --demo --s3`) made `Files.walk`'s iterator throw `UncheckedIOException`, which
+  // escaped `wipe` and left the demo's home behind. The walk is retried on a fresh tree.
+  "DemoHome.wipe" should "remove a tree whose walk fails once mid-iteration" in {
+    val dir                                         = populatedTree("demo-home-vanish")
+    val walks                                       = new AtomicInteger(0)
+    val walk: Path => java.util.stream.Stream[Path] = p =>
+      if walks.getAndIncrement() == 0 then
+        Files
+          .walk(p)
+          .map(q =>
+            if q.getFileName.toString == "2610" then
+              throw new UncheckedIOException(new NoSuchFileException(q.toString))
+            else q
+          )
+      else Files.walk(p)
+
+    noException should be thrownBy DemoHome.wipe(dir, walk)
+    Files.exists(dir) shouldBe false
+    walks.get() should be >= 2
+  }
+
+  it should "return without throwing when every walk fails" in {
+    val dir                                         = populatedTree("demo-home-walkfails")
+    val walks                                       = new AtomicInteger(0)
+    val walk: Path => java.util.stream.Stream[Path] = _ =>
+      walks.incrementAndGet()
+      throw new UncheckedIOException(new NoSuchFileException(dir.toString))
+
+    noException should be thrownBy DemoHome.wipe(dir, walk)
+    walks.get() shouldBe 5
+    Files.exists(dir) shouldBe true // best-effort: nothing removed, nothing thrown
+  }
 
   "DemoHome.create" should "make the home + subdirs and clean up" in {
     val base = Files.createTempDirectory("demo-home-spec")

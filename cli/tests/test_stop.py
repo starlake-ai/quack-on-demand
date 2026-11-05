@@ -90,6 +90,19 @@ def test_stop_escalates_to_sigkill(runner, stop_world, monkeypatch):
     assert "SIGKILL" in result.output
 
 
+def test_stop_with_a_non_integer_force_after_waits_10s_then_escalates(
+    runner, stop_world, monkeypatch
+):
+    from qod_cli.main import app
+
+    monkeypatch.setenv("FORCE_AFTER", "abc")
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 1
+    assert "still running after 10s" in result.output
+    sigkills = {pid for pid, sig in stop_world["killed"] if sig == signal.SIGKILL}
+    assert {111, 222} <= sigkills
+
+
 def test_stop_honors_port_env_overrides(runner, stop_world, monkeypatch):
     from qod_cli.main import app
 

@@ -171,16 +171,19 @@ def test_completed_teardown_lets_the_manager_finish_its_cleanup(tmp_path, monkey
     monkeypatch.setenv("FORCE_AFTER", "10")
     capture = _Capture(monkeypatch)
     flag = tmp_path / "teardown-done"
+    # The real manager got its SIGTERM from the teardown and is running its shutdown hooks, so the
+    # supervisor's own SIGTERM changes nothing: the child ignores it, as a JVM in shutdown does.
     child = [
         sys.executable,
         "-c",
-        "import os, sys, time\n"
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "while not os.path.exists(sys.argv[1]): time.sleep(0.05)\n"
         "time.sleep(2)\n"
         "sys.exit(0)",
         str(flag),
     ]
-    _interrupt_after(0.5)
+    _interrupt_after(1.0)
     code = _launch._run_supervised(child, dict(os.environ), teardown=flag.touch)
     assert code == 130
     assert capture.procs[0].returncode == 0  # exited on its own, not -9
@@ -194,9 +197,15 @@ def test_a_manager_that_never_exits_is_killed_after_force_after(monkeypatch):
     def teardown():
         returned.append(time.monotonic())
 
-    _interrupt_after(0.5)
+    _interrupt_after(1.0)
     code = _launch._run_supervised(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
+        [
+            sys.executable,
+            "-c",
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(60)",
+        ],
         dict(os.environ),
         teardown=teardown,
     )
@@ -204,6 +213,55 @@ def test_a_manager_that_never_exits_is_killed_after_force_after(monkeypatch):
     assert code == 130
     assert capture.procs[0].returncode == -signal.SIGKILL
     assert 0.8 <= waited < 5, waited
+
+
+def test_an_interrupt_the_teardown_did_not_signal_stops_the_manager_cleanly(monkeypatch):
+    # A Ctrl-C before the manager binds its ports: `qod stop` finds nothing to signal ("nothing
+    # running..."), and the child, in its own session, hears nothing. Waiting FORCE_AFTER and then
+    # SIGKILLing it let it finish booting and spawn nodes, then orphaned them and the embedded
+    # Postgres. The supervisor asks it to stop instead, so its shutdown hooks run.
+    monkeypatch.setenv("FORCE_AFTER", "10")
+    capture = _Capture(monkeypatch)
+    child = [
+        sys.executable,
+        "-c",
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "time.sleep(60)",
+    ]
+    _interrupt_after(1.0)
+    started = time.monotonic()
+    code = _launch._run_supervised(child, dict(os.environ), teardown=lambda: None)
+    took = time.monotonic() - started
+    assert code == 130
+    assert capture.procs[0].returncode != -signal.SIGKILL
+    assert capture.procs[0].returncode == 0
+    assert took < 5, took
+
+
+def test_a_force_after_that_cannot_be_read_still_kills_the_manager(monkeypatch):
+    # `grace` is read inside the supervisor's `finally`; a failure there must not skip the
+    # safety-net kill, or the child, in its own session, outlives the CLI.
+    capture = _Capture(monkeypatch)
+
+    def unreadable():
+        raise ValueError("invalid literal for int() with base 10: 'abc'")
+
+    monkeypatch.setattr(_launch, "force_after_seconds", unreadable)
+    _interrupt_after(1.0)
+    with pytest.raises(ValueError):
+        _launch._run_supervised(
+            [
+                sys.executable,
+                "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(60)",
+            ],
+            dict(os.environ),
+            teardown=lambda: None,
+        )
+    assert capture.procs[0].poll() == -signal.SIGKILL
 
 
 def test_default_teardown_is_qod_stop(monkeypatch):

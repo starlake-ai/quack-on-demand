@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.demo
 
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 /** Ephemeral root for a `qod demo` run. Everything a demo touches lives under `root` so teardown is
   * a single recursive delete.
@@ -81,7 +82,7 @@ object DemoHome:
     // default QOD_LOG_LEVEL=ERROR swallows). So every run starts from an empty tree. The clean is
     // scoped to the three subdirs the demo owns, never `root` itself: `QOD_DEMO_HOME` is
     // caller-supplied and may point at a directory holding other things.
-    List(pgDir, dataPath, nativeDir).foreach(wipe)
+    List(pgDir, dataPath, nativeDir).foreach(wipe(_))
     // `wipe` is best-effort by design (teardown must not throw). Here a silent failure would land
     // right back on the unreadable initdb error, so check the one path that matters and say what
     // to remove.
@@ -171,17 +172,50 @@ object DemoHome:
     val deadline = System.currentTimeMillis() + budgetMs
     while h.isAlive && System.currentTimeMillis() < deadline do Thread.sleep(50)
 
+  /** How many times [[wipe]] walks a tree whose walk fails, and the pause between two walks. */
+  private val WipeAttempts  = 5
+  private val WipeBackoffMs = 100L
+
   /** Best-effort recursive delete of one subtree, deepest-first. Never throws: it runs both on the
     * teardown path (which must not mask the real failure) and on the pre-flight clean above.
+    *
+    * The walk itself can fail, not only a delete: a file that vanishes while the walk reads its
+    * directory (Postgres finishing its shutdown under a Ctrl-C) makes the iterator throw
+    * `UncheckedIOException`, which stopped the delete and left the home behind. Such a walk is
+    * retried, up to [[WipeAttempts]] walks [[WipeBackoffMs]] ms apart, so a tree that changed under
+    * it is still removed. `walk` is a test seam.
     */
-  private def wipe(dir: Path): Unit =
-    if Files.exists(dir) then
-      Files
-        .walk(dir)
-        .sorted(java.util.Comparator.reverseOrder())
-        .iterator()
-        .asScala
-        .foreach(p =>
-          try Files.deleteIfExists(p)
-          catch { case _: Throwable => () }
-        )
+  private[demo] def wipe(
+      dir: Path,
+      walk: Path => java.util.stream.Stream[Path] = Files.walk(_)
+  ): Unit =
+    // One walk and its deletes; false when the walk failed and is worth another try.
+    def attempt(): Boolean =
+      try
+        if Files.exists(dir) then
+          val paths = walk(dir)
+          try
+            paths
+              .sorted(java.util.Comparator.reverseOrder())
+              .iterator()
+              .asScala
+              .foreach(p =>
+                try Files.deleteIfExists(p)
+                catch { case _: Throwable => () }
+              )
+          finally paths.close()
+        true
+      catch { case NonFatal(_) => false }
+    def loop(attemptsLeft: Int): Unit =
+      if !attempt() && attemptsLeft > 1 then
+        val slept =
+          try
+            Thread.sleep(WipeBackoffMs)
+            true
+          catch
+            case _: InterruptedException =>
+              // Asked to stop: keep the flag for the caller and give up the retries.
+              Thread.currentThread().interrupt()
+              false
+        if slept then loop(attemptsLeft - 1)
+    loop(WipeAttempts)

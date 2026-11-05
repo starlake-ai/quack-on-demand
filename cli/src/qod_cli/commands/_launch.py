@@ -138,7 +138,14 @@ def _run_supervised(cmd: list[str], env: dict, teardown=None) -> int:
             interrupted_again = True
             typer.echo("second interrupt; killing the manager directly.", err=True)
         finally:
-            _reap(proc, grace=None if interrupted_again else force_after_seconds())
+            # Whatever reading the grace does, the child (in its own session) must not outlive
+            # the CLI: past a failure here it is killed at once.
+            grace = None
+            try:
+                if not interrupted_again:
+                    grace = force_after_seconds()
+            finally:
+                _reap(proc, grace=grace)
         return 130
     finally:
         signal.signal(signal.SIGTERM, old_term)
@@ -151,17 +158,26 @@ def _reap(proc: subprocess.Popen, grace: int | None) -> None:
     and spawn scripts are gone, but the JVM still runs its own cleanup after its ports close (with
     `--s3-path` it deletes the demo's run folder), so a completed teardown waits `grace` seconds
     for it to exit on its own and kills it only past that. `grace=None` (a second interrupt)
-    kills at once, and so does an interrupt during the wait."""
-    if grace is not None and proc.poll() is None:
-        try:
-            proc.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            pass
-        except KeyboardInterrupt:
-            typer.echo("second interrupt; killing the manager directly.", err=True)
-    if proc.poll() is None:
-        proc.kill()
-    proc.wait()
+    kills at once, and so does an interrupt during the wait.
+
+    The wait starts with a SIGTERM of its own: the teardown finds the manager only through its
+    listening ports, so a Ctrl-C during boot (embedded Postgres starting, provisioning, REST not
+    up yet) left a manager no one had signalled, which finished booting, spawned nodes and was
+    then killed, orphaning them. A manager already running its shutdown hooks ignores the second
+    SIGTERM."""
+    try:
+        if grace is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+            except KeyboardInterrupt:
+                typer.echo("second interrupt; killing the manager directly.", err=True)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
 
 
 def resolve_java() -> str:

@@ -192,3 +192,39 @@ def test_existing_new_file_wins_and_legacy_is_kept(monkeypatch, tmp_path):
     new.write_text('[profiles.default]\ntoken = "new"\n')
     assert load_settings().token == "new"
     assert legacy.is_file()
+
+
+def test_force_after_seconds_reads_a_number(monkeypatch):
+    from qod_cli import config
+
+    monkeypatch.setenv("FORCE_AFTER", "42")
+    assert config.force_after_seconds() == 42
+
+
+def test_force_after_seconds_falls_back_to_10_on_a_non_integer(monkeypatch):
+    # The Ctrl-C supervisor reads it inside its `finally`: raising there skipped the safety-net
+    # kill and left the manager (in its own session) running past the CLI.
+    from qod_cli import config
+
+    monkeypatch.setenv("FORCE_AFTER", "abc")
+    assert config.force_after_seconds() == 10
+
+
+def test_force_after_seconds_falls_back_to_10_when_the_profile_cannot_be_read(monkeypatch):
+    from qod_cli import config
+
+    monkeypatch.delenv("FORCE_AFTER", raising=False)
+
+    def broken():
+        raise ValueError("Invalid statement (at line 1, column 1)")
+
+    monkeypatch.setattr(config, "load_start_env", broken)
+    assert config.force_after_seconds() == 10
+
+
+def test_force_after_seconds_falls_back_to_10_on_a_profile_that_is_no_toml(monkeypatch):
+    from qod_cli import config
+
+    monkeypatch.delenv("FORCE_AFTER", raising=False)
+    config_path().write_text("[start\nFORCE_AFTER = ")
+    assert config.force_after_seconds() == 10
