@@ -6454,6 +6454,11 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/profile/s3/add:
     post:
+      description: 'Register S3 keys of your own for a scope. 400 scope_in_data_folder:
+        the scope lies at or under a data folder that counts against your tenant''s
+        users: one QoD or a superuser signs, one of managed storage, or one of your
+        own tenant''s databases holding its own keys. Another tenant''s database holding
+        its own keys does not count.'
       operationId: postApiProfileS3Add
       parameters:
       - name: X-API-Key

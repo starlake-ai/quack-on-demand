@@ -229,9 +229,9 @@ final class PoolSupervisor(
     */
   @volatile var serverLivenessAll: () => Map[String, String] = () => Map.empty
 
-  /** The folders no new database of an untrusted writer may overlap: all the location rules deny,
-    * which `Main` wires (`LiveLocationRules.dataFolders`: data paths, those it still remembers,
-    * managed prefixes within retention); Left when they cannot be read.
+  /** The folders no new database of an untrusted writer may overlap: all the location rules know,
+    * whoever each counts against, which `Main` wires (`LiveLocationRules.dataFolders`: data paths,
+    * those it still remembers, managed prefixes within retention); Left when they cannot be read.
     */
   @volatile var dataFolderDenySet: () => Either[String, List[String]] =
     () =>
@@ -2008,21 +2008,49 @@ final class PoolSupervisor(
     * retention window. In memory, so HA replicas stay fresh through the topology refresh; derived
     * again only after a tenant-db change (the same list until then).
     */
-  def dataPaths(): List[String] =
-    val version   = tenantDbsVersion.get()
-    val (at, got) = dataPathsMemo
-    if at == version then got
+  def dataPaths(): List[String] = derivedDataPaths()._2
+
+  /** [[dataPaths]] with who holds each: a row's tenant at the path its nodes get when it holds
+    * complete keys of its own there ([[holdsItsFolder]]), and no tenant, so every non-superuser,
+    * for anything else: a path the row merely states, an unplaced row, the default metastore's
+    * path.
+    */
+  def dataPathHolders(): List[ai.starlake.quack.edge.authz.location.DataPathHolder] =
+    derivedDataPaths()._1
+
+  private def derivedDataPaths()
+      : (List[ai.starlake.quack.edge.authz.location.DataPathHolder], List[String]) =
+    val version          = tenantDbsVersion.get()
+    val (at, got, paths) = dataPathsMemo
+    if at == version then (got, paths)
     else
       val fresh = deriveDataPaths()
-      dataPathsMemo = (version, fresh)
-      fresh
+      val named = fresh.map(_.path).distinct
+      dataPathsMemo = (version, fresh, named)
+      (fresh, named)
 
-  @volatile private var dataPathsMemo: (Long, List[String]) = (-1L, Nil)
+  @volatile private var dataPathsMemo
+      : (Long, List[ai.starlake.quack.edge.authz.location.DataPathHolder], List[String]) =
+    (-1L, Nil, Nil)
+
+  /** Whether `td` signs `path`, the one its nodes get, with keys of its own that are neither QoD's
+    * managed store's nor a branch's of a row that does not. Whether its path is one of managed
+    * storage is the location rules' to read, from the managed prefixes.
+    */
+  private def holdsItsFolder(td: TenantDb, path: String): Boolean =
+    TenantDb.holdsOwnKeys(path, td.objectStore) &&
+      !managedStore.exists(m =>
+        m.accessKeyId.nonEmpty && td.objectStore.get("s3_access_key_id").contains(m.accessKeyId)
+      ) &&
+      td.branchOf.forall(id =>
+        tenantDbs.get(id).exists(parent => TenantDb.holdsOwnKeys(path, parent.objectStore))
+      )
 
   /** The unplaced tenant-dbs already named in a WARN: once per row while it stays unplaced. */
   private val unplacedWarned = TrieMap.empty[String, Unit]
 
-  private def deriveDataPaths(): List[String] =
+  private def deriveDataPaths(): List[ai.starlake.quack.edge.authz.location.DataPathHolder] =
+    import ai.starlake.quack.edge.authz.location.DataPathHolder
     val folders  = ai.starlake.quack.edge.authz.location.DataFolders
     val unplaced = folders.Unplaced
     val rows     = tenantDbs.values.toList
@@ -2058,10 +2086,26 @@ final class PoolSupervisor(
         )
       case _ => ()
     }
-    val paths = perRow.flatMap { (td, effective) =>
-      effective.getOrElse(List(unplaced)) ++ (td.dataPath :: td.metastore.get("dataPath").toList)
+    val holders = perRow.flatMap { (td, effective) =>
+      val nodes = effective.toOption.flatMap(_.headOption).map(_.trim)
+      (effective.getOrElse(List(unplaced)) ++ (td.dataPath :: td.metastore.get("dataPath").toList))
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .distinct
+        .map { p =>
+          val itself = p.stripSuffix(folders.NamePrefixMarker)
+          DataPathHolder(
+            p,
+            Option.when(nodes.contains(itself) && holdsItsFolder(td, itself))(td.tenantId)
+          )
+        }
     }
-    (paths ++ defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
+    val default = defaultMetastore
+      .get("dataPath")
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(DataPathHolder.ofEveryone)
+    (holders ++ default).distinct
 
   /** The databases whose data path is `path` as [[dataPaths]] lists it (a duckdb-file path's
     * name-prefix entry included), and the default metastore when it is its path: what a log line
@@ -2965,8 +3009,9 @@ final class PoolSupervisor(
                 IO.blocking(mutation {
                   store.upsertTenantDb(merged)
                   putTenantDbRow(merged)
-                  if merged.metastore != td.metastore || merged.dataPath != td.dataPath then
-                    dataFoldersChanged()
+                  if merged.metastore != td.metastore || merged.dataPath != td.dataPath ||
+                    merged.objectStore != td.objectStore
+                  then dataFoldersChanged()
                   // Node-affecting edit is the documented remediation for a boot-time
                   // DataPathMismatchException, so clear any block rather than skipping this
                   // tenant-db's pools forever. Optimistic: a wrong fix re-blocks on the next boot.

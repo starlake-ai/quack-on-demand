@@ -153,23 +153,24 @@ object UserS3CredentialCache:
   val StaleReason: String = "the users' S3 credentials could not be read"
 
 /** The credentials a replica may serve: [[UserS3Credentials]] `base` without any credential whose
-  * scope now lies at or under a database data folder ([[location.LocationChecker.scopeError]]
-  * against the live deny set), nor one whose endpoint the operator no longer allows
-  * (`allowedEndpoints`: `QOD_USER_S3_ALLOWED_ENDPOINTS` as `UserS3Config.endpoints` normalizes it;
-  * a credential on AWS's own endpoint is always allowed). Both are checked when a credential is
-  * added, but a database created afterwards at that scope or at an ancestor of it (a DuckLake
-  * database with no data path of its own lands at `parent(default)/<name>`) would otherwise let the
-  * user's keys sign that database's files, and an endpoint the operator removed, then restarted,
-  * would still reach nodes, which would sign requests to that host. [[current]] is Left while
-  * either the base or the deny set cannot be read; [[digest]] is the served set's, so a handle
-  * names exactly what the credentials endpoint answers, and [[UserS3Credentials.UnavailableDigest]]
-  * while there is none. A user the base holds no credential of is always served the empty set
-  * (digest ""), whatever can be read: nothing to withhold. Each withheld credential is named once
-  * in a WARN (its user and id, never a key).
+  * scope now lies at or under a database data folder that counts against its user
+  * ([[location.LocationChecker.scopeError]] against `foldersAgainstUser`,
+  * [[location.LiveLocationRules.foldersAgainstUser]]), nor one whose endpoint the operator no
+  * longer allows (`allowedEndpoints`: `QOD_USER_S3_ALLOWED_ENDPOINTS` as `UserS3Config.endpoints`
+  * normalizes it; a credential on AWS's own endpoint is always allowed). Both are checked when a
+  * credential is added, but a database created afterwards at that scope or at an ancestor of it (a
+  * DuckLake database with no data path of its own lands at `parent(default)/<name>`) would
+  * otherwise let the user's keys sign that database's files, and an endpoint the operator removed,
+  * then restarted, would still reach nodes, which would sign requests to that host. [[current]] is
+  * Left while either the base or the deny set cannot be read; [[digest]] is the served set's, so a
+  * handle names exactly what the credentials endpoint answers, and
+  * [[UserS3Credentials.UnavailableDigest]] while there is none. A user the base holds no credential
+  * of is always served the empty set (digest ""), whatever can be read: nothing to withhold. Each
+  * withheld credential is named once in a WARN (its user and id, never a key).
   */
 final class ServedUserS3Credentials(
     base: UserS3Credentials,
-    dataFolders: () => Either[String, List[String]],
+    foldersAgainstUser: String => Either[String, List[String]],
     allowedEndpoints: List[String]
 ) extends UserS3Credentials
     with LazyLogging:
@@ -184,7 +185,7 @@ final class ServedUserS3Credentials(
   override def current(userId: String): Either[String, List[UserS3Credential]] =
     for
       set     <- base.current(userId)
-      folders <- if set.isEmpty then Right(Nil) else dataFolders()
+      folders <- if set.isEmpty then Right(Nil) else foldersAgainstUser(userId)
     yield set.filter(admitted(_, folders))
 
   private def admitted(c: UserS3Credential, folders: List[String]): Boolean =

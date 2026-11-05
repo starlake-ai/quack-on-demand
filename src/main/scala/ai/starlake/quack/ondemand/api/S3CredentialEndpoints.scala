@@ -42,6 +42,12 @@ object S3CredentialEndpoints:
   ] =
     base.post
       .in("profile" / "s3" / "add")
+      .description(
+        "Register S3 keys of your own for a scope. 400 scope_in_data_folder: the scope lies at or " +
+          "under a data folder that counts against your tenant's users: one QoD or a superuser " +
+          "signs, one of managed storage, or one of your own tenant's databases holding its own " +
+          "keys. Another tenant's database holding its own keys does not count."
+      )
       .in(jsonBody[ProfileS3AddRequest])
       .in(authToken)
       .out(jsonBody[S3CredentialDto])

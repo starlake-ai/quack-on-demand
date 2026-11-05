@@ -122,13 +122,28 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
     c.current("u-9") shouldBe Right(Nil)
   }
 
-  "the served view" should "withhold a credential whose scope now lies at or under a data folder" in {
+  "the served view" should "judge each credential by the folders against its own user" in {
+    val b     = cred("b" * 32, "u-b", "s3://shared/a/zone/", 10L)
+    val a     = cred("a" * 32, "u-a", "s3://shared/a/zone/", 10L)
+    val cache = new UserS3CredentialCache(() => List(a, b))
+    cache.refresh()
+    val served = new ServedUserS3Credentials(
+      cache,
+      u => Right(if u == "u-a" then List("s3://shared/a/") else Nil),
+      Nil
+    )
+    served.current("u-b") shouldBe Right(List(b))
+    served.current("u-a") shouldBe Right(Nil)
+    served.digest("u-a") shouldBe ""
+  }
+
+  it should "withhold a credential whose scope now lies at or under a data folder" in {
     val folders = new AtomicReference[Either[String, List[String]]](Right(Nil))
     val etl     = cred("a" * 32, "u-1", "s3://acme-etl/x/", 10L)
     val inLake  = cred("c" * 32, "u-1", "s3://lake/root/salesdb/main/", 30L)
     val cache   = new UserS3CredentialCache(() => List(etl, inLake))
     cache.refresh()
-    val served = new ServedUserS3Credentials(cache, () => folders.get(), Nil)
+    val served = new ServedUserS3Credentials(cache, _ => folders.get(), Nil)
     served.current("u-1").map(_.map(_.id).toSet) shouldBe Right(Set(etl.id, inLake.id))
     served.digest("u-1") shouldBe UserS3Credentials.digestOf(List(etl, inLake))
     // A database created afterwards at an ancestor of the scope.

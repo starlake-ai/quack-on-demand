@@ -100,7 +100,7 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     cache.refresh()
     // Main's wiring: handles and answers both from the served view over the cache.
     val folders = new AtomicReference[Either[String, List[String]]](Right(Nil))
-    val served  = new ServedUserS3Credentials(cache, () => folders.get(), endpoints)
+    val served  = new ServedUserS3Credentials(cache, _ => folders.get(), endpoints)
     val keys    = new NodeKeys(
       Secret,
       "http://127.0.0.1:20900",

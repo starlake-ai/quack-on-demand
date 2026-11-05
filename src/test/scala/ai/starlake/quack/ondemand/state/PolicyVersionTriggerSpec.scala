@@ -358,6 +358,11 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
         "UPDATE qodstate_tenant_db SET metastore_params = '{\"dataPath\":\"/x/\"}'::jsonb " +
           "WHERE id = 'td-1'"
       )
+      // A row's own keys decide whom its folder counts against.
+      bumpsEveryTenant(c)(
+        "UPDATE qodstate_tenant_db SET object_store_params = '{\"s3_access_key_id\":\"x\"}'::jsonb " +
+          "WHERE id = 'td-1'"
+      )
       delta(c)("UPDATE qodstate_tenant_db SET disabled = true WHERE id = 'td-1'") shouldBe Nothing
       bumpsEveryTenant(c)("DELETE FROM qodstate_tenant_db WHERE id = 'td-1'")
     }

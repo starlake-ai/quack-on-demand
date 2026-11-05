@@ -32,7 +32,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
     val storeReads = new AtomicInteger(0)
     val storeFails = new AtomicReference(false)
     val rules      = new LiveLocationRules(
-      dataPaths = () => paths.get(),
+      holders = () => paths.get().map(DataPathHolder.ofEveryone),
       unpurgedPrefixes = () => {
         storeReads.incrementAndGet()
         if storeFails.get() then throw new RuntimeException("pg down")
@@ -44,6 +44,191 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
       sameHost = false,
       clock = () => clock.get()
     )
+
+  /** Rules over holders a case changes, and managed prefixes it changes. */
+  private final class Held(
+      initial: List[DataPathHolder],
+      prefixes: List[String] = Nil,
+      scopes: List[String] = Nil,
+      tenants: Map[String, Option[String]] = Map.empty
+  ):
+    val clock       = new AtomicLong(1_000_000L)
+    val holders     = new AtomicReference(initial)
+    val managed     = new AtomicReference(prefixes)
+    val storeFails  = new AtomicReference(false)
+    val tenantFails = new AtomicReference(false)
+    val rules       = new LiveLocationRules(
+      holders = () => holders.get(),
+      unpurgedPrefixes = () => {
+        if storeFails.get() then throw new RuntimeException("pg down")
+        managed.get()
+      },
+      tenantLocations = _ => Nil,
+      userScopes = _ => Right(scopes),
+      filesRoot = None,
+      sameHost = false,
+      clock = () => clock.get(),
+      tenantOfUser = u => {
+        if tenantFails.get() then throw new RuntimeException("pg down")
+        tenants.get(u)
+      }
+    )
+    def against(tenant: String): Set[String] =
+      rules.foldersAgainst(Some(tenant)).toOption.get.toSet
+    def whole: Set[String]                    = rules.dataFolders().toOption.get.toSet
+    def admitted(tenant: String, url: String) =
+      LocationChecker.check(url, rules.rulesFor(tenant, "u").toOption.get).isRight
+
+  private val AtA      = "s3://shared/a/"
+  private def ofA      = DataPathHolder(AtA, Some("ta"))
+  private def everyone = DataPathHolder.ofEveryone(AtA)
+
+  "A folder holding its own keys" should "count against its own tenant's users alone" in {
+    val f = new Held(List(ofA))
+    f.against("ta") shouldBe Set(AtA)
+    f.against("tb") shouldBe empty
+    f.against("unknown") shouldBe empty
+    f.rules.dataFolderOverlap(Some("tb"), s"${AtA}x/") shouldBe Right(None)
+    f.rules.dataFolderOverlap(Some("ta"), s"${AtA}x/").map(_.isDefined) shouldBe Right(true)
+  }
+
+  it should "stay in the whole set: what no new database may overlap, and a superuser's scope" in {
+    val f = new Held(List(ofA))
+    f.whole shouldBe Set(AtA)
+    f.rules.foldersAgainst(None).toOption.get.toSet shouldBe Set(AtA)
+    f.rules.dataFolderOverlap(None, s"${AtA}x/").map(_.isDefined) shouldBe Right(true)
+  }
+
+  "A folder holding no keys of its own" should "count against every non-superuser" in {
+    val f = new Held(List(everyone, DataPathHolder.ofEveryone(DataFolders.Unplaced)))
+    f.against("ta") should contain(AtA)
+    f.against("tb") should contain(AtA)
+    f.against("tb") should contain(DataFolders.Unplaced)
+  }
+
+  "Several rows at one path" should "count for each tenant holding it, or everyone if one does not qualify" in {
+    val both = new Held(List(ofA, DataPathHolder(AtA, Some("tc"))))
+    both.against("ta") shouldBe Set(AtA)
+    both.against("tc") shouldBe Set(AtA)
+    both.against("tb") shouldBe empty
+    val mixed = new Held(List(ofA, everyone))
+    mixed.against("tb") shouldBe Set(AtA)
+  }
+
+  "A folder a row left" should "count against everyone while it is remembered" in {
+    val f = new Held(List(ofA))
+    f.against("tb") shouldBe empty
+    f.holders.set(Nil)
+    f.against("tb") shouldBe Set(AtA)
+    f.against("ta") shouldBe Set(AtA)
+    f.clock.addAndGet(LiveLocationRules.RecentMs + 2)
+    f.against("tb") shouldBe empty
+    f.whole shouldBe empty
+  }
+
+  "A row that stops qualifying" should "count against everyone at once, and for a while once it qualifies again" in {
+    val f = new Held(List(ofA))
+    f.against("tb") shouldBe empty
+    f.holders.set(List(everyone))
+    f.against("tb") shouldBe Set(AtA)
+    f.holders.set(List(ofA))
+    f.against("tb") shouldBe Set(AtA)
+    f.clock.addAndGet(LiveLocationRules.RecentMs + 2)
+    f.against("tb") shouldBe empty
+    f.against("ta") shouldBe Set(AtA)
+  }
+
+  "A new row at a remembered path" should "not narrow it" in {
+    val f = new Held(List(DataPathHolder(AtA, Some("tc"))))
+    f.against("tc") shouldBe Set(AtA)
+    f.holders.set(List(ofA))
+    f.against("tb") shouldBe Set(AtA)
+    f.against("tc") shouldBe Set(AtA)
+  }
+
+  "A path of managed storage" should "count against everyone, whatever its row holds" in {
+    val prefix = "s3://shared/managed-1/"
+    List(
+      DataPathHolder(prefix, Some("ta")),
+      DataPathHolder("s3://shared/managed-1/under/", Some("ta")),
+      DataPathHolder("s3://shared/managed-1__br_0123abcd/", Some("ta"))
+    ).foreach { h =>
+      withClue(h.path) {
+        val f = new Held(List(h), prefixes = List(prefix))
+        f.against("tb") should contain(h.path)
+      }
+    }
+    // Another path of the same bucket is not.
+    new Held(List(ofA), prefixes = List(prefix)).against("tb") shouldBe Set(prefix)
+  }
+
+  it should "be read again as soon as a holder changes" in {
+    val prefix = "s3://shared/managed-1/"
+    val f      = new Held(List(ofA))
+    f.against("tb") shouldBe empty
+    // Within the store's TTL: the prefix written before its row is listed.
+    f.managed.set(List(prefix))
+    f.holders.set(List(ofA, DataPathHolder(prefix, Some("ta"))))
+    f.against("tb") should contain(prefix)
+    f.against("tb") should not contain AtA
+  }
+
+  "A store read that fails" should "give no list, and refuse a scope with no verdict" in {
+    val f = new Held(List(ofA), scopes = List("s3://shared/"))
+    f.against("tb") shouldBe empty
+    f.storeFails.set(true)
+    f.clock.addAndGet(LiveLocationRules.StoreTtlMs + 1)
+    f.rules.foldersAgainst(Some("tb")).isLeft shouldBe true
+    f.rules.dataFolderOverlap(Some("tb"), s"${AtA}x/").isLeft shouldBe true
+    f.rules.rulesFor("tb", "u").isLeft shouldBe true
+    f.rules.dataFolders().isLeft shouldBe true
+  }
+
+  "A location several folders cover" should "be refused if any counts against the user" in {
+    val inner = "s3://shared/a/inner/"
+    val f     = new Held(
+      List(ofA, DataPathHolder.ofEveryone(inner)),
+      scopes = List("s3://shared/")
+    )
+    f.admitted("tb", s"${AtA}file.parquet") shouldBe true
+    f.admitted("tb", s"${inner}file.parquet") shouldBe false
+    f.admitted("ta", s"${AtA}file.parquet") shouldBe false
+    // A scope at or under a folder that does not count against the user stays.
+    f.rules.rulesFor("tb", "u").toOption.get.s3Scopes shouldBe List("s3://shared/")
+  }
+
+  it should "leave a scope of the user that lies under it out of the rules of its own tenant" in {
+    val f = new Held(List(ofA), scopes = List(s"${AtA}x/"))
+    f.rules.rulesFor("tb", "u").toOption.get.s3Scopes shouldBe List(s"${AtA}x/")
+    f.rules.rulesFor("ta", "u").toOption.get.s3Scopes shouldBe empty
+  }
+
+  "A tenant's list" should "be one instance while nothing changes" in {
+    val f = new Held(List(ofA))
+    (f.rules.foldersAgainst(Some("ta")).toOption.get eq
+      f.rules.foldersAgainst(Some("ta")).toOption.get) shouldBe true
+    (f.rules.foldersAgainst(Some("tb")).toOption.get eq
+      f.rules.foldersAgainst(Some("tc")).toOption.get) shouldBe true
+  }
+
+  "foldersAgainstUser" should "read the user's tenant, and the whole set for none" in {
+    val f = new Held(
+      List(ofA),
+      tenants = Map("in-a" -> Some("ta"), "in-b" -> Some("tb"), "root" -> None)
+    )
+    f.rules.foldersAgainstUser("in-a").toOption.get shouldBe List(AtA)
+    f.rules.foldersAgainstUser("in-b").toOption.get shouldBe empty
+    f.rules.foldersAgainstUser("root").toOption.get shouldBe List(AtA)
+    f.rules.foldersAgainstUser("nobody").toOption.get shouldBe List(AtA)
+  }
+
+  it should "give no list when the user cannot be read" in {
+    val f = new Held(List(ofA), tenants = Map("in-b" -> Some("tb")))
+    f.tenantFails.set(true)
+    f.rules.foldersAgainstUser("in-b").isLeft shouldBe true
+    f.tenantFails.set(false)
+    f.rules.foldersAgainstUser("in-b").toOption.get shouldBe empty
+  }
 
   "rulesFor" should "keep the user's own S3 scopes and the tenant's folders under root/tenant" in {
     val f = new Fixture()
@@ -138,7 +323,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
       (p: String) => p.replace("/srv/qod-files/acme/in/", "/etc/")
     ).foreach { real =>
       val r = new LiveLocationRules(
-        dataPaths = () => Nil,
+        holders = () => Nil.map(DataPathHolder.ofEveryone),
         unpurgedPrefixes = () => Nil,
         tenantLocations = t => Locations.getOrElse(t, Nil),
         userScopes = u => Right(Scopes.getOrElse(u, Nil)),
@@ -153,7 +338,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
   it should "use real paths for the root and the folders" in {
     val real = (p: String) => p.replace("/srv/", "/private/srv/")
     val r    = new LiveLocationRules(
-      dataPaths = () => List("/srv/qod-files/acme/in/lake"),
+      holders = () => List("/srv/qod-files/acme/in/lake").map(DataPathHolder.ofEveryone),
       unpurgedPrefixes = () => Nil,
       tenantLocations = t => Locations.getOrElse(t, Nil),
       userScopes = u => Right(Scopes.getOrElse(u, Nil)),
@@ -181,15 +366,17 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
 
   "dataFolderOverlap" should "refuse a scope at a data folder, admit its ancestor, and fail closed" in {
     val f = new Fixture()
-    f.rules.dataFolderOverlap("s3://lake/acme_tpch-1a2b3c4d/main/") shouldBe
+    f.rules.dataFolderOverlap(None, "s3://lake/acme_tpch-1a2b3c4d/main/") shouldBe
       Right(Some(s"s3://lake/acme_tpch-1a2b3c4d/main/ ${LocationChecker.DataFolder}"))
-    f.rules.dataFolderOverlap("s3://lake/") shouldBe Right(None)
-    f.rules.dataFolderOverlap("s3://managed/acme_old-0f0f0f0f/").map(_.isDefined) shouldBe Right(
+    f.rules.dataFolderOverlap(None, "s3://lake/") shouldBe Right(None)
+    f.rules
+      .dataFolderOverlap(None, "s3://managed/acme_old-0f0f0f0f/")
+      .map(_.isDefined) shouldBe Right(
       true
     )
     f.storeFails.set(true)
     f.clock.addAndGet(LiveLocationRules.StoreTtlMs)
-    f.rules.dataFolderOverlap("s3://lake/") shouldBe Left(
+    f.rules.dataFolderOverlap(None, "s3://lake/") shouldBe Left(
       "the database data folders could not be read"
     )
   }
@@ -221,7 +408,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
 
   it should "make the rules unavailable while the user's credentials cannot be read" in {
     val r = new LiveLocationRules(
-      dataPaths = () => Nil,
+      holders = () => Nil.map(DataPathHolder.ofEveryone),
       unpurgedPrefixes = () => Nil,
       tenantLocations = t => Locations.getOrElse(t, Nil),
       userScopes = _ => Left("the users' S3 credentials could not be read"),
@@ -235,7 +422,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
     val calls = new AtomicInteger(0)
     val clock = new AtomicLong(1_000_000L)
     val r     = new LiveLocationRules(
-      dataPaths = () => Nil,
+      holders = () => Nil.map(DataPathHolder.ofEveryone),
       unpurgedPrefixes = () => Nil,
       tenantLocations = t => Locations.getOrElse(t, Nil),
       userScopes = u => Right(Scopes.getOrElse(u, Nil)),
@@ -264,7 +451,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
     // database causes it (Phase C ledger T5C-2). An absolute path or a bucket is placed: no WARN.
     val paths = new AtomicReference(List("s3://lake/acme_tpch/", "/srv/lake/acme_x/", "./lake/t"))
     val rules = new LiveLocationRules(
-      dataPaths = () => paths.get(),
+      holders = () => paths.get().map(DataPathHolder.ofEveryone),
       unpurgedPrefixes = () => Nil,
       tenantLocations = _ => Nil,
       userScopes = _ => Right(Nil),

@@ -1,0 +1,10 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0057-own-keys-policy-version
+      author: qod
+      changes:
+        # A folder holding complete keys of its own counts against its own tenant's users alone, and
+        # any other against every non-superuser, so a change of a row's keys moves what every tenant
+        # may name: it moves every tenant's policy version, as 0054 does for a data path.
+        - sql:
+            sql: CREATE TRIGGER qod_policy_version_own_keys_upd AFTER UPDATE ON qodstate_tenant_db FOR EACH ROW WHEN (OLD.object_store_params IS DISTINCT FROM NEW.object_store_params) EXECUTE FUNCTION qod_bump_every_policy_version()

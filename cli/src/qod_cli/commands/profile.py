@@ -141,7 +141,9 @@ def s3_add(
     url_style: str = typer.Option(None, "--url-style", help="path | vhost."),
 ):
     """Register S3 keys of your own for SCOPE (a scope you already hold is replaced). Your statements
-    then reach s3:// URLs under it, signed with these keys; never a database's data folder."""
+    then reach s3:// URLs under it, signed with these keys; never a data folder that counts against
+    your tenant's users. Another tenant's database holding its own keys does not count: there, what
+    your keys may do on the store decides."""
     secret, token = _read_secrets(secret_stdin, secret_prompt, session_token_stdin, session_token_prompt)
     body: dict = {"scope": scope, "accessKeyId": access_key_id, "secretAccessKey": secret}
     for key, value in (("sessionToken", token), ("region", region), ("endpoint", endpoint), ("urlStyle", url_style)):

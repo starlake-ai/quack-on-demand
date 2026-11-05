@@ -53,11 +53,16 @@ class UserS3CredentialHandlersSpec extends AnyFlatSpec with Matchers:
     val scopeOf: SessionScope.Resolver = t =>
       t.flatMap(sessions.get).fold(SessionScope.NoAccess)(_.scope)
 
+    val tenantsAsked = scala.collection.mutable.ListBuffer.empty[Option[String]]
+
     val h = new UserS3CredentialHandlers(
       sup,
       RestCaller(sessionOf = sessions.get, patOf = _ => None),
       allowedEndpoints = List("http://127.0.0.1:9000"),
-      dataFolderOverlap = overlap,
+      dataFolderOverlap = (tenant, scope) => {
+        tenantsAsked += tenant
+        overlap(scope)
+      },
       audit = new AuditRecorder(auditRows, _ => None)
     )
 
@@ -86,6 +91,13 @@ class UserS3CredentialHandlersSpec extends AnyFlatSpec with Matchers:
     listed.asJson.noSpaces should not include Secret
     f.mine("gina-tok").toOption.get.credentials shouldBe Nil
     f.sup.userS3.of(f.alice).map(_.secretAccessKey) shouldBe List(Secret)
+  }
+
+  it should "judge a scope against the caller's own tenant, and a superuser against all" in {
+    val f = new Fixture
+    f.add("alice-tok", req()).isRight shouldBe true
+    f.add("root-tok", req("s3://root-etl/")).isRight shouldBe true
+    f.tenantsAsked.toList shouldBe List(Some("acme"), None)
   }
 
   it should "work for a superuser's own row too" in {

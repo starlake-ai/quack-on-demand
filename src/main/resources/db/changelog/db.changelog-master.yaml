@@ -117,3 +117,5 @@ databaseChangeLog:
       file: db/changelog/0055-drop-pool-lockdown.yaml
   - include:
       file: db/changelog/0056-branch-three-way-merge.yaml
+  - include:
+      file: db/changelog/0057-own-keys-policy-version.yaml

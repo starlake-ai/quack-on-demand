@@ -522,17 +522,18 @@ object Main extends IOApp with LazyLogging:
     val userS3 =
       new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
     // What NodeKeys digests and the credentials endpoint serves: the cache without a credential
-    // whose scope now lies at or under a database data folder, nor one whose endpoint
+    // whose scope now lies at or under a database data folder that counts against its user, nor
+    // one whose endpoint
     // QOD_USER_S3_ALLOWED_ENDPOINTS no longer lists (checked at add, and here again since a
     // restart may have shortened the list). The deny set is the location rules', built after the
     // supervisor (denySet is set there); until then nothing is served.
     val denySet = new java.util.concurrent.atomic.AtomicReference[
-      () => Either[String, List[String]]
-    ](() => Left("the database data folders are not loaded yet"))
+      String => Either[String, List[String]]
+    ](_ => Left("the database data folders are not loaded yet"))
     val servedUserS3 =
       new ai.starlake.quack.edge.authz.ServedUserS3Credentials(
         userS3,
-        () => denySet.get()(),
+        userId => denySet.get()(userId),
         mgrCfg.userS3.endpoints
       )
     // The nonces of the handles this replica mints: the credentials endpoint answers only those.
@@ -766,7 +767,7 @@ object Main extends IOApp with LazyLogging:
     // The tenants' local folders, the users' S3 scopes and every database data folder, read live
     // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
     val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
-    denySet.set(() => locationRules.dataFolders())
+    denySet.set(locationRules.foldersAgainstUser)
     sup.dataFolderDenySet = () => locationRules.dataFolders()
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>

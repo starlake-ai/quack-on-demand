@@ -15,9 +15,9 @@ import sttp.model.StatusCode
   * a request field, so they cannot be aimed at another user. A disabled owner is refused (`403
   * account_disabled`, a session JWT outlives a disablement). An add is validated by
   * [[UserS3CredentialRules]] (with the operator's `allowedEndpoints`), then checked against the
-  * live data-folder deny set (`dataFolderOverlap`, the location rules': a scope at or under a data
-  * folder is `400 scope_in_data_folder`, an unreadable deny set `503 deny_set_unavailable`), before
-  * the supervisor writes.
+  * live data folders that count against the caller's tenant (`dataFolderOverlap`, the location
+  * rules': a scope at or under one is `400 scope_in_data_folder`, an unreadable deny set `503
+  * deny_set_unavailable`), before the supervisor writes.
   *
   * The user routes are an admin's: TenantScopeCheck.rejectForUser (a tenant admin only for their
   * own tenant's users, a superuser for anyone; a missing user is 404), list and remove only.
@@ -28,7 +28,7 @@ final class UserS3CredentialHandlers(
     sup: PoolSupervisor,
     callers: RestCaller,
     allowedEndpoints: List[String],
-    dataFolderOverlap: String => Either[String, Option[String]],
+    dataFolderOverlap: (Option[String], String) => Either[String, Option[String]],
     audit: AuditRecorder = AuditRecorder.noop
 ):
 
@@ -45,7 +45,7 @@ final class UserS3CredentialHandlers(
         UserS3CredentialRules.validate(input(req), allowedEndpoints) match
           case Left((code, msg)) => IO.pure(Left(StatusCode.BadRequest -> ErrorResponse(code, msg)))
           case Right(accepted)   =>
-            IO.blocking(dataFolderOverlap(accepted.scope)).flatMap {
+            IO.blocking(dataFolderOverlap(u.tenant, accepted.scope)).flatMap {
               case Left(why) =>
                 IO.pure(
                   Left(StatusCode.ServiceUnavailable -> ErrorResponse("deny_set_unavailable", why))

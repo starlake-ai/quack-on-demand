@@ -39,7 +39,7 @@ class McpProfileToolsSpec extends AnyFlatSpec with Matchers:
       sup,
       RestCaller(sessionOf = _ => None, patOf = pats.get),
       Nil,
-      _ => Right(None)
+      (_, _) => Right(None)
     )
     val tools = new McpProfileTools(handlers)
 

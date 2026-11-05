@@ -588,7 +588,7 @@ object ManagerServerHarness:
       sup,
       restCaller,
       Nil,
-      _ => Right(None),
+      (_, _) => Right(None),
       audit
     )
     val previewHandlers = new CatalogPreviewHandlers(

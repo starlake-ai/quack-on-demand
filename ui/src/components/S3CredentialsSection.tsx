@@ -11,8 +11,8 @@ type Editing = { kind: 'add' } | { kind: 'replace'; scope: string };
 
 /** The caller's own S3 credentials, on the profile page (decision 23): the keys their statements
   * reach S3 with, one credential per scope (`s3://bucket/` or a prefix in it), so a user holding
-  * several buckets adds one credential for each. A database's data folder stays unreachable
-  * whatever is registered. The secret and the session token are write-only: this section never
+  * several buckets adds one credential for each. A data folder that counts against the tenant's
+  * users stays unreachable whatever is registered. The secret and the session token are write-only: this section never
   * prefills or shows them, and clears them as soon as a save is done. */
 export function S3CredentialsSection() {
   const [rows, setRows] = useState<S3Credential[] | null>(null);
@@ -114,8 +114,9 @@ export function S3CredentialsSection() {
       <p className="subtle">
         Add one credential for each bucket or prefix your statements read or write. A statement
         reaching an <code>s3://</code> URL is signed with the keys of the scope that covers it.
-        A database's data folder is never reachable this way. Secrets and session tokens are
-        write-only.
+        A database's data folder is not reachable this way, unless it is another tenant's holding
+        its own keys, where what your keys may do on the store decides. Secrets and session tokens
+        are write-only.
       </p>
       {error && <div className="login-err">{error}</div>}
       {notice && <div className="subtle" role="status">{notice}</div>}

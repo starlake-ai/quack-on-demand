@@ -185,13 +185,14 @@ object BootFactories extends LazyLogging:
       store: ai.starlake.quack.ondemand.state.ControlPlaneStore
   ): ai.starlake.quack.edge.authz.location.LiveLocationRules =
     new ai.starlake.quack.edge.authz.location.LiveLocationRules(
-      dataPaths = () => sup.dataPaths(),
+      holders = () => sup.dataPathHolders(),
       unpurgedPrefixes = () => store.unpurgedManagedPrefixes().map(_.prefix),
       tenantLocations = sup.tenantLocations,
       userScopes = userId => sup.userS3.current(userId).map(_.map(_.scope)),
       filesRoot = mgrCfg.tenantFiles.rootOpt,
       sameHost = RuntimeType.isLocal(mgrCfg.runtimeType),
-      owners = sup.dataPathOwners
+      owners = sup.dataPathOwners,
+      tenantOfUser = sup.tenantForUser
     )
 
   /** qodstate_tenant.id -> the tenant_db names the tenant owns: the catalogs a wildcard catalog

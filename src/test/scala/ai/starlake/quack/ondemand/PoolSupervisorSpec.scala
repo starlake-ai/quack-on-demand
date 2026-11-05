@@ -202,7 +202,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
         "tl-2", "acme", "local", "/srv/qod-files/acme/lake/", 0L, None)
     )
     new ai.starlake.quack.edge.authz.location.LiveLocationRules(
-      dataPaths = () => sup.dataPaths(),
+      holders = () => sup.dataPathHolders(),
       unpurgedPrefixes = () => Nil,
       tenantLocations = _ => locs,
       userScopes = _ => Right(List("s3://lake/")),

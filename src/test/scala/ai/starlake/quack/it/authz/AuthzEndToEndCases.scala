@@ -168,12 +168,11 @@ abstract class AuthzEndToEndCases(
         filesRoot = root,
         userS3Endpoints = s"$Rustfs,${fake.endpoint}",
         // Tenant catalogs and the Postgres source database of an earlier run of this stack.
-        stackPrefixes =
-          List(
-            s"acme${stackName.replace("_", "")}x",
-            s"globex${stackName.replace("_", "")}x",
-            s"qod_pg_${stackName}_"
-          )
+        stackPrefixes = List(
+          s"acme${stackName.replace("_", "")}x",
+          s"globex${stackName.replace("_", "")}x",
+          s"qod_pg_${stackName}_"
+        )
       )
       stack.boot()
       provisionFiles()
@@ -300,13 +299,8 @@ abstract class AuthzEndToEndCases(
     // Another tenant's DuckLake data, inside acme's authorized folder and Alice's S3 scope: rows only.
     createDb(Globex, "glake", "ducklake", "dataPath" -> s(s"$globexLake/"))
     if s3Ready then
-      createDb(
-        Globex,
-        "gs3",
-        "ducklake",
-        "dataPath"    -> s(s"s3://$Bucket/globex_lake/"),
-        "objectStore" -> storeJson
-      )
+      // A folder holding no keys of its own: it counts against every tenant's users.
+      createDb(Globex, "gs3", "ducklake", "dataPath" -> s(s"s3://$Bucket/globex_lake/"))
     // The tenant's folder before the pools (a local folder needs no node secret).
     stack.post("/api/tenant/location/add", obj("tenant" -> s(Acme), "location" -> s(s"$shared/")))
     provisionFederation()

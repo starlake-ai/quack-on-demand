@@ -32,10 +32,12 @@ object ObjectStoreSecret:
     *   - any other path is a directory: itself with one trailing `/`, and its branches' prefix
     *     `<path>__br_`, which a merge node (the parent's node shape) attaches beside it.
     *
-    * No user's scope lies at or under any of these (UserS3CredentialRules at add, the location
-    * checker at use), so for every data file one of them is the longest match. A branch of a
-    * bucket-root database is the one shape left odd: its prefix `s3://<bucket>__br_<id8>/` names
-    * another bucket (not a valid S3 bucket name, so the branch's writes fail).
+    * No user of a tenant whose nodes hold such a secret has a scope at or under these
+    * (UserS3CredentialRules at add, the location checker at use, the credentials a replica serves),
+    * so on those nodes, for every data file, one of them is the longest match. A user of another
+    * tenant may hold one under a row's own keys, on nodes that hold no secret of that row. A branch
+    * of a bucket-root database is the one shape left odd: its prefix `s3://<bucket>__br_<id8>/`
+    * names another bucket (not a valid S3 bucket name, so the branch's writes fail).
     */
   def dataScopes(dataPath: String, kind: String): List[String] =
     if kind == ai.starlake.quack.model.TenantDbKind.DuckDbFile.wireValue then List(dataPath)

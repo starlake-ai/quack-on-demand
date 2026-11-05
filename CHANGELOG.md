@@ -5,7 +5,8 @@
 ### Upgrading from 0.11.0
 
 Back up the control-plane database: Liquibase `0056` runs at boot and adds the columns of a three-way
-merge to `qodstate_branch_merge`. A proposal from before the upgrade reads `head_snapshot_at_propose`
+merge to `qodstate_branch_merge`, and `0057` makes a change of a database's object-store keys move
+every tenant's policy version. A proposal from before the upgrade reads `head_snapshot_at_propose`
 NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, finish a rolling upgrade
 before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
 proposed.
@@ -28,6 +29,16 @@ count. To keep counts from a user, refuse on the table.
 
 ### Breaking
 
+- A database holding complete keys of its own no longer blocks other tenants' users. Its data folder
+  counts against the users of its own tenant only, for `400 scope_in_data_folder` and for a statement
+  naming a URL there. **On a bucket tenants share, a user's own keys now reach another tenant's folder
+  holding its own keys wherever the store allows them, for reads and writes, and the store's key
+  permissions are what protects it:** give each tenant keys limited to its own prefix. Every other
+  folder counts against every non-superuser as before: one QoD placed, managed storage and its branches,
+  one signed with the manager's keys, a local path, one whose row holds partial keys, and one that
+  stopped qualifying or was dropped within the last ten minutes. A location several folders cover is
+  refused if any counts against the user. `409 data_path_taken` still judges every folder, whoever holds
+  it.
 - Only a superuser is shown QoD's own Postgres server. `/api/pool/list`,
   `GET /api/pool/{tenant}/{tenantDb}/{pool}/status` (which now reads its caller's credential),
   `/api/database/list`, the answers of `database create` and `update`, and MCP `get_pool_status`,

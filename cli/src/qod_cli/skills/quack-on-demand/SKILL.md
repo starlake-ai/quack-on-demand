@@ -648,7 +648,8 @@ Adding a scope you already hold replaces its keys. Refusals: `400 invalid_scope`
 `s3://<bucket>/` or `s3://<bucket>/<prefix>/`, an uppercase bucket, an access point alias, an empty,
 `.` or `..` segment, `%`, `?`, `#`, `\` or a glob character), `400 credential_required` (no key id or
 secret), `400 invalid_credential`, `400 invalid_endpoint`, `400 endpoint_not_allowed` (the operator
-did not list it), `400 scope_in_data_folder` (at or under a database data folder), `400
+did not list it), `400 scope_in_data_folder` (at or under a data folder that counts against your
+tenant's users, see below), `400
 too_many_credentials` (32 per user). Over MCP: `list_my_s3_credentials`, `remove_my_s3_credential
 {id}` (no add: a secret never goes through an agent). Credentials are not in manifests: users enter
 them again after an import. The profile page of the UI shows the same list. The keys travel from the
@@ -689,10 +690,16 @@ Then a user of `acme` holding keys for `s3://acme-etl/` may:
 
 S3 then lets them do what their keys allow, no more. Always refused to tenant users:
 
-- a database's data folder, any tenant's (`QoD: <path> is a database data folder`), except through
+- a database's data folder (`QoD: <path> is a database data folder`), except through
   a symbolic link below a tenant folder (see below): keys for a
   DuckLake bucket never open the folder holding its Parquet files; `s3://b/lake-1/` does not cover
-  `s3://b/lake-10/`;
+  `s3://b/lake-10/`. That holds for every data folder but one kind: a folder whose database holds
+  complete keys of its own counts against the users of its own tenant only. On a bucket tenants
+  share, a user's own keys reach another tenant's such folder wherever the store allows them, for
+  reads and writes, and the store's key permissions are what protects it: give each tenant keys
+  limited to its own prefix. A folder QoD placed, one of managed storage, one signed with the
+  manager's keys and a local one count against every tenant user, as does one that stopped
+  qualifying or was dropped within the last ten minutes;
 - an `s3://` URL none of their keys covers (`QoD: <url> is outside the tenant's authorized locations
   (no S3 credential of yours covers it)`), a local path outside the tenant's folders, any scheme but
   `s3://` (`http(s)`, `gs`, `az`, `r2`), relative paths, `.` / `..` / empty segments, a
@@ -1481,8 +1488,9 @@ Two operator cautions:
 - **All managed databases share the operator credential.** Isolation between
   tenants' managed data is prefix-by-convention, enforced by the per-db
   `CREATE SECRET` scoped to that database's own `dataPath`, and by the nodes,
-  which refuse every database data folder to tenant users and sign their S3
-  requests with their own keys only; not by store-level ACLs.
+  which refuse these folders to every tenant user and sign their S3
+  requests with their own keys only; not by store-level ACLs. A database holding its
+  own keys is protected from other tenants by those keys' permissions on the store alone.
 
 ### Register a federated source
 
@@ -2582,7 +2590,7 @@ eviction are opt-in knobs.
 - **Direct file access, only where the user may reach** (always) - a tenant user, `*.*.* ALL`
   included, reads or writes a file by path only through a file reader or `COPY` naming an `s3://`
   location one of their own S3 credentials covers, or a folder the tenant authorized (see "Files and
-  S3 for tenant users"), never a database data folder; a path or URL in a table position (`FROM
+  S3 for tenant users"), never a data folder that counts against them; a path or URL in a table position (`FROM
   's3://b/x.parquet'`), `EXPORT` / `IMPORT DATABASE`, `ATTACH`, `CREATE` / `DROP SECRET` and `SET` of
   the `s3_*`, proxy, certificate and cache settings stay refused. The nodes decide this on what DuckDB
   parsed and resolved ("QoD: ... is outside the tenant's authorized locations") and sign each user's
@@ -2751,7 +2759,7 @@ eviction are opt-in knobs.
 | `QoD: authorization unavailable, retry` (FlightSQL `UNAVAILABLE`) | The node could not get a verdict from the manager replica that minted the session's handle in time (`QOD_AUTHZ_DECIDE_TIMEOUT_MS`, default 2000): that replica restarted, is down or unreachable from the nodes, or a client that reaches the verdict listener's port is holding its connection slots (it reads a call's body before it can check the call's signature). A multi-statement submission so refused is not retryable as a whole (FlightSQL `INVALID_ARGUMENT`, "not retryable as a whole: the statements before the refused one may have run") | Retry a single statement. For a batch, check which of its statements ran before resubmitting. If it persists, check that the nodes reach `QOD_INTERNAL_URL` (boot prints `node decide URL: ...`), and on Kubernetes that the NetworkPolicy lets node pods reach the manager on 20901. Only the nodes should reach that port (with no NetworkPolicy any pod can) |
 | `QoD: authorization unavailable, retry: authorization context expired; retry` under load | The replica kept fewer session handle contexts than its statement rate needs (each lives 360 s; about `QOD_AUTHZ_HANDLE_CONTEXTS_MAX / 360` tenant statements per second per replica, about 555 at the default 200000). `cache_evictions_total{cache="qod_minted_handles"}` rises | Raise `QOD_AUTHZ_HANDLE_CONTEXTS_MAX` (at least 1000), or add replicas |
 | `QoD: catalog <alias> is read-only` for a superuser | The federated source is read-only (`--read-only`), which binds every principal | Re-create the source with `--no-read-only` if writes are intended |
-| `QoD: <url> is outside the tenant's authorized locations` / `QoD: <path> is a database data folder` | A tenant user named a file their own S3 credentials or their tenant's folders do not cover, or a database's data folder | `qod profile s3 add` for the user's own bucket or prefix, or `qod tenant location add` for a local folder (see "Files and S3 for tenant users"); a data folder is never reachable |
+| `QoD: <url> is outside the tenant's authorized locations` / `QoD: <path> is a database data folder` | A tenant user named a file their own S3 credentials or their tenant's folders do not cover, or a database's data folder | `qod profile s3 add` for the user's own bucket or prefix, or `qod tenant location add` for a local folder (see "Files and S3 for tenant users"); a data folder that counts against them is never reachable |
 | Manager refuses to boot: `fleet mode requires QOD_INTERNAL_URL ...`, `QOD_INTERNAL_URL ... names port N, the manager's REST port ...` or `the node decide URL is ..., a loopback address no node pod can reach on the kubernetes runtime ...` | Nodes call the manager back for every statement's verdict, at the URL each handle carries, on the node verdict listener's port (the REST port + 1 by default, `QOD_INTERNAL_PORT`) | Fleet: set `QOD_INTERNAL_URL` to this replica's own `http://` address on the servers' network, naming the verdict listener's port. Kubernetes: the Helm chart sets `QOD_POD_IP`; a hand-written manifest sets `QOD_POD_IP` from the downward API (`status.podIP`) or `QOD_INTERNAL_URL` to the pod's own address |
 | Manager refuses to boot: `the node verdict listener's port N (QOD_INTERNAL_PORT, ...; by default the REST port + 1) is the REST port` (or `the FlightSQL port`, `the Quack port`, `in the node port range ...`), or `the REST port N leaves no port for the node verdict listener` | Nodes call the manager back for verdicts on a listener of its own, on the REST port + 1 unless `QOD_INTERNAL_PORT` names another port, which must differ from the REST, FlightSQL and Quack ports and lie outside the node port range (`QOD_MIN_PORT` to `QOD_MAX_PORT`) | Set `QOD_INTERNAL_PORT` to a free port outside those |
 | Boot stops with `the node verdict listener could not bind <host>:<port> (QOD_INTERNAL_PORT): ...`, after the nodes started | Another process holds the verdict listener's port: the REST port + 1 by default, so two managers on one host on consecutive REST ports clash. The bind comes after the nodes were spawned, and a boot that fails there leaves them running | Stop the holder, or set `QOD_INTERNAL_PORT` on one of the managers to a free port. On the local runtime run `qod stop` first, so the nodes of the failed boot do not hold their ports |

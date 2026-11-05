@@ -1,8 +1,7 @@
 package ai.starlake.quack.edge.authz.location
 
 import ai.starlake.quack.model.UnshownCodePoints
-
-import java.util.concurrent.atomic.AtomicReference
+import com.github.benmanes.caffeine.cache.Caffeine
 
 /** What one principal's statements may name as a file location (spec decisions 15, 18 and 23): the
   * principal's own S3 scopes and its tenant's local folders.
@@ -10,10 +9,11 @@ import java.util.concurrent.atomic.AtomicReference
   *   - `s3Scopes`: the S3 folders (`s3://<bucket>/` or a prefix in it) the principal holds
   *     credentials of its own for (decision 23), as UserS3CredentialRules stored them.
   *   - `tenantFolders`: the absolute local folders it authorized, each under `filesRoot/<tenant>/`.
-  *   - `dataFolders`: every database data folder of the deployment, any tenant's, as
-  *     [[DataFolders.of]] spells them: `s3://<bucket>/<key>/`, an absolute local folder, a relative
-  *     data path whose place on the node is unknown, or [[DataFolders.Unplaced]] (either of the
-  *     last two denies every local location).
+  *   - `dataFolders`: every database data folder that counts against this principal
+  *     ([[LiveLocationRules.foldersAgainst]]), as [[DataFolders.of]] spells them:
+  *     `s3://<bucket>/<key>/`, an absolute local folder, a relative data path whose place on the
+  *     node is unknown, or [[DataFolders.Unplaced]] (either of the last two denies every local
+  *     location).
   *   - `filesRoot`: the operator's root for tenant folders (`QOD_TENANT_FILES_ROOT`); None when no
   *     local folder can be authorized.
   */
@@ -56,10 +56,10 @@ object LocationChecker:
     yield ()
 
   /** Why a user may not hold an S3 credential for `scope` (as UserS3CredentialRules normalized it):
-    * the scope lies at or under a database data folder of any tenant, or one of its derived
-    * siblings (`.wal`, `__br_<id8>`), or in a bucket whose data path the checker cannot parse. An
-    * ancestor of a data folder is admitted: the folder itself stays refused at use (decision 18).
-    * None when the scope may be held.
+    * the scope lies at or under one of `dataFolders`, those that count against that user, or one of
+    * its derived siblings (`.wal`, `__br_<id8>`), or in a bucket whose data path the checker cannot
+    * parse. An ancestor of a data folder is admitted: the folder itself stays refused at use
+    * (decision 18). None when the scope may be held.
     */
   def scopeError(scope: String, dataFolders: List[String]): Option[String] =
     val shown = shownOf(scope)
@@ -154,19 +154,15 @@ object LocationChecker:
     */
   def unplaceable(s: String): Boolean = entry(s) == Entry.UnknownLocal
 
-  /** The deny set as parsed entries, kept for the last list judged: the live rules hand every
-    * statement the same list until a data path changes, so each data folder is parsed and folded
-    * once, not once per statement.
+  /** The deny lists as parsed entries, by list instance: the live rules hand each tenant's
+    * statements the same list until a data path changes, so each data folder is parsed and folded
+    * once per list, not once per statement.
     */
-  private val lastEntries = new AtomicReference[(List[String], List[Entry])]((Nil, Nil))
+  private val parsedLists =
+    Caffeine.newBuilder().weakKeys().maximumSize(1024L).build[List[String], List[Entry]]()
 
   private def entriesOf(dataFolders: List[String]): List[Entry] =
-    val (folders, parsed) = lastEntries.get()
-    if folders eq dataFolders then parsed
-    else
-      val fresh = dataFolders.map(entry)
-      lastEntries.set((dataFolders, fresh))
-      fresh
+    parsedLists.get(dataFolders, _.map(entry))
 
   /** Some(detail) when `p` reaches a data folder (detail empty, or why it may). */
   private def deny(p: LocationPath, dataFolders: List[String]): Option[String] =

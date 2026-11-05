@@ -94,10 +94,113 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
     f.sup.userS3.of(f.alice) shouldBe Nil
   }
 
+  private val OwnKeys =
+    Map("s3_access_key_id" -> "MADEUP", "s3_secret_access_key" -> "made-up-sentinel")
+
+  "dataPathHolders" should "name a row's tenant only where it holds complete keys of its own" in {
+    val store   = new InMemoryControlPlaneStore()
+    val managed = ai.starlake.quack.ManagedObjectStoreConfig(accessKeyId = "OPERATOR")
+    val sup     = new PoolSupervisor(
+      StubQuackBackend.noop(),
+      new NodeLoadTracker,
+      store,
+      defaultMetastore = Map("dataPath" -> "s3://shared/default/lake"),
+      managedStore = Some(managed)
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    def row(
+        id: String,
+        path: String,
+        objectStore: Map[String, String],
+        metastore: Map[String, String] = Map.empty,
+        branchOf: Option[String] = None
+    ) = store.upsertTenantDb(
+      ai.starlake.quack.model.TenantDb(
+        id = id,
+        tenantId = "acme",
+        name = s"acme_$id",
+        kind = TenantDbKind.DuckLake,
+        metastore = metastore,
+        dataPath = path,
+        objectStore = objectStore,
+        branchOf = branchOf
+      )
+    )
+    row("own", "s3://shared/own/", OwnKeys)
+    row("partial", "s3://shared/partial/", OwnKeys - "s3_secret_access_key")
+    row("blank", "s3://shared/blank/", OwnKeys.updated("s3_secret_access_key", " "))
+    row("nokeys", "s3://shared/nokeys/", Map.empty)
+    row("local", "/data/local/", OwnKeys)
+    row("operator", "s3://shared/operator/", OwnKeys.updated("s3_access_key_id", "OPERATOR"))
+    row("stated", "s3://shared/stated/", OwnKeys, metastore = Map("dataPath" -> "s3://shared/old/"))
+    row("branch", "s3://shared/own__br_0123abcd/", OwnKeys, branchOf = Some("own"))
+    row("orphan", "s3://shared/gone__br_0123abcd/", OwnKeys, branchOf = Some("gone"))
+    row("ofnokeys", "s3://shared/nokeys__br_0123abcd/", OwnKeys, branchOf = Some("nokeys"))
+    sup.restore()
+    val of = sup.dataPathHolders().groupMap(_.path)(_.tenant)
+    of("s3://shared/own/") shouldBe List(Some("acme"))
+    of("s3://shared/own__br_0123abcd/") shouldBe List(Some("acme"))
+    of("s3://shared/stated/") shouldBe List(Some("acme"))
+    List(
+      "s3://shared/partial/",
+      "s3://shared/blank/",
+      "s3://shared/nokeys/",
+      "/data/local/",
+      "s3://shared/operator/",
+      "s3://shared/old/",
+      "s3://shared/gone__br_0123abcd/",
+      "s3://shared/nokeys__br_0123abcd/",
+      "s3://shared/default/lake"
+    ).foreach(p => withClue(p)(of(p) shouldBe List(None)))
+    sup.dataPaths().toSet shouldBe of.keySet
+  }
+
+  it should "count against everyone as soon as a superuser clears a row's keys" in {
+    val f  = new Fixture
+    val td = f.sup
+      .createTenantDb(
+        "acme",
+        "owned",
+        TenantDbKind.DuckLake,
+        Map(
+          "pgHost"     -> "localhost",
+          "pgPort"     -> "5432",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p",
+          "schemaName" -> "main"
+        ),
+        "s3://shared/owned/",
+        objectStore = OwnKeys,
+        writerTrusted = true
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+    def holder = f.sup.dataPathHolders().filter(_.path == "s3://shared/owned/").map(_.tenant)
+    holder shouldBe List(Some("acme"))
+    // What the trigger does to the row's tenant: the update publishes it to this replica's handles.
+    f.store.bumpPolicyVersion("acme")
+    val moved = f.store.policyVersions()("acme")
+    f.sup.policyVersions.current("acme") should be < moved
+    f.sup
+      .updateTenantDb(
+        "acme",
+        td.name,
+        ai.starlake.quack.ondemand.TenantDbPatch(
+          objectStore = Some(Map("s3_access_key_id" -> "", "s3_secret_access_key" -> "")),
+          writerTrusted = true
+        )
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    holder shouldBe List(None)
+    f.sup.policyVersions.current("acme") should be >= moved
+  }
+
   "a credential" should "stop being served and admitted once a database lands at or above its scope" in {
     val f     = new Fixture
     val rules = new ai.starlake.quack.edge.authz.location.LiveLocationRules(
-      dataPaths = () => f.sup.dataPaths(),
+      holders = () => f.sup.dataPathHolders(),
       unpurgedPrefixes = () => Nil,
       tenantLocations = f.sup.tenantLocations,
       userScopes = u => f.sup.userS3.current(u).map(_.map(_.scope)),
@@ -106,7 +209,7 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
     )
     val served = new ai.starlake.quack.edge.authz.ServedUserS3Credentials(
       f.sup.userS3,
-      () => rules.dataFolders(),
+      rules.foldersAgainstUser,
       Nil
     )
     // Registered first, while nothing lies there.

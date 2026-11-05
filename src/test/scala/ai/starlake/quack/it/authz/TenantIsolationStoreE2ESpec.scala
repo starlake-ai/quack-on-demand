@@ -82,6 +82,7 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
         relayed = false,
         stackPrefixes = List(Prefix),
         defaultDataPath = Some(s"s3://$Bucket/$Prefix$run/default/"),
+        userS3Endpoints = s"http://$endpoint",
         extraManagerConfig = s"""
           |managedObjectStore {
           |  enabled = true
@@ -231,7 +232,11 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
     }
 
   private val Elsewhere = Map("s3_endpoint" -> "http://127.0.0.1:1", "s3_url_style" -> "path")
-  private val MadeUp    =
+
+  /** What a statement reads when its location lies in a data folder that counts against its user.
+    */
+  private val LocationDenied = "is a database data folder"
+  private val MadeUp         =
     Map("s3_access_key_id" -> "MADEUPID", "s3_secret_access_key" -> "made-up-secret-sentinel")
 
   // ---------- cases ----------
@@ -385,3 +390,150 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
       rowsRead(t, name, "pb", "pb") shouldBe Right(List("20000"))
       objectStoreOf(t, name, token) shouldBe shown
     }
+
+  // ---------- a user's own keys and a folder holding its own ----------
+
+  private def addScope(token: String, scope: String): (Int, String) =
+    // Registering a scope again replaces it: safe to send again on a connection lost under load.
+    def send() =
+      stack.postStatus(
+        "/api/profile/s3/add",
+        obj(
+          "scope"           -> s(scope),
+          "accessKeyId"     -> s(sys.env("QOD_S3_ACCESS_KEY_ID")),
+          "secretAccessKey" -> s(sys.env.getOrElse("QOD_S3_SECRET_ACCESS_KEY", "")),
+          "region"          -> s("us-east-1"),
+          "endpoint"        -> s(s"http://$endpoint"),
+          "urlStyle"        -> s("path")
+        ),
+        token
+      )
+    try send()
+    catch case _: java.io.IOException => send()
+
+  private def inDataFolder(out: (Int, String)): Unit =
+    withClue(out._2.take(300)) {
+      out._1 shouldBe 400
+      field(out._2, "error") shouldBe "scope_in_data_folder"
+    }
+
+  private def added(out: (Int, String)): Unit =
+    withClue(out._2.take(300))(out._1 shouldBe 200)
+
+  private def effectivePath(t: String, name: String, token: String): String =
+    rowOf(t, name, token).hcursor.get[String]("effectiveDataPath").getOrElse(fail("no path"))
+
+  "A folder holding its own keys" should "count against the users of its own tenant alone" in {
+    ready()
+    val ta     = s"${Prefix}b1$run"
+    val tb     = s"${Prefix}b2$run"
+    val tokenA = tenantWithAdmin(ta, "ra")
+    val tokenB = tenantWithAdmin(tb, "rb")
+    val shared = s"s3://$Bucket/$Prefix$run/shared"
+    val lake   = s"$shared/lake/"
+    val zone   = s"${lake}zone/"
+    val homeB  = createDb(tb, "home", tokenB)
+    openPool(tb, homeB, "rb", tokenB)
+    serving(tb, "rb", "rb")
+    def asB(sql: String)                = stack.flight(sql, "rb", Pw, tb, "rb")
+    def write(file: String, value: Int) =
+      asB(s"COPY (SELECT $value AS v) TO '$file' (FORMAT parquet)")
+    def read(file: String)                       = asB(s"SELECT sum(v) FROM read_parquet('$file')")
+    def wrote(out: Either[String, List[String]]) =
+      withClue(out.toString.take(300))(out.isRight shouldBe true)
+    def isRefused(out: Either[String, List[String]], why: String) =
+      withClue(out.toString.take(300)) {
+        out.isLeft shouldBe true
+        out.left.toOption.get should include(why)
+      }
+
+    // Before A's database: the scope registers, reads and writes.
+    added(addScope(tokenB, zone))
+    wrote(write(s"${zone}f1.parquet", 41))
+    read(s"${zone}f1.parquet") shouldBe Right(List("41"))
+
+    // A's database at a parent of it, on keys that open nothing.
+    val lakeA = createDb(
+      ta,
+      "lake",
+      tokenA,
+      "dataPath"    -> s(lake),
+      "objectStore" -> Json.obj(MadeUp.toList.map((k, v) => k -> s(v))*)
+    )
+
+    // After it: the same, for B's user.
+    added(addScope(tokenB, s"${lake}zone2/"))
+    read(s"${zone}f1.parquet") shouldBe Right(List("41"))
+    wrote(write(s"${zone}f2.parquet", 42))
+    read(s"${zone}f2.parquet") shouldBe Right(List("42"))
+    wrote(write(s"${lake}zone2/f3.parquet", 43))
+
+    // A's own user is refused there: their scope above it covers the URL, and their node signs it.
+    inDataFolder(addScope(tokenA, zone))
+    added(addScope(tokenA, s"$shared/"))
+    openPool(ta, lakeA, "ra", tokenA)
+    serving(ta, "ra", "ra")
+    isRefused(
+      stack.flight(s"SELECT sum(v) FROM read_parquet('${zone}f1.parquet')", "ra", Pw, ta, "ra"),
+      "would be signed with this node's own S3 keys"
+    )
+
+    // A node of B holds no secret of A's row, and a node of A holds it.
+    val ofB = secrets(tb, "rb")
+    withClue(ofB.toString)(ofB.exists(_.contains(lake)) shouldBe false)
+    val ofA = secrets(ta, "ra")
+    withClue(ofA.toString)(
+      ofA.exists(l => l.startsWith("qod_db_store") && l.contains(lake)) shouldBe true
+    )
+
+    // B's user holds a scope above everything from here on, so only the folder refuses.
+    added(addScope(tokenB, s"s3://$Bucket/"))
+
+    // A folder QoD placed for A, and one of managed storage, count against B's user.
+    val placedA = createDb(ta, "placed", tokenA)
+    val placed  = effectivePath(ta, placedA, tokenA).stripSuffix("/") + "/"
+    inDataFolder(addScope(tokenB, s"${placed}x/"))
+    isRefused(read(s"${placed}x.parquet"), LocationDenied)
+    val managedA = createDb(ta, "managed", tokenA, "managedStorage" -> Json.True)
+    val managed  = effectivePath(ta, managedA, tokenA).stripSuffix("/") + "/"
+    inDataFolder(addScope(tokenB, s"${managed}x/"))
+    isRefused(read(s"${managed}x.parquet"), LocationDenied)
+
+    // A folder of B's own database holding its own keys counts against B's user.
+    val bown = s"$shared/bown/"
+    createDb(
+      tb,
+      "bown",
+      tokenB,
+      "dataPath"    -> s(bown),
+      "objectStore" -> Json.obj(MadeUp.toList.map((k, v) => k -> s(v))*)
+    )
+    inDataFolder(addScope(tokenB, s"${bown}x/"))
+    isRefused(read(s"${bown}x.parquet"), LocationDenied)
+
+    // A tenant admin naming a path at A's folder: the whole set, whoever holds it.
+    val (takenCode, takenBody) = stack.postStatus(
+      "/api/database/create",
+      obj(
+        "tenant"      -> s(tb),
+        "name"        -> s("taken"),
+        "kind"        -> s("ducklake"),
+        "dataPath"    -> s(lake),
+        "objectStore" -> Json.obj(MadeUp.toList.map((k, v) => k -> s(v))*)
+      ),
+      tokenB
+    )
+    withClue(takenBody.take(300)) {
+      takenCode shouldBe 409
+      field(takenBody, "error") shouldBe "data_path_taken"
+    }
+
+    // A superuser clears its keys: B's user is refused on the next statement.
+    read(s"${zone}f1.parquet") shouldBe Right(List("41"))
+    val (cleared, clearedBody) =
+      updateStore(ta, lakeA, su, Map("s3_access_key_id" -> "", "s3_secret_access_key" -> ""))
+    withClue(clearedBody.take(300))(cleared shouldBe 200)
+    isRefused(read(s"${zone}f1.parquet"), LocationDenied)
+    isRefused(write(s"${zone}f4.parquet", 44), LocationDenied)
+    inDataFolder(addScope(tokenB, s"${lake}zone3/"))
+  }

@@ -313,8 +313,22 @@ credentials (`POST /api/user/s3/list|remove`, `TenantScopeCheck`, `qod user s3 l
 user view), never adds one; MCP lists and removes only (`list_my_s3_credentials`,
 `remove_my_s3_credential`). An endpoint other than AWS's own must be listed in
 `quack-on-demand.userS3.allowedEndpoints` (`QOD_USER_S3_ALLOWED_ENDPOINTS`: `host[:port]` for TLS,
-`http://host[:port]` for plain HTTP; empty means AWS only). A scope at or under a database data folder
-is refused when added (`400 scope_in_data_folder`) and again at use. Every handle carries `creds`, the
+`http://host[:port]` for plain HTTP; empty means AWS only). A scope at or under a data folder that
+counts against the user is refused when added (`400 scope_in_data_folder`) and again at use, through
+one function, `LiveLocationRules.foldersAgainst`, at add, in the statement's rules and in the
+credentials a replica serves. A folder of a row holding complete keys of its own
+(`TenantDb.holdsOwnKeys`, not on the managed store's key, its branch's parent holding them too) counts
+against the users of that row's tenant only; anything else against every non-superuser: QoD placed,
+managed storage or a branch of it, a superuser's row signing with the manager's keys, a local path,
+`DataFolders.Unplaced`, a path a row merely states. So do these, whatever the row holds: several rows at
+one path when one does not qualify (else each one's tenant), a path a holder left (a drop, keys cleared)
+within `RecentMs`, a managed prefix within retention; a store read that fails gives no list, so no
+verdict. A location several folders cover is refused if any counts against the user.
+`namedDataPathTaken` and `409 data_path_taken` keep the whole set (`LiveLocationRules.dataFolders`),
+whoever owns it. **On a bucket tenants share, a user's own keys reach another tenant's folder holding
+its own keys wherever the store allows them, for reads and writes; the store's key permissions are what
+protects it.** A node holds no secret of another tenant's row. A change of a row's keys moves every
+tenant's policy version (`0057`). Every handle carries `creds`, the
 SHA-256 of the user's credential ids and update times (empty for none); when it differs from what a
 node connection last installed, or a client ROLLBACK undid those secrets, `qod_session` fetches the set
 from the handle's replica (`POST /api/internal/authz/credentials`, `CredentialsRoute`, mounted beside
@@ -324,7 +338,7 @@ principal and digest for 5 minutes, and installs one connection secret `qod_uc_<
 (DuckDB's `connection` secret storage: invisible to other connections, transactional, every s3 key
 named so no session setting fills one in). A failed fetch refuses the statement, retryable, and no
 statement runs on that connection until a prelude succeeds. A user's `s3://` URL is admitted only
-under one of their own scopes and outside every data folder; one that a node secret of its own (an
+under one of their own scopes and outside every data folder that counts against them; one that a node secret of its own (an
 Iceberg catalog's `qod_ice_*`, an operator's) would sign over the user's is refused on the node. The
 keys travel manager to node signed, not encrypted, like the node token: a private network is
 required. The keys sit in plaintext in the control-plane database (`qodstate_user_s3_credential.
@@ -1123,7 +1137,7 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
 - **Add every new RBAC table to the policy-version trigger.** `qod_bump_policy_version()` (Liquibase
   `0050`, extended by `0051` and `0052`) bumps `qodstate_tenant.policy_version` on writes to the
   tables it is attached to, and `qod_bump_every_policy_version()` (`0054`) bumps every tenant on a
-  change to the data-path deny set (attach a new source of data folders to that one); a table that changes what a principal may do but is not attached (a new
+  change to the data-path deny set, a row's object-store keys included (`0057`; attach a new source of data folders to that one); a table that changes what a principal may do but is not attached (a new
   grant or policy table, a new tenant ACL column, a new source of data folders) never invalidates
   cached verdicts, so nodes keep allowing for up to the verdict's 60 s. Attach it in the same changeset
   that creates it.
