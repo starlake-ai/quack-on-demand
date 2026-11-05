@@ -2,10 +2,14 @@ package ai.starlake.quack.ondemand.demo
 
 import ai.starlake.quack.Main
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec
-import ai.starlake.quack.{FlightConfig, ManagerConfig}
+import ai.starlake.quack.{FlightConfig, ManagerConfig, QuackNativeConfig}
+import ai.starlake.quack.ondemand.storage.{ManagedStoreClient, S3ManagedStoreClient}
 import cats.effect.{ExitCode, IO}
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig.ConfigSource
+
+import java.util.concurrent.atomic.AtomicReference
+import scala.util.control.NonFatal
 
 /** `qod demo` orchestration. Boots a fully self-contained, seeded, RBAC-secured manager on an
   * embedded ephemeral Postgres, prints the demo banner, and tears everything down on exit.
@@ -53,6 +57,12 @@ object DemoRunner extends LazyLogging:
     com.typesafe.config.ConfigFactory.invalidateCaches()
 
   def runDemo(args: List[String]): IO[ExitCode] =
+    // Before anything is created: a malformed path stops here with one line, not a stack trace.
+    DemoS3.fromEnv(sys.env.get) match
+      case Left(err) => IO.blocking(System.err.println(s"demo: $err")).as(ExitCode.Error)
+      case Right(s3) => runDemo(args, s3)
+
+  private def runDemo(args: List[String], s3: Option[DemoS3]): IO[ExitCode] =
     val explicitHome = args.headOption
     // `home` is created up front (a cheap, side-effect-free mkdir) and `pgRef` records the embedded
     // PG instance the moment it starts, BEFORE any later setup step (createDatabase, config load,
@@ -61,17 +71,36 @@ object DemoRunner extends LazyLogging:
     // deletes the home instead of leaking both under ${TMPDIR}/qod-demo.
     val home          = DemoHome.create(explicitHome)
     val propsSnapshot = snapshotSysProps() // captured BEFORE `setup` sets any of MutatedSysProps
-    val pgRef         = new java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]](None)
-    val cleanup       = IO.blocking {
+    val pgRef         = new AtomicReference[Option[DemoPostgres]](None)
+    // Set once the store is known to work, so a bad key does not also report a failed delete.
+    val prepared = new AtomicReference[Option[(DemoS3, ManagedStoreClient)]](None)
+    val cleanup  = IO.blocking {
       logger.info("demo: tearing down")
-      try pgRef.get().foreach(_.stop())
+      try prepared.get().foreach((s, c) => removeRun(s, c))
       finally
-        try home.deleteRecursively()
-        finally restoreSysProps(propsSnapshot)
+        try pgRef.get().foreach(_.stop())
+        finally
+          try home.deleteRecursively()
+          finally restoreSysProps(propsSnapshot)
     }
-    IO.blocking(setup(home, pgRef))
-      .flatMap(configs => bootWithBanner(home, configs))
+    IO.blocking(setup(home, pgRef, s3, prepared))
+      .flatMap(configs => bootWithBanner(home, configs, s3))
       .guarantee(cleanup)
+
+  /** Own-bucket mode's end: the only thing left of a run is its folder of objects. A local store's
+    * objects go with the store, which the CLI deletes. Never fails the exit.
+    */
+  private def removeRun(s3: DemoS3, client: ManagedStoreClient): Unit =
+    if !s3.local then
+      val outcome =
+        try s3.deleteRun(client)
+        catch case NonFatal(e) => Left(String.valueOf(e.getMessage))
+      outcome match
+        case Right(n)  => println(s"demo: deleted $n objects under ${s3.runFolder}")
+        case Left(err) =>
+          System.err.println(
+            s"demo: could not delete ${s3.runFolder}: ${s3.redact(err)}. Remove it by hand."
+          )
 
   /** Blocking, ordered setup: embedded PG -> databases -> config overlay -> seed manifest env ->
     * data seed. `pgRef` is populated as soon as PG starts so `runDemo`'s cleanup can stop it even
@@ -79,7 +108,9 @@ object DemoRunner extends LazyLogging:
     */
   private def setup(
       home: DemoHome,
-      pgRef: java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]]
+      pgRef: AtomicReference[Option[DemoPostgres]],
+      s3: Option[DemoS3],
+      prepared: AtomicReference[Option[(DemoS3, ManagedStoreClient)]]
   ): DemoConfigs =
     // RLS/CLS are the whole point of the demo banner's promise, but both are read straight off
     // `com.typesafe.config.ConfigFactory.load()` deep inside `Main.bootManager` (`cls.enabled` /
@@ -94,13 +125,19 @@ object DemoRunner extends LazyLogging:
     System.setProperty("quack-on-demand.cls.enabled", "true")
     System.setProperty("quack-on-demand.rls.enabled", "true")
     com.typesafe.config.ConfigFactory.invalidateCaches()
+    s3.foreach { s =>
+      val client = new S3ManagedStoreClient(s.storeConfig)
+      s.prepare(client, key => client.putObject(key, Array.emptyByteArray)) match
+        case Left(err) => sys.error(s.redact(err))
+        case Right(()) => prepared.set(Some((s, client)))
+    }
     val pg = DemoPostgres.start(home.pgDir)
     pgRef.set(Some(pg))
     pg.createDatabase("qod")  // control plane
     pg.createDatabase(DbName) // tenant-db DuckLake catalog
 
     val base    = loadBase()
-    val configs = DemoConfig.overlay(base._1, base._2, pg.coords, home)
+    val configs = DemoConfig.overlay(base._1, base._2, base._3, pg.coords, home, s3)
 
     // Point DemoBootstrapHook at the bundled minimal manifest so the manager seeds the control
     // plane on first boot. The hook's env reader is patched (Step 6b) to fall back to system
@@ -110,16 +147,25 @@ object DemoRunner extends LazyLogging:
     // Liquibase must create qodstate_* before the hook imports; the manager boot does that. The
     // hook runs inside boot after migration. Data seeding, however, needs the tenant-db catalog
     // reachable independently -- run it now against the embedded PG.
-    DemoSeed.run(pg.coords, DbName, Schema, home, Sf) match
+    DemoSeed.run(
+      pg.coords,
+      DbName,
+      Schema,
+      s3.fold(home.dataPath.toString)(_.defaultDataPath),
+      Sf,
+      s3.fold[List[String]](Nil)(_.seedStorageSql),
+      s3.fold[String => String](identity)(s => s.redact)
+    ) match
       case Left(err) => sys.error(err)
       case Right(()) => ()
     configs
 
-  private def loadBase(): (ManagerConfig, FlightConfig) =
+  private def loadBase(): (ManagerConfig, FlightConfig, QuackNativeConfig) =
     val src = ConfigSource.default
     (
       src.at("quack-on-demand").loadOrThrow[ManagerConfig],
-      src.at("quack-flightsql").loadOrThrow[FlightConfig]
+      src.at("quack-flightsql").loadOrThrow[FlightConfig],
+      src.at("quack-native").loadOrThrow[QuackNativeConfig]
     )
 
   // NOTE (Step 6b): the manifest path is delivered via System.setProperty above; the boot-time
@@ -127,7 +173,11 @@ object DemoRunner extends LazyLogging:
   // `env = sys.env.get` to `env = k => sys.env.get(k).orElse(sys.props.get(k))`. Additive: the real
   // env var still wins for normal boots; only the demo path relies on the sysprop fallback.
 
-  private def bootWithBanner(home: DemoHome, configs: DemoConfigs): IO[ExitCode] =
+  private def bootWithBanner(
+      home: DemoHome,
+      configs: DemoConfigs,
+      s3: Option[DemoS3]
+  ): IO[ExitCode] =
     val baseAuthCfg =
       ConfigSource.default
         .at("quack-flightsql.auth")
@@ -163,10 +213,11 @@ object DemoRunner extends LazyLogging:
     val banner = DemoBanner.render(
       restPort = configs.manager.port,
       flightPort = configs.flight.port,
-      dataPath = home.dataPath.toString,
+      dataPath = s3.fold(home.dataPath.toString)(_.runFolder),
       rows = "~150K",
       adminNames = configs.manager.admin.usernameList,
-      adminPasswordLabel = configs.adminPasswordLabel
+      adminPasswordLabel = configs.adminPasswordLabel,
+      storageNotes = s3.fold[List[String]](Nil)(_.bannerNotes)
     )
     // Print the banner once the manager REST port actually accepts connections, so the
     // connect recipes land at the END of the boot output instead of scrolling away under
@@ -177,4 +228,11 @@ object DemoRunner extends LazyLogging:
       println(banner)
     }
     printWhenReady.start *>
-      Main.bootManager(configs.manager, configs.flight, authCfg, metricsCfg, opaCfg)
+      Main.bootManager(
+        configs.manager,
+        configs.flight,
+        authCfg,
+        metricsCfg,
+        opaCfg,
+        quackCfg = Some(configs.quack)
+      )

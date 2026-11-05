@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.demo
 
-import ai.starlake.quack.{FlightConfig, ManagerConfig}
+import ai.starlake.quack.{FlightConfig, ManagerConfig, QuackNativeConfig}
 
 /** The effective demo configs produced by [[DemoConfig.overlay]]. */
 /** `adminPasswordLabel` is what the banner shows as the seeded admins' password: the literal demo
@@ -10,6 +10,7 @@ import ai.starlake.quack.{FlightConfig, ManagerConfig}
 final case class DemoConfigs(
     manager: ManagerConfig,
     flight: FlightConfig,
+    quack: QuackNativeConfig,
     adminPasswordLabel: String
 )
 
@@ -29,24 +30,33 @@ object DemoConfig:
 
   val DefaultAdminPassword     = "admin"
   val ChosenAdminPasswordLabel = "<QOD_ADMIN_PASSWORD>"
+  private val Loopback         = "127.0.0.1"
 
+  /** On the user's own bucket every client listener binds loopback: the demo's superuser logins are
+    * public and the manager's environment holds real keys. The safe side is the default: only a run
+    * the CLI marks local keeps the configured hosts, as its keys and data are throwaway.
+    */
   def overlay(
       baseManager: ManagerConfig,
       baseFlight: FlightConfig,
+      baseQuack: QuackNativeConfig,
       pg: PgCoords,
-      home: DemoHome
+      home: DemoHome,
+      s3: Option[DemoS3]
   ): DemoConfigs =
     val passwordDefaulted = baseManager.admin.password.isEmpty
+    val loopbackOnly      = s3.exists(!_.local)
     val metastore         = baseManager.defaultMetastore.copy(
       pgHost = pg.host,
       pgPort = pg.port.toString,
       pgUser = pg.user,
       pgPassword = pg.password,
       dbName = "qod",
-      dataPath = home.dataPath.toString
+      dataPath = s3.fold(home.dataPath.toString)(_.defaultDataPath)
     )
     val manager = baseManager.copy(
       runtimeType = "local",
+      host = if loopbackOnly then Loopback else baseManager.host,
       // The demo defaults the admin password to `admin`; an exported QOD_ADMIN_PASSWORD still wins.
       admin =
         if passwordDefaulted then baseManager.admin.copy(password = DefaultAdminPassword)
@@ -54,6 +64,7 @@ object DemoConfig:
       defaultMetastore = metastore
     )
     val flight = baseFlight.copy(
+      host = if loopbackOnly then Loopback else baseFlight.host,
       tlsEnabled = true,
       port = 31338,
       tlsCertChain = home.root.resolve("certs/server-cert.pem").toString,
@@ -62,6 +73,7 @@ object DemoConfig:
     DemoConfigs(
       manager,
       flight,
+      if loopbackOnly then baseQuack.copy(host = Loopback) else baseQuack,
       adminPasswordLabel =
         if passwordDefaulted then DefaultAdminPassword else ChosenAdminPasswordLabel
     )

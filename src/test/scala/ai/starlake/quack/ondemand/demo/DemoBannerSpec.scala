@@ -89,6 +89,22 @@ class DemoBannerSpec extends AnyFlatSpec with Matchers:
     (b should not).include("dbapi.connect")
   }
 
+  it should "print the storage notes under the data path, and nothing extra without them" in {
+    def render(notes: Seq[String]) = DemoBanner.render(
+      restPort = 20900,
+      flightPort = 31338,
+      dataPath = "s3://b12/qod-demo-1a2b3c4d",
+      rows = "~150K",
+      adminNames = Seq("admin"),
+      adminPasswordLabel = "admin",
+      storageNotes = notes
+    )
+    render(Seq("note one", "note two")) should include(
+      "DuckLake: s3://b12/qod-demo-1a2b3c4d (tenant acme, ~150K TPC-H rows)\n  note one\n  note two\n"
+    )
+    render(Nil) should include("TPC-H rows)\n\n  Admin UI:")
+  }
+
   "DemoBanner.awaitPort" should "return true once the port accepts and false on timeout" in {
     val srv = new java.net.ServerSocket(0)
     try

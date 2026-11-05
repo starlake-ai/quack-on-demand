@@ -15,6 +15,8 @@ class DemoConfigSpec extends AnyFlatSpec with Matchers:
     ConfigSource.default.at("quack-on-demand").loadOrThrow[ai.starlake.quack.ManagerConfig]
   private val baseFlight =
     ConfigSource.default.at("quack-flightsql").loadOrThrow[ai.starlake.quack.FlightConfig]
+  private val baseQuack =
+    ConfigSource.default.at("quack-native").loadOrThrow[ai.starlake.quack.QuackNativeConfig]
 
   private val home =
     DemoHome(Paths.get("/x"), Paths.get("/x/pg"), Paths.get("/x/dl"), Paths.get("/x/native"))
@@ -26,8 +28,10 @@ class DemoConfigSpec extends AnyFlatSpec with Matchers:
         .overlay(
           baseManager.copy(admin = baseManager.admin.copy(password = pw)),
           baseFlight,
+          baseQuack,
           pg,
-          home
+          home,
+          None
         )
         .manager
         .admin
@@ -42,8 +46,10 @@ class DemoConfigSpec extends AnyFlatSpec with Matchers:
         .overlay(
           baseManager.copy(admin = baseManager.admin.copy(password = pw)),
           baseFlight,
+          baseQuack,
           pg,
-          home
+          home,
+          None
         )
         .adminPasswordLabel
     labelWith("") shouldBe "admin"
@@ -52,7 +58,7 @@ class DemoConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "force the approved demo posture" in {
-    val out = DemoConfig.overlay(baseManager, baseFlight, pg, home)
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, None)
     out.manager.defaultMetastore.pgHost shouldBe "localhost"
     out.manager.defaultMetastore.pgPort shouldBe "54321"
     out.manager.defaultMetastore.pgUser shouldBe "postgres"
@@ -71,20 +77,66 @@ class DemoConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "not pick a manager-to-node client: the native client is the only one" in {
-    val out = DemoConfig.overlay(baseManager, baseFlight, pg, home)
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, None)
     (out.manager.productElementNames.toList should contain).noneOf("nativeClient", "nodeDisableSsl")
   }
 
   it should "carry no API key setting" in {
-    val out = DemoConfig.overlay(baseManager, baseFlight, pg, home)
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, None)
     (out.manager.productElementNames.toList should not).contain("apiKey")
   }
 
   it should "leave the base configs untouched (Guardrail 1: no in-place mutation)" in {
     val beforeTls       = baseFlight.tlsEnabled
     val beforeMetastore = baseManager.defaultMetastore
-    DemoConfig.overlay(baseManager, baseFlight, pg, home)
+    DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, None)
     baseFlight.tlsEnabled shouldBe beforeTls
     // A boolean: a failure must not print the metastore (its password included).
     (baseManager.defaultMetastore == beforeMetastore) shouldBe true
+  }
+
+  private val s3Run                      = "s3://b12/qod-demo-1a2b3c4d"
+  private def s3(local: Boolean): DemoS3 =
+    DemoS3
+      .fromEnv(
+        Map(
+          "QOD_DEMO_S3_PATH"         -> s3Run,
+          "QOD_S3_ACCESS_KEY_ID"     -> "k",
+          "QOD_S3_SECRET_ACCESS_KEY" -> "s"
+        ).updatedWith("QOD_DEMO_S3_LOCAL")(_ => Option.when(local)("1")).get
+      )
+      .toOption
+      .flatten
+      .get
+
+  "DemoConfig.overlay with no S3" should "keep the folder and the configured hosts" in {
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, None)
+    out.manager.defaultMetastore.dataPath shouldBe "/x/dl"
+    out.manager.host shouldBe baseManager.host
+    out.flight.host shouldBe baseFlight.host
+    out.quack.host shouldBe baseQuack.host
+  }
+
+  "DemoConfig.overlay on a local store" should "use the S3 path and keep the configured hosts" in {
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, Some(s3(true)))
+    out.manager.defaultMetastore.dataPath shouldBe s"$s3Run/data"
+    out.manager.host shouldBe baseManager.host
+    out.flight.host shouldBe baseFlight.host
+    out.quack.host shouldBe baseQuack.host
+  }
+
+  "DemoConfig.overlay on the user's bucket" should "bind every client listener to loopback" in {
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, Some(s3(false)))
+    out.manager.defaultMetastore.dataPath shouldBe s"$s3Run/data"
+    out.manager.host shouldBe "127.0.0.1"
+    out.flight.host shouldBe "127.0.0.1"
+    out.quack.host shouldBe "127.0.0.1"
+  }
+
+  it should "derive the demo's database inside the run folder" in {
+    val out = DemoConfig.overlay(baseManager, baseFlight, baseQuack, pg, home, Some(s3(false)))
+    ai.starlake.quack.ondemand.PoolSupervisor.replaceLastSegment(
+      out.manager.defaultMetastore.dataPath,
+      "acme_tpch"
+    ) shouldBe s"$s3Run/acme_tpch"
   }

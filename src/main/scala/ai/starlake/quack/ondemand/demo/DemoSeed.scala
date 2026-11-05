@@ -29,11 +29,14 @@ object DemoSeed extends LazyLogging:
       dbName: String,
       schema: String,
       dataPath: String,
-      sf: Double
+      sf: Double,
+      storageSql: List[String] = Nil
   ): String =
     val ctas = Tables
       .map(t => s"CREATE TABLE $dbName.$schema.$t AS SELECT * FROM memory.main.$t;")
       .mkString("\n")
+    // Each statement on lines of its own: the CLI skips the rest of a line after a failure.
+    val storageBlock = storageSql.map(_ + ";\n").mkString
     // The password rides a temporary secret, never the attach path ([[CatalogPgSecret]]).
     val secret = CatalogPgSecret.Name
     s"""INSTALL ducklake;
@@ -42,7 +45,7 @@ object DemoSeed extends LazyLogging:
        |LOAD postgres;
        |INSTALL tpch;
        |LOAD tpch;
-       |${CatalogPgSecret.createSql(secret, pg.password)};
+       |$storageBlock${CatalogPgSecret.createSql(secret, pg.password)};
        |ATTACH 'ducklake:postgres:host=${pg.host} port=${pg.port} dbname=$dbName user=${pg.user}' AS $dbName
        |  (DATA_PATH '$dataPath', ${CatalogPgSecret.metadataParameters(secret)});
        |${CatalogPgSecret.dropSql(secret)};
@@ -64,12 +67,13 @@ object DemoSeed extends LazyLogging:
       dbName: String,
       schema: String,
       dataPath: String,
-      sf: Double
+      sf: Double,
+      storageSql: List[String]
   ): String =
     val createSchema   = s"CREATE SCHEMA IF NOT EXISTS $dbName.$schema;"
     val dropThenCreate =
       s"DROP SCHEMA IF EXISTS $dbName.$schema CASCADE;\n$createSchema"
-    buildInitSql(pg, dbName, schema, dataPath, sf).replace(createSchema, dropThenCreate)
+    buildInitSql(pg, dbName, schema, dataPath, sf, storageSql).replace(createSchema, dropThenCreate)
 
   /** The first lines fed to every seed run. DuckDB loads every persistent secret of its secret
     * directory on first secret use, and the default is the OS user's `~/.duckdb/stored_secrets`;
@@ -128,29 +132,31 @@ object DemoSeed extends LazyLogging:
       pg: PgCoords,
       dbName: String,
       schema: String,
-      home: DemoHome,
+      defaultDataPath: String,
       sf: Double,
+      storageSql: List[String],
+      redact: String => String,
       duckdb: String = "duckdb",
       maxAttempts: Int = 3
   ): Either[String, Unit] =
     // `PoolSupervisor.effectiveMetastoreFor` derives a DuckLake tenant-db's dataPath by replacing
-    // the LAST path segment of `defaultMetastore.dataPath` (== `home.dataPath` here, per
+    // the LAST path segment of `defaultMetastore.dataPath` (`defaultDataPath` here, per
     // DemoConfig.overlay) with the tenant-db's name (`PoolSupervisor.replaceLastSegment`) -- e.g.
     // `.../ducklake` -> `.../acme_tpch`, NOT a subdirectory of `.../ducklake`. Seeding must ATTACH
     // at that SAME computed path, or the manager's own node later ATTACHes a physically different
     // (empty) directory and reports `Catalog "acme_tpch" does not exist!` even though the seed
     // "succeeded" against the wrong path. See DuckLake's absolute-DATA_PATH matching requirement
     // (class doc above).
-    val dataPath = ai.starlake.quack.ondemand.PoolSupervisor.replaceLastSegment(
-      home.dataPath.toString,
-      dbName
-    )
-    val firstSql      = buildInitSql(pg, dbName, schema, dataPath, sf)
-    lazy val retrySql = buildRetryInitSql(pg, dbName, schema, dataPath, sf)
+    val dataPath =
+      ai.starlake.quack.ondemand.PoolSupervisor.replaceLastSegment(defaultDataPath, dbName)
+    val firstSql      = buildInitSql(pg, dbName, schema, dataPath, sf, storageSql)
+    lazy val retrySql = buildRetryInitSql(pg, dbName, schema, dataPath, sf, storageSql)
     logger.info(s"demo seed: dbgen sf=$sf into $dbName.$schema at $dataPath")
     @scala.annotation.tailrec
     def attempt(n: Int, sql: String): Either[String, Unit] =
-      val (exit, err) = runOnce(duckdb, sql)
+      val (exit, rawErr) = runOnce(duckdb, sql)
+      // DuckDB's errors can quote the statement, and the storage SQL holds keys.
+      val err = redact(rawErr)
       if exit == 0 then Right(())
       else if n < maxAttempts then
         logger.warn(s"demo seed: attempt $n/$maxAttempts failed (exit $exit): $err -- retrying")

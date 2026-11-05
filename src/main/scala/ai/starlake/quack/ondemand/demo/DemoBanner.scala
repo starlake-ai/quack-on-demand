@@ -29,8 +29,10 @@ object DemoBanner:
       dataPath: String,
       rows: String,
       adminNames: Seq[String],
-      adminPasswordLabel: String
+      adminPasswordLabel: String,
+      storageNotes: Seq[String] = Nil
   ): String =
+    val notesBlock   = storageNotes.map(n => s"\n  $n").mkString
     val adminUiTable = table(
       header = Seq("Tenant", "User", "Password", "Access"),
       rows = Seq(Seq("(blank)", "root", "demo-root", "superuser console")) ++
@@ -54,7 +56,7 @@ object DemoBanner:
         | QoD demo ready  (self-signed TLS, ephemeral catalog)
         |===================================================================
         |
-        |  DuckLake: $dataPath (tenant acme, $rows TPC-H rows)
+        |  DuckLake: $dataPath (tenant acme, $rows TPC-H rows)$notesBlock
         |
         |  Admin UI: http://localhost:$restPort/ui/
         |
