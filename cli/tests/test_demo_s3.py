@@ -2,17 +2,22 @@
 
 import hashlib
 import io
+import json
 import os
+import re
 import shutil
+import stat
+import subprocess
 import sys
 import tarfile
 import zipfile
+from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from qod_cli import launcher
+from qod_cli import demo_s3, launcher
 
 # Read at import: the autouse isolated_env fixture deletes every QOD_* variable.
 LIVE_WEED = os.environ.get("QOD_DEMO_WEED_BIN") or shutil.which("weed")
@@ -199,12 +204,6 @@ def test_ensure_weed_lowercases_the_machine_name(monkeypatch, tmp_path):
     assert exe.name == "weed.exe"
 
 
-import json
-import re
-import stat
-
-from qod_cli import demo_s3
-
 ARGS = dict(
     demo=True, s3=False, s3_path=None, endpoint=None, region=None,
     access_key_id=None, secret_access_key=None, environ={},
@@ -314,6 +313,22 @@ def test_endpoint_decides_scheme_and_url_style(endpoint, host, ssl, style):
 def test_endpoint_with_a_path_is_refused():
     with pytest.raises(demo_s3.DemoS3Error, match="--endpoint"):
         _own(endpoint="http://minio:9000/some/path")
+
+
+def test_a_refused_endpoint_is_not_echoed():
+    with pytest.raises(demo_s3.DemoS3Error, match="--endpoint") as e:
+        _own(endpoint="http://user:secret@h:1/x")
+    assert "secret" not in str(e.value)
+    assert "user" not in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "over", [{"access_key_id": "K"}, {"secret_access_key": "S"}], ids=["id-only", "secret-only"]
+)
+def test_half_a_key_pair_is_refused_even_when_the_env_has_the_other_half(over):
+    env = {"AWS_ACCESS_KEY_ID": "EK", "AWS_SECRET_ACCESS_KEY": "ES"}
+    with pytest.raises(demo_s3.DemoS3Error, match="both --access-key-id and --secret-access-key"):
+        _req(s3_path="s3://b12/x", environ=env, **over)
 
 
 def test_a_request_prints_no_secret():
@@ -442,6 +457,8 @@ def _folders(tmp_path):
 
 
 def test_store_start_writes_private_credentials_and_a_record(tmp_path, monkeypatch):
+    for name in ("AWS_ACCESS_KEY_ID", "QOD_X", "WEED_X"):
+        monkeypatch.setenv(name, "ambient")
     store, captured = _start(tmp_path, monkeypatch, _FakeProc(), lambda port: True)
     folder = _folders(tmp_path)[0]
     assert stat.S_IMODE(folder.stat().st_mode) == 0o700 or sys.platform == "win32"
@@ -456,6 +473,9 @@ def test_store_start_writes_private_credentials_and_a_record(tmp_path, monkeypat
     # Nothing secret on the command line or in the store's environment.
     assert store.secret_access_key not in " ".join(captured["cmd"])
     assert not any(k.startswith(("AWS_", "QOD_", "WEED_")) for k in captured["kw"]["env"])
+    assert "PATH" in captured["kw"]["env"]
+    # Its own folder, so it never reads a security.toml or master.toml from the caller's.
+    assert captured["kw"]["cwd"] == folder
     assert captured["kw"].get("start_new_session") is True or sys.platform == "win32"
     assert store.secret_access_key not in repr(store)
 
@@ -473,6 +493,61 @@ def test_store_that_dies_at_start_fails_at_once(tmp_path, monkeypatch):
     with pytest.raises(demo_s3.DemoS3Error, match="exited"):
         _start(tmp_path, monkeypatch, _FakeProc(exits_at=1), lambda port: False)
     assert _folders(tmp_path) == []
+
+
+def test_store_leaves_nothing_when_the_process_cannot_be_started(tmp_path, monkeypatch):
+    monkeypatch.setattr(demo_s3.tempfile, "tempdir", str(tmp_path))
+
+    def popen(cmd, **kw):
+        raise OSError("exec format error")
+
+    with pytest.raises(OSError, match="exec format error"):
+        demo_s3.LocalStore.start(
+            tmp_path / "weed", record=tmp_path / "rec" / "store.json", popen=popen
+        )
+    assert _folders(tmp_path) == []
+    assert not (tmp_path / "rec" / "store.json").exists()
+
+
+def test_store_kills_the_process_when_the_record_cannot_be_written(tmp_path, monkeypatch):
+    (tmp_path / "rec").write_text("a file where the record's folder should be")
+    proc = _FakeProc()
+    with pytest.raises(OSError):
+        _start(tmp_path, monkeypatch, proc, lambda port: True)
+    assert proc.killed == 1
+    assert _folders(tmp_path) == []
+
+
+def test_store_is_cleaned_up_on_ctrl_c_while_waiting(tmp_path, monkeypatch):
+    proc = _FakeProc()
+
+    def interrupted(port):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _start(tmp_path, monkeypatch, proc, interrupted)
+    assert proc.killed == 1
+    assert _folders(tmp_path) == []
+    assert not (tmp_path / "rec" / "store.json").exists()
+
+
+def test_store_stop_keeps_a_record_another_run_has_taken_over(tmp_path, monkeypatch):
+    proc = _FakeProc()
+    store, _ = _start(tmp_path, monkeypatch, proc, lambda port: True)
+    rec = tmp_path / "rec" / "store.json"
+    rec.write_text(json.dumps({"pid": 9999, "dir": "/elsewhere/qod-demo-s3-x", "owner": 1}))
+    store.stop()
+    assert proc.killed >= 1
+    assert _folders(tmp_path) == []
+    assert json.loads(rec.read_text())["pid"] == 9999
+
+
+def test_store_stop_leaves_a_broken_record_as_it_is(tmp_path, monkeypatch):
+    store, _ = _start(tmp_path, monkeypatch, _FakeProc(), lambda port: True)
+    rec = tmp_path / "rec" / "store.json"
+    rec.write_text("not json")
+    store.stop()
+    assert rec.read_text() == "not json"
 
 
 def test_store_stop_kills_cleans_and_can_run_twice(tmp_path, monkeypatch):
@@ -527,6 +602,57 @@ def test_sweep_cleans_up_when_the_store_is_already_gone(tmp_path):
     assert not folder.exists() and not rec.exists()
 
 
+def test_sweep_touches_nothing_when_the_owner_cannot_be_read(tmp_path):
+    rec, folder = _record(tmp_path)
+    line = {111: f"/x/weed server -dir={folder}/data", 222: demo_s3.UNKNOWN}
+    assert _sweep(rec, line) == []
+    assert folder.exists() and rec.exists()
+
+
+def test_sweep_touches_nothing_when_the_store_cannot_be_read(tmp_path):
+    rec, folder = _record(tmp_path)
+    assert _sweep(rec, {111: demo_s3.UNKNOWN}) == []
+    assert folder.exists() and rec.exists()
+
+
+def _ps(monkeypatch, platform, result):
+    monkeypatch.setattr(demo_s3.sys, "platform", platform)
+
+    def run(cmd, **kw):
+        if isinstance(result, BaseException):
+            raise result
+        return subprocess.CompletedProcess(cmd, result[0], stdout=result[1], stderr="")
+
+    monkeypatch.setattr(demo_s3.subprocess, "run", run)
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_command_line_returns_the_line_of_a_live_process(monkeypatch, platform):
+    _ps(monkeypatch, platform, (0, "/x/weed server\n"))
+    assert demo_s3._command_line(1) == "/x/weed server"
+
+
+def test_command_line_is_none_when_ps_finds_no_such_process(monkeypatch):
+    _ps(monkeypatch, "linux", (1, ""))
+    assert demo_s3._command_line(1) is None
+
+
+def test_command_line_is_none_when_powershell_finds_no_such_process(monkeypatch):
+    _ps(monkeypatch, "win32", (0, ""))
+    assert demo_s3._command_line(1) is None
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize(
+    "result",
+    [subprocess.TimeoutExpired("ps", 10), OSError("no ps"), (2, ""), (127, "")],
+    ids=["timeout", "oserror", "rc2", "rc127"],
+)
+def test_command_line_is_unknown_when_the_query_cannot_answer(monkeypatch, platform, result):
+    _ps(monkeypatch, platform, result)
+    assert demo_s3._command_line(1) is demo_s3.UNKNOWN
+
+
 def test_sweep_deletes_only_a_folder_named_as_a_store(tmp_path):
     other = tmp_path / "precious"
     rec, _ = _record(tmp_path, folder=other)
@@ -545,8 +671,6 @@ def test_sweep_survives_no_record_and_a_broken_one(tmp_path):
 @pytest.mark.skipif(not LIVE_WEED, reason="no weed: set QOD_DEMO_WEED_BIN or put one on PATH")
 def test_live_store_starts_refuses_anonymous_and_stops_clean(tmp_path, monkeypatch):
     monkeypatch.setattr(demo_s3.tempfile, "tempdir", str(tmp_path))
-    from pathlib import Path
-
     store = demo_s3.LocalStore.start(Path(LIVE_WEED), record=tmp_path / "store.json")
     try:
         r = httpx.get(f"http://127.0.0.1:{store.s3_port}/", timeout=5, trust_env=False)

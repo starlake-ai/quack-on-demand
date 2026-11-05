@@ -34,6 +34,8 @@ _S3_PATH = re.compile(r"^s3://[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9](/[A-Za-z0-9._\-]
 _ENDPOINT = re.compile(r"^(https?://)?[A-Za-z0-9.\-]+(:[0-9]+)?/?$")
 # All the store is given. WEED_* would reconfigure it, and it has no use for anyone's keys.
 _STORE_ENV_KEYS = ("PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot")
+# `_command_line`'s answer when the query itself failed: neither alive nor gone.
+UNKNOWN = object()
 
 
 class DemoS3Error(Exception):
@@ -80,6 +82,11 @@ def request(
             f"--s3-path must be s3://<bucket>[/<prefix>], with letters, digits, '.', '_' and '-' "
             f"only: {s3_path}"
         )
+    if bool(access_key_id) != bool(secret_access_key):
+        raise DemoS3Error(
+            "give both --access-key-id and --secret-access-key, or neither (then "
+            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are used)"
+        )
     key = access_key_id or environ.get("AWS_ACCESS_KEY_ID")
     secret = secret_access_key or environ.get("AWS_SECRET_ACCESS_KEY")
     if not (key and secret):
@@ -96,7 +103,8 @@ def request(
     host, use_ssl, url_style = "", True, "vhost"
     if endpoint:
         if not _ENDPOINT.match(endpoint):
-            raise DemoS3Error(f"--endpoint must be [http[s]://]host[:port]: {endpoint}")
+            # Not echoed: it may hold user:pass@.
+            raise DemoS3Error("--endpoint must be [http[s]://]host[:port]")
         use_ssl = not endpoint.startswith("http://")
         host = endpoint.removeprefix("http://").removeprefix("https://").rstrip("/")
         url_style = "path"
@@ -228,6 +236,30 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
+def _names_pid(record: Path, pid: int) -> bool:
+    try:
+        return int(json.loads(record.read_text())["pid"]) == pid
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _discard(proc, folder: Path, record: Path) -> None:
+    """Kill the process (if there is one), remove its folder, and its record if it still names
+    this process: a second concurrent run may have rewritten it."""
+    if proc is not None:
+        if proc.poll() is None:
+            if sys.platform == "win32":
+                _kill_tree(proc.pid)
+            proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    shutil.rmtree(folder, ignore_errors=True)
+    if proc is not None and _names_pid(record, proc.pid):
+        record.unlink(missing_ok=True)
+
+
 class LocalStore:
     """A SeaweedFS for one demo run, on loopback, with random keys, in a folder of its own."""
 
@@ -254,75 +286,73 @@ class LocalStore:
     ) -> "LocalStore":
         record = record if record is not None else store_record_path()
         folder = Path(tempfile.mkdtemp(prefix=FOLDER_PREFIX))
-        (folder / "data").mkdir()
-        (folder / "logs").mkdir()
-        key, secret = secrets.token_hex(12), secrets.token_hex(24)
-        _write_private(
-            folder / "s3.json",
-            json.dumps(
-                {
-                    "identities": [
-                        {
-                            "name": "demo",
-                            "credentials": [{"accessKey": key, "secretKey": secret}],
-                            "actions": ["Admin", "Read", "Write", "List", "Tagging"],
-                        }
-                    ]
-                }
-            ),
-        )
-        ports = _free_ports()
-        env = {k: os.environ[k] for k in _STORE_ENV_KEYS if k in os.environ}
-        # Its own session, so a Ctrl-C at the terminal reaches the CLI and not the store: the store
-        # outlives the jar, which still needs it while it shuts down.
-        isolate = (
-            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-            if sys.platform == "win32"
-            else {"start_new_session": True}
-        )
-        with (folder / "logs" / "weed.out").open("wb") as log:
-            proc = popen(
-                weed_command(weed, folder, ports),
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                **isolate,
+        proc = None
+        try:
+            (folder / "data").mkdir()
+            (folder / "logs").mkdir()
+            key, secret = secrets.token_hex(12), secrets.token_hex(24)
+            _write_private(
+                folder / "s3.json",
+                json.dumps(
+                    {
+                        "identities": [
+                            {
+                                "name": "demo",
+                                "credentials": [{"accessKey": key, "secretKey": secret}],
+                                "actions": ["Admin", "Read", "Write", "List", "Tagging"],
+                            }
+                        ]
+                    }
+                ),
             )
-        record.parent.mkdir(parents=True, exist_ok=True)
-        _write_private(
-            record, json.dumps({"pid": proc.pid, "dir": str(folder), "owner": os.getpid()})
-        )
-        store = cls(proc, folder, record, ports["s3"], key, secret)
-        deadline = monotonic() + READY_TIMEOUT_S
-        while True:
-            if proc.poll() is not None:
-                tail = _log_tail(folder)
-                store.stop()
-                raise DemoS3Error(f"the local S3 store exited at start:\n{tail}")
-            if answers(ports["s3"]):
-                return store
-            if monotonic() > deadline:
-                tail = _log_tail(folder)
-                store.stop()
-                raise DemoS3Error(
-                    f"the local S3 store did not answer within {READY_TIMEOUT_S:.0f} s:\n{tail}"
+            ports = _free_ports()
+            env = {k: os.environ[k] for k in _STORE_ENV_KEYS if k in os.environ}
+            # Its own session, so a Ctrl-C at the terminal reaches the CLI and not the store: the
+            # store outlives the jar, which still needs it while it shuts down.
+            isolate = (
+                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                if sys.platform == "win32"
+                else {"start_new_session": True}
+            )
+            with (folder / "logs" / "weed.out").open("wb") as log:
+                proc = popen(
+                    weed_command(weed, folder, ports),
+                    env=env,
+                    # Its own folder: it reads security.toml and master.toml from where it runs.
+                    cwd=folder,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    **isolate,
                 )
-            sleep(0.1)
+            record.parent.mkdir(parents=True, exist_ok=True)
+            _write_private(
+                record, json.dumps({"pid": proc.pid, "dir": str(folder), "owner": os.getpid()})
+            )
+            store = cls(proc, folder, record, ports["s3"], key, secret)
+            deadline = monotonic() + READY_TIMEOUT_S
+            while True:
+                if proc.poll() is not None:
+                    raise DemoS3Error(
+                        f"the local S3 store exited at start:\n{_log_tail(folder)}"
+                    )
+                if answers(ports["s3"]):
+                    return store
+                if monotonic() > deadline:
+                    raise DemoS3Error(
+                        f"the local S3 store did not answer within {READY_TIMEOUT_S:.0f} s:\n"
+                        f"{_log_tail(folder)}"
+                    )
+                sleep(0.1)
+        except BaseException:
+            # Ctrl-C included: the store has a session of its own and never sees the SIGINT.
+            _discard(proc, folder, record)
+            raise
 
     def stop(self) -> None:
         """A hard kill: everything it holds is being thrown away, and it takes many seconds to
         honor a SIGTERM. Safe to call twice."""
-        if self._proc.poll() is None:
-            if sys.platform == "win32":
-                _kill_tree(self._proc.pid)
-            self._proc.kill()
-        try:
-            self._proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-        shutil.rmtree(self._folder, ignore_errors=True)
-        self._record.unlink(missing_ok=True)
+        _discard(self._proc, self._folder, self._record)
 
 
 def store_record_path() -> Path:
@@ -330,18 +360,26 @@ def store_record_path() -> Path:
     return launcher.default_cache_dir() / "weed" / "store.json"
 
 
-def _command_line(pid: int) -> str | None:
-    """The process's command line; None when it is gone or cannot be read."""
+def _command_line(pid: int):
+    """The process's command line; None when the query answered that there is no such process;
+    UNKNOWN when it could not answer (the caller must not read that as gone)."""
+    windows = sys.platform == "win32"
     try:
-        if sys.platform == "win32":
+        if windows:
             query = f'(Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CommandLine'
             cmd = ["powershell", "-NoProfile", "-Command", query]
         else:
             cmd = ["ps", "-o", "command=", "-p", str(pid)]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout.strip()
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
+        return UNKNOWN
+    out = (done.stdout or "").strip()
+    if done.returncode == 0 and out:
+        return out
+    # `ps` exits 1 with nothing for a pid it does not know; PowerShell exits 0 with nothing.
+    if not out and done.returncode == (0 if windows else 1):
         return None
-    return out or None
+    return UNKNOWN
 
 
 def sweep_orphan(record=None, command_line=None, kill=None, echo=None) -> None:
@@ -361,9 +399,12 @@ def sweep_orphan(record=None, command_line=None, kill=None, echo=None) -> None:
     except (OSError, ValueError, KeyError, TypeError):
         record.unlink(missing_ok=True)
         return
+    # Alive, or not readable: either way the store is not ours to touch.
     if command_line(owner) is not None:
         return
     line = command_line(pid)
+    if line is UNKNOWN:
+        return
     if line is not None and "weed" in line and folder in line:
         echo(f"stopping an orphaned demo S3 store (pid {pid})")
         kill(pid)
