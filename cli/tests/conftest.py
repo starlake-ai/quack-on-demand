@@ -41,6 +41,15 @@ def isolated_env(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def no_real_demo_store(tmp_path, monkeypatch):
+    """perform_stop sweeps the demo's store record: never the one on this developer's machine,
+    where a demo may be running."""
+    from qod_cli import demo_s3
+
+    monkeypatch.setattr(demo_s3, "store_record_path", lambda: tmp_path / "weed-store.json")
+
+
 @pytest.fixture
 def runner():
     return CliRunner()

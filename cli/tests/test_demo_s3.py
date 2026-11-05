@@ -197,3 +197,363 @@ def test_ensure_weed_lowercases_the_machine_name(monkeypatch, tmp_path):
         )
         exe = launcher.ensure_weed(tmp_path, os_name="win32", arch="AMD64")
     assert exe.name == "weed.exe"
+
+
+import json
+import re
+import stat
+
+from qod_cli import demo_s3
+
+ARGS = dict(
+    demo=True, s3=False, s3_path=None, endpoint=None, region=None,
+    access_key_id=None, secret_access_key=None, environ={},
+)
+
+
+def _req(**over):
+    return demo_s3.request(**{**ARGS, **over})
+
+
+def _own(**over):
+    return _req(s3_path="s3://my-bucket/qod", access_key_id="K", secret_access_key="S", **over)
+
+
+def test_plain_demo_and_plain_serve_have_no_request():
+    assert _req() is None
+    assert _req(demo=False) is None
+    # Not a demo: serve's own target flags stay serve's.
+    assert _req(demo=False, endpoint="http://x:1", access_key_id="K", secret_access_key="S") is None
+
+
+@pytest.mark.parametrize("over", [{"s3": True}, {"s3_path": "s3://b12/x"}])
+def test_s3_flags_need_demo(over):
+    with pytest.raises(demo_s3.DemoS3Error, match="--demo"):
+        _req(demo=False, **over)
+
+
+def test_s3_and_s3_path_exclude_each_other():
+    with pytest.raises(demo_s3.DemoS3Error, match="--s3-path"):
+        _req(s3=True, s3_path="s3://b12/x", access_key_id="K", secret_access_key="S")
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"endpoint": "http://x:1"},
+        {"region": "eu-west-1"},
+        {"access_key_id": "K"},
+        {"secret_access_key": "S"},
+        {"s3": True, "region": "eu-west-1"},
+    ],
+)
+def test_store_flags_need_s3_path(over):
+    with pytest.raises(demo_s3.DemoS3Error, match="--s3-path"):
+        _req(**over)
+
+
+def test_s3_alone_asks_for_the_local_store():
+    assert isinstance(_req(s3=True), demo_s3.LocalRequest)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["my-bucket/x", "gs://b12/x", "az://b12/x", "r2://b12/x", "s3a://b12/x", "s3://", "s3://B/x",
+     "s3://b12/it's", "s3://b12/../x", "s3://b12/a b"],
+)
+def test_s3_path_refuses_what_is_not_a_plain_s3_url(path):
+    with pytest.raises(demo_s3.DemoS3Error, match="s3://"):
+        _req(s3_path=path, access_key_id="K", secret_access_key="S")
+
+
+def test_s3_path_keeps_a_bucket_root_and_drops_a_trailing_slash():
+    assert _req(s3_path="s3://b12", access_key_id="K", secret_access_key="S").path == "s3://b12"
+    assert _req(s3_path="s3://b12/a/", access_key_id="K", secret_access_key="S").path == "s3://b12/a"
+
+
+def test_keys_come_from_flags_then_aws_env_and_never_qod_s3():
+    env = {"AWS_ACCESS_KEY_ID": "EK", "AWS_SECRET_ACCESS_KEY": "ES"}
+    r = _req(s3_path="s3://b12/x", environ=env)
+    assert (r.access_key_id, r.secret_access_key) == ("EK", "ES")
+    r = _req(s3_path="s3://b12/x", access_key_id="K", secret_access_key="S", environ=env)
+    assert (r.access_key_id, r.secret_access_key) == ("K", "S")
+    with pytest.raises(demo_s3.DemoS3Error, match="key"):
+        _req(s3_path="s3://b12/x", environ={"QOD_S3_ACCESS_KEY_ID": "A",
+                                            "QOD_S3_SECRET_ACCESS_KEY": "B"})
+
+
+def test_temporary_aws_keys_are_refused_with_the_reason():
+    env = {"AWS_ACCESS_KEY_ID": "EK", "AWS_SECRET_ACCESS_KEY": "ES", "AWS_SESSION_TOKEN": "T"}
+    with pytest.raises(demo_s3.DemoS3Error, match="long-lived"):
+        _req(s3_path="s3://b12/x", environ=env)
+    # Keys given as flags are not the token's.
+    assert _req(s3_path="s3://b12/x", access_key_id="K", secret_access_key="S", environ=env)
+
+
+def test_region_comes_from_flag_then_aws_env_then_a_default():
+    assert _own().region == "us-east-1"
+    assert _own(environ={"AWS_DEFAULT_REGION": "d"}).region == "d"
+    assert _own(environ={"AWS_REGION": "r", "AWS_DEFAULT_REGION": "d"}).region == "r"
+    assert _own(region="f", environ={"AWS_REGION": "r"}).region == "f"
+
+
+@pytest.mark.parametrize(
+    "endpoint,host,ssl,style",
+    [
+        (None, "", True, "vhost"),
+        ("http://minio:9000", "minio:9000", False, "path"),
+        ("https://acct.r2.example/", "acct.r2.example", True, "path"),
+        ("minio:9000", "minio:9000", True, "path"),
+    ],
+)
+def test_endpoint_decides_scheme_and_url_style(endpoint, host, ssl, style):
+    r = _own(endpoint=endpoint)
+    assert (r.endpoint, r.use_ssl, r.url_style) == (host, ssl, style)
+
+
+def test_endpoint_with_a_path_is_refused():
+    with pytest.raises(demo_s3.DemoS3Error, match="--endpoint"):
+        _own(endpoint="http://minio:9000/some/path")
+
+
+def test_a_request_prints_no_secret():
+    req = _req(s3_path="s3://b12/x", access_key_id="HIDDENKEY", secret_access_key="HIDDENSECRET")
+    assert "HIDDEN" not in repr(req)
+
+
+def test_bucket_env_sets_every_variable_and_drops_ambient_values():
+    base = {
+        "QOD_S3_ENDPOINT": "stale:1", "QOD_DEMO_S3_LOCAL": "1", "QOD_S3_ACCESS_KEY_ID": "stale",
+        "PATH": "/bin",
+    }
+    env = demo_s3.bucket_env(base, _own(), run_id="1a2b3c4d")
+    assert env["QOD_DEMO_S3_PATH"] == "s3://my-bucket/qod/qod-demo-1a2b3c4d"
+    assert "QOD_DEMO_S3_LOCAL" not in env
+    assert "QOD_S3_ENDPOINT" not in env
+    assert env["QOD_S3_ACCESS_KEY_ID"] == "K"
+    assert env["QOD_S3_SECRET_ACCESS_KEY"] == "S"
+    assert env["QOD_S3_REGION"] == "us-east-1"
+    assert env["QOD_S3_URL_STYLE"] == "vhost"
+    assert env["QOD_S3_USE_SSL"] == "true"
+    assert env["PATH"] == "/bin"
+    # The caller's dict is untouched.
+    assert base["QOD_S3_ENDPOINT"] == "stale:1"
+
+
+def test_bucket_env_makes_a_new_run_folder_each_time():
+    a = demo_s3.bucket_env({}, _own())["QOD_DEMO_S3_PATH"]
+    b = demo_s3.bucket_env({}, _own())["QOD_DEMO_S3_PATH"]
+    assert a != b
+    assert re.fullmatch(r"s3://my-bucket/qod/qod-demo-[0-9a-f]{8}", a)
+
+
+class _FakeStore:
+    s3_port = 18333
+    access_key_id = "LK"
+    secret_access_key = "LS"
+
+
+def test_local_env_points_at_the_store_and_exempts_it_from_a_proxy():
+    env = demo_s3.local_env(
+        {"QOD_S3_ENDPOINT": "stale:1", "NO_PROXY": "corp"}, _FakeStore(), run_id="1a2b3c4d"
+    )
+    assert env["QOD_DEMO_S3_PATH"] == "s3://qod-demo/qod-demo-1a2b3c4d"
+    assert env["QOD_DEMO_S3_LOCAL"] == "1"
+    assert env["QOD_S3_ENDPOINT"] == "127.0.0.1:18333"
+    assert env["QOD_S3_ACCESS_KEY_ID"] == "LK"
+    assert env["QOD_S3_SECRET_ACCESS_KEY"] == "LS"
+    assert env["QOD_S3_REGION"] == "us-east-1"
+    assert env["QOD_S3_URL_STYLE"] == "path"
+    assert env["QOD_S3_USE_SSL"] == "false"
+    assert env["NO_PROXY"] == "127.0.0.1,corp"
+    assert env["no_proxy"] == "127.0.0.1"
+
+
+def test_plain_env_drops_a_stale_demo_path():
+    env = demo_s3.plain_env({"QOD_DEMO_S3_PATH": "s3://x", "QOD_DEMO_S3_LOCAL": "1", "PATH": "/b"})
+    assert env == {"PATH": "/b"}
+
+
+def test_weed_command_binds_loopback_and_disables_what_the_demo_does_not_use(tmp_path):
+    ports = dict(zip(demo_s3.PORT_NAMES, range(40001, 40009)))
+    assert demo_s3.weed_command(tmp_path / "weed", tmp_path / "f", ports) == [
+        str(tmp_path / "weed"),
+        f"-logdir={tmp_path / 'f' / 'logs'}",
+        "server",
+        f"-dir={tmp_path / 'f' / 'data'}",
+        "-ip=127.0.0.1",
+        "-ip.bind=127.0.0.1",
+        "-master.port=40001",
+        "-master.port.grpc=40002",
+        "-volume.port=40003",
+        "-volume.port.grpc=40004",
+        "-filer.port=40005",
+        "-filer.port.grpc=40006",
+        "-s3",
+        "-s3.port=40007",
+        "-s3.port.grpc=40008",
+        f"-s3.config={tmp_path / 'f' / 's3.json'}",
+        "-s3.port.iceberg=0",
+        "-s3.port.lance=0",
+        "-master.volumeSizeLimitMB=1024",
+    ]
+
+
+class _FakeProc:
+    def __init__(self, exits_at=None):
+        self.pid = 4242
+        self.killed = 0
+        self._code = exits_at
+
+    def poll(self):
+        return self._code
+
+    def kill(self):
+        self.killed += 1
+        self._code = -9
+
+    def wait(self, timeout=None):
+        return self._code
+
+
+def _start(tmp_path, monkeypatch, proc, answers):
+    monkeypatch.setattr(demo_s3.tempfile, "tempdir", str(tmp_path))
+    captured = {}
+
+    def popen(cmd, **kw):
+        captured["cmd"], captured["kw"] = cmd, kw
+        return proc
+
+    clock = {"t": 0.0}
+
+    def monotonic():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    store = demo_s3.LocalStore.start(
+        tmp_path / "weed", record=tmp_path / "rec" / "store.json",
+        popen=popen, answers=answers, monotonic=monotonic, sleep=lambda s: None,
+    )
+    return store, captured
+
+
+def _folders(tmp_path):
+    return [p for p in tmp_path.iterdir() if p.name.startswith("qod-demo-s3-")]
+
+
+def test_store_start_writes_private_credentials_and_a_record(tmp_path, monkeypatch):
+    store, captured = _start(tmp_path, monkeypatch, _FakeProc(), lambda port: True)
+    folder = _folders(tmp_path)[0]
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700 or sys.platform == "win32"
+    config = folder / "s3.json"
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600 or sys.platform == "win32"
+    identity = json.loads(config.read_text())["identities"][0]
+    assert identity["credentials"][0]["accessKey"] == store.access_key_id
+    assert identity["credentials"][0]["secretKey"] == store.secret_access_key
+    assert len(store.secret_access_key) >= 32
+    record = json.loads((tmp_path / "rec" / "store.json").read_text())
+    assert record == {"pid": 4242, "dir": str(folder), "owner": os.getpid()}
+    # Nothing secret on the command line or in the store's environment.
+    assert store.secret_access_key not in " ".join(captured["cmd"])
+    assert not any(k.startswith(("AWS_", "QOD_", "WEED_")) for k in captured["kw"]["env"])
+    assert captured["kw"].get("start_new_session") is True or sys.platform == "win32"
+    assert store.secret_access_key not in repr(store)
+
+
+def test_store_gives_up_after_60s_with_its_log_and_leaves_nothing(tmp_path, monkeypatch):
+    proc = _FakeProc()
+    with pytest.raises(demo_s3.DemoS3Error, match="did not answer"):
+        _start(tmp_path, monkeypatch, proc, lambda port: False)
+    assert proc.killed == 1
+    assert _folders(tmp_path) == []
+    assert not (tmp_path / "rec" / "store.json").exists()
+
+
+def test_store_that_dies_at_start_fails_at_once(tmp_path, monkeypatch):
+    with pytest.raises(demo_s3.DemoS3Error, match="exited"):
+        _start(tmp_path, monkeypatch, _FakeProc(exits_at=1), lambda port: False)
+    assert _folders(tmp_path) == []
+
+
+def test_store_stop_kills_cleans_and_can_run_twice(tmp_path, monkeypatch):
+    proc = _FakeProc()
+    store, _ = _start(tmp_path, monkeypatch, proc, lambda port: True)
+    store.stop()
+    store.stop()
+    assert proc.killed >= 1
+    assert _folders(tmp_path) == []
+    assert not (tmp_path / "rec" / "store.json").exists()
+
+
+def _record(tmp_path, pid=111, owner=222, folder=None):
+    folder = folder or tmp_path / "qod-demo-s3-abc"
+    folder.mkdir(exist_ok=True)
+    rec = tmp_path / "store.json"
+    rec.write_text(json.dumps({"pid": pid, "dir": str(folder), "owner": owner}))
+    return rec, folder
+
+
+def _sweep(rec, lines):
+    killed = []
+    demo_s3.sweep_orphan(
+        record=rec, command_line=lambda pid: lines.get(pid), kill=killed.append, echo=lambda m: None
+    )
+    return killed
+
+
+def test_sweep_kills_an_orphan_and_cleans_up(tmp_path):
+    rec, folder = _record(tmp_path)
+    assert _sweep(rec, {111: f"/x/weed server -dir={folder}/data"}) == [111]
+    assert not folder.exists() and not rec.exists()
+
+
+def test_sweep_leaves_a_store_whose_owner_lives(tmp_path):
+    rec, folder = _record(tmp_path)
+    line = {111: f"/x/weed server -dir={folder}/data", 222: "python qod serve --demo --s3"}
+    assert _sweep(rec, line) == []
+    assert folder.exists() and rec.exists()
+
+
+@pytest.mark.parametrize("line", ["/bin/some-other-thing", "/x/weed server -dir=/elsewhere/data"])
+def test_sweep_never_signals_a_recycled_pid(tmp_path, line):
+    rec, folder = _record(tmp_path)
+    assert _sweep(rec, {111: line}) == []
+    assert not rec.exists()
+
+
+def test_sweep_cleans_up_when_the_store_is_already_gone(tmp_path):
+    rec, folder = _record(tmp_path)
+    assert _sweep(rec, {}) == []
+    assert not folder.exists() and not rec.exists()
+
+
+def test_sweep_deletes_only_a_folder_named_as_a_store(tmp_path):
+    other = tmp_path / "precious"
+    rec, _ = _record(tmp_path, folder=other)
+    assert _sweep(rec, {}) == []
+    assert other.exists() and not rec.exists()
+
+
+def test_sweep_survives_no_record_and_a_broken_one(tmp_path):
+    rec = tmp_path / "store.json"
+    assert _sweep(rec, {}) == []
+    rec.write_text("not json")
+    assert _sweep(rec, {}) == []
+    assert not rec.exists()
+
+
+@pytest.mark.skipif(not LIVE_WEED, reason="no weed: set QOD_DEMO_WEED_BIN or put one on PATH")
+def test_live_store_starts_refuses_anonymous_and_stops_clean(tmp_path, monkeypatch):
+    monkeypatch.setattr(demo_s3.tempfile, "tempdir", str(tmp_path))
+    from pathlib import Path
+
+    store = demo_s3.LocalStore.start(Path(LIVE_WEED), record=tmp_path / "store.json")
+    try:
+        r = httpx.get(f"http://127.0.0.1:{store.s3_port}/", timeout=5, trust_env=False)
+        assert r.status_code == 403
+        folder = _folders(tmp_path)[0]
+        assert any((folder / "logs").iterdir())
+    finally:
+        store.stop()
+    assert _folders(tmp_path) == []
+    assert not (tmp_path / "store.json").exists()
