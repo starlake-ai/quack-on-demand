@@ -485,7 +485,116 @@ def ensure_libduckdb(
     return lib_dir
 
 
-_WINDOWS_ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
+# SeaweedFS, for `qod serve --demo --s3`. A single binary, fetched only by that flag, so neither the
+# jar nor the wheel carries an S3 server. Pinned with a checksum per asset; changing the version
+# means hashing every asset again.
+WEED_VERSION = "4.52"
+_WEED_BASE_URL = f"https://github.com/seaweedfs/seaweedfs/releases/download/{WEED_VERSION}"
+_WEED_ASSETS = {
+    ("darwin", "arm64"): (
+        "darwin_arm64.tar.gz",
+        "7aed4f7db8048a8aedab47a71ea4dd3875caa5abdb925d6aa72fb65438a47910",
+    ),
+    ("darwin", "x86_64"): (
+        "darwin_amd64.tar.gz",
+        "da72538d30dd25a9f26f52edd09c42136932ec88b7c9340da3f1ed3e6d11a2f1",
+    ),
+    ("linux", "x86_64"): (
+        "linux_amd64.tar.gz",
+        "8b538c22d47d0c3fb6792adaa6b0c735a967401270a53427d5a476dcaca9b7ae",
+    ),
+    ("linux", "amd64"): (
+        "linux_amd64.tar.gz",
+        "8b538c22d47d0c3fb6792adaa6b0c735a967401270a53427d5a476dcaca9b7ae",
+    ),
+    ("linux", "aarch64"): (
+        "linux_arm64.tar.gz",
+        "b70a09540bf8aa2b9ea2a48b3b16abe27e162e90a0c3bf041f8d414caf52de8a",
+    ),
+    ("linux", "arm64"): (
+        "linux_arm64.tar.gz",
+        "b70a09540bf8aa2b9ea2a48b3b16abe27e162e90a0c3bf041f8d414caf52de8a",
+    ),
+    ("win32", "amd64"): (
+        "windows_amd64.zip",
+        "e3dfe6c441686887b8fdde4420aa2c11ad9c8ce152340bd053e8176e07851a26",
+    ),
+    ("win32", "x86_64"): (
+        "windows_amd64.zip",
+        "e3dfe6c441686887b8fdde4420aa2c11ad9c8ce152340bd053e8176e07851a26",
+    ),
+}
+
+
+class WeedUnavailable(RuntimeError):
+    """No SeaweedFS binary can be had for this host."""
+
+
+def weed_asset(os_name: str, arch: str) -> tuple[str, str]:
+    """The (release asset, sha256) for a platform."""
+    asset = _WEED_ASSETS.get((os_name, arch.lower()))
+    if asset is None:
+        raise WeedUnavailable(
+            f"SeaweedFS has no build for {os_name}/{arch}, so --s3 cannot run here; "
+            "name a bucket with --s3-path instead"
+        )
+    return asset
+
+
+def _extract_zip(archive: Path, dest: Path) -> None:
+    """Unpack a zip into `dest`, refusing members that would land outside it."""
+    import zipfile
+
+    root = dest.resolve()
+    with zipfile.ZipFile(archive) as z:
+        for member in z.namelist():
+            if not (dest / member).resolve().is_relative_to(root):
+                raise RuntimeError(f"unexpected member {member!r} in {archive.name}")
+        z.extractall(dest)
+
+
+def ensure_weed(
+    cache_dir: Path | None = None,
+    os_name: str = sys.platform,
+    arch: str | None = None,
+) -> Path:
+    """The pinned `weed` binary: `QOD_DEMO_WEED_BIN` when set (air-gapped hosts, tests), else the
+    cached copy, else downloaded and checked against its pinned sha256 before it is unpacked."""
+    import platform
+
+    override = os.environ.get("QOD_DEMO_WEED_BIN", "").strip()
+    if override:
+        path = Path(override)
+        if not path.is_file():
+            raise WeedUnavailable(f"QOD_DEMO_WEED_BIN names no file: {override}")
+        return path
+
+    arch = arch if arch is not None else platform.machine()
+    name, sha256 = weed_asset(os_name, arch)
+    base = cache_dir if cache_dir is not None else default_cache_dir()
+    folder = base / "weed" / WEED_VERSION
+    exe = folder / ("weed.exe" if os_name == "win32" else "weed")
+    if exe.is_file():
+        return exe
+    folder.mkdir(parents=True, exist_ok=True)
+    archive = folder / name
+    try:
+        actual = _download(f"{_WEED_BASE_URL}/{name}", archive, f"SeaweedFS {WEED_VERSION}")
+        if actual != sha256:
+            raise IntegrityError(f"{name}: sha256 {actual} is not the pinned {sha256}")
+        if name.endswith(".zip"):
+            _extract_zip(archive, folder)
+        else:
+            _extract_tar_gz(archive, folder)
+    finally:
+        archive.unlink(missing_ok=True)
+    if not exe.is_file():
+        raise RuntimeError(f"no {exe.name} found after extracting {name} in {folder}")
+    exe.chmod(0o755)
+    return exe
+
+
+_WINDOWS_ARCH ={"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
 
 
 def node_release(jar: Path) -> str:
