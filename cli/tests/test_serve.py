@@ -1697,12 +1697,15 @@ def test_serve_refuses_bad_s3_flags_before_anything_starts(runner, wired, monkey
     result = _invoke(runner, wired, *args)
     assert result.exit_code == 1
     assert message in result.output
-    assert ran == [] and "cmd" not in wired
+    assert ran == []
+    assert "cmd" not in wired and "provision" not in wired
 
 
 def test_serve_passes_the_s3_request_to_the_demo(runner, wired, monkeypatch):
     from qod_cli import demo_s3
     from qod_cli.commands import serve as serve_cmd
+
+    monkeypatch.setenv("QOD_DEMO_WEED_BIN", "/nowhere/weed")
 
     got = {}
     monkeypatch.setattr(
@@ -1717,6 +1720,38 @@ def test_serve_passes_the_s3_request_to_the_demo(runner, wired, monkeypatch):
     )
     assert result.exit_code == 0
     assert got["s3"].path == "s3://b12/x"
+
+
+def test_serve_demo_s3_refuses_an_unsupported_platform_before_anything_launches(
+    runner, wired, monkeypatch
+):
+    from qod_cli.commands import serve as serve_cmd
+
+    def no_build(os_name, arch):
+        raise launcher.WeedUnavailable("no build; name a bucket with --s3-path instead")
+
+    monkeypatch.delenv("QOD_DEMO_WEED_BIN", raising=False)
+    monkeypatch.setattr(launcher, "weed_asset", no_build)
+    ran = []
+    monkeypatch.setattr(serve_cmd, "run_demo", lambda *a, **kw: ran.append(1))
+    result = _invoke(runner, wired, "--demo", "--s3")
+    assert result.exit_code == 1
+    assert "error: no build; name a bucket with --s3-path instead" in result.output
+    assert ran == []
+
+
+def test_serve_demo_s3_skips_the_platform_check_with_a_weed_binary(runner, wired, monkeypatch):
+    from qod_cli.commands import serve as serve_cmd
+
+    def no_build(os_name, arch):
+        raise launcher.WeedUnavailable("must not be asked")
+
+    monkeypatch.setenv("QOD_DEMO_WEED_BIN", "/nowhere/weed")
+    monkeypatch.setattr(launcher, "weed_asset", no_build)
+    ran = []
+    monkeypatch.setattr(serve_cmd, "run_demo", lambda *a, **kw: ran.append(1))
+    assert _invoke(runner, wired, "--demo", "--s3").exit_code == 0
+    assert ran == [1]
 
 
 def test_serve_with_a_target_keeps_its_store_flags(runner, wired):

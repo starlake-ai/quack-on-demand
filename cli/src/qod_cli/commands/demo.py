@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 
-import httpx
 import typer
 
 from .. import demo_s3, launcher
@@ -49,13 +48,13 @@ def run_demo(ctx: typer.Context, version: str | None, jar: Path | None, s3=None)
         try:
             demo_s3.sweep_orphan()
             store = demo_s3.LocalStore.start(launcher.ensure_weed(app_home))
-        except (demo_s3.DemoS3Error, RuntimeError, httpx.HTTPError, OSError) as e:
+        except Exception as e:
             typer.echo(f"could not start the local S3 store: {e}", err=True)
             raise typer.Exit(1)
         env = demo_s3.local_env(env, store)
     elif isinstance(s3, demo_s3.BucketRequest):
         env = demo_s3.bucket_env(env, s3)
-        if "FORCE_AFTER" not in os.environ and "FORCE_AFTER" not in load_start_env():
+        if not os.environ.get("FORCE_AFTER") and not load_start_env().get("FORCE_AFTER"):
             os.environ["FORCE_AFTER"] = BUCKET_FORCE_AFTER
     else:
         env = demo_s3.plain_env(env)

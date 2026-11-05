@@ -25,6 +25,8 @@ interrupted run is resumed by simply re-running the command.
 from __future__ import annotations
 
 import os
+import platform
+import sys
 import threading
 import time
 from pathlib import Path
@@ -641,7 +643,7 @@ def serve(
         help="Run the self-contained demo instead: embedded ephemeral Postgres, seeded "
         "TPC-H, RLS/CLS showcase. Takes no TARGET; all state is deleted on exit. Other "
         "serve flags (--tenant, --size, ...) are ignored in demo mode; the object-store "
-        "flags apply only with --s3-path.",
+        "flags are refused unless --s3-path is given.",
     ),
     s3: bool = typer.Option(
         False,
@@ -655,7 +657,8 @@ def serve(
         help="With --demo: keep the demo's data on your own bucket, s3://bucket[/prefix], under "
         "a new qod-demo-<id> folder deleted on exit. Takes --endpoint, --region and a key pair "
         "(--access-key-id and --secret-access-key, or AWS_*). The demo then listens on 127.0.0.1 "
-        "only. Use a dedicated bucket and key.",
+        "only. Use a dedicated bucket and key. On Windows, Ctrl-C stops the demo before it can "
+        "delete that folder: remove it by hand.",
     ),
     with_starflow: bool = _starflow.WITH_STARFLOW,
     starflow_home: str = _starflow.STARFLOW_HOME,
@@ -703,6 +706,17 @@ def serve(
     except demo_s3.DemoS3Error as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1)
+
+    if isinstance(s3_request, demo_s3.LocalRequest) and not os.environ.get(
+        "QOD_DEMO_WEED_BIN", ""
+    ).strip():
+        # Before the jar download and the DuckDB provisioning: a host with no SeaweedFS build
+        # cannot run --s3, so say so now.
+        try:
+            launcher.weed_asset(sys.platform, platform.machine())
+        except launcher.WeedUnavailable as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(1)
 
     manager_url = ctx.obj.settings.manager_url
 

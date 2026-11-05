@@ -814,6 +814,27 @@ def test_own_bucket_demo_keeps_a_grace_the_user_set_in_the_shell(demo_world, mon
     assert os.environ["FORCE_AFTER"] == "7"
 
 
+def test_own_bucket_demo_treats_an_empty_grace_as_unset(demo_world, monkeypatch):
+    monkeypatch.setenv("FORCE_AFTER", "")
+    _run_demo(demo_world, _own())
+    assert os.environ["FORCE_AFTER"] == "90"
+
+
+def test_an_unexpected_store_error_stops_the_demo_without_a_traceback(
+    demo_world, monkeypatch, capsys
+):
+    def failing(c):
+        raise ValueError("odd")
+
+    monkeypatch.setattr(launcher, "ensure_weed", failing)
+    with pytest.raises(typer.Exit) as e:
+        _run_demo(demo_world, demo_s3.LocalRequest())
+    assert e.value.exit_code == 1
+    assert "jar" not in demo_world["events"]
+    err = capsys.readouterr().err
+    assert "could not start the local S3 store" in err and "odd" in err
+
+
 def test_own_bucket_demo_keeps_a_grace_the_user_set_in_qod_setup(demo_world, monkeypatch):
     from qod_cli.commands import demo as demo_cmd
 
