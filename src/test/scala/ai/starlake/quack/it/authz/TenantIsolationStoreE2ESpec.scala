@@ -409,7 +409,10 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
         token
       )
     try send()
-    catch case _: java.io.IOException => send()
+    catch
+      case e: java.io.IOException =>
+        println(s"[store spec] profile/s3/add sent again after a lost connection: ${e.getMessage}")
+        send()
 
   private def inDataFolder(out: (Int, String)): Unit =
     withClue(out._2.take(300)) {
@@ -422,6 +425,33 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
 
   private def effectivePath(t: String, name: String, token: String): String =
     rowOf(t, name, token).hcursor.get[String]("effectiveDataPath").getOrElse(fail("no path"))
+
+  "A row holding the manager's own key" should "read as signing with it, from the environment" in {
+    ready()
+    val store = new ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore()
+    val sup   = new ai.starlake.quack.ondemand.PoolSupervisor(
+      ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop(),
+      new ai.starlake.quack.edge.adapter.NodeLoadTracker,
+      store
+    )
+    def row(name: String, key: String) = store.upsertTenantDb(
+      ai.starlake.quack.model.TenantDb(
+        id = name,
+        tenantId = "acme",
+        name = name,
+        kind = ai.starlake.quack.model.TenantDbKind.DuckLake,
+        metastore = Map.empty,
+        dataPath = s"s3://shared/$name/",
+        objectStore = Map("s3_access_key_id" -> key, "s3_secret_access_key" -> "sentinel")
+      )
+    )
+    row("manager", sys.env("QOD_S3_ACCESS_KEY_ID"))
+    row("own", "MADEUPID")
+    sup.restore()
+    val of = sup.dataPathHolders().map(h => h.path -> h.tenant).toMap
+    of("s3://shared/manager/") shouldBe None
+    of("s3://shared/own/") shouldBe Some("acme")
+  }
 
   "A folder holding its own keys" should "count against the users of its own tenant alone" in {
     ready()
@@ -498,6 +528,21 @@ class TenantIsolationStoreE2ESpec extends AnyFlatSpec with Matchers with BeforeA
     val managed  = effectivePath(ta, managedA, tokenA).stripSuffix("/") + "/"
     inDataFolder(addScope(tokenB, s"${managed}x/"))
     isRefused(read(s"${managed}x.parquet"), LocationDenied)
+
+    // A row a superuser gave the manager's own key signs with it: it counts against B's user too.
+    val managerPath = s"$shared/manager/"
+    createDb(
+      ta,
+      "manager",
+      su,
+      "dataPath"    -> s(managerPath),
+      "objectStore" -> Json.obj(
+        "s3_access_key_id"     -> s(sys.env("QOD_S3_ACCESS_KEY_ID")),
+        "s3_secret_access_key" -> s(sys.env.getOrElse("QOD_S3_SECRET_ACCESS_KEY", ""))
+      )
+    )
+    inDataFolder(addScope(tokenB, s"${managerPath}x/"))
+    isRefused(read(s"${managerPath}x.parquet"), LocationDenied)
 
     // A folder of B's own database holding its own keys counts against B's user.
     val bown = s"$shared/bown/"

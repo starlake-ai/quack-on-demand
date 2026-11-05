@@ -351,7 +351,8 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
     List(
       "Connection to pg.internal:5432 refused. Check that the hostname and port are correct",
       "connection to server at \"pg.internal\" (10.0.0.5), port 5432 failed: FATAL",
-      "connection to server at \"10.0.0.5\", port 5432 failed",
+      "pg.internal:5432 refused",
+      "pg.internal, port 5432 failed",
       "FATAL: password authentication failed for user \"qod\"",
       "FATAL: role \"qod\" does not exist",
       "ducklake:postgres:host=pg.internal port=5432 dbname=x user=qod",
@@ -360,8 +361,7 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
       "no pg_hba.conf entry for host \"10.0.0.5\", user \"qod\", database \"x\"",
       "jdbc:postgresql://pg.internal/qod",
       "at host=pg.internal",
-      "user=qod",
-      "port 5432 failed"
+      "user=qod"
     ).foreach(t => withClue(t)(read(t) shouldBe TenantDb.ServerTextWithheld))
     // What names none of them stays, the words that only look alike included.
     List(
@@ -369,6 +369,12 @@ class TenantDbServerSpec extends AnyFlatSpec with Matchers:
       "setupSql is for sourceType 'sql', not 'qod'",
       "not.pg.internal.example refused",
       "port 54321 is taken",
+      // A tenant's own source on the usual port, at another host, keeps its text.
+      "connection to server at \"other.example\" (10.1.1.1), port 5432 failed: Connection refused",
+      "Connection to other.example:5432 refused",
+      "connection to server at \"10.0.0.5\", port 5432 failed",
+      "port 5432 failed",
+      "not.pg.internal:5432 refused",
       "user \"qodder\" holds no grant",
       // A name the caller sent, quoted back: the answer says nothing on whether it is QoD's.
       "pool pg.internal is taken",

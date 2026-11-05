@@ -94,6 +94,9 @@ final class McpDataTools(
       // releases on the node record, not on its first passed health probe (the
       // documented readiness-hold gap). Transient by construction, so say so.
       "a node is still starting; retry in a few seconds"
+    case failed @ (RouterFailure.Unavailable(_) | RouterFailure.Internal(_) |
+        RouterFailure.AlreadyExists(_)) =>
+      McpToolArgs.serverFailure(failed.reason)
     case other => other.reason
 
   /** The caller identity + scope ceiling threaded into the routed executor: the PAT's owner with

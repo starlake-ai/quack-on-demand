@@ -280,9 +280,10 @@ object TenantDb {
 
   /** `text`, or [[ServerTextWithheld]] when it names the host, the port or the user of QoD's
     * Postgres server as a connection's error does (`host=`, `host name "`, `server at "`,
-    * `connection to `, `user "`, `role "`, `port `, `:<port>`). The whole text goes, as a client
-    * library's wording around them says more than the values. A bare value is left: a refusal can
-    * quote a name the caller sent, and withholding that would answer whether it is QoD's.
+    * `connection to `, `user "`, `role "`, and the port only beside that host, `<host>:<port>` or
+    * `"<host>" (<address>), port <port>`). The whole text goes, as a client library's wording
+    * around them says more than the values. A bare value is left: a refusal can quote a name the
+    * caller sent, and a tenant's own source on the usual port names nothing of QoD's.
     */
   def textShownToTenant(text: String, defaults: Map[String, String]): String =
     def value(key: String) = defaults.get(key).map(_.trim).filter(_.nonEmpty)
@@ -292,7 +293,11 @@ object TenantDb {
         "(?i)(host[a-z ]*[=:\" ]+|server at \"?|connection to \"?|//|@)" +
           s"${quoted(h)}(?![A-Za-z0-9_-])"
       ),
-      value("pgPort").map(p => s"(?i)(port[= ]+|:)${quoted(p)}(?![0-9])"),
+      for
+        h <- value("pgHost")
+        p <- value("pgPort")
+      yield "(?i)(?<![A-Za-z0-9_.-])" + quoted(h) + "\"?( *\\([^)]*\\))?(,? *port[= ]+|:)" +
+        quoted(p) + "(?![0-9])",
       value("pgUser").map(u => s"(?i)((user|role)[= ]+\"|user=|//)${quoted(u)}(?![A-Za-z0-9_-])")
     ).flatten
     if named.exists(_.r.findFirstIn(text).isDefined) then ServerTextWithheld else text

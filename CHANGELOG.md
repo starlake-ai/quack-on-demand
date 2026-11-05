@@ -46,7 +46,8 @@ count. To keep counts from a user, refuse on the table.
   QoD's server, and nothing else the manager's defaults filled in, such as an inherited `schemaName`.
   A PAT follows its owner. A database on another server still shows its own. A superuser's answer is
   unchanged. A blocked pool's `statusDetail` tells them why it is blocked and leaves the fix out. A
-  server failure or a conflict whose text names that host, port or user reads a fixed text instead,
+  server failure or a conflict whose text names that host or user, or the port beside that host, reads a
+  fixed text instead,
   with the same code, and the text goes to the manager's log. A tenant admin's `database update`
   leaves those keys out and they stay as stored; naming any of them is `403 superuser_required`
   whatever the value says, where sending them back unchanged was the way before.

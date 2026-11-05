@@ -57,12 +57,35 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     run = (_, _) => IO.pure(Left("the pool is waking from suspend; retry in a few seconds"))
   )
 
-  private val namingTool = McpToolDef(
-    name = "names_the_server",
+  /** A tool whose handler answers `status`, with a text the routes read as naming QoD's Postgres.
+    */
+  private def namingTool(name: String, status: sttp.model.StatusCode) = McpToolDef(
+    name = name,
     description = "returns an error naming QoD's Postgres",
     inputSchema = Json.obj("type" -> Json.fromString("object")),
     adminOnly = false,
-    run = (_, _) => IO.pure(Left("names-the-server"))
+    run = (_, _) =>
+      IO.pure(
+        McpToolArgs.bridge[Json](
+          Left((status, ai.starlake.quack.ondemand.api.ErrorResponse("code", "names-the-server")))
+        )
+      )
+  )
+
+  private val namingTools = List(
+    namingTool("failed_500", sttp.model.StatusCode.InternalServerError),
+    namingTool("failed_502", sttp.model.StatusCode.BadGateway),
+    namingTool("conflict_409", sttp.model.StatusCode.Conflict),
+    namingTool("refused_400", sttp.model.StatusCode.BadRequest),
+    namingTool("refused_403", sttp.model.StatusCode.Forbidden),
+    namingTool("refused_404", sttp.model.StatusCode.NotFound),
+    McpToolDef(
+      name = "refused_plain",
+      description = "returns a refusal of its own",
+      inputSchema = Json.obj("type" -> Json.fromString("object")),
+      adminOnly = false,
+      run = (_, _) => IO.pure(Left("names-the-server"))
+    )
   )
 
   private val adminTool = McpToolDef(
@@ -77,7 +100,7 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     new McpRoutes(
       cfg = McpConfig(),
       resolvePat = resolvePat,
-      tools = List(echoTool, failTool, namingTool, adminTool),
+      tools = List(echoTool, failTool, adminTool) ++ namingTools,
       serverVersion = "test",
       limits = RestLimitsConfig(),
       textForTenant = t => if t.contains("names-the-server") then "withheld" else t
@@ -229,17 +252,28 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     parse(text).toOption.flatMap(_.hcursor.get[Int]("x").toOption) shouldBe Some(7)
   }
 
-  it should "withhold a tool's error naming QoD's Postgres from who is not a superuser" in {
-    val params = Json.obj("name" -> Json.fromString("names_the_server"), "arguments" -> Json.obj())
-    def text(token: String) =
-      bodyJson(post(rpc("tools/call", params = params), bearer = Some(token))).hcursor
-        .downField("result")
-        .downField("content")
-        .downN(0)
-        .get[String]("text")
-        .toOption
-    text(UserPat) shouldBe Some("withheld")
-    text(McpSuperuserPat.Token) shouldBe Some("names-the-server")
+  private def toolText(tool: String, token: String) =
+    val params = Json.obj("name" -> Json.fromString(tool), "arguments" -> Json.obj())
+    bodyJson(post(rpc("tools/call", params = params), bearer = Some(token))).hcursor
+      .downField("result")
+      .downField("content")
+      .downN(0)
+      .get[String]("text")
+      .toOption
+
+  it should "withhold what would be a 5xx or a 409 naming QoD's Postgres, from who is not a superuser" in
+    List("failed_500", "failed_502", "conflict_409").foreach { tool =>
+      withClue(tool) {
+        toolText(tool, UserPat) shouldBe Some("withheld")
+        toolText(tool, McpSuperuserPat.Token) shouldBe Some("code: names-the-server")
+      }
+    }
+
+  it should "leave a refusal of the request as it is, whatever it quotes" in {
+    List("refused_400", "refused_403", "refused_404").foreach { tool =>
+      withClue(tool)(toolText(tool, UserPat) shouldBe Some("code: names-the-server"))
+    }
+    toolText("refused_plain", UserPat) shouldBe Some("names-the-server")
   }
 
   it should "wrap Left as isError text content" in {

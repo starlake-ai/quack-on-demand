@@ -480,6 +480,29 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get should include("retry")
   }
 
+  it should "mark what a statement fails on, not what it is refused" in
+    List(
+      RouterFailure.Internal("the node failed")     -> true,
+      RouterFailure.Unavailable("no node answered") -> true,
+      RouterFailure.AlreadyExists("it is there")    -> true,
+      RouterFailure.AccessDenied("no grant on t")   -> false,
+      RouterFailure.BadRequest("not a statement")   -> false,
+      RouterFailure.NotFound("no such table")       -> false
+    ).foreach { (failure, marked) =>
+      withClue(failure.reason) {
+        val failing: CatalogPreviewHandlers.PreviewExecutor = (_, _, _) => IO.pure(Left(failure))
+        val out                                             = call(
+          fixture(failing),
+          "run_sql",
+          McpSuperuserPat.principal,
+          "sql"      -> Json.fromString("SELECT 1"),
+          "database" -> Json.fromString(TenantDb),
+          "tenant"   -> Json.fromString(Tenant)
+        )
+        McpToolArgs.readToolError(out.swap.toOption.get) shouldBe ((failure.reason, marked))
+      }
+    }
+
   it should "surface an authorization-service outage verbatim, never as a startup hint" in {
     val reason = "authorization service unavailable: java.net.ConnectException: opa resuming"
     val opaDown: CatalogPreviewHandlers.PreviewExecutor =

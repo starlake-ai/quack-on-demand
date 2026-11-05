@@ -87,10 +87,28 @@ private[mcp] object McpToolArgs:
             )
 
   /** REST-handler bridge: the handlers' (code, ErrorResponse) rejections become tool-level error
-    * text, keeping the stable `error` code in front so agents can branch on it.
+    * text, keeping the stable `error` code in front so agents can branch on it. What REST answers
+    * 5xx or 409 goes out marked ([[serverFailure]]).
     */
   def bridge[A](res: Either[(StatusCode, ErrorResponse), A]): Either[String, A] =
-    res.left.map((_, e) => s"${e.error}: ${e.message}")
+    res.left.map { (status, e) =>
+      val text = s"${e.error}: ${e.message}"
+      if status.code >= 500 || status == StatusCode.Conflict then serverFailure(text) else text
+    }
+
+  /** Ends a tool's error that REST would answer 5xx or 409, which [[McpRoutes]] reads and removes:
+    * a tool's `Left` is a plain text, and these are the ones that can carry a client library's text
+    * on QoD's Postgres, where a refusal of the request only quotes what the caller sent.
+    */
+  private val ServerFailureMark = "\u0000qod-server-failure"
+
+  /** `text`, marked as what REST would answer 5xx or 409. */
+  def serverFailure(text: String): String = text + ServerFailureMark
+
+  /** A tool's error without its mark, and whether it held one. */
+  def readToolError(error: String): (String, Boolean) =
+    if error.endsWith(ServerFailureMark) then (error.stripSuffix(ServerFailureMark), true)
+    else (error, false)
 
   /** The shared `tenant` schema property: PATs infer it, superuser credentials pass it. */
   val tenantProp: (String, Json) =

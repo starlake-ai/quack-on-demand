@@ -145,6 +145,10 @@ final class PoolSupervisor(
       * stamps on the tombstone row.
       */
     managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None,
+    /** The manager's own object-store access key id, `QOD_S3_ACCESS_KEY_ID`: a row holding it signs
+      * with the manager's key, so its folder counts against every non-superuser.
+      */
+    managerS3KeyId: Option[String] = sys.env.get("QOD_S3_ACCESS_KEY_ID"),
     /** The metastore, whether the row is encrypted, and whether a missing catalog database is
       * created (a row of QoD's own server only).
       */
@@ -2034,14 +2038,15 @@ final class PoolSupervisor(
     (-1L, Nil, Nil)
 
   /** Whether `td` signs `path`, the one its nodes get, with keys of its own that are neither QoD's
-    * managed store's nor a branch's of a row that does not. Whether its path is one of managed
-    * storage is the location rules' to read, from the managed prefixes.
+    * managed store's, the manager's own, nor a branch's of a row that does not. Whether its path is
+    * one of managed storage is the location rules' to read, from the managed prefixes.
     */
   private def holdsItsFolder(td: TenantDb, path: String): Boolean =
     TenantDb.holdsOwnKeys(path, td.objectStore) &&
-      !managedStore.exists(m =>
-        m.accessKeyId.nonEmpty && td.objectStore.get("s3_access_key_id").contains(m.accessKeyId)
-      ) &&
+      !(managedStore.map(_.accessKeyId).toList ++ managerS3KeyId)
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .exists(key => td.objectStore.get("s3_access_key_id").exists(_.trim == key)) &&
       td.branchOf.forall(id =>
         tenantDbs.get(id).exists(parent => TenantDb.holdsOwnKeys(path, parent.objectStore))
       )

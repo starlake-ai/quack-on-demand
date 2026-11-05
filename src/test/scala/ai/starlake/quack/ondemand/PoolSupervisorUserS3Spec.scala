@@ -105,7 +105,8 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
       new NodeLoadTracker,
       store,
       defaultMetastore = Map("dataPath" -> "s3://shared/default/lake"),
-      managedStore = Some(managed)
+      managedStore = Some(managed),
+      managerS3KeyId = Some("MANAGER")
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     def row(
@@ -132,6 +133,8 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
     row("nokeys", "s3://shared/nokeys/", Map.empty)
     row("local", "/data/local/", OwnKeys)
     row("operator", "s3://shared/operator/", OwnKeys.updated("s3_access_key_id", "OPERATOR"))
+    row("manager", "s3://shared/manager/", OwnKeys.updated("s3_access_key_id", "MANAGER"))
+    row("spaced", "s3://shared/spaced/", OwnKeys.updated("s3_access_key_id", " MANAGER "))
     row("stated", "s3://shared/stated/", OwnKeys, metastore = Map("dataPath" -> "s3://shared/old/"))
     row("branch", "s3://shared/own__br_0123abcd/", OwnKeys, branchOf = Some("own"))
     row("orphan", "s3://shared/gone__br_0123abcd/", OwnKeys, branchOf = Some("gone"))
@@ -147,6 +150,8 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
       "s3://shared/nokeys/",
       "/data/local/",
       "s3://shared/operator/",
+      "s3://shared/manager/",
+      "s3://shared/spaced/",
       "s3://shared/old/",
       "s3://shared/gone__br_0123abcd/",
       "s3://shared/nokeys__br_0123abcd/",

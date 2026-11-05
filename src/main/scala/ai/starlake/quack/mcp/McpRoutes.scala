@@ -52,7 +52,8 @@ final class McpRoutes(
     tools: List[McpToolDef],
     serverVersion: String,
     limits: RestLimitsConfig,
-    /** A tool's error as a caller who is not a superuser reads it (`TenantDb.textShownToTenant`).
+    /** A tool's error REST would answer 5xx or 409, as a caller who is not a superuser reads it
+      * (`TenantDb.textShownToTenant`). A refusal of the request stays as it is.
       */
     textForTenant: String => String
 ) extends LazyLogging:
@@ -174,8 +175,10 @@ final class McpRoutes(
               .run(principal, args)
               .map {
                 case Right(json) => toolResult(rpc.id, json.noSpaces, isError = false)
-                case Left(msg)   =>
-                  val read = if principal.superuser then msg else textForTenant(msg)
+                case Left(error) =>
+                  val (msg, serverFailure) = McpToolArgs.readToolError(error)
+                  val read                 =
+                    if serverFailure && !principal.superuser then textForTenant(msg) else msg
                   if read != msg then logger.error(s"mcp tools/call $name: $msg")
                   toolResult(rpc.id, read, isError = true)
               }
