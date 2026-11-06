@@ -1,19 +1,11 @@
 # Changelog
 
-## 0.12.0
+## Unreleased
 
-### Upgrading from 0.11.0
+### Upgrading from 0.12.0
 
-Back up the control-plane database: Liquibase `0056` runs at boot and adds the columns of a three-way
-merge to `qodstate_branch_merge`, and `0057` makes a change of a database's object-store keys move
-every tenant's policy version. A proposal from before the upgrade reads `head_snapshot_at_propose`
-NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, finish a rolling upgrade
-before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
-proposed.
-
-On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
-cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
-upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
+Back up the control-plane database: Liquibase `0057` runs at boot and makes a change of a
+database's object-store keys move every tenant's policy version.
 
 A database whose metastore names another Postgres server than QoD's own, with no login of its own,
 stops connecting at the next node start or restart: QoD's login is no longer filled in there. Have a
@@ -22,10 +14,6 @@ superuser give it its own `pgUser` and `pgPassword` with `qod database update`, 
 `127.0.0.1` counts as another server. A module calling `PoolSupervisor.createTenantDb` must recompile: it
 now states `writerTrusted`, and with `false` it names no server and no path of its own, as a tenant admin.
 Upgrade the node image and fleet servers with the manager, and restart every node.
-
-On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
-is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
-count. To keep counts from a user, refuse on the table.
 
 ### Breaking
 
@@ -51,15 +39,6 @@ count. To keep counts from a user, refuse on the table.
   with the same code, and the text goes to the manager's log. A tenant admin's `database update`
   leaves those keys out and they stay as stored; naming any of them is `403 superuser_required`
   whatever the value says, where sending them back unchanged was the way before.
-- Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
-  `--proposal`: the approver names the proposal they read, and another one in its place is
-  `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and
-  the tag: what a retry reads after an answer that was lost, or a second approver.
-- Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
-  used to take the newer head. Proposing a branch that is already proposed replaces its open
-  proposal, and `409 already_proposed` is gone.
-- Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
-  rename the column), as one named `rowid` already did not.
 - A new tenant's name holds letters and digits only and starts with a letter: `tenant/create` answers
   `400 invalid_id` to any other, an underscore included, for a superuser too. So does every path that
   creates a tenant through the supervisor: MCP, `qod serve`'s boot provisioning and a module's direct
@@ -165,6 +144,46 @@ count. To keep counts from a user, refuse on the table.
   created or changed and at each boot: a node reads whatever files its catalog lists, local files
   included. It names the source and nothing of its connection, refuses nothing, and advises
   `QOD_NODE_ALLOW_LOCAL_FILES=false` with data on object storage.
+
+### Fixed
+
+- The boot banner's PROBLEMS and `/api/pool/list`'s `statusDetail` print no secret of a database whose data
+  path is refused, in any spelling of the secret's name.
+- `QOD_FLEET_NODE_PG_HOST` / `_PORT` rewrite only a database on QoD's own server, host and port alike. A
+  database on another port of that host keeps its address in fleet assignments.
+
+## 0.12.0
+
+### Upgrading from 0.11.0
+
+Back up the control-plane database: Liquibase `0056` runs at boot and adds the columns of a three-way
+merge to `qodstate_branch_merge`. A proposal from before the upgrade reads `head_snapshot_at_propose`
+NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, finish a rolling upgrade
+before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
+proposed.
+
+On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
+cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
+upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
+
+On an OPA tenant, read any rule keyed on columns. A branch's change count now reads rowids only, so OPA
+is asked about that statement with `columns: []`: a rule that refuses by column no longer refuses a
+count. To keep counts from a user, refuse on the table.
+
+### Breaking
+
+- Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
+  `--proposal`: the approver names the proposal they read, and another one in its place is
+  `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and
+  the tag: what a retry reads after an answer that was lost, or a second approver.
+- Branches: a merge refuses `409 proposal_stale` when the branch moved since the proposal, where it
+  used to take the newer head. Proposing a branch that is already proposed replaces its open
+  proposal, and `409 already_proposed` is gone.
+- Branches: a table with a column named `snapshot_id` no longer merges (`422 merge_unsupported`:
+  rename the column), as one named `rowid` already did not.
+
+### Added
+
 - **Branches merge three ways.** Every table the branch modified merges cell by cell, by `rowid`
   (main's side is empty when only the branch changed it); a conflict refuses the merge unless the
   proposal names a winner (`--on-conflict main|branch`), `--key` catches rows both sides inserted,
@@ -210,10 +229,6 @@ count. To keep counts from a user, refuse on the table.
 
 ### Fixed
 
-- The boot banner's PROBLEMS and `/api/pool/list`'s `statusDetail` print no secret of a database whose data
-  path is refused, in any spelling of the secret's name.
-- `QOD_FLEET_NODE_PG_HOST` / `_PORT` rewrite only a database on QoD's own server, host and port alike. A
-  database on another port of that host keeps its address in fleet assignments.
 - An undrop (REST, MCP, `UNDROP TABLE`) stamps its commit with its own message whatever
   `QOD_STAMP_WRITES` says, and is not sent when its stamp fails: with the knob off, or after a stamp
   that failed, it used to land with no message, and an answer lost afterwards could not be settled
