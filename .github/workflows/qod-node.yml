@@ -85,7 +85,7 @@ jobs:
           - runner: macos-15-intel
             platform: osx-x86_64
             duckdb_platform: osx-universal
-          - runner: macos-14
+          - runner: macos-15
             platform: osx-aarch64
             duckdb_platform: osx-universal
     steps:

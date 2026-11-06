@@ -30,7 +30,7 @@ name: quackwire native build
 #   - macos-15-intel      : x86_64 macOS; macos-13 is deprecated as of
 #                           the 2026 runner-images cleanup so we use the
 #                           current Intel-on-macOS-15 image instead
-#   - macos-14            : arm64 macOS (Apple Silicon)
+#   - macos-15            : arm64 macOS (Apple Silicon); macos-14 is no longer supported
 
 on:
   push:
@@ -114,7 +114,7 @@ jobs:
             libname: libquackwire.dylib
             os: macos
             duckdb_archive: duckdb-shared-libs-osx-universal.tar.gz
-          - runner: macos-14
+          - runner: macos-15
             platform: osx-aarch64
             libname: libquackwire.dylib
             os: macos
