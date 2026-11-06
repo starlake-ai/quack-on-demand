@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
 ### Upgrading from 0.11.0
 
@@ -145,8 +145,6 @@ count. To keep counts from a user, refuse on the table.
   dropped, recreated or altered table shows dashes, where it read `0 0 0` whatever it held, as rows
   are counted only for a table the branch modified. The Merge column says `cannot be merged` of a
   table listed under table conflicts, where it said `ok`.
-
-## 0.11.1
 
 ### FlightSQL: limits before a credential
 
