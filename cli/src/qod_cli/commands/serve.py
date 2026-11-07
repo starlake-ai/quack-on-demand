@@ -644,8 +644,10 @@ def serve(
         "--demo",
         help="Run the self-contained demo instead: embedded ephemeral Postgres, seeded "
         "TPC-H, RLS/CLS showcase. Takes no TARGET; all state is deleted on exit. Other "
-        "serve flags (--tenant, --size, ...) are ignored in demo mode; the object-store "
-        "flags are refused unless --s3-path is given.",
+        "serve flags (--tenant, --size, ...) are ignored in demo mode, except "
+        "--with-starflow, whose wait --ready-timeout bounds; the object-store flags are "
+        "refused unless "
+        "--s3-path is given.",
     ),
     s3: bool = typer.Option(
         False,
@@ -686,7 +688,8 @@ def serve(
     With --with-starflow, Starflow (the Starlake API + UI) runs next to the
     manager in a `starlake` database on the embedded Postgres, paired for SSO,
     REST and FlightSQL; it is installed on first use and stopped by Ctrl-C and
-    qod stop. Refused with --demo and when a manager is already running.
+    qod stop. With --demo, Starflow keeps its state in a folder deleted on exit.
+    Refused when a manager is already running.
 
     Running against your own Postgres instead? Use qod start.
     """
@@ -730,13 +733,6 @@ def serve(
     )
 
     if demo:
-        if sf_request is not None:
-            typer.echo(
-                "error: --with-starflow cannot run with the demo (ephemeral, insecure by "
-                "design); drop --demo",
-                err=True,
-            )
-            raise typer.Exit(1)
         if target is not None:
             typer.echo(
                 "error: qod serve --demo takes no TARGET (the demo seeds its own sample "
@@ -754,7 +750,10 @@ def serve(
                 err=True,
             )
             raise typer.Exit(1)
-        run_demo(ctx, version, jar, s3=s3_request)
+        run_demo(
+            ctx, version, jar, s3=s3_request, starflow_request=sf_request,
+            ready_timeout=ready_timeout,
+        )
         return
 
     # F4: the server stores tenants lowercase (HandlerResolvers.resolveTenantId), so

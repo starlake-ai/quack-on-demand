@@ -152,8 +152,14 @@ qod start --with-starflow --starflow-env-file ./starflow.env
 ```
 
 Starflow logs to `logs/starflow.log` under the qod data dir; Ctrl-C and
-`qod stop` stop it before the manager. Not supported on Windows yet, and not
-with `--demo` or when `qod serve` would attach to a manager already running.
+`qod stop` stop it before the manager. Not supported on Windows yet, nor when
+`qod serve` would attach to a manager already running.
+
+With the demo, `qod serve --demo --with-starflow`, Starflow keeps its state in
+a folder of the qod data dir deleted on exit, and nothing is stored in the CLI
+config. Sign in to the QoD UI as `acme-admin` / `demo-acme-admin` (the
+superuser cannot create a QoD project in Starflow), then open Starflow.
+`qod start --demo` does not take `--with-starflow`.
 
 **Serve your own data in one command.** `qod serve <target>` provisions a
 tenant, database, and pool around data the user already has, on a persistent

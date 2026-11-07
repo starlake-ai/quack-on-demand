@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import time
@@ -135,7 +136,7 @@ def starflow_env(
     port: int,
     url: str,
     secret: str,
-    pg: PgCoords,
+    pg: PgCoords | None,
     java_home: str,
 ) -> dict[str, str]:
     """Starflow's process env: process env (minus the manager's JAVA_OPTS), then
@@ -166,14 +167,67 @@ def starflow_env(
             "SL_API_HTTP_PORT": str(port),
             "SL_API_HTTP_FRONT_URL": url,
             "SL_API_DOMAIN": urlparse(url).hostname or "localhost",
-            "SL_API_JDBC_URL": f"jdbc:postgresql://{pg.host}:{pg.port}/{STARFLOW_DB}",
-            "SL_API_JDBC_USER": pg.user,
-            "SL_API_JDBC_PASSWORD": pg.password,
-            "SL_API_JDBC_DRIVER": "org.postgresql.Driver",
             "JAVA_HOME": java_home,
         }
     )
+    if pg is not None:
+        # The demo passes none: its Starflow keeps its state on H2 (demo_starflow_env).
+        env.update(
+            {
+                "SL_API_JDBC_URL": f"jdbc:postgresql://{pg.host}:{pg.port}/{STARFLOW_DB}",
+                "SL_API_JDBC_USER": pg.user,
+                "SL_API_JDBC_PASSWORD": pg.password,
+                "SL_API_JDBC_DRIVER": "org.postgresql.Driver",
+            }
+        )
     return env
+
+
+# The demo's FlightSQL edge: DemoConfig forces TLS on and this port, whatever PROXY_* say.
+DEMO_FLIGHT_PORT = 31338
+# Under the qod data dir, beside the Starflow pid file: one demo Starflow per host.
+DEMO_RUN_DIR = "starflow-demo"
+# The demo's tenant admin (bootstrap-demo-minimal.yaml): a superuser cannot create a QoD project in
+# Starflow, so the hint names the tenant admin.
+DEMO_SIGN_IN_NOTE = "sign in to the QoD UI as acme-admin / demo-acme-admin, then open Starflow; "
+
+
+def demo_starflow_env(env: dict, *, run_dir: Path, mgr_port: str, loopback_only: bool) -> dict:
+    """The demo's overlay on starflow_env. Starflow's state goes on H2 in the run folder qod deletes
+    on exit, over the env file and the process env, since nothing may outlive the demo. The manager is
+    reached on 127.0.0.1, where the demo always listens. On the user's own bucket the demo binds
+    loopback only, and so does Starflow."""
+    out = dict(env)
+    out.update(
+        {
+            "SL_API_JDBC_URL": f"jdbc:h2:{run_dir / 'h2-starlake-db'}",
+            "SL_API_JDBC_USER": "sa",
+            "SL_API_JDBC_PASSWORD": "sa",
+            "SL_API_JDBC_DRIVER": "org.h2.Driver",
+            "SL_API_PROJECTS_ROOT": str(run_dir / "projects"),
+            "SL_API_DAG_FOLDER": str(run_dir / "dags"),
+            "QOD_URL": f"http://127.0.0.1:{mgr_port}",
+            "QOD_FLIGHT_URL": f"https://127.0.0.1:{DEMO_FLIGHT_PORT}",
+        }
+    )
+    if loopback_only:
+        out["SL_API_HTTP_INTERFACE"] = "127.0.0.1"
+    return out
+
+
+def remove_run_dir(path: Path) -> None:
+    """Delete the demo's Starflow folder. A link is removed, never followed."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def reset_run_dir(path: Path) -> None:
+    """An empty, owner-only folder: the demo's Starflow starts from nothing."""
+    remove_run_dir(path)
+    path.mkdir(parents=True, mode=0o700)
+    path.chmod(0o700)  # mkdir's mode is subject to the umask
 
 
 # The official installer (starflow/distrib/setup.sh) fetches this script, then
@@ -467,13 +521,14 @@ def _clear_pid_file(state_dir: Path, pid: int) -> None:
 def run_after_ready(
     *,
     client,
-    pg: PgCoords,
+    pg: PgCoords | None,
     home: Path,
     env: dict,
     state_dir: Path,
     url: str,
     ready_timeout: float,
     echo: Callable[[str], None],
+    note: str = "",
     wait=wait_ready,
     ensure_db=ensure_database,
     launch_fn=launch,
@@ -488,7 +543,7 @@ def run_after_ready(
     except Exception as exc:
         echo(f"Starflow not started: {exc}")
         return
-    echo(f"Starflow: {url}  (log: {log_path(state_dir)})")
+    echo(f"Starflow: {url}  ({note}log: {log_path(state_dir)})")
     code = proc.wait()
     _clear_pid_file(state_dir, proc.pid)
     if code is not None and code < 0:
