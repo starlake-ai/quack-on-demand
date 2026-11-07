@@ -288,6 +288,30 @@ class FlightJdbcSpec extends AnyFlatSpec with Matchers:
       edge.drain().count(_.contains("VALUES (23,")) shouldBe 1
   }
 
+  /** DuckDB statements that answer with rows under a leading keyword of their own. Classified
+    * `Other`, they were prepared with no schema, and `executeQuery` refused them as updates ("did
+    * not return a result set"): Starflow's SUMMARIZE of a table, for every user.
+    */
+  private val ReadsOfTheirOwn = List(
+    "SUMMARIZE orders",
+    "SUMMARIZE TABLE orders",
+    "DESC orders",
+    "TABLE orders",
+    "PIVOT orders ON email USING count(*)",
+    "PIVOT_WIDER orders ON email USING count(*)",
+    "UNPIVOT orders ON id INTO NAME k VALUE v",
+    "PIVOT_LONGER orders ON id INTO NAME k VALUE v"
+  )
+
+  "a read under a DuckDB keyword of its own" should "answer executeQuery with its rows" in withEdge {
+    edge =>
+      for sql <- ReadsOfTheirOwn do
+        withClue(s"[$sql]: ") {
+          statement(edge.client)(s => rows(s.executeQuery(sql))) should not be empty
+          prepared(edge.client, sql)(s => rows(s.executeQuery())) should not be empty
+        }
+  }
+
   "the paths that worked" should "keep working" in withEdge { edge =>
     statement(edge.client)(s => rows(s.executeQuery("SELECT 'x' AS a"))) shouldBe List("x")
     prepared(edge.client, "SELECT 'x' AS a")(s => rows(s.executeQuery())) shouldBe List("x")
