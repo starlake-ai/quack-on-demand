@@ -1185,7 +1185,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val (sup, b, st) = freshSupervisorWithStore()
     b.spawnPid = None
     val otherDb = sup
-      .createTenantDb("acme", "default_eu", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("acme", "default_eu", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
       .toOption
       .get
@@ -1263,7 +1263,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "accept a hyphen, and refuse a pool that reads the same as another of its database" in:
     val (sup, _, st) = freshSupervisorWithStore()
     sup
-      .createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("acme", "other", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
     val dist = RoleDistribution(0, 0, 1)
     sup.createPool(PoolKey("acme", "acme_default", "eu-west"), dist).unsafeRunSync()
@@ -1316,7 +1316,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val first  = replica
     first.createTenant(Tenant("acme")).unsafeRunSync()
     first
-      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
     val second = replica
     second.restore()
@@ -1340,31 +1340,32 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   "PoolSupervisor.createTenant" should "refuse a tenant id the rule refuses, whoever asks" in:
     val (sup, _) = freshSupervisorWithBackend()
-    List("a__b", "a_").foreach { id =>
+    // A new tenant's name holds no underscore at all, so these never reach the node id rule.
+    List("a__b", "a_", "a_b").foreach { id =>
       sup.createTenant(Tenant(id)).unsafeRunSync() match
         case Left(err: ai.starlake.quack.ondemand.SupervisorError.InvalidName) =>
           withClue(id)(err.message should include(s"'$id'"))
         case other => fail(s"$id: $other")
     }
-    sup.createTenant(Tenant("a_b")).unsafeRunSync().isRight shouldBe true
+    sup.createTenant(Tenant("ab")).unsafeRunSync().isRight shouldBe true
 
   "PoolSupervisor.createTenantDb" should "refuse a database name the rule refuses, whoever asks" in:
     val (sup, _, _) = freshSupervisorWithStore()
     List("_x", "x_", "a__b", "acme__b", "acme_a__b").foreach { name =>
       sup
-        .createTenantDb("acme", name, TenantDbKind.InMemory, Map.empty, dataPath = "")
+        .createTenantDb("acme", name, TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
         .unsafeRunSync() match
         case Left(err: ai.starlake.quack.ondemand.SupervisorError.InvalidName) =>
           withClue(name)(err.message should include("'--'"))
         case other => fail(s"$name: $other")
     }
     sup
-      .createTenantDb("acme", "a_b", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("acme", "a_b", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
       .map(_.name) shouldBe Right("acme_a_b")
     // The composed name's own prefix does not count against the suffix.
     sup
-      .createTenantDb("acme", "acme_c", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("acme", "acme_c", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
       .map(_.name) shouldBe Right("acme_c")
 
@@ -1377,7 +1378,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     )
     sup.restore()
     sup
-      .createTenantDb("a__b", "sales", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb("a__b", "sales", TenantDbKind.InMemory, Map.empty, dataPath = "", writerTrusted = true)
       .unsafeRunSync()
       .map(_.name) shouldBe Right("a__b_sales")
 

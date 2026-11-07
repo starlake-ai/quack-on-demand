@@ -29,7 +29,14 @@ class NameRuleWritersSpec extends AnyFlatSpec with Matchers:
     val pools         = new PoolHandlers(sup, new NodeLoadTracker, audit = audit)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
-      .createTenantDb("acme", "shop", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .createTenantDb(
+        "acme",
+        "shop",
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath = "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
 
     def tenant(id: String) =
@@ -57,7 +64,8 @@ class NameRuleWritersSpec extends AnyFlatSpec with Matchers:
 
   "tenant/create" should "answer 400 invalid_id for a name the rule refuses, writing nothing" in {
     val f = new Fixture
-    List("a__b", "a_").foreach { id =>
+    // A new tenant's name holds no underscore at all.
+    List("a__b", "a_", "a_b").foreach { id =>
       withClue(id) {
         val (status, error) = f.tenant(id).unsafeRunSync().left.toOption.get
         status shouldBe StatusCode.BadRequest
@@ -70,7 +78,7 @@ class NameRuleWritersSpec extends AnyFlatSpec with Matchers:
     status shouldBe StatusCode.BadRequest
     error.error shouldBe "invalid_id"
     f.sup.listTenants().map(_.id) shouldBe List("acme")
-    f.tenant("a_b").unsafeRunSync().isRight shouldBe true
+    f.tenant("ab").unsafeRunSync().isRight shouldBe true
   }
 
   "database/create" should "answer 400 invalid_name for a name the rule refuses, writing nothing" in {
