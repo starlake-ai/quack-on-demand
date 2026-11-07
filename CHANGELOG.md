@@ -174,6 +174,12 @@ nodes.
 
 ### Fixed
 
+- A JDBC `executeQuery` of `SUMMARIZE`, `DESC`, `TABLE`, `PIVOT` / `PIVOT_WIDER` or `UNPIVOT` /
+  `PIVOT_LONGER` answers with its rows instead of `Statement did not return a result set` (Starflow's
+  summary of a table hit it, for every user). These DuckDB reads were classified `Other`, so FlightSQL
+  prepared them with no result schema; they are now reads, run once at prepare to learn their schema, as
+  SHOW and DESCRIBE are. An operator who set `QOD_CLASSIFIER_SELECT` keeps that list: add the seven verbs
+  to it.
 - The boot banner's PROBLEMS and `/api/pool/list`'s `statusDetail` print no secret of a database whose data
   path is refused, in any spelling of the secret's name.
 - `QOD_FLEET_NODE_PG_HOST` / `_PORT` rewrite only a database on QoD's own server, host and port alike. A

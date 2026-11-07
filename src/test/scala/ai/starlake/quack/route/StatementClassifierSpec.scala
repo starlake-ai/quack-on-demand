@@ -9,6 +9,21 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
   "StatementClassifier" should "classify SELECT" in:
     StatementClassifier.classify("SELECT * FROM t") shouldBe StatementKind.Select
 
+  it should "classify DuckDB's reads under a keyword of their own as Select" in:
+    // Each answers with rows (checked against DuckDB 2.0.0): classified Other, they were prepared
+    // with no schema and a JDBC executeQuery refused them.
+    List(
+      "SUMMARIZE t",
+      "SUMMARIZE TABLE t",
+      "summarize SELECT * FROM t",
+      "DESC t",
+      "TABLE t",
+      "PIVOT t ON b USING sum(c)",
+      "PIVOT_WIDER t ON b USING sum(c)",
+      "UNPIVOT t ON a, c INTO NAME k VALUE v",
+      "PIVOT_LONGER t ON a, c INTO NAME k VALUE v"
+    ).foreach(sql => withClue(sql)(StatementClassifier.classify(sql) shouldBe StatementKind.Select))
+
   it should "classify the DuckDB / BigQuery FROM-first shorthand as Select" in:
     // `FROM t` and variations are valid read queries in DuckDB / BigQuery
     // pipe-syntax; route them to a ReadOnly node, not Other.

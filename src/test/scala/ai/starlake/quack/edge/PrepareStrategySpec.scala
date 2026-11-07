@@ -77,6 +77,23 @@ class PrepareStrategySpec extends AnyFlatSpec with Matchers:
     PrepareStrategy.choose("DESCRIBE customer", StatementKind.Select) shouldBe
       PrepareStrategy.FullExecute
 
+  it should "fall back to full execute for DuckDB's reads under a keyword of their own" in:
+    // Not wrapped as a subquery: the node refuses SUMMARIZE / DESC of a table to non-superusers,
+    // and the gateway's tenant rewrite (RefusedForms) only reads a statement headed by its verb.
+    List(
+      "SUMMARIZE customer",
+      "DESC customer",
+      "TABLE customer",
+      "PIVOT customer ON c_mktsegment USING count(*)",
+      "PIVOT_WIDER customer ON c_mktsegment USING count(*)",
+      "UNPIVOT customer ON c_custkey INTO NAME k VALUE v",
+      "PIVOT_LONGER customer ON c_custkey INTO NAME k VALUE v"
+    ).foreach { sql =>
+      withClue(sql)(
+        PrepareStrategy.choose(sql, StatementKind.Select) shouldBe PrepareStrategy.FullExecute
+      )
+    }
+
   it should "fall back to full execute for PRAGMA" in:
     PrepareStrategy.choose("PRAGMA database_list", StatementKind.Other) shouldBe
       PrepareStrategy.FullExecute

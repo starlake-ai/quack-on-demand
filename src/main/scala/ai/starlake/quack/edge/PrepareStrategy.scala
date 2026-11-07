@@ -20,8 +20,9 @@ import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
   *     inner query but the executor short-circuits on LIMIT 0, so the Arrow stream comes back with
   *     the correct schema and zero rows.
   *   - [[ai.starlake.quack.edge.PrepareStrategy.FullExecute FullExecute]] - a single statement that
-  *     reads and isn't subquery-safe (SHOW / EXPLAIN / DESCRIBE, a lone PRAGMA). The original SQL
-  *     runs to read the schema off its result.
+  *     reads and isn't subquery-safe (SHOW / EXPLAIN / DESCRIBE, a lone PRAGMA, and DuckDB's DESC,
+  *     SUMMARIZE, TABLE, PIVOT and UNPIVOT forms). The original SQL runs to read the schema off its
+  *     result.
   *   - [[ai.starlake.quack.edge.PrepareStrategy.Unprobed Unprobed]] - a statement a probe could not
   *     run without running its effects: any batch of more than one statement (the node runs every
   *     statement of the text it is sent, so `SELECT 1; INSERT ...` wrote at probe time and again at
@@ -39,9 +40,25 @@ enum PrepareStrategy:
 
 object PrepareStrategy:
 
-  /** Verbs in the classifier's `select` bucket that are NOT safe to wrap as a subquery. */
+  /** Verbs in the classifier's `select` bucket that are NOT safe to wrap as a subquery. DuckDB
+    * would plan `FROM (SUMMARIZE t)` and its kin, but the node refuses SUMMARIZE / DESC of a table
+    * to non-superusers and the gateway's tenant rewrite (`RefusedForms`) reads only a statement
+    * headed by its verb, so these run whole to learn their schema, as SHOW and DESCRIBE do.
+    */
   private val NotSubquerySafe: Set[String] =
-    Set("SHOW", "DESCRIBE", "EXPLAIN", "PRAGMA")
+    Set(
+      "SHOW",
+      "DESCRIBE",
+      "EXPLAIN",
+      "PRAGMA",
+      "DESC",
+      "SUMMARIZE",
+      "TABLE",
+      "PIVOT",
+      "PIVOT_WIDER",
+      "UNPIVOT",
+      "PIVOT_LONGER"
+    )
 
   def choose(sql: String, kind: StatementKind): PrepareStrategy =
     kind match

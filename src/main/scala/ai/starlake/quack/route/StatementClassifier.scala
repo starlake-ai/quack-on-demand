@@ -49,7 +49,11 @@ object StatementClassifierConfig:
     * Buckets:
     *   - `select` - read-side verbs. `WITH` covers CTE-prefixed selects. `FROM` covers DuckDB /
     *     BigQuery FROM-first shorthand. `EXPLAIN` is read-side by convention (an EXPLAIN of an
-    *     INSERT still doesn't mutate).
+    *     INSERT still doesn't mutate). `DESC`, `SUMMARIZE`, `TABLE`, `PIVOT` / `PIVOT_WIDER` and
+    *     `UNPIVOT` / `PIVOT_LONGER` are DuckDB reads under a keyword of their own: classified
+    *     `Other`, they were prepared with no result schema, and a JDBC `executeQuery` refused them
+    *     as updates. `CALL` and `EXECUTE` answer with rows too but stay `Other` (unprobed), since
+    *     either can run a write.
     *   - `dml` - write-side verbs. `COPY` covers DuckDB's data-load / data-export. `UPSERT` /
     *     `REPLACE` are dialect variants of INSERT-with-conflict-resolution.
     *   - `ddl` - schema-mutating. `ATTACH` / `DETACH` are DuckDB catalog manipulation;
@@ -65,7 +69,22 @@ object StatementClassifierConfig:
     * read.
     */
   val Defaults: StatementClassifierConfig = StatementClassifierConfig(
-    select = Set("SELECT", "WITH", "VALUES", "SHOW", "DESCRIBE", "EXPLAIN", "FROM"),
+    select = Set(
+      "SELECT",
+      "WITH",
+      "VALUES",
+      "SHOW",
+      "DESCRIBE",
+      "EXPLAIN",
+      "FROM",
+      "DESC",
+      "SUMMARIZE",
+      "TABLE",
+      "PIVOT",
+      "PIVOT_WIDER",
+      "UNPIVOT",
+      "PIVOT_LONGER"
+    ),
     dml = Set("INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "COPY"),
     ddl = Set(
       "CREATE",
