@@ -2,6 +2,7 @@ import itertools
 import json
 import pathlib
 import time
+from types import SimpleNamespace
 
 import httpx
 from click import unstyle
@@ -1160,7 +1161,7 @@ def test_serve_demo_delegates_to_the_demo_runner(runner, wired, monkeypatch):
     called = {}
     monkeypatch.setattr(
         serve_cmd, "run_demo",
-        lambda ctx, version, jar, s3=None: called.setdefault("args", (version, jar, s3)),
+        lambda ctx, version, jar, s3=None, **kw: called.setdefault("args", (version, jar, s3)),
         raising=False,
     )
     result = _invoke(runner, wired, "--demo")
@@ -1531,13 +1532,182 @@ def test_serve_with_starflow_uses_the_embedded_postgres(runner, starflow_wired):
     assert "provision" in starflow_wired  # serve's own provisioning still runs
 
 
-def test_serve_demo_refuses_with_starflow(runner, starflow_wired):
+@pytest.fixture
+def demo_starflow(starflow_wired, monkeypatch):
+    """`--demo --with-starflow` on top of starflow_wired: the demo's own exec is captured."""
+    from qod_cli.commands import demo as demo_cmd
+    from qod_cli.commands import serve as serve_cmd
+
+    def fake_demo_exec(cmd, env=None):
+        starflow_wired["demo_cmd"], starflow_wired["demo_env"] = cmd, env
+        starflow_wired["run_dir_at_exec"] = (
+            starflow_wired["tmp"] / "state" / "starflow-demo"
+        ).is_dir()
+
+    monkeypatch.setattr(demo_cmd, "_exec", fake_demo_exec)
+    monkeypatch.setattr(serve_cmd, "_manager_running", lambda url: False)
+    monkeypatch.delenv("SL_API_HTTP_INTERFACE", raising=False)
+    return starflow_wired
+
+
+def _demo_invoke(runner, wired, *args):
     from qod_cli.main import app
 
-    result = runner.invoke(app, ["serve", "--demo", "--with-starflow"])
+    return runner.invoke(
+        app, ["serve", "--demo", "--with-starflow", *args, "--jar", str(wired["jar"])]
+    )
+
+
+def test_serve_demo_runs_starflow_beside_the_demo(runner, demo_starflow):
+    result = _demo_invoke(runner, demo_starflow, "--ready-timeout", "42")
+    assert result.exit_code == 0, result.output
+    assert demo_starflow["demo_cmd"][-1] == "demo"
+    mgr = demo_starflow["demo_env"]
+    assert mgr["SL_ENABLED"] == "true"
+    assert mgr["SL_URL"] == "http://localhost:9900"
+    secret = mgr["QOD_SESSION_JWT_SECRET"]
+    assert mgr["JWT_SECRET_KEY"] == secret
+    sf = demo_starflow["starflow"]
+    assert sf["env"]["JWT_SECRET_KEY"] == secret
+    run_dir = demo_starflow["tmp"] / "state" / "starflow-demo"
+    assert sf["env"]["SL_API_JDBC_URL"] == f"jdbc:h2:{run_dir / 'h2-starlake-db'}"
+    assert "SL_API_HTTP_INTERFACE" not in sf["env"]
+    assert sf["ready_timeout"] == 42.0
+    assert sf["pg"] is None
+    # Never printed, never stored.
+    assert secret not in result.output
+    config = demo_starflow["tmp"] / "config.toml"
+    assert not config.exists() or secret not in config.read_text()
+    # The folder existed while the jar ran and is gone once it returned.
+    assert demo_starflow["run_dir_at_exec"] is True
+    assert not run_dir.exists()
+    assert "provision" not in demo_starflow  # the demo provisions nothing of serve's
+
+
+def test_serve_demo_starflow_deletes_the_run_folder_when_the_jar_fails(
+    runner, demo_starflow, monkeypatch
+):
+    import typer
+
+    from qod_cli.commands import demo as demo_cmd
+
+    def jar_fails(cmd, env=None):
+        raise typer.Exit(1)
+
+    monkeypatch.setattr(demo_cmd, "_exec", jar_fails)
+    result = _demo_invoke(runner, demo_starflow)
     assert result.exit_code == 1
-    assert "cannot run with the demo" in result.output
-    assert "drop --demo" in result.output
+    assert not (demo_starflow["tmp"] / "state" / "starflow-demo").exists()
+
+
+def test_serve_demo_starflow_on_the_users_bucket_listens_on_loopback(
+    runner, demo_starflow, monkeypatch
+):
+    # run_demo sets FORCE_AFTER only when unset; a set value keeps os.environ clean after the test.
+    monkeypatch.setenv("FORCE_AFTER", "5")
+    result = _demo_invoke(
+        runner, demo_starflow, "--s3-path", "s3://b12/x",
+        "--access-key-id", "K", "--secret-access-key", "S",
+    )
+    assert result.exit_code == 0, result.output
+    assert demo_starflow["starflow"]["env"]["SL_API_HTTP_INTERFACE"] == "127.0.0.1"
+    # The bucket's keys stay with the jar.
+    assert "QOD_S3_SECRET_ACCESS_KEY" not in demo_starflow["starflow"]["env"]
+
+
+@pytest.fixture
+def demo_local_store(demo_starflow, monkeypatch):
+    """`--demo --s3` runnable without SeaweedFS: a fake store, and an `order` of the teardown."""
+    from qod_cli import demo_s3
+    from qod_cli.commands import _starflow
+
+    order = []
+    store = SimpleNamespace(
+        access_key_id="AK", secret_access_key="SK", s3_port=18333,
+        stop=lambda: order.append("store.stop"),
+    )
+    monkeypatch.setenv("QOD_DEMO_WEED_BIN", "/nowhere/weed")
+    monkeypatch.setattr(launcher, "ensure_weed", lambda app_home: pathlib.Path("/nowhere/weed"))
+    monkeypatch.setattr(demo_s3, "sweep_orphan", lambda *a, **kw: None)
+    monkeypatch.setattr(demo_s3.LocalStore, "start", classmethod(lambda cls, weed: store))
+    real_finish = _starflow.finish_demo
+
+    def finish_recorded(plan, *a, **kw):
+        try:
+            return real_finish(plan, *a, **kw)
+        finally:
+            order.append("finish_demo")
+
+    monkeypatch.setattr(_starflow, "finish_demo", finish_recorded)
+    demo_starflow["order"] = order
+    return demo_starflow
+
+
+def test_serve_demo_starflow_on_the_local_store_stops_starflow_before_the_store(
+    runner, demo_local_store
+):
+    result = _demo_invoke(runner, demo_local_store, "--s3")
+    assert result.exit_code == 0, result.output
+    assert demo_local_store["order"] == ["finish_demo", "store.stop"]
+    assert "SL_API_HTTP_INTERFACE" not in demo_local_store["starflow"]["env"]
+    assert demo_local_store["demo_env"]["QOD_DEMO_S3_LOCAL"] == "1"
+    assert demo_local_store["demo_env"]["SL_ENABLED"] == "true"
+    assert not (demo_local_store["tmp"] / "state" / "starflow-demo").exists()
+
+
+def test_serve_demo_starflow_stops_the_store_when_starflow_teardown_is_interrupted(
+    runner, demo_local_store, monkeypatch
+):
+    from qod_cli.commands import _starflow
+
+    def interrupted(plan, *a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_starflow, "finish_demo", interrupted)
+    _demo_invoke(runner, demo_local_store, "--s3")
+    assert "store.stop" in demo_local_store["order"]
+
+
+def test_serve_demo_starflow_deletes_the_run_folder_when_the_store_cannot_start(
+    runner, demo_local_store, monkeypatch
+):
+    from qod_cli import demo_s3
+
+    def no_weed(cls, weed):
+        raise RuntimeError("no weed")
+
+    monkeypatch.setattr(demo_s3.LocalStore, "start", classmethod(no_weed))
+    result = _demo_invoke(runner, demo_local_store, "--s3")
+    assert result.exit_code == 1
+    assert "could not start the local S3 store" in result.output
+    assert not (demo_local_store["tmp"] / "state" / "starflow-demo").exists()
+    assert "demo_cmd" not in demo_local_store
+
+
+def test_serve_demo_starflow_refused_on_windows(runner, demo_starflow, monkeypatch):
+    from qod_cli.commands import _starflow
+
+    monkeypatch.setattr(_starflow, "_is_windows", lambda: True)
+    result = _demo_invoke(runner, demo_starflow)
+    assert result.exit_code == 1
+    assert "not supported on Windows" in result.output
+    assert "demo_cmd" not in demo_starflow
+
+
+def test_serve_demo_starflow_refused_while_a_manager_runs(runner, demo_starflow, monkeypatch):
+    from qod_cli.commands import serve as serve_cmd
+
+    monkeypatch.setattr(serve_cmd, "_manager_running", lambda url: True)
+    result = _demo_invoke(runner, demo_starflow)
+    assert result.exit_code == 1
+    assert "stop it first" in result.output
+    assert "starflow" not in demo_starflow and "demo_cmd" not in demo_starflow
+
+
+def test_serve_demo_starflow_flag_without_with_starflow_is_a_usage_error(runner, wired):
+    result = _invoke(runner, wired, "--demo", "--starflow-url", "http://x:1")
+    assert result.exit_code == 2
+    assert "--with-starflow" in result.output
 
 
 def test_serve_attach_mode_refuses_with_starflow(runner, starflow_wired, monkeypatch):
@@ -1709,7 +1879,7 @@ def test_serve_passes_the_s3_request_to_the_demo(runner, wired, monkeypatch):
 
     got = {}
     monkeypatch.setattr(
-        serve_cmd, "run_demo", lambda ctx, version, jar, s3=None: got.setdefault("s3", s3)
+        serve_cmd, "run_demo", lambda ctx, version, jar, s3=None, **kw: got.setdefault("s3", s3)
     )
     assert _invoke(runner, wired, "--demo", "--s3").exit_code == 0
     assert isinstance(got["s3"], demo_s3.LocalRequest)

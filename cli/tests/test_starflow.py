@@ -1,5 +1,6 @@
 import importlib
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -729,3 +730,263 @@ def test_run_after_ready_removes_own_pid_file_after_exit(tmp_path):
 def test_run_after_ready_keeps_pid_file_of_a_newer_run(tmp_path):
     _run_after_ready_with(tmp_path, 4242, lambda: _pid_file(tmp_path, f"5555\n{HOME}\n"))
     assert (tmp_path / starflow.PID_FILE).read_text() == f"5555\n{HOME}\n"
+
+
+# --- the demo (qod serve --demo --with-starflow) ---
+
+
+def _demo_env(tmp_path, file_env=None, mgr_env=None, loopback_only=False):
+    base = starflow.starflow_env(
+        {}, file_env or {}, mgr_env or {}, port=9900, url="http://localhost:9900", secret="s",
+        pg=None, java_home="/jdk",
+    )
+    return starflow.demo_starflow_env(
+        base,
+        run_dir=tmp_path / "run",
+        mgr_port=(mgr_env or {}).get("QOD_ON_DEMAND_PORT", "20900"),
+        loopback_only=loopback_only,
+    )
+
+
+def test_starflow_env_without_pg_sets_no_jdbc_keys():
+    env = starflow.starflow_env(
+        {}, {}, {}, port=9900, url="http://localhost:9900", secret="s", pg=None, java_home="/jdk"
+    )
+    assert not [k for k in env if k.startswith("SL_API_JDBC_")]
+    assert env["JWT_SECRET_KEY"] == "s"
+
+
+def test_demo_starflow_env_keeps_state_in_the_run_folder_over_the_env_file(tmp_path):
+    env = _demo_env(
+        tmp_path,
+        file_env={
+            "SL_API_JDBC_URL": "jdbc:postgresql://db:5432/kept",
+            "SL_API_JDBC_USER": "u",
+            "SL_API_JDBC_PASSWORD": "p",
+            "SL_API_JDBC_DRIVER": "org.postgresql.Driver",
+            "SL_API_PROJECTS_ROOT": "/kept/projects",
+            "SL_API_DAG_FOLDER": "/kept/dags",
+        },
+    )
+    run = tmp_path / "run"
+    assert env["SL_API_JDBC_URL"] == f"jdbc:h2:{run / 'h2-starlake-db'}"
+    assert (env["SL_API_JDBC_USER"], env["SL_API_JDBC_PASSWORD"]) == ("sa", "sa")
+    assert env["SL_API_JDBC_DRIVER"] == "org.h2.Driver"
+    assert env["SL_API_PROJECTS_ROOT"] == str(run / "projects")
+    assert env["SL_API_DAG_FOLDER"] == str(run / "dags")
+    assert env["JWT_SECRET_KEY"] == "s"
+
+
+def test_demo_starflow_env_reaches_the_manager_on_loopback_and_the_demo_edge(tmp_path):
+    env = _demo_env(
+        tmp_path,
+        mgr_env={"QOD_ON_DEMAND_PORT": "21000", "PROXY_PORT": "32000", "PROXY_TLS_ENABLED": "false"},
+    )
+    assert env["QOD_URL"] == "http://127.0.0.1:21000"
+    # The demo forces FlightSQL TLS on and port 31338, whatever PROXY_* say.
+    assert env["QOD_FLIGHT_URL"] == "https://127.0.0.1:31338"
+
+
+def test_demo_starflow_env_binds_loopback_only_on_the_users_bucket(tmp_path):
+    assert "SL_API_HTTP_INTERFACE" not in _demo_env(tmp_path)
+    env = _demo_env(tmp_path, file_env={"SL_API_HTTP_INTERFACE": "0.0.0.0"}, loopback_only=True)
+    assert env["SL_API_HTTP_INTERFACE"] == "127.0.0.1"
+
+
+@posix_only
+def test_reset_run_dir_makes_an_empty_owner_only_folder(tmp_path):
+    run = tmp_path / "state" / "starflow-demo"
+    (run / "projects").mkdir(parents=True)
+    (run / "projects" / "old.txt").write_text("x")
+    starflow.reset_run_dir(run)
+    assert run.is_dir() and list(run.iterdir()) == []
+    assert run.stat().st_mode & 0o777 == 0o700
+
+
+@posix_only
+def test_reset_run_dir_replaces_a_symlink_without_following_it(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep.txt").write_text("x")
+    run = tmp_path / "starflow-demo"
+    run.symlink_to(target, target_is_directory=True)
+    starflow.reset_run_dir(run)
+    assert run.is_dir() and not run.is_symlink()
+    assert (target / "keep.txt").read_text() == "x"
+
+
+def test_remove_run_dir_deletes_the_tree_and_tolerates_a_missing_one(tmp_path):
+    run = tmp_path / "starflow-demo"
+    (run / "dags").mkdir(parents=True)
+    (run / "h2-starlake-db.mv.db").write_text("x")
+    starflow.remove_run_dir(run)
+    assert not run.exists()
+    starflow.remove_run_dir(run)  # no error
+
+
+def test_run_after_ready_prints_the_note_on_the_ready_line(tmp_path):
+    lines = []
+    proc = SimpleNamespace(pid=4242, wait=lambda: 0)
+    starflow.run_after_ready(
+        client="c", pg=None, home=tmp_path, env={}, state_dir=tmp_path, url="http://sf:9000",
+        ready_timeout=5.0, echo=lines.append, wait=lambda client, timeout_s: None,
+        ensure_db=lambda pg: False, launch_fn=lambda *a: proc, note="sign in as x; ",
+    )
+    assert f"Starflow: http://sf:9000  (sign in as x; log: {starflow.log_path(tmp_path)})" in lines
+
+
+import dataclasses
+
+import typer
+
+
+@pytest.fixture
+def demo_glue(tmp_path, monkeypatch):
+    from qod_cli import launcher
+
+    monkeypatch.setattr(launcher, "default_data_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(launcher, "default_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(starflow, "java_home_of", lambda java, run=None: "/jdk")
+    monkeypatch.setattr(starflow, "ensure_installed", lambda *a, **kw: None)
+    monkeypatch.setattr(starflow_cmd, "_user_home", lambda: tmp_path / "home")
+    saved, spawned = [], {}
+    monkeypatch.setattr(starflow_cmd, "save_start_env", saved.append)
+    monkeypatch.setattr(starflow_cmd, "_spawn", lambda **kw: spawned.update(kw))
+    for var in ("SL_URL", "SL_API_HTTP_PORT", "STARLAKE_HOME", "STARFLOW_ENV_FILE",
+                "STARFLOW_VERSION", "SL_API_HTTP_INTERFACE"):
+        monkeypatch.delenv(var, raising=False)
+    return SimpleNamespace(tmp=tmp_path, saved=saved, spawned=spawned)
+
+
+DEMO_REQ = starflow_cmd.StarflowRequest(home=None, version=None, port=None, url=None, env_file=None)
+
+
+def test_prepare_demo_mints_a_fresh_secret_per_run_and_never_stores_it(demo_glue, capsys):
+    base = {"QOD_SESSION_JWT_SECRET": "stored-one"}
+    first = starflow_cmd.prepare_demo(DEMO_REQ, base, "/java")
+    second = starflow_cmd.prepare_demo(DEMO_REQ, base, "/java")
+    assert first.secret != second.secret
+    assert "stored-one" not in (first.secret, second.secret)
+    assert len(first.secret) >= 48
+    assert demo_glue.saved == []
+    out = capsys.readouterr()
+    assert first.secret not in out.out + out.err
+    assert second.secret not in out.out + out.err
+
+
+@posix_only
+def test_prepare_demo_empties_the_run_folder(demo_glue):
+    run = demo_glue.tmp / "state" / "starflow-demo"
+    (run / "projects").mkdir(parents=True)
+    (run / "projects" / "old.txt").write_text("x")
+    plan = starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+    assert plan.run_dir == run
+    assert run.is_dir() and list(run.iterdir()) == []
+    assert run.stat().st_mode & 0o777 == 0o700
+
+
+def test_prepare_demo_reaps_the_leftover_starflow_before_wiping(demo_glue, monkeypatch):
+    order = []
+    monkeypatch.setattr(starflow, "stop_running", lambda state_dir, echo: order.append("reap"))
+    monkeypatch.setattr(starflow, "reset_run_dir", lambda path: order.append("reset"))
+    starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+    assert order == ["reap", "reset"]
+
+
+def test_prepare_demo_refuses_when_the_run_folder_cannot_be_made(demo_glue, monkeypatch, capsys):
+    def denied(path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(starflow, "reset_run_dir", denied)
+    with pytest.raises(typer.Exit) as exc:
+        starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+    assert exc.value.exit_code == 1
+    assert "starflow-demo" in capsys.readouterr().err
+
+
+def test_start_demo_after_ready_spawns_on_h2_with_a_loopback_wait(demo_glue):
+    plan = dataclasses.replace(
+        starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java"),
+        file_env={"SL_API_JDBC_URL": "jdbc:postgresql://db/kept"},
+    )
+    starflow_cmd.start_demo_after_ready(
+        plan,
+        mgr_env={"QOD_ON_DEMAND_PORT": "21000", "PROXY_PORT": "1"},
+        loopback_only=True,
+        ready_timeout=42.0,
+    )
+    sp = demo_glue.spawned
+    assert sp["client"]._settings.manager_url == "http://127.0.0.1:21000"
+    assert sp["pg"] is None
+    assert sp["ensure_db"](None) is False  # no Postgres database in demo mode
+    assert sp["note"] == starflow.DEMO_SIGN_IN_NOTE
+    assert sp["ready_timeout"] == 42.0
+    assert sp["state_dir"] == demo_glue.tmp / "state"
+    env = sp["env"]
+    assert env["SL_API_JDBC_URL"] == f"jdbc:h2:{plan.run_dir / 'h2-starlake-db'}"
+    assert env["QOD_URL"] == "http://127.0.0.1:21000"
+    assert env["QOD_FLIGHT_URL"] == "https://127.0.0.1:31338"
+    assert env["SL_API_HTTP_INTERFACE"] == "127.0.0.1"
+    assert env["JWT_SECRET_KEY"] == plan.secret
+
+
+def test_finish_demo_stops_starflow_then_deletes_the_run_folder(demo_glue, monkeypatch):
+    plan = starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+    seen = []
+    monkeypatch.setattr(starflow, "begin_stop", lambda state_dir, echo=None, **kw: 77)
+    monkeypatch.setattr(
+        starflow,
+        "finish_stop",
+        lambda state_dir, pgid, echo=None, **kw: seen.append((pgid, plan.run_dir.exists())),
+    )
+    starflow_cmd.finish_demo(plan, echo=lambda line: None)
+    assert seen == [(77, True)]  # stopped while the folder was still there
+    assert not plan.run_dir.exists()
+
+
+def test_finish_demo_warns_and_never_raises(demo_glue, monkeypatch):
+    plan = starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+
+    def stop_fails(state_dir, echo=None, **kw):
+        raise RuntimeError("ps failed")
+
+    def delete_fails(path):
+        raise OSError("busy")
+
+    monkeypatch.setattr(starflow, "begin_stop", stop_fails)
+    monkeypatch.setattr(starflow, "remove_run_dir", delete_fails)
+    lines = []
+    starflow_cmd.finish_demo(plan, echo=lines.append)
+    assert lines[0] == "WARN: could not stop Starflow: ps failed"
+    assert lines[1].startswith(f"WARN: could not delete {plan.run_dir}: busy")
+
+
+def test_finish_demo_kills_starflow_on_a_second_interrupt_and_still_deletes_the_folder(
+    demo_glue, monkeypatch
+):
+    plan = starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+
+    def interrupted(state_dir, pgid, echo=None, **kw):
+        raise KeyboardInterrupt
+
+    killed = []
+    monkeypatch.setattr(starflow, "begin_stop", lambda state_dir, echo=None, **kw: 77)
+    monkeypatch.setattr(starflow, "finish_stop", interrupted)
+    monkeypatch.setattr(starflow_cmd, "_killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    lines = []
+    starflow_cmd.finish_demo(plan, echo=lines.append)  # no exception escapes
+    assert killed == [(77, signal.SIGKILL)]
+    assert not plan.run_dir.exists()
+    assert "second interrupt; killing Starflow directly." in lines
+
+
+def test_finish_demo_without_a_starflow_running_only_deletes_the_folder(demo_glue, monkeypatch):
+    plan = starflow_cmd.prepare_demo(DEMO_REQ, {}, "/java")
+    monkeypatch.setattr(starflow, "begin_stop", lambda state_dir, echo=None, **kw: None)
+    monkeypatch.setattr(
+        starflow, "finish_stop", lambda *a, **kw: pytest.fail("nothing of ours to stop")
+    )
+    lines = []
+    starflow_cmd.finish_demo(plan, echo=lines.append)
+    assert not plan.run_dir.exists()
+    assert lines == []

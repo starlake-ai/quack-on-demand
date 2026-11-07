@@ -7,6 +7,8 @@ port/URL precedence stays flag > env file > process env > default."""
 from __future__ import annotations
 
 import os
+import secrets
+import signal
 import sys
 import threading
 from dataclasses import dataclass
@@ -24,7 +26,8 @@ WITH_STARFLOW = typer.Option(
     "--with-starflow",
     envvar="QOD_WITH_STARFLOW",
     help="Also run Starflow (the Starlake API + UI) next to the manager, sharing its "
-    "Postgres server and SSO. Installs Starflow on first use.",
+    "Postgres server (with qod serve --demo: H2 in a folder deleted on exit) and SSO. "
+    "Installs Starflow on first use.",
 )
 STARFLOW_HOME = typer.Option(
     None,
@@ -72,6 +75,8 @@ class StarflowPlan:
     secret: str
     file_env: dict
     java_home: str
+    # The demo's folder for Starflow's state, deleted on exit; None outside the demo.
+    run_dir: Path | None = None
 
 
 def _is_windows() -> bool:
@@ -104,9 +109,9 @@ def request(with_starflow, home, version, port, url, env_file) -> StarflowReques
     return StarflowRequest(home=home, version=version, port=port, url=url, env_file=env_file)
 
 
-def prepare(req: StarflowRequest, base_env: dict, java: str) -> StarflowPlan:
-    """Everything that can fail before the manager boots: env file, port/URL,
-    install, the shared session secret (persisted before boot so a restart keeps SSO)."""
+def _resolve(req: StarflowRequest, base_env: dict, java: str) -> tuple[Path, int, str, dict, str]:
+    """What both paths settle before the manager boots: env file, port/URL, the leftover Starflow,
+    install. Returns (home, port, url, file_env, java_home)."""
     echo = lambda line: typer.echo(line, err=True)
     proc_env = dict(os.environ)
     raw_file = req.env_file or base_env.get("STARFLOW_ENV_FILE")
@@ -127,13 +132,21 @@ def prepare(req: StarflowRequest, base_env: dict, java: str) -> StarflowPlan:
     except (starflow.StarflowError, OSError, httpx.HTTPError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
+    return home, port, url, file_env, java_home
+
+
+def prepare(req: StarflowRequest, base_env: dict, java: str) -> StarflowPlan:
+    """Everything that can fail before the manager boots: env file, port/URL,
+    install, the shared session secret (persisted before boot so a restart keeps SSO)."""
+    home, port, url, file_env, java_home = _resolve(req, base_env, java)
     generated = not base_env.get("QOD_SESSION_JWT_SECRET")
     secret = starflow.ensure_shared_secrets(base_env, save_start_env)
     if generated:
         # The name only: the value never reaches the terminal.
-        echo(
+        typer.echo(
             "generated QOD_SESSION_JWT_SECRET for the Starflow pairing "
-            f"(stored in {config_path()})"
+            f"(stored in {config_path()})",
+            err=True,
         )
     return StarflowPlan(
         home=home,
@@ -142,6 +155,34 @@ def prepare(req: StarflowRequest, base_env: dict, java: str) -> StarflowPlan:
         secret=secret,
         file_env=file_env,
         java_home=java_home,
+    )
+
+
+def demo_run_dir() -> Path:
+    return launcher.default_data_dir() / starflow.DEMO_RUN_DIR
+
+
+def prepare_demo(
+    req: StarflowRequest, base_env: dict, java: str, token=secrets.token_urlsafe
+) -> StarflowPlan:
+    """`prepare` for the demo: a fresh secret per run, never stored (the demo keeps nothing, and a
+    stored secret would also reach a later plain serve), and an empty run folder, made after
+    `_resolve` reaped the leftover Starflow so that nothing still writes there."""
+    home, port, url, file_env, java_home = _resolve(req, base_env, java)
+    run_dir = demo_run_dir()
+    try:
+        starflow.reset_run_dir(run_dir)
+    except OSError as exc:
+        typer.echo(f"error: could not prepare {run_dir}: {exc}", err=True)
+        raise typer.Exit(1)
+    return StarflowPlan(
+        home=home,
+        port=port,
+        url=url,
+        secret=token(48),
+        file_env=file_env,
+        java_home=java_home,
+        run_dir=run_dir,
     )
 
 
@@ -179,6 +220,72 @@ def start_after_ready(
         ready_timeout=ready_timeout,
         echo=lambda line: typer.echo(line, err=True),
     )
+
+
+def start_demo_after_ready(
+    plan: StarflowPlan, *, mgr_env: dict, loopback_only: bool, ready_timeout: float = 180.0
+) -> None:
+    """`start_after_ready` for the demo: no Postgres database, Starflow's state in the run folder,
+    the wait and the manager on 127.0.0.1."""
+    mgr_port = mgr_env.get("QOD_ON_DEMAND_PORT") or "20900"
+    env = starflow.starflow_env(
+        dict(os.environ),
+        plan.file_env,
+        mgr_env,
+        port=plan.port,
+        url=plan.url,
+        secret=plan.secret,
+        pg=None,
+        java_home=plan.java_home,
+    )
+    env = starflow.demo_starflow_env(
+        env, run_dir=plan.run_dir, mgr_port=mgr_port, loopback_only=loopback_only
+    )
+    _spawn(
+        client=RestClient(Settings(manager_url=f"http://127.0.0.1:{mgr_port}")),
+        pg=None,
+        home=plan.home,
+        env=env,
+        state_dir=launcher.default_data_dir(),
+        url=plan.url,
+        ready_timeout=ready_timeout,
+        echo=lambda line: typer.echo(line, err=True),
+        ensure_db=lambda pg: False,
+        note=starflow.DEMO_SIGN_IN_NOTE,
+    )
+
+
+def _killpg(pgid: int, sig: int) -> None:
+    """Seam: tests replace this. Resolved at call time: os.killpg does not exist on Windows, where
+    this module must still import (the demo Starflow is refused there before any of this runs)."""
+    os.killpg(pgid, sig)
+
+
+def finish_demo(plan: StarflowPlan, echo=lambda line: typer.echo(line, err=True)) -> None:
+    """Once the demo jar is gone: stop a Starflow still running (the jar exited on its own, or an
+    interrupt landed as Starflow launched), then delete the run folder. Never raises an error: a
+    failure is a WARN and leaves the exit code alone. A second interrupt during the bounded wait
+    kills the Starflow group at once, as a second Ctrl-C kills the manager, and the folder is still
+    deleted."""
+    state_dir = launcher.default_data_dir()
+    pgid = None
+    try:
+        pgid = starflow.begin_stop(state_dir, echo=echo)
+        if pgid is not None:
+            starflow.finish_stop(state_dir, pgid, echo=echo)
+    except KeyboardInterrupt:
+        echo("second interrupt; killing Starflow directly.")
+        if pgid is not None:
+            try:
+                _killpg(pgid, signal.SIGKILL)
+            except Exception:
+                pass  # already gone
+    except Exception as exc:
+        echo(f"WARN: could not stop Starflow: {exc}")
+    try:
+        starflow.remove_run_dir(plan.run_dir)
+    except Exception as exc:
+        echo(f"WARN: could not delete {plan.run_dir}: {exc}; remove it by hand")
 
 
 def _spawn(**kwargs) -> None:

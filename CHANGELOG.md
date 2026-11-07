@@ -140,6 +140,11 @@ nodes.
 
 ### Added
 
+- **`qod serve --demo --with-starflow` runs Starflow beside the demo**, paired for SSO, REST and
+  FlightSQL like a plain `qod serve --with-starflow`. Starflow keeps its state on H2 in
+  `starflow-demo` under the qod data dir, deleted on exit, and the pairing's session secret is new
+  each run and never stored. With `--s3-path` Starflow listens on 127.0.0.1 only, like the demo.
+  Sign in as `acme-admin`, then open Starflow. Not on Windows, and not with `qod start --demo`.
 - **`QOD_NODE_ALLOW_LOCAL_FILES=false` starts every node with its local file system off**
   (`quack-on-demand.nodeFiles.allowLocal`, default `true`, no change for anyone who does not set it; no
   Helm value, set it in the chart's `env`; it applies at each node's next start, and a node that does
