@@ -57,7 +57,14 @@ class LocalFilesOffE2ESpec
   /** One line per node the spawn wrapper started, its id. */
   private lazy val spawnLog: Path = work.resolve("spawns.log")
 
-  /** Until this exists, a node whose id holds `noswitch` starts as if its spawn script did not know
+  /** The pool and database whose node starts as if its spawn script did not know the setting, found
+    * by the spawn wrapper in the node's id. Short on purpose: with this spec's tenant a node id is
+    * `49 + 2 * length` characters, and past 63 `PoolSupervisor.nodeId` keeps only a prefix and a
+    * hash, which drops the name and leaves the switch applied. Seven characters at most.
+    */
+  private val Held = "nosw"
+
+  /** Until this exists, a node whose id holds [[Held]] starts as if its spawn script did not know
     * the setting.
     */
   private lazy val noswitchFixed: Path = work.resolve("noswitch-fixed")
@@ -90,7 +97,7 @@ class LocalFilesOffE2ESpec
       wrapper,
       s"""#!/usr/bin/env bash
          |echo "$${QOD_NODE_ID:-}" >> "$spawnLog"
-         |if [[ "$${QOD_NODE_ID:-}" == *noswitch* && ! -e "$noswitchFixed" ]]; then
+         |if [[ "$${QOD_NODE_ID:-}" == *$Held* && ! -e "$noswitchFixed" ]]; then
          |  export QOD_NODE_ALLOW_LOCAL_FILES=true
          |fi
          |if [[ "$${dbName:-}" == *chain* ]]; then
@@ -1027,10 +1034,15 @@ class LocalFilesOffE2ESpec
     val switched = memoryDatabase("switched")
     pool(switched, "switched")
 
-    val held = memoryDatabase("noswitch")
-    openPool(held, "noswitch")
+    val held = memoryDatabase(Held)
+    openPool(held, Held)
+    // The wrapper finds the node by its id: an id that lost the name leaves the switch applied, and
+    // the wait below would only time out.
+    stack.await(s"a node of $Held started under an id holding its name (see Held)", 30.seconds) {
+      Option.when(spawnsOf(Held) >= 1)(())
+    }
     val detail = stack.await("the probe to hold the node out", 60.seconds) {
-      poolInfo("noswitch").hcursor.get[String]("statusDetail").toOption
+      poolInfo(Held).hcursor.get[String]("statusDetail").toOption
     }
     note(s"statusDetail: $detail")
     detail should include("QOD_NODE_ALLOW_LOCAL_FILES=false")
@@ -1038,15 +1050,15 @@ class LocalFilesOffE2ESpec
     detail should include("restart the node")
     detail should include("upgrade its image or fleet server")
     // Node health is not what `status` says: a blocked pool is one whose nodes never start.
-    poolInfo("noswitch").hcursor.get[String]("status") shouldBe Right("ready")
-    val nodeOf = poolInfo("noswitch").hcursor.downField("nodes").downArray
+    poolInfo(Held).hcursor.get[String]("status") shouldBe Right("ready")
+    val nodeOf = poolInfo(Held).hcursor.downField("nodes").downArray
     nodeOf.get[Boolean]("healthy") shouldBe Right(false)
     val nodeId = nodeOf.get[String]("nodeId").getOrElse(fail("no node listed"))
 
     // As for no routable node, for anyone.
-    refusal(show("a superuser's statement", su("noswitch", "SELECT 1"))) should
+    refusal(show("a superuser's statement", su(Held, "SELECT 1"))) should
       include("no node with role")
-    refusal(show("a plain user's statement", pat("noswitch", "SELECT 1"))) should
+    refusal(show("a plain user's statement", pat(Held, "SELECT 1"))) should
       include("no node with role")
 
     // In the same run, on the same manager, the node with the switch applied passes.
@@ -1064,12 +1076,12 @@ class LocalFilesOffE2ESpec
 
     // It stays as it is: three reconcile passes start nothing, since the process lives. On a server
     // whose release never applies the setting, a restart here would never end.
-    spawnsOf("noswitch") shouldBe 1
+    spawnsOf(Held) shouldBe 1
     Thread.sleep(7000)
-    spawnsOf("noswitch") shouldBe 1
-    poolInfo("noswitch").hcursor.downField("nodes").downArray.get[String]("nodeId") shouldBe
+    spawnsOf(Held) shouldBe 1
+    poolInfo(Held).hcursor.downField("nodes").downArray.get[String]("nodeId") shouldBe
       Right(nodeId)
-    poolInfo("noswitch").hcursor.get[String]("statusDetail") shouldBe Right(detail)
+    poolInfo(Held).hcursor.get[String]("statusDetail") shouldBe Right(detail)
 
     // Restarted on a script that applies it, the node serves and the listing says nothing more.
     Files.writeString(noswitchFixed, "")
@@ -1078,19 +1090,19 @@ class LocalFilesOffE2ESpec
       obj(
         "tenant"   -> s(Acme),
         "tenantDb" -> s(held),
-        "pool"     -> s("noswitch"),
+        "pool"     -> s(Held),
         "nodeId"   -> s(nodeId)
       ),
       timeoutSec = 120
     )
     withClue(body.take(300))(code shouldBe 200)
     stack.await("the restarted node serving", 120.seconds) {
-      su("noswitch", "SELECT current_setting('enable_external_access')").toOption
+      su(Held, "SELECT current_setting('enable_external_access')").toOption
     } shouldBe List("false")
     stack.await("the listing to say nothing more", 30.seconds) {
-      Option.when(poolInfo("noswitch").hcursor.get[String]("statusDetail").isLeft)(())
+      Option.when(poolInfo(Held).hcursor.get[String]("statusDetail").isLeft)(())
     }
-    spawnsOf("noswitch") shouldBe 2
+    spawnsOf(Held) shouldBe 2
   }
 
   // ---------- branches and maintenance ----------
