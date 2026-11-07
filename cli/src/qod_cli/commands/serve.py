@@ -656,7 +656,8 @@ def serve(
     s3_path: str = typer.Option(
         None,
         "--s3-path",
-        help="With --demo: keep the demo's data on your own bucket, s3://bucket[/prefix], under "
+        help="With --demo: keep the demo's data on your own bucket, s3://bucket or "
+        "s3://bucket/prefix, under "
         "a new qod-demo-<id> folder deleted on exit. Takes --endpoint, --region and a key pair "
         "(--access-key-id and --secret-access-key, or AWS_*). The demo then listens on 127.0.0.1 "
         "only. Use a dedicated bucket and key. On Windows, Ctrl-C stops the demo before it can "

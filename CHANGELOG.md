@@ -151,6 +151,8 @@ Upgrade the node image and fleet servers with the manager, and restart every nod
   path is refused, in any spelling of the secret's name.
 - `QOD_FLEET_NODE_PG_HOST` / `_PORT` rewrite only a database on QoD's own server, host and port alike. A
   database on another port of that host keeps its address in fleet assignments.
+- `qod serve --help` no longer crashes with a `MarkupError`: the `--s3-path` help wrote the bucket as
+  `s3://bucket[/prefix]`, which the help printer read as markup.
 
 ## 0.12.0
 
