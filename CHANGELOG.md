@@ -15,8 +15,30 @@ superuser give it its own `pgUser` and `pgPassword` with `qod database update`, 
 now states `writerTrusted`, and with `false` it names no server and no path of its own, as a tenant admin.
 Upgrade the node image and fleet servers with the manager, and restart every node.
 
+Node ids and per-pool Secrets change form. A node keeps its stored id across every restart, and a new
+slot takes the new form, `quack--<tenant>--<db>--<pool>--<index>`, so one pool can show both. On
+Kubernetes a running pod reads its per-pool Secrets under their old names until the manager next starts it
+(a container restart is not that), which moves it to the new ones, and the old ones go once no pod reads
+them. Under HA, finish a rolling upgrade before stopping or deleting a pool on Kubernetes: a replica still
+on 0.12.0 removes only the old names.
+
+Two pools that already read alike come apart at the first boot: a node keeps its stored id, and a pool
+left with no node row starts in the new form, on the fleet runtime once a server is free (the pair shared
+one). On Kubernetes a running pod keeps reading the old-named Secrets, which can hold the other pool's
+values, until the manager next starts it; a container restart is not that. Two pools of one database that
+differ only by `_` and `-` (`eu-west`, `eu_west`) read alike in the new form too, and no restart ends it: on
+the local and fleet runtimes a fresh slot takes the other's id again, and on Kubernetes each start writes
+the per-pool Secrets both read. Recreate one under another name, and on Kubernetes then restart the other's
+nodes.
+
 ### Breaking
 
+- A new database or pool name may not hold `__` nor start or end with `_` (`400 invalid_name`). A pool
+  name, which had no rule at all, is now 1 to 63 letters, digits, `_` or `-`, starting with a letter, not
+  ending with `-` and holding none of `--`, `_-` or `-_`. A pool that reads the same as another of its
+  database once `_` becomes `-` (`eu-west`, `eu_west`) is `409 pool_reads_alike`. Names that exist keep
+  working, and a manifest import keeps importing them, with one ERROR per name; a fresh node of such a name
+  takes a hashed id.
 - A database holding complete keys of its own no longer blocks other tenants' users. Its data folder
   counts against the users of its own tenant only, for `400 scope_in_data_folder` and for a statement
   naming a URL there. **On a bucket tenants share, a user's own keys now reach another tenant's folder
@@ -153,6 +175,18 @@ Upgrade the node image and fleet servers with the manager, and restart every nod
   database on another port of that host keeps its address in fleet assignments.
 - `qod serve --help` no longer crashes with a `MarkupError`: the `--s3-path` help wrote the bucket as
   `s3://bucket[/prefix]`, which the help printer read as markup.
+- Kubernetes: a node id past 63 characters no longer gets a `422`. A branch pool's id took 36 characters
+  plus its tenant's and its parent's names, so a branch of a long tenant and database name answered
+  `502 branch_create_failed`, and a pool with long names never started. On every runtime such an id now
+  keeps its start and ends `-<hash>-<index>`, 63 characters in all, the hash being 16 hex characters of a
+  SHA-256 of the tenant, database, pool and index. A node a local or fleet manager started under a longer
+  id keeps it.
+- Two pools could share a node id and per-pool Secrets: `-` between the names, with `_` read as `-`, made
+  (`acme`, `acme_sales`, `eu_west`) and (`acme`, `acme_sales_eu`, `west`) read alike. On the local and fleet
+  runtimes the second pool's create took the first's node with no error, and each then restarted the other
+  on every reconcile pass. On Kubernetes the second failed to start, and its values stayed in the Secrets
+  the first pool's pods read. Node ids and per-pool Secret names now put `--` between the names, and names
+  that would break that are refused (see Breaking). For pools that already read alike, see Upgrading.
 
 ## 0.12.0
 
@@ -164,22 +198,6 @@ NULL and is refused `409 proposal_stale` on merge: propose it again. Under HA, f
 before merging a branch: a replica still on 0.11.0 serves its fast-forward merge on a row a new replica
 proposed.
 
-Node ids and per-pool Secrets change form. A node keeps its stored id across every restart, and a new
-slot takes the new form, `quack--<tenant>--<db>--<pool>--<index>`, so one pool can show both. On
-Kubernetes a running pod reads its per-pool Secrets under their old names until the manager next starts it
-(a container restart is not that), which moves it to the new ones, and the old ones go once no pod reads
-them. Restart every node after upgrading, as usual. Under HA, finish a rolling upgrade before stopping or
-deleting a pool on Kubernetes: a replica still on 0.11.0 removes only the old names.
-
-Two pools that already read alike come apart at the first boot: a node keeps its stored id, and a pool
-left with no node row starts in the new form, on the fleet runtime once a server is free (the pair shared
-one). On Kubernetes a running pod keeps reading the old-named Secrets, which can hold the other pool's
-values, until the manager next starts it; a container restart is not that. Two pools of one database that
-differ only by `_` and `-` (`eu-west`, `eu_west`) read alike in the new form too, and no restart ends it: on
-the local and fleet runtimes a fresh slot takes the other's id again, and on Kubernetes each start writes
-the per-pool Secrets both read. Recreate one under another name, and on Kubernetes then restart the other's
-nodes.
-
 On Kubernetes, read your maintenance policies first. No maintenance node has ever started on a real
 cluster (see Fixed), so a database with maintenance enabled runs it for the first time after this
 upgrade: its first runs do all the snapshot expiry, compaction and file cleanup that never ran.
@@ -190,12 +208,6 @@ count. To keep counts from a user, refuse on the table.
 
 ### Breaking
 
-- A new tenant, database or pool name may not hold `__` nor start or end with `_` (a tenant answers
-  `400 invalid_id`, a database and a pool `400 invalid_name`). A pool name, which had no rule at all, is
-  now 1 to 63 letters, digits, `_` or `-`, starting with a letter, not ending with `-` and holding none of
-  `--`, `_-` or `-_`. A pool that reads the same as another of its database once `_` becomes `-`
-  (`eu-west`, `eu_west`) is `409 pool_reads_alike`. Names that exist keep working, and a manifest import
-  keeps importing them, with one ERROR per name; a fresh node of such a name takes a hashed id.
 - Branches: `POST /api/branch/merge` requires `proposalId` and `qod branch merge` requires
   `--proposal`: the approver names the proposal they read, and another one in its place is
   `409 proposal_replaced`. One that has merged is `409 already_merged`, naming the main snapshot and
@@ -297,25 +309,15 @@ count. To keep counts from a user, refuse on the table.
 - A propose past the branch's TTL answers `409 branch_expired`, for every principal, leaving an open
   proposal as it is: since a sweep skips a branch a run holds, a loop of proposals could otherwise keep a
   branch past its TTL, and with it the snapshots of the whole database. A merge past the TTL stays allowed.
-- Kubernetes: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end no longer make a label
-  an API server refuses. `quack-tenant`, `quack-tenant-db` and `quack-pool` hold a name as it is, so running
-  pods and their selectors stay, or, for those, `qod.<name>.qod`.
+- Kubernetes: a label an API server refuses is no longer written. `quack-tenant`, `quack-tenant-db` and
+  `quack-pool` hold a name as it is, so running pods and their selectors stay, or `qod.<name>.qod` when a
+  label value cannot hold it: `__merge`, `__maint`, `__br_<id8>` and any slug with `_` at either end.
   Merge, maintenance and branch nodes could not start on a real cluster (`422`), and now every proposal
   of a modified table needs a merge node. A maintenance node's name no longer holds `_`, also a `422`:
   until now every maintenance run on Kubernetes ended `failed` with `node spawn failed`, its cause at WARN
-  only. A pool ending in `_` gets Secret names the API accepts.
-- Kubernetes: a node id past 63 characters no longer gets a `422`. A branch pool's id took 36 characters
-  plus its tenant's and its parent's names, so a branch of `wayne_corp` / `wayne_corp_sales_2026` answered
-  `502 branch_create_failed`, and a pool with long names never started. On every runtime such an id now
-  keeps its start and ends `-<hash>-<index>`, 63 characters in all, the hash being 16 hex characters of a
-  SHA-256 of the tenant, database, pool and index. A node a local or fleet manager started under a longer
-  id keeps it.
-- Two pools could share a node id and per-pool Secrets: `-` between the names, with `_` read as `-`, made
-  (`acme`, `acme_sales`, `eu_west`) and (`acme`, `acme_sales_eu`, `west`) read alike. On the local and fleet
-  runtimes the second pool's create took the first's node with no error, and each then restarted the other
-  on every reconcile pass. On Kubernetes the second failed to start, and its values stayed in the Secrets
-  the first pool's pods read. Node ids and per-pool Secret names now put `--` between the names, and names
-  that would break that are refused (see Breaking). For pools that already read alike, see Upgrading.
+  only. A pool ending in `_` gets Secret names the API accepts. A node id past 63 characters is still
+  refused (`422`): a branch pool's takes 36 characters plus its tenant and parent names, and `branch
+  create` answers `502 branch_create_failed`; a merge node's stays within 35.
 - A table restore whose COMMIT writers tip past DuckLake's retry limit answers `409 concurrent_write`, as
   the commit fence's refusal does, where it answered `502 restore_failed`. An undrop refused that way
   answers `undrop_failed` with `retryable: true` and "nothing was committed" (`UNDROP TABLE`: Flight
