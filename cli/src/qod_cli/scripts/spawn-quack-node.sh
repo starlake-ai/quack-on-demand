@@ -328,14 +328,14 @@ if [[ "${QOD_SPAWN_DRY_RUN:-}" != "1" ]]; then
   [[ "$QOD_NODE" == /* ]] || QOD_NODE="$START_DIR/$QOD_NODE"
 fi
 
-# The spill directory a stale node directory records (spill.path), removed only when it is one this
-# script makes: `qod-node.XXXXXX` directly under a spill root of this host (see SPILL_ROOT below),
-# a real directory owned by this user, compared on physical paths. Anything else (a planted path, a
-# spill root of another starting directory) is left in place; the `tmp` fallback inside the node
-# directory goes with that directory.
+# The spill directory a stale node directory records (spill.path's first line), removed only when it
+# is one this script makes: `qod-node.XXXXXX` directly under a spill root of this host (see
+# SPILL_ROOT below), a real directory owned by this user, compared on physical paths. Anything else
+# (a planted path, a spill root of another starting directory) is left in place; the `tmp` fallback
+# inside the node directory goes with that directory.
 remove_stale_spill() {
   local sp name parent root
-  sp="$(cat "$1/spill.path" 2>/dev/null || true)"
+  sp="$(head -n 1 "$1/spill.path" 2>/dev/null || true)"
   name="${sp##*/}"
   [[ "$name" =~ ^qod-node\.[A-Za-z0-9]{6}$ ]] || return 0
   [[ -d "$sp" && ! -L "$sp" && -O "$sp" ]] || return 0
@@ -347,6 +347,34 @@ remove_stale_spill() {
       return 0
     fi
   done
+  return 0
+}
+
+# A spill leaf qod-node made under a superuser's temp_directory (spill.path's later lines): removed
+# only when its name is one qod-node makes and it is a real directory this user owns. Its parent is
+# wherever the superuser pointed temp_directory. A relative leaf is as qod-node recorded it, relative
+# to the directory it ran in (the node directory's `cwd`, WORK_DIR below), so it is read against that
+# directory of the node directory `$2`, never against this script's.
+remove_spill_leaf() {
+  local leaf="$1" name="${1##*/}"
+  [[ "$name" =~ ^qod-spill\.([0-9]+-[0-9a-f]+\.)?[A-Za-z0-9]{6}$ ]] || return 0
+  [[ "$leaf" == /* ]] || leaf="$2/cwd/$leaf"
+  [[ -d "$leaf" && ! -L "$leaf" && -O "$leaf" ]] || return 0
+  rm -rf -- "$leaf" 2>/dev/null || true
+}
+
+# Every line of spill.path after the first in the node directory `$1`, blank ones skipped. Returns 0 whatever it finds: it runs
+# under set -e, in the stale sweep and in cleanup().
+remove_spill_leaves() {
+  local line first=1
+  [[ -f "$1/spill.path" && ! -L "$1/spill.path" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ $first -eq 1 ]]; then
+      first=0
+    elif [[ -n "$line" ]]; then
+      remove_spill_leaf "$line" "$1"
+    fi
+  done 2>/dev/null < "$1/spill.path" || true
   return 0
 }
 
@@ -368,6 +396,7 @@ for d in "${TMPDIR:-/tmp}"/quack-node.*; do
     continue
   fi
   remove_stale_spill "$d"
+  remove_spill_leaves "$d"
   # The read-only secret directory holds its marker file: writable again before rm -rf. Never
   # through a symlink, which would change the mode of whatever it points at.
   if [[ -d "$d/secrets" && ! -L "$d/secrets" ]]; then
@@ -390,6 +419,7 @@ cleanup() {
     wait "$NODE_PID" 2>/dev/null || true
   fi
   chmod 700 "$NODE_DIR/secrets" 2>/dev/null || true
+  remove_spill_leaves "$NODE_DIR"
   rm -rf -- "$NODE_DIR" ${SPILL_DIR:+"$SPILL_DIR"}
   dispose_secrets_dir
 }
@@ -777,8 +807,15 @@ if [[ -z "${QOD_NODE_ID:-}" ]]; then
   echo "ERROR: QOD_NODE_ID is not set (the launcher names the node it starts)" >&2
   exit 1
 fi
+# --spill-dir is SPILL_DIR exactly as RESOURCE_SQL sets it (qod-node compares the two strings), and
+# --node-dir is where qod-node appends, as a new line of spill.path, the leaf it makes when a trusted
+# init statement points temp_directory elsewhere; cleanup() and the stale sweep remove those leaves.
 NODE_ARGS=(--port "$PORT" --bind "$NODE_BIND" --secrets-dir "$QOD_SECRETS_DIR"
-  --secret-directory "$SECRET_PATH" --node-id "$QOD_NODE_ID" --parent-pid "$$" --init -)
+  --secret-directory "$SECRET_PATH" --node-id "$QOD_NODE_ID" --parent-pid "$$"
+  --spill-dir "$SPILL_DIR" --node-dir "$NODE_DIR" --init -)
+if [[ -n "$MARKER" ]]; then
+  NODE_ARGS+=(--marker "$MARKER")
+fi
 if [[ "${QOD_SECRETS_DIR_EPHEMERAL:-}" == "1" ]]; then
   NODE_ARGS+=(--secrets-ephemeral)
 fi

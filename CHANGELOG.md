@@ -31,7 +31,27 @@ the local and fleet runtimes a fresh slot takes the other's id again, and on Kub
 the per-pool Secrets both read. Recreate one under another name, and on Kubernetes then restart the other's
 nodes.
 
+qod-node now requires `--spill-dir` and `--node-dir` in serve mode, which this release's spawn scripts
+pass. A `QOD_NODE_BIN` naming an earlier build, or a stale `native/qod-node/build`, fails every spawn
+with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use the bundled binary.
+
 ### Breaking
+
+- A node whose superuser initSql sets `temp_directory` can stop at start where it started before:
+  it now makes a folder of its own there (Added, below) and refuses the folder rather than spill
+  elsewhere, with `cannot create the spill directory under <folder>: ...` naming the path at fault.
+  It refuses:
+  - an existing folder of the path, a symbolic link followed in it, or a folder or link on that link's
+    real path, owned by a user other than root and the node's own: a group-writable folder shared with
+    colleagues, an NFS export with `root_squash` that shows `nobody`, or a host folder bind-mounted
+    into a rootless container or under `userns-remap`, where a host-root folder also shows `nobody`;
+  - with a node running as root, a folder of the path owned by any non-root user;
+  - a path that cannot be created (permission, a read-only filesystem, a component that is a file);
+  - on Windows, any symbolic link, junction or mounted folder in the path;
+  - a path holding a line break.
+
+  Point `temp_directory` at a folder that root or the node's OS user owns all the way up, or drop the
+  `SET` to keep the default spill folder.
 
 - A new database or pool name may not hold `__` nor start or end with `_` (`400 invalid_name`). A pool
   name, which had no rule at all, is now 1 to 63 letters, digits, `_` or `-`, starting with a letter, not
@@ -140,6 +160,13 @@ nodes.
 
 ### Added
 
+- **Each node spills to a folder of its own under a superuser's `temp_directory`.** A database's or
+  pool's initSql that sets `temp_directory` (a fast disk, say) no longer makes every node of the
+  database share that folder, where nodes could read each other's spill files and one node's cleanup
+  could remove another's. Each node makes `<folder>/qod-spill.<marker>.XXXXXX` (`qod-spill.XXXXXX` on
+  Kubernetes and fleet), mode 0700, and spills there; missing parents of the folder are created with
+  mode 0700 and stay. The spawn scripts remove the leaf when the node stops and sweep it after a kill.
+  The default spill folder is unchanged, and a tenant admin still cannot set `temp_directory`.
 - **`qod serve --demo --with-starflow` runs Starflow beside the demo**, paired for SSO, REST and
   FlightSQL like a plain `qod serve --with-starflow`. Starflow keeps its state on H2 in
   `starflow-demo` under the qod data dir, deleted on exit, and the pairing's session secret is new

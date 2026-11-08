@@ -439,23 +439,131 @@ function Test-RealDirectory([string]$path) {
     -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
 }
 
-# The spill directory a node directory records (spill.path), removed only when it is one this script
-# makes: `qod-node.<id>` directly under `.tmp` of this script's starting directory, a real directory.
-# Anything else (a planted path, the spill root of another starting directory) is left in place; the
-# `tmp` fallback inside the node directory goes with that directory. Mirrors remove_stale_spill in
-# spawn-quack-node.sh.
+# Who this script runs as, read once: off Windows the numeric uid; on Windows the user's SID and
+# whether the token is elevated (an elevated process's new directories are owned by Administrators,
+# S-1-5-32-544, not by the user).
+$myUid = ''
+$mySid = ''
+$iAmElevated = $false
+if ($onWindows) {
+  try {
+    $myIdentity  = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $mySid       = $myIdentity.User.Value
+    $iAmElevated = ([System.Security.Principal.WindowsPrincipal]::new($myIdentity)).IsInRole(
+      [System.Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch {}
+} else {
+  try { $myUid = (& id -u).Trim() } catch {}
+}
+
+# Whether an owner (a uid off Windows, a SID on Windows) is this script's user `$me`: the same value,
+# or, for an elevated token, the Administrators group. Anything else, an unknown owner included, is
+# not. Pure, so a test can judge it with any owner.
+function Test-OwnerIsMine([string]$owner, [string]$me, [bool]$elevated) {
+  if ([string]::IsNullOrEmpty($owner) -or [string]::IsNullOrEmpty($me)) { return $false }
+  if ($owner -ceq $me) { return $true }
+  return ($elevated -and $owner -ceq 'S-1-5-32-544')
+}
+
+# The owner SID of the directory $path, on Windows PowerShell 5.1 (Directory.GetAccessControl) and on
+# pwsh 7 (.NET moved it to FileSystemAclExtensions).
+function Get-DirectoryOwnerSid([string]$path) {
+  $owner = [System.Security.AccessControl.AccessControlSections]::Owner
+  $byPath = [System.IO.Directory].GetMethod('GetAccessControl',
+    [Type[]]@([string], [System.Security.AccessControl.AccessControlSections]))
+  if ($null -ne $byPath) {
+    $sec = [System.IO.Directory]::GetAccessControl($path, $owner)
+  } else {
+    $sec = [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]::new($path), $owner)
+  }
+  return $sec.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+}
+
+# Whether this user owns the directory $path (mirror of bash's -O). Off Windows `ls -ldn` prints the
+# numeric owner uid as its third field; on Windows the owner SID is read from the directory's
+# security descriptor. A path whose owner cannot be read is not ours.
+function Test-OwnedByMe([string]$path) {
+  try {
+    if ($onWindows) {
+      return (Test-OwnerIsMine (Get-DirectoryOwnerSid $path) $mySid $iAmElevated)
+    }
+    $uid = ((& ls -ldn -- $path) -split '\s+')[2]
+    return (Test-OwnerIsMine $uid $myUid $false)
+  } catch { return $false }
+}
+
+# Deletes the real directory $path and everything under it. Directory.Delete removes a symlink or
+# junction met inside as the link itself, never following it. Never throws.
+function Remove-RealDirectory([string]$path) {
+  try { [System.IO.Directory]::Delete($path, $true) } catch {}
+}
+
+# The spill directories a node directory records in spill.path, read once, never through a spill.path
+# that is a link: the first line (below), then every later line (Remove-SpillLeaves). The first line
+# is removed only when it is one this script makes: `qod-node.<id>` directly under `.tmp` of this
+# script's starting directory, a real directory. Anything else (a planted path, the spill root of
+# another starting directory) is left in place; the `tmp` fallback inside the node directory goes
+# with that directory. Mirrors remove_stale_spill and remove_spill_leaves in spawn-quack-node.sh.
 function Remove-SpillDirectory([string]$dir) {
   $spillFile = Join-Path $dir 'spill.path'
-  if (-not (Test-Path -LiteralPath $spillFile -PathType Leaf)) { return }
+  $item = Get-Item -LiteralPath $spillFile -Force -ErrorAction SilentlyContinue
+  if ($null -eq $item -or $item.PSIsContainer -or
+      ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return }
+  try { $lines = [System.IO.File]::ReadAllLines($spillFile) } catch { return }
+  if ($lines.Count -eq 0) { return }
   try {
-    $spill = [System.IO.Path]::GetFullPath(([System.IO.File]::ReadAllText($spillFile)).Trim())
+    $spill = [System.IO.Path]::GetFullPath($lines[0].Trim())
     $root  = [System.IO.Path]::GetFullPath((Join-Path $startDir '.tmp'))
-  } catch { return }
-  $cmp = if ($onWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-  $parent = (Split-Path -Parent $spill).TrimEnd('\', '/')
-  if ((Split-Path -Leaf $spill) -match '^qod-node\.[0-9a-f]{12}$' -and
-      [string]::Equals($parent, $root.TrimEnd('\', '/'), $cmp) -and (Test-RealDirectory $spill)) {
-    Remove-Item -LiteralPath $spill -Recurse -Force -ErrorAction SilentlyContinue
+    $cmp = if ($onWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $parent = (Split-Path -Parent $spill).TrimEnd('\', '/')
+    if ((Split-Path -Leaf $spill) -match '^qod-node\.[0-9a-f]{12}$' -and
+        [string]::Equals($parent, $root.TrimEnd('\', '/'), $cmp) -and (Test-RealDirectory $spill)) {
+      Remove-RealDirectory $spill
+    }
+  } catch {}
+  Remove-SpillLeaves $lines $dir
+}
+
+# A spill leaf qod-node made under a superuser's temp_directory (spill.path's later lines): removed
+# only when its name is one qod-node makes and it is a real directory (no symlink or junction) this
+# user owns. Its parent is wherever the superuser pointed temp_directory, possibly a folder other
+# users share, hence the owner check. A relative leaf is as qod-node recorded it, relative to the
+# directory it ran in (the node directory's `cwd`, $workDir below), so it is read against that
+# directory of the node directory $dir, never against this script's. On Windows a path rooted at no
+# drive (`\x`) is read on the drive of that directory, and a drive-relative one (`C:x`) is left in
+# place. Mirrors remove_spill_leaf in spawn-quack-node.sh.
+function Remove-SpillLeaf([string]$leaf, [string]$dir) {
+  $name = ($leaf -split '[\\/]')[-1]
+  if ($name -cnotmatch '^qod-spill\.([0-9]+-[0-9a-f]+\.)?[A-Za-z0-9]{6}$') { return }
+  $cwd = Join-Path $dir 'cwd'
+  if ($onWindows) {
+    if ($leaf -match '^([A-Za-z]:[\\/]|[\\/]{2})') {
+      $path = $leaf
+    } elseif ($leaf -match '^[\\/]') {
+      $path = ([System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($cwd))).TrimEnd('\', '/') + $leaf
+    } elseif ($leaf -match '^[A-Za-z]:') {
+      return
+    } else {
+      $path = Join-Path $cwd $leaf
+    }
+  } elseif ($leaf.StartsWith('/')) {
+    $path = $leaf
+  } else {
+    $path = Join-Path $cwd $leaf
+  }
+  $path = [System.IO.Path]::GetFullPath($path)
+  if ((Test-RealDirectory $path) -and (Test-OwnedByMe $path)) {
+    Remove-RealDirectory $path
+  }
+}
+
+# Every line of spill.path after the first ($lines, as Remove-SpillDirectory read them) of the node
+# directory $dir, blank ones skipped. A line that cannot be read as a path is skipped: nothing here
+# stops the cleanup or the sweep. Mirrors remove_spill_leaves in spawn-quack-node.sh.
+function Remove-SpillLeaves([string[]]$lines, [string]$dir) {
+  for ($i = 1; $i -lt $lines.Count; $i++) {
+    if ([string]::IsNullOrEmpty($lines[$i])) { continue }
+    try { Remove-SpillLeaf $lines[$i] $dir } catch {}
   }
 }
 
@@ -501,17 +609,12 @@ function Remove-NodeDirectory([string]$dir) {
 # symlink or junction) qualifies, and off Windows only one owned by this user. A stray entry never
 # aborts this spawn: anything unexpected skips it.
 $tempRoot = [System.IO.Path]::GetTempPath()
-$myUid = ''
-if (-not $onWindows) { try { $myUid = (& id -u).Trim() } catch {} }
 Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'quack-node.*' -ErrorAction SilentlyContinue |
   ForEach-Object {
     try {
       $dir = $_.FullName
       $mine = Test-RealDirectory $dir
-      if ($mine -and -not $onWindows) {
-        # `ls -ldn` prints the numeric owner uid as its third field.
-        $mine = ($myUid -ne '' -and ((& ls -ldn -- $dir) -split '\s+')[2] -eq $myUid)
-      }
+      if ($mine -and -not $onWindows) { $mine = Test-OwnedByMe $dir }
       $ownerFile = Join-Path $dir 'owner.pid'
       if ($mine -and (Test-Path -LiteralPath $ownerFile -PathType Leaf)) {
         $parts = (([System.IO.File]::ReadAllText($ownerFile)).Trim() -split '\s+')
@@ -534,7 +637,9 @@ Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'quack-node.*' -ErrorAct
     }
   }
 $nodeId  = [Guid]::NewGuid().ToString('N').Substring(0, 12)
-if (-not [string]::IsNullOrEmpty($Marker) -and $Marker -notmatch '^[0-9]+-[0-9a-f]+$') {
+# Case-sensitive and anchored at the very ends (\z: '$' would also match before a final line break), as
+# bash's =~ and qod-node's --marker check read it.
+if (-not [string]::IsNullOrEmpty($Marker) -and $Marker -cnotmatch '\A[0-9]+-[0-9a-f]+\z') {
   [Console]::Error.WriteLine("ERROR: invalid manager marker '$Marker' (expected <rest-port>-<hex boot id>)")
   Exit-Spawn 1
 }
@@ -774,8 +879,14 @@ if ([string]::IsNullOrEmpty($qodNodeId)) {
   Remove-NodeDirectory $nodeDir
   Exit-Spawn 1
 }
+# --spill-dir is $spillDir exactly as the init SQL sets it (qod-node compares the two strings), and
+# --node-dir is where qod-node appends, as a new line of spill.path, the leaf it makes when a trusted
+# init statement points temp_directory elsewhere; Remove-NodeDirectory and the stale sweep remove
+# those leaves. Mirrors NODE_ARGS in spawn-quack-node.sh.
 $nodeArgs = @('--port', "$Port", '--bind', $nodeBind, '--secrets-dir', $secretsDir,
-  '--secret-directory', $secretPath, '--node-id', $qodNodeId, '--parent-pid', "$PID", '--init', '-')
+  '--secret-directory', $secretPath, '--node-id', $qodNodeId, '--parent-pid', "$PID",
+  '--spill-dir', $spillDir, '--node-dir', $nodeDir, '--init', '-')
+if (-not [string]::IsNullOrEmpty($Marker)) { $nodeArgs += @('--marker', $Marker) }
 if ($secretsEphemeral) { $nodeArgs += '--secrets-ephemeral' }
 # Decision 17, mirror of spawn-quack-node.sh: each extension flag only for the exact string "true"
 # (-ceq is case-sensitive like bash's ==).

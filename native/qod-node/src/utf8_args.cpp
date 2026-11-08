@@ -62,4 +62,13 @@ std::filesystem::path PathFromUtf8(const std::string &utf8) {
 #endif
 }
 
+std::string PathToUtf8(const std::filesystem::path &path) {
+#if defined(__cpp_char8_t)
+	auto text = path.u8string();
+	return std::string(text.begin(), text.end());
+#else
+	return path.u8string();
+#endif
+}
+
 } // namespace qod

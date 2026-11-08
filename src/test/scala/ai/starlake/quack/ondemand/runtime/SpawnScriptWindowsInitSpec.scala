@@ -236,6 +236,146 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     Files.exists(realSpill) shouldBe false
   }
 
+  // A superuser's temp_directory gives each node a leaf of its own, which qod-node records as a later
+  // line of spill.path. The sweep removes each such line's leaf when its name is one qod-node makes and
+  // it is a real directory this user owns, reads a relative line against the dead node's `cwd`, never
+  // follows a link, and skips blank and malformed lines without stopping. Mirrors the bash sweep cases
+  // of SpawnScriptLiveNodeSpec.
+  it should "sweep a dead node's spill leaves and leave every other line's path" in {
+    assume(!scala.util.Properties.isWin, "symlinks need privileges on Windows")
+    val tmp                     = Files.createDirectories(tempDir.resolve("t"))
+    val start                   = Files.createDirectories(tempDir.resolve("start"))
+    def withFile(d: Path): Path =
+      Files.writeString(Files.createDirectories(d).resolve("spill.bin"), "x")
+      d
+    // The first line keeps its own rule: the default spill folder under the start directory's .tmp.
+    val default   = withFile(start.resolve(".tmp/qod-node.0123456789ab"))
+    val elsewhere = Files.createDirectories(tempDir.resolve("elsewhere"))
+    val leaf      = withFile(elsewhere.resolve("qod-spill.20900-5eedbeef.Ab12Cd"))
+    val bareLeaf  = withFile(elsewhere.resolve("qod-spill.Zz9Yy8"))
+    val unrelated = withFile(elsewhere.resolve("keep-me"))
+    // Names qod-node never makes: a non-hex boot id, seven random characters (case is not tried:
+    // macOS file systems fold it, so an upper-case twin would be the leaf itself).
+    val nonHex = withFile(elsewhere.resolve("qod-spill.20900-5eedbeeg.Ab12Cd"))
+    val seven  = withFile(elsewhere.resolve("qod-spill.Ab12Cd7"))
+    // A link named as a leaf: never followed, so neither it nor what it points at goes.
+    val target = withFile(elsewhere.resolve("link-target"))
+    val link   = Files.createSymbolicLink(elsewhere.resolve("qod-spill.LnkLnk"), target)
+    // A relative line names a leaf of the dead node's cwd, never one of the later spawn's start.
+    val inStart = withFile(start.resolve("qod-spill.Rel123"))
+    val stale   = Files.createDirectories(tmp.resolve("quack-node.deadbeef0005"))
+    withFile(stale.resolve("cwd/qod-spill.Rel123"))
+    // A relative line that climbs out of the dead node's cwd names a real leaf elsewhere.
+    val climbed = withFile(tempDir.resolve("qod-spill.Up4567"))
+    Files.writeString(stale.resolve("owner.pid"), s"${deadPid()} 0")
+    Files.writeString(
+      stale.resolve("spill.path"),
+      // Blank lines, a line with a NUL (no path) and a blank last line are skipped.
+      Seq(
+        default.toRealPath().toString,
+        leaf.toString,
+        unrelated.toString,
+        "",
+        "bad\u0000path/qod-spill.Nul123",
+        link.toString,
+        nonHex.toString,
+        seven.toString,
+        "qod-spill.Rel123",
+        "../../../qod-spill.Up4567",
+        bareLeaf.toString
+      ).mkString("\n") + "\n\n"
+    )
+    val ((rc, _, err), _) = dryRun(tmp, start)
+    withClue(err)(rc shouldBe 0)
+    Files.exists(stale) shouldBe false
+    Files.exists(default) shouldBe false
+    Files.exists(leaf) shouldBe false
+    Files.exists(bareLeaf) shouldBe false
+    Files.exists(climbed) shouldBe false
+    Files.isDirectory(unrelated) shouldBe true
+    Files.isDirectory(nonHex) shouldBe true
+    Files.isDirectory(seven) shouldBe true
+    Files.isDirectory(inStart) shouldBe true
+    Files.isSymbolicLink(link) shouldBe true
+    Files.exists(target.resolve("spill.bin")) shouldBe true
+  }
+
+  /** Runs `body` in PowerShell after defining the ps1 functions `names`, taken from the script's
+    * syntax tree so that the script itself does not run; returns the lines it prints.
+    */
+  private def withFunctions(names: Seq[String], body: String): List[String] =
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
+    val list    = names.map(n => s"'$n'").mkString(", ")
+    val prelude =
+      s"""$$ast = [System.Management.Automation.Language.Parser]::ParseFile('${ps1.replace(
+          "'",
+          "''"
+        )}', [ref]$$null, [ref]$$null)
+         |foreach ($$n in @($list)) {
+         |  $$f = $$ast.Find({ param($$a) $$a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $$a.Name -eq $$n }, $$true)
+         |  . ([scriptblock]::Create($$f.Extent.Text))
+         |}
+         |""".stripMargin
+    Process(PowerShell.command.get ++ Seq("-Command", prelude + body)).!!.linesIterator.toList
+
+  private def myUid: String = Process(Seq("id", "-u")).!!.trim
+
+  // The owner rule behind every leaf removal, judged with owners this host cannot make without root:
+  // the same uid or SID is ours, the Administrators group only for an elevated token, anything else
+  // (an unknown owner included) is not.
+  "the PowerShell owner check" should "accept only this user, or Administrators when elevated" in {
+    withFunctions(
+      Seq("Test-OwnerIsMine"),
+      """Test-OwnerIsMine '501' '501' $false
+        |Test-OwnerIsMine '0' '501' $false
+        |Test-OwnerIsMine '' '501' $false
+        |Test-OwnerIsMine '501' '' $false
+        |Test-OwnerIsMine 'S-1-5-21-1-2-3-1001' 'S-1-5-21-1-2-3-1001' $false
+        |Test-OwnerIsMine 'S-1-5-32-544' 'S-1-5-21-1-2-3-1001' $true
+        |Test-OwnerIsMine 'S-1-5-32-544' 'S-1-5-21-1-2-3-1001' $false
+        |Test-OwnerIsMine 'S-1-5-21-1-2-3-1002' 'S-1-5-21-1-2-3-1001' $true
+        |Test-OwnerIsMine 's-1-5-32-544' 'S-1-5-21-1-2-3-1001' $true
+        |""".stripMargin
+    ) shouldBe List("True", "False", "False", "False", "True", "True", "False", "False", "False")
+  }
+
+  it should "read a directory's owner off Windows" in {
+    assume(!scala.util.Properties.isWin, "reads the POSIX branch")
+    assume(myUid != "0", "root owns the reference directory")
+    val mine = Files.createDirectories(tempDir.resolve("mine"))
+    withFunctions(
+      Seq("Test-OwnerIsMine", "Test-OwnedByMe"),
+      s"""$$onWindows = $$false
+         |$$myUid = '$myUid'
+         |Test-OwnedByMe '${mine.toString.replace("'", "''")}'
+         |Test-OwnedByMe '/'
+         |Test-OwnedByMe '${tempDir.resolve("absent").toString.replace("'", "''")}'
+         |$$myUid = ''
+         |Test-OwnedByMe '${mine.toString.replace("'", "''")}'
+         |""".stripMargin
+    ) shouldBe List("True", "False", "False", "False")
+  }
+
+  // End to end, a leaf-named real directory another user owns is left in place: making one needs
+  // root (chown), so the case is cancelled, saying so, when the suite runs as anyone else.
+  "a later PowerShell spawn" should "leave a spill leaf another user owns" in {
+    assume(!scala.util.Properties.isWin, "checks the POSIX branch")
+    assume(myUid == "0", "skipped: chown to another user needs root")
+    val tmp    = Files.createDirectories(tempDir.resolve("t"))
+    val start  = Files.createDirectories(tempDir.resolve("start"))
+    val theirs = Files.createDirectories(tempDir.resolve("shared/qod-spill.Th1rs0"))
+    val ours   = Files.createDirectories(tempDir.resolve("shared/qod-spill.0urs00"))
+    Process(Seq("chown", "65534", theirs.toString)).!!
+    val stale = Files.createDirectories(tmp.resolve("quack-node.deadbeef0006"))
+    Files.writeString(stale.resolve("owner.pid"), s"${deadPid()} 0")
+    Files.writeString(stale.resolve("spill.path"), Seq("", theirs, ours).mkString("\n"))
+    val ((rc, _, err), _) = dryRun(tmp, start)
+    withClue(err)(rc shouldBe 0)
+    Files.exists(stale) shouldBe false
+    Files.isDirectory(theirs) shouldBe true
+    Files.exists(ours) shouldBe false
+  }
+
   /** A stand-in qod-node (a POSIX shell script) that records its arguments, its environment, what
     * its secrets directory holds and its stdin, then exits.
     */
@@ -270,13 +410,14 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       port: Int,
       secrets: Map[String, String] = Map.empty,
       extraEnv: Seq[(String, String)] = Nil,
-      withNodeId: Boolean = true
+      withNodeId: Boolean = true,
+      marker: Option[String] = None
   ): (java.lang.Process, Path, Path) =
     assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val tmp        = Files.createDirectories(tempDir.resolve("t"))
     val (env, dir) = spawnEnv(tmp, secrets, Seq("QOD_NODE_BIN" -> bin.toString) ++ extraEnv)
     val pb         = new java.lang.ProcessBuilder(
-      (PowerShell.command.get ++ Seq("-File", ps1, port.toString)).asJava
+      (PowerShell.command.get ++ Seq("-File", ps1, port.toString) ++ marker).asJava
     ).directory(Files.createDirectories(start).toFile)
     pb.environment().putAll(env.toMap.asJava)
     if !withNodeId then pb.environment().remove(NodeSecretFiles.NodeIdEnv)
@@ -322,6 +463,13 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     val spill = start.toRealPath().resolve(".tmp").toString.replace("'", "''")
     sql should include(s"SET temp_directory = '$spill/qod-node.")
     sql should include("SELECT 'fed-ps1';")
+    // --spill-dir is the folder the init SQL sets, spelled the same; --node-dir is the node
+    // directory; no marker was given, so no --marker.
+    sql should include(s"SET temp_directory = '${pairs("--spill-dir").replace("'", "''")}';")
+    val nodeDir = Paths.get(pairs("--node-dir"))
+    nodeDir.getFileName.toString should startWith("quack-node.")
+    nodeDir.getParent.toRealPath() shouldBe tmp.toRealPath()
+    args should not contain "--marker"
     // No secret in an argument or the environment of the node. The checks never print the
     // environment, which holds whatever this test JVM inherited.
     val env   = Files.readString(probe.resolve("env"), StandardCharsets.UTF_8)
@@ -361,6 +509,43 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       .asScala
       .toList
       .filter(_.endsWith("-extensions")) shouldBe List("--allow-unsigned-extensions")
+  }
+
+  it should "pass qod-node the manager's marker, and the node directory it names" in {
+    assume(!scala.util.Properties.isWin, "the stand-in qod-node is a shell script")
+    val probe     = Files.createDirectories(tempDir.resolve("probe-marker"))
+    val (p, _, _) = launch(
+      tempDir.resolve("start-marker"),
+      fakeQodNode(probe),
+      23965,
+      marker = Some("20900-5eedbeef")
+    )
+    p.getInputStream.readAllBytes()
+    p.waitFor(60, TimeUnit.SECONDS) shouldBe true
+    val args  = Files.readAllLines(probe.resolve("args"), StandardCharsets.UTF_8).asScala.toList
+    val pairs = args.sliding(2).collect { case List(k, v) if k.startsWith("--") => k -> v }.toMap
+    pairs("--marker") shouldBe "20900-5eedbeef"
+    Paths.get(pairs("--node-dir")).getFileName.toString should startWith(
+      "quack-node.20900-5eedbeef."
+    )
+  }
+
+  it should "refuse a marker in uppercase or ending in a line break, as bash and qod-node do" in {
+    assume(!scala.util.Properties.isWin, "the stand-in qod-node is a shell script")
+    Seq("20900-5EEDBEEF" -> 23966, "20900-5eedbeef\n" -> 23967).foreach { case (marker, port) =>
+      val probe     = Files.createDirectories(tempDir.resolve(s"probe-bad-marker-$port"))
+      val (p, _, _) = launch(
+        tempDir.resolve(s"start-bad-marker-$port"),
+        fakeQodNode(probe),
+        port,
+        marker = Some(marker)
+      )
+      val out = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
+      p.waitFor(60, TimeUnit.SECONDS) shouldBe true
+      withClue(out)(p.exitValue() shouldBe 1)
+      out should include("invalid manager marker")
+      withClue("qod-node was started")(Files.exists(probe.resolve("args")) shouldBe false)
+    }
   }
 
   it should "refuse to start without qod-node" in {

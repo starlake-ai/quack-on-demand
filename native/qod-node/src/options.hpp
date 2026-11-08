@@ -39,6 +39,13 @@ struct NodeOptions {
 	std::vector<std::string> init_files;
 	//! Exit when this process ends (the spawn script's wrapper). 0: no parent to watch.
 	long long parent_pid = 0;
+	//! The spill folder the spawn script chose and set (--spill-dir); a trusted init statement that sets
+	//! another temp_directory gets a per-node leaf under its value instead.
+	std::string spill_dir;
+	//! The node directory (--node-dir), whose spill.path the spawn scripts read to clean up.
+	std::string node_dir;
+	//! The manager marker (--marker), part of the leaf's name; empty without one.
+	std::string marker;
 	//! Applied before the database opens, in every mode that opens one.
 	ExtensionPolicy extensions;
 };

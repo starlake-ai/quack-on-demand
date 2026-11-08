@@ -27,16 +27,6 @@ bool IsSeparator(char c) {
 #endif
 }
 
-//! A path as UTF-8 text (the inverse of PathFromUtf8).
-std::string Utf8(const fs::path &path) {
-#if defined(__cpp_char8_t)
-	auto text = path.u8string();
-	return std::string(text.begin(), text.end());
-#else
-	return path.u8string();
-#endif
-}
-
 std::string Lower(std::string text) {
 	for (auto &c : text) {
 		if (c >= 'A' && c <= 'Z') {
@@ -163,7 +153,7 @@ std::optional<std::string> ResolveLocalPath(const std::string &path, std::string
 		}
 		return std::nullopt;
 	}
-	auto resolved = Utf8(real);
+	auto resolved = PathToUtf8(real);
 #ifdef _WIN32
 	if (resolved.compare(0, 4, "\\\\?\\") == 0) {
 		resolved = resolved.substr(4);

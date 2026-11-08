@@ -23,6 +23,7 @@
 #include "options.hpp"
 #include "secrets.hpp"
 #include "settings_list.hpp"
+#include "spill_dir.hpp"
 #include "sql_script.hpp"
 #include "utf8_args.hpp"
 #ifdef QOD_NODE_DUCKDB_STATIC
@@ -41,10 +42,12 @@ using namespace qod;
 //! serving node's init file must open with the nonce line (RequireInitNonceLine): a stream whose
 //! script read another nonce is refused whole, never run with its tenant sections trusted.
 void RunInitFiles(duckdb::Connection &con, const NodeOptions &options, const std::string &nonce = "",
-                  const std::function<void(const std::string &)> &before_trusted = nullptr) {
+                  const std::function<void(const std::string &)> &before_trusted = nullptr,
+                  const std::function<void()> &before_untrusted = nullptr) {
 	for (auto &file : options.init_files) {
 		auto sql = ReadAll(file);
-		RunInit(con, nonce.empty() ? sql : RequireInitNonceLine(sql, nonce), nonce, before_trusted);
+		RunInit(con, nonce.empty() ? sql : RequireInitNonceLine(sql, nonce), nonce, before_trusted,
+		        before_untrusted);
 	}
 }
 
@@ -132,6 +135,43 @@ int Serve(const NodeOptions &options) {
 	RunStrict(con, "SET secret_directory = " + QuoteLiteral(options.secret_directory), "setting the secret directory");
 	RunStrict(con, "SELECT count(*) FROM duckdb_secrets()", "starting the secret manager");
 
+	// The spill folder the launcher chose, before the init SQL (the spawn script sets it there too): so
+	// DuckDB's default (.tmp under the working directory) never counts as a superuser's folder below.
+	RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(options.spill_dir), "setting the spill directory");
+
+	// A superuser's initSql may set temp_directory: every node of the database would then share that
+	// folder. Each node spills to a leaf of its own under it instead. The check runs before every trusted
+	// init statement and every admitted tenant one (so it reads what the one before left, and a leaf is set
+	// before a later statement can spill into the shared folder or turn external access off, after which
+	// DuckDB refuses SET temp_directory) and once after the init SQL. `last_spill` is the folder the node
+	// spills to now. Between statements the read may fail (a trusted BEGIN whose transaction a failed
+	// statement aborted refuses every statement until ROLLBACK, and nothing spills there either): it is
+	// skipped then, and the read after the init SQL is strict.
+	auto last_spill = options.spill_dir;
+	auto settle_spill = [&](bool strict) {
+		const std::string query = "SELECT current_setting('temp_directory')";
+		duckdb::unique_ptr<duckdb::QueryResult> read;
+		if (strict) {
+			read = RunStrict(con, query, "reading temp_directory");
+		} else {
+			read = con.Query(query);
+			if (read->HasError()) {
+				return;
+			}
+		}
+		auto chunk = read->Fetch();
+		auto current = chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : std::string();
+		if (current.empty() || current == last_spill || current == options.spill_dir) {
+			return;
+		}
+		auto leaf = MakePerNodeSpillDir(current, options.marker);
+		// Recorded first: a SET that fails then leaves no leaf the spawn script does not know of.
+		RecordSpillDir(options.node_dir, leaf);
+		RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(leaf), "setting the per-node spill directory");
+		last_spill = leaf;
+		std::cerr << "[qod-node] spill directory: " << leaf << std::endl;
+	};
+
 	// quack loads after the trusted init statements that set where extensions come from
 	// (custom_extension_repository, extension_directory), and before the first one that restricts the
 	// node's file or network access (a superuser's initSql may disable the local file system, and
@@ -144,11 +184,20 @@ int Serve(const NodeOptions &options) {
 			RunStrict(con, "LOAD quack", "loading quack");
 		}
 	};
-	RunInitFiles(con, options, secrets.init_nonce, [&](const std::string &statement) {
-		if (RestrictsNodeAccess(*con.context, statement)) {
-			load_quack();
-		}
-	});
+	// A tenant's statement gets the folder check only: a trusted SET temp_directory right before a tenant's
+	// section has its leaf before a tenant's SET memory_limit can evict into the shared folder (after which
+	// DuckDB refuses the move to the leaf). A tenant's statement never restricts the node's access (the
+	// allowlist admits none), so quack does not load there.
+	RunInitFiles(
+	    con, options, secrets.init_nonce,
+	    [&](const std::string &statement) {
+		    settle_spill(false);
+		    if (RestrictsNodeAccess(*con.context, statement)) {
+			    load_quack();
+		    }
+	    },
+	    [&]() { settle_spill(false); });
+	settle_spill(true);
 	load_quack();
 
 	// A trusted init statement may have set disabled_optimizers: remote_pushdown stays in it.

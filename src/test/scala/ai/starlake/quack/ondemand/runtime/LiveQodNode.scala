@@ -133,6 +133,13 @@ object LiveQodNode:
       Some(dir)
     )
     val logFile = dir.resolve(s"node-$port.log")
+    // The spill folder and node directory a serving node requires (node protocol 6, as the vendored
+    // build; an earlier `bin` such as OldProtocolNodeSpec's would refuse these flags, and that spec is
+    // cancelled while the vendored protocol is 6). Made as the spawn scripts make them: spill.path in
+    // the node directory holds the spill folder, with no trailing newline.
+    val spillDir = Files.createDirectories(dir.resolve(s"spill-$port"))
+    val nodeDir  = Files.createDirectories(dir.resolve(s"node-$port"))
+    Files.writeString(nodeDir.resolve("spill.path"), spillDir.toString)
     val builder = new java.lang.ProcessBuilder(
       exe.toString,
       "--port",
@@ -146,6 +153,10 @@ object LiveQodNode:
       dir.resolve(s"secret-dir-$port").toString,
       "--node-id",
       nodeId,
+      "--spill-dir",
+      spillDir.toString,
+      "--node-dir",
+      nodeDir.toString,
       "--parent-pid",
       ProcessHandle.current().pid().toString,
       "--init",

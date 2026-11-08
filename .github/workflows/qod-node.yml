@@ -128,6 +128,14 @@ jobs:
           cmake --build native/qod-node/build --config Release
           ctest --test-dir native/qod-node/build --output-on-failure --timeout 300
 
+      # The spill folder's foreign-owner cases chown to another user, so they need root: the run above
+      # skips them. One Linux job runs that test again as root.
+      - name: Test the spill folder's owner rules as root
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          set -euo pipefail
+          sudo "$(command -v ctest)" --test-dir native/qod-node/build -R spill_dir --output-on-failure --timeout 300
+
       - name: Build the vendored binary (relative rpath only)
         run: |
           set -euo pipefail
