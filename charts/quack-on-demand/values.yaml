@@ -308,9 +308,18 @@ quack:
 flightsql:
   tls:
     enabled: true
-    # Leave both empty to let the manager auto-generate a self-signed cert at
-    # boot (saved under /tmp/certs inside the pod). For real deployments,
-    # mount a Secret containing the chain + key.
+    # Leave existingSecret empty to let the manager auto-generate a self-signed
+    # cert at boot (saved under /tmp/certs inside the pod). For real
+    # deployments, name a Secret in the release namespace holding the PEM
+    # chain under certKey and the PEM key under keyKey: the chart mounts it
+    # read-only at /etc/qod/flight-tls and points PROXY_TLS_CERT_CHAIN /
+    # PROXY_TLS_PRIVATE_KEY (and the native front door's
+    # QOD_QUACK_TLS_CERT_CHAIN / QOD_QUACK_TLS_PRIVATE_KEY) at it. Rule: with
+    # existingSecret set the chart owns those four variables and
+    # PROXY_TLS_ENABLED, so setting any of them under `env`, or
+    # flightsql.tls.enabled false, fails the render. With existingSecret empty
+    # they stay free for a mount of your own (extraVolumes). The manager reads
+    # the pair at boot: restart the pods after rotating the Secret.
     existingSecret: ""
     certKey: server-cert.pem
     keyKey: server-key.pem

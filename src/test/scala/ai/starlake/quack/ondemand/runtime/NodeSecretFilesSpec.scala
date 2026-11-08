@@ -151,6 +151,21 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       .foreach(n => withClue(n)(NodeSecretFiles.isInheritedSecret(n) shouldBe false))
   }
 
+  it should "drop a name whose secret part is a KEY segment, and keep KEY inside a word" in {
+    Seq("QOD_METRICS_AZURE_KEY", "KEY", "QOD_KEY", "KEY_FILE", "qod_metrics_azure_key")
+      .foreach(n => withClue(n)(NodeSecretFiles.isInheritedSecret(n) shouldBe true))
+    // The cloud SDK names stay, whatever segment they hold; a KEY inside a word is no KEY segment.
+    Seq(
+      "AWS_ACCESS_KEY_ID",
+      "AZURE_STORAGE_KEY",
+      "GOOGLE_KEY",
+      "QOD_AUTH_KEYCLOAK_ENABLED",
+      "QOD_AUTH_KEYCLOAK_BASE_URL",
+      "MONKEY_COUNT",
+      "QOD_KEYS"
+    ).foreach(n => withClue(n)(NodeSecretFiles.isInheritedSecret(n) shouldBe false))
+  }
+
   "writePrivateDir" should "create an owner-only directory of owner-only files and refuse a foreign key" in {
     val dir = NodeSecretFiles.writePrivateDir(Map("pgPassword" -> "p\nwith newline"), Some(tempDir))
     Files.readString(dir.resolve("pgPassword")) shouldBe "p\nwith newline"

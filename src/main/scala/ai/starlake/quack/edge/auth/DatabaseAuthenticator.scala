@@ -149,20 +149,7 @@ class DatabaseAuthenticator(
                 // emailless row).
                 if lockoutActive then
                   lockoutStore.foreach(_.resetFailures(scope.tenantId, username))
-                Right(
-                  AuthenticatedProfile(
-                    username = username,
-                    role = role,
-                    groups = Set(role),
-                    claims = Map(
-                      "sub"         -> username,
-                      "role"        -> role,
-                      "auth_method" -> DatabaseAuthenticator.AuthMethod
-                    ),
-                    authMethod = DatabaseAuthenticator.AuthMethod,
-                    tenant = scope.tenantId
-                  )
-                )
+                Right(DatabaseAuthenticator.profileFor(username, role, scope.tenantId))
           else
             // Unknown username: burn the same bcrypt verify as a live row and answer with the
             // exact same failure as a wrong password. Message AND timing must not distinguish
@@ -203,3 +190,22 @@ object DatabaseAuthenticator:
     * rights come from the rows of the realm the login names.
     */
   val AuthMethod: String = "database"
+
+  /** The profile of a verified `qodstate_user` row: `kind` is the row's account kind, its `role`.
+    * It carries no token role or group name: a kind is no tenant role or group, and a row's rights
+    * are its memberships alone.
+    */
+  def profileFor(username: String, kind: String, tenant: Option[String]): AuthenticatedProfile =
+    AuthenticatedProfile(
+      username = username,
+      role = kind,
+      groups = Set.empty,
+      tokenRoles = Set.empty,
+      claims = Map(
+        "sub"         -> username,
+        "role"        -> kind,
+        "auth_method" -> AuthMethod
+      ),
+      authMethod = AuthMethod,
+      tenant = tenant
+    )

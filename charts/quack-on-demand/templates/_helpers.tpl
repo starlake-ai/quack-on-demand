@@ -176,4 +176,29 @@ Refusals checked on every render (deployment.yaml includes this first):
 {{- if hasKey (.Values.env | default dict) "QOD_INTERNAL_URL" }}
 {{- fail "env.QOD_INTERNAL_URL must stay unset: each replica's decide URL comes from its own pod IP (QOD_POD_IP), the chart's Service has no verdict port, and one shared URL would send every node's verdict calls to a single replica" }}
 {{- end }}
+{{- if .Values.flightsql.tls.existingSecret }}
+{{- if not .Values.flightsql.tls.enabled }}
+{{- fail "flightsql.tls.existingSecret is set while flightsql.tls.enabled is false: enable TLS or clear existingSecret" }}
+{{- end }}
+{{- range $k := list "PROXY_TLS_ENABLED" "PROXY_TLS_CERT_CHAIN" "PROXY_TLS_PRIVATE_KEY" "QOD_QUACK_TLS_CERT_CHAIN" "QOD_QUACK_TLS_PRIVATE_KEY" }}
+{{- if hasKey ($.Values.env | default dict) $k }}
+{{- fail (printf "env.%s must stay unset while flightsql.tls.existingSecret is set: the chart sets it from flightsql.tls" $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Where the manager reads the FlightSQL TLS pair mounted from flightsql.tls.existingSecret.
+*/}}
+{{- define "qod.flightTlsDir" -}}
+/etc/qod/flight-tls
+{{- end -}}
+
+{{- define "qod.flightTlsCertPath" -}}
+{{ include "qod.flightTlsDir" . }}/cert.pem
+{{- end -}}
+
+{{- define "qod.flightTlsKeyPath" -}}
+{{ include "qod.flightTlsDir" . }}/key.pem
 {{- end -}}

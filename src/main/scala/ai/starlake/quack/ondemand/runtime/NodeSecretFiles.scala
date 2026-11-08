@@ -134,15 +134,20 @@ object NodeSecretFiles extends LazyLogging:
   private val SecretNamePattern =
     "(?i).*(PASSWORD|PASSWD|PASSFILE|SECRET|TOKEN|PASSPHRASE|CREDENTIAL|PRIVATE|API_?KEY|ACCESS_KEY|CONNECTION_STRING|JWT).*".r
 
+  /** A name holding `KEY` as a whole `_`-separated segment (`QOD_METRICS_AZURE_KEY`, `KEY_FILE`),
+    * never inside a word (`QOD_AUTH_KEYCLOAK_ENABLED`).
+    */
+  private val KeySegmentPattern = "(?i)(.*_)?KEY(_.*)?".r
+
   /** True for an inherited manager environment variable that must not reach a node process: the
     * manager's own credentials (`QOD_SESSION_JWT_SECRET`, `QOD_ADMIN_PASSWORD`, control-plane and
-    * SMTP passwords, a module's payment key...) are readable by any node user through `getenv()`
-    * otherwise. Cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) are kept: an operator may rely
-    * on DuckDB's credential chain reading them.
+    * SMTP passwords, a module's payment key, a metrics sink's account key...) are readable by any
+    * node user through `getenv()` otherwise. Cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`)
+    * are kept: an operator may rely on DuckDB's credential chain reading them.
     */
   def isInheritedSecret(name: String): Boolean =
     !SdkPrefixes.exists(p => name.toUpperCase(java.util.Locale.ROOT).startsWith(p)) &&
-      SecretNamePattern.matches(name)
+      (SecretNamePattern.matches(name) || KeySegmentPattern.matches(name))
 
   /** The values to deliver by file, keyed by canonical name. The metastore (tenant-admin input)
     * supplies only its own secrets ([[NodeMetastore.secrets]]: `pgPassword`, `encryptionKey`), the

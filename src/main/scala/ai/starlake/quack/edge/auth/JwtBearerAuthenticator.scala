@@ -94,14 +94,15 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     else Right(())
 
   private def profileOf(claims: JWTClaimsSet, username: String): AuthenticatedProfile =
-    val role   = RoleExtractor.extract(claims, roleClaim)
-    val groups = RoleExtractor.extractGroups(claims, "groups")
+    val claimedRole = RoleExtractor.claimed(claims, roleClaim)
+    val groups      = RoleExtractor.extractGroups(claims, "groups")
     AuthenticatedProfile(
       username = username,
-      role = role,
-      groups = groups + role,
+      role = claimedRole.getOrElse(RoleExtractor.DefaultRole),
+      groups = groups ++ claimedRole,
       claims = flattenClaims(claims),
-      authMethod = "jwt"
+      authMethod = "jwt",
+      tokenRoles = claimedRole.toSet
     )
 
   private def verifySignature(jwt: SignedJWT): Boolean =

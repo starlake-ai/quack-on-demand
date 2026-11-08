@@ -16,6 +16,17 @@ object RoleExtractor:
     *   5. Default: "user"
     */
   def extract(claims: JWTClaimsSet, roleClaim: String): String =
+    claimed(claims, roleClaim).getOrElse(DefaultRole)
+
+  /** What [[extract]] answers when the token names no role. A descriptive default only: it is never
+    * resolved as a tenant role, see [[claimed]].
+    */
+  val DefaultRole: String = "user"
+
+  /** The role the token itself names, by [[extract]]'s fallback chain without its default: the only
+    * role name the data-plane handshake resolves against the tenant's roles.
+    */
+  def claimed(claims: JWTClaimsSet, roleClaim: String): Option[String] =
     // 1. Try configured claim as a string
     tryStringClaim(claims, roleClaim)
       // 2. Try configured claim as a list (take first)
@@ -26,7 +37,6 @@ object RoleExtractor:
       .orElse(tryKeycloakRealmAccess(claims))
       // 5. Try AWS Cognito "cognito:groups"
       .orElse(tryListClaim(claims, "cognito:groups"))
-      .getOrElse("user")
 
   /** Extract role from a flat string claims map. */
   def extractFromMap(claims: Map[String, String], roleClaim: String): String =

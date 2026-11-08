@@ -142,6 +142,18 @@ spec:
                   name: {{ include "qod.s3SecretName"   . | quote }}
                   key:  {{ include "qod.s3SecretKeyKey" . | quote }}
             {{- end }}
+            {{- if .Values.flightsql.tls.existingSecret }}
+            # The FlightSQL edge's pair, from flightsql.tls.existingSecret; the native front door
+            # reuses it when quack.tls.enabled is true.
+            - name: PROXY_TLS_CERT_CHAIN
+              value: {{ include "qod.flightTlsCertPath" . | quote }}
+            - name: PROXY_TLS_PRIVATE_KEY
+              value: {{ include "qod.flightTlsKeyPath" . | quote }}
+            - name: QOD_QUACK_TLS_CERT_CHAIN
+              value: {{ include "qod.flightTlsCertPath" . | quote }}
+            - name: QOD_QUACK_TLS_PRIVATE_KEY
+              value: {{ include "qod.flightTlsKeyPath" . | quote }}
+            {{- end }}
             {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}
@@ -183,11 +195,33 @@ spec:
             failureThreshold:    {{ .Values.probes.readiness.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.extraVolumeMounts }}
+          {{- if or .Values.flightsql.tls.existingSecret .Values.extraVolumeMounts }}
           volumeMounts:
+            {{- if .Values.flightsql.tls.existingSecret }}
+            - name: flight-tls
+              mountPath: {{ include "qod.flightTlsDir" . | quote }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
-      {{- with .Values.extraVolumes }}
+      {{- if or .Values.flightsql.tls.existingSecret .Values.extraVolumes }}
       volumes:
+        {{- if .Values.flightsql.tls.existingSecret }}
+        # Only the two keys, under fixed names: kubelet refuses to start the pod when either key
+        # is missing from the Secret. Mode 0440 reads through the pod's fsGroup.
+        - name: flight-tls
+          secret:
+            secretName: {{ .Values.flightsql.tls.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ required "flightsql.tls.certKey is required with flightsql.tls.existingSecret" .Values.flightsql.tls.certKey | quote }}
+                path: cert.pem
+              - key: {{ required "flightsql.tls.keyKey is required with flightsql.tls.existingSecret" .Values.flightsql.tls.keyKey | quote }}
+                path: key.pem
+        {{- end }}
+        {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
