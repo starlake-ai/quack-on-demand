@@ -270,7 +270,8 @@ std::string InitVerdictJson(const InitVerdict &verdict) {
 	                                 {"statements", JsonInt(static_cast<int64_t>(verdict.statements))}}));
 }
 
-size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &label) {
+size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &label,
+                    const std::function<void()> &before) {
 	if (sql.size() > kMaxTenantInitSqlBytes) {
 		std::cerr << "[qod-node] " << label << ": skipped whole: " << TooLarge(sql.size()) << std::endl;
 		return 1;
@@ -289,6 +290,9 @@ size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &
 		if (!parsed) {
 			continue;
 		}
+		if (before) {
+			before();
+		}
 		// The statement judged, not the text parsed again.
 		auto result = con.Query(std::move(parsed));
 		if (result->HasError()) {
@@ -303,7 +307,8 @@ size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &
 }
 
 size_t RunInit(Connection &con, const std::string &sql, const std::string &nonce,
-               const std::function<void(const std::string &)> &before_trusted) {
+               const std::function<void(const std::string &)> &before_trusted,
+               const std::function<void()> &before_untrusted) {
 	size_t skipped = 0;
 	for (auto &section : SplitInitSections(sql, nonce)) {
 		if (section.trusted) {
@@ -311,7 +316,8 @@ size_t RunInit(Connection &con, const std::string &sql, const std::string &nonce
 		} else {
 			skipped += RunUntrusted(con, section.sql,
 			                        "tenant " + (section.label.empty() ? std::string("") : section.label + " ") +
-			                            "initSql");
+			                            "initSql",
+			                        before_untrusted);
 		}
 	}
 	return skipped;

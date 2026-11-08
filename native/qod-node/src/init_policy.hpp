@@ -80,12 +80,16 @@ std::string InitVerdictJson(const InitVerdict &verdict);
 //! Runs the untrusted `sql` on `con` statement by statement under the allowlist: a refused statement
 //! is skipped and reported on stderr with its position and the reason, a failing one with DuckDB's
 //! error (ErrorWithoutStatement), and the rest still runs. Returns how many were refused or failed.
-size_t RunUntrusted(duckdb::Connection &con, const std::string &sql, const std::string &label);
+//! `before`, when set, is called before each admitted statement runs.
+size_t RunUntrusted(duckdb::Connection &con, const std::string &sql, const std::string &label,
+                    const std::function<void()> &before = nullptr);
 
 //! Runs an init script: its trusted sections as RunBestEffort does, its untrusted ones (marked with
 //! `nonce`, see SplitInitSections) through RunUntrusted. Returns how many statements were refused or
-//! failed. `before_trusted`, when set, is called with each trusted statement before it runs.
+//! failed. `before_trusted`, when set, is called with each trusted statement before it runs, and
+//! `before_untrusted` before each admitted untrusted one.
 size_t RunInit(duckdb::Connection &con, const std::string &sql, const std::string &nonce,
-               const std::function<void(const std::string &)> &before_trusted = nullptr);
+               const std::function<void(const std::string &)> &before_trusted = nullptr,
+               const std::function<void()> &before_untrusted = nullptr);
 
 } // namespace qod

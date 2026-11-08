@@ -682,6 +682,26 @@ SET temp_directory = '$work/after-rollback';"
 check_leaf spill-aborted "$work/after-rollback"
 stop_spill_node spill-aborted
 
+# 9. A trusted SET temp_directory right before a tenant's section: the check runs before each untrusted
+# statement too, so the tenant's SET memory_limit, which evicts the table the trusted SQL built to temp
+# files, evicts into the leaf. Without it the eviction lands in the superuser's folder, and DuckDB then
+# refuses the move to the leaf after the init SQL ("Cannot switch temporary directory").
+spill_node spill-untrusted "SET threads = 1;
+CREATE TABLE big AS SELECT i, md5(i::VARCHAR) AS s FROM range(3000000) t(i);
+SET temp_directory = '$work/untrusted';
+-- qod:untrusted-begin $init_nonce pool
+SET memory_limit = '64MB';
+-- qod:untrusted-end $init_nonce"
+check_leaf spill-untrusted "$work/untrusted"
+if [[ -n "$leaf" ]]; then
+  grep -q 'tenant pool initSql: 1 of 1 statement(s) ran' "$spill_out" ||
+    fail "spill-untrusted: the tenant's SET did not run: $(grep 'initSql' "$spill_out")"
+  ls "$leaf" | grep -q '^duckdb_temp_' || fail "spill-untrusted: nothing was evicted into the leaf"
+  [[ "$(ls -A "$work/untrusted")" == "${leaf##*/}" ]] ||
+    fail "spill-untrusted: the superuser's folder holds more than the leaf: $(ls -A "$work/untrusted" | tr '\n' ' ')"
+fi
+stop_spill_node spill-untrusted
+
 # --- serve: a quack_serve failure is fatal ---------------------------------------------------------
 # 192.0.2.1 (TEST-NET-1) is never a local address, so binding it fails. (A busy port is no test: quack
 # does not refuse a port another listener holds.)
