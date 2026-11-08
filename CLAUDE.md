@@ -126,6 +126,24 @@ wrapper does (`--parent-pid`) or on SIGTERM; a stop while it is still starting e
 failing init statement is logged with DuckDB's error minus the `LINE n:` statement excerpt (init SQL
 carries credentials).
 
+Spill folders: qod-node requires `--spill-dir` (the per-node folder the spawn script chose; qod-node
+sets it as `temp_directory` before the init SQL) and `--node-dir`, and accepts `--marker`
+(`<rest-port>-<hex boot id>`, checked at parse). Before every init statement, trusted and tenant alike,
+and once after, it compares `temp_directory` with `--spill-dir`: a superuser's other value gets a
+per-node leaf, `<value>/qod-spill.<marker>.XXXXXX` (`qod-spill.XXXXXX` with no marker), recorded as a
+new line of `<node dir>/spill.path` and then set (`spill_dir.cpp`, `main.cpp`). Checking before each
+statement matters: once anything spilled into a folder, DuckDB refuses to switch away from it and the
+node would never start. Missing parents and the leaf are made with mode 0700; every pre-existing folder
+of the path, a followed link and every folder of its real path must be owned by root or the node's own
+user (on Windows every link, junction or mounted folder is refused), and a value holding a line break
+is refused, else the node stops at start with `cannot create the spill directory under <folder>`. The
+spawn scripts own cleanup: on stop and in the stale sweep they remove every line of `spill.path` after
+the first, read against `<node dir>/cwd` when relative, only when it names a real directory owned by
+this user (Windows: owner SID, Administrators when elevated; `Directory.Delete`) whose name matches
+`^qod-spill\.([0-9]+-[0-9a-f]+\.)?[A-Za-z0-9]{6}$`; `SpillLeafPatternSpec` pins that the pattern agrees
+in qod-node and both scripts. Anything that starts qod-node in serve mode (a test helper such as
+`LiveQodNode` included) must pass both flags.
+
 Every statement the manager sends a node runs for a verified principal. Before each PREPARE on a node
 connection (a relayed client statement, a stamp prelude, a COMMIT) the manager sends its own PREPARE
 `CALL system.main.qod_session('<handle>')`: a session handle `<base64url JSON>.<hex HMAC-SHA256>` naming
@@ -456,8 +474,8 @@ Residuals: it covers local files only and says nothing about what the node's own
 storage. DuckDB leaves the temp directory allowed: a superuser reads and writes it, a non-superuser is
 refused by the location rules, and a file list naming a file there reads it, which holds only spill files
 (no Parquet: they read as nothing) and what a superuser put there; a superuser's init SQL that moves
-`temp_directory` moves that allowance with it, and a tenant admin's cannot (it is not on the initSql
-allowlist). The five CA files stay open to DuckDB, for reading and for writing: a superuser's statement
+`temp_directory` moves that allowance to the node's own `qod-spill.*` leaf under it (see "Spill folders"
+in the qod-node section), and a tenant admin's cannot (it is not on the initSql allowlist). The five CA files stay open to DuckDB, for reading and for writing: a superuser's statement
 reads them, and writes them as far as the node's OS user may, and a deletion schedule naming one of them
 removes it when the node's OS user may (root; the node images run as uid 1000). A local file a superuser's
 init SQL attached before the switch stays reachable (DuckDB adds attached paths to `allowed_paths`). A
