@@ -1,11 +1,7 @@
 package ai.starlake.quack.ondemand.security
 
 import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
-import ai.starlake.quack.ondemand.state.{
-  ControlPlaneSnapshot,
-  LiquibaseRunner,
-  PostgresControlPlaneStore
-}
+import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PostgresControlPlaneStore}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -72,7 +68,9 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
   private def facts(store: PostgresControlPlaneStore, tds: List[TenantDb] = Nil) =
     LiveAuditFacts(
       store.jdbcDataSource,
-      () => ControlPlaneSnapshot(tenantDbs = tds),
+      tenants = () => Nil,
+      tenantDbs = () => tds,
+      pools = () => Nil,
       td => td.dataPath,
       t => t == "acme"
     )
@@ -92,7 +90,9 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
   it should "list only the tenants whose sign-in is OIDC" in withDb { (store, _) =>
     val f = LiveAuditFacts(
       store.jdbcDataSource,
-      () => ControlPlaneSnapshot(tenants = List(Tenant("globex"), Tenant("acme"))),
+      tenants = () => List(Tenant("globex"), Tenant("acme")),
+      tenantDbs = () => Nil,
+      pools = () => Nil,
       td => td.dataPath,
       t => t == "acme"
     )
@@ -113,11 +113,9 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
         Pool("p1", "acme", "d2", "bi", 1, RoleDistribution(0, 0, 1), initSql = "SET threads = 1")
       val withPool = LiveAuditFacts(
         store.jdbcDataSource,
-        () =>
-          ControlPlaneSnapshot(
-            tenantDbs = List(untrusted, trusted, otherTenant),
-            pools = List(pool)
-          ),
+        tenants = () => Nil,
+        tenantDbs = () => List(untrusted, trusted, otherTenant),
+        pools = () => List(pool),
         td => td.dataPath,
         _ => false
       )
@@ -145,4 +143,27 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
       }
     }
     facts(store).controlPlaneLoginIsSuperuser() shouldBe expected
+  }
+
+  it should "derive the row facts from the rows it is given, with no control-plane read" in {
+    // The supervisor's cached rows: no snapshot of the store per request. A data source that
+    // cannot connect proves the row facts never reach it.
+    val unreachable = new org.postgresql.ds.PGSimpleDataSource()
+    unreachable.setURL("jdbc:postgresql://127.0.0.1:1/none")
+    val local =
+      TenantDb("d1", "acme", "acme_sales", TenantDbKind.DuckLake, Map.empty, "/srv/data/sales")
+    val untrusted =
+      local.copy(id = "d2", name = "acme_x", dataPath = "s3://b/x/", initSql = "SET threads = 2")
+    val f = LiveAuditFacts(
+      unreachable,
+      tenants = () => List(Tenant("acme")),
+      tenantDbs = () => List(local, untrusted),
+      pools = () => Nil,
+      td => td.dataPath,
+      _ => true
+    )
+    f.localDatabases() shouldBe List("acme/acme_sales")
+    f.untrustedInitSql() shouldBe List("acme/database 'acme_x'")
+    f.oidcTenants() shouldBe List("acme")
+    an[java.sql.SQLException] should be thrownBy f.unboundApprovedServers()
   }

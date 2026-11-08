@@ -1997,6 +1997,14 @@ final class PoolSupervisor(
   def listPoolsOfTenant(name: String): List[String] =
     pools.values.filter(_.key.tenant == name.toLowerCase(Locale.ROOT)).map(_.key.pool).toList.sorted
 
+  /** Every cached tenant-db row, branches included, by tenant id then name. */
+  def listAllTenantDbs(): List[TenantDb] =
+    tenantDbs.values.toList.sortBy(td => (td.tenantId, td.name))
+
+  /** Every cached pool row, the manager's own (`__merge`, `__br_<id8>`, ...) included. */
+  def listAllPoolRows(): List[Pool] =
+    poolRows.values.toList.sortBy(p => (p.tenantId, p.tenantDbId, p.name))
+
   def listTenantDbsByTenant(tenantName: String): List[TenantDb] =
     getTenant(tenantName)
       .map(t => tenantDbs.values.filter(_.tenantId == t.id).toList.sortBy(_.name))

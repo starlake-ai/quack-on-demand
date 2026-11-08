@@ -1,19 +1,22 @@
 package ai.starlake.quack.ondemand.security
 
 import ai.starlake.quack.NodeFilesConfig
-import ai.starlake.quack.model.{TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{Pool, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
-import ai.starlake.quack.ondemand.state.ControlPlaneSnapshot
 import java.sql.{Connection, ResultSet}
 import javax.sql.DataSource
 import scala.util.Using
 
-/** Read-only answers from the control plane: SQL on its pool for the stored rows, the snapshot for
-  * what the manager derives from them. Counts and names only.
+/** Read-only answers from the control plane: SQL on its pool (each query under a 5 s timeout) for
+  * the stored rows, and the supervisor's cached tenants, tenant-dbs and pools (`tenants`,
+  * `tenantDbs`, `pools`) for what the manager derives from them, so a request reads no snapshot of
+  * the store. Counts and names only.
   */
 final case class LiveAuditFacts(
     ds: DataSource,
-    snapshot: () => ControlPlaneSnapshot,
+    tenants: () => List[Tenant],
+    tenantDbs: () => List[TenantDb],
+    pools: () => List[Pool],
     dataPathOf: TenantDb => String,
     isOidcTenant: String => Boolean
 ) extends AuditFacts:
@@ -82,7 +85,7 @@ final case class LiveAuditFacts(
     )(rs => rs.getString(1) -> rs.getInt(2))
 
   def localDatabases(): List[String] =
-    snapshot().tenantDbs
+    tenantDbs()
       .filter(td =>
         NodeFilesConfig
           .localDataPath(td.kind == TenantDbKind.InMemory, dataPathOf(td))
@@ -92,11 +95,10 @@ final case class LiveAuditFacts(
       .sorted
 
   def untrustedInitSql(): List[String] =
-    val snap = snapshot()
     InitSqlTrustReport
-      .untrusted(snap.tenantDbs, snap.pools)
+      .untrusted(tenantDbs(), pools())
       .map(r => s"${r.tenant}/${r.label}")
       .sorted
 
   def oidcTenants(): List[String] =
-    snapshot().tenants.map(_.id).filter(isOidcTenant).sorted
+    tenants().map(_.id).filter(isOidcTenant).sorted

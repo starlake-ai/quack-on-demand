@@ -1674,9 +1674,13 @@ object Main extends IOApp with LazyLogging:
       val securityAuditHandlers =
         val auditConfig = ai.starlake.quack.ondemand.security.AuditConfig
           .resolved(liveConfig, mgrCfg, edgeCfg, quackCfgResolved, authCfg)
+        // The row facts read the supervisor's cached rows, as `dataPathOf` does: no full read of
+        // the store per request.
         val facts = ai.starlake.quack.ondemand.security.LiveAuditFacts(
           store.jdbcDataSource,
-          () => store.snapshot(),
+          tenants = () => sup.listTenants(),
+          tenantDbs = () => sup.listAllTenantDbs(),
+          pools = () => sup.listAllPoolRows(),
           sup.dataPathOf,
           t =>
             mgmtAuth.authModeResolver.modeFor(Some(t)) ==
