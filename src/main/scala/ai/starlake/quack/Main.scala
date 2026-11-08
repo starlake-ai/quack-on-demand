@@ -1666,10 +1666,14 @@ object Main extends IOApp with LazyLogging:
       val serverConfigHandlers =
         new ConfigHandlers(liveConfig, configEntries, telemetryStore.enabled)
 
-      // The superuser-only security audit. It reads the live config and the control plane on each
-      // request, so it reports how this replica stands now. `dataPathOf` resolves the row itself:
-      // a lookup by name would fall back to the default metastore for a row missing from the cache.
+      // The superuser-only security audit. It reads the configuration this replica booted with
+      // (the live one with what the boot resolved laid over it: the embedded control plane's
+      // passwords, the demo's TLS and binds) and the control plane on each request, so it reports
+      // how this replica stands now. `dataPathOf` resolves the row itself: a lookup by name would
+      // fall back to the default metastore for a row missing from the cache.
       val securityAuditHandlers =
+        val auditConfig = ai.starlake.quack.ondemand.security.AuditConfig
+          .resolved(liveConfig, mgrCfg, edgeCfg, quackCfgResolved, authCfg)
         val facts = ai.starlake.quack.ondemand.security.LiveAuditFacts(
           store.jdbcDataSource,
           () => store.snapshot(),
@@ -1686,7 +1690,7 @@ object Main extends IOApp with LazyLogging:
             ai.starlake.quack.ondemand.security
               .SecurityAudit(
                 ai.starlake.quack.ondemand.security.checks.SecurityChecks.all,
-                ai.starlake.quack.ondemand.security.AuditContext(liveConfig, facts),
+                ai.starlake.quack.ondemand.security.AuditContext(auditConfig, facts),
                 replica,
                 version
               )

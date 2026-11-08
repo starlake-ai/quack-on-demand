@@ -5,6 +5,9 @@ import cats.effect.IO
 
 object SecretChecks:
 
+  private def embedded(ctx: AuditContext): Boolean =
+    ctx.bool("quack-on-demand.embeddedPostgres.enabled")
+
   /** The control-plane password `application.conf` ships with. */
   val ShippedPgPassword = "azizam"
 
@@ -12,23 +15,32 @@ object SecretChecks:
     "secret.pg-default-password",
     Area.Secrets,
     "Postgres password is the shipped default",
-    List("QOD_PG_PASSWORD", "QOD_AUTH_DB_PASSWORD"),
+    List("QOD_PG_PASSWORD", "QOD_AUTH_DB_PASSWORD", "QOD_PG_EMBEDDED"),
     "/operating/deploy-single-server#secure-in-production",
     ctx =>
       IO.pure {
-        val which = List(
-          "QOD_PG_PASSWORD"      -> "quack-on-demand.defaultMetastore.pgPassword",
-          "QOD_AUTH_DB_PASSWORD" -> "quack-flightsql.auth.database.password"
-        ).collect { case (env, path) if ctx.string(path) == ShippedPgPassword => env }
-        if which.isEmpty then Outcome(Status.Ok, "No Postgres password is the shipped default.")
-        else
+        // The embedded server (`qod serve`) runs trust authentication on loopback: the passwords
+        // the manager holds are placeholders the server never checks.
+        if embedded(ctx) then
           Outcome(
-            Status.Critical,
-            s"${which.mkString(" and ")} still ${
-                if which.size == 1 then "holds" else "hold"
-              } the password application.conf ships with.",
-            "Give the control-plane login a password of its own and set it in the manager's environment."
+            Status.Warn,
+            "The embedded control-plane Postgres lets any local OS user connect as its superuser without a password (trust authentication on loopback).",
+            "Run the manager against a Postgres of your own (QOD_PG_*) in production."
           )
+        else
+          val which = List(
+            "QOD_PG_PASSWORD"      -> "quack-on-demand.defaultMetastore.pgPassword",
+            "QOD_AUTH_DB_PASSWORD" -> "quack-flightsql.auth.database.password"
+          ).collect { case (env, path) if ctx.string(path) == ShippedPgPassword => env }
+          if which.isEmpty then Outcome(Status.Ok, "No Postgres password is the shipped default.")
+          else
+            Outcome(
+              Status.Critical,
+              s"${which.mkString(" and ")} still ${
+                  if which.size == 1 then "holds" else "hold"
+                } the password application.conf ships with.",
+              "Give the control-plane login a password of its own and set it in the manager's environment."
+            )
       }
   )
 
@@ -36,18 +48,21 @@ object SecretChecks:
     "secret.pg-superuser",
     Area.Secrets,
     "Control-plane login is a Postgres superuser",
-    List("QOD_PG_USER"),
+    List("QOD_PG_USER", "QOD_PG_EMBEDDED"),
     "/operating/tenants-databases#secure-in-production",
     ctx =>
-      IO.blocking(ctx.facts.controlPlaneLoginIsSuperuser()).map {
-        case true =>
-          Outcome(
-            Status.Warn,
-            "The control-plane login is a Postgres superuser: whoever reads it reaches every database on the server.",
-            "Use a role with CREATEDB and no SUPERUSER for QOD_PG_USER."
-          )
-        case false => Outcome(Status.Ok, "The control-plane login is not a Postgres superuser.")
-      }
+      if embedded(ctx) then
+        IO.pure(Outcome(Status.Na, "The manager runs the embedded control plane."))
+      else
+        IO.blocking(ctx.facts.controlPlaneLoginIsSuperuser()).map {
+          case true =>
+            Outcome(
+              Status.Warn,
+              "The control-plane login is a Postgres superuser: whoever reads it reaches every database on the server.",
+              "Use a role with CREATEDB and no SUPERUSER for QOD_PG_USER."
+            )
+          case false => Outcome(Status.Ok, "The control-plane login is not a Postgres superuser.")
+        }
   )
 
   private def storedSecret(

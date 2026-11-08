@@ -94,6 +94,24 @@ class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
     ok.detail should not include "s3cret"
   }
 
+  "secret.pg-default-password and secret.pg-superuser" should "speak of the embedded control plane" in {
+    val embedded = cfg("""quack-on-demand.embeddedPostgres.enabled = true
+                         |quack-on-demand.defaultMetastore.pgPassword = "azizam"
+                         |quack-flightsql.auth.database.password = "azizam"""".stripMargin)
+    val pw = status(SecretChecks.all, "secret.pg-default-password", embedded)
+    pw.status shouldBe Status.Warn
+    pw.detail shouldBe "The embedded control-plane Postgres lets any local OS user connect as its superuser without a password (trust authentication on loopback)."
+    pw.fix shouldBe "Run the manager against a Postgres of your own (QOD_PG_*) in production."
+    val su = status(
+      SecretChecks.all,
+      "secret.pg-superuser",
+      embedded,
+      StubAuditFacts(superuserLogin = true)
+    )
+    su.status shouldBe Status.Na
+    su.detail should include("embedded control plane")
+  }
+
   "secret.pg-superuser" should "warn when the control-plane login is a superuser" in {
     status(
       SecretChecks.all,
