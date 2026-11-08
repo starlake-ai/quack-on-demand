@@ -114,19 +114,31 @@ object NodeDataChecks:
     List("QOD_REQUIRE_ENCRYPTION"),
     "/operating/encryption#secure-in-production",
     ctx =>
-      if ctx.bool("quack-on-demand.requireEncryption") then
-        IO.pure(Outcome(Status.Ok, "QOD_REQUIRE_ENCRYPTION refuses unencrypted creates."))
-      else
-        IO.blocking(ctx.facts.unencryptedDatabases()).map { counts =>
-          if counts.isEmpty then
-            Outcome(Status.Ok, "Every DuckLake and duckdb-file database is encrypted.")
-          else
-            Outcome(
-              Status.Warn,
-              "Unencrypted databases: " + counts.map((t, n) => s"$n in $t").mkString(", ") + ".",
-              "Set QOD_REQUIRE_ENCRYPTION=true for new databases; encryption is chosen at create time only."
-            )
-        }
+      // QOD_REQUIRE_ENCRYPTION gates creates only, so the stored rows are read either way.
+      val required = ctx.bool("quack-on-demand.requireEncryption")
+      IO.blocking(ctx.facts.unencryptedDatabases()).map { counts =>
+        val perTenant = counts.map((t, n) => s"$n in $t").mkString(", ")
+        val total     = counts.map(_._2).sum
+        if total == 0 then
+          Outcome(Status.Ok, "Every DuckLake and duckdb-file database is encrypted.")
+        else if required then
+          Outcome(
+            Status.Warn,
+            (if total == 1 then
+               "1 database created before QOD_REQUIRE_ENCRYPTION was set is unencrypted"
+             else
+               s"$total databases created before QOD_REQUIRE_ENCRYPTION was set are unencrypted"
+            ) +
+              s" ($perTenant).",
+            "Encryption is chosen at create time only: recreate them encrypted."
+          )
+        else
+          Outcome(
+            Status.Warn,
+            s"Unencrypted databases: $perTenant.",
+            "Set QOD_REQUIRE_ENCRYPTION=true for new databases; encryption is chosen at create time only."
+          )
+      }
   )
 
   private def listed(

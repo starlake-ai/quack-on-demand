@@ -184,11 +184,26 @@ class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
       StubAuditFacts(unencrypted = List("acme" -> 2))
     ).status shouldBe Status.Warn
     run("data.unencrypted", off, StubAuditFacts()).status shouldBe Status.Ok
+  }
+
+  it should "warn under requireEncryption about the databases created before it was set" in {
+    val on = cfg("quack-on-demand.requireEncryption = true")
+    val o  =
+      run("data.unencrypted", on, StubAuditFacts(unencrypted = List("acme" -> 2, "globex" -> 1)))
+    o.status shouldBe Status.Warn
+    o.detail should startWith(
+      "3 databases created before QOD_REQUIRE_ENCRYPTION was set are unencrypted"
+    )
+    o.detail should include("2 in acme")
+    o.fix shouldBe "Encryption is chosen at create time only: recreate them encrypted."
     run(
       "data.unencrypted",
-      cfg("quack-on-demand.requireEncryption = true"),
-      StubAuditFacts(unencrypted = List("acme" -> 2))
-    ).status shouldBe Status.Ok
+      on,
+      StubAuditFacts(unencrypted = List("acme" -> 1))
+    ).detail should startWith(
+      "1 database created before QOD_REQUIRE_ENCRYPTION was set is unencrypted"
+    )
+    run("data.unencrypted", on, StubAuditFacts()).status shouldBe Status.Ok
   }
 
   "data.untrusted-initsql, data.writable-federation-with-secrets, data.branch-no-ttl" should "warn and name what they found" in {
