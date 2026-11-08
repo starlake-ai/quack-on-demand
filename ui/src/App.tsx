@@ -81,6 +81,7 @@ import { NAV, visibleNav } from './nav/navModel';
 import { legacyRedirect } from './nav/legacy';
 import Config from './pages/Config';
 import Profile from './pages/Profile';
+import SecurityAudit from './pages/SecurityAudit';
 
 // Regular (non-admin) session: the server only lets this token reach
 // /api/auth/{whoami,logout} and /api/profile/{usage,statements}, so the
@@ -174,6 +175,7 @@ function Shell() {
         <Route path="/tenants" element={<TenantList />} />
         {isSuperuser && <Route path="/servers" element={<Servers />} />}
         {isSuperuser && <Route path="/settings/config" element={<Config />} />}
+        {isSuperuser && <Route path="/settings/security-audit" element={<SecurityAudit />} />}
         <Route path="/settings/profile" element={<Profile />} />
         <Route path="*" element={<LegacyRedirect />} />
       </Routes>

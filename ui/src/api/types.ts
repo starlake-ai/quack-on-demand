@@ -1583,3 +1583,24 @@ export interface BranchProposeResponse {
 }
 
 export type BranchMergeResponse = BranchProposeResponse;
+
+export type AuditStatus = 'critical' | 'warn' | 'ok' | 'na' | 'error';
+
+export interface SecurityFinding {
+  id: string;
+  area: 'network' | 'secrets' | 'identity' | 'data' | 'fleet';
+  status: AuditStatus;
+  title: string;
+  detail: string;
+  fix: string;
+  settings: string[];
+  docs: string;
+}
+
+export interface SecurityAuditResponse {
+  generatedAt: string;
+  replica: string;
+  version: string;
+  summary: { critical: number; warn: number; ok: number; na: number; error: number };
+  findings: SecurityFinding[];
+}
