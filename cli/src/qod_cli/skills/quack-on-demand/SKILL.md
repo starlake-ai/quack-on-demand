@@ -2742,6 +2742,20 @@ eviction are opt-in knobs.
   `QOD_CATALOG_READER_IDLE_EVICT_MIN=1`, browse a tenant-db's catalog, wait a
   couple minutes, and grep the manager log for `reader-cache sweep: evicted`.
 
+### Security audit
+
+A superuser checks the deployment against the docs' "Secure in production" checklists:
+
+```bash
+qod admin security-audit                       # critical and warning findings, each with its fix and docs link
+qod admin security-audit --fail-on warn,error  # also exit 3 on a warning or an error (CI gate); a critical always exits 3
+qod --json admin security-audit                # every check, ok and n/a included
+```
+
+The console shows the same under Settings > Security audit. A finding names settings, counts and
+object names, never a secret's value. `error` means the check could not complete (see the manager log).
+The audit reads the answering replica's configuration and the shared control plane; it changes nothing.
+
 ## Typical failure modes
 
 | Symptom | Cause | Fix |
