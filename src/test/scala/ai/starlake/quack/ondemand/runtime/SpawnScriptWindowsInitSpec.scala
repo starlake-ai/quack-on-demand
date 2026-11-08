@@ -300,6 +300,82 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     Files.exists(target.resolve("spill.bin")) shouldBe true
   }
 
+  /** Runs `body` in PowerShell after defining the ps1 functions `names`, taken from the script's
+    * syntax tree so that the script itself does not run; returns the lines it prints.
+    */
+  private def withFunctions(names: Seq[String], body: String): List[String] =
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
+    val list    = names.map(n => s"'$n'").mkString(", ")
+    val prelude =
+      s"""$$ast = [System.Management.Automation.Language.Parser]::ParseFile('${ps1.replace(
+          "'",
+          "''"
+        )}', [ref]$$null, [ref]$$null)
+         |foreach ($$n in @($list)) {
+         |  $$f = $$ast.Find({ param($$a) $$a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $$a.Name -eq $$n }, $$true)
+         |  . ([scriptblock]::Create($$f.Extent.Text))
+         |}
+         |""".stripMargin
+    Process(PowerShell.command.get ++ Seq("-Command", prelude + body)).!!.linesIterator.toList
+
+  private def myUid: String = Process(Seq("id", "-u")).!!.trim
+
+  // The owner rule behind every leaf removal, judged with owners this host cannot make without root:
+  // the same uid or SID is ours, the Administrators group only for an elevated token, anything else
+  // (an unknown owner included) is not.
+  "the PowerShell owner check" should "accept only this user, or Administrators when elevated" in {
+    withFunctions(
+      Seq("Test-OwnerIsMine"),
+      """Test-OwnerIsMine '501' '501' $false
+        |Test-OwnerIsMine '0' '501' $false
+        |Test-OwnerIsMine '' '501' $false
+        |Test-OwnerIsMine '501' '' $false
+        |Test-OwnerIsMine 'S-1-5-21-1-2-3-1001' 'S-1-5-21-1-2-3-1001' $false
+        |Test-OwnerIsMine 'S-1-5-32-544' 'S-1-5-21-1-2-3-1001' $true
+        |Test-OwnerIsMine 'S-1-5-32-544' 'S-1-5-21-1-2-3-1001' $false
+        |Test-OwnerIsMine 'S-1-5-21-1-2-3-1002' 'S-1-5-21-1-2-3-1001' $true
+        |Test-OwnerIsMine 's-1-5-32-544' 'S-1-5-21-1-2-3-1001' $true
+        |""".stripMargin
+    ) shouldBe List("True", "False", "False", "False", "True", "True", "False", "False", "False")
+  }
+
+  it should "read a directory's owner off Windows" in {
+    assume(!scala.util.Properties.isWin, "reads the POSIX branch")
+    assume(myUid != "0", "root owns the reference directory")
+    val mine = Files.createDirectories(tempDir.resolve("mine"))
+    withFunctions(
+      Seq("Test-OwnerIsMine", "Test-OwnedByMe"),
+      s"""$$onWindows = $$false
+         |$$myUid = '$myUid'
+         |Test-OwnedByMe '${mine.toString.replace("'", "''")}'
+         |Test-OwnedByMe '/'
+         |Test-OwnedByMe '${tempDir.resolve("absent").toString.replace("'", "''")}'
+         |$$myUid = ''
+         |Test-OwnedByMe '${mine.toString.replace("'", "''")}'
+         |""".stripMargin
+    ) shouldBe List("True", "False", "False", "False")
+  }
+
+  // End to end, a leaf-named real directory another user owns is left in place: making one needs
+  // root (chown), so the case is cancelled, saying so, when the suite runs as anyone else.
+  "a later PowerShell spawn" should "leave a spill leaf another user owns" in {
+    assume(!scala.util.Properties.isWin, "checks the POSIX branch")
+    assume(myUid == "0", "skipped: chown to another user needs root")
+    val tmp    = Files.createDirectories(tempDir.resolve("t"))
+    val start  = Files.createDirectories(tempDir.resolve("start"))
+    val theirs = Files.createDirectories(tempDir.resolve("shared/qod-spill.Th1rs0"))
+    val ours   = Files.createDirectories(tempDir.resolve("shared/qod-spill.0urs00"))
+    Process(Seq("chown", "65534", theirs.toString)).!!
+    val stale = Files.createDirectories(tmp.resolve("quack-node.deadbeef0006"))
+    Files.writeString(stale.resolve("owner.pid"), s"${deadPid()} 0")
+    Files.writeString(stale.resolve("spill.path"), Seq("", theirs, ours).mkString("\n"))
+    val ((rc, _, err), _) = dryRun(tmp, start)
+    withClue(err)(rc shouldBe 0)
+    Files.exists(stale) shouldBe false
+    Files.isDirectory(theirs) shouldBe true
+    Files.exists(ours) shouldBe false
+  }
+
   /** A stand-in qod-node (a POSIX shell script) that records its arguments, its environment, what
     * its secrets directory holds and its stdin, then exits.
     */
