@@ -54,6 +54,101 @@ class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
     an[Exception] should be thrownBy status(NetworkChecks.all, "tls.flight-self-signed", missing)
   }
 
+  /** Runs a command quietly; false when it fails or its binary is not on the PATH. */
+  private def sh(dir: java.nio.file.Path, cmd: String*): Boolean =
+    scala.util
+      .Try {
+        val p = new ProcessBuilder(cmd*)
+          .directory(dir.toFile)
+          .redirectErrorStream(true)
+          .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+          .start()
+        p.waitFor() == 0
+      }
+      .getOrElse(false)
+
+  /** A leaf certificate signed by a throwaway CA, with openssl or else keytool. */
+  private def caSignedLeaf(dir: java.nio.file.Path): Option[String] =
+    val viaOpenssl =
+      sh(
+        dir,
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-subj",
+        "/CN=QoD Test CA",
+        "-days",
+        "2"
+      ) &&
+        sh(
+          dir,
+          "openssl",
+          "req",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          "leaf.key",
+          "-out",
+          "leaf.csr",
+          "-subj",
+          "/CN=localhost"
+        ) &&
+        sh(
+          dir,
+          "openssl",
+          "x509",
+          "-req",
+          "-in",
+          "leaf.csr",
+          "-CA",
+          "ca.pem",
+          "-CAkey",
+          "ca.key",
+          "-CAcreateserial",
+          "-out",
+          "leaf.pem",
+          "-days",
+          "2"
+        )
+    def ks(args: String*) =
+      sh(dir, (Seq("keytool") ++ args ++ Seq("-keystore", "ks.p12", "-storepass", "changeit"))*)
+    lazy val viaKeytool =
+      ks(
+        "-genkeypair",
+        "-alias",
+        "ca",
+        "-dname",
+        "CN=QoD Test CA",
+        "-keyalg",
+        "RSA",
+        "-ext",
+        "bc:c"
+      ) &&
+        ks("-genkeypair", "-alias", "leaf", "-dname", "CN=localhost", "-keyalg", "RSA") &&
+        ks("-certreq", "-alias", "leaf", "-file", "leaf.csr") &&
+        ks("-gencert", "-alias", "ca", "-infile", "leaf.csr", "-outfile", "leaf.pem", "-rfc")
+    Option.when(viaOpenssl || viaKeytool)(dir.resolve("leaf.pem").toString)
+
+  it should "be ok for a certificate a certificate authority signed" in {
+    val dir  = Files.createTempDirectory("qod-audit-ca")
+    val leaf = caSignedLeaf(dir).getOrElse(cancel("neither openssl nor keytool could sign a cert"))
+    val o    = status(
+      NetworkChecks.all,
+      "tls.flight-self-signed",
+      cfg(s"""quack-flightsql.tlsEnabled = true
+             |quack-flightsql.tlsCertChain = "$leaf"""".stripMargin)
+    )
+    o.status shouldBe Status.Ok
+  }
+
   "tls.quack-off-exposed" should "be critical only with TLS off on a non-loopback bind" in {
     def q(enabled: Boolean, tls: Boolean, host: String) =
       status(

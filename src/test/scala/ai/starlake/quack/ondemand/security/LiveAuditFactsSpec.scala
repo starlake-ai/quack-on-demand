@@ -24,23 +24,31 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
     """INSERT INTO qodstate_tenant (id, display_name) VALUES ('acme', 'acme');
       |INSERT INTO qodstate_role (id, tenant_id, name, builtin) VALUES
       |  ('r-all', 'acme', 'qod_all_tables', true), ('r-an', 'acme', 'analyst', false);
-      |INSERT INTO qodstate_group (id, tenant_id, name, builtin) VALUES ('g-all', 'acme', 'qod_all_pools', true);
+      |INSERT INTO qodstate_group (id, tenant_id, name, builtin) VALUES
+      |  ('g-all', 'acme', 'qod_all_pools', true), ('g-ops', 'acme', 'ops', false);
       |INSERT INTO qodstate_user (id, tenant, username, password_hash, kind, enabled) VALUES
       |  ('u1', 'acme', 'wide', 'x', 'user', true),
       |  ('u2', 'acme', 'narrow', 'x', 'user', true),
       |  ('u3', 'acme', 'gone', 'x', 'user', false),
-      |  ('u5', 'acme', 'off-wide', 'x', 'user', false);
-      |INSERT INTO qodstate_user_role (user_id, role_id) VALUES ('u1', 'r-all'), ('u2', 'r-all'), ('u2', 'r-an'), ('u5', 'r-all');
-      |INSERT INTO qodstate_user_group (user_id, group_id) VALUES ('u1', 'g-all'), ('u2', 'g-all'), ('u5', 'g-all');
+      |  ('u5', 'acme', 'off-wide', 'x', 'user', false),
+      |  ('u6', 'acme', 'role-only', 'x', 'user', true),
+      |  ('u7', 'acme', 'extra-group', 'x', 'user', true),
+      |  ('u8', 'acme', 'group-only', 'x', 'user', true);
+      |INSERT INTO qodstate_user_role (user_id, role_id) VALUES ('u1', 'r-all'), ('u2', 'r-all'), ('u2', 'r-an'), ('u5', 'r-all'),
+      |  ('u6', 'r-all'), ('u7', 'r-all');
+      |INSERT INTO qodstate_user_group (user_id, group_id) VALUES ('u1', 'g-all'), ('u2', 'g-all'), ('u5', 'g-all'),
+      |  ('u7', 'g-all'), ('u7', 'g-ops'), ('u8', 'g-all');
       |INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, expires_at, revoked_at) VALUES
       |  ('p1', 'u3', 'ci', 'h1', now(), NULL, NULL),
       |  ('p2', 'u3', 'revoked', 'h2', now(), NULL, now()),
       |  ('p3', 'u3', 'expired', 'h3', now(), now() - interval '1 day', NULL),
-      |  ('p4', 'u1', 'live-enabled', 'h4', now(), NULL, NULL);
+      |  ('p4', 'u1', 'live-enabled', 'h4', now(), NULL, NULL),
+      |  ('p5', 'u1', 'expiring-enabled', 'h5', now(), now() + interval '1 day', NULL),
+      |  ('p6', 'u3', 'expiring-disabled', 'h6', now(), now() + interval '1 day', NULL);
       |INSERT INTO qodstate_tenant_db (id, tenant_id, name, kind, encrypted) VALUES
       |  ('d1', 'acme', 'acme_sales', 'ducklake', false), ('d2', 'acme', 'acme_vault', 'ducklake', true);
       |INSERT INTO qodstate_tenant_db (id, tenant_id, name, kind, encrypted) VALUES
-      |  ('d4', 'acme', 'acme_mem', 'memory', false);
+      |  ('d4', 'acme', 'acme_mem', 'memory', false), ('d5', 'acme', 'acme_file', 'duckdb-file', false);
       |INSERT INTO qodstate_tenant_db (id, tenant_id, name, kind, encrypted, branch_of) VALUES
       |  ('d3', 'acme', 'acme_sales__br_b1', 'ducklake', false, 'd1');
       |INSERT INTO qodstate_federated_source (id, tenant_db_id, alias, source_type, read_only) VALUES
@@ -53,7 +61,9 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
       |  ('b1', 'acme', 'd1', 'acme_sales', 'feature', 'd3', 'acme_sales__br_b1', '__br_b1',
       |   '/srv/data/sales__br_b1/', 1, 'wide', 'open'),
       |  ('b2', 'acme', 'd1', 'acme_sales', 'done', 'd3', 'acme_sales__br_b2', '__br_b2',
-      |   '/srv/data/sales__br_b2/', 1, 'wide', 'merged');
+      |   '/srv/data/sales__br_b2/', 1, 'wide', 'merged'),
+      |  ('b4', 'acme', 'd1', 'acme_sales', 'review', 'd3', 'acme_sales__br_b4', '__br_b4',
+      |   '/srv/data/sales__br_b4/', 1, 'wide', 'proposed');
       |INSERT INTO qodstate_branch (id, tenant, parent_db_id, parent_db_name, name, tenant_db_id,
       |  tenant_db_name, pool_name, data_path, fork_snapshot, owner_user, status, expires_at) VALUES
       |  ('b3', 'acme', 'd1', 'acme_sales', 'ttl', 'd3', 'acme_sales__br_b3', '__br_b3',
@@ -78,12 +88,15 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
   "LiveAuditFacts" should "read each stored fact by name and count" in withDb { (store, db) =>
     TestPostgres.psql(db, Seed)
     val f = facts(store)
+    // Only u1: u6 has no group, u7 an extra group of its own, u8 no role, u5 is disabled.
     f.permissiveBuiltinUsers() shouldBe List("acme" -> 1)
-    f.dormantPatsOfDisabledUsers() shouldBe 1
+    // p1 and p6 (expiring later) of the disabled u3; p5, expiring later too, has an enabled owner.
+    f.dormantPatsOfDisabledUsers() shouldBe 2
     f.writableSourcesWithSecrets() shouldBe List("acme/acme_sales/pg")
-    f.liveBranchesWithoutTtl() shouldBe List("acme/acme_sales/feature")
+    f.liveBranchesWithoutTtl() shouldBe List("acme/acme_sales/feature", "acme/acme_sales/review")
     f.unboundApprovedServers() shouldBe List("srv-1")
-    f.unencryptedDatabases() shouldBe List("acme" -> 1)
+    // d1 (ducklake) and d5 (duckdb-file); not the memory row, nor the branch.
+    f.unencryptedDatabases() shouldBe List("acme" -> 2)
     f.oidcTenants() shouldBe Nil // the snapshot passed holds no tenant
   }
 

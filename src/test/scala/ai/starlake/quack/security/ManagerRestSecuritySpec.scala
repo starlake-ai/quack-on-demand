@@ -1145,6 +1145,25 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "deny bob's profile-only session with 403 admin_required" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      // A regular user's tenant login mints a profile-only session, which the guard keeps to the
+      // profile allowlist.
+      val token = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/security/audit", apiKey = Some(token))
+      withClue(s"body: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) should contain("admin_required")
+      }
+    finally h.shutdown()
+  }
+
   it should "refuse a request with no credential with 401" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)
