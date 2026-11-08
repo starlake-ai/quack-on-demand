@@ -87,7 +87,8 @@ class SpawnScriptLiveNodeSpec
   private def startNode(
       extraSetupSql: String = "",
       env: Seq[(String, String)] = Nil,
-      moreSecrets: Map[String, String] = Map.empty
+      moreSecrets: Map[String, String] = Map.empty,
+      marker: Option[String] = None
   ): (java.lang.Process, Int) =
     assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val port    = freePort()
@@ -100,7 +101,7 @@ class SpawnScriptLiveNodeSpec
       ) ++ moreSecrets,
       Some(tempDir)
     )
-    val pb = new java.lang.ProcessBuilder("bash", script, port.toString)
+    val pb = new java.lang.ProcessBuilder((Seq("bash", script, port.toString) ++ marker).asJava)
       .directory(Files.createDirectories(tempDir.resolve("start")).toFile)
       .redirectErrorStream(true)
       .redirectOutput(tempDir.resolve("node.log").toFile)
@@ -609,6 +610,119 @@ class SpawnScriptLiveNodeSpec
       NodeSecretFiles.EphemeralEnv -> "1"
     ).!!
     Files.exists(stale) shouldBe false
+  }
+
+  // A superuser's initSql that sets temp_directory would put every node of the database in one spill
+  // folder. qod-node gives each node a leaf of its own under it (the script passes the folder it set,
+  // the node directory and the marker) and records the leaf as a later line of spill.path; the script
+  // removes every such line's leaf on stop, and the stale sweep after a SIGKILL.
+  private val Marker = "20900-5eedbeef"
+
+  /** The one node directory under the script's TMPDIR. */
+  private def nodeDir: Path =
+    val dirs = entries(nodeTmp).filter(_.startsWith("quack-node."))
+    withClue(dirs)(dirs.size shouldBe 1)
+    nodeTmp.resolve(dirs.head)
+
+  private def spillLines(dir: Path): List[String] =
+    Files.readString(dir.resolve("spill.path")).split("\n", -1).toList
+
+  private def leafIn(parent: Path) =
+    (java.util.regex.Pattern.quote(parent.toString + "/") +
+      java.util.regex.Pattern.quote("qod-spill." + Marker + ".") + "[A-Za-z0-9]{6}").r
+
+  "a superuser's temp_directory" should
+    "give the node a spill folder of its own under it, removed when the node stops" in {
+      val fast      = tempDir.resolve("fastdisk/duckdb-tmp")
+      val (p, port) = startNode(
+        moreSecrets =
+          Map(NodeSecretFiles.TenantDbInitTrustedKey -> s"SET temp_directory = '$fast';"),
+        marker = Some(Marker)
+      )
+      try
+        val lines = spillLines(nodeDir)
+        withClue(lines)(lines.size shouldBe 2)
+        withClue(lines)(leafIn(fast).matches(lines(1)) shouldBe true)
+        val leaf = Paths.get(lines(1))
+        Files.isDirectory(leaf) shouldBe true
+        onNode(port, "SELECT current_setting('temp_directory')") shouldBe List(leaf.toString)
+        p.destroy()
+        p.waitFor(20, TimeUnit.SECONDS) shouldBe true
+        Files.exists(leaf) shouldBe false
+        // The parents the superuser named stay: other nodes may spill under them.
+        Files.isDirectory(fast) shouldBe true
+      finally hardStop(p)
+    }
+
+  it should "remove every leaf on stop when the database's and the pool's initSql both set one" in {
+    val fastDb    = tempDir.resolve("fastdisk/db")
+    val fastPool  = tempDir.resolve("fastdisk/pool")
+    val (p, port) = startNode(
+      moreSecrets = Map(
+        NodeSecretFiles.TenantDbInitTrustedKey   -> s"SET temp_directory = '$fastDb';",
+        NodeSecretFiles.TenantPoolInitTrustedKey -> s"SET temp_directory = '$fastPool';"
+      ),
+      marker = Some(Marker)
+    )
+    try
+      val lines = spillLines(nodeDir)
+      withClue(lines)(lines.size shouldBe 3)
+      withClue(lines)(leafIn(fastDb).matches(lines(1)) shouldBe true)
+      withClue(lines)(leafIn(fastPool).matches(lines(2)) shouldBe true)
+      onNode(port, "SELECT current_setting('temp_directory')") shouldBe List(lines(2))
+      p.destroy()
+      p.waitFor(20, TimeUnit.SECONDS) shouldBe true
+      Files.exists(Paths.get(lines(1))) shouldBe false
+      Files.exists(Paths.get(lines(2))) shouldBe false
+    finally hardStop(p)
+  }
+
+  "a later spawn" should "sweep a dead node's spill leaves and leave every other line's path" in {
+    val dead = new java.lang.ProcessBuilder("true").start()
+    dead.waitFor(10, TimeUnit.SECONDS) shouldBe true
+    val start = Files.createDirectories(tempDir.resolve("start"))
+    // The first line: the default spill folder the script made under its start directory's .tmp.
+    val default                 = Files.createDirectories(start.resolve(".tmp/qod-node.Old123"))
+    val elsewhere               = Files.createDirectories(tempDir.resolve("elsewhere"))
+    def withFile(d: Path): Path =
+      Files.writeString(Files.createDirectories(d).resolve("spill.bin"), "x")
+      d
+    val leaf      = withFile(elsewhere.resolve(s"qod-spill.$Marker.Ab12Cd"))
+    val bareLeaf  = withFile(elsewhere.resolve("qod-spill.Zz9Yy8"))
+    val unrelated = withFile(elsewhere.resolve("keep-me"))
+    // A relative leaf lived in the dead node's own working directory, which goes with its node
+    // directory: never read against the later spawn's start directory.
+    val relative = withFile(start.resolve("qod-spill.Rel123"))
+    // A link named as a leaf: never followed, so neither it nor what it points at goes.
+    val target = withFile(elsewhere.resolve("link-target"))
+    val link   = Files.createSymbolicLink(elsewhere.resolve("qod-spill.LnkLnk"), target)
+    val stale  = Files.createDirectories(nodeTmp.resolve("quack-node.STALE2"))
+    Files.writeString(stale.resolve("owner.pid"), dead.pid().toString)
+    Files.writeString(
+      stale.resolve("spill.path"),
+      // A blank line, and a blank last line, are skipped; neither may stop the spawn under set -e.
+      Seq(default, leaf, unrelated, "", link, "qod-spill.Rel123", bareLeaf).mkString("\n") + "\n\n"
+    )
+    val dir = NodeSecretFiles.writePrivateDir(Map(NodeSecretFiles.TokenKey -> Token), Some(tempDir))
+    Process(
+      Seq("bash", script, "21999"),
+      start.toFile,
+      "QOD_SPAWN_DRY_RUN"          -> "1",
+      "TMPDIR"                     -> nodeTmp.toString,
+      "kind"                       -> "memory",
+      "schemaName"                 -> "main",
+      "dbName"                     -> "m",
+      NodeSecretFiles.DirEnv       -> dir.toString,
+      NodeSecretFiles.EphemeralEnv -> "1"
+    ).!!
+    Files.exists(stale) shouldBe false
+    Files.exists(default) shouldBe false
+    Files.exists(leaf) shouldBe false
+    Files.exists(bareLeaf) shouldBe false
+    Files.isDirectory(unrelated) shouldBe true
+    Files.isDirectory(relative) shouldBe true
+    Files.isSymbolicLink(link) shouldBe true
+    Files.exists(target.resolve("spill.bin")) shouldBe true
   }
 
   // qod-node waits for its wrapper to end (or a stop signal) without a query, which would pin a
