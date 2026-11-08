@@ -25,17 +25,24 @@ export default function SecurityAudit() {
   return (
     <div className="card">
       <h2>Security audit</h2>
-      {report && (
-        <p>
-          {summaryLine(report.summary)}{' '}
-          <span style={{ color: 'var(--text-mute)' }}>
-            ({report.replica}, {new Date(report.generatedAt).toLocaleString()})
-          </span>{' '}
-          <button onClick={load} disabled={loading}>Re-run</button>
-        </p>
-      )}
+      <p>
+        {report && (
+          <>
+            {summaryLine(report.summary)}{' '}
+            <span style={{ color: 'var(--text-mute)' }}>
+              ({report.replica}, {new Date(report.generatedAt).toLocaleString()})
+            </span>{' '}
+          </>
+        )}
+        <button onClick={load} disabled={loading}>Re-run</button>
+      </p>
       {loading && <p>Loading…</p>}
       {err && <p style={{ color: 'var(--bad)' }}>{err}</p>}
+      {err && report && (
+        <p style={{ color: 'var(--text-mute)' }}>
+          Showing the previous run ({new Date(report.generatedAt).toLocaleString()}).
+        </p>
+      )}
       {report && !loading && (
         <>
           <label>
