@@ -131,6 +131,13 @@ grep -q -- '--spill-dir is required' "$work/no-spill-dir.out" || fail "no --spil
 status=$?
 [[ $status -eq 2 ]] || fail "no --node-dir: exit $status, expected 2"
 grep -q -- '--node-dir is required' "$work/no-node-dir.out" || fail "no --node-dir: missing '--node-dir is required'"
+# A marker that is not <digits>-<lowercase hex> is a usage error, whether or not a leaf is ever made.
+"$node_bin" --port "$(port)" --secrets-dir "$work/x" --secret-directory "$work/secret-dir" --node-id "$node_id" \
+  "${node_dirs[@]}" --marker 20900-AB12 > "$work/bad-marker.out" 2>&1
+status=$?
+[[ $status -eq 2 ]] || fail "bad --marker: exit $status, expected 2"
+grep -q -- "--marker must be <digits>-<lowercase hex>, got '20900-AB12'" "$work/bad-marker.out" ||
+  fail "bad --marker: missing the --marker refusal"
 
 # --- listings: every function and setting a node resolves, one JSON element per line --------------
 "$node_bin" --list-functions > "$work/functions.json" 2> "$work/functions.err"
@@ -609,8 +616,9 @@ stop_spill_node spill-fast-2
 printf 'x' > "$work/plain-file"
 spill_node spill-file "SET temp_directory = '$work/plain-file/under';"
 if wait_exit "$spill_pid"; then
-  [[ "$exit_status" -ne 0 ]] || fail "spill-file: the node started with a spill folder under a file"
-  grep -q 'plain-file' "$spill_out" || { fail "spill-file: the error does not name plain-file"; cat "$spill_out"; }
+  [[ "$exit_status" -eq 1 ]] || fail "spill-file: exit $exit_status, expected 1"
+  grep -q "$work/plain-file exists and is not a directory" "$spill_out" ||
+    { fail "spill-file: the error does not say plain-file exists and is not a directory"; cat "$spill_out"; }
   ! grep -q '\[qod-node\] ready' "$spill_out" || fail "spill-file: the node became ready"
 else
   fail "spill-file: the node kept running"
@@ -640,6 +648,39 @@ for variant in none own; do
     cat "$spill_out"
   fi
 done
+
+# 6. A temp_directory set after a statement that restricts file access (quack loads there) still gets a
+# leaf: the check runs before every init statement, not once.
+spill_node spill-late "SET allowed_directories = ['$work'];
+SET temp_directory = '$work/late';"
+check_leaf spill-late "$work/late"
+stop_spill_node spill-late
+
+# 7. A trusted statement right after SET temp_directory that spills (a table four times the memory limit,
+# offloaded to temp files) spills into the leaf, never into the superuser's folder itself.
+spill_node spill-busy "SET memory_limit = '64MB';
+SET threads = 1;
+SET preserve_insertion_order = false;
+SET temp_directory = '$work/busy';
+CREATE TABLE big AS SELECT i, md5(i::VARCHAR) AS s FROM range(3000000) t(i);"
+check_leaf spill-busy "$work/busy"
+if [[ -n "$leaf" ]]; then
+  grep -q '5 of 5 statement(s) ran' "$spill_out" || fail "spill-busy: the spilling CTAS did not run"
+  ls "$leaf" | grep -q '^duckdb_temp_' || fail "spill-busy: nothing spilled into the leaf"
+  [[ "$(ls -A "$work/busy")" == "${leaf##*/}" ]] ||
+    fail "spill-busy: the superuser's folder holds more than the leaf: $(ls -A "$work/busy" | tr '\n' ' ')"
+fi
+stop_spill_node spill-busy
+
+# 8. A trusted transaction a failed statement aborted refuses every statement until ROLLBACK, the check's
+# read included: the check skips there, and the node still starts.
+spill_node spill-aborted "BEGIN;
+SELECT * FROM no_such_table;
+SET temp_directory = '$work/aborted';
+ROLLBACK;
+SET temp_directory = '$work/after-rollback';"
+check_leaf spill-aborted "$work/after-rollback"
+stop_spill_node spill-aborted
 
 # --- serve: a quack_serve failure is fatal ---------------------------------------------------------
 # 192.0.2.1 (TEST-NET-1) is never a local address, so binding it fails. (A busy port is no test: quack

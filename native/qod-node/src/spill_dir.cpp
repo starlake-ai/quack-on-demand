@@ -145,14 +145,18 @@ std::string SpillLeafPrefix(const std::string &marker) {
 	return marker.empty() ? "qod-spill." : "qod-spill." + marker + ".";
 }
 
+bool IsSpillMarker(const std::string &marker) {
+	static const std::regex kMarker(R"(^[0-9]+-[0-9a-f]+$)");
+	return marker.empty() || std::regex_match(marker, kMarker);
+}
+
 bool IsSpillLeafName(const std::string &name) {
 	static const std::regex kLeaf(R"(^qod-spill\.([0-9]+-[0-9a-f]+\.)?[A-Za-z0-9]{6}$)");
 	return std::regex_match(name, kLeaf);
 }
 
 std::string MakePerNodeSpillDir(const std::string &parent, const std::string &marker) {
-	static const std::regex kMarker(R"(^[0-9]+-[0-9a-f]+$)");
-	if (!marker.empty() && !std::regex_match(marker, kMarker)) {
+	if (!IsSpillMarker(marker)) {
 		throw std::invalid_argument("the spill marker '" + marker + "' is not <port>-<hex>");
 	}
 	fs::path path = PathFromUtf8(parent);

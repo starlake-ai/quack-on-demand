@@ -40,6 +40,12 @@ fs::path TempRoot() {
 int main() {
 	Expect(qod::SpillLeafPrefix("20900-ab12") == "qod-spill.20900-ab12.", "prefix with marker");
 	Expect(qod::SpillLeafPrefix("") == "qod-spill.", "prefix without marker");
+	Expect(qod::IsSpillMarker(""), "no marker");
+	Expect(qod::IsSpillMarker("20900-ab12"), "a marker");
+	Expect(!qod::IsSpillMarker("20900-AB12"), "uppercase hex");
+	Expect(!qod::IsSpillMarker("20900"), "no boot id");
+	Expect(!qod::IsSpillMarker("x-ab12"), "a port that is not digits");
+	Expect(!qod::IsSpillMarker("20900-ab12/.."), "a marker holding a path");
 	Expect(qod::IsSpillLeafName("qod-spill.20900-ab12.Ab3dE9"), "leaf name with marker");
 	Expect(qod::IsSpillLeafName("qod-spill.Ab3dE9"), "leaf name without marker");
 	Expect(!qod::IsSpillLeafName("qod-spill.Ab3dE"), "five random characters");

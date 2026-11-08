@@ -1,5 +1,7 @@
 #include "options.hpp"
 
+#include "spill_dir.hpp"
+
 #include <stdexcept>
 
 namespace qod {
@@ -63,6 +65,9 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 			options.node_dir = Value(args, i);
 		} else if (arg == "--marker") {
 			options.marker = Value(args, i);
+			if (!IsSpillMarker(options.marker)) {
+				throw std::invalid_argument("--marker must be <digits>-<lowercase hex>, got '" + options.marker + "'");
+			}
 		} else if (arg == "--allow-community-extensions") {
 			options.extensions.allow_community = true;
 		} else if (arg == "--allow-unsigned-extensions") {

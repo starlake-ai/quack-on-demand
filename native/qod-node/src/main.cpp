@@ -138,23 +138,35 @@ int Serve(const NodeOptions &options) {
 	RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(options.spill_dir), "setting the spill directory");
 
 	// A superuser's initSql may set temp_directory: every node of the database would then share that
-	// folder. Each node spills to a leaf of its own under it instead, set before the first statement that
-	// restricts file access (DuckDB refuses SET temp_directory once external access is off).
-	auto spill_settled = false;
-	auto settle_spill = [&]() {
-		if (spill_settled) {
-			return;
+	// folder. Each node spills to a leaf of its own under it instead. The check runs before every trusted
+	// init statement (so it reads what the one before left, and a leaf is set before a later statement can
+	// spill into the shared folder or turn external access off, after which DuckDB refuses SET
+	// temp_directory) and once after the init SQL. `last_spill` is the folder the node spills to now.
+	// Between statements the read may fail (a trusted BEGIN whose transaction a failed statement aborted
+	// refuses every statement until ROLLBACK, and nothing spills there either): it is skipped then, and
+	// the read after the init SQL is strict.
+	auto last_spill = options.spill_dir;
+	auto settle_spill = [&](bool strict) {
+		const std::string query = "SELECT current_setting('temp_directory')";
+		duckdb::unique_ptr<duckdb::QueryResult> read;
+		if (strict) {
+			read = RunStrict(con, query, "reading temp_directory");
+		} else {
+			read = con.Query(query);
+			if (read->HasError()) {
+				return;
+			}
 		}
-		spill_settled = true;
-		auto read = RunStrict(con, "SELECT current_setting('temp_directory')", "reading temp_directory");
 		auto chunk = read->Fetch();
 		auto current = chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : std::string();
-		if (current.empty() || current == options.spill_dir) {
+		if (current.empty() || current == last_spill || current == options.spill_dir) {
 			return;
 		}
 		auto leaf = MakePerNodeSpillDir(current, options.marker);
-		RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(leaf), "setting the per-node spill directory");
+		// Recorded first: a SET that fails then leaves no leaf the spawn script does not know of.
 		RecordSpillDir(options.node_dir, leaf);
+		RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(leaf), "setting the per-node spill directory");
+		last_spill = leaf;
 		std::cerr << "[qod-node] spill directory: " << leaf << std::endl;
 	};
 
@@ -171,12 +183,12 @@ int Serve(const NodeOptions &options) {
 		}
 	};
 	RunInitFiles(con, options, secrets.init_nonce, [&](const std::string &statement) {
+		settle_spill(false);
 		if (RestrictsNodeAccess(*con.context, statement)) {
-			settle_spill();
 			load_quack();
 		}
 	});
-	settle_spill();
+	settle_spill(true);
 	load_quack();
 
 	// A trusted init statement may have set disabled_optimizers: remote_pushdown stays in it.
