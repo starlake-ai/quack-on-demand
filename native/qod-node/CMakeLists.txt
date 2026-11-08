@@ -168,6 +168,7 @@ set(QOD_NODE_CORE_SOURCES
   src/secrets.cpp
   src/settings_list.cpp
   src/socket_compat.cpp
+  src/spill_dir.cpp
   src/sql_script.cpp
   src/utf8_args.cpp
   src/verdict.cpp
@@ -283,6 +284,8 @@ if(QOD_NODE_TESTS)
   add_test(NAME json_writer COMMAND json_writer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/canonical-json-v1.txt)
   qod_node_test(node_config_test)
   add_test(NAME node_config COMMAND node_config_test)
+  qod_node_test(spill_dir_test)
+  add_test(NAME spill_dir COMMAND spill_dir_test)
   qod_node_test(s3_env_test)
   add_test(NAME s3_env COMMAND s3_env_test)
   # Fake credentials in this test's environment only, never in the shell's.
