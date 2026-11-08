@@ -628,8 +628,10 @@ final class PoolSupervisor(
     then stamped.updated(TenantDb.CreateDatabaseKey, "true")
     else stamped.removed(TenantDb.CreateDatabaseKey)
 
-  /** [[effectiveMetastoreFor]] on the row itself, never a lookup by name (the security audit). */
-  def effectiveMetastoreOf(td: TenantDb): Map[String, String] = effectiveMetastoreFor(td)
+  /** The row's resolved data path, from the row itself, never a lookup by name (the security
+    * audit). Empty when it resolves to none.
+    */
+  def dataPathOf(td: TenantDb): String = effectiveMetastoreFor(td).getOrElse("dataPath", "")
 
   /** Why `td` cannot run while nodes have their local file system off
     * (`quack-on-demand.nodeFiles.allowLocal`): its resolved data path is local. None while nodes

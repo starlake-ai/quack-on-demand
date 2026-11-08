@@ -1024,6 +1024,52 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  /** A harness whose PAT routes run on a throwaway Postgres database (`qodstate_pat` has an FK to
+    * `qodstate_user`), dropped afterwards; cancelled when Postgres is unreachable. For the security
+    * audit, which is outside `EndpointModules.all` and so outside SuperuserPatCompletenessSpec.
+    */
+  private def withAuditPatHarness(body: ManagerServerHarness.Harness => Unit): Unit =
+    import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+    import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
+    TestPostgres.ensureReachable()
+    TestPostgres.dropStrayTestDatabases("qodauditpat")
+    val dbName = s"qodauditpat_test_${System.nanoTime()}"
+    TestPostgres.psql("postgres", s"""CREATE DATABASE "$dbName"""")
+    try
+      val url = TestPostgres.dbUrl(dbName)
+      new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
+      val users = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      val pats  = new PatStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        users.upsertUser(
+          None,
+          SecurityFixtures.RootUsername,
+          SecurityFixtures.RootPassword,
+          "admin"
+        )
+        val fix = SecurityFixtures.freshStore()
+        val h   = ManagerServerHarness.boot(
+          fix.store,
+          patStore = Some(pats),
+          patUserOf =
+            Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
+          patAuth = Some(
+            new ai.starlake.quack.ondemand.auth.PatAuthenticator(
+              pats,
+              users.userById,
+              u => List(UserGrant(u.tenant, u.kind))
+            )
+          )
+        )
+        try body(h)
+        finally h.shutdown()
+      finally
+        pats.close()
+        users.close()
+    finally
+      scala.util.Try(TestPostgres.dropDatabase(dbName))
+      ()
+
   "SecurityAuditHandlers /api/security/audit" should "answer root's superuser session with every check" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)
@@ -1032,21 +1078,54 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       val resp  = get(h.httpClient, s"${h.baseUrl}/api/security/audit", apiKey = Some(token))
       withClue(s"body: ${resp.body()}") {
         resp.statusCode() shouldBe 200
-        val ids = io.circe.parser
-          .parse(resp.body())
-          .toOption
-          .get
-          .hcursor
-          .downField("findings")
-          .values
-          .get
-          .flatMap(_.hcursor.get[String]("id").toOption)
-          .toList
+        val body     = io.circe.parser.parse(resp.body()).toOption.get.hcursor
+        val findings = body.downField("findings").values.get.toList
+        val ids      = findings.flatMap(_.hcursor.get[String]("id").toOption)
         ids.toSet shouldBe ai.starlake.quack.ondemand.security.checks.SecurityChecks.all
           .map(_.id)
           .toSet
+        body.get[String]("generatedAt").toOption.exists(_.nonEmpty) shouldBe true
+        body.get[String]("replica").toOption.exists(_.nonEmpty) shouldBe true
+        body.get[String]("version").toOption.exists(_.nonEmpty) shouldBe true
+        val summary = body.downField("summary")
+        val counted = List("critical", "warn", "ok", "na", "error")
+          .map(k => summary.get[Int](k).toOption.get)
+          .sum
+        counted shouldBe findings.size
       }
     finally h.shutdown()
+  }
+
+  it should "answer root's session sent as the qod_session cookie" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  = getWithCookie(h.httpClient, s"${h.baseUrl}/api/security/audit", token)
+      withClue(s"body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }
+
+  it should "answer a superuser PAT" in withAuditPatHarness { h =>
+    val resp =
+      get(h.httpClient, s"${h.baseUrl}/api/security/audit", apiKey = Some(h.superuserPat()))
+    withClue(s"body: ${resp.body()}") {
+      resp.statusCode() shouldBe 200
+    }
+  }
+
+  it should "deny a superuser PAT minted with dropAdmin with 403" in withAuditPatHarness { h =>
+    val resp = get(
+      h.httpClient,
+      s"${h.baseUrl}/api/security/audit",
+      apiKey = Some(h.superuserPat(dropAdmin = true))
+    )
+    withClue(s"body: ${resp.body()}") {
+      resp.statusCode() shouldBe 403
+      errorCode(resp.body()) should contain("admin_required")
+    }
   }
 
   it should "deny alice's tenant-scoped session with 403 superuser_required" in {

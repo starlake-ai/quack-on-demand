@@ -1673,7 +1673,7 @@ object Main extends IOApp with LazyLogging:
         val facts = ai.starlake.quack.ondemand.security.LiveAuditFacts(
           store.jdbcDataSource,
           () => store.snapshot(),
-          td => sup.effectiveMetastoreOf(td).getOrElse("dataPath", ""),
+          sup.dataPathOf,
           t =>
             mgmtAuth.authModeResolver.modeFor(Some(t)) ==
               Right(ai.starlake.quack.ondemand.auth.ManagementAuthMode.Oidc)
