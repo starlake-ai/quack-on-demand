@@ -31,7 +31,8 @@ trait AuditFacts:
   /** Databases whose resolved data path is local, as `tenant/database`. */
   def localDatabases(): List[String]
 
-  /** Databases and pools holding untrusted initSql, as `InitSqlTrustReport.Row.label`s. */
+  /** Databases and pools holding untrusted initSql, as `tenant/label` (`InitSqlTrustReport.Row`).
+    */
   def untrustedInitSql(): List[String]
 
   /** Tenants whose console sign-in resolves to OIDC, by id. */

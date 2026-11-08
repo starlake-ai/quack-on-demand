@@ -93,7 +93,10 @@ final case class LiveAuditFacts(
 
   def untrustedInitSql(): List[String] =
     val snap = snapshot()
-    InitSqlTrustReport.untrusted(snap.tenantDbs, snap.pools).map(_.label).distinct.sorted
+    InitSqlTrustReport
+      .untrusted(snap.tenantDbs, snap.pools)
+      .map(r => s"${r.tenant}/${r.label}")
+      .sorted
 
   def oidcTenants(): List[String] =
     snapshot().tenants.map(_.id).filter(isOidcTenant).sorted
