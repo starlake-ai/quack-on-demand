@@ -83,6 +83,31 @@ class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
     ).status shouldBe Status.Ok
   }
 
+  it should "warn for the system login under identitySource=oidc, with no OIDC tenant" in {
+    val sys =
+      cfg("""quack-on-demand.auth.management { identitySource = "oidc", publicBaseUrl = "" }""")
+    val o = run("id.sso-redirect-default", sys, StubAuditFacts())
+    o.status shouldBe Status.Warn
+    o.detail should include("QOD_MGMT_IDENTITY_SOURCE=oidc")
+    o.detail should not include "Tenants"
+    val both = run("id.sso-redirect-default", sys, StubAuditFacts(oidc = List("acme")))
+    both.status shouldBe Status.Warn
+    both.detail should include("QOD_MGMT_IDENTITY_SOURCE=oidc")
+    both.detail should include("acme")
+    run(
+      "id.sso-redirect-default",
+      cfg(
+        """quack-on-demand.auth.management { identitySource = "OIDC", publicBaseUrl = "https://q" }"""
+      ),
+      StubAuditFacts()
+    ).status shouldBe Status.Ok
+    run(
+      "id.sso-redirect-default",
+      cfg("""quack-on-demand.auth.management { identitySource = "db", publicBaseUrl = "" }"""),
+      StubAuditFacts()
+    ).status shouldBe Status.Na
+  }
+
   "id.permissive-builtins" should "warn with counts per tenant" in {
     val o = run(
       "id.permissive-builtins",

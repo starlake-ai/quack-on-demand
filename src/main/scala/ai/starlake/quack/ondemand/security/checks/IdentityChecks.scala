@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.security.checks
 
+import ai.starlake.quack.ondemand.auth.ManagementIdentitySource
 import ai.starlake.quack.ondemand.security.*
 import cats.effect.IO
 
@@ -51,17 +52,28 @@ object IdentityChecks:
     "id.sso-redirect-default",
     Area.Identity,
     "SSO redirect URI falls back to localhost",
-    List("QOD_MGMT_PUBLIC_BASE_URL"),
+    List("QOD_MGMT_PUBLIC_BASE_URL", "QOD_MGMT_IDENTITY_SOURCE"),
     "/operating/authentication#secure-in-production",
     ctx =>
       IO.blocking(ctx.facts.oidcTenants()).map { tenants =>
-        if tenants.isEmpty then Outcome(Status.Na, "No tenant signs in through OIDC.")
+        // The system login (bare /ui/) is SSO under identitySource=oidc, the rule
+        // ManagementAuthWiring warns on at boot; an unknown value throws, as it refuses boot.
+        val systemOidc = ManagementIdentitySource.fromConfig(
+          ctx.string("quack-on-demand.auth.management.identitySource")
+        ) == ManagementIdentitySource.Oidc
+        if !systemOidc && tenants.isEmpty then Outcome(Status.Na, "No sign-in goes through OIDC.")
         else if ctx.string("quack-on-demand.auth.management.publicBaseUrl").nonEmpty then
           Outcome(Status.Ok, "QOD_MGMT_PUBLIC_BASE_URL is set.")
         else
+          val who = List(
+            Option.when(systemOidc)("The system login (QOD_MGMT_IDENTITY_SOURCE=oidc)"),
+            Option.when(tenants.nonEmpty)(
+              s"${if systemOidc then "tenants" else "Tenants"} signing in through OIDC (${tenants.mkString(", ")})"
+            )
+          ).flatten
           Outcome(
             Status.Warn,
-            s"Tenants signing in through OIDC (${tenants.mkString(", ")}) get a http://localhost redirect URI.",
+            s"${who.mkString(" and ")} get a http://localhost redirect URI.",
             "Set QOD_MGMT_PUBLIC_BASE_URL to the console's public https origin and register it with each identity provider."
           )
       }
