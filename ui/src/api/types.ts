@@ -1588,7 +1588,8 @@ export type AuditStatus = 'critical' | 'warn' | 'ok' | 'na' | 'error';
 
 export interface SecurityFinding {
   id: string;
-  area: 'network' | 'secrets' | 'identity' | 'data' | 'fleet';
+  /** network, secrets, identity, data or fleet; a newer manager may send another. */
+  area: string;
   status: AuditStatus;
   title: string;
   detail: string;

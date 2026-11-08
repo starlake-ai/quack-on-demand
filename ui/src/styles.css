@@ -400,6 +400,7 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
 .badge.good    { background: rgba(52,211,153,.15); color: var(--good); }
 .badge.warn    { background: rgba(251,191,36,.15);  color: var(--warn); }
 .badge.bad     { background: rgba(248,113,113,.15); color: var(--bad);  }
+.badge.error   { box-shadow: inset 0 0 0 1px var(--bad); color: var(--bad); }
 .badge.role-dual      { background: rgba(96,165,250,.15); color: var(--link); }
 .badge.role-readonly  { background: rgba(52,211,153,.15);  color: var(--good); }
 .badge.role-writeonly { background: rgba(245,158,11,.15); color: var(--accent); }

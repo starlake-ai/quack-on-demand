@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError, errorMessage } from '../api/client';
 import type { SecurityAuditResponse } from '../api/types';
-import { AREA_LABEL, STATUS_BADGE, STATUS_LABEL, groupByArea, summaryLine, visibleFindings } from '../api/securityAudit';
+import { STATUS_BADGE, STATUS_LABEL, areaLabel, groupByArea, summaryLine, visibleFindings } from '../api/securityAudit';
 
 export default function SecurityAudit() {
   const [report, setReport] = useState<SecurityAuditResponse | null>(null);
@@ -51,7 +51,7 @@ export default function SecurityAudit() {
           </label>
           {groupByArea(visibleFindings(report.findings, showPassing)).map(g => (
             <section key={g.area}>
-              <h3>{AREA_LABEL[g.area]}</h3>
+              <h3>{areaLabel(g.area)}</h3>
               <table className="config-table">
                 <tbody>
                   {g.findings.map(f => (
