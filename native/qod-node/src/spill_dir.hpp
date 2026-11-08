@@ -19,7 +19,8 @@ bool IsSpillLeafName(const std::string &name);
 bool TrustedLinkOwner(unsigned owner, unsigned self);
 
 //! Creates every missing component of `parent` (mode 0700), then a fresh leaf under it, and returns the
-//! leaf's path. Throws std::runtime_error naming the failing path and the OS reason.
+//! leaf's path. Throws std::runtime_error naming the failing path and the OS reason, and
+//! std::invalid_argument for a marker IsSpillMarker refuses or a parent holding a line break.
 std::string MakePerNodeSpillDir(const std::string &parent, const std::string &marker);
 
 //! Appends `leaf` as a line of <node_dir>/spill.path. Throws std::runtime_error on failure.

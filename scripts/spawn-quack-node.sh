@@ -352,17 +352,18 @@ remove_stale_spill() {
 
 # A spill leaf qod-node made under a superuser's temp_directory (spill.path's later lines): removed
 # only when its name is one qod-node makes and it is a real directory this user owns. Its parent is
-# wherever the superuser pointed temp_directory. A relative leaf sits in the node's own working
-# directory, which goes with its node directory: read against this script's directory it would name
-# something else, so it is skipped.
+# wherever the superuser pointed temp_directory. A relative leaf is as qod-node recorded it, relative
+# to the directory it ran in (the node directory's `cwd`, WORK_DIR below), so it is read against that
+# directory of the node directory `$2`, never against this script's.
 remove_spill_leaf() {
   local leaf="$1" name="${1##*/}"
   [[ "$name" =~ ^qod-spill\.([0-9]+-[0-9a-f]+\.)?[A-Za-z0-9]{6}$ ]] || return 0
-  [[ "$leaf" == /* && -d "$leaf" && ! -L "$leaf" && -O "$leaf" ]] || return 0
+  [[ "$leaf" == /* ]] || leaf="$2/cwd/$leaf"
+  [[ -d "$leaf" && ! -L "$leaf" && -O "$leaf" ]] || return 0
   rm -rf -- "$leaf" 2>/dev/null || true
 }
 
-# Every line of spill.path after the first, blank ones skipped. Returns 0 whatever it finds: it runs
+# Every line of spill.path after the first in the node directory `$1`, blank ones skipped. Returns 0 whatever it finds: it runs
 # under set -e, in the stale sweep and in cleanup().
 remove_spill_leaves() {
   local line first=1
@@ -371,7 +372,7 @@ remove_spill_leaves() {
     if [[ $first -eq 1 ]]; then
       first=0
     elif [[ -n "$line" ]]; then
-      remove_spill_leaf "$line"
+      remove_spill_leaf "$line" "$1"
     fi
   done 2>/dev/null < "$1/spill.path" || true
   return 0

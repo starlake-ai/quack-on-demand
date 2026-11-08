@@ -180,6 +180,22 @@ int main() {
 	}
 	Expect(!fs::exists(root / "marker"), "a refused marker creates nothing");
 
+	// spill.path is line-based: a parent holding a line break is refused before anything is created,
+	// and the error quotes nothing of the value.
+	for (std::string bad : {"\n", "\r", "\r\n"}) {
+		auto parent = (root / ("broken" + bad + "secretpart")).string();
+		try {
+			qod::MakePerNodeSpillDir(parent, "");
+			Expect(false, "a parent holding a line break must be refused");
+		} catch (std::invalid_argument &e) {
+			std::string what = e.what();
+			Expect(what.find("holds a line break") != std::string::npos, "the error says why");
+			Expect(what.find("secretpart") == std::string::npos && what.find("broken") == std::string::npos,
+			       "the error names nothing of the value");
+		}
+		Expect(!fs::exists(root / "broken"), "a refused parent creates nothing");
+	}
+
 	auto blocked = root / "plain-file" / "under";
 	try {
 		qod::MakePerNodeSpillDir(blocked.string(), "");

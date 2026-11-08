@@ -156,6 +156,11 @@ bool IsSpillLeafName(const std::string &name) {
 }
 
 std::string MakePerNodeSpillDir(const std::string &parent, const std::string &marker) {
+	// spill.path is one path per line, so a path with a line break could not be recorded as itself (the
+	// spawn script would read its pieces as paths of their own). The value is not quoted back.
+	if (parent.find_first_of("\r\n") != std::string::npos) {
+		throw std::invalid_argument("the spill directory's parent holds a line break");
+	}
 	if (!IsSpillMarker(marker)) {
 		throw std::invalid_argument("the spill marker '" + marker + "' is not <port>-<hex>");
 	}
