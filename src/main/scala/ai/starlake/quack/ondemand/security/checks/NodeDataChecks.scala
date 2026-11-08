@@ -63,8 +63,8 @@ object NodeDataChecks:
           )
         )
       else
-        IO.blocking(ctx.facts.localDatabases()).map { local =>
-          if local.nonEmpty then
+        IO.blocking((ctx.facts.localDatabases(), ctx.facts.memoryDatabases())).map {
+          case (local, _) if local.nonEmpty =>
             Outcome(
               Status.Ok,
               if local.size == 1 then
@@ -72,10 +72,15 @@ object NodeDataChecks:
               else
                 s"${local.size} databases keep their data on local paths, so nodes need local files."
             )
-          else
+          case (_, memory) if memory.nonEmpty =>
+            Outcome(
+              Status.Ok,
+              s"No database keeps its data on a local path, but memory databases (${memory.mkString(", ")}) may read local files, as the views `qod serve` makes over a local file do."
+            )
+          case _ =>
             Outcome(
               Status.Warn,
-              "Every database keeps its data on object storage, yet nodes may open local files.",
+              "No database keeps its data on a local path or is a memory database, yet nodes may open local files.",
               "Set QOD_NODE_ALLOW_LOCAL_FILES=false and restart the nodes."
             )
         }

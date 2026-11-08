@@ -31,6 +31,11 @@ trait AuditFacts:
   /** Databases whose resolved data path is local, as `tenant/database`. */
   def localDatabases(): List[String]
 
+  /** Memory databases, as `tenant/database`, sorted: one may read local files whatever its path
+    * (`qod serve <file>` makes one with views over local files and no path).
+    */
+  def memoryDatabases(): List[String]
+
   /** Databases and pools holding untrusted initSql, as `tenant/label` (`InitSqlTrustReport.Row`).
     */
   def untrustedInitSql(): List[String]

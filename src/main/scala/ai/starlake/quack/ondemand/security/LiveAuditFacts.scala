@@ -94,6 +94,12 @@ final case class LiveAuditFacts(
       .map(td => s"${td.tenantId}/${td.name}")
       .sorted
 
+  def memoryDatabases(): List[String] =
+    tenantDbs()
+      .filter(_.kind == TenantDbKind.InMemory)
+      .map(td => s"${td.tenantId}/${td.name}")
+      .sorted
+
   def untrustedInitSql(): List[String] =
     InitSqlTrustReport
       .untrusted(tenantDbs(), pools())

@@ -10,6 +10,7 @@ final case class StubAuditFacts(
     unboundServers: List[String] = Nil,
     unencrypted: List[(String, Int)] = Nil,
     local: List[String] = Nil,
+    memory: List[String] = Nil,
     untrusted: List[String] = Nil,
     oidc: List[String] = Nil,
     failWith: Option[Throwable] = None
@@ -23,5 +24,6 @@ final case class StubAuditFacts(
   def unboundApprovedServers(): List[String]        = give(unboundServers)
   def unencryptedDatabases(): List[(String, Int)]   = give(unencrypted)
   def localDatabases(): List[String]                = give(local)
+  def memoryDatabases(): List[String]               = give(memory)
   def untrustedInitSql(): List[String]              = give(untrusted)
   def oidcTenants(): List[String]                   = give(oidc)

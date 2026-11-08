@@ -279,6 +279,22 @@ class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  "node.local-files" should "be ok when a memory database may read local files" in {
+    val on = cfg("""quack-on-demand { nodeFiles.allowLocal = true, tenantFiles.root = "" }""")
+    val o  = run("node.local-files", on, StubAuditFacts(memory = List("acme/acme_files")))
+    o.status shouldBe Status.Ok
+    o.detail should include("memory databases")
+    o.detail should include("acme/acme_files")
+    o.detail should include("local files")
+  }
+
+  it should "word the warning so that it also reads right with no database at all" in {
+    val on = cfg("""quack-on-demand { nodeFiles.allowLocal = true, tenantFiles.root = "" }""")
+    val o  = run("node.local-files", on, StubAuditFacts())
+    o.status shouldBe Status.Warn
+    o.detail shouldBe "No database keeps its data on a local path or is a memory database, yet nodes may open local files."
+  }
+
   "node.community-extensions" should "name each setting that is on" in {
     val one = run(
       "node.community-extensions",

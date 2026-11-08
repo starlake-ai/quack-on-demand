@@ -163,7 +163,26 @@ class LiveAuditFactsSpec extends AnyFlatSpec with Matchers:
       _ => true
     )
     f.localDatabases() shouldBe List("acme/acme_sales")
+    f.memoryDatabases() shouldBe Nil
     f.untrustedInitSql() shouldBe List("acme/database 'acme_x'")
     f.oidcTenants() shouldBe List("acme")
     an[java.sql.SQLException] should be thrownBy f.unboundApprovedServers()
+  }
+
+  it should "list the memory databases, whatever their path" in {
+    val unreachable = new org.postgresql.ds.PGSimpleDataSource()
+    unreachable.setURL("jdbc:postgresql://127.0.0.1:1/none")
+    val files =
+      TenantDb("m1", "acme", "acme_files", TenantDbKind.InMemory, Map.empty, "")
+    val scoped = files.copy(id = "m2", name = "acme_scoped", dataPath = "s3://b/scoped/")
+    val lake   =
+      TenantDb("d1", "acme", "acme_sales", TenantDbKind.DuckLake, Map.empty, "s3://b/sales/")
+    LiveAuditFacts(
+      unreachable,
+      tenants = () => Nil,
+      tenantDbs = () => List(scoped, lake, files),
+      pools = () => Nil,
+      td => td.dataPath,
+      _ => false
+    ).memoryDatabases() shouldBe List("acme/acme_files", "acme/acme_scoped")
   }
