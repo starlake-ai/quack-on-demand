@@ -179,8 +179,11 @@ final class EdgeHandshake(
           lookupPool = lookupPool
         ) match
           case Right(resolved) =>
-            val jwtRoles  = profileOpt.map(_.role).filter(_.nonEmpty).toSet
-            val jwtGroups = profileOpt.map(_.groups).getOrElse(Set.empty)
+            // Only the names an identity provider's token carries: never the profile's role, which
+            // for a password login is the account kind and would stand for a tenant role of that
+            // name (see AuthenticatedProfile).
+            val jwtRoles  = profileOpt.map(_.tokenRoles.filter(_.nonEmpty)).getOrElse(Set.empty)
+            val jwtGroups = profileOpt.map(_.groups.filter(_.nonEmpty)).getOrElse(Set.empty)
             val jwtClaims = profileOpt.map(_.claims).getOrElse(Map.empty)
             SessionGrants.authorize(
               AuthzRequest(

@@ -3,23 +3,38 @@ package ai.starlake.quack.edge
 import ai.starlake.quack.edge.auth.{
   AuthFailure,
   AuthScope,
-  AuthenticatedProfile,
   AuthenticationService,
   BasicAuthProvider,
-  DatabaseAuthenticator
+  DatabaseAuthenticator,
+  JwtBearerAuthenticator
 }
-import ai.starlake.quack.edge.config.AuthenticationConfig
+import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.config.{AuthenticationConfig, JwtAuthConfig}
 import ai.starlake.quack.model.{PoolKey, Tenant}
+import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{
   AuthorizedHandshake,
   AuthzRequest,
   EffectiveSet,
   HandshakeDenial
 }
-import ai.starlake.quack.ondemand.state.RbacUser
-import ai.starlake.quack.security.InMemoryAuthService
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
+import ai.starlake.quack.ondemand.state.{
+  PoolPermission,
+  RbacGroup,
+  RbacRole,
+  RbacUser,
+  RolePermission
+}
+import ai.starlake.quack.security.{InMemoryAuthService, SecurityFixtures}
+import com.nimbusds.jose.crypto.MACSigner
+import com.nimbusds.jose.{JWSAlgorithm, JWSHeader}
+import com.nimbusds.jwt.{JWTClaimsSet, SignedJWT}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import java.time.Instant
+import java.util.Date
 
 /** The handshake shared by the FlightSQL edge and the Quack front door, exercised over a basic
   * chain that admits any password, so the gates around the auth chain are what is pinned; and with
@@ -31,14 +46,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
 
   /** What the any-password chain answers for `user` in the tenant realm `tenant`. */
   private def profile(user: String, tenant: String) =
-    AuthenticatedProfile(
-      user,
-      "user",
-      Set.empty,
-      Map.empty,
-      DatabaseAuthenticator.AuthMethod,
-      Some(tenant)
-    )
+    DatabaseAuthenticator.profileFor(user, "user", Some(tenant))
 
   private val eff =
     EffectiveSet(RbacUser("u-1", Some("t-1"), "alice", kind = "user"), Nil, Nil, Nil, Nil)
@@ -180,3 +188,157 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
     val out = handshake().authenticate(None, None, Some("bi"), Some("acme"), false)
     out.isLeft shouldBe true
     out.swap.toOption.get.message should include("no credentials presented")
+
+  // An account's kind (admin / user) is no tenant role or group name: a tenant may hold a role and
+  // a group literally named `user`, and a password login of kind `user` must not hold them. Only
+  // the names an identity provider's token carries are resolved as roles and groups.
+
+  /** The canonical fixture plus a role `user` granting one table and a group `user` granting the
+    * pool, neither held by bob (kind `user`).
+    */
+  private def kindNamedRbac(extra: SecurityFixtures.Fixture => Unit = _ => ()) =
+    val fix = SecurityFixtures.freshStore()
+    val s   = fix.store
+    s.upsertRole(RbacRole(id = "r-user0001", tenantId = SecurityFixtures.TenantId, name = "user"))
+    s.insertRolePermission(
+      RolePermission(
+        id = "rp-user0001",
+        roleId = "r-user0001",
+        catalogName = SecurityFixtures.TenantDbName,
+        schemaName = "main",
+        tableName = "orders",
+        verb = "RO"
+      )
+    )
+    s.upsertGroup(RbacGroup(id = "g-user0001", tenantId = SecurityFixtures.TenantId, name = "user"))
+    s.insertPoolPermission(
+      PoolPermission(
+        id = "pp-guser001",
+        tenantId = SecurityFixtures.TenantId,
+        poolId = Some(SecurityFixtures.PoolId),
+        groupId = Some("g-user0001")
+      )
+    )
+    extra(fix)
+    val sup = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, s)
+    sup.restore()
+    (fix, sup)
+
+  /** The effective set a handshake bound, failing the test when it bound none. */
+  private def effOf(out: Either[HandshakeFailure, HandshakeBound]): EffectiveSet =
+    out match
+      case Right(b) => b.grants.current().fold(e => fail(s"no grants: $e"), identity)
+      case Left(f)  => fail(s"expected a bound session, got $f")
+
+  private def overSupervisor(svc: AuthenticationService, sup: PoolSupervisor) =
+    new EdgeHandshake(
+      svc,
+      lookupPool = (tn, p) =>
+        sup.findPoolKeyByTenantAndPoolName(tn, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
+      resolveTenant = raw => sup.getTenant(raw),
+      authorize = sup.authorizeHandshakeDetailed,
+      versions = sup.policyVersions
+    )
+
+  private val JwtSecret = "edge-handshake-spec-secret-0123456789"
+
+  private def bearerFor(user: String, role: Option[String], groups: List[String]) =
+    val now = Instant.now()
+    val b   = new JWTClaimsSet.Builder()
+      .subject(user)
+      .claim("preferred_username", user)
+      .issueTime(Date.from(now))
+      .expirationTime(Date.from(now.plusSeconds(300)))
+    role.foreach(r => b.claim("role", r))
+    if groups.nonEmpty then b.claim("groups", java.util.Arrays.asList(groups*))
+    val jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), b.build())
+    jwt.sign(new MACSigner(JwtSecret))
+    jwt.serialize()
+
+  private def bearerService =
+    InMemoryAuthService.realServiceWithChains(
+      Nil,
+      List(
+        new JwtBearerAuthenticator(
+          JwtAuthConfig(secretKey = JwtSecret, publicKeyPath = "", issuer = "", audience = ""),
+          "role"
+        )
+      ),
+      None
+    )
+
+  "a password login" should "not hold the pool of a group named after its account kind" in:
+    val (fix, sup) = kindNamedRbac()
+    val hs         =
+      overSupervisor(new InMemoryAuthService.Service(fix.store, providersEnabled = true), sup)
+    hs.authenticate(
+      None,
+      Some((SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)),
+      Some(SecurityFixtures.PoolName),
+      Some(SecurityFixtures.TenantId),
+      false
+    ) match
+      case Left(HandshakeFailure.Unauthorized(_)) => succeed
+      case other                                  => fail(s"expected the pool refused, got $other")
+
+  it should "not hold the table grants of a role named after its account kind" in:
+    // A pool grant of bob's own, so the handshake binds and the effective set can be read.
+    val (fix, sup) = kindNamedRbac(f =>
+      f.store.insertPoolPermission(
+        PoolPermission(
+          id = "pp-bob00001",
+          tenantId = SecurityFixtures.TenantId,
+          poolId = Some(SecurityFixtures.PoolId),
+          userId = Some(f.bobUserId)
+        )
+      )
+    )
+    val hs =
+      overSupervisor(new InMemoryAuthService.Service(fix.store, providersEnabled = true), sup)
+    val eff = effOf(
+      hs.authenticate(
+        None,
+        Some((SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)),
+        Some(SecurityFixtures.PoolName),
+        Some(SecurityFixtures.TenantId),
+        false
+      )
+    )
+    eff.roles.map(_.name) should not contain "user"
+    eff.groups.map(_.name) should not contain "user"
+    eff.permissions.map(_.tableName) should not contain "orders"
+
+  it should "carry its account kind as its role and no token role or group name" in:
+    val p = DatabaseAuthenticator.profileFor("bob", "user", Some(SecurityFixtures.TenantId))
+    p.role shouldBe "user"
+    p.tokenRoles shouldBe empty
+    p.groups shouldBe empty
+
+  "a bearer token" should "hold the role and group its claims name, even when named user" in:
+    val (_, sup) = kindNamedRbac()
+    val hs       = overSupervisor(bearerService, sup)
+    val eff      = effOf(
+      hs.authenticate(
+        Some(bearerFor(SecurityFixtures.BobUsername, Some("user"), List("user"))),
+        None,
+        Some(SecurityFixtures.PoolName),
+        Some(SecurityFixtures.TenantId),
+        false
+      )
+    )
+    eff.roles.map(_.name) should contain("user")
+    eff.groups.map(_.name) should contain("user")
+    eff.permissions.map(_.tableName) should contain("orders")
+
+  it should "hold no role or group named user when its claims name none" in:
+    val (_, sup) = kindNamedRbac()
+    val hs       = overSupervisor(bearerService, sup)
+    hs.authenticate(
+      Some(bearerFor(SecurityFixtures.BobUsername, None, Nil)),
+      None,
+      Some(SecurityFixtures.PoolName),
+      Some(SecurityFixtures.TenantId),
+      false
+    ) match
+      case Left(HandshakeFailure.Unauthorized(_)) => succeed
+      case other                                  => fail(s"expected the pool refused, got $other")

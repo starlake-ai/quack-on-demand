@@ -110,19 +110,10 @@ object InMemoryAuthService:
                 // enabled account, so the distinct failure is safe to reveal.
                 Left(AuthFailure.PasswordChangeRequired)
               case Some(u) =>
-                Right(
-                  AuthenticatedProfile(
-                    username = u.username,
-                    role = u.kind,
-                    groups = Set.empty,
-                    claims = Map.empty,
-                    // Stands in for the database authenticator, so its profile is the
-                    // authenticator's own: the management login takes it as the verified
-                    // qodstate_user row (the (tenant, kind) it carries) and reads no directory.
-                    authMethod = DatabaseAuthenticator.AuthMethod,
-                    tenant = u.tenant
-                  )
-                )
+                // Stands in for the database authenticator, so its profile is the
+                // authenticator's own: the management login takes it as the verified
+                // qodstate_user row (the (tenant, kind) it carries) and reads no directory.
+                Right(DatabaseAuthenticator.profileFor(u.username, u.kind, u.tenant))
           else Left(AuthFailure.InvalidCredentials("invalid credentials"))
 
   /** A REAL [[AuthenticationService]] (its own `authenticateBasic`, first match wins, with the
@@ -147,16 +138,7 @@ object InMemoryAuthService:
           username: String,
           password: String
       ): Either[AuthFailure, AuthenticatedProfile] =
-        Right(
-          AuthenticatedProfile(
-            username = username,
-            role = "user",
-            groups = Set.empty,
-            claims = Map.empty,
-            authMethod = DatabaseAuthenticator.AuthMethod,
-            tenant = scope.tenantId
-          )
-        )))
+        Right(DatabaseAuthenticator.profileFor(username, "user", scope.tenantId))))
 
   /** A REAL [[AuthenticationService]] whose basic chain is `basic` and whose manager-wide bearer
     * chain is `bearer`, with `tenantOidcRegistry` substituting a tenant's own OIDC authenticator

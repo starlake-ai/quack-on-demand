@@ -100,9 +100,10 @@ class ResourceOwnerPasswordAuthenticator(
                   )
                 )
               case Some(extractedUsername) =>
-                val role   = RoleExtractor.extract(claims, roleClaim)
-                val groups = RoleExtractor.extractGroups(claims, "groups")
-                val email  = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
+                val claimedRole = RoleExtractor.claimed(claims, roleClaim)
+                val role        = claimedRole.getOrElse(RoleExtractor.DefaultRole)
+                val groups      = RoleExtractor.extractGroups(claims, "groups")
+                val email       = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
                 // IdentityNaming (the management login and the data-plane handshake) reads these
                 // two to tell a user name that fell back to the email claim, an address its holder
                 // may have typed, from the IdP's own account name: the name came from the email
@@ -115,7 +116,8 @@ class ResourceOwnerPasswordAuthenticator(
                   AuthenticatedProfile(
                     username = extractedUsername,
                     role = role,
-                    groups = groups + role,
+                    groups = groups ++ claimedRole,
+                    tokenRoles = claimedRole.toSet,
                     claims = Map(
                       "sub"         -> extractedUsername,
                       "role"        -> role,

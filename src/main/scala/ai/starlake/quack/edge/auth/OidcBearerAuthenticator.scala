@@ -109,8 +109,8 @@ class OidcBearerAuthenticator(
     else Right(())
 
   private def profileOf(claims: JWTClaimsSet, username: String): AuthenticatedProfile =
-    val role   = RoleExtractor.extract(claims, roleClaim)
-    var groups = RoleExtractor.extractGroups(claims, "groups")
+    val claimedRole = RoleExtractor.claimed(claims, roleClaim)
+    var groups      = RoleExtractor.extractGroups(claims, "groups")
 
     // Enrich groups from external lookup (e.g., Google Directory API)
     groupsLookup.foreach { lookup =>
@@ -123,10 +123,11 @@ class OidcBearerAuthenticator(
 
     AuthenticatedProfile(
       username = username,
-      role = role,
-      groups = groups + role,
+      role = claimedRole.getOrElse(RoleExtractor.DefaultRole),
+      groups = groups ++ claimedRole,
       claims = flattenClaims(claims),
-      authMethod = providerName
+      authMethod = providerName,
+      tokenRoles = claimedRole.toSet
     )
 
   private def extractUsername(claims: JWTClaimsSet): Option[String] =
