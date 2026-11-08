@@ -198,6 +198,15 @@ with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use 
   created or changed and at each boot: a node reads whatever files its catalog lists, local files
   included. It names the source and nothing of its connection, refuses nothing, and advises
   `QOD_NODE_ALLOW_LOCAL_FILES=false` with data on object storage.
+- **The console edits an existing user's roles and groups.** The Edit user panel lists the roles granted
+  to the user directly and its groups, adds and removes only what changed, and names the roles the user
+  also holds through a group. It opens for users of an OIDC tenant too, without the password fields. A
+  new "Direct pool grants" card under a tenant user's row grants and revokes pools for that user alone.
+  `UserResponse` gains `directRoles`, the role names granted to the user itself (`roles` holds those and
+  the ones through groups).
+- **Column and row policies are edited in place** from the role panel, through the existing update
+  endpoints: one call, so a policy no longer lapses between a delete and a re-create. What a policy covers
+  stays fixed. The policy tabs show their counts.
 
 ### Fixed
 
@@ -225,6 +234,15 @@ with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use 
   on every reconcile pass. On Kubernetes the second failed to start, and its values stayed in the Secrets
   the first pool's pods read. Node ids and per-pool Secret names now put `--` between the names, and names
   that would break that are refused (see Breaking). For pools that already read alike, see Upgrading.
+- Creating a column or row policy with a blank catalog, schema or table answers `400` naming the field,
+  on REST, the CLI and MCP. A blank name matches no table, so such a policy was stored and never applied;
+  `*` still matches every one. A manifest import keeps restoring any such row a backup holds.
+- The console no longer offers what the server refuses: Delete, Locked and unchecking Admin are disabled
+  on the caller's own account and on the last enabled superuser, and built-in roles and groups show a
+  disabled Delete. A group's pool picker leaves out the pools it already holds, and its role picker lists
+  roles made since the page opened.
+- The security audit's "Control-plane Postgres login" finding links to the page that covers the shipped
+  Postgres password, and its table gives the finding text the width the status badge took.
 
 ## 0.12.0
 

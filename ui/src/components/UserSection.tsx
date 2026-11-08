@@ -6,10 +6,12 @@ import type {
 } from '../api/types';
 import EffectivePermsCard from './EffectivePermsCard';
 import UserS3CredentialsCard from './UserS3CredentialsCard';
+import UserPoolGrantsCard from './UserPoolGrantsCard';
 import MultiSelectDropdown from './MultiSelectDropdown';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
 import { poolPath, tenantHome } from '../nav/links';
+import { useAuth } from '../auth/AuthContext';
 
 // Mirrors the server-side EmailFormat detector (ai.starlake.quack state
 // package): a username that looks like an email address is treated as
@@ -60,6 +62,10 @@ export default function UserSection({
   superusersOnly?: boolean;
 }) {
   const [rows, setRows]       = useState<UserResponse[]>([]);
+  const { username: myUsername, tenant: myTenant } = useAuth();
+  // Bumped by every completed reload; keys the open permissions card so it fetches again after
+  // an edit (its own fetch runs only when the user id changes).
+  const [rowsVersion, setRowsVersion] = useState(0);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
   // Which user's permissions card is currently expanded under their row.
@@ -174,15 +180,100 @@ export default function UserSection({
   // omit = unchanged).
   const [editLocked, setEditLocked]                 = useState(false);
   const [editLockedOriginal, setEditLockedOriginal] = useState(false);
+  // Direct role and group memberships of the user being edited, with what the form opened with
+  // so Save adds and removes only the difference. Superusers have none: they bypass RBAC.
+  const [editRoles,  setEditRoles]  = useState<string[]>([]);
+  const [editGroups, setEditGroups] = useState<string[]>([]);
+  const [editRolesOriginal,  setEditRolesOriginal]  = useState<string[]>([]);
+  const [editGroupsOriginal, setEditGroupsOriginal] = useState<string[]>([]);
+  const [editTenantRoles,  setEditTenantRoles]  = useState<RoleResponse[]>([]);
+  const [editTenantGroups, setEditTenantGroups] = useState<GroupResponse[]>([]);
+  const editingUser = rows.find(r => r.id === editingId) ?? null;
+  const editingTenant = editingUser ? tenantIdOfRow(editingUser.tenant) : null;
+
+  useEffect(() => {
+    setEditTenantRoles([]);
+    setEditTenantGroups([]);
+    if (!editingTenant) return;
+    // Ignore a late answer for a panel already closed or switched to another user.
+    let live = true;
+    api.listRoles(editingTenant)
+      .then(r => { if (live) setEditTenantRoles(builtinsFirst(r.roles)); })
+      .catch(() => {});
+    api.listGroups(editingTenant)
+      .then(g => { if (live) setEditTenantGroups(builtinsFirst(g.groups)); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [editingId, editingTenant]);
+
+  const sameSet = (a: string[], b: string[]) =>
+    a.length === b.length && a.every(x => b.includes(x));
+  // Emptying a list the user had entries in is refused, as at create: pick qod_no_tables /
+  // qod_no_pools to take access away. A list that was already empty may stay so.
+  const editMembershipsMissing = editingTenant != null && (
+    (editRoles.length === 0 && editRolesOriginal.length > 0) ||
+    (editGroups.length === 0 && editGroupsOriginal.length > 0));
+
+  function closeEdit() {
+    setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false);
+    setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false);
+    setEditRoles([]); setEditGroups([]); setEditRolesOriginal([]); setEditGroupsOriginal([]);
+    setError(null);
+  }
+
+  /** Add then remove the direct memberships that changed, adds first so the user is never left
+    * with fewer grants than either the old or the new set in between. Names resolve to ids
+    * through the tenant's lists. */
+  async function applyMemberships(userId: string) {
+    const roleId  = new Map(editTenantRoles.map(r => [r.name, r.id]));
+    const groupId = new Map(editTenantGroups.map(g => [g.name, g.id]));
+    const added   = (next: string[], prev: string[]) => next.filter(x => !prev.includes(x));
+    for (const n of added(editRoles, editRolesOriginal)) {
+      const id = roleId.get(n); if (id) await api.addUserRole({ userId, roleId: id });
+    }
+    for (const n of added(editGroups, editGroupsOriginal)) {
+      const id = groupId.get(n); if (id) await api.addUserGroup({ userId, groupId: id });
+    }
+    for (const n of added(editRolesOriginal, editRoles)) {
+      const id = roleId.get(n); if (id) await api.removeUserRole({ userId, roleId: id });
+    }
+    for (const n of added(editGroupsOriginal, editGroups)) {
+      const id = groupId.get(n); if (id) await api.removeUserGroup({ userId, groupId: id });
+    }
+  }
+
+  /** Why the server refuses to delete, lock or demote `u` (UserHandlers.selfAndFloorGuard), or
+    * null when it does not: nobody acts on their own account, and the last enabled superuser
+    * stays. Superusers are all listed whenever one is (every view that shows them lists them
+    * all), so the count below is the server's. */
+  function protectedReason(u: UserResponse): string | null {
+    if (myUsername != null && u.username === myUsername && tenantIdOfRow(u.tenant) === (myTenant ?? null)) {
+      return 'This is your own account';
+    }
+    const isEnabledSuperuser = (x: UserResponse) => x.tenant == null && x.kind === 'admin' && x.enabled;
+    if (isEnabledSuperuser(u) && rows.filter(isEnabledSuperuser).length <= 1) {
+      return 'This is the last enabled superuser';
+    }
+    return null;
+  }
 
   // Resolve the selected new-tenant to its provider so the form can
   // adapt. Superuser always uses the db backend (no IdP routing).
   const newTenantRow = tenants.find(t => t.name === newTenant);
   const newTenantIsDb = newTenant === SUPERUSER || newTenantRow?.authProvider === 'db';
 
+  // A user row names its tenant by display name (UserHandlers.toResponse), which may differ from
+  // the id every other call and the session take (e.g. "Acme Corporation" for `acme`).
+  function tenantOfRow(shown: string | null): TenantResponse | undefined {
+    return shown == null ? undefined : (tenants.find(t => t.id === shown) ?? tenants.find(t => t.displayName === shown));
+  }
+  function tenantIdOfRow(shown: string | null): string | null {
+    return shown == null ? null : (tenantOfRow(shown)?.id ?? shown);
+  }
+
   // Same lookup but for the rows currently displayed.
   const tenantProviderOf = (tenantName: string | null): string =>
-    tenantName ? (tenants.find(t => t.name === tenantName)?.authProvider ?? 'db') : 'db';
+    tenantName ? (tenantOfRow(tenantName)?.authProvider ?? 'db') : 'db';
 
   // When the page filter is pinned to a single tenant backed by an
   // external IdP, surface a banner so the operator knows accounts are
@@ -194,7 +285,10 @@ export default function UserSection({
   function reload() {
     setError(null);
     api.listUsers(tenant ?? undefined)
-      .then(r => setRows(superusersOnly ? r.users.filter(u => u.tenant == null) : r.users))
+      .then(r => {
+        setRows(superusersOnly ? r.users.filter(u => u.tenant == null) : r.users);
+        setRowsVersion(v => v + 1);
+      })
       .catch(e => setError(errorMessage(e)));
   }
 
@@ -255,11 +349,16 @@ export default function UserSection({
           : (editEmail === editEmailOriginal ? undefined : editEmail),
         enabled: editLocked === editLockedOriginal ? undefined : !editLocked,
       });
-      setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false);
-      setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false);
+      if (editingTenant &&
+          !(sameSet(editRoles, editRolesOriginal) && sameSet(editGroups, editGroupsOriginal))) {
+        await applyMemberships(id);
+      }
+      closeEdit();
       reload();
     } catch (e) {
       setError(errorMessage(e));
+      // Some memberships may have been written before the failure: show the table as it is now.
+      reload();
     }
   }
 
@@ -359,35 +458,31 @@ export default function UserSection({
                       : <span className="badge bad">locked</span>}
                   </td>
                   <td className="actions">
-                    {allowEdit ? (
-                      <button
-                        className="icon-btn"
-                        title="Edit"
-                        aria-label="Edit"
-                        onClick={() => {
-                          setEditingId(u.id);
-                          setEditPassword('');
-                          setEditIsAdmin(u.kind === 'admin');
-                          setEditEmail(u.email ?? '');
-                          setEditEmailOriginal(u.email ?? '');
-                          setEditLocked(!u.enabled);
-                          setEditLockedOriginal(!u.enabled);
-                          setError(null);
-                        }}
-                      ><EditIcon /></button>
-                    ) : (
-                      <button
-                        className="icon-btn"
-                        disabled
-                        aria-label="Edit"
-                        title={`Password is managed by the tenant's ${rowProvider} provider`}
-                      ><EditIcon /></button>
-                    )}
+                    <button
+                      className="icon-btn"
+                      title={allowEdit ? 'Edit' : `Edit (the password is managed by the tenant's ${rowProvider} provider)`}
+                      aria-label="Edit"
+                      onClick={() => {
+                        setEditingId(u.id);
+                        setEditPassword('');
+                        setEditIsAdmin(u.kind === 'admin');
+                        setEditEmail(u.email ?? '');
+                        setEditEmailOriginal(u.email ?? '');
+                        setEditLocked(!u.enabled);
+                        setEditLockedOriginal(!u.enabled);
+                        setEditRoles(u.directRoles ?? []);
+                        setEditRolesOriginal(u.directRoles ?? []);
+                        setEditGroups(u.groups);
+                        setEditGroupsOriginal(u.groups);
+                        setError(null);
+                      }}
+                    ><EditIcon /></button>
                     {' '}
                     <button
                       className="icon-btn danger"
-                      title="Delete"
+                      title={protectedReason(u) ? `${protectedReason(u)}: it cannot be deleted` : 'Delete'}
                       aria-label="Delete"
+                      disabled={protectedReason(u) != null}
                       onClick={() => handleDelete(u)}
                     ><DeleteIcon /></button>
                   </td>
@@ -396,7 +491,10 @@ export default function UserSection({
               const perms = isExpanded ? [(
                 <tr key={u.id + '-perms'} className="expanded-row">
                   <td colSpan={8}>
-                    <EffectivePermsCard userId={u.id} tenants={tenants} pools={pools} />
+                    <EffectivePermsCard key={rowsVersion} userId={u.id} tenants={tenants} pools={pools} />
+                    {u.tenant != null && (
+                      <UserPoolGrantsCard userId={u.id} tenantId={tenantIdOfRow(u.tenant)!} pools={pools} onChange={reload} />
+                    )}
                     <UserS3CredentialsCard userId={u.id} />
                   </td>
                 </tr>
@@ -501,26 +599,34 @@ export default function UserSection({
         </Modal>
       )}
 
-      {editingId && (() => {
-        const u = rows.find(r => r.id === editingId);
-        if (!u) return null;
+      {editingUser && (() => {
+        const u = editingUser;
+        const passwordEditable = u.tenant === null || tenantProviderOf(u.tenant) === 'db';
+        const guard = protectedReason(u);
+        const inherited = u.roles.filter(r => !editRoles.includes(r) && !(u.directRoles ?? []).includes(r));
         return (
-          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false); setError(null); }}>
+          <Modal maxWidth={480} onClose={closeEdit}>
               <div className="card-title">
                 Edit user <code>{u.username}</code>
                 {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
               </div>
               {error && <p className="login-err">{error}</p>}
               <form onSubmit={ev => { ev.preventDefault(); void handleUpdate(u.id, u.username); }}>
-                <label>
-                  New password
-                  <input
-                    type="password"
-                    value={editPassword}
-                    onChange={ev => setEditPassword(ev.target.value)}
-                    placeholder="(leave blank to leave unchanged)"
-                  />
-                </label>
+                {passwordEditable ? (
+                  <label>
+                    New password
+                    <input
+                      type="password"
+                      value={editPassword}
+                      onChange={ev => setEditPassword(ev.target.value)}
+                      placeholder="(leave blank to leave unchanged)"
+                    />
+                  </label>
+                ) : (
+                  <p className="subtle" style={{ marginTop: 0 }}>
+                    The password is managed by the tenant's <code>{tenantProviderOf(u.tenant)}</code> provider.
+                  </p>
+                )}
                 <label>
                   Email{' '}
                   <span className="subtle">
@@ -534,19 +640,51 @@ export default function UserSection({
                     placeholder="used for forgot-password links"
                   />
                 </label>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={editMustChange}
-                    disabled={!editPassword}
-                    onChange={ev => setEditMustChange(ev.target.checked)}
-                  />
-                  {' '}Require password change at next login
-                </label>
+                {passwordEditable && (
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={editMustChange}
+                      disabled={!editPassword}
+                      onChange={ev => setEditMustChange(ev.target.checked)}
+                    />
+                    {' '}Require password change at next login
+                  </label>
+                )}
+                {u.tenant !== null ? (
+                  <>
+                    <MultiSelectDropdown
+                      caption="Roles"
+                      options={editTenantRoles.map(r => ({ value: r.name, label: `${r.name}${r.builtin ? ' (built-in)' : ''}` }))}
+                      selected={editRoles}
+                      onChange={setEditRoles}
+                    />
+                    {inherited.length > 0 && (
+                      <p className="subtle" style={{ marginTop: 0 }}>
+                        Also through groups: {inherited.join(', ')}
+                      </p>
+                    )}
+                    <MultiSelectDropdown
+                      caption="Groups"
+                      options={editTenantGroups.map(g => ({ value: g.name, label: `${g.name}${g.builtin ? ' (built-in)' : ''}` }))}
+                      selected={editGroups}
+                      onChange={setEditGroups}
+                    />
+                    {editMembershipsMissing && (
+                      <p className="subtle">
+                        Keep at least one role and one group: pick <code>qod_no_tables</code> or <code>qod_no_pools</code> to take access away.
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="subtle">Superusers bypass roles and groups.</p>
+                )}
                 <label className="checkbox-label">
                   <input
                     type="checkbox"
                     checked={editIsAdmin}
+                    disabled={guard != null && u.kind === 'admin'}
+                    title={guard != null && u.kind === 'admin' ? `${guard}: it cannot be demoted` : undefined}
                     onChange={ev => setEditIsAdmin(ev.target.checked)}
                   />
                   {' '}Admin User
@@ -555,10 +693,17 @@ export default function UserSection({
                   <input
                     type="checkbox"
                     checked={editLocked}
+                    disabled={guard != null && u.enabled}
+                    title={guard != null && u.enabled ? `${guard}: it cannot be locked` : undefined}
                     onChange={ev => setEditLocked(ev.target.checked)}
                   />
                   {' '}Locked
                 </label>
+                {guard != null && (u.enabled || u.kind === 'admin') && (
+                  <p className="subtle" style={{ marginTop: 0 }}>
+                    {guard}: it cannot be {u.kind === 'admin' ? 'locked, demoted or deleted' : 'locked or deleted'}.
+                  </p>
+                )}
                 {editLocked && !editLockedOriginal && (
                   <p className="subtle" style={{ marginTop: 0 }}>
                     Sign-in is refused and the user's tokens stop working; only an
@@ -566,8 +711,8 @@ export default function UserSection({
                   </p>
                 )}
                 <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
-                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false); setError(null); }}>Cancel</button>
-                  <button type="submit" style={{ minWidth: '7rem' }}>Save</button>
+                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeEdit}>Cancel</button>
+                  <button type="submit" style={{ minWidth: '7rem' }} disabled={editMembershipsMissing}>Save</button>
                 </div>
               </form>
           </Modal>

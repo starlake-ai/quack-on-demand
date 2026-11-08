@@ -9,6 +9,11 @@ import Tabs from './Tabs';
 
 const VERBS = ['RO', 'RW', 'DDL', 'ALL'];
 
+/** A tab title with its count in parentheses, or the bare title while the count is unknown. */
+function withCount(label: string, n: number | null): string {
+  return n == null ? label : `${label} (${n})`;
+}
+
 /** Roles tab at `/t/:tenant/roles`. Two-pane layout:
   *   - left: roles list + "+ New role"
   *   - right: the selected role's permission rows + inline grant form
@@ -28,6 +33,12 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
   // in the edit modal so the list stays in sync without a second
   // round-trip.
   const [verbCounts, setVerbCounts] = useState<Record<string, Record<string, number>>>({});
+
+  // Policy counts of the open role, shown in its tab titles. Only the active tab is mounted,
+  // so both are fetched when the role opens; a mounted section reports its own count after
+  // each load (create and delete included). null until known.
+  const [columnPolicyCount, setColumnPolicyCount] = useState<number | null>(null);
+  const [rowPolicyCount,    setRowPolicyCount]    = useState<number | null>(null);
 
   const [newName, setNewName]   = useState('');
   const [newDesc, setNewDesc]   = useState('');
@@ -66,6 +77,21 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
       .then(x => setPerms(x.permissions))
       .catch(e => setError(errorMessage(e)));
   }
+
+  useEffect(() => {
+    setColumnPolicyCount(null);
+    setRowPolicyCount(null);
+    if (!selected || selected.builtin) return;
+    // A role closed or switched before its answers arrive must not label the next one.
+    let current = true;
+    api.listColumnPolicies(selected.id)
+      .then(r => { if (current) setColumnPolicyCount(r.policies.length); })
+      .catch(() => {});
+    api.listRowPolicies(selected.id)
+      .then(r => { if (current) setRowPolicyCount(r.policies.length); })
+      .catch(() => {});
+    return () => { current = false; };
+  }, [selected?.id, selected?.builtin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     // Empty the previous tenant's data before loading the new scope, so stale
@@ -193,13 +219,16 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
               ))}
               <td className="actions">
                 <button className="icon-btn" title={r.builtin ? 'View' : 'Edit'} aria-label={r.builtin ? 'View' : 'Edit'} onClick={() => setSelected(r)}><EditIcon /></button>
-                {/* Built-in roles refuse delete server-side (409 builtin_protected). */}
-                {!r.builtin && (
-                  <>
-                    {' '}
-                    <button className="icon-btn danger" title="Delete" aria-label="Delete" onClick={() => handleDelete(r)}><DeleteIcon /></button>
-                  </>
-                )}
+                {/* Built-in roles refuse delete server-side (409 builtin_protected). The button stays,
+                    disabled, so every row's icons line up. */}
+                {' '}
+                <button
+                  className="icon-btn danger"
+                  title={r.builtin ? 'Built-in roles cannot be deleted' : 'Delete'}
+                  aria-label="Delete"
+                  disabled={r.builtin}
+                  onClick={() => handleDelete(r)}
+                ><DeleteIcon /></button>
               </td>
             </tr>
           ))}</tbody>
@@ -268,13 +297,13 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
                   ...(selected.builtin ? [] : [
                     {
                       id: 'column-policies',
-                      label: 'Column policies',
-                      body: <RoleColumnPoliciesSection roleId={selected.id} />,
+                      label: withCount('Column policies', columnPolicyCount),
+                      body: <RoleColumnPoliciesSection roleId={selected.id} onCount={setColumnPolicyCount} />,
                     },
                     {
                       id: 'row-policies',
-                      label: 'Row policies',
-                      body: <RoleRowPoliciesSection roleId={selected.id} />,
+                      label: withCount('Row policies', rowPolicyCount),
+                      body: <RoleRowPoliciesSection roleId={selected.id} onCount={setRowPolicyCount} />,
                     },
                   ]),
                 ]}

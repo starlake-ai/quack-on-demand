@@ -60,7 +60,8 @@ final class UserHandlers(
       roles = roles,
       groups = groups,
       poolGrants = grants,
-      email = u.email
+      email = u.email,
+      directRoles = eff.directRoles.map(_.name)
     )
 
   /** Convenience: build the response for one user, doing the supervisor lookup inline. Returns

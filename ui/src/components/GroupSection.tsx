@@ -109,6 +109,9 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     if (!selected) { setPoolPerms([]); setGroupRoles([]); return; }
     reloadGroupPools(selected);
     reloadGroupRoles(selected);
+    // The pickers' users, roles and pools may have changed since the page loaded (a role made
+    // on the Roles page), so read them again for each group opened.
+    reloadTenantContext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
@@ -192,12 +195,12 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
 
   async function handleGrantPool(ev: React.FormEvent) {
     ev.preventDefault();
-    if (!selected || !tenant) return;
+    if (!selected || !tenant || grantPoolSelected == null) return;
     setError(null);
     try {
       await api.grantPoolPermission({
         tenant,
-        poolId:  grantPoolId.trim() || null,
+        poolId:  grantPoolSelected || null,
         groupId: selected.id,
       });
       setGrantPoolId('');
@@ -298,20 +301,27 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     </>
   );
 
+  // A pool already granted to the group is not offered again (one grant per group and pool),
+  // nor "every pool" once that is granted.
+  const grantedPools = new Set(poolPerms.map(p => p.poolId ?? ''));
+  const offeredPools = [
+    { value: '', label: '(every pool in tenant)' },
+    ...tenantPools.map(p => ({ value: p.id, label: p.pool })),
+  ].filter(o => !grantedPools.has(o.value));
+  const grantPoolSelected =
+    offeredPools.some(o => o.value === grantPoolId) ? grantPoolId : (offeredPools[0]?.value ?? null);
+
   const poolsTab = !selected ? null : (
     <>
       {/* A built-in group's pool grants are fixed (409 builtin_protected). */}
-      {!selected.builtin && (
+      {!selected.builtin && grantPoolSelected != null && (
       <form onSubmit={handleGrantPool} className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
         <select
           style={{ flex: 1 }}
-          value={grantPoolId}
+          value={grantPoolSelected}
           onChange={ev => setGrantPoolId(ev.target.value)}
         >
-          <option value="">(every pool in tenant)</option>
-          {tenantPools.map(p => (
-            <option key={p.id} value={p.id}>{p.pool}</option>
-          ))}
+          {offeredPools.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
         <button type="submit" style={{ whiteSpace: 'nowrap' }}>+ Grant pool</button>
       </form>
@@ -373,13 +383,16 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
               <td>{poolCounts[g.id] ?? 0}</td>
               <td className="actions">
                 <button className="icon-btn" title="Edit" aria-label="Edit" onClick={() => setSelected(g)}><EditIcon /></button>
-                {/* Built-in groups refuse delete server-side (409 builtin_protected). */}
-                {!g.builtin && (
-                  <>
-                    {' '}
-                    <button className="icon-btn danger" title="Delete" aria-label="Delete" onClick={() => handleDelete(g)}><DeleteIcon /></button>
-                  </>
-                )}
+                {/* Built-in groups refuse delete server-side (409 builtin_protected). The button stays,
+                    disabled, so every row's icons line up. */}
+                {' '}
+                <button
+                  className="icon-btn danger"
+                  title={g.builtin ? 'Built-in groups cannot be deleted' : 'Delete'}
+                  aria-label="Delete"
+                  disabled={g.builtin}
+                  onClick={() => handleDelete(g)}
+                ><DeleteIcon /></button>
               </td>
             </tr>
           ))}</tbody>
