@@ -23,6 +23,7 @@
 #include "options.hpp"
 #include "secrets.hpp"
 #include "settings_list.hpp"
+#include "spill_dir.hpp"
 #include "sql_script.hpp"
 #include "utf8_args.hpp"
 #ifdef QOD_NODE_DUCKDB_STATIC
@@ -132,6 +133,31 @@ int Serve(const NodeOptions &options) {
 	RunStrict(con, "SET secret_directory = " + QuoteLiteral(options.secret_directory), "setting the secret directory");
 	RunStrict(con, "SELECT count(*) FROM duckdb_secrets()", "starting the secret manager");
 
+	// The spill folder the launcher chose, before the init SQL (the spawn script sets it there too): so
+	// DuckDB's default (.tmp under the working directory) never counts as a superuser's folder below.
+	RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(options.spill_dir), "setting the spill directory");
+
+	// A superuser's initSql may set temp_directory: every node of the database would then share that
+	// folder. Each node spills to a leaf of its own under it instead, set before the first statement that
+	// restricts file access (DuckDB refuses SET temp_directory once external access is off).
+	auto spill_settled = false;
+	auto settle_spill = [&]() {
+		if (spill_settled) {
+			return;
+		}
+		spill_settled = true;
+		auto read = RunStrict(con, "SELECT current_setting('temp_directory')", "reading temp_directory");
+		auto chunk = read->Fetch();
+		auto current = chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : std::string();
+		if (current.empty() || current == options.spill_dir) {
+			return;
+		}
+		auto leaf = MakePerNodeSpillDir(current, options.marker);
+		RunStrict(con, "SET GLOBAL temp_directory = " + QuoteLiteral(leaf), "setting the per-node spill directory");
+		RecordSpillDir(options.node_dir, leaf);
+		std::cerr << "[qod-node] spill directory: " << leaf << std::endl;
+	};
+
 	// quack loads after the trusted init statements that set where extensions come from
 	// (custom_extension_repository, extension_directory), and before the first one that restricts the
 	// node's file or network access (a superuser's initSql may disable the local file system, and
@@ -146,9 +172,11 @@ int Serve(const NodeOptions &options) {
 	};
 	RunInitFiles(con, options, secrets.init_nonce, [&](const std::string &statement) {
 		if (RestrictsNodeAccess(*con.context, statement)) {
+			settle_spill();
 			load_quack();
 		}
 	});
+	settle_spill();
 	load_quack();
 
 	// A trusted init statement may have set disabled_optimizers: remote_pushdown stays in it.

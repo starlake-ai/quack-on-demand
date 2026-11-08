@@ -57,6 +57,12 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 			options.init_files.push_back(Value(args, i));
 		} else if (arg == "--parent-pid") {
 			options.parent_pid = Number(arg, Value(args, i), 1, 0x7fffffffLL);
+		} else if (arg == "--spill-dir") {
+			options.spill_dir = Value(args, i);
+		} else if (arg == "--node-dir") {
+			options.node_dir = Value(args, i);
+		} else if (arg == "--marker") {
+			options.marker = Value(args, i);
 		} else if (arg == "--allow-community-extensions") {
 			options.extensions.allow_community = true;
 		} else if (arg == "--allow-unsigned-extensions") {
@@ -80,6 +86,12 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 		if (options.node_id.empty()) {
 			throw std::invalid_argument("--node-id is required");
 		}
+		if (options.spill_dir.empty()) {
+			throw std::invalid_argument("--spill-dir is required");
+		}
+		if (options.node_dir.empty()) {
+			throw std::invalid_argument("--node-dir is required");
+		}
 	}
 	return options;
 }
@@ -87,8 +99,8 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 std::string Usage() {
 	return "usage:\n"
 	       "  qod-node --port <port> [--bind <address>] --secrets-dir <dir> [--secrets-ephemeral]\n"
-	       "           --secret-directory <path> --node-id <id> [--init <file>|-]... [--parent-pid <pid>]\n"
-	       "           [<extension flag>]...\n"
+	       "           --secret-directory <path> --node-id <id> --spill-dir <dir> --node-dir <dir>\n"
+	       "           [--marker <marker>] [--init <file>|-]... [--parent-pid <pid>] [<extension flag>]...\n"
 	       "  qod-node --build-info\n"
 	       "  qod-node --list-settings [--init <file>|-]... [<extension flag>]...\n"
 	       "  qod-node --list-functions [--init <file>|-]... [<extension flag>]...\n"

@@ -87,6 +87,19 @@ new_secrets() {
   echo "$dir"
 }
 
+# The spill folder and node directory a serving node gets (--spill-dir, --node-dir), made as the spawn
+# script makes them: the node directory's spill.path holds the spill folder, with no newline. Sets
+# node_dirs to the two flags; call it in this shell (not in $(...)) with a name unique to the node.
+node_dirs=()
+new_node_dirs() {
+  local spill="$work/spill-$1" dir="$work/node-$1"
+  mkdir -p "$spill" "$dir"
+  printf '%s' "$spill" > "$dir/spill.path"
+  node_dirs=(--spill-dir "$spill" --node-dir "$dir")
+}
+# Nodes that stop before serving share these.
+new_node_dirs shared
+
 # --- build marker ---------------------------------------------------------------------------------
 marker="$("$node_bin" --build-info)"
 if [[ ! "$marker" =~ ^qod-node-build-info:protocol=6\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
@@ -102,10 +115,22 @@ grep -q -- '--port is required' "$work/usage.out" || fail "no arguments: missing
 "$node_bin" --port 70000 > /dev/null 2>&1
 [[ $? -eq 2 ]] || fail "--port 70000 must be refused"
 
-"$node_bin" --port "$(port)" --secrets-dir "$work/x" --secret-directory "$work/secret-dir" > "$work/no-id.out" 2>&1
+"$node_bin" --port "$(port)" --secrets-dir "$work/x" --secret-directory "$work/secret-dir" "${node_dirs[@]}" > "$work/no-id.out" 2>&1
 status=$?
 [[ $status -eq 2 ]] || fail "no --node-id: exit $status, expected 2"
 grep -q -- '--node-id is required' "$work/no-id.out" || fail "no --node-id: missing '--node-id is required'"
+
+# Both folders are required in serve mode: no default, which would leave the spill leaf off.
+"$node_bin" --port "$(port)" --secrets-dir "$work/x" --secret-directory "$work/secret-dir" --node-id "$node_id" \
+  --node-dir "$work/node-shared" > "$work/no-spill-dir.out" 2>&1
+status=$?
+[[ $status -eq 2 ]] || fail "no --spill-dir: exit $status, expected 2"
+grep -q -- '--spill-dir is required' "$work/no-spill-dir.out" || fail "no --spill-dir: missing '--spill-dir is required'"
+"$node_bin" --port "$(port)" --secrets-dir "$work/x" --secret-directory "$work/secret-dir" --node-id "$node_id" \
+  --spill-dir "$work/spill-shared" > "$work/no-node-dir.out" 2>&1
+status=$?
+[[ $status -eq 2 ]] || fail "no --node-dir: exit $status, expected 2"
+grep -q -- '--node-dir is required' "$work/no-node-dir.out" || fail "no --node-dir: missing '--node-dir is required'"
 
 # --- listings: every function and setting a node resolves, one JSON element per line --------------
 "$node_bin" --list-functions > "$work/functions.json" 2> "$work/functions.err"
@@ -124,7 +149,7 @@ grep -qF '{"kind":"alias","name":"memory_limit","target":"max_memory"}' "$work/s
 
 # --- missing or malformed secrets -----------------------------------------------------------------
 mkdir -p "$work/empty-secrets"
-"$node_bin" --port "$(port)" --secrets-dir "$work/empty-secrets" --secret-directory "$work/secret-dir" \
+"$node_bin" --port "$(port)" --secrets-dir "$work/empty-secrets" --secret-directory "$work/secret-dir" "${node_dirs[@]}" \
   --node-id "$node_id" > "$work/no-token.out" 2>&1
 status=$?
 [[ $status -eq 1 ]] || fail "missing token: exit $status, expected 1"
@@ -132,7 +157,7 @@ grep -q 'has no QOD_NODE_TOKEN' "$work/no-token.out" || fail "missing token: mes
 
 mkdir -p "$work/no-key"
 printf 'tok-no-key' > "$work/no-key/QOD_NODE_TOKEN"
-"$node_bin" --port "$(port)" --secrets-dir "$work/no-key" --secret-directory "$work/secret-dir" \
+"$node_bin" --port "$(port)" --secrets-dir "$work/no-key" --secret-directory "$work/secret-dir" "${node_dirs[@]}" \
   --node-id "$node_id" > "$work/no-key.out" 2>&1
 status=$?
 [[ $status -eq 1 ]] || fail "missing node key: exit $status, expected 1"
@@ -143,7 +168,7 @@ grep -q 'has no QOD_NODE_AUTHZ_KEY' "$work/no-key.out" || fail "missing node key
 refuses_key() {
   local label="$1" value="$2" message="$3" status
   "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-key "$value")" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-key.out" 2>&1
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" > "$work/bad-key.out" 2>&1
   status=$?
   [[ $status -eq 1 ]] || fail "$label node key: exit $status, expected 1"
   grep -q "$message" "$work/bad-key.out" || fail "$label node key: '$message' not found"
@@ -168,7 +193,7 @@ refuses_nonce() {
   dir="$(new_secrets tok-bad-nonce "$node_key" "$value")"
   [[ "$value" == "<none>" ]] && rm -f "$dir/QOD_INIT_NONCE"
   "$node_bin" --port "$(port)" --secrets-dir "$dir" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-nonce.out" 2>&1
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" > "$work/bad-nonce.out" 2>&1
   status=$?
   [[ $status -eq 1 ]] || fail "$label init nonce: exit $status, expected 1"
   grep -q "$message" "$work/bad-nonce.out" || fail "$label init nonce: '$message' not found"
@@ -179,14 +204,14 @@ refuses_nonce "uppercase" "0A1B2C3D4E5F60718293A4B5C6D7E8F9" "QOD_INIT_NONCE is 
 
 # A malformed decide limit stops the node at start, naming the variable, never its value.
 QOD_AUTHZ_DECIDE_TIMEOUT_MS=qodbadlimit "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-limit)" \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-limit.out" 2>&1
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" > "$work/bad-limit.out" 2>&1
 status=$?
 [[ $status -eq 1 ]] || fail "malformed QOD_AUTHZ_DECIDE_TIMEOUT_MS: exit $status, expected 1"
 grep -q 'QOD_AUTHZ_DECIDE_TIMEOUT_MS must be a number' "$work/bad-limit.out" ||
   fail "malformed QOD_AUTHZ_DECIDE_TIMEOUT_MS: message not found"
 ! grep -q 'qodbadlimit' "$work/bad-limit.out" || fail "malformed QOD_AUTHZ_DECIDE_TIMEOUT_MS: the value reached the output"
 QOD_AUTHZ_CACHE_ENTRIES=-1 "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-entries)" \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-entries.out" 2>&1
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" > "$work/bad-entries.out" 2>&1
 status=$?
 [[ $status -eq 1 ]] || fail "malformed QOD_AUTHZ_CACHE_ENTRIES: exit $status, expected 1"
 grep -q 'QOD_AUTHZ_CACHE_ENTRIES must be a number' "$work/bad-entries.out" ||
@@ -195,14 +220,14 @@ grep -q 'QOD_AUTHZ_CACHE_ENTRIES must be a number' "$work/bad-entries.out" ||
 # An ephemeral secrets directory goes even when a read fails.
 mkdir -p "$work/empty-ephemeral"
 "$node_bin" --port "$(port)" --secrets-dir "$work/empty-ephemeral" --secrets-ephemeral \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" > /dev/null 2>&1
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" > /dev/null 2>&1
 [[ ! -e "$work/empty-ephemeral" ]] || fail "missing token: the ephemeral secrets directory was kept"
 
 # --- a stop while starting ends the node at once --------------------------------------------------
 # An init FIFO no one writes blocks startup in open(), where only an immediate exit reaches it.
 mkfifo "$work/stuck-init"
 "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-stuck)" \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" --init "$work/stuck-init" \
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init "$work/stuck-init" \
   > "$work/stuck-term.out" 2>&1 &
 stuck=$!
 pids+=("$stuck")
@@ -220,7 +245,7 @@ sleep 300 &
 stuck_parent=$!
 pids+=("$stuck_parent")
 "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-orphan)" \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" --init "$work/stuck-init" \
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init "$work/stuck-init" \
   --parent-pid "$stuck_parent" > "$work/stuck-parent.out" 2>&1 &
 orphan=$!
 pids+=("$orphan")
@@ -251,11 +276,12 @@ SET GLOBAL quack_authorization_function = 'system.main.no_such_function';
 SQL
 } > "$work/init.sql"
 serve_port="$(port)"
+new_node_dirs serve
 sleep 300 &
 parent=$!
 pids+=("$parent")
 "$node_bin" --port "$serve_port" --bind 127.0.0.1 --secrets-dir "$secrets" --secrets-ephemeral \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" --init "$work/init.sql" --parent-pid "$parent" \
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init "$work/init.sql" --parent-pid "$parent" \
   > "$work/serve.out" 2>&1 &
 node=$!
 pids+=("$node")
@@ -316,9 +342,10 @@ else
 fi
 
 # --- serve: init SQL on stdin, SIGTERM stops the node ---------------------------------------------
+new_node_dirs term
 { nonce_line; printf 'CREATE TABLE piped AS SELECT 7 AS v;\nSELECT * FROM piped;'; } |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-one)" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/term.out" 2>&1 &
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - > "$work/term.out" 2>&1 &
 term_node=$!
 pids+=("$term_node")
 if wait_for '\[qod-node\] ready' "$work/term.out"; then
@@ -337,9 +364,10 @@ fi
 
 # --- serve: a UTF-8 byte order mark before the nonce line is dropped --------------------------------
 # Windows PowerShell's Process.Start writes one down the child's stdin under code page 65001.
+new_node_dirs bom
 { printf '\xef\xbb\xbf'; nonce_line; printf 'SELECT 1;\n'; } |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-bom)" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/bom.out" 2>&1 &
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - > "$work/bom.out" 2>&1 &
 bom_node=$!
 pids+=("$bom_node")
 if wait_for '\[qod-node\] ready' "$work/bom.out"; then
@@ -355,9 +383,10 @@ fi
 # A trusted init statement (a superuser's database or pool initSql) may disable the local file system:
 # quack, whose extension file is local, is loaded before that statement runs (RestrictsNodeAccess).
 # The init SQL loads httpfs first, which quack_serve needs once the local file system is off.
+new_node_dirs localfs
 { nonce_line; printf "INSTALL httpfs;\nLOAD httpfs;\nSET disabled_filesystems = 'LocalFileSystem';\n"; } |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-localfs)" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/localfs.out" 2>&1 &
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - > "$work/localfs.out" 2>&1 &
 localfs_node=$!
 pids+=("$localfs_node")
 if wait_for '\[qod-node\] ready' "$work/localfs.out"; then
@@ -370,9 +399,10 @@ else
 fi
 
 # --- serve: remote_pushdown stays disabled whatever the init SQL sets (item 32 A) -----------------
+new_node_dirs optimizers
 { nonce_line; printf "SET disabled_optimizers = 'filter_pushdown';\n"; } |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-optimizers)" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/optimizers.out" 2>&1 &
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - > "$work/optimizers.out" 2>&1 &
 optimizers_node=$!
 pids+=("$optimizers_node")
 if wait_for '\[qod-node\] ready' "$work/optimizers.out"; then
@@ -390,9 +420,10 @@ fi
 # quack install (an air-gapped mirror): here an empty directory and a repository no one serves, so
 # installing quack fails, naming the repository.
 mkdir -p "$work/empty-extensions"
+new_node_dirs extdir
 { nonce_line; printf "SET extension_directory = '%s';\nSET custom_extension_repository = 'http://127.0.0.1:9/qod-no-repository';\n" "$work/empty-extensions"; } |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-extdir)" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/extdir.out" 2>&1 &
+    --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - > "$work/extdir.out" 2>&1 &
 extdir_node=$!
 pids+=("$extdir_node")
 if wait_exit "$extdir_node"; then
@@ -411,9 +442,10 @@ fi
 ext_settings() {
   local label="$1" expected="$2"
   shift 2
+  new_node_dirs "ext-$label"
   { nonce_line; printf "SET allow_community_extensions = true;\nSET allow_unsigned_extensions = true;\nCOPY (SELECT current_setting('allow_community_extensions') AS c, current_setting('allow_unsigned_extensions') AS u, current_setting('autoinstall_known_extensions') AS a) TO '%s' (HEADER false);\n" "$work/ext-$label.csv"; } |
     "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets "token-ext-$label")" \
-      --secret-directory "$work/secret-dir" --node-id "$node_id" --init - "$@" > "$work/ext-$label.out" 2>&1 &
+      --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - "$@" > "$work/ext-$label.out" 2>&1 &
   local ext_node=$!
   pids+=("$ext_node")
   if ! wait_for '\[qod-node\] ready' "$work/ext-$label.out"; then
@@ -450,8 +482,9 @@ SET threads = 3;
 -- qod:untrusted-end $init_nonce
 COPY (SELECT current_setting('memory_limit') AS m, current_setting('threads') AS t, (SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_leak') AS leak, (SELECT count(*) FROM duckdb_secrets() WHERE name = 'tenant_s3') AS secrets, (SELECT count(*) FROM duckdb_tables() WHERE table_name = 'trusted_made') AS trusted) TO '$work/tenant-init.csv' (HEADER false);
 SQL
+new_node_dirs tenant
 "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-tenant)" \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" --init - < "$work/tenant-init.sql" \
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - < "$work/tenant-init.sql" \
   > "$work/tenant.out" 2>&1 &
 tenant_node=$!
 pids+=("$tenant_node")
@@ -482,7 +515,7 @@ refuses_stream() {
   local label="$1" first="$2" status
   { [[ -n "$first" ]] && printf '%s\n' "$first"; printf 'CREATE TABLE never AS SELECT 1;\n'; } |
     "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets "token-stream-$label")" \
-      --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/stream-$label.out" 2>&1
+      --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --init - > "$work/stream-$label.out" 2>&1
   status=$?
   [[ $status -eq 1 ]] || fail "init stream $label: exit $status, expected 1"
   grep -q "does not open with this node's init nonce line" "$work/stream-$label.out" ||
@@ -510,11 +543,110 @@ printf 'SET threads = 2;\nRESET memory_limit;\nINSTALL httpfs;\nPRAGMA version;\
 [[ "$(cat "$work/check-ok.json")" == '{"refused":[],"statements":4}' ]] ||
   fail "--check-init: an allowed initSql was refused: $(cat "$work/check-ok.json")"
 
+# --- a superuser's temp_directory gets a per-node leaf ---------------------------------------------
+# A trusted init statement that sets temp_directory to another folder than --spill-dir would make every
+# node of the database spill there: each node gets a fresh leaf of its own under it instead, its missing
+# parents created, the leaf recorded as the second line of spill.path for the spawn script's cleanup.
+mode_of() {
+  if [[ "$(uname)" == Darwin ]]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+# Starts a node on `nonce line + sql` with the manager marker 20900-ab12 and dirs of its own; sets
+# spill_pid, spill_out and spill_node_dir.
+spill_node() {
+  local name="$1" sql="$2"
+  new_node_dirs "$name"
+  spill_out="$work/$name.out"
+  spill_node_dir="$work/node-$name"
+  { nonce_line; printf '%s\n' "$sql"; } |
+    "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets "token-$name")" \
+      --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" --marker 20900-ab12 \
+      --init - > "$spill_out" 2>&1 &
+  spill_pid=$!
+  pids+=("$spill_pid")
+}
+# The leaf a ready node logged, checked against its parent; sets leaf ("" when the node failed).
+check_leaf() {
+  local label="$1" parent="$2"
+  leaf=""
+  if ! wait_for '\[qod-node\] ready' "$spill_out"; then
+    fail "$label: the node never became ready"
+    cat "$spill_out"
+    return
+  fi
+  leaf="$(sed -n 's/^\[qod-node\] spill directory: //p' "$spill_out")"
+  if [[ "$leaf" != "$parent/qod-spill.20900-ab12."* || ! "${leaf##*.}" =~ ^[A-Za-z0-9]{6}$ ]]; then
+    fail "$label: logged spill directory '$leaf', expected $parent/qod-spill.20900-ab12.XXXXXX"
+    return
+  fi
+  [[ -d "$leaf" && ! -L "$leaf" ]] || fail "$label: the leaf $leaf is not a directory"
+  [[ "$(mode_of "$leaf")" == 700 ]] || fail "$label: the leaf has mode $(mode_of "$leaf"), expected 700"
+  [[ "$(sed -n 1p "$spill_node_dir/spill.path")" == "$work/spill-$label" ]] ||
+    fail "$label: spill.path no longer opens with the spill folder"
+  [[ "$(sed -n 2p "$spill_node_dir/spill.path")" == "$leaf" ]] ||
+    fail "$label: the second line of spill.path is not the leaf: $(cat "$spill_node_dir/spill.path")"
+}
+stop_spill_node() {
+  kill -TERM "$spill_pid" 2>/dev/null
+  wait_exit "$spill_pid" || fail "$1: the node did not stop"
+}
+
+# 1. A missing three-level parent: created, each component and the leaf mode 700.
+spill_node spill-fast "SET temp_directory = '$work/fast/a/b';"
+check_leaf spill-fast "$work/fast/a/b"
+first_leaf="$leaf"
+for d in "$work/fast" "$work/fast/a" "$work/fast/a/b"; do
+  [[ "$(mode_of "$d")" == 700 ]] || fail "spill-fast: the created parent $d has mode $(mode_of "$d"), expected 700"
+done
+stop_spill_node spill-fast
+
+# 2. A second node on the same init SQL gets a leaf of its own.
+spill_node spill-fast-2 "SET temp_directory = '$work/fast/a/b';"
+check_leaf spill-fast-2 "$work/fast/a/b"
+[[ -z "$leaf" || "$leaf" != "$first_leaf" ]] || fail "spill-fast-2: two nodes got the same leaf $leaf"
+stop_spill_node spill-fast-2
+
+# 3. A component that is a regular file stops the node at start, naming it.
+printf 'x' > "$work/plain-file"
+spill_node spill-file "SET temp_directory = '$work/plain-file/under';"
+if wait_exit "$spill_pid"; then
+  [[ "$exit_status" -ne 0 ]] || fail "spill-file: the node started with a spill folder under a file"
+  grep -q 'plain-file' "$spill_out" || { fail "spill-file: the error does not name plain-file"; cat "$spill_out"; }
+  ! grep -q '\[qod-node\] ready' "$spill_out" || fail "spill-file: the node became ready"
+else
+  fail "spill-file: the node kept running"
+  kill_quietly "$spill_pid"
+fi
+
+# 4. Before the statement that turns external access off (DuckDB then refuses SET temp_directory). httpfs
+# loads first, as quack_serve needs it once external access is off.
+spill_node spill-locked "INSTALL httpfs;
+LOAD httpfs;
+SET temp_directory = '$work/fast2';
+SET enable_external_access = false;"
+check_leaf spill-locked "$work/fast2"
+stop_spill_node spill-locked
+
+# 5. No temp_directory in the init SQL, or the spill folder itself (what the spawn script sets): no leaf.
+for variant in none own; do
+  if [[ "$variant" == none ]]; then sql="SELECT 1;"; else sql="SET temp_directory = '$work/spill-spill-$variant';"; fi
+  spill_node "spill-$variant" "$sql"
+  if wait_for '\[qod-node\] ready' "$spill_out"; then
+    ! grep -q 'spill directory:' "$spill_out" || fail "spill-$variant: a leaf was made: $(grep 'spill directory:' "$spill_out")"
+    [[ "$(cat "$spill_node_dir/spill.path")" == "$work/spill-spill-$variant" ]] ||
+      fail "spill-$variant: spill.path changed: $(cat "$spill_node_dir/spill.path")"
+    stop_spill_node "spill-$variant"
+  else
+    fail "spill-$variant: the node never became ready"
+    cat "$spill_out"
+  fi
+done
+
 # --- serve: a quack_serve failure is fatal ---------------------------------------------------------
 # 192.0.2.1 (TEST-NET-1) is never a local address, so binding it fails. (A busy port is no test: quack
 # does not refuse a port another listener holds.)
+new_node_dirs unbindable
 "$node_bin" --port "$(port)" --bind 192.0.2.1 --secrets-dir "$(new_secrets token-two)" \
-  --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/unbindable.out" 2>&1 &
+  --secret-directory "$work/secret-dir" "${node_dirs[@]}" --node-id "$node_id" > "$work/unbindable.out" 2>&1 &
 unbindable=$!
 pids+=("$unbindable")
 if wait_exit "$unbindable"; then
