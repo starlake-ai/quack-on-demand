@@ -36,7 +36,7 @@ std::string RandomSuffix(std::mt19937_64 &rng) {
 	return out;
 }
 
-std::string NotADirectory(const std::string &parent, const fs::path &at, const char *what) {
+std::string NotADirectory(const std::string &parent, const fs::path &at, const std::string &what) {
 	return "cannot create the spill directory under " + parent + ": " + PathToUtf8(at) + " " + what;
 }
 
@@ -55,10 +55,10 @@ bool MakeDirectory(const fs::path &dir) {
 	throw std::runtime_error("cannot create " + PathToUtf8(dir) + ": " + std::strerror(err));
 }
 
-std::string OwnedByAnother(const std::string &parent, const fs::path &at, const char *what, unsigned owner) {
-	return NotADirectory(parent, at, (std::string("is ") + what + " owned by another user (uid " +
-	                                   std::to_string(owner) + "): only root or the node's own user may own it")
-	                                      .c_str());
+std::string OwnedByAnother(const std::string &parent, const fs::path &at, const std::string &what, unsigned owner) {
+	return NotADirectory(parent, at,
+	                     "is " + what + " owned by another user (uid " + std::to_string(owner) +
+	                         "): only root or the node's own user may own it");
 }
 
 //! Accepts a component that is already there when root or this user owns it (a system's /tmp, an
@@ -73,11 +73,12 @@ void AcceptExisting(const std::string &parent, const fs::path &built, bool follo
 	struct stat link {};
 	if (::lstat(built.c_str(), &link) != 0) {
 		int err = errno;
-		throw std::runtime_error(NotADirectory(parent, built, (std::string("cannot be read: ") + std::strerror(err)).c_str()));
+		throw std::runtime_error(NotADirectory(parent, built, std::string("cannot be read: ") + std::strerror(err)));
 	}
 	if (S_ISLNK(link.st_mode)) {
 		if (!followLinks) {
-			throw std::runtime_error(NotADirectory(parent, built, "appeared as a symbolic link while it was being created"));
+			throw std::runtime_error(
+			    NotADirectory(parent, built, "appeared as a symbolic link while it was being created"));
 		}
 		if (!TrustedLinkOwner(link.st_uid, self)) {
 			throw std::runtime_error(OwnedByAnother(parent, built, "a symbolic link", link.st_uid));
@@ -85,14 +86,18 @@ void AcceptExisting(const std::string &parent, const fs::path &built, bool follo
 		struct stat target {};
 		if (::stat(built.c_str(), &target) != 0) {
 			int err = errno;
-			throw std::runtime_error(
-			    NotADirectory(parent, built, (std::string("is a symbolic link that cannot be read through: ") + std::strerror(err)).c_str()));
+			throw std::runtime_error(NotADirectory(
+			    parent, built, std::string("is a symbolic link that cannot be read through: ") + std::strerror(err)));
 		}
 		if (!S_ISDIR(target.st_mode)) {
-			throw std::runtime_error(NotADirectory(parent, built, "is a symbolic link to something that is not a directory"));
+			throw std::runtime_error(
+			    NotADirectory(parent, built, "is a symbolic link to something that is not a directory"));
 		}
 		if (!TrustedLinkOwner(target.st_uid, self)) {
-			throw std::runtime_error(OwnedByAnother(parent, built, "a symbolic link to a directory", target.st_uid));
+			std::error_code ignored;
+			auto leads_to = PathToUtf8(fs::read_symlink(built, ignored));
+			throw std::runtime_error(
+			    OwnedByAnother(parent, built, "a symbolic link to " + leads_to + ", a directory", target.st_uid));
 		}
 		return;
 	}

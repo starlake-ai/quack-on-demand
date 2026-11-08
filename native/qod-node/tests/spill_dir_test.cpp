@@ -124,7 +124,22 @@ int main() {
 		fs::create_directory_symlink(target, foreign_link);
 		Expect(::chown(foreign_dir.c_str(), 1, 1) == 0 && ::lchown(foreign_link.c_str(), 1, 1) == 0,
 		       "chown to uid 1");
-		for (auto dir : {foreign_dir, foreign_link}) {
+		// A root-owned link to a directory that another user owns.
+		auto foreign_target = root / "foreign-target";
+		fs::create_directories(foreign_target);
+		auto link_to_foreign = root / "link-to-foreign";
+		fs::create_directory_symlink(foreign_target, link_to_foreign);
+		Expect(::chown(foreign_target.c_str(), 1, 1) == 0, "chown the target to uid 1");
+		auto spill_entries = [&](const fs::path &dir) {
+			int count = 0;
+			std::error_code ec;
+			for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+				count += it->path().filename().string().rfind("qod-spill.", 0) == 0 ? 1 : 0;
+			}
+			return count;
+		};
+		for (auto dir : {foreign_dir, foreign_link, link_to_foreign}) {
+			auto before = spill_entries(root) + spill_entries(foreign_target);
 			try {
 				qod::MakePerNodeSpillDir((dir / "y").string(), "");
 				Expect(false, "a component owned by another user must be refused: " + dir.string());
@@ -133,9 +148,15 @@ int main() {
 				Expect(what.find(dir.string()) != std::string::npos &&
 				           what.find("owned by another user") != std::string::npos,
 				       "the error names the component and its owner: " + what);
+				if (dir == link_to_foreign) {
+					Expect(what.find(foreign_target.string()) != std::string::npos,
+					       "the error names the link's target: " + what);
+				}
 			}
+			Expect(spill_entries(root) + spill_entries(foreign_target) == before,
+			       "no qod-spill entry is made behind " + dir.string());
 		}
-		Expect(!fs::exists(foreign_dir / "y") && !fs::exists(target / "y" / "y"), "nothing is made behind them");
+		Expect(!fs::exists(foreign_dir / "y") && !fs::exists(foreign_target / "y"), "no parent is made behind them");
 		Expect((fs::status(target).permissions() & fs::perms::all) == kOpen, "the targets keep their mode");
 	} else {
 		std::cout << "spill_dir: skipped the foreign-owner case (needs root to chown)" << std::endl;
