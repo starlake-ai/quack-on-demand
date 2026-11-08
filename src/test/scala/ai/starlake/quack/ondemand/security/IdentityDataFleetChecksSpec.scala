@@ -8,7 +8,9 @@ import org.scalatest.matchers.should.Matchers
 
 class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
 
-  private def cfg(hocon: String): Config = ConfigFactory.parseString(hocon)
+  // The checks read real paths: every path a check reads must exist in the shipped configuration.
+  private def cfg(hocon: String): Config =
+    ConfigFactory.parseString(hocon).withFallback(ConfigFactory.load())
   private def run(id: String, c: Config = cfg(""), f: AuditFacts = StubAuditFacts()): Outcome =
     SecurityChecks.all
       .find(_.id == id)

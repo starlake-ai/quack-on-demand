@@ -17,7 +17,7 @@ class SecurityAuditResponseSpec extends AnyFlatSpec with Matchers:
     val cfg = ConfigFactory
       .parseString(
         s"""quack-on-demand.defaultMetastore.pgPassword = "$Sentinel"
-           |quack-flightsql.auth.db.password = "$Sentinel"
+           |quack-flightsql.auth.database.password = "$Sentinel"
            |quack-on-demand.auth.management.sessionJwtSecret = "$Sentinel"
            |quack-on-demand.nodeAuthz.keySecret = "$Sentinel"
            |quack-on-demand.managedObjectStore.secretAccessKey = "$Sentinel"

@@ -10,7 +10,9 @@ import java.nio.file.Files
 
 class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
 
-  private def cfg(hocon: String): Config = ConfigFactory.parseString(hocon)
+  // The checks read real paths: every path a check reads must exist in the shipped configuration.
+  private def cfg(hocon: String): Config =
+    ConfigFactory.parseString(hocon).withFallback(ConfigFactory.load())
 
   private def status(
       checks: List[SecurityCheck],
@@ -81,7 +83,7 @@ class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
       SecretChecks.all,
       "secret.pg-default-password",
       cfg(s"""quack-on-demand.defaultMetastore.pgPassword = "$meta"
-             |quack-flightsql.auth.db.password = "$auth"""".stripMargin)
+             |quack-flightsql.auth.database.password = "$auth"""".stripMargin)
     )
     p("azizam", "x").status shouldBe Status.Critical
     p("azizam", "x").detail should include("still holds")

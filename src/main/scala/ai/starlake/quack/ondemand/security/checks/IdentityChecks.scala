@@ -19,7 +19,7 @@ object IdentityChecks:
           Outcome(
             Status.Warn,
             "Account lockout is off: a password can be guessed without limit on the console and the data plane.",
-            if ctx.string("quack-on-demand.smtp.host").isEmpty then
+            if ctx.optString("quack-on-demand.smtp.host").isEmpty then
               "Set QOD_SMTP_HOST, then QOD_AUTH_LOCKOUT_ENABLED=true (boot refuses lockout without SMTP)."
             else "Set QOD_AUTH_LOCKOUT_ENABLED=true."
           )
@@ -34,7 +34,7 @@ object IdentityChecks:
     "/operating/auth-providers#secure-in-production",
     ctx =>
       IO.pure(
-        if ctx.string("quack-on-demand.smtp.host").isEmpty then
+        if ctx.optString("quack-on-demand.smtp.host").isEmpty then
           Outcome(Status.Na, "No SMTP relay: no mail is sent.")
         else if ctx.string("quack-on-demand.publicBaseUrl").nonEmpty then
           Outcome(Status.Ok, "Reset links use QOD_PUBLIC_BASE_URL.")

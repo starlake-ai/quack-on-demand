@@ -18,7 +18,7 @@ object SecretChecks:
       IO.pure {
         val which = List(
           "QOD_PG_PASSWORD"      -> "quack-on-demand.defaultMetastore.pgPassword",
-          "QOD_AUTH_DB_PASSWORD" -> "quack-flightsql.auth.db.password"
+          "QOD_AUTH_DB_PASSWORD" -> "quack-flightsql.auth.database.password"
         ).collect { case (env, path) if ctx.string(path) == ShippedPgPassword => env }
         if which.isEmpty then Outcome(Status.Ok, "No Postgres password is the shipped default.")
         else
