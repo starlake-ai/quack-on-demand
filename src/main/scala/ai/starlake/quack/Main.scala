@@ -260,6 +260,7 @@ object Main extends IOApp with LazyLogging:
         resolvedAuth,
         metricsCfg,
         opaCfg,
+        demoControlPlane = false,
         modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
         quackCfg = Some(quackCfg)
       )
@@ -274,6 +275,12 @@ object Main extends IOApp with LazyLogging:
         * must load and validate it, so a bad QOD_ACL_MODE / QOD_OPA_URL fails boot everywhere.
         */
       opaCfg: OpaConfig,
+      /** Whether the control plane is the demo's `DemoPostgres` (trust authentication on loopback),
+        * which no configuration path says: true only from `DemoRunner`. The security audit judges
+        * it as it judges `qod serve`'s embedded control plane. No default: a caller that starts a
+        * trust-auth Postgres and forgets it would read `ok`.
+        */
+      demoControlPlane: Boolean,
       modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
       /** The native Quack front door block; loaded from `quack-native` when the caller does not
         * pass one (demo and serve overlays set their system properties before this runs).
@@ -429,7 +436,8 @@ object Main extends IOApp with LazyLogging:
       quackCfgResolved,
       qodNodeBin,
       internalHost,
-      internalPort
+      internalPort,
+      demoControlPlane
     )
 
   /** The boot after the Liquibase apply and the session secret's resolution: `mgrCfg` carries the
@@ -446,7 +454,8 @@ object Main extends IOApp with LazyLogging:
       quackCfgResolved: QuackNativeConfig,
       qodNodeBin: Option[java.nio.file.Path],
       internalHost: String,
-      internalPort: Int
+      internalPort: Int,
+      demoControlPlane: Boolean
   ): IO[ExitCode] =
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
@@ -1666,6 +1675,50 @@ object Main extends IOApp with LazyLogging:
       val serverConfigHandlers =
         new ConfigHandlers(liveConfig, configEntries, telemetryStore.enabled)
 
+      // The superuser-only security audit. It reads the configuration this replica booted with
+      // (the live one with what the boot resolved laid over it: the embedded or demo control
+      // plane, its passwords, the demo's TLS and binds) and the control plane on each request, so
+      // it reports how this replica stands now. `dataPathOf` resolves the row itself: a lookup by
+      // name would fall back to the default metastore for a row missing from the cache.
+      val securityAuditHandlers =
+        val auditConfig = ai.starlake.quack.ondemand.security.AuditConfig
+          .resolved(
+            liveConfig,
+            mgrCfg,
+            edgeCfg,
+            quackCfgResolved,
+            authCfg,
+            ai.starlake.quack.ondemand.security.AuditConfig
+              .trustAuthControlPlane(mgrCfg, demoControlPlane)
+          )
+        // The row facts read the supervisor's cached rows, as `dataPathOf` does: no full read of
+        // the store per request.
+        val facts = ai.starlake.quack.ondemand.security.LiveAuditFacts(
+          store.jdbcDataSource,
+          tenants = () => sup.listTenants(),
+          tenantDbs = () => sup.listAllTenantDbs(),
+          pools = () => sup.listAllPoolRows(),
+          sup.dataPathOf,
+          t =>
+            mgmtAuth.authModeResolver.modeFor(Some(t)) ==
+              Right(ai.starlake.quack.ondemand.auth.ManagementAuthMode.Oidc)
+        )
+        val replica =
+          scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown")
+        val version = Option(getClass.getPackage.getImplementationVersion).getOrElse("dev")
+        new SecurityAuditHandlers(
+          IO.defer(
+            ai.starlake.quack.ondemand.security
+              .SecurityAudit(
+                ai.starlake.quack.ondemand.security.checks.SecurityChecks.all,
+                ai.starlake.quack.ondemand.security.AuditContext(auditConfig, facts),
+                replica,
+                version
+              )
+              .run()
+          )
+        )
+
       val federatedSourceHandlers: Option[ai.starlake.quack.ondemand.api.FederatedSourceHandlers] =
         val dm               = mgrCfg.defaultMetastore
         val jdbcUrlForFed    = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
@@ -2111,6 +2164,7 @@ object Main extends IOApp with LazyLogging:
         rowPolicyHandlers,
         activeStmtHandlers,
         audit = auditRecorder,
+        securityAudit = securityAuditHandlers,
         auditLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter(),
         auditHandlers = auditHandlers,
         history = historyApiHandlers,

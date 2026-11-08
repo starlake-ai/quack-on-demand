@@ -1,4 +1,9 @@
-"""`qod admin reset-password`: break-glass recovery of a superuser password.
+"""`qod admin`: superuser recovery and the security audit.
+
+`qod admin security-audit` calls the manager's REST API (superuser only) and
+prints how the deployment stands against the docs' production checklists.
+
+`qod admin reset-password`: break-glass recovery of a superuser password.
 
 Runs the manager jar's one-shot `admin reset-password` subcommand, which
 writes the new bcrypt hash straight into the control-plane database (lockout
@@ -19,15 +24,18 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
 import typer
 
 from .. import admin_password, launcher
 from ..config import load_start_env
 from ._launch import resolve_jar, resolve_java
+from ..output import render
+from ._run import call
 from .status import _embedded_postgres_port, _tcp_open
 
-app = typer.Typer(help="Superuser recovery (never starts Postgres).", no_args_is_help=True)
+app = typer.Typer(help="Superuser recovery and the security audit.", no_args_is_help=True)
 
 
 @app.command("reset-password")
@@ -124,3 +132,68 @@ def reset_password(
     )
     proc = subprocess.run(cmd, input=password + "\n", text=True, env=env)
     raise typer.Exit(proc.returncode)
+
+
+_ORDER = ("critical", "warn", "error", "ok", "na")
+_LABEL = {"critical": "critical", "warn": "warning", "error": "error", "ok": "ok", "na": "n/a"}
+_PLURAL = {"critical": "critical", "warn": "warnings", "error": "errors", "ok": "ok", "na": "n/a"}
+
+
+def _summary(s: dict) -> str:
+    parts = [f"{s[k]} {_LABEL[k] if s[k] == 1 else _PLURAL[k]}" for k in _ORDER if s.get(k)]
+    return ", ".join(parts)
+
+
+def _unexpected(why: str) -> typer.Exit:
+    typer.echo(f"error: unexpected answer from /api/security/audit ({why})", err=True)
+    return typer.Exit(1)
+
+
+@app.command("security-audit")
+def security_audit(
+    ctx: typer.Context,
+    fail_on: List[str] = typer.Option(
+        [],
+        "--fail-on",
+        help="Also fail (exit 3) on warn and/or error findings. Repeatable, or comma-separated.",
+    ),
+):
+    """How this deployment stands against the docs' Secure in production checklists (superuser).
+
+    Exits 3 when a critical finding (or a --fail-on status) is present."""
+    bad = {p.strip().lower() for f in fail_on for p in f.split(",") if p.strip()}
+    unknown = bad - {"warn", "error"}
+    if unknown:
+        typer.echo(f"error: --fail-on takes warn or error, not {', '.join(sorted(unknown))}", err=True)
+        raise typer.Exit(1)
+    data = call(ctx, "GET", "/api/security/audit", quiet=True)
+    if not isinstance(data, dict):
+        raise _unexpected("missing an object")
+    if not isinstance(data.get("findings"), list):
+        raise _unexpected("missing findings")
+    if not all(isinstance(f, dict) and isinstance(f.get("status"), str) for f in data["findings"]):
+        raise _unexpected("findings entries")
+    if ctx.obj.json_output:
+        render(data, True)
+    else:
+        if not isinstance(data.get("summary"), dict):
+            raise _unexpected("missing summary")
+        line = _summary(data["summary"]) or "no findings"
+        typer.echo(f"{line}  ({data.get('replica', '?')}, {data.get('generatedAt', '?')})")
+        passing = 0
+        for f in data["findings"]:
+            status = f.get("status")
+            if status in ("ok", "na"):
+                passing += 1
+                continue
+            typer.echo(f"\n[{_LABEL.get(status, status)}] {f.get('title', '')}  ({f.get('id', '')})")
+            typer.echo(f"    {f.get('detail', '')}")
+            if f.get("fix"):
+                typer.echo(f"    fix: {f['fix']}")
+            if f.get("docs"):
+                typer.echo(f"    docs: {f['docs']}")
+        if passing:
+            typer.echo(f"\n{passing} checks passed or do not apply (--json lists them).")
+    statuses = {f.get("status") for f in data["findings"]}
+    if "critical" in statuses or statuses & bad:
+        raise typer.Exit(3)

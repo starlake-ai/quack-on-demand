@@ -628,6 +628,11 @@ final class PoolSupervisor(
     then stamped.updated(TenantDb.CreateDatabaseKey, "true")
     else stamped.removed(TenantDb.CreateDatabaseKey)
 
+  /** The row's resolved data path, from the row itself, never a lookup by name (the security
+    * audit). Empty when it resolves to none.
+    */
+  def dataPathOf(td: TenantDb): String = effectiveMetastoreFor(td).getOrElse("dataPath", "")
+
   /** Why `td` cannot run while nodes have their local file system off
     * (`quack-on-demand.nodeFiles.allowLocal`): its resolved data path is local. None while nodes
     * may open local files. Read from the row each time, so every replica agrees, and an update
@@ -1991,6 +1996,14 @@ final class PoolSupervisor(
 
   def listPoolsOfTenant(name: String): List[String] =
     pools.values.filter(_.key.tenant == name.toLowerCase(Locale.ROOT)).map(_.key.pool).toList.sorted
+
+  /** Every cached tenant-db row, branches included, by tenant id then name. */
+  def listAllTenantDbs(): List[TenantDb] =
+    tenantDbs.values.toList.sortBy(td => (td.tenantId, td.name))
+
+  /** Every cached pool row, the manager's own (`__merge`, `__br_<id8>`, ...) included. */
+  def listAllPoolRows(): List[Pool] =
+    poolRows.values.toList.sortBy(p => (p.tenantId, p.tenantDbId, p.name))
 
   def listTenantDbsByTenant(tenantName: String): List[TenantDb] =
     getTenant(tenantName)

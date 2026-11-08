@@ -159,6 +159,7 @@ final class AuthzStack(
         authCfg,
         metrics,
         opa,
+        demoControlPlane = false,
         modules = modules,
         quackCfg = Some(quackCfg)
       )

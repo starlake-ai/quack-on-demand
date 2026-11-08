@@ -36,6 +36,7 @@ import type {
   UpdateTenantDbResponse,
   ClientConfigResponse,
   ConfigListResponse,
+  SecurityAuditResponse,
   ManifestImportSummary,
   AuthModeResponse,
   LoginRequest,
@@ -252,6 +253,7 @@ export const api = {
   health:        () => fetch('/health').then(r => r.json() as Promise<HealthResponse>),
   clientConfig:  () => get<ClientConfigResponse>('/config/client'),
   serverConfig:  () => get<ConfigListResponse>('/config/server'),
+  securityAudit: () => get<SecurityAuditResponse>('/security/audit'),
   exportManifest: async (): Promise<string> => {
     const r = await fetch(`${BASE}/manifest/export`, FETCH_OPTS);
     if (!r.ok) throw new ApiError(r.status, await r.text());

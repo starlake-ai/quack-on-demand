@@ -58,6 +58,9 @@ final class ManagerServer(
     rowPolicies: RoleRowPolicyHandlers,
     activeStmts: ActiveStatementHandlers,
     audit: AuditRecorder = AuditRecorder.noop,
+    // The superuser-only security audit (GET /api/security/audit). Required: Main and the test
+    // harness pass it by name. Internal: its endpoint is not in EndpointModules.all.
+    securityAudit: SecurityAuditHandlers,
     auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
     auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore),
     history: HistoryHandlers = new HistoryHandlers(NoopTelemetryStore),
@@ -1245,6 +1248,7 @@ final class ManagerServer(
         )
       ),
       Endpoints.serverConfig.serverLogic(token => serverConfig.list(token)(scopeOfToken)),
+      SecurityAuditEndpoints.audit.serverLogic(token => securityAudit.run(token)(scopeOfToken)),
       Endpoints.manifestExport.serverLogic(token => manifest.exportYaml(token)(scopeOfToken)),
       Endpoints.manifestImport.serverLogic { case (body, token) =>
         manifest.importYaml(body, token)(scopeOfToken)

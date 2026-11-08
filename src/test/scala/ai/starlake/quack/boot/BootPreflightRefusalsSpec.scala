@@ -91,6 +91,7 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig],
       source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
       opa,
+      demoControlPlane = false,
       env = env,
       rawConfig = ConfigFactory.empty(),
       shutdownNowAvailable = shutdownNowAvailable

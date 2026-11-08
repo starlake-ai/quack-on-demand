@@ -235,5 +235,7 @@ object DemoRunner extends LazyLogging:
         authCfg,
         metricsCfg,
         opaCfg,
+        // The control plane is DemoPostgres: trust authentication on loopback, as qod serve's.
+        demoControlPlane = true,
         quackCfg = Some(configs.quack)
       )

@@ -69,6 +69,7 @@ export const NAV: NavItem[] = [
     id: 'settings', label: 'Settings', icon: 'settings',
     children: [
       { id: 'config', label: 'Config', icon: 'config', path: '/settings/config', rules: ['admin', 'superuser'] },
+      { id: 'security-audit', label: 'Security audit', icon: 'shield', path: '/settings/security-audit', rules: ['admin', 'superuser'] },
       { id: 'profile', label: 'Profile', icon: 'profile', path: '/settings/profile' },
     ],
   },
