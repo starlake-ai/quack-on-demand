@@ -167,3 +167,18 @@ def test_no_findings_prints_no_findings(runner):
     result = runner.invoke(app, ["admin", "security-audit"])
     assert result.exit_code == 0
     assert "no findings" in result.output
+
+
+@respx.mock
+def test_malformed_findings_entries(runner):
+    not_an_object = report("ok")
+    not_an_object["findings"].append("critical")
+    bad_status = report("ok")
+    bad_status["findings"][0]["status"] = 3
+    for body in (not_an_object, bad_status):
+        respx.get(f"{BASE}/api/security/audit").mock(return_value=_answer(body))
+        for args in (["admin", "security-audit"], ["--json", "admin", "security-audit"]):
+            result = runner.invoke(app, args)
+            assert result.exit_code == 1, result.output
+            assert "error: unexpected answer from /api/security/audit (findings entries)" in result.stderr
+            assert "Traceback" not in result.output

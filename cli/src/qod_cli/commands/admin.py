@@ -144,8 +144,8 @@ def _summary(s: dict) -> str:
     return ", ".join(parts)
 
 
-def _unexpected(missing: str) -> typer.Exit:
-    typer.echo(f"error: unexpected answer from /api/security/audit (missing {missing})", err=True)
+def _unexpected(why: str) -> typer.Exit:
+    typer.echo(f"error: unexpected answer from /api/security/audit ({why})", err=True)
     return typer.Exit(1)
 
 
@@ -168,14 +168,16 @@ def security_audit(
         raise typer.Exit(1)
     data = call(ctx, "GET", "/api/security/audit", quiet=True)
     if not isinstance(data, dict):
-        raise _unexpected("an object")
+        raise _unexpected("missing an object")
     if not isinstance(data.get("findings"), list):
-        raise _unexpected("findings")
+        raise _unexpected("missing findings")
+    if not all(isinstance(f, dict) and isinstance(f.get("status"), str) for f in data["findings"]):
+        raise _unexpected("findings entries")
     if ctx.obj.json_output:
         render(data, True)
     else:
         if not isinstance(data.get("summary"), dict):
-            raise _unexpected("summary")
+            raise _unexpected("missing summary")
         line = _summary(data["summary"]) or "no findings"
         typer.echo(f"{line}  ({data.get('replica', '?')}, {data.get('generatedAt', '?')})")
         passing = 0
