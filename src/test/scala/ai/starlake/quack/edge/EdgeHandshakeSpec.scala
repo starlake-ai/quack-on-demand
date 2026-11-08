@@ -342,3 +342,67 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
     ) match
       case Left(HandshakeFailure.Unauthorized(_)) => succeed
       case other                                  => fail(s"expected the pool refused, got $other")
+
+  // With JWT_SECRET_KEY equal to the session secret (the Starflow pairing), the edge's bearer
+  // provider verifies a QoD management session, which Starflow presents as its FlightSQL bearer.
+  // The session's account kind must not read as a role the token claims.
+
+  private def sessionOf(user: String, kind: String) =
+    new ai.starlake.quack.ondemand.api.SessionTokenStore(secret = JwtSecret).mintWithScope(
+      DatabaseAuthenticator.profileFor(user, kind, Some(SecurityFixtures.TenantId)),
+      ai.starlake.quack.ondemand.auth.SessionScope(superuser = false, Set.empty)
+    )
+
+  private def jwtProvider =
+    new JwtBearerAuthenticator(
+      JwtAuthConfig(secretKey = JwtSecret, publicKeyPath = "", issuer = "", audience = ""),
+      "role"
+    )
+
+  "a management session presented as a bearer" should "claim no role or group" in:
+    for kind <- List("user", "admin") do
+      val p = jwtProvider.authenticate(sessionOf(SecurityFixtures.BobUsername, kind)).toOption.get
+      p.username shouldBe SecurityFixtures.BobUsername
+      p.tokenRoles shouldBe empty
+      p.groups shouldBe empty
+
+  it should "not hold the pool of a group named after its account kind" in:
+    val (_, sup) = kindNamedRbac()
+    overSupervisor(bearerService, sup).authenticate(
+      Some(sessionOf(SecurityFixtures.BobUsername, "user")),
+      None,
+      Some(SecurityFixtures.PoolName),
+      Some(SecurityFixtures.TenantId),
+      false
+    ) match
+      case Left(HandshakeFailure.Unauthorized(_)) => succeed
+      case other                                  => fail(s"expected the pool refused, got $other")
+
+  it should "not hold the table grants of a role named after its account kind" in:
+    val (fix, sup) = kindNamedRbac(f =>
+      f.store.insertPoolPermission(
+        PoolPermission(
+          id = "pp-bob00001",
+          tenantId = SecurityFixtures.TenantId,
+          poolId = Some(SecurityFixtures.PoolId),
+          userId = Some(f.bobUserId)
+        )
+      )
+    )
+    val eff = effOf(
+      overSupervisor(bearerService, sup).authenticate(
+        Some(sessionOf(SecurityFixtures.BobUsername, "user")),
+        None,
+        Some(SecurityFixtures.PoolName),
+        Some(SecurityFixtures.TenantId),
+        false
+      )
+    )
+    eff.user.username shouldBe SecurityFixtures.BobUsername
+    eff.roles.map(_.name) should not contain "user"
+    eff.groups.map(_.name) should not contain "user"
+    eff.permissions.map(_.tableName) should not contain "orders"
+
+  "an external token whose role claim is user" should "still claim role user" in:
+    val p = jwtProvider.authenticate(bearerFor("carol", Some("user"), Nil)).toOption.get
+    p.tokenRoles shouldBe Set("user")

@@ -783,7 +783,7 @@ final class AuthHandlers(
         )
     else
       val sessionScope = SessionScope(superuser, manageableTenants)
-      // The JWT role claim must reflect AUTHORITY, not the IdP's descriptive
+      // The JWT kind claim must reflect AUTHORITY, not the IdP's descriptive
       // claim: an admin principal (superuser or tenant admin) always mints
       // role=admin so isAdmin() and the guard admit them; a non-admin principal
       // whose profile claims admin is demoted to user so a profile-only session

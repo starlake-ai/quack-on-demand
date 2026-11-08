@@ -63,6 +63,13 @@ object SessionTokenStore:
     case Expired
     case Revoked
 
+  /** The claim carrying the account kind (`admin` / `user`, the profile's `role`). Never `role`:
+    * when `JWT_SECRET_KEY` equals the session secret (the Starflow pairing) the FlightSQL edge's
+    * bearer provider verifies a session, and it reads `role` as a role the token claims, which the
+    * handshake resolves against the tenant's roles and groups.
+    */
+  val KindClaim: String = "kind"
+
   /** Generate a random HS256-safe (32-byte) secret encoded as a base64 string. Used as the fallback
     * when no operator secret is configured -- the encoded form is still raw bytes for `MACSigner`
     * so JWTs signed with this secret can be verified by any process that holds the same string.
@@ -112,7 +119,7 @@ final class SessionTokenStore(
       .expirationTime(Date.from(exp))
       .jwtID(jti)
       .claim("tenant", profile.tenant.orNull)
-      .claim("role", profile.role)
+      .claim(SessionTokenStore.KindClaim, profile.role)
       .claim("authMethod", profile.authMethod)
       .claim("superuser", scope.superuser)
       .claim("manageableTenants", scope.manageableTenants.toList.sorted.asJava)
@@ -129,7 +136,8 @@ final class SessionTokenStore(
 
   /** Resolve a token with a structured failure reason. The categories distinguish:
     *   - [[SessionTokenStore.LookupResult.NoSession]] -- caller sent no token at all
-    *   - [[SessionTokenStore.LookupResult.Invalid]] -- not a JWT, bad signature, missing jti
+    *   - [[SessionTokenStore.LookupResult.Invalid]] -- not a JWT, bad signature, missing jti, no
+    *     account kind
     *   - [[SessionTokenStore.LookupResult.Expired]] -- jwt `exp` is in the past
     *   - [[SessionTokenStore.LookupResult.Revoked]] -- jti was explicitly revoked
     *
@@ -150,7 +158,7 @@ final class SessionTokenStore(
             sweepDenylist()
             LookupResult.Expired
           else if denylist.containsKey(jti) then LookupResult.Revoked
-          else LookupResult.Ok(reconstruct(claims))
+          else reconstruct(claims).fold(LookupResult.Invalid)(LookupResult.Ok(_))
 
   /** Mark a token revoked. Stores its `jti` in a small denylist that expires alongside the token's
     * natural `exp`. Manager restart wipes the denylist; that's the documented stateless trade-off.
@@ -174,9 +182,10 @@ final class SessionTokenStore(
   def seedRevoked(entries: Iterable[(String, Instant)]): Unit =
     entries.foreach { case (jti, exp) => denylist.put(jti, exp) }
 
-  /** True when the token resolves to a session whose `role = admin`. The login handler also mints
-    * non-admin sessions (tenant-scoped regular users, for the profile-only view), so the role check
-    * is load-bearing: "the token resolves" is NOT the same as "the caller is an admin".
+  /** True when the token resolves to a session whose kind (the profile's `role`) is `admin`. The
+    * login handler also mints non-admin sessions (tenant-scoped regular users, for the profile-only
+    * view), so the role check is load-bearing: "the token resolves" is NOT the same as "the caller
+    * is an admin".
     */
   def isAdmin(token: String): Boolean =
     lookup(token).exists(_.profile.role.equalsIgnoreCase("admin"))
@@ -214,25 +223,30 @@ final class SessionTokenStore(
         if jti.isEmpty then None else Some((claims, jti))
     catch case _: Throwable => None
 
-  private def reconstruct(claims: JWTClaimsSet): Session =
-    val profile = AuthenticatedProfile(
-      username = Option(claims.getSubject).getOrElse(""),
-      role = Option(claims.getStringClaim("role")).getOrElse("admin"),
-      // Groups + claims map were not round-tripped through the JWT -- the
-      // management-plane session-checks don't read them.
-      groups = Set.empty,
-      claims = Map.empty,
-      authMethod = Option(claims.getStringClaim("authMethod")).getOrElse("unknown"),
-      tenant = Option(claims.getStringClaim("tenant"))
-    )
-    val scope = SessionScope(
-      superuser = Option(claims.getBooleanClaim("superuser")).exists(_.booleanValue),
-      manageableTenants = Option(claims.getStringListClaim("manageableTenants"))
-        .map(_.asScala.toSet)
-        .getOrElse(Set.empty)
-    )
-    val createdAt = Option(claims.getIssueTime).map(_.toInstant).getOrElse(clock())
-    SessionTokenStore.Session(profile, scope, createdAt)
+  /** The session the claims describe, or None when they name no account kind: a missing kind is
+    * refused, never read as one, so no token stands for an admin by leaving the claim out.
+    */
+  private def reconstruct(claims: JWTClaimsSet): Option[Session] =
+    Option(claims.getStringClaim(SessionTokenStore.KindClaim)).filter(_.nonEmpty).map { kind =>
+      val profile = AuthenticatedProfile(
+        username = Option(claims.getSubject).getOrElse(""),
+        role = kind,
+        // Groups + claims map were not round-tripped through the JWT -- the
+        // management-plane session-checks don't read them.
+        groups = Set.empty,
+        claims = Map.empty,
+        authMethod = Option(claims.getStringClaim("authMethod")).getOrElse("unknown"),
+        tenant = Option(claims.getStringClaim("tenant"))
+      )
+      val scope = SessionScope(
+        superuser = Option(claims.getBooleanClaim("superuser")).exists(_.booleanValue),
+        manageableTenants = Option(claims.getStringListClaim("manageableTenants"))
+          .map(_.asScala.toSet)
+          .getOrElse(Set.empty)
+      )
+      val createdAt = Option(claims.getIssueTime).map(_.toInstant).getOrElse(clock())
+      SessionTokenStore.Session(profile, scope, createdAt)
+    }
 
   private def sweepDenylist(): Unit =
     val now = clock()
