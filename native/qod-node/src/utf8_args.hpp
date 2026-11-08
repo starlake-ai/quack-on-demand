@@ -16,4 +16,7 @@ std::vector<std::string> Utf8Arguments(int argc, char **argv);
 //! page instead.
 std::filesystem::path PathFromUtf8(const std::string &utf8);
 
+//! A path as UTF-8 text (the inverse of PathFromUtf8).
+std::string PathToUtf8(const std::filesystem::path &path);
+
 } // namespace qod
