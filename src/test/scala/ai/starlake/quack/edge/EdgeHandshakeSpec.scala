@@ -406,3 +406,60 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
   "an external token whose role claim is user" should "still claim role user" in:
     val p = jwtProvider.authenticate(bearerFor("carol", Some("user"), Nil)).toOption.get
     p.tokenRoles shouldBe Set("user")
+
+  // A QoD session (a token carrying the `kind` claim) yields no role and no group on the edge,
+  // whatever claim QOD_AUTH_ROLE_CLAIM names: `kind` and `tenant` are both claims a session holds.
+
+  private def jwtProviderNaming(roleClaim: String) =
+    new JwtBearerAuthenticator(
+      JwtAuthConfig(secretKey = JwtSecret, publicKeyPath = "", issuer = "", audience = ""),
+      roleClaim
+    )
+
+  private def bearerServiceNaming(roleClaim: String) =
+    InMemoryAuthService.realServiceWithChains(Nil, List(jwtProviderNaming(roleClaim)), None)
+
+  for roleClaim <- List("kind", "tenant") do
+    s"a management session under roleClaim = $roleClaim" should "claim no role or group" in:
+      val p = jwtProviderNaming(roleClaim)
+        .authenticate(sessionOf(SecurityFixtures.BobUsername, "user"))
+        .toOption
+        .get
+      p.tokenRoles shouldBe empty
+      p.groups shouldBe empty
+
+    it should "not hold the pool of a group named after its account kind" in:
+      val (_, sup) = kindNamedRbac()
+      overSupervisor(bearerServiceNaming(roleClaim), sup).authenticate(
+        Some(sessionOf(SecurityFixtures.BobUsername, "user")),
+        None,
+        Some(SecurityFixtures.PoolName),
+        Some(SecurityFixtures.TenantId),
+        false
+      ) match
+        case Left(HandshakeFailure.Unauthorized(_)) => succeed
+        case other => fail(s"expected the pool refused, got $other")
+
+  "a token carrying the kind claim" should "claim no role or group, whatever else it names" in:
+    val now = Instant.now()
+    val b   = new JWTClaimsSet.Builder()
+      .subject(SecurityFixtures.BobUsername)
+      .issueTime(Date.from(now))
+      .expirationTime(Date.from(now.plusSeconds(300)))
+      .claim("kind", "user")
+      .claim("role", "user")
+      .claim("roles", java.util.Arrays.asList("user"))
+      .claim("groups", java.util.Arrays.asList("user"))
+    val jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), b.build())
+    jwt.sign(new MACSigner(JwtSecret))
+    val p = jwtProviderNaming("role").authenticate(jwt.serialize()).toOption.get
+    p.tokenRoles shouldBe empty
+    p.groups shouldBe empty
+
+  "an external token with no kind claim" should "claim the role and groups it names" in:
+    val p = jwtProviderNaming("role")
+      .authenticate(bearerFor("carol", Some("user"), List("user", "analysts")))
+      .toOption
+      .get
+    p.tokenRoles shouldBe Set("user")
+    p.groups shouldBe Set("user", "analysts")
