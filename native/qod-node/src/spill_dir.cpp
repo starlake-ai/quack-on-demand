@@ -14,6 +14,7 @@
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -53,11 +54,12 @@ bool MakeDirectory(const fs::path &dir) {
 	throw std::runtime_error("cannot create " + PathToUtf8(dir) + ": " + std::strerror(errno));
 }
 
-//! Accepts a component that is already there: a real directory, or a symbolic link owned by root (a
-//! system's own /tmp or /var, which the operator did not make) that leads to one. Any other link, or a
-//! file, is refused: a link planted by someone else must not carry the spill folder out of the path
-//! the operator named. Never changes the component's mode.
-void AcceptExisting(const std::string &parent, const fs::path &built) {
+//! Accepts a component that is already there: a real directory, or, when `followLinks`, a symbolic link
+//! owned by root or by this user (a system's /tmp, an operator's own /fastdisk -> /mnt/ssd) that leads to
+//! a directory. Any other link, or a file, is refused: a link someone else planted must not carry the
+//! spill folder out of the path the operator named. A component that appeared just after our mkdir got
+//! EEXIST is never followed as a link, whoever owns it. Never changes the component's mode.
+void AcceptExisting(const std::string &parent, const fs::path &built, bool followLinks) {
 	struct stat link {};
 	if (::lstat(built.c_str(), &link) != 0) {
 		throw std::runtime_error("cannot examine " + PathToUtf8(built) + ": " + std::strerror(errno));
@@ -69,9 +71,10 @@ void AcceptExisting(const std::string &parent, const fs::path &built) {
 		throw std::runtime_error(NotADirectory(parent, built, "exists and is not a directory"));
 	}
 	struct stat target {};
-	if (link.st_uid != 0 || ::stat(built.c_str(), &target) != 0 || !S_ISDIR(target.st_mode)) {
-		throw std::runtime_error(
-		    NotADirectory(parent, built, "is a symbolic link not owned by root, or one that leads nowhere"));
+	if (!followLinks || !TrustedLinkOwner(link.st_uid, ::geteuid()) || ::stat(built.c_str(), &target) != 0 ||
+	    !S_ISDIR(target.st_mode)) {
+		throw std::runtime_error(NotADirectory(
+		    parent, built, "is a symbolic link that is not yours or root's, or leads nowhere, or appeared while it was made"));
 	}
 }
 
@@ -88,7 +91,7 @@ bool MakeDirectory(const fs::path &dir) {
 	return false;
 }
 
-void AcceptExisting(const std::string &parent, const fs::path &built) {
+void AcceptExisting(const std::string &parent, const fs::path &built, bool) {
 	std::error_code ec;
 	auto status = fs::symlink_status(built, ec);
 	if (ec || status.type() != fs::file_type::directory) {
@@ -99,6 +102,10 @@ void AcceptExisting(const std::string &parent, const fs::path &built) {
 #endif
 
 } // namespace
+
+bool TrustedLinkOwner(unsigned owner, unsigned self) {
+	return owner == 0 || owner == self;
+}
 
 std::string SpillLeafPrefix(const std::string &marker) {
 	return marker.empty() ? "qod-spill." : "qod-spill." + marker + ".";
@@ -122,12 +129,12 @@ std::string MakePerNodeSpillDir(const std::string &parent, const std::string &ma
 		// Only a component this call made is restricted to its owner (it is MakeDirectory's 0700); one
 		// that was there is the operator's and keeps its mode.
 		if (fs::exists(fs::symlink_status(built, ec))) {
-			AcceptExisting(parent, built);
+			AcceptExisting(parent, built, true);
 			continue;
 		}
 		if (!MakeDirectory(built)) {
 			// Created by someone between the check and the call: judge what is there now.
-			AcceptExisting(parent, built);
+			AcceptExisting(parent, built, false);
 		}
 	}
 	std::mt19937_64 rng(std::random_device {}());

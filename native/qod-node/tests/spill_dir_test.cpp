@@ -44,7 +44,14 @@ int main() {
 	Expect(!qod::IsSpillLeafName("qod-spill.Ab3dE"), "five random characters");
 	Expect(!qod::IsSpillLeafName("qod-node.Ab3dE9"), "another prefix");
 
+	// Only root and the node's own user own a link that may be followed.
+	Expect(qod::TrustedLinkOwner(0, 501), "root's link is followed");
+	Expect(qod::TrustedLinkOwner(501, 501), "the node user's link is followed");
+	Expect(!qod::TrustedLinkOwner(502, 501), "another user's link is refused");
+	Expect(!qod::TrustedLinkOwner(1, 0) , "a third user's link is refused even for a root node");
+
 	auto root = TempRoot();
+	std::ofstream(root / "plain-file") << "x";
 	auto parent = root / "fast" / "a" / "b";
 #ifndef _WIN32
 	// A permissive umask: the 0700 below is the call's own, not the process's.
@@ -83,25 +90,31 @@ int main() {
 	           bare.rfind("qod-spill.", 0) == 0,
 	       "an empty marker gives qod-spill.XXXXXX: " + bare);
 
-	// A symbolic link at a component is refused and its target is not touched.
+	// A symbolic link of this user's own (an operator's /fastdisk -> /mnt/ssd) is followed, the target
+	// keeps its mode and the leaf lands under it.
 	auto target = root / "target";
 	fs::create_directories(target);
-	fs::permissions(target, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
-	                            fs::perms::others_read | fs::perms::others_exec,
-	                fs::perm_options::replace);
+	const auto kOpen = fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
+	                   fs::perms::others_read | fs::perms::others_exec;
+	fs::permissions(target, kOpen, fs::perm_options::replace);
 	fs::create_directory_symlink(target, parent / "x");
-	try {
-		qod::MakePerNodeSpillDir((parent / "x" / "y").string(), "");
-		Expect(false, "a symbolic link component must be refused");
-	} catch (std::runtime_error &e) {
-		Expect(std::string(e.what()).find((parent / "x").string()) != std::string::npos,
-		       "the error names the link");
+	auto through = fs::path(qod::MakePerNodeSpillDir((parent / "x" / "y").string(), ""));
+	Expect(through.parent_path() == parent / "x" / "y" && fs::is_directory(target / "y" / through.filename()),
+	       "the leaf lands under the link's target");
+	Expect((fs::status(target).permissions() & fs::perms::all) == kOpen, "the link's target keeps its mode");
+
+	// A link leading to a file, or nowhere, is refused naming the link.
+	fs::create_symlink(root / "plain-file", parent / "to-file");
+	fs::create_symlink(root / "nowhere", parent / "dangling");
+	for (auto name : {"to-file", "dangling"}) {
+		try {
+			qod::MakePerNodeSpillDir((parent / name / "y").string(), "");
+			Expect(false, std::string("link ") + name + " must be refused");
+		} catch (std::runtime_error &e) {
+			Expect(std::string(e.what()).find((parent / name).string()) != std::string::npos,
+			       std::string("the error names the link ") + name);
+		}
 	}
-	auto target_perms = fs::status(target).permissions() & fs::perms::all;
-	Expect(target_perms == (fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
-	                        fs::perms::others_read | fs::perms::others_exec),
-	       "the link's target keeps its mode");
-	Expect(!fs::exists(target / "y"), "nothing is made behind the link");
 	::umask(old_umask);
 #endif
 
@@ -115,7 +128,6 @@ int main() {
 	}
 	Expect(!fs::exists(root / "marker"), "a refused marker creates nothing");
 
-	std::ofstream(root / "plain-file") << "x";
 	auto blocked = root / "plain-file" / "under";
 	try {
 		qod::MakePerNodeSpillDir(blocked.string(), "");
