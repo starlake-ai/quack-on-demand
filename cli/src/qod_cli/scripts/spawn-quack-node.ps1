@@ -637,7 +637,9 @@ Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'quack-node.*' -ErrorAct
     }
   }
 $nodeId  = [Guid]::NewGuid().ToString('N').Substring(0, 12)
-if (-not [string]::IsNullOrEmpty($Marker) -and $Marker -notmatch '^[0-9]+-[0-9a-f]+$') {
+# Case-sensitive and anchored at the very ends (\z: '$' would also match before a final line break), as
+# bash's =~ and qod-node's --marker check read it.
+if (-not [string]::IsNullOrEmpty($Marker) -and $Marker -cnotmatch '\A[0-9]+-[0-9a-f]+\z') {
   [Console]::Error.WriteLine("ERROR: invalid manager marker '$Marker' (expected <rest-port>-<hex boot id>)")
   Exit-Spawn 1
 }

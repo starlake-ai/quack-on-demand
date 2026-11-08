@@ -530,6 +530,24 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     )
   }
 
+  it should "refuse a marker in uppercase or ending in a line break, as bash and qod-node do" in {
+    assume(!scala.util.Properties.isWin, "the stand-in qod-node is a shell script")
+    Seq("20900-5EEDBEEF" -> 23966, "20900-5eedbeef\n" -> 23967).foreach { case (marker, port) =>
+      val probe     = Files.createDirectories(tempDir.resolve(s"probe-bad-marker-$port"))
+      val (p, _, _) = launch(
+        tempDir.resolve(s"start-bad-marker-$port"),
+        fakeQodNode(probe),
+        port,
+        marker = Some(marker)
+      )
+      val out = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
+      p.waitFor(60, TimeUnit.SECONDS) shouldBe true
+      withClue(out)(p.exitValue() shouldBe 1)
+      out should include("invalid manager marker")
+      withClue("qod-node was started")(Files.exists(probe.resolve("args")) shouldBe false)
+    }
+  }
+
   it should "refuse to start without qod-node" in {
     assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val (p, _, secrets) =
