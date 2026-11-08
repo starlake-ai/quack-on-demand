@@ -48,33 +48,59 @@ bool MakeDirectory(const fs::path &dir) {
 	if (::mkdir(dir.c_str(), 0700) == 0) {
 		return true;
 	}
-	if (errno == EEXIST) {
+	int err = errno;
+	if (err == EEXIST) {
 		return false;
 	}
-	throw std::runtime_error("cannot create " + PathToUtf8(dir) + ": " + std::strerror(errno));
+	throw std::runtime_error("cannot create " + PathToUtf8(dir) + ": " + std::strerror(err));
 }
 
-//! Accepts a component that is already there: a real directory, or, when `followLinks`, a symbolic link
-//! owned by root or by this user (a system's /tmp, an operator's own /fastdisk -> /mnt/ssd) that leads to
-//! a directory. Any other link, or a file, is refused: a link someone else planted must not carry the
-//! spill folder out of the path the operator named. A component that appeared just after our mkdir got
-//! EEXIST is never followed as a link, whoever owns it. Never changes the component's mode.
+std::string OwnedByAnother(const std::string &parent, const fs::path &at, const char *what, unsigned owner) {
+	return NotADirectory(parent, at, (std::string("is ") + what + " owned by another user (uid " +
+	                                   std::to_string(owner) + "): only root or the node's own user may own it")
+	                                      .c_str());
+}
+
+//! Accepts a component that is already there when root or this user owns it (a system's /tmp, an
+//! operator's own folder): a real directory, or, when `followLinks`, a symbolic link that leads to a
+//! directory the same two own (an operator's /fastdisk -> /mnt/ssd). A component owned by anyone else is
+//! refused, directories included, because its owner could swap the components this call creates; no
+//! writable-by-others test is made, so a Kubernetes emptyDir (0777, root's) still works. A component that
+//! appeared just after our mkdir got EEXIST is never followed as a link, whoever owns it. Never changes a
+//! component's mode.
 void AcceptExisting(const std::string &parent, const fs::path &built, bool followLinks) {
+	const unsigned self = ::geteuid();
 	struct stat link {};
 	if (::lstat(built.c_str(), &link) != 0) {
-		throw std::runtime_error("cannot examine " + PathToUtf8(built) + ": " + std::strerror(errno));
+		int err = errno;
+		throw std::runtime_error(NotADirectory(parent, built, (std::string("cannot be read: ") + std::strerror(err)).c_str()));
 	}
-	if (S_ISDIR(link.st_mode)) {
+	if (S_ISLNK(link.st_mode)) {
+		if (!followLinks) {
+			throw std::runtime_error(NotADirectory(parent, built, "appeared as a symbolic link while it was being created"));
+		}
+		if (!TrustedLinkOwner(link.st_uid, self)) {
+			throw std::runtime_error(OwnedByAnother(parent, built, "a symbolic link", link.st_uid));
+		}
+		struct stat target {};
+		if (::stat(built.c_str(), &target) != 0) {
+			int err = errno;
+			throw std::runtime_error(
+			    NotADirectory(parent, built, (std::string("is a symbolic link that cannot be read through: ") + std::strerror(err)).c_str()));
+		}
+		if (!S_ISDIR(target.st_mode)) {
+			throw std::runtime_error(NotADirectory(parent, built, "is a symbolic link to something that is not a directory"));
+		}
+		if (!TrustedLinkOwner(target.st_uid, self)) {
+			throw std::runtime_error(OwnedByAnother(parent, built, "a symbolic link to a directory", target.st_uid));
+		}
 		return;
 	}
-	if (!S_ISLNK(link.st_mode)) {
+	if (!S_ISDIR(link.st_mode)) {
 		throw std::runtime_error(NotADirectory(parent, built, "exists and is not a directory"));
 	}
-	struct stat target {};
-	if (!followLinks || !TrustedLinkOwner(link.st_uid, ::geteuid()) || ::stat(built.c_str(), &target) != 0 ||
-	    !S_ISDIR(target.st_mode)) {
-		throw std::runtime_error(NotADirectory(
-		    parent, built, "is a symbolic link that is not yours or root's, or leads nowhere, or appeared while it was made"));
+	if (!TrustedLinkOwner(link.st_uid, self)) {
+		throw std::runtime_error(OwnedByAnother(parent, built, "a directory", link.st_uid));
 	}
 }
 
@@ -94,7 +120,10 @@ bool MakeDirectory(const fs::path &dir) {
 void AcceptExisting(const std::string &parent, const fs::path &built, bool) {
 	std::error_code ec;
 	auto status = fs::symlink_status(built, ec);
-	if (ec || status.type() != fs::file_type::directory) {
+	if (ec) {
+		throw std::runtime_error(NotADirectory(parent, built, ("cannot be read: " + ec.message()).c_str()));
+	}
+	if (status.type() != fs::file_type::directory) {
 		throw std::runtime_error(NotADirectory(parent, built, "exists and is not a directory"));
 	}
 }

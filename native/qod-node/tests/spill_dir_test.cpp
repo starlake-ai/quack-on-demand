@@ -13,6 +13,7 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -114,6 +115,30 @@ int main() {
 			Expect(std::string(e.what()).find((parent / name).string()) != std::string::npos,
 			       std::string("the error names the link ") + name);
 		}
+	}
+	// Components owned by another user are refused, directories as well as links. Needs root to chown.
+	if (::geteuid() == 0) {
+		auto foreign_dir = root / "foreign-dir";
+		fs::create_directories(foreign_dir);
+		auto foreign_link = root / "foreign-link";
+		fs::create_directory_symlink(target, foreign_link);
+		Expect(::chown(foreign_dir.c_str(), 1, 1) == 0 && ::lchown(foreign_link.c_str(), 1, 1) == 0,
+		       "chown to uid 1");
+		for (auto dir : {foreign_dir, foreign_link}) {
+			try {
+				qod::MakePerNodeSpillDir((dir / "y").string(), "");
+				Expect(false, "a component owned by another user must be refused: " + dir.string());
+			} catch (std::runtime_error &e) {
+				std::string what = e.what();
+				Expect(what.find(dir.string()) != std::string::npos &&
+				           what.find("owned by another user") != std::string::npos,
+				       "the error names the component and its owner: " + what);
+			}
+		}
+		Expect(!fs::exists(foreign_dir / "y") && !fs::exists(target / "y" / "y"), "nothing is made behind them");
+		Expect((fs::status(target).permissions() & fs::perms::all) == kOpen, "the targets keep their mode");
+	} else {
+		std::cout << "spill_dir: skipped the foreign-owner case (needs root to chown)" << std::endl;
 	}
 	::umask(old_umask);
 #endif
