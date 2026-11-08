@@ -623,6 +623,20 @@ object ManagerServerHarness:
     val liveConfig    = ConfigFactory.load()
     val configEntries = ConfigRegistry.collect(List.empty) // empty: no annotations to reflect
     val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
+    // The audit over a stub control plane: the REST tests pin the gate and the answer's shape.
+    val securityAuditHandlers = new SecurityAuditHandlers(
+      ai.starlake.quack.ondemand.security
+        .SecurityAudit(
+          ai.starlake.quack.ondemand.security.checks.SecurityChecks.all,
+          ai.starlake.quack.ondemand.security.AuditContext(
+            liveConfig,
+            ai.starlake.quack.ondemand.security.StubAuditFacts()
+          ),
+          "test-harness",
+          "test-harness"
+        )
+        .run()
+    )
 
     val manifestHandlers = new ManifestHandlers(
       store = store,
@@ -748,6 +762,7 @@ object ManagerServerHarness:
       rowPolicies = rowPolicyHandlers,
       activeStmts = activeStmtHandlers,
       audit = audit,
+      securityAudit = securityAuditHandlers,
       auditLimiter = auditLimiter,
       auditHandlers = auditHandlers,
       history = historyApiHandlers,

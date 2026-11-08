@@ -1024,6 +1024,55 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  "SecurityAuditHandlers /api/security/audit" should "answer root's superuser session with every check" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  = get(h.httpClient, s"${h.baseUrl}/api/security/audit", apiKey = Some(token))
+      withClue(s"body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+        val ids = io.circe.parser
+          .parse(resp.body())
+          .toOption
+          .get
+          .hcursor
+          .downField("findings")
+          .values
+          .get
+          .flatMap(_.hcursor.get[String]("id").toOption)
+          .toList
+        ids.toSet shouldBe ai.starlake.quack.ondemand.security.checks.SecurityChecks.all
+          .map(_.id)
+          .toSet
+      }
+    finally h.shutdown()
+  }
+
+  it should "deny alice's tenant-scoped session with 403 superuser_required" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/security/audit", apiKey = Some(token))
+      withClue(s"body: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) should contain("superuser_required")
+      }
+    finally h.shutdown()
+  }
+
+  it should "refuse a request with no credential with 401" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try get(h.httpClient, s"${h.baseUrl}/api/security/audit").statusCode() shouldBe 401
+    finally h.shutdown()
+  }
+
   "ManifestHandlers /api/manifest/export" should "admit root's superuser session" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)

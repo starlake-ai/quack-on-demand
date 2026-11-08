@@ -628,6 +628,9 @@ final class PoolSupervisor(
     then stamped.updated(TenantDb.CreateDatabaseKey, "true")
     else stamped.removed(TenantDb.CreateDatabaseKey)
 
+  /** [[effectiveMetastoreFor]] on the row itself, never a lookup by name (the security audit). */
+  def effectiveMetastoreOf(td: TenantDb): Map[String, String] = effectiveMetastoreFor(td)
+
   /** Why `td` cannot run while nodes have their local file system off
     * (`quack-on-demand.nodeFiles.allowLocal`): its resolved data path is local. None while nodes
     * may open local files. Read from the row each time, so every replica agrees, and an update

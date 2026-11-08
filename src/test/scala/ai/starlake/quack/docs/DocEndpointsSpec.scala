@@ -16,3 +16,9 @@ class DocEndpointsSpec extends AnyFunSuite:
     assert(keys.forall(_.nonEmpty), "an endpoint produced an empty (method, path) key")
     assert(keys.distinct.size == keys.size, s"duplicate routes: ${keys.diff(keys.distinct).distinct}")
   }
+
+  test("never documents the internal security audit") {
+    val keys = DocEndpoints.all.map(DocEndpoints.routeKey)
+    assert(!keys.contains("GET /api/security/audit"), "the internal audit leaked into the docs")
+    assert(!keys.exists(_.contains("security/audit")), s"the internal audit leaked: $keys")
+  }
