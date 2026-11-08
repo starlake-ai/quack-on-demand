@@ -20,7 +20,6 @@ on the child's stdin, never in argv or a file.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -32,6 +31,7 @@ import typer
 from .. import admin_password, launcher
 from ..config import load_start_env
 from ._launch import resolve_jar, resolve_java
+from ..output import render
 from ._run import call
 from .status import _embedded_postgres_port, _tcp_open
 
@@ -144,37 +144,54 @@ def _summary(s: dict) -> str:
     return ", ".join(parts)
 
 
+def _unexpected(missing: str) -> typer.Exit:
+    typer.echo(f"error: unexpected answer from /api/security/audit (missing {missing})", err=True)
+    return typer.Exit(1)
+
+
 @app.command("security-audit")
 def security_audit(
     ctx: typer.Context,
     fail_on: List[str] = typer.Option(
-        [], "--fail-on", help="Also fail (exit 3) on warn and/or error findings."
+        [],
+        "--fail-on",
+        help="Also fail (exit 3) on warn and/or error findings. Repeatable, or comma-separated.",
     ),
 ):
     """How this deployment stands against the docs' Secure in production checklists (superuser).
 
     Exits 3 when a critical finding (or a --fail-on status) is present."""
-    bad = {f.strip().lower() for f in fail_on}
+    bad = {p.strip().lower() for f in fail_on for p in f.split(",") if p.strip()}
     unknown = bad - {"warn", "error"}
     if unknown:
         typer.echo(f"error: --fail-on takes warn or error, not {', '.join(sorted(unknown))}", err=True)
         raise typer.Exit(1)
     data = call(ctx, "GET", "/api/security/audit", quiet=True)
+    if not isinstance(data, dict):
+        raise _unexpected("an object")
+    if not isinstance(data.get("findings"), list):
+        raise _unexpected("findings")
     if ctx.obj.json_output:
-        typer.echo(json.dumps(data, indent=2))
+        render(data, True)
     else:
-        typer.echo(f"{_summary(data['summary'])}  ({data['replica']}, {data['generatedAt']})")
+        if not isinstance(data.get("summary"), dict):
+            raise _unexpected("summary")
+        line = _summary(data["summary"]) or "no findings"
+        typer.echo(f"{line}  ({data.get('replica', '?')}, {data.get('generatedAt', '?')})")
+        passing = 0
         for f in data["findings"]:
-            if f["status"] in ("ok", "na"):
+            status = f.get("status")
+            if status in ("ok", "na"):
+                passing += 1
                 continue
-            typer.echo(f"\n[{_LABEL[f['status']]}] {f['title']}  ({f['id']})")
-            typer.echo(f"    {f['detail']}")
-            if f["fix"]:
+            typer.echo(f"\n[{_LABEL.get(status, status)}] {f.get('title', '')}  ({f.get('id', '')})")
+            typer.echo(f"    {f.get('detail', '')}")
+            if f.get("fix"):
                 typer.echo(f"    fix: {f['fix']}")
-            typer.echo(f"    docs: {f['docs']}")
-        passing = sum(1 for f in data["findings"] if f["status"] in ("ok", "na"))
+            if f.get("docs"):
+                typer.echo(f"    docs: {f['docs']}")
         if passing:
             typer.echo(f"\n{passing} checks passed or do not apply (--json lists them).")
-    statuses = {f["status"] for f in data["findings"]}
+    statuses = {f.get("status") for f in data["findings"]}
     if "critical" in statuses or statuses & bad:
         raise typer.Exit(3)
