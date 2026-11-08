@@ -342,3 +342,124 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
     ) match
       case Left(HandshakeFailure.Unauthorized(_)) => succeed
       case other                                  => fail(s"expected the pool refused, got $other")
+
+  // With JWT_SECRET_KEY equal to the session secret (the Starflow pairing), the edge's bearer
+  // provider verifies a QoD management session, which Starflow presents as its FlightSQL bearer.
+  // The session's account kind must not read as a role the token claims.
+
+  private def sessionOf(user: String, kind: String) =
+    new ai.starlake.quack.ondemand.api.SessionTokenStore(secret = JwtSecret).mintWithScope(
+      DatabaseAuthenticator.profileFor(user, kind, Some(SecurityFixtures.TenantId)),
+      ai.starlake.quack.ondemand.auth.SessionScope(superuser = false, Set.empty)
+    )
+
+  private def jwtProvider =
+    new JwtBearerAuthenticator(
+      JwtAuthConfig(secretKey = JwtSecret, publicKeyPath = "", issuer = "", audience = ""),
+      "role"
+    )
+
+  "a management session presented as a bearer" should "claim no role or group" in:
+    for kind <- List("user", "admin") do
+      val p = jwtProvider.authenticate(sessionOf(SecurityFixtures.BobUsername, kind)).toOption.get
+      p.username shouldBe SecurityFixtures.BobUsername
+      p.tokenRoles shouldBe empty
+      p.groups shouldBe empty
+
+  it should "not hold the pool of a group named after its account kind" in:
+    val (_, sup) = kindNamedRbac()
+    overSupervisor(bearerService, sup).authenticate(
+      Some(sessionOf(SecurityFixtures.BobUsername, "user")),
+      None,
+      Some(SecurityFixtures.PoolName),
+      Some(SecurityFixtures.TenantId),
+      false
+    ) match
+      case Left(HandshakeFailure.Unauthorized(_)) => succeed
+      case other                                  => fail(s"expected the pool refused, got $other")
+
+  it should "not hold the table grants of a role named after its account kind" in:
+    val (fix, sup) = kindNamedRbac(f =>
+      f.store.insertPoolPermission(
+        PoolPermission(
+          id = "pp-bob00001",
+          tenantId = SecurityFixtures.TenantId,
+          poolId = Some(SecurityFixtures.PoolId),
+          userId = Some(f.bobUserId)
+        )
+      )
+    )
+    val eff = effOf(
+      overSupervisor(bearerService, sup).authenticate(
+        Some(sessionOf(SecurityFixtures.BobUsername, "user")),
+        None,
+        Some(SecurityFixtures.PoolName),
+        Some(SecurityFixtures.TenantId),
+        false
+      )
+    )
+    eff.user.username shouldBe SecurityFixtures.BobUsername
+    eff.roles.map(_.name) should not contain "user"
+    eff.groups.map(_.name) should not contain "user"
+    eff.permissions.map(_.tableName) should not contain "orders"
+
+  "an external token whose role claim is user" should "still claim role user" in:
+    val p = jwtProvider.authenticate(bearerFor("carol", Some("user"), Nil)).toOption.get
+    p.tokenRoles shouldBe Set("user")
+
+  // A QoD session (a token carrying the `kind` claim) yields no role and no group on the edge,
+  // whatever claim QOD_AUTH_ROLE_CLAIM names: `kind` and `tenant` are both claims a session holds.
+
+  private def jwtProviderNaming(roleClaim: String) =
+    new JwtBearerAuthenticator(
+      JwtAuthConfig(secretKey = JwtSecret, publicKeyPath = "", issuer = "", audience = ""),
+      roleClaim
+    )
+
+  private def bearerServiceNaming(roleClaim: String) =
+    InMemoryAuthService.realServiceWithChains(Nil, List(jwtProviderNaming(roleClaim)), None)
+
+  for roleClaim <- List("kind", "tenant") do
+    s"a management session under roleClaim = $roleClaim" should "claim no role or group" in:
+      val p = jwtProviderNaming(roleClaim)
+        .authenticate(sessionOf(SecurityFixtures.BobUsername, "user"))
+        .toOption
+        .get
+      p.tokenRoles shouldBe empty
+      p.groups shouldBe empty
+
+    it should "not hold the pool of a group named after its account kind" in:
+      val (_, sup) = kindNamedRbac()
+      overSupervisor(bearerServiceNaming(roleClaim), sup).authenticate(
+        Some(sessionOf(SecurityFixtures.BobUsername, "user")),
+        None,
+        Some(SecurityFixtures.PoolName),
+        Some(SecurityFixtures.TenantId),
+        false
+      ) match
+        case Left(HandshakeFailure.Unauthorized(_)) => succeed
+        case other => fail(s"expected the pool refused, got $other")
+
+  "a token carrying the kind claim" should "claim no role or group, whatever else it names" in:
+    val now = Instant.now()
+    val b   = new JWTClaimsSet.Builder()
+      .subject(SecurityFixtures.BobUsername)
+      .issueTime(Date.from(now))
+      .expirationTime(Date.from(now.plusSeconds(300)))
+      .claim("kind", "user")
+      .claim("role", "user")
+      .claim("roles", java.util.Arrays.asList("user"))
+      .claim("groups", java.util.Arrays.asList("user"))
+    val jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), b.build())
+    jwt.sign(new MACSigner(JwtSecret))
+    val p = jwtProviderNaming("role").authenticate(jwt.serialize()).toOption.get
+    p.tokenRoles shouldBe empty
+    p.groups shouldBe empty
+
+  "an external token with no kind claim" should "claim the role and groups it names" in:
+    val p = jwtProviderNaming("role")
+      .authenticate(bearerFor("carol", Some("user"), List("user", "analysts")))
+      .toOption
+      .get
+    p.tokenRoles shouldBe Set("user")
+    p.groups shouldBe Set("user", "analysts")

@@ -71,3 +71,57 @@ class SessionTokenStoreSpec extends AnyFlatSpec, Matchers:
     // Local denylist is authoritative regardless of the hook outcome.
     store.get(token) shouldBe None
   }
+
+  // A session carries the account kind under `kind`, never `role`: with JWT_SECRET_KEY equal to the
+  // session secret (the Starflow pairing) the FlightSQL edge's bearer provider verifies a session,
+  // and it reads `role` as a role the token claims.
+
+  private def userProfile = profile.copy(username = "bob", role = "user", tenant = Some("t-a"))
+
+  "a session" should "carry the account kind under kind and no role claim" in {
+    val store  = new SessionTokenStore(secret = TestSecret)
+    val claims =
+      com.nimbusds.jwt.SignedJWT.parse(store.mintWithScope(userProfile, scope)).getJWTClaimsSet
+    claims.getStringClaim("kind") shouldBe "user"
+    claims.getClaim("role") shouldBe null
+  }
+
+  it should "read its kind back: a user session is a user, an admin session an admin" in {
+    val store = new SessionTokenStore(secret = TestSecret)
+    val user  = store.mintWithScope(userProfile, scope)
+    val admin = store.mintWithScope(profile, scope)
+    store.get(user).map(_.profile.role) shouldBe Some("user")
+    store.get(user).flatMap(_.profile.tenant) shouldBe Some("t-a")
+    store.isAdmin(user) shouldBe false
+    store.get(admin).map(_.profile.role) shouldBe Some("admin")
+    store.isAdmin(admin) shouldBe true
+    store.get(admin).map(_.scope) shouldBe Some(scope)
+  }
+
+  it should "refuse a token with no kind claim, even one whose role says admin" in {
+    import com.nimbusds.jose.crypto.MACSigner
+    import com.nimbusds.jose.{JWSAlgorithm, JWSHeader}
+    import com.nimbusds.jwt.{JWTClaimsSet, SignedJWT}
+    val store = new SessionTokenStore(secret = TestSecret)
+    def signed(extra: JWTClaimsSet.Builder => JWTClaimsSet.Builder): String =
+      val now = java.util.Date.from(Instant.now())
+      val b   = new JWTClaimsSet.Builder()
+        .subject("alice")
+        .issueTime(now)
+        .expirationTime(java.util.Date.from(Instant.now().plusSeconds(600)))
+        .jwtID(java.util.UUID.randomUUID().toString)
+        .claim("authMethod", "db")
+        .claim("superuser", false)
+        .claim("manageableTenants", java.util.List.of("t-a"))
+      val jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), extra(b).build())
+      jwt.sign(new MACSigner(TestSecret))
+      jwt.serialize()
+    val noClaim  = signed(identity)
+    val roleOnly = signed(_.claim("role", "admin"))
+    val blank    = signed(_.claim("kind", ""))
+    for t <- List(noClaim, roleOnly, blank) do
+      store.lookupResult(t) shouldBe SessionTokenStore.LookupResult.Invalid
+      store.get(t) shouldBe None
+      store.isAdmin(t) shouldBe false
+      store.scopeOf(t) shouldBe None
+  }

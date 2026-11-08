@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.edge.config.JwtAuthConfig
+import ai.starlake.quack.ondemand.api.SessionTokenStore
 import ai.starlake.sql.TooDeep
 import com.nimbusds.jose.crypto.{MACVerifier, RSASSAVerifier}
 import com.nimbusds.jose.jwk.RSAKey
@@ -94,8 +95,16 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     else Right(())
 
   private def profileOf(claims: JWTClaimsSet, username: String): AuthenticatedProfile =
-    val claimedRole = RoleExtractor.claimed(claims, roleClaim)
-    val groups      = RoleExtractor.extractGroups(claims, "groups")
+    // A QoD management session reaches this provider when JWT_SECRET_KEY equals the session secret
+    // (the Starflow pairing, where Starflow presents the user's own session as its bearer). A
+    // session names no role or group: its claims (kind, tenant, authMethod, ...) describe the
+    // account, so whatever claim roleClaim names, nothing of it is read as a role or group, and
+    // such a token holds only the grants of the row its subject names. Trusting the `kind` marker
+    // is safe: it is read only on a token whose signature verified, and whoever can sign with this
+    // key can already mint a token claiming any role, so leaving `kind` out gains them nothing.
+    val session     = claims.getClaim(SessionTokenStore.KindClaim) != null
+    val claimedRole = if session then None else RoleExtractor.claimed(claims, roleClaim)
+    val groups      = if session then Set.empty else RoleExtractor.extractGroups(claims, "groups")
     AuthenticatedProfile(
       username = username,
       role = claimedRole.getOrElse(RoleExtractor.DefaultRole),

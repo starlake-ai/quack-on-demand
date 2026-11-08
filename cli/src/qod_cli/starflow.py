@@ -105,8 +105,8 @@ def ensure_shared_secrets(
     save: Callable[[dict], None],
     token: Callable[[int], str] = secrets.token_urlsafe,
 ) -> str:
-    """The session secret both sides share: the manager signs its sessions with it
-    and Starflow mints its SSO tokens with it. Generated once and persisted (qod
+    """The session secret both sides share: the manager signs its sessions with it,
+    and Starflow receives it as JWT_SECRET_KEY. Generated once and persisted (qod
     config [start] table) so SSO survives a restart. Nothing else is shared: no
     static API key is part of the pairing."""
     secret = base_env.get("QOD_SESSION_JWT_SECRET") or ""
@@ -118,8 +118,9 @@ def ensure_shared_secrets(
 
 def manager_env(url: str, secret: str) -> dict[str, str]:
     """Overlay for the manager JVM: Starlake menu/SSO on, the shared secret.
-    JWT_SECRET_KEY feeds the edge's bearer provider, which must verify the
-    tokens Starflow mints with the same secret."""
+    JWT_SECRET_KEY feeds the edge's bearer provider, which verifies the user's own
+    QoD session when Starflow presents it on the FlightSQL edge. Such a session
+    yields no token role or group there: the user gets the grants of their row."""
     return {
         "SL_ENABLED": "true",
         "SL_URL": url,

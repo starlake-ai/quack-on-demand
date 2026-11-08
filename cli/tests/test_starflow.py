@@ -961,6 +961,7 @@ def test_finish_demo_warns_and_never_raises(demo_glue, monkeypatch):
     assert lines[1].startswith(f"WARN: could not delete {plan.run_dir}: busy")
 
 
+@posix_only
 def test_finish_demo_kills_starflow_on_a_second_interrupt_and_still_deletes_the_folder(
     demo_glue, monkeypatch
 ):
