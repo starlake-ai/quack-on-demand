@@ -18,8 +18,18 @@ bool IsSpillLeafName(const std::string &name);
 //! node's own user (`self`). A link owned by anyone else could only have been planted in a shared folder.
 bool TrustedLinkOwner(unsigned owner, unsigned self);
 
+#ifndef _WIN32
+//! Follows absolute `path` component by component, as the kernel resolves it, and judges every directory
+//! and every symbolic link it passes through (each lstat), the folders above a link's target and the links
+//! inside it included, with TrustedLinkOwner against `self`. Returns "" when all pass, else why the first
+//! that does not: "<path> is a directory owned by another user (uid N): ..." (or a link, or a component
+//! that cannot be read).
+std::string ForeignOwnerOnPath(const std::string &path, unsigned self);
+#endif
+
 //! Creates every missing component of `parent` (mode 0700), then a fresh leaf under it, and returns the
-//! leaf's path. Throws std::runtime_error naming the failing path and the OS reason, and
+//! leaf's path. On POSIX the leaf's real path is then judged by ForeignOwnerOnPath, and the leaf removed
+//! when it fails. Throws std::runtime_error naming the failing path and the OS reason, and
 //! std::invalid_argument for a marker IsSpillMarker refuses or a parent holding a line break.
 std::string MakePerNodeSpillDir(const std::string &parent, const std::string &marker);
 

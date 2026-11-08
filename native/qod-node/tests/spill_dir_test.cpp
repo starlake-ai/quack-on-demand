@@ -130,6 +130,26 @@ int Run() {
 			       std::string("the error names the link ") + name);
 		}
 	}
+	current_case = "the owners on the real path";
+	// The walk that judges the leaf's real path, every folder on it and every link it passes through: all
+	// root's or this user's here, and with another user as the node's (no root needed) the first folder this
+	// user owns is named.
+	{
+		const unsigned self = ::geteuid();
+		Expect(qod::ForeignOwnerOnPath(through.string(), self).empty(),
+		       "a leaf through a link of this user's own has no foreign owner on its way: " +
+		           qod::ForeignOwnerOnPath(through.string(), self));
+		Expect(qod::ForeignOwnerOnPath("/", self).empty(), "the root is root's");
+		// Root's folders pass for every node user, so under root there is nothing of another owner to find.
+		if (self != 0) {
+			auto other = qod::ForeignOwnerOnPath(through.string(), self + 1);
+			Expect(other.find("owned by another user (uid " + std::to_string(self) + ")") != std::string::npos,
+			       "as another node user, a folder of this user's is named: " + other);
+			Expect(other.find(through.string()) == std::string::npos,
+			       "the first such folder is named, not the leaf: " + other);
+		}
+	}
+
 	current_case = "components owned by another user";
 	// Components owned by another user are refused, directories as well as links. Needs root to chown.
 	if (::geteuid() == 0) {
@@ -172,6 +192,41 @@ int Run() {
 			       "no qod-spill entry is made behind " + dir.string());
 		}
 		Expect(!fs::exists(foreign_dir / "y") && !fs::exists(foreign_target / "y"), "no parent is made behind them");
+
+		// Past the link and its target: a link of this user's own to a directory whose parent another user
+		// owns (/fast -> /mnt/ssd/qod, /mnt/ssd someone else's), and a link to a path that goes through a link
+		// another user owns. Both are refused naming the foreign folder or link, and the leaf made under them
+		// is removed.
+		auto foreign_parent = root / "foreign-parent";
+		fs::create_directories(foreign_parent / "qod");
+		auto to_foreign_parent = root / "to-foreign-parent";
+		fs::create_directory_symlink(foreign_parent / "qod", to_foreign_parent);
+		Expect(::chown(foreign_parent.c_str(), 1, 1) == 0, "chown the target's parent to uid 1");
+		auto mine = root / "mine";
+		fs::create_directories(mine);
+		auto foreign_hop = root / "foreign-hop";
+		fs::create_directory_symlink(mine, foreign_hop);
+		Expect(::lchown(foreign_hop.c_str(), 1, 1) == 0, "lchown the hop to uid 1");
+		auto through_hop = root / "through-hop";
+		fs::create_directory_symlink(foreign_hop / ".", through_hop);
+		struct Case {
+			fs::path link;
+			fs::path named;
+			fs::path made;
+		};
+		for (auto c : {Case {to_foreign_parent, foreign_parent, foreign_parent / "qod"},
+		               Case {through_hop, foreign_hop, mine}}) {
+			try {
+				qod::MakePerNodeSpillDir(c.link.string(), "");
+				Expect(false, "a foreign owner past the link must be refused: " + c.link.string());
+			} catch (std::runtime_error &e) {
+				std::string what = e.what();
+				Expect(what.find(c.named.string() + " is a") != std::string::npos &&
+				           what.find("owned by another user (uid 1)") != std::string::npos,
+				       "the error names " + c.named.string() + " and its owner: " + what);
+			}
+			Expect(spill_entries(c.made) == 0, "the leaf made under " + c.link.string() + " is removed");
+		}
 		Expect((fs::status(target).permissions() & fs::perms::all) == kOpen, "the targets keep their mode");
 	} else {
 		std::cout << "spill_dir: skipped the foreign-owner case (needs root to chown)" << std::endl;
@@ -204,7 +259,7 @@ int Run() {
 			Expect(what.find("secretpart") == std::string::npos && what.find("broken") == std::string::npos,
 			       "the error names nothing of the value");
 		}
-		Expect(!fs::exists(root / "broken"), "a refused parent creates nothing");
+		Expect(!fs::exists(parent), "a refused parent creates nothing");
 	}
 
 	current_case = "a component that is a file";

@@ -147,6 +147,77 @@ bool TrustedLinkOwner(unsigned owner, unsigned self) {
 	return owner == 0 || owner == self;
 }
 
+#ifndef _WIN32
+
+namespace {
+
+//! As many links as Linux follows in one lookup (MAXSYMLINKS): past it the path is a loop.
+constexpr int kMaxLinks = 40;
+
+//! Resolves absolute `path` into `real` as the kernel would, judging each component it lstats. Returns ""
+//! or the first refusal (see ForeignOwnerOnPath). `links` counts the links followed so far.
+std::string ResolveJudged(const fs::path &path, unsigned self, int &links, fs::path &real) {
+	fs::path built = path.root_path();
+	for (const auto &part : path.relative_path()) {
+		if (part.empty() || part == ".") {
+			continue;
+		}
+		if (part == "..") {
+			// `built` is real here, so its parent is the folder ".." names.
+			built = built.parent_path();
+			continue;
+		}
+		auto next = built / part;
+		struct stat st {};
+		if (::lstat(next.c_str(), &st) != 0) {
+			int err = errno;
+			return PathToUtf8(next) + " cannot be read: " + std::strerror(err);
+		}
+		bool link = S_ISLNK(st.st_mode);
+		if (!TrustedLinkOwner(st.st_uid, self)) {
+			return PathToUtf8(next) + " is " + (link ? "a symbolic link" : "a directory") +
+			       " owned by another user (uid " + std::to_string(st.st_uid) +
+			       "): only root or the node's own user may own it";
+		}
+		if (!link) {
+			built = next;
+			continue;
+		}
+		if (++links > kMaxLinks) {
+			return PathToUtf8(next) + " leads through too many symbolic links";
+		}
+		std::error_code ec;
+		auto target = fs::read_symlink(next, ec);
+		if (ec) {
+			return PathToUtf8(next) + " cannot be read: " + ec.message();
+		}
+		fs::path resolved;
+		auto refused = ResolveJudged(target.is_absolute() ? target : built / target, self, links, resolved);
+		if (!refused.empty()) {
+			return refused;
+		}
+		built = resolved;
+	}
+	real = built;
+	return "";
+}
+
+} // namespace
+
+std::string ForeignOwnerOnPath(const std::string &path, unsigned self) {
+	int links = 0;
+	fs::path real;
+	std::error_code ec;
+	// A relative path (DuckDB's temp_directory may be one) resolves from the working directory.
+	auto absolute = fs::absolute(PathFromUtf8(path), ec);
+	if (ec) {
+		return path + " cannot be made absolute: " + ec.message();
+	}
+	return ResolveJudged(absolute, self, links, real);
+}
+
+#endif
+
 std::string SpillLeafPrefix(const std::string &marker) {
 	return marker.empty() ? "qod-spill." : "qod-spill." + marker + ".";
 }
@@ -196,6 +267,16 @@ std::string MakePerNodeSpillDir(const std::string &parent, const std::string &ma
 	for (int attempt = 0; attempt < kAttempts; attempt++) {
 		auto leaf = path / PathFromUtf8(SpillLeafPrefix(marker) + RandomSuffix(rng));
 		if (MakeDirectory(leaf)) {
+#ifndef _WIN32
+			// The walk above judged the path as written, a followed link and its target: the folders above
+			// that target, and any link inside it, are judged here on the leaf's real path (an operator's
+			// /fast -> /mnt/ssd/qod with /mnt/ssd another user's). The leaf goes again when one fails.
+			auto refused = ForeignOwnerOnPath(PathToUtf8(leaf), ::geteuid());
+			if (!refused.empty()) {
+				::rmdir(leaf.c_str());
+				throw std::runtime_error("cannot create the spill directory under " + parent + ": " + refused);
+			}
+#endif
 			return PathToUtf8(leaf);
 		}
 	}
