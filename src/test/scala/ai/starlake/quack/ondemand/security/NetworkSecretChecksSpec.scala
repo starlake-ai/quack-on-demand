@@ -12,7 +12,10 @@ class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
 
   // The checks read real paths: every path a check reads must exist in the shipped configuration.
   private def cfg(hocon: String): Config =
-    ConfigFactory.parseString(hocon).withFallback(ConfigFactory.load())
+    ConfigFactory
+      .parseString(hocon)
+      .withFallback(ConfigFactory.parseString(s"${AuditConfig.TrustAuthControlPlane} = false"))
+      .withFallback(ConfigFactory.load())
 
   private def status(
       checks: List[SecurityCheck],
@@ -189,22 +192,39 @@ class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
     ok.detail should not include "s3cret"
   }
 
-  "secret.pg-default-password and secret.pg-superuser" should "speak of the embedded control plane" in {
-    val embedded = cfg("""quack-on-demand.embeddedPostgres.enabled = true
-                         |quack-on-demand.defaultMetastore.pgPassword = "azizam"
-                         |quack-flightsql.auth.database.password = "azizam"""".stripMargin)
-    val pw = status(SecretChecks.all, "secret.pg-default-password", embedded)
+  "secret.pg-default-password and secret.pg-superuser" should "judge a trust-auth control plane, qod serve's or the demo's" in {
+    val trust = cfg(s"""${AuditConfig.TrustAuthControlPlane} = true
+                       |quack-on-demand.defaultMetastore.pgPassword = "postgres"
+                       |quack-flightsql.auth.database.password = "postgres"""".stripMargin)
+    val pw = status(SecretChecks.all, "secret.pg-default-password", trust)
     pw.status shouldBe Status.Warn
     pw.detail shouldBe "The embedded control-plane Postgres lets any local OS user connect as its superuser without a password (trust authentication on loopback)."
     pw.fix shouldBe "Run the manager against a Postgres of your own (QOD_PG_*) in production."
     val su = status(
       SecretChecks.all,
       "secret.pg-superuser",
-      embedded,
+      trust,
       StubAuditFacts(superuserLogin = true)
     )
     su.status shouldBe Status.Na
     su.detail should include("embedded control plane")
+  }
+
+  they should "key on the signal, not on the embedded flag" in {
+    val flagOnly = cfg("""quack-on-demand.embeddedPostgres.enabled = true
+                         |quack-on-demand.defaultMetastore.pgPassword = "azizam"""".stripMargin)
+    status(SecretChecks.all, "secret.pg-default-password", flagOnly).status shouldBe Status.Critical
+    status(
+      SecretChecks.all,
+      "secret.pg-superuser",
+      flagOnly,
+      StubAuditFacts(superuserLogin = true)
+    ).status shouldBe Status.Warn
+  }
+
+  "secret.pg-default-password" should "read right on both control planes" in {
+    SecretChecks.all.find(_.id == "secret.pg-default-password").get.title shouldBe
+      "Control-plane Postgres login"
   }
 
   "secret.pg-superuser" should "warn when the control-plane login is a superuser" in {

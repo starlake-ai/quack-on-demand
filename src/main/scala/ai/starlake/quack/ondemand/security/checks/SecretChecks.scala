@@ -5,8 +5,9 @@ import cats.effect.IO
 
 object SecretChecks:
 
+  /** `qod serve`'s embedded control plane or the demo's: trust authentication on loopback. */
   private def embedded(ctx: AuditContext): Boolean =
-    ctx.bool("quack-on-demand.embeddedPostgres.enabled")
+    ctx.bool(AuditConfig.TrustAuthControlPlane)
 
   /** The control-plane password `application.conf` ships with. */
   val ShippedPgPassword = "azizam"
@@ -14,13 +15,13 @@ object SecretChecks:
   private val pgDefaultPassword = SecurityCheck(
     "secret.pg-default-password",
     Area.Secrets,
-    "Postgres password is the shipped default",
+    "Control-plane Postgres login",
     List("QOD_PG_PASSWORD", "QOD_AUTH_DB_PASSWORD", "QOD_PG_EMBEDDED"),
     "/operating/deploy-single-server#secure-in-production",
     ctx =>
       IO.pure {
-        // The embedded server (`qod serve`) runs trust authentication on loopback: the passwords
-        // the manager holds are placeholders the server never checks.
+        // The embedded server (`qod serve`, the demo) runs trust authentication on loopback: the
+        // passwords the manager holds are placeholders the server never checks.
         if embedded(ctx) then
           Outcome(
             Status.Warn,

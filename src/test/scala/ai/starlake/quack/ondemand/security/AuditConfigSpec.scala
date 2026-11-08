@@ -28,11 +28,12 @@ class AuditConfigSpec extends AnyFlatSpec with Matchers:
       ),
       flight.copy(tlsEnabled = true, tlsCertChain = "/demo/home/certs/server-cert.pem"),
       quack.copy(enabled = true, host = "127.0.0.1", tlsEnabled = true),
-      auth.copy(database = auth.database.copy(password = "booted-auth"))
+      auth.copy(database = auth.database.copy(password = "booted-auth")),
+      trustAuthControlPlane = true
     )
     booted.getString("quack-on-demand.runtimeType") shouldBe "local"
     booted.getString("quack-on-demand.defaultMetastore.pgPassword") shouldBe "booted-pg"
-    booted.getBoolean("quack-on-demand.embeddedPostgres.enabled") shouldBe true
+    booted.getBoolean(AuditConfig.TrustAuthControlPlane) shouldBe true
     booted.getString("quack-flightsql.auth.database.password") shouldBe "booted-auth"
     booted.getBoolean("quack-flightsql.tlsEnabled") shouldBe true
     booted.getString("quack-flightsql.tlsCertChain") shouldBe "/demo/home/certs/server-cert.pem"
@@ -53,16 +54,30 @@ class AuditConfigSpec extends AnyFlatSpec with Matchers:
       ),
       flight,
       quack,
-      auth
+      auth,
+      trustAuthControlPlane = false
     )
     booted.getString("quack-on-demand.auth.management.sessionJwtSecret") shouldBe
       live.getString("quack-on-demand.auth.management.sessionJwtSecret")
   }
 
   it should "fall back to the live configuration for every other path" in {
-    val booted = AuditConfig.resolved(live, manager, flight, quack, auth)
+    val booted =
+      AuditConfig.resolved(live, manager, flight, quack, auth, trustAuthControlPlane = false)
+    booted.getBoolean(AuditConfig.TrustAuthControlPlane) shouldBe false
     booted.getBoolean("quack-on-demand.nodeFiles.allowLocal") shouldBe
       live.getBoolean("quack-on-demand.nodeFiles.allowLocal")
     booted.getString("quack-on-demand.fleet.autoApprove") shouldBe
       live.getString("quack-on-demand.fleet.autoApprove")
+  }
+
+  "AuditConfig.trustAuthControlPlane" should "hold for qod serve's embedded server and the demo's" in {
+    val embedded = manager.copy(embeddedPostgres = manager.embeddedPostgres.copy(enabled = true))
+    val external = manager.copy(embeddedPostgres = manager.embeddedPostgres.copy(enabled = false))
+    // qod serve: the embedded control plane (QOD_PG_EMBEDDED).
+    AuditConfig.trustAuthControlPlane(embedded, demoControlPlane = false) shouldBe true
+    // qod demo: DemoPostgres, whose overlay leaves embeddedPostgres.enabled false.
+    AuditConfig.trustAuthControlPlane(external, demoControlPlane = true) shouldBe true
+    // A Postgres of the operator's own.
+    AuditConfig.trustAuthControlPlane(external, demoControlPlane = false) shouldBe false
   }

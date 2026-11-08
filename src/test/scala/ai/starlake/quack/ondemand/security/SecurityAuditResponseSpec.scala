@@ -25,6 +25,7 @@ class SecurityAuditResponseSpec extends AnyFlatSpec with Matchers:
            |quack-flightsql.opa.token = "$Sentinel"
            |quack-on-demand.userS3.allowedEndpoints = "http://$Sentinel:9000"
            |quack-flightsql.tlsEnabled = false
+           |${AuditConfig.TrustAuthControlPlane} = false
            |""".stripMargin
       )
       .withFallback(ConfigFactory.load())

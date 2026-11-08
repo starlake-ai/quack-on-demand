@@ -285,7 +285,12 @@ object Main extends IOApp with LazyLogging:
       env: String => Option[String] = sys.env.get,
       rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load(),
       /** Whether this JDK has `HttpClient.shutdownNow` (21 and later); tests pass their own. */
-      shutdownNowAvailable: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow
+      shutdownNowAvailable: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow,
+      /** True only from `DemoRunner`: the control plane is the demo's `DemoPostgres` (trust
+        * authentication on loopback), which no configuration path says. The security audit judges
+        * it as it judges `qod serve`'s embedded control plane.
+        */
+      demoControlPlane: Boolean = false
   ): IO[ExitCode] =
     // The retired settings first, at the top of bootManager, before it opens any socket: they read
     // the configuration alone. One asking for what the manager cannot do (QOD_ACL_ENABLED or
@@ -429,7 +434,8 @@ object Main extends IOApp with LazyLogging:
       quackCfgResolved,
       qodNodeBin,
       internalHost,
-      internalPort
+      internalPort,
+      demoControlPlane
     )
 
   /** The boot after the Liquibase apply and the session secret's resolution: `mgrCfg` carries the
@@ -446,7 +452,8 @@ object Main extends IOApp with LazyLogging:
       quackCfgResolved: QuackNativeConfig,
       qodNodeBin: Option[java.nio.file.Path],
       internalHost: String,
-      internalPort: Int
+      internalPort: Int,
+      demoControlPlane: Boolean
   ): IO[ExitCode] =
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
@@ -1667,13 +1674,21 @@ object Main extends IOApp with LazyLogging:
         new ConfigHandlers(liveConfig, configEntries, telemetryStore.enabled)
 
       // The superuser-only security audit. It reads the configuration this replica booted with
-      // (the live one with what the boot resolved laid over it: the embedded control plane's
-      // passwords, the demo's TLS and binds) and the control plane on each request, so it reports
-      // how this replica stands now. `dataPathOf` resolves the row itself: a lookup by name would
-      // fall back to the default metastore for a row missing from the cache.
+      // (the live one with what the boot resolved laid over it: the embedded or demo control
+      // plane, its passwords, the demo's TLS and binds) and the control plane on each request, so
+      // it reports how this replica stands now. `dataPathOf` resolves the row itself: a lookup by
+      // name would fall back to the default metastore for a row missing from the cache.
       val securityAuditHandlers =
         val auditConfig = ai.starlake.quack.ondemand.security.AuditConfig
-          .resolved(liveConfig, mgrCfg, edgeCfg, quackCfgResolved, authCfg)
+          .resolved(
+            liveConfig,
+            mgrCfg,
+            edgeCfg,
+            quackCfgResolved,
+            authCfg,
+            ai.starlake.quack.ondemand.security.AuditConfig
+              .trustAuthControlPlane(mgrCfg, demoControlPlane)
+          )
         // The row facts read the supervisor's cached rows, as `dataPathOf` does: no full read of
         // the store per request.
         val facts = ai.starlake.quack.ondemand.security.LiveAuditFacts(

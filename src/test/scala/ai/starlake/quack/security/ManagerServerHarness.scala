@@ -629,7 +629,11 @@ object ManagerServerHarness:
         .SecurityAudit(
           ai.starlake.quack.ondemand.security.checks.SecurityChecks.all,
           ai.starlake.quack.ondemand.security.AuditContext(
-            liveConfig,
+            ConfigFactory
+              .parseString(
+                s"${ai.starlake.quack.ondemand.security.AuditConfig.TrustAuthControlPlane} = false"
+              )
+              .withFallback(liveConfig),
             ai.starlake.quack.ondemand.security.StubAuditFacts()
           ),
           "test-harness",
