@@ -35,8 +35,20 @@ qod-node now requires `--spill-dir` and `--node-dir` in serve mode, which this r
 pass. A `QOD_NODE_BIN` naming an earlier build, or a stale `native/qod-node/build`, fails every spawn
 with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use the bundled binary.
 
+Console sessions minted by an earlier release no longer resolve: everyone signs in again, `qod login`
+included. Personal access tokens are not affected.
+
 ### Breaking
 
+- A console session carries the account kind under `kind`, and a session token without it is refused
+  (it used to read a missing kind as `admin`). Sessions from an earlier release stop resolving; see
+  Upgrading.
+- An account's kind (`admin` or `user`) no longer works as a role or group name. A password login used to
+  hold every tenant role and group literally named `admin` or `user`, by that name alone; it now holds only
+  what its memberships grant, and the FlightSQL edge takes role and group names only from what an identity
+  provider's token names. With the Starflow pairing, where the edge accepts a QoD console session as a
+  bearer, that session yields no role and no group, whatever `QOD_AUTH_ROLE_CLAIM` names. Grant such a
+  role or group through a membership where a user relied on holding it by name.
 - A node whose superuser initSql sets `temp_directory` can stop at start where it started before:
   it now makes a folder of its own there (Added, below) and refuses the folder rather than spill
   elsewhere, with `cannot create the spill directory under <folder>: ...` naming the path at fault.
@@ -160,6 +172,13 @@ with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use 
 
 ### Added
 
+- **A superuser security audit**, in the console (Settings > Security audit) and the CLI (`qod admin
+  security-audit`). It judges the deployment against the operator docs' "Secure in production"
+  checklists, as the manager booted: 23 checks over network and TLS, secrets, identity, nodes and data,
+  and the fleet, each `critical`, `warn`, `ok`, `na` or `error`, with its fix and a docs link. Findings
+  name settings, counts and object names, never a secret's value. The CLI prints the critical and warning
+  findings, `--json` gives every check, and it exits 3 on a critical finding (or on the statuses
+  `--fail-on warn,error` names). Tenant admins are refused.
 - **Each node spills to a folder of its own under a superuser's `temp_directory`.** A database's or
   pool's initSql that sets `temp_directory` (a fast disk, say) no longer makes every node of the
   database share that folder, where nodes could read each other's spill files and one node's cleanup
@@ -241,8 +260,11 @@ with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use 
   on the caller's own account and on the last enabled superuser, and built-in roles and groups show a
   disabled Delete. A group's pool picker leaves out the pools it already holds, and its role picker lists
   roles made since the page opened.
-- The security audit's "Control-plane Postgres login" finding links to the page that covers the shipped
-  Postgres password, and its table gives the finding text the width the status badge took.
+- The Helm chart mounts `flightsql.tls.existingSecret`: the value was declared but never read, so setting it
+  kept the self-signed certificate. The manager now reads the Secret, at `/etc/qod/flight-tls`, through
+  `certKey` and `keyKey`.
+- On the local runtime, a manager variable whose name holds a `KEY` segment (`QOD_METRICS_AZURE_KEY`) no
+  longer reaches the nodes' environment, where a superuser's statement could read it with `getenv()`.
 
 ## 0.12.0
 
