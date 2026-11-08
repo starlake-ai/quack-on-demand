@@ -122,11 +122,30 @@ bool MakeDirectory(const fs::path &dir) {
 	return false;
 }
 
-void AcceptExisting(const std::string &parent, const fs::path &built, bool) {
+//! Windows has no owner test here (the PowerShell twin checks the leaf's owner): a directory is accepted, and
+//! so is a link to one unless it appeared while it was being created. Every filesystem call takes an
+//! error_code, so nothing but std::runtime_error leaves.
+void AcceptExisting(const std::string &parent, const fs::path &built, bool followLinks) {
 	std::error_code ec;
 	auto status = fs::symlink_status(built, ec);
 	if (ec) {
-		throw std::runtime_error(NotADirectory(parent, built, ("cannot be read: " + ec.message()).c_str()));
+		throw std::runtime_error(NotADirectory(parent, built, "cannot be read: " + ec.message()));
+	}
+	if (status.type() == fs::file_type::symlink) {
+		if (!followLinks) {
+			throw std::runtime_error(
+			    NotADirectory(parent, built, "appeared as a symbolic link while it was being created"));
+		}
+		auto target = fs::status(built, ec);
+		if (ec) {
+			throw std::runtime_error(
+			    NotADirectory(parent, built, "is a symbolic link that cannot be read through: " + ec.message()));
+		}
+		if (target.type() != fs::file_type::directory) {
+			throw std::runtime_error(
+			    NotADirectory(parent, built, "is a symbolic link to something that is not a directory"));
+		}
+		return;
 	}
 	if (status.type() != fs::file_type::directory) {
 		throw std::runtime_error(NotADirectory(parent, built, "exists and is not a directory"));
@@ -165,8 +184,14 @@ std::string MakePerNodeSpillDir(const std::string &parent, const std::string &ma
 		throw std::invalid_argument("the spill marker '" + marker + "' is not <port>-<hex>");
 	}
 	fs::path path = PathFromUtf8(parent);
-	fs::path built;
-	for (const auto &part : path) {
+	// The root ("/", or "C:\\" on Windows) is where the walk starts, not a component to examine or make: on
+	// Windows iterating the whole path yields the drive "C:" first, which names the drive's current
+	// directory, not its root.
+	fs::path built = path.root_path();
+	for (const auto &part : path.relative_path()) {
+		if (part.empty()) {
+			continue;
+		}
 		built /= part;
 		std::error_code ec;
 		// Only a component this call made is restricted to its owner (it is MakeDirectory's 0700); one

@@ -21,6 +21,8 @@ namespace fs = std::filesystem;
 namespace {
 
 int failures = 0;
+//! The case in progress, named when something throws that the case did not expect.
+const char *current_case = "start";
 
 void Expect(bool ok, const std::string &what) {
 	if (!ok) {
@@ -37,7 +39,8 @@ fs::path TempRoot() {
 
 } // namespace
 
-int main() {
+int Run() {
+	current_case = "names and markers";
 	Expect(qod::SpillLeafPrefix("20900-ab12") == "qod-spill.20900-ab12.", "prefix with marker");
 	Expect(qod::SpillLeafPrefix("") == "qod-spill.", "prefix without marker");
 	Expect(qod::IsSpillMarker(""), "no marker");
@@ -51,12 +54,14 @@ int main() {
 	Expect(!qod::IsSpillLeafName("qod-spill.Ab3dE"), "five random characters");
 	Expect(!qod::IsSpillLeafName("qod-node.Ab3dE9"), "another prefix");
 
+	current_case = "link owners";
 	// Only root and the node's own user own a link that may be followed.
 	Expect(qod::TrustedLinkOwner(0, 501), "root's link is followed");
 	Expect(qod::TrustedLinkOwner(501, 501), "the node user's link is followed");
 	Expect(!qod::TrustedLinkOwner(502, 501), "another user's link is refused");
 	Expect(!qod::TrustedLinkOwner(1, 0) , "a third user's link is refused even for a root node");
 
+	current_case = "creating a leaf under a missing parent";
 	auto root = TempRoot();
 	std::ofstream(root / "plain-file") << "x";
 	auto parent = root / "fast" / "a" / "b";
@@ -78,6 +83,7 @@ int main() {
 		Expect(created == fs::perms::owner_all, "a created component is 0700: " + dir.string());
 	}
 
+	current_case = "a pre-existing component keeps its mode";
 	// A component that was already there keeps its mode.
 	auto pre = root / "pre";
 	fs::create_directories(pre);
@@ -97,6 +103,7 @@ int main() {
 	           bare.rfind("qod-spill.", 0) == 0,
 	       "an empty marker gives qod-spill.XXXXXX: " + bare);
 
+	current_case = "a link of the node user's own";
 	// A symbolic link of this user's own (an operator's /fastdisk -> /mnt/ssd) is followed, the target
 	// keeps its mode and the leaf lands under it.
 	auto target = root / "target";
@@ -110,6 +117,7 @@ int main() {
 	       "the leaf lands under the link's target");
 	Expect((fs::status(target).permissions() & fs::perms::all) == kOpen, "the link's target keeps its mode");
 
+	current_case = "a link to a file or to nowhere";
 	// A link leading to a file, or nowhere, is refused naming the link.
 	fs::create_symlink(root / "plain-file", parent / "to-file");
 	fs::create_symlink(root / "nowhere", parent / "dangling");
@@ -122,6 +130,7 @@ int main() {
 			       std::string("the error names the link ") + name);
 		}
 	}
+	current_case = "components owned by another user";
 	// Components owned by another user are refused, directories as well as links. Needs root to chown.
 	if (::geteuid() == 0) {
 		auto foreign_dir = root / "foreign-dir";
@@ -170,6 +179,7 @@ int main() {
 	::umask(old_umask);
 #endif
 
+	current_case = "a bad marker";
 	for (std::string bad : {"20900/x", "ABC"}) {
 		try {
 			qod::MakePerNodeSpillDir((root / "marker").string(), bad);
@@ -180,6 +190,7 @@ int main() {
 	}
 	Expect(!fs::exists(root / "marker"), "a refused marker creates nothing");
 
+	current_case = "a parent holding a line break";
 	// spill.path is line-based: a parent holding a line break is refused before anything is created,
 	// and the error quotes nothing of the value.
 	for (std::string bad : {"\n", "\r", "\r\n"}) {
@@ -196,6 +207,7 @@ int main() {
 		Expect(!fs::exists(root / "broken"), "a refused parent creates nothing");
 	}
 
+	current_case = "a component that is a file";
 	auto blocked = root / "plain-file" / "under";
 	try {
 		qod::MakePerNodeSpillDir(blocked.string(), "");
@@ -204,20 +216,37 @@ int main() {
 		Expect(std::string(e.what()).find("plain-file") != std::string::npos, "the error names the path");
 	}
 
+	current_case = "recording the leaf";
 	auto node_dir = root / "node";
 	fs::create_directories(node_dir);
 	std::ofstream(node_dir / "spill.path") << "/default/qod-node.abcdef";
 	qod::RecordSpillDir(node_dir.string(), first.string());
-	std::ifstream in(node_dir / "spill.path");
 	std::string line1, line2;
-	std::getline(in, line1);
-	std::getline(in, line2);
+	{
+		// Closed before the folder is removed: Windows will not delete a file that is open.
+		std::ifstream in(node_dir / "spill.path");
+		std::getline(in, line1);
+		std::getline(in, line2);
+	}
 	Expect(line1 == "/default/qod-node.abcdef", "the default line is kept");
 	Expect(line2 == first.string(), "the leaf is appended on its own line");
 
-	fs::remove_all(root);
+	current_case = "cleaning up";
+	std::error_code ignored;
+	fs::remove_all(root, ignored);
 	if (failures == 0) {
 		std::cout << "spill_dir: all passed" << std::endl;
 	}
 	return failures == 0 ? 0 : 1;
+}
+
+int main() {
+	try {
+		return Run();
+	} catch (const std::exception &e) {
+		std::cerr << "FAIL: an exception in the case '" << current_case << "': " << e.what() << std::endl;
+	} catch (...) {
+		std::cerr << "FAIL: an unknown exception in the case '" << current_case << "'" << std::endl;
+	}
+	return 1;
 }
