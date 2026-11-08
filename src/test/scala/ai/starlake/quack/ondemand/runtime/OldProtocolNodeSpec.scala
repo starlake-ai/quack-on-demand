@@ -41,6 +41,9 @@ class OldProtocolNodeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
         case Right(bin) =>
           QodNodeBinary.runBuildInfo(bin).toOption.flatMap(QodNodeBinary.parseMarker) match
             case Some(info) if info.protocol < QodNodeBinary.Protocol =>
+              // LiveQodNode.start passes --spill-dir and --node-dir, which assume node protocol 6: an
+              // earlier vendored build refuses them, so a vendored protocol below 6 needs a start
+              // without them. Today the vendored protocol is 6 and this branch never runs.
               live = LiveQodNode.start(
                 dir,
                 "CREATE TABLE answers AS SELECT 42 AS v;\n",
