@@ -43,7 +43,8 @@ with `unknown option '--spill-dir'`: rebuild it, or unset `QOD_NODE_BIN` to use 
   It refuses:
   - an existing folder of the path, a symbolic link followed in it, or a folder or link on that link's
     real path, owned by a user other than root and the node's own: a group-writable folder shared with
-    colleagues, or an NFS export with `root_squash` that shows `nobody`;
+    colleagues, an NFS export with `root_squash` that shows `nobody`, or a host folder bind-mounted
+    into a rootless container or under `userns-remap`, where a host-root folder also shows `nobody`;
   - with a node running as root, a folder of the path owned by any non-root user;
   - a path that cannot be created (permission, a read-only filesystem, a component that is a file);
   - on Windows, any symbolic link, junction or mounted folder in the path;
