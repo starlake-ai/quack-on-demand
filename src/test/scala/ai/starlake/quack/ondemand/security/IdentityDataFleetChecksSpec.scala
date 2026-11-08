@@ -30,7 +30,7 @@ class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
       "id.reset-link-relative",
       "id.sso-redirect-default",
       "id.permissive-builtins",
-      "id.disabled-superuser-pats",
+      "id.disabled-account-pats",
       "node.unsigned-extensions",
       "node.community-extensions",
       "node.local-files",
@@ -92,12 +92,12 @@ class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
     run("id.permissive-builtins").status shouldBe Status.Ok
   }
 
-  "id.disabled-superuser-pats" should "warn on dormant tokens" in {
+  "id.disabled-account-pats" should "warn on dormant tokens" in {
     run(
-      "id.disabled-superuser-pats",
+      "id.disabled-account-pats",
       f = StubAuditFacts(dormantPats = 2)
     ).status shouldBe Status.Warn
-    run("id.disabled-superuser-pats").status shouldBe Status.Ok
+    run("id.disabled-account-pats").status shouldBe Status.Ok
   }
 
   "node.unsigned-extensions and node.community-extensions" should "grade unsigned critical, the others warn" in {
@@ -206,4 +206,77 @@ class IdentityDataFleetChecksSpec extends AnyFlatSpec with Matchers:
       StubAuditFacts(unboundServers = List("srv-1"))
     ).status shouldBe Status.Warn
     run("fleet.unbound-approvals", fleet(""), StubAuditFacts()).status shouldBe Status.Ok
+  }
+
+  "fleet.auto-approve-open" should "judge entries as the manager does" in {
+    def fleet(approve: String) =
+      cfg(s"""quack-on-demand { runtimeType = "fleet", fleet.autoApprove = "$approve" }""")
+    val v6 = run("fleet.auto-approve-open", fleet("::0/0"))
+    v6.status shouldBe Status.Critical
+    v6.detail should include("::0/0")
+    val v4 = run("fleet.auto-approve-open", fleet("10.0.0.0/0"))
+    v4.status shouldBe Status.Critical
+    v4.detail should include("10.0.0.0/0")
+    run("fleet.auto-approve-open", fleet("10.0.0.0/8")).status shouldBe Status.Ok
+    an[IllegalArgumentException] should be thrownBy run(
+      "fleet.auto-approve-open",
+      fleet("nonsense")
+    )
+  }
+
+  "fleet.unbound-approvals" should "name the servers" in {
+    val c = cfg("""quack-on-demand.runtimeType = "fleet"""")
+    run(
+      "fleet.unbound-approvals",
+      c,
+      StubAuditFacts(unboundServers = List("srv-1"))
+    ).detail should include("srv-1")
+  }
+
+  "node.local-files" should "be ok when tenant folders are authorized, and word the count" in {
+    val withRoot =
+      cfg("""quack-on-demand { nodeFiles.allowLocal = true, tenantFiles.root = "/srv/t" }""")
+    val o = run(
+      "node.local-files",
+      withRoot,
+      StubAuditFacts(failWith = Some(new RuntimeException("not read")))
+    )
+    o.status shouldBe Status.Ok
+    o.detail shouldBe "Tenant folders are authorized under QOD_TENANT_FILES_ROOT, so nodes need local files."
+    val on = cfg("""quack-on-demand { nodeFiles.allowLocal = true, tenantFiles.root = "" }""")
+    run("node.local-files", on, StubAuditFacts(local = List("a/b"))).detail should startWith(
+      "1 database keeps"
+    )
+    run("node.local-files", on, StubAuditFacts(local = List("a/b", "a/c"))).detail should startWith(
+      "2 databases keep"
+    )
+  }
+
+  "node.community-extensions" should "name each setting that is on" in {
+    val one = run(
+      "node.community-extensions",
+      cfg("quack-on-demand.nodeExtensions { allowCommunity = true, autoinstallKnown = false }")
+    )
+    one.status shouldBe Status.Warn
+    one.detail should include("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS")
+    one.detail should not include "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
+    val both = run(
+      "node.community-extensions",
+      cfg("quack-on-demand.nodeExtensions { allowCommunity = true, autoinstallKnown = true }")
+    )
+    both.detail should include("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS")
+    both.detail should include("QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS")
+  }
+
+  "id.lockout-off" should "only mention SMTP when none is configured" in {
+    val noSmtp = run(
+      "id.lockout-off",
+      cfg("""quack-on-demand { auth.lockout.enabled = false, smtp.host = "" }""")
+    )
+    noSmtp.fix should include("QOD_SMTP_HOST")
+    val smtp = run(
+      "id.lockout-off",
+      cfg("""quack-on-demand { auth.lockout.enabled = false, smtp.host = "mail" }""")
+    )
+    smtp.fix shouldBe "Set QOD_AUTH_LOCKOUT_ENABLED=true."
   }

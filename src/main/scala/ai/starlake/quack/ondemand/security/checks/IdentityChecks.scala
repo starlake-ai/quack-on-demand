@@ -19,7 +19,9 @@ object IdentityChecks:
           Outcome(
             Status.Warn,
             "Account lockout is off: a password can be guessed without limit on the console and the data plane.",
-            "Set QOD_SMTP_HOST, then QOD_AUTH_LOCKOUT_ENABLED=true (boot refuses lockout without SMTP)."
+            if ctx.string("quack-on-demand.smtp.host").isEmpty then
+              "Set QOD_SMTP_HOST, then QOD_AUTH_LOCKOUT_ENABLED=true (boot refuses lockout without SMTP)."
+            else "Set QOD_AUTH_LOCKOUT_ENABLED=true."
           )
       )
   )
@@ -86,7 +88,7 @@ object IdentityChecks:
   )
 
   private val disabledPats = SecurityCheck(
-    "id.disabled-superuser-pats",
+    "id.disabled-account-pats",
     Area.Identity,
     "Disabled accounts still own live tokens",
     Nil,

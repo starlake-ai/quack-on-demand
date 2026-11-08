@@ -50,17 +50,27 @@ object NodeDataChecks:
     "node.local-files",
     Area.Data,
     "Nodes may open local files though no database needs them",
-    List("QOD_NODE_ALLOW_LOCAL_FILES"),
+    List("QOD_NODE_ALLOW_LOCAL_FILES", "QOD_TENANT_FILES_ROOT"),
     "/operating/tenants-databases#secure-in-production",
     ctx =>
       if !ctx.bool("quack-on-demand.nodeFiles.allowLocal") then
         IO.pure(Outcome(Status.Ok, "Nodes open no local file outside DuckDB's temp directory."))
+      else if ctx.string("quack-on-demand.tenantFiles.root").nonEmpty then
+        IO.pure(
+          Outcome(
+            Status.Ok,
+            "Tenant folders are authorized under QOD_TENANT_FILES_ROOT, so nodes need local files."
+          )
+        )
       else
         IO.blocking(ctx.facts.localDatabases()).map { local =>
           if local.nonEmpty then
             Outcome(
               Status.Ok,
-              s"${local.size} databases keep their data on local paths, so nodes need local files."
+              if local.size == 1 then
+                "1 database keeps its data on a local path, so nodes need local files."
+              else
+                s"${local.size} databases keep their data on local paths, so nodes need local files."
             )
           else
             Outcome(

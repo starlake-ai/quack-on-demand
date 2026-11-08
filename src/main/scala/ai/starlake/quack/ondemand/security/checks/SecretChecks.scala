@@ -24,7 +24,9 @@ object SecretChecks:
         else
           Outcome(
             Status.Critical,
-            s"${which.mkString(" and ")} still hold the password application.conf ships with.",
+            s"${which.mkString(" and ")} still ${
+                if which.size == 1 then "holds" else "hold"
+              } the password application.conf ships with.",
             "Give the control-plane login a password of its own and set it in the manager's environment."
           )
       }

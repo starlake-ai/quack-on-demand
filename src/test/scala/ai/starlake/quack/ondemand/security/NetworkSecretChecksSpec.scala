@@ -84,6 +84,8 @@ class NetworkSecretChecksSpec extends AnyFlatSpec with Matchers:
              |quack-flightsql.auth.db.password = "$auth"""".stripMargin)
     )
     p("azizam", "x").status shouldBe Status.Critical
+    p("azizam", "x").detail should include("still holds")
+    p("azizam", "azizam").detail should include("still hold ")
     p("x", "azizam").status shouldBe Status.Critical
     val ok = p("s3cret-1", "s3cret-2")
     ok.status shouldBe Status.Ok
