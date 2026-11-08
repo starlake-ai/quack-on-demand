@@ -122,33 +122,20 @@ bool MakeDirectory(const fs::path &dir) {
 	return false;
 }
 
-//! Windows has no owner test here (the PowerShell twin checks the leaf's owner): a directory is accepted, and
-//! so is a link to one unless it appeared while it was being created. Every filesystem call takes an
-//! error_code, so nothing but std::runtime_error leaves.
-void AcceptExisting(const std::string &parent, const fs::path &built, bool followLinks) {
+//! Windows has no owner test here (the PowerShell twin checks the leaf's owner), so a symbolic link or a
+//! junction among the components is refused, not followed: one planted by another user would carry the spill
+//! folder elsewhere and nothing here could tell. Only a real directory is accepted (symlink_status does not
+//! follow, and reports a junction as its own type). Every filesystem call takes an error_code, so nothing
+//! but std::runtime_error leaves.
+void AcceptExisting(const std::string &parent, const fs::path &built, bool) {
 	std::error_code ec;
 	auto status = fs::symlink_status(built, ec);
 	if (ec) {
 		throw std::runtime_error(NotADirectory(parent, built, "cannot be read: " + ec.message()));
 	}
-	if (status.type() == fs::file_type::symlink) {
-		if (!followLinks) {
-			throw std::runtime_error(
-			    NotADirectory(parent, built, "appeared as a symbolic link while it was being created"));
-		}
-		auto target = fs::status(built, ec);
-		if (ec) {
-			throw std::runtime_error(
-			    NotADirectory(parent, built, "is a symbolic link that cannot be read through: " + ec.message()));
-		}
-		if (target.type() != fs::file_type::directory) {
-			throw std::runtime_error(
-			    NotADirectory(parent, built, "is a symbolic link to something that is not a directory"));
-		}
-		return;
-	}
 	if (status.type() != fs::file_type::directory) {
-		throw std::runtime_error(NotADirectory(parent, built, "exists and is not a directory"));
+		throw std::runtime_error(NotADirectory(
+		    parent, built, "exists and is not a directory (a symbolic link or junction is not followed here)"));
 	}
 }
 
