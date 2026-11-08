@@ -189,6 +189,15 @@ th.actions, td.actions { text-align: right; white-space: nowrap; }
 table.config-table { table-layout: fixed; }
 table.config-table td { vertical-align: top; word-break: break-all; }
 table.config-table td:last-child { word-break: normal; color: var(--text-mute); }
+
+/* ----- Security audit page ----- */
+/* Fixed widths for the badge and Docs columns, so every area's table lines up and the
+   finding text takes the rest. Long paths in a finding wrap; words do not split. */
+table.audit-table { table-layout: fixed; }
+table.audit-table col.audit-status { width: 6.5rem; }
+table.audit-table col.audit-docs { width: 4.5rem; }
+table.audit-table td { vertical-align: top; overflow-wrap: anywhere; }
+table.audit-table td:last-child { text-align: right; }
 tbody tr.config-section {
   background: var(--bg-elev);
 }
@@ -379,6 +388,7 @@ button.danger {
   border: 1px solid var(--bad);
 }
 button.danger:hover { background: rgba(248,113,113,.1); }
+button.danger[disabled]:hover { background: transparent; }
 
 fieldset {
   border: 1px solid var(--border);

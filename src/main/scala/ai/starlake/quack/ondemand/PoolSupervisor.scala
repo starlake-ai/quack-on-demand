@@ -4473,6 +4473,25 @@ final class PoolSupervisor(
   def tenantForColumnPolicy(id: String): Option[String] =
     store.getColumnPolicy(id).flatMap(p => rbacResolver.role(p.roleId).map(_.tenantId))
 
+  /** A policy's catalog, schema or table left blank matches no table (`PolicyCoverage.covers`
+    * compares names; only "*" is a wildcard), so the policy would be stored and never apply: a mask
+    * or row filter its author believes in force. Refused at create; a manifest import, which writes
+    * through the store, keeps restoring whatever a backup holds.
+    */
+  private def blankPolicyScopeError(
+      catalogName: String,
+      schemaName: String,
+      tableName: String
+  ): Option[SupervisorError] =
+    val blank =
+      List("catalogName" -> catalogName, "schemaName" -> schemaName, "tableName" -> tableName)
+        .collect { case (field, v) if v.trim.isEmpty => field }
+    Option.when(blank.nonEmpty)(
+      SupervisorError.InvalidArgument(
+        s"${blank.mkString(", ")} must not be blank: a blank name matches no table (use '*' to match every one)"
+      )
+    )
+
   def createColumnPolicy(
       roleId: String,
       catalogName: String,
@@ -4485,7 +4504,9 @@ final class PoolSupervisor(
     withCacheRecovery("createColumnPolicy") {
       val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
       val builtin             = builtinRoleError(roleId)
+      val blankScope          = blankPolicyScopeError(catalogName, schemaName, tableName)
       if builtin.isDefined then Left(builtin.get)
+      else if blankScope.isDefined then Left(blankScope.get)
       else if !state.RoleColumnPolicy.ValidActions.contains(action) then
         Left(
           SupervisorError.InvalidArgument(
@@ -4605,7 +4626,9 @@ final class PoolSupervisor(
       predicateSql: String
   ): IO[Either[SupervisorError, state.RoleRowPolicy]] = IO.blocking {
     withCacheRecovery("createRowPolicy") {
-      builtinRoleError(roleId) match
+      builtinRoleError(roleId).orElse(
+        blankPolicyScopeError(catalogName, schemaName, tableName)
+      ) match
         case Some(err) => Left(err)
         case None      =>
           ai.starlake.quack.edge.rls.RowPredicateValidator.validate(predicateSql) match
@@ -5180,7 +5203,8 @@ final class PoolSupervisor(
         effPerms,
         directPools ++ viaGroupPools,
         columnPolicies,
-        rowPolicies
+        rowPolicies,
+        directRoles = directRoleIdsLocal.toList.flatMap(rbacResolver.role).sortBy(_.name)
       )
     }
 
@@ -5211,7 +5235,8 @@ final class PoolSupervisor(
           effRoles,
           effGroups,
           effPerms,
-          directPools ++ viaGroupPools
+          directPools ++ viaGroupPools,
+          directRoles = directRoleIds.toList.flatMap(rbacResolver.role).sortBy(_.name)
         )
       }.toMap
 

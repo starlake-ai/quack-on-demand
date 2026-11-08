@@ -2696,6 +2696,32 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.effectiveSetForUser(user.id).map(_.columnPolicies.map(_.columnName)) shouldBe
       Some(List("c_email"))
 
+  // ---------- policy create: a blank catalog, schema or table matches no table ----------
+
+  it should "refuse a column or row policy whose catalog, schema or table is blank" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val t     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val role  = sup.createRole(t.id, "analyst").unsafeRunSync().toOption.get
+    def refusal(out: Either[SupervisorError, ?]): String =
+      out.swap.toOption.get match
+        case SupervisorError.InvalidArgument(m) => m
+        case other                              => fail(s"expected InvalidArgument, got $other")
+    for (cat, sch, tbl, field) <- List(
+        ("  ", "tpch1", "customer", "catalogName"),
+        ("*", "", "customer", "schemaName"),
+        ("*", "tpch1", " ", "tableName")
+      )
+    do
+      refusal(
+        sup.createColumnPolicy(role.id, cat, sch, tbl, "c_email", "mask", Some("'***'")).unsafeRunSync()
+      ) should include(field)
+      refusal(sup.createRowPolicy(role.id, cat, sch, tbl, "1 = 1").unsafeRunSync()) should include(field)
+    store.listColumnPolicies(role.id) shouldBe Nil
+    store.listRowPolicies(role.id) shouldBe Nil
+    // '*' stays the way to cover every one.
+    sup.createRowPolicy(role.id, "*", "*", "*", "1 = 1").unsafeRunSync() shouldBe a[Right[?, ?]]
+
   // ---------- row policy create: comment-carrying predicates rejected ----------
 
   it should "reject a comment-carrying predicate at createRowPolicy (reviewer's repro)" in:

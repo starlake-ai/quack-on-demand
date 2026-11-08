@@ -544,10 +544,11 @@ export interface UserResponse {
   username: string;
   kind: string;                     // account kind: admin | user (management rights), NOT an RBAC role
   enabled: boolean;
-  roles:  string[];                 // effective role NAMES
-  groups: string[];                 // effective group NAMES
+  roles:  string[];                 // effective role NAMES (direct and via groups)
+  groups: string[];                 // group NAMES (a user's groups are all direct)
   poolGrants: string[];             // human "tenant/pool" or "tenant/*" labels
   email?: string | null;
+  directRoles?: string[];           // role NAMES granted to the user itself, not via a group
 }
 
 export interface UserCreateRequest {

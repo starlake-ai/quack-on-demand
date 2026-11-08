@@ -12,10 +12,9 @@ import ai.starlake.quack.ondemand.state._
   * }}}
   *
   * One of these is pinned onto each FlightSQL [[ai.starlake.quack.edge.ConnectionContext]] keyed by
-  * peerId, and each statement's session handle carries it (the node decider judges with it)
-  * without any further joins. The REST surface also
-  * exposes it through `/user/{id}/effective` and reuses it inside the role/group/pool columns
-  * served by `/user/list`.
+  * peerId, and each statement's session handle carries it (the node decider judges with it) without
+  * any further joins. The REST surface also exposes it through `/user/{id}/effective` and reuses it
+  * inside the role/group/pool columns served by `/user/list`.
   */
 final case class EffectiveSet(
     user: RbacUser,
@@ -40,5 +39,8 @@ final case class EffectiveSet(
     // place a token narrows a set); None when no token did. The node decision pipeline reads it
     // (branchOnly, and the session context the handle digests). Like `claims`, never part of the
     // effective-set cache key.
-    restriction: Option[ai.starlake.quack.ondemand.auth.TokenRestriction] = None
+    restriction: Option[ai.starlake.quack.ondemand.auth.TokenRestriction] = None,
+    // The roles granted to the user itself, as opposed to through a group (`roles` holds both).
+    // Shown by the admin UI so its role editor adds and removes only these; no decision reads it.
+    directRoles: List[RbacRole] = Nil
 )

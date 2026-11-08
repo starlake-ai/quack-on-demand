@@ -11674,6 +11674,10 @@ components:
             type: string
         email:
           type: string
+        directRoles:
+          type: array
+          items:
+            type: string
     UserRoleMembershipRequest:
       title: UserRoleMembershipRequest
       type: object

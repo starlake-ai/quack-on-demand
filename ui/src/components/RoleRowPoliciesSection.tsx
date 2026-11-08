@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
 import type { RowPolicyDto } from '../api/types';
-import { DeleteIcon } from './Icons';
+import { DeleteIcon, EditIcon } from './Icons';
 
 /** Row-level policy tab body inside the Role edit modal.
   * Lists existing row policies for the role and provides an inline
@@ -9,11 +9,15 @@ import { DeleteIcon } from './Icons';
   * boolean SQL expression that may embed identity tokens
   * (${user}, ${tenant}, ${tenantId}, ${roles}, ${groups}) substituted at
   * query time. Row-level security is enabled by default; QOD_RLS_ENABLED=false
-  * on the manager disables it. */
-export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
+  * on the manager disables it. `onCount` hears the policy count after every load,
+  * so the tab title can show it. */
+export default function RoleRowPoliciesSection({ roleId, onCount }: { roleId: string; onCount?: (n: number) => void }) {
   const [policies, setPolicies] = useState<RowPolicyDto[]>([]);
   const [error,    setError]    = useState<string | null>(null);
   const [adding,   setAdding]   = useState(false);
+  // The policy the form edits in place (its predicate only: the update endpoint keeps what it
+  // covers), or null when the form creates one.
+  const [editing,  setEditing]  = useState<RowPolicyDto | null>(null);
 
   // Form fields
   const [fCatalog,   setFCatalog]   = useState('*');
@@ -24,7 +28,7 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
   function reload() {
     setError(null);
     api.listRowPolicies(roleId)
-      .then(r => setPolicies(r.policies))
+      .then(r => { setPolicies(r.policies); onCount?.(r.policies.length); })
       .catch(e => setError(errorMessage(e)));
   }
 
@@ -39,11 +43,39 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
     setFTable('');
     setFPredicate('');
     setError(null);
+    setEditing(null);
+  }
+
+  function startEdit(p: RowPolicyDto) {
+    setFCatalog(p.catalogName);
+    setFSchema(p.schemaName);
+    setFTable(p.tableName);
+    setFPredicate(p.predicateSql);
+    setError(null);
+    setEditing(p);
+    setAdding(true);
   }
 
   async function handleCreate(ev: React.FormEvent) {
     ev.preventDefault();
     setError(null);
+    if (editing) {
+      // One update, so the role never sees every row as it would between a delete and a create.
+      try {
+        await api.updateRowPolicy({ id: editing.id, predicateSql: fPredicate.trim() });
+        setAdding(false);
+        resetForm();
+        reload();
+      } catch (e) {
+        setError(errorMessage(e));
+      }
+      return;
+    }
+    // A blank schema or table matches no table, so the policy would never apply.
+    if (!fSchema.trim() || !fTable.trim()) {
+      setError('Schema and table are required (use * for every one).');
+      return;
+    }
     try {
       await api.createRowPolicy({
         roleId,
@@ -99,6 +131,14 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
                 </td>
                 <td className="actions">
                   <button
+                    className="icon-btn"
+                    title="Edit"
+                    aria-label="Edit"
+                    onClick={() => startEdit(p)}
+                  >
+                    <EditIcon />
+                  </button>{' '}
+                  <button
                     className="icon-btn danger"
                     title="Delete"
                     aria-label="Delete"
@@ -132,12 +172,18 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
             padding: '0.75rem 1rem',
           }}
         >
+          {editing && (
+            <div className="subtle" style={{ marginBottom: 8 }}>
+              Editing the policy on <code>{editing.tableName}</code>: what it covers is fixed; delete and re-create it to change that.
+            </div>
+          )}
           <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
             <div style={{ flex: '1 1 8rem', minWidth: 80 }}>
               <label style={{ margin: 0 }}>
                 Catalog
                 <input
                   value={fCatalog}
+                  disabled={editing != null}
                   onChange={ev => setFCatalog(ev.target.value)}
                   placeholder="*"
                 />
@@ -148,6 +194,7 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
                 Schema
                 <input
                   value={fSchema}
+                  disabled={editing != null}
                   onChange={ev => setFSchema(ev.target.value)}
                   placeholder="schema"
                   required
@@ -159,6 +206,7 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
                 Table
                 <input
                   value={fTable}
+                  disabled={editing != null}
                   onChange={ev => setFTable(ev.target.value)}
                   placeholder="table"
                   required
@@ -191,7 +239,7 @@ export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
             >
               Cancel
             </button>
-            <button type="submit" style={{ minWidth: '7rem' }}>Create</button>
+            <button type="submit" style={{ minWidth: '7rem' }}>{editing ? 'Save' : 'Create'}</button>
           </div>
         </form>
       )}

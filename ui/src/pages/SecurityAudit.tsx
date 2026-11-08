@@ -52,7 +52,12 @@ export default function SecurityAudit() {
           {groupByArea(visibleFindings(report.findings, showPassing)).map(g => (
             <section key={g.area}>
               <h3>{areaLabel(g.area)}</h3>
-              <table className="config-table">
+              <table className="audit-table">
+                <colgroup>
+                  <col className="audit-status" />
+                  <col />
+                  <col className="audit-docs" />
+                </colgroup>
                 <tbody>
                   {g.findings.map(f => (
                     <tr key={f.id}>

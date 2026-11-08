@@ -17,7 +17,7 @@ object SecretChecks:
     Area.Secrets,
     "Control-plane Postgres login",
     List("QOD_PG_PASSWORD", "QOD_AUTH_DB_PASSWORD", "QOD_PG_EMBEDDED"),
-    "/operating/deploy-single-server#secure-in-production",
+    "/operating/tenants-databases#secure-in-production",
     ctx =>
       IO.pure {
         // The embedded server (`qod serve`, the demo) runs trust authentication on loopback: the

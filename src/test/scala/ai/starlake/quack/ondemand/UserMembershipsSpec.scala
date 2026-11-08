@@ -179,6 +179,28 @@ class UserMembershipsSpec extends AnyFlatSpec with Matchers:
     failAttach = true
   )
 
+  "UserResponse.directRoles" should "list the roles granted to the user, not those through a group" in
+    withSup { (sup, _, users) =>
+      val analyst = sup.createRole("acme", "analyst").unsafeRunSync().toOption.get
+      val viewer  = sup.createRole("acme", "viewer").unsafeRunSync().toOption.get
+      val team    = sup.createGroup("acme", "team").unsafeRunSync().toOption.get
+      sup.addGroupRole(team.id, viewer.id).unsafeRunSync() shouldBe Right(())
+      val u = create(
+        sup,
+        users,
+        Some("acme"),
+        UserMemberships.Requested(Some(List("analyst")), Some(List("team")))
+      ).toOption.get
+      val handlers = new UserHandlers(sup, users)
+      val one      = handlers.toResponseFor(u.id).get
+      one.roles should contain theSameElementsAs List(analyst.name, viewer.name)
+      one.directRoles shouldBe List(analyst.name)
+      one.groups shouldBe List(team.name)
+      // The bulk path behind user/list answers the same.
+      val listed = sup.effectiveSetsForUsers(List(sup.findUserById(u.id).get))(u.id)
+      handlers.toResponse(listed, Map.empty).directRoles shouldBe List(analyst.name)
+    }
+
   "REST user/create" should "answer 500 with a generic message when attaching fails" in withSup(
     (sup, store, users) =>
       val scopeOf: SessionScope.Resolver = _ => SessionScope.Superuser

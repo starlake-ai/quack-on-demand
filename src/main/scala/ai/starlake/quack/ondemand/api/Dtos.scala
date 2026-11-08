@@ -1116,10 +1116,11 @@ final case class UserResponse(
     username: String,
     kind: String, // account kind: admin | user (management rights), NOT an RBAC role
     enabled: Boolean = true,
-    roles: List[String] = Nil,      // role NAMES (not ids), tenant-scoped
-    groups: List[String] = Nil,     // group NAMES
+    roles: List[String] = Nil,      // role NAMES (not ids), tenant-scoped, direct and via groups
+    groups: List[String] = Nil,     // group NAMES (a user's groups are all direct)
     poolGrants: List[String] = Nil, // human label "tenant/pool" or "tenant/*"
-    email: Option[String] = None
+    email: Option[String] = None,
+    directRoles: List[String] = Nil // the role NAMES granted to the user itself, not via a group
 )
 final case class UserListResponse(users: List[UserResponse])
 
