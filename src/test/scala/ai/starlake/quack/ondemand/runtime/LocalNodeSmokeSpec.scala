@@ -197,6 +197,7 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
         authCfg,
         metrics,
         opa,
+        demoControlPlane = false,
         quackCfg = Some(quackCfg)
       )
       .attempt

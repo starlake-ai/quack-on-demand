@@ -164,6 +164,7 @@ class SessionSecretRestartSpec extends AnyFlatSpec with Matchers with BeforeAndA
         authCfg,
         source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
         opa,
+        demoControlPlane = false,
         quackCfg = Some(source.at("quack-native").loadOrThrow[QuackNativeConfig])
       )
       .attempt

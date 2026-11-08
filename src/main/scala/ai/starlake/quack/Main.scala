@@ -260,6 +260,7 @@ object Main extends IOApp with LazyLogging:
         resolvedAuth,
         metricsCfg,
         opaCfg,
+        demoControlPlane = false,
         modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
         quackCfg = Some(quackCfg)
       )
@@ -274,6 +275,12 @@ object Main extends IOApp with LazyLogging:
         * must load and validate it, so a bad QOD_ACL_MODE / QOD_OPA_URL fails boot everywhere.
         */
       opaCfg: OpaConfig,
+      /** Whether the control plane is the demo's `DemoPostgres` (trust authentication on loopback),
+        * which no configuration path says: true only from `DemoRunner`. The security audit judges
+        * it as it judges `qod serve`'s embedded control plane. No default: a caller that starts a
+        * trust-auth Postgres and forgets it would read `ok`.
+        */
+      demoControlPlane: Boolean,
       modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
       /** The native Quack front door block; loaded from `quack-native` when the caller does not
         * pass one (demo and serve overlays set their system properties before this runs).
@@ -285,12 +292,7 @@ object Main extends IOApp with LazyLogging:
       env: String => Option[String] = sys.env.get,
       rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load(),
       /** Whether this JDK has `HttpClient.shutdownNow` (21 and later); tests pass their own. */
-      shutdownNowAvailable: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow,
-      /** True only from `DemoRunner`: the control plane is the demo's `DemoPostgres` (trust
-        * authentication on loopback), which no configuration path says. The security audit judges
-        * it as it judges `qod serve`'s embedded control plane.
-        */
-      demoControlPlane: Boolean = false
+      shutdownNowAvailable: Boolean = ai.starlake.quack.edge.BoundedHttp.canShutdownNow
   ): IO[ExitCode] =
     // The retired settings first, at the top of bootManager, before it opens any socket: they read
     // the configuration alone. One asking for what the manager cannot do (QOD_ACL_ENABLED or

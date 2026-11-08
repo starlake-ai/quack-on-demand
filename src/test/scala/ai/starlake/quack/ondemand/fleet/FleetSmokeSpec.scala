@@ -370,6 +370,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         authCfg,
         metrics,
         opa,
+        demoControlPlane = false,
         quackCfg = Some(quackCfg)
       )
       .attempt
