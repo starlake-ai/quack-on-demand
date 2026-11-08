@@ -78,3 +78,35 @@ class SecurityAuditSpec extends AnyFlatSpec with Matchers:
     audit(List(check("a.ok", Status.Ok))).findings.head.docs shouldBe
       "https://docs.starlake.ai/qod/operating/tls"
   }
+
+  it should "bound a check stuck in a blocking call by its timeout" in {
+    val stuck = SecurityCheck(
+      "x.blocked",
+      Area.Data,
+      "t",
+      Nil,
+      "/operating/tls",
+      _ => IO.blocking(Thread.sleep(2000)).as(Outcome(Status.Ok, "late"))
+    )
+    val t0 = System.nanoTime()
+    val f  = audit(List(stuck), timeout = 100.millis).findings.head
+    val ms = (System.nanoTime() - t0) / 1000000
+    f.status shouldBe Status.Error
+    f.detail shouldBe SecurityAudit.FailedDetail
+    ms should be < 1500L
+  }
+
+  it should "turn a check that throws synchronously into error with the fixed detail" in {
+    val boom = SecurityCheck(
+      "x.sync",
+      Area.Secrets,
+      "t",
+      Nil,
+      "/operating/tls",
+      _ => throw new RuntimeException("password=x")
+    )
+    val f = audit(List(boom)).findings.head
+    f.status shouldBe Status.Error
+    f.detail shouldBe SecurityAudit.FailedDetail
+    f.detail should not include "password"
+  }

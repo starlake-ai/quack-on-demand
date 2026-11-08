@@ -7,7 +7,7 @@ import scala.concurrent.duration.*
 
 /** Runs every check in parallel, each under `timeout`. A check that fails or times out becomes an
   * `error` finding with [[SecurityAudit.FailedDetail]]: its exception never reaches the answer,
-  * since a message can quote a value. The cause goes to the log at WARN with the check's id.
+  * since a message can quote a value. The cause goes to the log at ERROR with the check's id.
   */
 final case class SecurityAudit(
     checks: List[SecurityCheck],
@@ -40,10 +40,10 @@ final case class SecurityAudit(
 
   private def runOne(c: SecurityCheck): IO[Finding] =
     IO.defer(c.run(ctx))
-      .timeout(timeout)
+      .timeoutAndForget(timeout)
       .handleErrorWith { e =>
         IO(
-          logger.warn(s"security audit check ${c.id} could not complete: ${e.getClass.getName}", e)
+          logger.error(s"security audit check ${c.id} could not complete: ${e.getClass.getName}", e)
         )
           .as(Outcome(Status.Error, SecurityAudit.FailedDetail))
       }

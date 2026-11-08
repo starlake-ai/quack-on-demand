@@ -12,7 +12,9 @@ final case class AuditContext(config: Config, facts: AuditFacts):
     string(path).split(',').iterator.map(_.trim).filter(_.nonEmpty).toList
 
 object AuditContext:
+  private val Ipv4Loopback = """127\.\d{1,3}\.\d{1,3}\.\d{1,3}""".r
+
   /** A bind host that only this machine reaches. Literal forms only: no name is resolved. */
   def isLoopback(host: String): Boolean =
     val h = host.trim.toLowerCase(java.util.Locale.ROOT).stripPrefix("[").stripSuffix("]")
-    h == "localhost" || h == "::1" || h.startsWith("127.")
+    h == "localhost" || h == "::1" || Ipv4Loopback.matches(h)
