@@ -4,9 +4,9 @@ import ai.starlake.quack.model.SqlLiterals
 
 /** The SQL text the REST edge hands to the routed executor.
   *
-  * Pure, and deliberately small: the edge builds ordinary statement text and lets
-  * `StatementValidator`, the RLS/CLS rewriters and the router see it like any other client's SQL.
-  * Two rules keep that text safe without a parallel quoting helper:
+  * Pure, and deliberately small: the edge builds ordinary statement text and lets the RLS/CLS
+  * rewriters, the router and the node's decision see it like any other client's SQL. Two rules keep
+  * that text safe without a parallel quoting helper:
   *
   *   - identifiers only through [[SqlLiterals.duckdbIdent]], and only names the probe returned (a
   *     [[ResolvedQuery]] cannot hold anything else) or the already-validated path segments;

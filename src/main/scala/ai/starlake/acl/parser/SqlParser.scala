@@ -63,8 +63,8 @@ object SqlParser:
 
   /** [[stripTimeTravelClauses]] plus the clauses it removed, in source order. The one scanner
     * behind both: the column and row policy rewriters strip with it and put each clause back on its
-    * table reference (`TimeTravelCarrier`), so what they parse is exactly what the validator
-    * parsed.
+    * table reference (`TimeTravelCarrier`), so what they parse is exactly what the metadata filter
+    * and the protected-write guard parsed.
     */
   def timeTravelClauses(sql: String): (String, List[TimeTravelClause]) =
     val (stripped, clauses) = ParserInput.timeTravelClauses(sql)

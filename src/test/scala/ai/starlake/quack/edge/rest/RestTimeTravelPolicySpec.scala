@@ -2,8 +2,7 @@ package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.edge.cls.ColumnCatalog
-import ai.starlake.quack.edge.sql.PostgresAclValidator
-import ai.starlake.quack.ondemand.state.{RoleColumnPolicy, RolePermission, RoleRowPolicy}
+import ai.starlake.quack.ondemand.state.{RoleColumnPolicy, RoleRowPolicy}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -11,12 +10,12 @@ import org.scalatest.matchers.should.Matchers
   * AND still apply the policy? The edge sends both its schema probe and its data statement with the
   * same `AT` id on a DuckLake tenant-db.
   *
-  * The ACL validator and the metadata filter strip the clause before parsing
-  * (SqlParser.stripTimeTravelClauses); jsqlparser itself rejects it. The column and row policy
-  * rewriters strip it with the validator's own scanner and put it back on the same table reference
-  * (TimeTravelCarrier), inside the row-policy wrapper on the base table, so a principal holding a
-  * column or row policy can still read at a snapshot with the policy applied. A clause that cannot
-  * be pinned to a table reference fails closed.
+  * The metadata filter strips the clause before parsing (SqlParser.stripTimeTravelClauses);
+  * jsqlparser itself rejects it, and the table grant is the node's to judge. The column and row
+  * policy rewriters strip it with the parser input's own scanner and put it back on the same table
+  * reference (TimeTravelCarrier), inside the row-policy wrapper on the base table, so a principal
+  * holding a column or row policy can still read at a snapshot with the policy applied. A clause
+  * that cannot be pinned to a table reference fails closed.
   */
 class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
 
@@ -53,17 +52,6 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       val sent = pipeline.run(st(WithAt), effWith()).fold(f => fail(f.toString), identity)
       sent should include(s"$Ref $At")
     }
-
-  it should "pass the ACL validator on a table grant: the validator strips the clause before parsing" in {
-    val validator = new PostgresAclValidator(tenantCatalogs = _ => Set(kc.catalog))
-    val grant     = RolePermission("p-1", "r-1", kc.catalog, "main", "customer", "RO")
-    val h         = harness(kc, columnCatalog, validator = validator)
-    statements.foreach { st =>
-      h.run(st(WithAt), effWith(permissions = List(grant))) match
-        case Right(sent) => sent should include(s"$Ref $At")
-        case Left(f)     => fail(s"expected admitted, got $f")
-    }
-  }
 
   "the policies" should "apply to the same probe and data statement without the AT clause" in
     statements.foreach { st =>

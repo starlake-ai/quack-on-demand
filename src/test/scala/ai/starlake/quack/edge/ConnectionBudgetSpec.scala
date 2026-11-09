@@ -234,3 +234,14 @@ class ConnectionBudgetSpec extends AnyFlatSpec with Matchers:
       "QOD_INTERNAL_MAX_CONNECTIONS: each can hold 1446 KiB before any credential, against a " +
       "fifth of this 1024 MiB heap. Raise the heap (-Xmx) to take more"
     line should not include "lower the limits"
+
+  // The REST data edge at its defaults (16 KiB heads, GET only so no body, TLS on).
+  private val restData    = ConnectionBudget.heldBytes(16384, 0L, tls = true)
+  private val restDataTcp = ConnectionBudget.heldBytes(16384, 0L, tls = false)
+
+  "the REST data edge" should "take a tenth of the heap at its defaults" in:
+    restData shouldBe 1584128L
+    restDataTcp shouldBe 1415168L
+    ConnectionBudget.fit(512, restData, oneGiB, ConnectionBudget.RestDataHeapParts) shouldBe 67
+    ConnectionBudget.fit(512, restDataTcp, oneGiB, ConnectionBudget.RestDataHeapParts) shouldBe 75
+    ConnectionBudget.fit(512, restData, chartHeap, ConnectionBudget.RestDataHeapParts) shouldBe 135

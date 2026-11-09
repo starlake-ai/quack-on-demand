@@ -4,7 +4,6 @@ import ai.starlake.quack.RestEdgeConfig
 import ai.starlake.quack.edge.adapter.{QuackError, QuackResponse, TestArrow}
 import ai.starlake.quack.edge.cls.ColumnCatalog
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
-import ai.starlake.quack.edge.sql.PostgresAclValidator
 import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ErrorResponse}
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -23,12 +22,15 @@ import java.sql.Connection
 /** Discovery fails closed, in the posture of `RbacTenantScopeSpec`: a principal sees exactly what
   * its grants cover, and an object it may not see answers exactly like one that does not exist.
   *
-  * The handlers run over the router's real text pipeline (the real `PostgresAclValidator`, the
-  * metadata filter and the column-policy rewriter, via [[PolicyPipelineFixture]]), and the node is
-  * an in-process DuckDB holding the tenant catalog, so every listing and probe is answered by
-  * DuckDB itself after the pipeline rewrote it. That DuckDB has no DuckLake extension, so the node
-  * drops the `AT (VERSION => n)` the edge sends on the DuckLake kind before executing; what the
-  * pipeline does with that clause is pinned by RestTimeTravelPolicySpec.
+  * The handlers run over the router's real text pipeline (the metadata filter and the column-policy
+  * rewriter, via [[PolicyPipelineFixture]]), and the node is an in-process DuckDB holding the
+  * tenant catalog, so every listing and probe is answered by DuckDB itself after the pipeline
+  * rewrote it. Table grants are qod-node's decision: this node answers a read of an ungranted table
+  * with the refusal qod-node sends ([[refusingUngranted]]), so what is pinned here is how the edge
+  * answers that refusal; `RestEdgeEndToEndSpec` has the real decision on live nodes. That DuckDB
+  * has no DuckLake extension, so the node drops the `AT (VERSION => n)` the edge sends on the
+  * DuckLake kind before executing; what the pipeline does with that clause is pinned by
+  * RestTimeTravelPolicySpec.
   */
 class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
 
@@ -109,6 +111,34 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
   private def grant(cat: String, schema: String, table: String) =
     RolePermission(s"p-$schema-$table", "r-1", cat, schema, table, "RO")
 
+  private val ThreePart = "\"([^\"]+)\"\\.\"([^\"]+)\"\\.\"([^\"]+)\"".r
+
+  /** qod-node's answer to a read of a table no grant covers, in front of `inner`: the edge always
+    * names a table by its quoted three-part name, so those are the reads judged. System schemas are
+    * the metadata filter's business, as on a real node.
+    */
+  private def refusingUngranted(
+      permissions: List[RolePermission],
+      inner: String => QuackResponse
+  ): String => QuackResponse = sent =>
+    val ungranted = ThreePart
+      .findAllMatchIn(sent)
+      .map(m => (m.group(1), m.group(2), m.group(3)))
+      .filterNot((_, sch, _) => sch == "information_schema" || sch == "pg_catalog")
+      .find { (cat, sch, tab) =>
+        !permissions.exists(p =>
+          (p.catalogName == "*" || p.catalogName == cat) &&
+            (p.schemaName == "*" || p.schemaName == sch) &&
+            (p.tableName == "*" || p.tableName == tab)
+        )
+      }
+    ungranted match
+      case Some((cat, sch, tab)) =>
+        QuackResponse.Failed(
+          QuackError.Permanent(s"Permission Error: QoD: user:alice lacks grants on $cat.$sch.$tab")
+        )
+      case None => inner(sent)
+
   /** The grants: `main.customer` and all of `sales`, nothing on `hr`. */
   private def grants(kc: KindCase) =
     List(grant(kc.catalog, "main", "customer"), grant(kc.catalog, "sales", "*"))
@@ -121,7 +151,6 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
 
   private def withHandlers[A](
       kc: KindCase,
-      filteredMetadata: Boolean = true,
       permissions: List[RolePermission] = Nil,
       columnPolicies: List[RoleColumnPolicy] = Nil,
       rowPolicies: List[RoleRowPolicy] = Nil
@@ -131,12 +160,8 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       val h = harness(
         kc,
         customerColumns,
-        validator = new PostgresAclValidator(
-          tenantCatalogs = _ => Set(tenantDbName(kc)),
-          filteredMetadata = filteredMetadata
-        ),
-        metadataFilter = new MetadataFilterRewriter(enabled = filteredMetadata),
-        respond = node(conn)
+        metadataFilter = new MetadataFilterRewriter(enabled = true),
+        respond = refusingUngranted(permissions, node(conn))
       )
       val eff = effWith(permissions, columnPolicies, rowPolicies)
       def executor(record: Boolean): CatalogPreviewHandlers.PreviewExecutor =
@@ -301,23 +326,6 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
             .unsafeRunSync()
             .map(ok => parse(ok.body).toOption.get) shouldBe
             Right(Json.arr(Json.obj("c_id" -> Json.fromInt(2))))
-        }
-      }
-  }
-
-  // ---- filtered metadata off ----------------------------------------------------------------
-
-  "with filtered metadata off" should "404 the listings of a principal without a grant on information_schema" in {
-    for kc <- AllKinds do
-      withClue(s"${kc.kind}: ") {
-        withHandlers(kc, filteredMetadata = false, permissions = grants(kc)) { h =>
-          val schemas = h.schemas("acme", db(kc), req()).unsafeRunSync()
-          schemas.left.map(_._1) shouldBe Left(StatusCode.NotFound)
-          h.tables("acme", db(kc), "main", req()).unsafeRunSync() shouldBe schemas
-          // The detail still serves the granted table; only its table-or-view answer is unknown.
-          val detail = h.table("acme", db(kc), "main", "customer", req()).unsafeRunSync()
-          detail.map(ok => parse(ok.body).toOption.get.hcursor.get[Option[String]]("type")) shouldBe
-            Right(Right(None))
         }
       }
   }

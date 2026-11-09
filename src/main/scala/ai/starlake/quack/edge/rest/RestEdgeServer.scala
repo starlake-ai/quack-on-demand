@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.RestEdgeConfig
-import ai.starlake.quack.edge.CertGen
+import ai.starlake.quack.edge.{BoundedBody, CertGen, ConnectionBudget}
 import ai.starlake.quack.edge.quack.PemKeyStore
 import ai.starlake.quack.ondemand.api.ErrorResponse
 import ai.starlake.quack.ondemand.api.Dtos.given
@@ -36,8 +36,9 @@ import scala.util.Try
   *     or `Transfer-Encoding` is a 400 with `Connection: close`, its body never read (request
   *     desync);
   *   - the Ember limits. The pinned http4s (0.23.24) has all four knobs, so there is no gap:
-  *     `withMaxHeaderSize` (bounds the request line, so the URI, too), the header receive timeout
-  *     (slowloris), the idle timeout and `withMaxConnections`;
+  *     `withMaxHeaderSize` (bounds the request line, so the URI, too, and the header block, each),
+  *     the header receive timeout (slowloris), the idle timeout and `withMaxConnections`, which
+  *     takes no more connections than fit a tenth of the heap ([[ConnectionBudget]]);
   *   - a fresh `X-Request-Id` per request, set on the request the handlers read (a client's own is
   *     replaced, never echoed) and on every response, including the ones Ember itself generates for
   *     an unparseable or oversized request head;
@@ -168,7 +169,17 @@ final class RestEdgeServer(
         .withHost(Host.fromString(cfg.host).getOrElse(Host.fromString("0.0.0.0").get))
         .withPort(Port.fromInt(cfg.port).getOrElse(Port.fromInt(31339).get))
         .withHttpApp(app)
-        .withMaxConnections(cfg.maxConnections)
+        .withMaxConnections(
+          ConnectionBudget.slots(
+            "The REST data edge",
+            "QOD_REST_DATA_MAX_CONNECTIONS",
+            cfg.maxConnections,
+            // GET only: a request with a body is refused unread.
+            ConnectionBudget.heldBytes(cfg.maxHeaderBytes, 0L, cfg.tlsEnabled),
+            heapParts = ConnectionBudget.RestDataHeapParts
+          )
+        )
+        .withReceiveBufferSize(BoundedBody.ReadBufferBytes)
         .withMaxHeaderSize(cfg.maxHeaderBytes)
         .withRequestHeaderReceiveTimeout(cfg.headerReceiveTimeoutSec.seconds)
         .withIdleTimeout(cfg.idleTimeoutSec.seconds)

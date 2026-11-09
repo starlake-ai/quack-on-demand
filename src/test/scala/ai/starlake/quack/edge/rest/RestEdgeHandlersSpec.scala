@@ -73,7 +73,7 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       StubQuackBackend.noop(),
       new NodeLoadTracker,
       new InMemoryControlPlaneStore(),
-      duckLakeInitializer = (_, _) => ()
+      duckLakeInitializer = (_, _, _) => ()
     )
     def ok[A](io: IO[Either[?, A]]): A =
       io.unsafeRunSync().fold(e => throw new IllegalStateException(e.toString), identity)
@@ -86,7 +86,14 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       "schemaName" -> "main"
     )
     val lake = ok(
-      s.createTenantDb("acme", "lake", TenantDbKind.DuckLake, lakeMeta, "/tmp/qod-rest-h/lake")
+      s.createTenantDb(
+        "acme",
+        "lake",
+        TenantDbKind.DuckLake,
+        lakeMeta,
+        "/tmp/qod-rest-h/lake",
+        writerTrusted = true
+      )
     )
     ok(
       s.createTenantDb(
@@ -94,12 +101,15 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         "file",
         TenantDbKind.DuckDbFile,
         Map("dbName" -> "acme_file", "schemaName" -> "main"),
-        "/tmp/qod-rest-h/file"
+        "/tmp/qod-rest-h/file",
+        writerTrusted = true
       )
     )
-    ok(s.createTenantDb("acme", "mem", TenantDbKind.InMemory, Map.empty, ""))
-    ok(s.createTenantDb("acme", "vault", TenantDbKind.InMemory, Map.empty, ""))
-    ok(s.createTenantDb("acme", "cold", TenantDbKind.InMemory, Map.empty, ""))
+    ok(s.createTenantDb("acme", "mem", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true))
+    ok(
+      s.createTenantDb("acme", "vault", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+    )
+    ok(s.createTenantDb("acme", "cold", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true))
     s.registerBranchTenantDb(
       TenantDb(
         id = "td-branch",
@@ -117,9 +127,14 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       PoolKey("acme", "acme_file", "fpool"),
       PoolKey("acme", "acme_mem", "mpool"),
       PoolKey("acme", "acme_vault", "vpool"),
-      PoolKey("acme", "acme_cold", "cpool"),
-      PoolKey("acme", "acme_lake__br_0123abcd", "__br_0123abcd")
+      PoolKey("acme", "acme_cold", "cpool")
     ).foreach(k => s.createPool(k, RoleDistribution(0, 0, 1)).unsafeRunSync())
+    // A branch's pool carries a manager-made name, which the naming rule of user pools refuses.
+    s.createPool(
+      PoolKey("acme", "acme_lake__br_0123abcd", "__br_0123abcd"),
+      RoleDistribution(0, 0, 1),
+      internalName = true
+    ).unsafeRunSync()
     // Hibernated: no node, the state a request finds before the router's resume.
     ok(s.suspendPool(ColdKey, "idle"))
     s

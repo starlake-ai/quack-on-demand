@@ -120,9 +120,9 @@ final class ProtectedWriteGuard(
     * snapshot whose name has not always meant that same table with those same column names
     * ([[ColumnCatalog.historyStable]]). The policies are keyed on today's names while the snapshot
     * binds its own, so a table or column renamed since (or a name reused by another one) would be
-    * read past its mask and row filter. `tenant` is the principal's: a catalog name resolves
-    * among its databases only. A clause the carrier cannot pin to a table, in a statement
-    * it cannot parse or a batch, is refused too.
+    * read past its mask and row filter. `tenant` is the principal's: a catalog name resolves among
+    * its databases only. A clause the carrier cannot pin to a table, in a statement it cannot parse
+    * or a batch, is refused too.
     */
   private def unstableTimeTravel(sql: String, tenant: String, ctx: SchemaContext): Option[String] =
     if SqlParser.timeTravelClauses(sql)._2.isEmpty then None

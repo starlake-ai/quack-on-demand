@@ -1,7 +1,6 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.edge.adapter.*
-import ai.starlake.quack.edge.sql.{Denied, StatementValidator, ValidationContext, ValidationResult}
 import ai.starlake.quack.edge.{FlightSqlRouter, RouterFailure, SessionRegistry}
 import ai.starlake.quack.model.{
   NodeSpec,
@@ -53,10 +52,10 @@ class RoutedExecutorRouterLegSpec extends AnyFlatSpec with Matchers:
 
   private def setup(
       nodeCount: Int = 1,
-      validator: StatementValidator = StatementValidator.allowAll,
       respond: () => IO[QuackResponse] = () => IO.pure(TestArrow.okResponse())
   ): Fixture =
     val backend = new QuackBackend:
+      def allowsLocalFiles   = true
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -81,26 +80,47 @@ class RoutedExecutorRouterLegSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, nodeCount)).unsafeRunSync()
     val store   = new RecordingTelemetryStore
     val journal = new EventJournal(store)
     val client  = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         respond()
     val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker),
-      validator = validator,
-      journal = journal
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      journal = journal,
+      metadataFilterRewriter =
+        new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true),
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
     Fixture(sup, router, journal, store, sup.get(poolKey).get.nodes)
 
-  private val denying = new StatementValidator:
-    def validate(ctx: ValidationContext): ValidationResult = Denied("no grant", Set.empty)
+  /** The node's authorization refusal, as qod-node answers an ungranted read. */
+  private val refusing: () => IO[QuackResponse] = () =>
+    IO.pure(
+      QuackResponse.Failed(
+        QuackError.Permanent("Permission Error: QoD: user:alice lacks grants on t:select"),
+        1L
+      )
+    )
 
   private def timedSystem(id: String, ms: Int): ExecCaller =
     ExecCaller
@@ -110,22 +130,31 @@ class RoutedExecutorRouterLegSpec extends AnyFlatSpec with Matchers:
   "RoutedExecutor.viaRouter" should "route to the caller's preferred node" in:
     val fx     = setup(nodeCount = 3)
     val target = fx.nodes(2).nodeId
-    val caller = ExecCaller.unrestricted("c-1", "alice").copy(preferredNode = Some(target))
-    val out    = fx.leg(caller, poolKey, "SELECT 1", None, true).unsafeRunSync()
+    val caller = ExecCaller
+      .unrestricted("c-1", "alice", superuserAdmissible = false)
+      .copy(preferredNode = Some(target))
+    val out = fx.leg(caller, poolKey, "SELECT 1", None, true).unsafeRunSync()
     out.map(_.nodeId) shouldBe Right(target)
     out.foreach(_.close())
 
   it should "record the caller's source as the audit origin" in:
-    val fx     = setup(validator = denying)
-    val caller = ExecCaller.unrestricted("c-2", "alice").copy(source = "rest-data")
+    val fx     = setup(respond = refusing)
+    val caller = ExecCaller
+      .unrestricted("c-2", "alice", superuserAdmissible = false)
+      .copy(source = "rest-data")
     fx.leg(caller, poolKey, "SELECT * FROM t", None, true).unsafeRunSync() shouldBe a[Left[?, ?]]
     fx.journal.drainNow()
     fx.store.events.map(_.origin) shouldBe List("rest-data")
 
   it should "keep the FlightSQL origin for a caller that names no source" in:
-    val fx = setup(validator = denying)
-    fx.leg(ExecCaller.unrestricted("c-3", "alice"), poolKey, "SELECT * FROM t", None, true)
-      .unsafeRunSync()
+    val fx = setup(respond = refusing)
+    fx.leg(
+      ExecCaller.unrestricted("c-3", "alice", superuserAdmissible = false),
+      poolKey,
+      "SELECT * FROM t",
+      None,
+      true
+    ).unsafeRunSync()
     fx.journal.drainNow()
     fx.store.events.map(_.origin) shouldBe List("flightsql")
 
