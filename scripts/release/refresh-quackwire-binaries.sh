@@ -5,7 +5,9 @@
 # Builds the HOST platform via cmake (linked against the pinned libduckdb in
 # $DUCKDB_CACHE_DIR/<abi>/, default .duckdb/<abi>/), downloads the other
 # platforms from a green 'quackwire native build' CI run of the commit being
-# refreshed, checks every binary's compiled build marker against the pin
+# refreshed (a Linux host takes its own platform from CI too: a binary links the
+# glibc it is built against, so only CI's manylinux_2_28 build meets the floor of
+# glibc-floor.sh), checks every binary's compiled build marker against the pin
 # (Quack protocol, DuckDB release, duckdb-quack commit: see
 # quackwire-build-info.sh), regenerates the .sha256 companions and the VERSION
 # stamp, and STOPS. Nothing in libquackwire/binaries/ changes unless every
@@ -24,6 +26,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_DIR"
 # shellcheck source=SCRIPTDIR/quackwire-build-info.sh
 source "$REPO_DIR/scripts/release/quackwire-build-info.sh"
+# shellcheck source=SCRIPTDIR/glibc-floor.sh
+source "$REPO_DIR/scripts/release/glibc-floor.sh"
 
 version="$(grep -E '^val libquackwireVersion' build.sbt | sed -E 's/.*"(.*)".*/\1/')"
 [[ -n "$version" ]] || { echo "cannot read libquackwireVersion from build.sbt" >&2; exit 1; }
@@ -61,19 +65,23 @@ host_platform="$host_os-$host_arch"
 # `QOD_VERSION=BUILD ./scripts/run-jar.sh` boot stages bin/, lib/, and the
 # internal-header include/ tree for the pinned version). The build dir is
 # wiped because CMake caches resolved find results.
-duckdb_abi="${version%%-*}"
-duckdb_home="${DUCKDB_CACHE_DIR:-$REPO_DIR/.duckdb}/$duckdb_abi"
-[[ -f "$duckdb_home/include/duckdb/common/serializer/binary_serializer.hpp" \
-   && -e "$duckdb_home/lib" ]] \
-  || { echo "pinned libduckdb cache missing at $duckdb_home (need lib/ + include/ with the internal header tree). Run 'QOD_VERSION=BUILD ./scripts/run-jar.sh' once to populate it, then re-run." >&2; exit 1; }
-echo "cmake build [$host_platform] (DUCKDB_HOME=$duckdb_home)..."
-( cd native/quackwire \
-  && rm -rf build \
-  && DUCKDB_HOME="$duckdb_home" cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  && cmake --build build --config Release )
-host_built="native/quackwire/build/libquackwire.$host_ext"
-quackwire_check_build_marker "$host_built" "$version" \
-  || { echo "the host build does not match $version; nothing was changed." >&2; exit 1; }
+build_host=1
+[[ "$host_os" != linux ]] || build_host=0
+if [[ "$build_host" == "1" ]]; then
+  duckdb_abi="${version%%-*}"
+  duckdb_home="${DUCKDB_CACHE_DIR:-$REPO_DIR/.duckdb}/$duckdb_abi"
+  [[ -f "$duckdb_home/include/duckdb/common/serializer/binary_serializer.hpp" \
+     && -e "$duckdb_home/lib" ]] \
+    || { echo "pinned libduckdb cache missing at $duckdb_home (need lib/ + include/ with the internal header tree). Run 'QOD_VERSION=BUILD ./scripts/run-jar.sh' once to populate it, then re-run." >&2; exit 1; }
+  echo "cmake build [$host_platform] (DUCKDB_HOME=$duckdb_home)..."
+  ( cd native/quackwire \
+    && rm -rf build \
+    && DUCKDB_HOME="$duckdb_home" cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release )
+  host_built="native/quackwire/build/libquackwire.$host_ext"
+  quackwire_check_build_marker "$host_built" "$version" \
+    || { echo "the host build does not match $version; nothing was changed." >&2; exit 1; }
+fi
 
 # --- fetch the other platforms from CI (ported from step 4) ---
 # Download the other platforms from a green quackwire CI run of this commit -
@@ -99,20 +107,25 @@ gh run download "$ci_run_id" --dir "$tmp_artifacts" --pattern 'quackwire-*'
 staged=()
 for d in "$tmp_artifacts"/quackwire-*; do
   plat=$(basename "$d" | sed 's/^quackwire-//')
-  [[ "$plat" == "$host_platform" ]] && continue
+  [[ "$plat" == "$host_platform" && "$build_host" == "1" ]] && continue
   # Unix artifacts carry libquackwire.{so,dylib}; the Windows artifact carries
   # the un-prefixed quackwire.dll.
   for f in "$d"/libquackwire.so "$d"/libquackwire.dylib "$d"/quackwire.dll; do
     [[ -f "$f" ]] || continue
     quackwire_check_build_marker "$f" "$version" \
       || { echo "CI run $ci_run_id: the $plat artifact does not match $version; nothing was changed." >&2; exit 1; }
+    if [[ "$plat" == linux-* ]]; then
+      glibc_floor_check "$f" || { echo "CI run $ci_run_id: nothing was changed." >&2; exit 1; }
+    fi
     staged+=("$plat:$f")
   done
 done
 [[ ${#staged[@]} -gt 0 ]] || { echo "CI run $ci_run_id has no quackwire-* platform artifacts." >&2; exit 1; }
 
-mkdir -p "libquackwire/binaries/$host_platform"
-cp "$host_built" "libquackwire/binaries/$host_platform/libquackwire.$host_ext"
+if [[ "$build_host" == "1" ]]; then
+  mkdir -p "libquackwire/binaries/$host_platform"
+  cp "$host_built" "libquackwire/binaries/$host_platform/libquackwire.$host_ext"
+fi
 for entry in "${staged[@]}"; do
   plat="${entry%%:*}"
   mkdir -p "libquackwire/binaries/$plat"

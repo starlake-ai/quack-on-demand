@@ -632,7 +632,9 @@ QOD_NODE_PROTOCOL` (both pinned to `QOD_NODE_PROTOCOL`).
 Vendoring follows libquackwire: `native/qod-node/binaries/<platform>/qod-node` for linux-x86_64,
 linux-aarch64, osx-x86_64 and osx-aarch64, with `.sha256` companions and a `VERSION` stamp,
 refreshed by `scripts/release/refresh-qod-node-binaries.sh` (the host's cmake build plus the
-artifacts of a green `qod-node` CI run of HEAD; `FETCH_CI=0` for the host alone), which also
+artifacts of a green `qod-node` CI run of HEAD; `FETCH_CI=0` for the host alone; a Linux host takes its
+own platform from CI, whose manylinux_2_28 build holds both natives to the glibc floor of
+`scripts/release/glibc-floor.sh`, also checked by the release gate), which also
 refreshes the copies the qod wheel bundles for `qod fleet join` (`cli/src/qod_cli/qod-node/`, gated
 by `cli/tests/test_qod_node_bundle.py`). `verify_qod_node_binaries` gates releases and snapshots.
 Windows' static `qod-node.exe` is too large to bundle: release.yml publishes

@@ -25,6 +25,9 @@ source "$REPO_DIR/scripts/release/quackwire-build-info.sh"
 # qod_node_check_marker and the platform list, used by verify_qod_node_binaries.
 # shellcheck source=SCRIPTDIR/qod-node-build-info.sh
 source "$REPO_DIR/scripts/release/qod-node-build-info.sh"
+# glibc_floor_check, used by both verify_* functions on the Linux binaries.
+# shellcheck source=SCRIPTDIR/glibc-floor.sh
+source "$REPO_DIR/scripts/release/glibc-floor.sh"
 
 REGISTRY_IMAGE="${REGISTRY_IMAGE:-starlakeai/quack-on-demand}"
 # Larger heap/stack for the signed publish + scaladoc steps.
@@ -137,6 +140,9 @@ verify_quackwire_binaries() {
     [[ "$(sha256_of "$f")" == "$(cat "$f.sha256")" ]] \
       || { echo "checksum mismatch for $f. Run scripts/release/refresh-quackwire-binaries.sh." >&2; return 1; }
     quackwire_check_build_marker "$f" "$version" || return 1
+    if [[ "$f" == libquackwire/binaries/linux-* ]]; then
+      glibc_floor_check "$f" || return 1
+    fi
   done
   echo "phase 1 OK: vendored libquackwire binaries match $version"
 }
@@ -159,6 +165,9 @@ verify_qod_node_binaries() {
       || { echo "checksum mismatch for $f. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
     id="$(qod_node_check_marker "$f")" || return 1
     ids+=("$id")
+    if [[ "$plat" == linux-* ]]; then
+      glibc_floor_check "$f" || return 1
+    fi
   done
   [[ "$(printf '%s\n' "${ids[@]}" | sort -u | wc -l | tr -d ' ')" == "1" ]] \
     || { echo "the vendored qod-node binaries are built against different DuckDB sources (${ids[*]}). Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }

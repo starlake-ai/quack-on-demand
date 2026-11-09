@@ -68,7 +68,10 @@ else()
     message(FATAL_ERROR "DUCKDB_HOME/lib lacks the release libduckdb (unpack duckdb-shared-libs-<platform>.tar.gz there)")
   endif()
   message(STATUS "qod-node: shared DuckDB ${DUCKDB_LIB}")
-  target_link_libraries(qod_node_duckdb INTERFACE ${DUCKDB_LIB})
+  # Named, not left to libc: before glibc 2.34 pthreads and dl are libraries of their own, and CI builds
+  # the Linux binaries against 2.28 (scripts/release/glibc-floor.sh).
+  find_package(Threads REQUIRED)
+  target_link_libraries(qod_node_duckdb INTERFACE ${DUCKDB_LIB} Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 
 # ---- build marker -------------------------------------------------------------------------------

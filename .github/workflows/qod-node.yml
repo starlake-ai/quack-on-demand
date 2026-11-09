@@ -22,12 +22,14 @@ on:
     paths:
       - 'native/qod-node/**'
       - 'scripts/spawn-quack-node.ps1'
+      - 'scripts/release/glibc-floor.sh'
       - 'project/Versions.scala'
       - '.github/workflows/qod-node.yml'
   pull_request:
     paths:
       - 'native/qod-node/**'
       - 'scripts/spawn-quack-node.ps1'
+      - 'scripts/release/glibc-floor.sh'
       - 'project/Versions.scala'
       - '.github/workflows/qod-node.yml'
   workflow_dispatch:
@@ -79,9 +81,11 @@ jobs:
           - runner: ubuntu-22.04
             platform: linux-x86_64
             duckdb_platform: linux-amd64
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64:2026.11.07-1
           - runner: ubuntu-22.04-arm
             platform: linux-aarch64
             duckdb_platform: linux-arm64
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64:2026.11.07-1
           - runner: macos-15-intel
             platform: osx-x86_64
             duckdb_platform: osx-universal
@@ -136,12 +140,26 @@ jobs:
           set -euo pipefail
           sudo "$(command -v ctest)" --test-dir native/qod-node/build -R spill_dir --output-on-failure --timeout 300
 
+      # On Linux the shipped binary is built in a manylinux_2_28 container, not on the runner: it links
+      # the glibc it is built against, and the runner's would refuse to start on older distributions
+      # (scripts/release/glibc-floor.sh). The tests above and below stay on the runner.
       - name: Build the vendored binary (relative rpath only)
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
         run: |
           set -euo pipefail
-          cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
+          build='cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
             -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$DUCKDB_HOME"
-          cmake --build native/qod-node/build-release --config Release --target qod-node
+          cmake --build native/qod-node/build-release --config Release --target qod-node'
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DUCKDB_HOME \
+              -v "$PWD:$PWD" -v "$DUCKDB_HOME:$DUCKDB_HOME:ro" -w "$PWD" \
+              "$MANYLINUX_IMAGE" bash -euc "$build"
+            source scripts/release/glibc-floor.sh
+            glibc_floor_check native/qod-node/build-release/qod-node
+          else
+            bash -euc "$build"
+          fi
           source scripts/release/qod-node-build-info.sh
           qod_node_check_marker native/qod-node/build-release/qod-node
 
