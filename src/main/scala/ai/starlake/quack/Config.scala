@@ -1737,13 +1737,17 @@ final case class RestEdgeConfig(
     )
     stmtTimeoutSec: Int,
     @field @ConfigField(
-      envVar = "QOD_REST_MAX_CONNECTIONS",
-      description = "Maximum concurrent client connections on the REST data edge."
+      envVar = "QOD_REST_DATA_MAX_CONNECTIONS",
+      description =
+        "Most connections the REST data edge keeps open at once. Fewer when a tenth of the heap " +
+          "cannot hold that many: boot says so."
     )
     maxConnections: Int,
     @field @ConfigField(
-      envVar = "QOD_REST_MAX_HEADER_BYTES",
-      description = "Largest request head accepted (request line plus headers), in bytes."
+      envVar = "QOD_REST_DATA_MAX_HEADER_BYTES",
+      description =
+        "Largest request line, and largest header block, the REST data edge reads, in bytes " +
+          "each. Raising it lowers how many connections fit the heap."
     )
     maxHeaderBytes: Int,
     @field @ConfigField(
@@ -1797,9 +1801,9 @@ object RestEdgeConfig:
           s"QOD_REST_STMT_TIMEOUT_SEC (${cfg.stmtTimeoutSec}) must be greater than " +
             s"PROXY_RESUME_HOLD_TIMEOUT_SEC ($resumeHoldTimeoutSec)"
         ),
-        atLeast(cfg.maxConnections, 1, "QOD_REST_MAX_CONNECTIONS"),
+        atLeast(cfg.maxConnections, 1, "QOD_REST_DATA_MAX_CONNECTIONS"),
         // Below 1 KiB a request line plus one bearer token no longer fits.
-        atLeast(cfg.maxHeaderBytes, 1024, "QOD_REST_MAX_HEADER_BYTES"),
+        atLeast(cfg.maxHeaderBytes, 1024, "QOD_REST_DATA_MAX_HEADER_BYTES"),
         atLeast(cfg.headerReceiveTimeoutSec, 1, "QOD_REST_HEADER_RECEIVE_TIMEOUT_SEC"),
         atLeast(cfg.idleTimeoutSec, 1, "QOD_REST_IDLE_TIMEOUT_SEC"),
         otherPorts.collectFirst {

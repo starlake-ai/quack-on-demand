@@ -14,10 +14,10 @@ import scala.util.Try
   * jsqlparser has no `AT (VERSION => n)`, and it takes `AT (TIMESTAMP => ...)` only BEFORE an alias
   * while DuckDB takes it only AFTER one (`FROM t x AT (...)`). Parsing the raw text therefore fails
   * and the router denies fail-closed: a principal holding any column or row policy could not read
-  * at a snapshot. Stripping the clause alone, as the ACL validator does, would admit the read but
+  * at a snapshot. Stripping the clause alone, as the metadata filter does, would admit the read but
   * drop the snapshot pin, so the rewritten statement would read the current data instead.
   *
-  * [[carry]] strips with the validator's own scanner ([[SqlParser.timeTravelClauses]]), parses the
+  * [[carry]] strips with the parser's own scanner ([[SqlParser.timeTravelClauses]]), parses the
   * stripped text, and pins each clause to the table reference it followed by source position, as a
   * numbered placeholder in jsqlparser's own time-travel slot on that [[Table]]. The rewriters then
   * work on an ordinary statement whose table nodes carry the placeholders along: the row policy

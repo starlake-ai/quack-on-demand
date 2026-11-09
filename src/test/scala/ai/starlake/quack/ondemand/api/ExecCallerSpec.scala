@@ -34,7 +34,7 @@ class ExecCallerSpec extends AnyFlatSpec with Matchers:
 
   it should "default to the FlightSQL source, the MCP OPA edge and no preferred node" in {
     // Every call site that predates the REST data edge keeps its audit origin, OPA tag and routing.
-    val c = ExecCaller.unrestricted("conn-1", "alice")
+    val c = ExecCaller.unrestricted("conn-1", "alice", superuserAdmissible = false)
     c.source shouldBe "flightsql"
     c.edge shouldBe "mcp"
     c.preferredNode shouldBe None

@@ -154,9 +154,14 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "stamp the audit origin with the source the caller of execute names" in {
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult = Denied("no grant", Set.empty)
-    val (router, journal, store) = setupWithJournal(validator = denying)
+    val refusal = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: user:alice lacks grants on cat.sch.tbl:select"
+        ),
+        1L
+      )
+    val (router, journal, store) = setupWithJournal(stub = refusal)
     router
       .execute("aud-src", "alice", poolKey, "SELECT * FROM cat.sch.tbl", source = "rest-data")
       .unsafeRunSync()

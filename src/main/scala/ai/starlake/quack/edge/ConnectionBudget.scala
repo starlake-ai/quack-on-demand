@@ -17,6 +17,11 @@ object ConnectionBudget:
     */
   val FlightHeapParts: Long = 10L
 
+  /** The read-only REST data edge (off by default) gets one part in this many: with every other
+    * listener flooded too, that leaves two tenths.
+    */
+  val RestDataHeapParts: Long = 10L
+
   /** What an open connection holds whatever it sends: its read buffer and Ember's state (measured,
     * 69 KB).
     */

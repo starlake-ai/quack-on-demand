@@ -74,9 +74,8 @@ final case class ExecCaller(
     * `GET /api/profile/pools` asks for each pool it lists, so "may connect" is one decision on
     * both. It carries the caller's realm (`superuserAdmissible`: only a superuser caller may bind a
     * superuser row). The caller's `edge` (`mcp` unless it names another) lands in the OPA input's
-    * `client.edge`; the token restriction
-    * attenuates the effective set before gate 4, so an opa tenant's connect decision sees only the
-    * token's roles.
+    * `client.edge`; the token restriction attenuates the effective set before gate 4, so an opa
+    * tenant's connect decision sees only the token's roles.
     */
   def authzRequest(poolKey: PoolKey): AuthzRequest =
     AuthzRequest(

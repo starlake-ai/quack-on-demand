@@ -64,8 +64,9 @@ object RestAuth:
   /** The executor caller, built as `McpDataTools.callerFor` builds one for a PAT: the connection id
     * stays stable per PAT because `executeWith` opens one router session per id, the restriction is
     * the token's own, `source` tags audit and `SessionOpened` with [[Origin]] and `edge` tags the
-    * OPA input's `client.edge` with it too. Never `ExecCaller.unrestricted`, never
-    * `ExecCaller.system`.
+    * OPA input's `client.edge` with it too, and `superuserAdmissible` is off: a superuser's token
+    * is refused before this, so no REST caller binds a tenant-less row. Never
+    * `ExecCaller.unrestricted`, never `ExecCaller.system`.
     */
   def callerFor(p: PatPrincipal): ExecCaller =
     ExecCaller(
@@ -74,5 +75,6 @@ object RestAuth:
       restriction = p.restriction,
       patId = Some(p.patId),
       source = Origin,
-      edge = Origin
+      edge = Origin,
+      superuserAdmissible = false
     )

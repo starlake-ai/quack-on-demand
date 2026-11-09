@@ -3,9 +3,10 @@ package ai.starlake.quack.model
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Pins the session-catalog resolver for every kind and metastore shape. The router's
-  * `ValidationContext` defaults and the REST edge's `<catalog>`/`<schema>` both come from here, so
-  * a change to one of these rows changes what the ACL validates AND what the edge qualifies.
+/** Pins the session-catalog resolver for every kind and metastore shape. The router's parser
+  * defaults (`FlightSqlRouter.defaultsOf`) and the REST edge's `<catalog>`/`<schema>` both come
+  * from here, so a change to one of these rows changes what the policy rewriters qualify AND what
+  * the edge qualifies.
   */
 class SessionCatalogSpec extends AnyFlatSpec with Matchers:
 

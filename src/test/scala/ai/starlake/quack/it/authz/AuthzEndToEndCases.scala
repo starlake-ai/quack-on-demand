@@ -2093,14 +2093,16 @@ abstract class AuthzEndToEndCases(
     val (old, _) = vaultHistory
     // mona's mask is on feed_a, and she holds vault_now: its current name reads, its old one cannot
     // carry her policies.
-    // The column policy rewriter cannot parse an AT clause and refuses it first (fail closed); the
-    // node's `renamed` rule stands behind it (AuthzDeciderSpec).
+    // The gateway's time-travel guard (ProtectedWriteGuard.unstableTimeTravel) refuses it first,
+    // the policy rewriters reading the AT clause through TimeTravelCarrier; the node's `renamed`
+    // rule stands behind it (AuthzDeciderSpec).
     allowed("mona", "lake", s"SELECT id FROM $lake.main.vault_now", Some(List("1")))
     doors.foreach { d =>
       withClue(s"[$d] mona: an AT read under the old name -> ") {
         as(d, "mona", "lake", s"SELECT id FROM $lake.main.vault AT (VERSION => $old)") match
           case Left(err) =>
-            err should (include("column policy rewrite could not parse statement") or
+            val guard = "under a column or row policy it cannot be read with time travel"
+            err should (include(guard) or
               include("not available to principals with column or row policies"))
           case Right(rows) => fail(s"expected a refusal, got rows $rows")
       }

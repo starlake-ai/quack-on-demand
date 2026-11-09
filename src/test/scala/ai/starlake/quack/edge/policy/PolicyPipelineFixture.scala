@@ -10,7 +10,6 @@ import ai.starlake.quack.edge.adapter.{
 }
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
-import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -38,11 +37,12 @@ import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ListBuffer
 import scala.util.Using
 
-/** Shared fixture for specs that drive a statement through the whole policy pipeline
-  * (FlightSqlRouter: ACL validator, column and row policy rewriters, metadata filter): a router
-  * over a one-node pool of a chosen tenant-db kind, whose node call only captures the fully
+/** Shared fixture for specs that drive a statement through the gateway's policy pipeline
+  * (FlightSqlRouter: column and row policy rewriters, metadata filter, protected-write guard): a
+  * router over a one-node pool of a chosen tenant-db kind, whose node call only captures the fully
   * rewritten, `USE`-prefixed SQL, plus an in-process DuckDB (core, no extensions) to execute that
-  * captured text against seeded tables.
+  * captured text against seeded tables. Table grants are not judged here: qod-node decides them, so
+  * a spec that needs a refusal answers it through `respond`, as the node would.
   */
 object PolicyPipelineFixture:
 
@@ -95,7 +95,6 @@ object PolicyPipelineFixture:
   def harness(
       kc: KindCase,
       columnCatalog: ColumnCatalog = new ColumnCatalog.MapCatalog(Map.empty),
-      validator: StatementValidator = StatementValidator.allowAll,
       metadataFilter: MetadataFilterRewriter = new MetadataFilterRewriter(enabled = false),
       /** What the node answers to the statement it received; by default one row of `SELECT 1`. */
       respond: String => QuackResponse = _ => TestArrow.okResponse(),
@@ -105,6 +104,7 @@ object PolicyPipelineFixture:
       guarded: Boolean = false
   ): Harness =
     val backend = new QuackBackend:
+      def allowsLocalFiles   = true
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -130,7 +130,7 @@ object PolicyPipelineFixture:
       backend,
       tracker,
       store,
-      duckLakeInitializer = (_, _) => ()
+      duckLakeInitializer = (_, _, _) => ()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     val metastore = kc.kind match
@@ -148,7 +148,7 @@ object PolicyPipelineFixture:
       case TenantDbKind.InMemory => ""
       case _                     => s"/tmp/qod-policy-pipeline/${kc.catalog}"
     sup
-      .createTenantDb("acme", kc.suffix, kc.kind, metastore, dataPath)
+      .createTenantDb("acme", kc.suffix, kc.kind, metastore, dataPath, writerTrusted = true)
       .unsafeRunSync()
       .fold(e => throw new IllegalStateException(s"createTenantDb(${kc.kind}): $e"), identity)
     val key = PoolKey("acme", s"acme_${kc.suffix}", "sales")
@@ -156,15 +156,20 @@ object PolicyPipelineFixture:
 
     @volatile var last: Option[String] = None
     val client                         = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         last = Some(sql)
         IO(respond(sql))
     val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker),
-      validator = validator,
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
       columnPolicyRewriter = new ColumnPolicyRewriter(columnCatalog, enabled = true),
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard =

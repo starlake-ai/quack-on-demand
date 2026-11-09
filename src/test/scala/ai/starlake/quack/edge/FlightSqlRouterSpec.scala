@@ -1013,10 +1013,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // the same resolver; if the router derived the catalog on its own, the policy rewriters could
   // qualify against one catalog while the node read another.
   it should "resolve the parser defaults through SessionCatalog for every kind and shape" in:
-    val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+    val admin   = ai.starlake.quack.ondemand.state.NoopDbAdmin
     val backend = new QuackBackend:
+      def allowsLocalFiles   = true
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -1114,7 +1113,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             kind = s.kind,
             metastore = s.metastore,
             dataPath = s.dataPath,
-            defaultDatabase = s.defaultDatabase
+            defaultDatabase = s.defaultDatabase,
+            writerTrusted = true
           )
           .unsafeRunSync() shouldBe a[Right[?, ?]]
         val key = PoolKey("zeta", s"zeta_${s.suffix}", s"p${s.suffix}")

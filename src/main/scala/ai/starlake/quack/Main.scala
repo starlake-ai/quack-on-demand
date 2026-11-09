@@ -371,7 +371,11 @@ object Main extends IOApp with LazyLogging:
     RestEdgeConfig
       .validate(
         restCfgResolved,
-        List("manager REST" -> mgrCfg0.port, "FlightSQL" -> edgeCfg.port) ++
+        List(
+          "manager REST"          -> mgrCfg0.port,
+          "FlightSQL"             -> edgeCfg.port,
+          "node verdict listener" -> mgrCfg0.nodeAuthz.listenerPort(mgrCfg0.port)
+        ) ++
           Option.when(quackCfgResolved.enabled)("Quack front door" -> quackCfgResolved.port),
         edgeCfg.resumeHoldTimeoutSec
       )
@@ -451,6 +455,7 @@ object Main extends IOApp with LazyLogging:
       opaCfg,
       modules,
       quackCfgResolved,
+      restCfgResolved,
       qodNodeBin,
       internalHost,
       internalPort,
@@ -469,6 +474,7 @@ object Main extends IOApp with LazyLogging:
       opaCfg: OpaConfig,
       modules: List[ai.starlake.quack.spi.ManagerModule],
       quackCfgResolved: QuackNativeConfig,
+      restCfgResolved: RestEdgeConfig,
       qodNodeBin: Option[java.nio.file.Path],
       internalHost: String,
       internalPort: Int,

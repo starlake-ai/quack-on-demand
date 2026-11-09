@@ -63,8 +63,8 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
       on.copy(maxRows = 999)               -> "QOD_REST_MAX_ROWS",
       on.copy(maxResponseBytes = 1023)     -> "QOD_REST_MAX_RESPONSE_BYTES",
       on.copy(stmtTimeoutSec = 0)          -> "QOD_REST_STMT_TIMEOUT_SEC",
-      on.copy(maxConnections = 0)          -> "QOD_REST_MAX_CONNECTIONS",
-      on.copy(maxHeaderBytes = 1023)       -> "QOD_REST_MAX_HEADER_BYTES",
+      on.copy(maxConnections = 0)          -> "QOD_REST_DATA_MAX_CONNECTIONS",
+      on.copy(maxHeaderBytes = 1023)       -> "QOD_REST_DATA_MAX_HEADER_BYTES",
       on.copy(headerReceiveTimeoutSec = 0) -> "QOD_REST_HEADER_RECEIVE_TIMEOUT_SEC",
       on.copy(idleTimeoutSec = 0)          -> "QOD_REST_IDLE_TIMEOUT_SEC"
     )
