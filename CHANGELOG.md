@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.2
+
+### Fixed
+
+- The manager boots on Linux distributions with a glibc older than 2.34 (Ubuntu 20.04, Debian 11, RHEL
+  8 and its rebuilds) instead of refusing with ``version `GLIBC_2.34' not found``. The bundled `qod-node`
+  and `libquackwire` for Linux were built on Ubuntu 22.04 and needed glibc 2.34 and 2.32; they are now
+  built in a `manylinux_2_28` container and need at most glibc 2.28, which the release gate checks. The
+  official `libduckdb` they load needs 2.25.
+
 ## 0.12.1
 
 ### Upgrading from 0.12.0
