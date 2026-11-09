@@ -51,7 +51,11 @@ class ExecCallerSpec extends AnyFlatSpec with Matchers:
       .unrestricted("conn-1", "alice", superuserAdmissible = false)
       .copy(jwtRoles = Set("r"), jwtGroups = Set("g"), jwtClaims = Map("sub" -> "alice"))
     val req = c.authzRequest(ai.starlake.quack.model.PoolKey("acme", "acme_db", "p"))
-    (req.jwtRoles, req.jwtGroups, req.jwtClaims) shouldBe (Set("r"), Set("g"), Map("sub" -> "alice"))
+    (req.jwtRoles, req.jwtGroups, req.jwtClaims) shouldBe (
+      Set("r"),
+      Set("g"),
+      Map("sub" -> "alice")
+    )
     req.superuserAdmissible shouldBe false
   }
 

@@ -11,11 +11,11 @@ import org.scalatest.matchers.should.Matchers
   * same `AT` id on a DuckLake tenant-db.
   *
   * The metadata filter strips the clause before parsing (SqlParser.stripTimeTravelClauses);
-  * jsqlparser itself rejects it, and the table grant is the node's to judge. The column and row policy
-  * rewriters strip it with the parser input's own scanner and put it back on the same table reference
-  * (TimeTravelCarrier), inside the row-policy wrapper on the base table, so a principal holding a
-  * column or row policy can still read at a snapshot with the policy applied. A clause that cannot
-  * be pinned to a table reference fails closed.
+  * jsqlparser itself rejects it, and the table grant is the node's to judge. The column and row
+  * policy rewriters strip it with the parser input's own scanner and put it back on the same table
+  * reference (TimeTravelCarrier), inside the row-policy wrapper on the base table, so a principal
+  * holding a column or row policy can still read at a snapshot with the policy applied. A clause
+  * that cannot be pinned to a table reference fails closed.
   */
 class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
 

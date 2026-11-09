@@ -156,7 +156,9 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
   it should "stamp the audit origin with the source the caller of execute names" in {
     val refusal = () =>
       QuackResponse.Failed(
-        QuackError.Permanent("Permission Error: QoD: user:alice lacks grants on cat.sch.tbl:select"),
+        QuackError.Permanent(
+          "Permission Error: QoD: user:alice lacks grants on cat.sch.tbl:select"
+        ),
         1L
       )
     val (router, journal, store) = setupWithJournal(stub = refusal)

@@ -23,13 +23,14 @@ import java.sql.Connection
   * its grants cover, and an object it may not see answers exactly like one that does not exist.
   *
   * The handlers run over the router's real text pipeline (the metadata filter and the column-policy
-  * rewriter, via [[PolicyPipelineFixture]]), and the node is an in-process DuckDB holding the tenant
-  * catalog, so every listing and probe is answered by DuckDB itself after the pipeline rewrote it.
-  * Table grants are qod-node's decision: this node answers a read of an ungranted table with the
-  * refusal qod-node sends ([[refusingUngranted]]), so what is pinned here is how the edge answers
-  * that refusal; `RestEdgeEndToEndSpec` has the real decision on live nodes. That DuckDB has no DuckLake extension, so the node
-  * drops the `AT (VERSION => n)` the edge sends on the DuckLake kind before executing; what the
-  * pipeline does with that clause is pinned by RestTimeTravelPolicySpec.
+  * rewriter, via [[PolicyPipelineFixture]]), and the node is an in-process DuckDB holding the
+  * tenant catalog, so every listing and probe is answered by DuckDB itself after the pipeline
+  * rewrote it. Table grants are qod-node's decision: this node answers a read of an ungranted table
+  * with the refusal qod-node sends ([[refusingUngranted]]), so what is pinned here is how the edge
+  * answers that refusal; `RestEdgeEndToEndSpec` has the real decision on live nodes. That DuckDB
+  * has no DuckLake extension, so the node drops the `AT (VERSION => n)` the edge sends on the
+  * DuckLake kind before executing; what the pipeline does with that clause is pinned by
+  * RestTimeTravelPolicySpec.
   */
 class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
 

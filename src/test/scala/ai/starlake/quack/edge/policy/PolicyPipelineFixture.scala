@@ -104,6 +104,7 @@ object PolicyPipelineFixture:
       guarded: Boolean = false
   ): Harness =
     val backend = new QuackBackend:
+      def allowsLocalFiles   = true
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
@@ -129,7 +130,7 @@ object PolicyPipelineFixture:
       backend,
       tracker,
       store,
-      duckLakeInitializer = (_, _) => ()
+      duckLakeInitializer = (_, _, _) => ()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     val metastore = kc.kind match
@@ -147,7 +148,7 @@ object PolicyPipelineFixture:
       case TenantDbKind.InMemory => ""
       case _                     => s"/tmp/qod-policy-pipeline/${kc.catalog}"
     sup
-      .createTenantDb("acme", kc.suffix, kc.kind, metastore, dataPath)
+      .createTenantDb("acme", kc.suffix, kc.kind, metastore, dataPath, writerTrusted = true)
       .unsafeRunSync()
       .fold(e => throw new IllegalStateException(s"createTenantDb(${kc.kind}): $e"), identity)
     val key = PoolKey("acme", s"acme_${kc.suffix}", "sales")
