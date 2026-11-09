@@ -41,6 +41,7 @@ on:
       - 'build.sbt'
       - 'project/Versions.scala'
       - 'scripts/release/quackwire-build-info.sh'
+      - 'scripts/release/glibc-floor.sh'
       - '.github/workflows/quackwire.yml'
   pull_request:
     paths:
@@ -49,6 +50,7 @@ on:
       - 'build.sbt'
       - 'project/Versions.scala'
       - 'scripts/release/quackwire-build-info.sh'
+      - 'scripts/release/glibc-floor.sh'
       - '.github/workflows/quackwire.yml'
   workflow_dispatch:
 
@@ -104,11 +106,13 @@ jobs:
             libname: libquackwire.so
             os: linux
             duckdb_archive: duckdb-shared-libs-linux-amd64.tar.gz
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64:2026.11.07-1
           - runner: ubuntu-22.04-arm
             platform: linux-aarch64
             libname: libquackwire.so
             os: linux
             duckdb_archive: duckdb-shared-libs-linux-arm64.tar.gz
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64:2026.11.07-1
           - runner: macos-15-intel
             platform: osx-x86_64
             libname: libquackwire.dylib
@@ -195,13 +199,30 @@ jobs:
           ls -l /usr/local/lib/libduckdb.so /usr/local/include/duckdb.hpp
           ls /usr/local/include/duckdb/common/serializer/binary_serializer.hpp
 
-      - name: CMake configure
+      - name: CMake configure and build (macOS)
+        if: matrix.os == 'macos'
         working-directory: native/quackwire
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
 
-      - name: CMake build
-        working-directory: native/quackwire
-        run: cmake --build build --config Release
+      # In a manylinux_2_28 container, not on the runner: the library links the glibc it is built
+      # against, and the runner's would refuse to load on older distributions
+      # (scripts/release/glibc-floor.sh).
+      - name: CMake configure and build (Linux, manylinux_2_28)
+        if: matrix.os == 'linux'
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+        run: |
+          set -euo pipefail
+          # Read here, where the checkout is ours: the marker's commit should not depend on git in the image.
+          quack_sha="$(git -C native/quackwire/thirdparty/duckdb-quack rev-parse HEAD)"
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e JAVA_HOME -e DUCKDB_HOME=/duckdb-home \
+            -e QUACK_SHA="$quack_sha" \
+            -v "$PWD:$PWD" -v "$JAVA_HOME:$JAVA_HOME:ro" \
+            -v /usr/local/include:/duckdb-home/include:ro -v /usr/local/lib:/duckdb-home/lib:ro \
+            -w "$PWD/native/quackwire" "$MANYLINUX_IMAGE" \
+            bash -euc 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DQUACKWIRE_QUACK_SHA="$QUACK_SHA" && cmake --build build --config Release'
 
       - name: Verify artifact
         working-directory: native/quackwire/build
@@ -226,6 +247,8 @@ jobs:
           if [[ "${{ matrix.os }}" == linux ]]; then
             readelf -d "${{ matrix.libname }}" | grep -E 'BIND_NOW|FLAGS.*NOW' \
               || { echo "::error::${{ matrix.libname }} is not linked with -z now"; exit 1; }
+            source "$GITHUB_WORKSPACE/scripts/release/glibc-floor.sh"
+            glibc_floor_check "${{ matrix.libname }}"
           fi
 
       - name: Upload native artifact

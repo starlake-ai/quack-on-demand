@@ -38,11 +38,23 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   ): String =
     s"quackwire-build-info:protocol=$protocol;duckdb=$duckdb;duckdb_source=b15358c371;quack=$quack"
 
-  /** A stand-in binary: the marker surrounded by NUL-padded junk, as in .rodata. */
-  private def fakeBinary(path: Path, marker: Option[String]): Path =
+  /** A stand-in binary: the marker and the glibc version names surrounded by NUL-padded junk, as
+    * in .rodata and .dynstr.
+    */
+  private def fakeBinary(path: Path, marker: Option[String], glibc: Seq[String] = Nil): Path =
     Files.createDirectories(path.getParent)
-    val junk = Array.fill[Byte](64)(0x7f) ++ Array.fill[Byte](8)(0)
-    Files.write(path, junk ++ marker.fold(Array.emptyByteArray)(_.getBytes("US-ASCII")) ++ junk)
+    val junk  = Array.fill[Byte](64)(0x7f) ++ Array.fill[Byte](8)(0)
+    val names = glibc.flatMap(g => g.getBytes("US-ASCII").toSeq :+ 0.toByte).toArray
+    Files.write(
+      path,
+      junk ++ marker.fold(Array.emptyByteArray)(_.getBytes("US-ASCII")) ++ junk ++ names
+    )
+
+  /** What a Linux stand-in names: within the floor unless the test says otherwise. */
+  private def linuxGlibc(plat: String, tooNew: Set[String]): Seq[String] =
+    if !plat.startsWith("linux-") then Nil
+    else if tooNew(plat) then Seq("GLIBC_2.2.5", "GLIBC_2.34")
+    else Seq("GLIBC_2.2.5", "GLIBC_2.17")
 
   private def sha256(path: Path): String =
     MessageDigest
@@ -95,10 +107,15 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   }
 
   /** A checkout holding just what `verify_quackwire_binaries` reads, every sidecar correct. */
-  private def releaseTree(stale: Set[String]): Path =
+  private def releaseTree(stale: Set[String], tooNew: Set[String] = Set.empty): Path =
     val root = tempDir.resolve("tree")
     Files.createDirectories(root.resolve("scripts/release"))
-    Seq("release-lib.sh", "quackwire-build-info.sh", "qod-node-build-info.sh").foreach { f =>
+    Seq(
+      "release-lib.sh",
+      "quackwire-build-info.sh",
+      "qod-node-build-info.sh",
+      "glibc-floor.sh"
+    ).foreach { f =>
       Files.copy(Paths.get(s"scripts/release/$f"), root.resolve(s"scripts/release/$f"))
     }
     Files.writeString(root.resolve("build.sbt"), s"""val libquackwireVersion = "$Pin"\n""")
@@ -111,7 +128,11 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       "windows-x86_64/quackwire.dll"
     ).foreach { rel =>
       val plat = rel.takeWhile(_ != '/')
-      val bin  = fakeBinary(bins.resolve(rel), if stale(plat) then None else Some(marker()))
+      val bin  = fakeBinary(
+        bins.resolve(rel),
+        if stale(plat) then None else Some(marker()),
+        linuxGlibc(plat, tooNew)
+      )
       Files.writeString(bins.resolve(s"$rel.sha256"), sha256(bin) + "\n")
     }
     Files.writeString(bins.resolve("VERSION"), Pin + "\n")
@@ -138,6 +159,41 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     out should include("windows-x86_64/quackwire.dll")
   }
 
+  it should "refuse a Linux library needing a glibc past the floor" in {
+    val (code, out) = verify(releaseTree(stale = Set.empty, tooNew = Set("linux-aarch64")))
+    code shouldBe 1
+    out should include("linux-aarch64/libquackwire.so needs glibc 2.34")
+  }
+
+  // ---- the glibc floor ---------------------------------------------------------------------
+
+  private def checkFloor(names: String*): (Int, String) =
+    val f = fakeBinary(tempDir.resolve("elf"), None, names)
+    bash(
+      Paths.get(".").toAbsolutePath,
+      s"source scripts/release/glibc-floor.sh && glibc_floor_check '$f'"
+    )
+
+  "glibc_floor_check" should "compare versions numerically, 2.9 being older than 2.28" in {
+    checkFloor("GLIBC_2.9", "GLIBC_2.2.5", "GLIBC_2.28")._1 shouldBe 0
+  }
+
+  it should "refuse the first version past the floor" in {
+    val (code, out) = checkFloor("GLIBC_2.9", "GLIBC_2.29")
+    code shouldBe 1
+    out should include("needs glibc 2.29; the limit is 2.28")
+  }
+
+  it should "not read GLIBC_PRIVATE as a version" in {
+    checkFloor("GLIBC_PRIVATE", "GLIBC_2.17")._1 shouldBe 0
+  }
+
+  it should "refuse a file naming no glibc at all rather than pass it" in {
+    val (code, out) = checkFloor()
+    code shouldBe 1
+    out should include("names no glibc version")
+  }
+
   // ---- qod-node ----------------------------------------------------------------------------
 
   private def nodeMarker(
@@ -152,7 +208,8 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     */
   private def nodeTree(
       markers: Map[String, Option[String]] = Map.empty,
-      version: String = "protocol=1;duckdb=v2.0.0;duckdb_source=d54cbbe3df"
+      version: String = "protocol=1;duckdb=v2.0.0;duckdb_source=d54cbbe3df",
+      tooNew: Set[String] = Set.empty
   ): Path =
     val root = releaseTree(stale = Set.empty)
     Files.createDirectories(root.resolve("native/qod-node"))
@@ -166,7 +223,7 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     Seq("linux-x86_64", "linux-aarch64", "osx-x86_64", "osx-aarch64").foreach { plat =>
       markers.getOrElse(plat, Some(nodeMarker())) match
         case Some(m) =>
-          val bin = fakeBinary(bins.resolve(s"$plat/qod-node"), Some(m))
+          val bin = fakeBinary(bins.resolve(s"$plat/qod-node"), Some(m), linuxGlibc(plat, tooNew))
           Files.writeString(bins.resolve(s"$plat/qod-node.sha256"), sha256(bin) + "\n")
         case None => ()
     }
@@ -186,6 +243,12 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val (code, out) = verifyNodes(nodeTree(markers = Map("osx-x86_64" -> None)))
     code shouldBe 1
     out should include("missing vendored qod-node binaries: osx-x86_64")
+  }
+
+  it should "refuse a Linux binary needing a glibc past the floor" in {
+    val (code, out) = verifyNodes(nodeTree(tooNew = Set("linux-x86_64")))
+    code shouldBe 1
+    out should include("linux-x86_64/qod-node needs glibc 2.34")
   }
 
   it should "refuse a binary of another node protocol" in {

@@ -11,7 +11,10 @@
 # default .duckdb/<abi>/) with the relative rpath a vendored binary needs
 # (QOD_NODE_RELATIVE_RPATH: libduckdb only in ../lib next to it), downloads the other Linux and
 # macOS platforms from a green 'qod-node' CI run of the commit being refreshed (FETCH_CI=0
-# vendors the host platform alone), checks every binary's build marker against the pin (node
+# vendors the host platform alone). A Linux host takes its own platform from CI too: a binary links
+# the glibc it is built against, so only CI's manylinux_2_28 build meets the floor of
+# glibc-floor.sh (with FETCH_CI=0 a Linux build past the floor is refused). Then it
+# checks every binary's build marker against the pin (node
 # protocol, DuckDB release, and one DuckDB source id for the whole set), regenerates the .sha256
 # companions and the VERSION stamp, and STOPS. Nothing under native/qod-node/binaries/ changes
 # unless every binary passes. Review the diff and commit like any other change.
@@ -26,6 +29,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_DIR"
 # shellcheck source=SCRIPTDIR/qod-node-build-info.sh
 source "$REPO_DIR/scripts/release/qod-node-build-info.sh"
+# shellcheck source=SCRIPTDIR/glibc-floor.sh
+source "$REPO_DIR/scripts/release/glibc-floor.sh"
 
 FETCH_CI="${FETCH_CI:-1}"
 VENDORED=native/qod-node/binaries
@@ -57,19 +62,30 @@ case "$(uname -m)" in
 esac
 host_platform="$host_os-$host_arch"
 
-duckdb_home="${DUCKDB_CACHE_DIR:-$REPO_DIR/.duckdb}/$pin"
-[[ -f "$duckdb_home/include/duckdb/planner/planner_extension.hpp" && -e "$duckdb_home/lib" ]] \
-  || { echo "pinned libduckdb cache missing at $duckdb_home (need lib/ and include/ with the internal header tree). Run 'QOD_VERSION=BUILD ./scripts/run-jar.sh' once to populate it, then re-run." >&2; exit 1; }
-echo "cmake build [$host_platform] (DUCKDB_HOME=$duckdb_home)..."
-rm -rf native/qod-node/build-release
-cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
-  -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$duckdb_home"
-cmake --build native/qod-node/build-release --config Release --target qod-node
-host_built=native/qod-node/build-release/qod-node
-source_id="$(qod_node_check_marker "$host_built")" \
-  || { echo "the host build does not match the pin; nothing was changed." >&2; exit 1; }
+build_host=1
+if [[ "$host_os" == linux && "$FETCH_CI" == "1" ]]; then
+  build_host=0
+fi
 
-staged=("$host_platform:$host_built")
+source_id=""
+staged=()
+if [[ "$build_host" == "1" ]]; then
+  duckdb_home="${DUCKDB_CACHE_DIR:-$REPO_DIR/.duckdb}/$pin"
+  [[ -f "$duckdb_home/include/duckdb/planner/planner_extension.hpp" && -e "$duckdb_home/lib" ]] \
+    || { echo "pinned libduckdb cache missing at $duckdb_home (need lib/ and include/ with the internal header tree). Run 'QOD_VERSION=BUILD ./scripts/run-jar.sh' once to populate it, then re-run." >&2; exit 1; }
+  echo "cmake build [$host_platform] (DUCKDB_HOME=$duckdb_home)..."
+  rm -rf native/qod-node/build-release
+  cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
+    -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$duckdb_home"
+  cmake --build native/qod-node/build-release --config Release --target qod-node
+  host_built=native/qod-node/build-release/qod-node
+  source_id="$(qod_node_check_marker "$host_built")" \
+    || { echo "the host build does not match the pin; nothing was changed." >&2; exit 1; }
+  if [[ "$host_os" == linux ]]; then
+    glibc_floor_check "$host_built" || { echo "nothing was changed." >&2; exit 1; }
+  fi
+  staged=("$host_platform:$host_built")
+fi
 
 # --- the other platforms from CI ---
 if [[ "$FETCH_CI" == "1" ]]; then
@@ -88,13 +104,17 @@ if [[ "$FETCH_CI" == "1" ]]; then
   trap 'rm -rf "$tmp_artifacts"' EXIT
   gh run download "$ci_run_id" --dir "$tmp_artifacts" --pattern 'qod-node-*'
   for plat in "${QOD_NODE_UNIX_PLATFORMS[@]}"; do
-    [[ "$plat" == "$host_platform" ]] && continue
+    [[ "$plat" == "$host_platform" && "$build_host" == "1" ]] && continue
     f="$tmp_artifacts/qod-node-$plat/qod-node"
     [[ -f "$f" ]] || { echo "CI run $ci_run_id has no qod-node-$plat artifact; nothing was changed." >&2; exit 1; }
     id="$(qod_node_check_marker "$f")" \
       || { echo "CI run $ci_run_id: the $plat artifact does not match the pin; nothing was changed." >&2; exit 1; }
+    [[ -n "$source_id" ]] || source_id="$id"
     [[ "$id" == "$source_id" ]] \
-      || { echo "CI run $ci_run_id: $plat is built against DuckDB source $id, the host against $source_id; nothing was changed." >&2; exit 1; }
+      || { echo "CI run $ci_run_id: $plat is built against DuckDB source $id, the rest of the set against $source_id; nothing was changed." >&2; exit 1; }
+    if [[ "$plat" == linux-* ]]; then
+      glibc_floor_check "$f" || { echo "CI run $ci_run_id: nothing was changed." >&2; exit 1; }
+    fi
     staged+=("$plat:$f")
   done
 fi
