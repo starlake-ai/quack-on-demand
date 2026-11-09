@@ -20,6 +20,8 @@ export interface NavItem {
   external?: 'workbench';
   /** Disabled (not hidden) under All tenants. */
   needsTenant?: boolean;
+  /** Disabled (not hidden) for a superuser. */
+  notForSuperuser?: boolean;
   rules?: Rule[];
   children?: NavItem[];
 }
@@ -32,7 +34,7 @@ export const NAV: NavItem[] = [
       { id: 'servers', label: 'Fleet servers', icon: 'server', path: '/servers', rules: ['admin', 'superuser', 'fleet'] },
     ],
   },
-  { id: 'workbench', label: 'Workbench', icon: 'workbench', external: 'workbench', rules: ['starlake'] },
+  { id: 'workbench', label: 'Workbench', icon: 'workbench', external: 'workbench', notForSuperuser: true, rules: ['starlake'] },
   {
     id: 'tenant', label: 'Tenant', icon: 'tenant', rules: ['admin'],
     children: [
@@ -92,6 +94,8 @@ export interface ResolvedNavItem {
   to: string | null;
   external: 'workbench' | null;
   disabled: boolean;
+  /** Why the entry is disabled, shown as its tooltip; null when enabled. */
+  disabledReason: string | null;
   children: ResolvedNavItem[];
 }
 
@@ -112,13 +116,18 @@ export function visibleNav(items: NavItem[], ctx: NavCtx): ResolvedNavItem[] {
     const to = item.section != null ? `${scopePrefix(ctx.scope)}/${item.section}` : item.path ?? null;
     // A group header whose every child is hidden has nothing to show.
     if (to == null && item.external == null && children.length === 0) return [];
+    const disabledReason =
+      item.notForSuperuser === true && ctx.superuser ? 'Not available to superusers'
+      : item.needsTenant === true && ctx.scope.kind === 'all' ? 'Pick a tenant first'
+      : null;
     return [{
       id: item.id,
       label: item.label,
       icon: item.icon,
       to,
       external: item.external ?? null,
-      disabled: item.needsTenant === true && ctx.scope.kind === 'all',
+      disabled: disabledReason != null,
+      disabledReason,
       children,
     }];
   });

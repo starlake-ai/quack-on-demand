@@ -53,6 +53,13 @@ describe('visibleNav', () => {
     expect(byId(ctx, 'users')?.disabled).toBe(false);
     expect(byId(ctx, 'dashboard')?.disabled).toBe(false);
   });
+  it('disables, not hides, the workbench for a superuser', () => {
+    expect(byId(superCtx, 'workbench')).toMatchObject({
+      disabled: true, disabledReason: 'Not available to superusers', external: 'workbench',
+    });
+    expect(byId({ ...superCtx, superuser: false }, 'workbench')).toMatchObject({ disabled: false, disabledReason: null });
+    expect(byId({ ...superCtx, scope: ALL }, 'pools')?.disabledReason).toBe('Pick a tenant first');
+  });
   it('reduces a profile-only session to workbench and profile', () => {
     const ctx: NavCtx = { superuser: false, admin: false, telemetry: true, fleet: true, starlake: true, scope: acme };
     expect(ids(ctx)).toEqual(['workbench', 'settings', 'profile']);
