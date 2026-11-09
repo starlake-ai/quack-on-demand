@@ -13,7 +13,9 @@ function NavTree({ items, depth }: { items: ResolvedNavItem[]; depth: number }) 
       {items.map(item => {
         const body = <><NavIcon name={item.icon} /><span className="nav-label">{item.label}</span></>;
         let entry: ReactNode;
-        if (item.external === 'workbench') {
+        if (item.disabled) {
+          entry = <span className="nav-item disabled" aria-disabled="true" title={item.disabledReason ?? undefined}>{body}</span>;
+        } else if (item.external === 'workbench') {
           entry = (
             <button
               type="button" className="nav-item" title="Opens in a new tab"
@@ -25,8 +27,6 @@ function NavTree({ items, depth }: { items: ResolvedNavItem[]; depth: number }) 
           );
         } else if (item.to == null) {
           entry = <div className="nav-group" title={item.label}>{body}</div>;
-        } else if (item.disabled) {
-          entry = <span className="nav-item disabled" aria-disabled="true" title="Pick a tenant first">{body}</span>;
         } else {
           entry = (
             <NavLink to={item.to} title={item.label} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
