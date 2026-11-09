@@ -299,7 +299,7 @@ answered.
 | Pool suspend / resume | Scale to zero keeping the role distribution; wake on REST, query, module, or idle policy | Pay for compute only while queried |
 | Idle hibernation | Leader-gated sweep suspends pools after an idle window | Automatic cost control per pool |
 | Demand scale-out | Owner-declared min / max band; readers added under load and shed when quiet | Elastic read capacity with a hard cap and quota gating |
-| Active-active manager HA | N managers on Kubernetes, one leader by Postgres advisory lock, caches synced by LISTEN / NOTIFY | No single point of failure for the control plane |
+| Active-active manager HA | N managers on Kubernetes or a fleet of servers, one leader by Postgres advisory lock, caches synced by LISTEN / NOTIFY | No single point of failure for the control plane |
 | Kubernetes backend | Pod plus Service per node, Secrets for tokens, federation SQL and metastore passwords, pod resources and templates, registry-drift healing | Production deployment shape, with the local backend for a single box |
 
 ### Operability and administration

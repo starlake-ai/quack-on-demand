@@ -863,7 +863,7 @@ sweep is that sink's sole drainer. Manual scale outside the band is refused
 (`outside_band`).
 See docs/superpowers/specs/2026-08-11-demand-scale-out-policy-design.md.
 
-### HA mode (opt-in, Kubernetes only)
+### HA mode (opt-in, Kubernetes or fleet)
 
 `QOD_HA_ENABLED=true` (helm: `replicaCount > 1`) runs N active-active managers.
 All replicas serve REST + FlightSQL; one holds a Postgres session advisory lock
