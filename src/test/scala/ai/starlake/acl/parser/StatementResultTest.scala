@@ -7,8 +7,8 @@ import ai.starlake.acl.model.TableRef
 class StatementResultTest extends AnyFunSuite with Matchers {
 
   test("Extracted variant is constructible with correct fields") {
-    val t       = TableRef("db", "schema", "orders")
-    val accesses = Set(TableAccess(t, Verb.Read))
+    val t                                 = TableRef("db", "schema", "orders")
+    val accesses                          = Set(TableAccess(t, Verb.Read))
     val result: StatementResult.Extracted =
       StatementResult.Extracted(0, "SELECT * FROM orders", accesses)
     result.index shouldBe 0
@@ -57,9 +57,11 @@ class StatementResultTest extends AnyFunSuite with Matchers {
     val t3 = TableRef("db", "s", "products")
 
     val results = List(
-      StatementResult.Extracted(0, "s1", Set(TableAccess(t1, Verb.Read), TableAccess(t2, Verb.Read))),
+      StatementResult
+        .Extracted(0, "s1", Set(TableAccess(t1, Verb.Read), TableAccess(t2, Verb.Read))),
       StatementResult.ParseError(1, "s2", "error"),
-      StatementResult.Extracted(2, "s3", Set(TableAccess(t2, Verb.Read), TableAccess(t3, Verb.Read))),
+      StatementResult
+        .Extracted(2, "s3", Set(TableAccess(t2, Verb.Read), TableAccess(t3, Verb.Read))),
       StatementResult.ControlFlow(3, "s4", "Insert")
     )
 
@@ -69,7 +71,7 @@ class StatementResultTest extends AnyFunSuite with Matchers {
   }
 
   test("ExtractionResult.fromStatements deduplicates tables across statements") {
-    val t1 = TableRef("db", "s", "orders")
+    val t1      = TableRef("db", "s", "orders")
     val results = List(
       StatementResult.Extracted(0, "s1", Set(TableAccess(t1, Verb.Read))),
       StatementResult.Extracted(1, "s2", Set(TableAccess(t1, Verb.Read)))
@@ -87,7 +89,7 @@ class StatementResultTest extends AnyFunSuite with Matchers {
   }
 
   test("truncateSnippet truncates long strings with ellipsis") {
-    val long = "x" * 300
+    val long   = "x" * 300
     val result = truncateSnippet(long)
     result shouldBe ("x" * 200 + "...")
     result.length shouldBe 203

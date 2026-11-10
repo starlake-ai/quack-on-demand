@@ -4,14 +4,15 @@ import ai.starlake.acl.model.Config
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Regression for the FromQuery shorthand (`FROM t [pipe ops...]`). JSQLParser
-  * parses this as a `Select` subclass (`net.sf.jsqlparser.statement.piped.FromQuery`),
-  * but the visitor's legacy match arms only covered PlainSelect / SetOperationList /
-  * Values / LateralSubSelect / ParenthesedSelect, so FromQuery used to silently
-  * drop all table refs and the validator admitted the query unconditionally.
+/** Regression for the FromQuery shorthand (`FROM t [pipe ops...]`). JSQLParser parses this as a
+  * `Select` subclass (`net.sf.jsqlparser.statement.piped.FromQuery`), but the visitor's legacy
+  * match arms only covered PlainSelect / SetOperationList / Values / LateralSubSelect /
+  * ParenthesedSelect, so FromQuery used to silently drop all table refs and the validator admitted
+  * the query unconditionally.
   *
-  * See project memory `project-dml-acl-unenforced` for the parallel DML gap that
-  * was fixed in the same wave of parser work. */
+  * See project memory `project-dml-acl-unenforced` for the parallel DML gap that was fixed in the
+  * same wave of parser work.
+  */
 class SqlParserFromQuerySpec extends AnyFlatSpec with Matchers:
 
   private val config = Config.forGeneric("testdb", "public")

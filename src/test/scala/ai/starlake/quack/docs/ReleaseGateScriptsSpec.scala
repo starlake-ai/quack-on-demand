@@ -38,8 +38,8 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   ): String =
     s"quackwire-build-info:protocol=$protocol;duckdb=$duckdb;duckdb_source=b15358c371;quack=$quack"
 
-  /** A stand-in binary: the marker and the glibc version names surrounded by NUL-padded junk, as
-    * in .rodata and .dynstr.
+  /** A stand-in binary: the marker and the glibc version names surrounded by NUL-padded junk, as in
+    * .rodata and .dynstr.
     */
   private def fakeBinary(path: Path, marker: Option[String], glibc: Seq[String] = Nil): Path =
     Files.createDirectories(path.getParent)

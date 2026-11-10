@@ -29,7 +29,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- JOINs ---
 
   test("extract tables from JOIN") {
-    val sql = "SELECT * FROM orders o JOIN customers c ON o.cid = c.id"
+    val sql    = "SELECT * FROM orders o JOIN customers c ON o.cid = c.id"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(
       TableRef("testdb", "public", "orders"),
@@ -40,7 +40,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- Subqueries ---
 
   test("extract tables from WHERE subquery") {
-    val sql = "SELECT * FROM orders WHERE cid IN (SELECT id FROM customers)"
+    val sql    = "SELECT * FROM orders WHERE cid IN (SELECT id FROM customers)"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(
       TableRef("testdb", "public", "orders"),
@@ -49,7 +49,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   }
 
   test("extract tables from SELECT subquery") {
-    val sql = "SELECT (SELECT name FROM departments LIMIT 1), * FROM employees"
+    val sql    = "SELECT (SELECT name FROM departments LIMIT 1), * FROM employees"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(
       TableRef("testdb", "public", "departments"),
@@ -60,7 +60,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- CTEs ---
 
   test("exclude CTE names from results") {
-    val sql = "WITH cte AS (SELECT * FROM orders) SELECT * FROM cte"
+    val sql    = "WITH cte AS (SELECT * FROM orders) SELECT * FROM cte"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(TableRef("testdb", "public", "orders"))
   }
@@ -68,7 +68,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- Set operations ---
 
   test("extract tables from UNION") {
-    val sql = "SELECT * FROM orders UNION SELECT * FROM archive_orders"
+    val sql    = "SELECT * FROM orders UNION SELECT * FROM archive_orders"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(
       TableRef("testdb", "public", "orders"),
@@ -97,7 +97,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- Multi-statement ---
 
   test("handle multi-statement input") {
-    val sql = "SELECT * FROM t1; SELECT * FROM t2"
+    val sql    = "SELECT * FROM t1; SELECT * FROM t2"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 2
     result.statements.foreach(_ shouldBe a[StatementResult.Extracted])
@@ -110,7 +110,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- Deduplication ---
 
   test("deduplicate same table referenced multiple times") {
-    val sql = "SELECT * FROM orders JOIN orders ON 1=1"
+    val sql    = "SELECT * FROM orders JOIN orders ON 1=1"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(TableRef("testdb", "public", "orders"))
     result.allTables.size shouldBe 1
@@ -119,7 +119,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- Case normalization ---
 
   test("normalize table names to lowercase") {
-    val sql = "SELECT * FROM MyDB.Public.ORDERS"
+    val sql    = "SELECT * FROM MyDB.Public.ORDERS"
     val result = SqlParser.extract(sql, config)
     result.allTables should have size 1
     val table = result.allTables.head
@@ -131,7 +131,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- File references ---
 
   test("ignore string-literal file references") {
-    val sql = "SELECT * FROM 'data.parquet'"
+    val sql    = "SELECT * FROM 'data.parquet'"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 1
     result.statements.head match {
@@ -145,7 +145,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
 
   test("return UnqualifiedTable when database default missing") {
     val noDbConfig = Config.forGeneric(defaultSchema = Some("public"))
-    val result = SqlParser.extract("SELECT * FROM orders", noDbConfig)
+    val result     = SqlParser.extract("SELECT * FROM orders", noDbConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
     stmt.accesses.map(_.table) shouldBe empty
@@ -171,7 +171,8 @@ class SqlParserTest extends AnyFunSuite with Matchers {
   // --- EXISTS subquery ---
 
   test("extract tables from EXISTS subquery") {
-    val sql = "SELECT * FROM orders WHERE EXISTS (SELECT 1 FROM customers WHERE customers.id = orders.cid)"
+    val sql =
+      "SELECT * FROM orders WHERE EXISTS (SELECT 1 FROM customers WHERE customers.id = orders.cid)"
     val result = SqlParser.extract(sql, config)
     result.allTables shouldBe Set(
       TableRef("testdb", "public", "orders"),

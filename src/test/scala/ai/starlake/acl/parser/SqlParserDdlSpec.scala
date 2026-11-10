@@ -4,11 +4,11 @@ import ai.starlake.acl.model.Config
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Verifies that `SqlParser.processStatement` extracts the right
-  * `TableAccess(table, verb)` tuples for DDL statements (CREATE / DROP /
-  * ALTER / TRUNCATE). Mirrors `SqlParserDmlSpec` for the write path -- DDL
-  * grants are now enforceable per-table because the parser emits an
-  * explicit `Verb.Ddl` access on the target. */
+/** Verifies that `SqlParser.processStatement` extracts the right `TableAccess(table, verb)` tuples
+  * for DDL statements (CREATE / DROP / ALTER / TRUNCATE). Mirrors `SqlParserDmlSpec` for the write
+  * path -- DDL grants are now enforceable per-table because the parser emits an explicit `Verb.Ddl`
+  * access on the target.
+  */
 class SqlParserDdlSpec extends AnyFlatSpec with Matchers:
 
   private val config = Config.forGeneric("testdb", "public")

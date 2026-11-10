@@ -10,8 +10,8 @@ class RoleMatcherSpec extends AnyFlatSpec with Matchers:
     RoleMatcher.preferred(StatementKind.Select) shouldBe List(Role.ReadOnly, Role.Dual)
 
   it should "list WO and DUAL for DML, DDL and BEGIN" in:
-    RoleMatcher.preferred(StatementKind.Dml)   shouldBe List(Role.WriteOnly, Role.Dual)
-    RoleMatcher.preferred(StatementKind.Ddl)   shouldBe List(Role.WriteOnly, Role.Dual)
+    RoleMatcher.preferred(StatementKind.Dml) shouldBe List(Role.WriteOnly, Role.Dual)
+    RoleMatcher.preferred(StatementKind.Ddl) shouldBe List(Role.WriteOnly, Role.Dual)
     RoleMatcher.preferred(StatementKind.Begin) shouldBe List(Role.WriteOnly, Role.Dual)
 
   "RoleMatcher.fallback" should "promote to DUAL when RO is exhausted" in:
