@@ -190,17 +190,12 @@ final class McpDataTools(
       database: String,
       poolArg: Option[String]
   ): Either[String, ai.starlake.quack.model.PoolKey] =
-    poolArg match
-      case Some(pool) =>
-        sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
-          case Some(key) if key.tenantDb == database => Right(key)
-          case Some(key)                             =>
-            Left(s"pool '$pool' serves database '${key.tenantDb}', not '$database'")
-          case None => Left(s"pool '$pool' not found in tenant '$tenant'")
-      case None =>
-        PoolPicks
-          .readPoolKey(sup, tenant, database)
-          .toRight(s"no pool serves database '$database' in tenant '$tenant'")
+    PoolPicks.forDatabase(sup, tenant, database, poolArg).left.map {
+      case PoolPicks.Miss.OtherDatabase(pool, served) =>
+        s"pool '$pool' serves database '$served', not '$database'"
+      case PoolPicks.Miss.PoolNotFound(pool) => s"pool '$pool' not found in tenant '$tenant'"
+      case PoolPicks.Miss.NoPool => s"no pool serves database '$database' in tenant '$tenant'"
+    }
 
   // ---------- run_sql ----------
 

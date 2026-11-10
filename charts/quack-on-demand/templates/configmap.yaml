@@ -35,6 +35,10 @@ data:
   QOD_QUACK_ENABLED:            {{ .Values.quack.enabled | quote }}
   QOD_QUACK_TLS_ENABLED:        {{ .Values.quack.tls.enabled | quote }}
 
+  # ---- Read-only REST data edge ---------------------------------------------
+  QOD_REST_ENABLED:             {{ .Values.rest.enabled | quote }}
+  QOD_REST_TLS_ENABLED:         {{ .Values.rest.tls.enabled | quote }}
+
   # ---- Metrics sink ---------------------------------------------------------
   QOD_METRICS_SINK:        {{ .Values.metrics.sink | quote }}
 

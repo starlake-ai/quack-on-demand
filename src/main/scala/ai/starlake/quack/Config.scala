@@ -1682,3 +1682,133 @@ final case class QuackNativeConfig(
     "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC must not exceed QOD_QUACK_BODY_TIMEOUT_SEC, which must be " +
       "at most 86400"
   )
+
+/** The read-only REST data edge (`quack-rest` block): `GET /api/v1/...` over PAT bearer auth on its
+  * own port, translating one request into one SELECT through the routed executor. Off by default.
+  */
+final case class RestEdgeConfig(
+    @field @ConfigField(
+      envVar = "QOD_REST_ENABLED",
+      description = "Serve the read-only REST data edge (PAT bearer, GET only)."
+    )
+    enabled: Boolean,
+    @field @ConfigField(envVar = "QOD_REST_HOST", description = "REST data edge bind address.")
+    host: String,
+    @field @ConfigField(envVar = "QOD_REST_PORT", description = "REST data edge port.")
+    port: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_TLS_ENABLED",
+      description =
+        "Enable TLS on the REST data edge. On by default: PAT bearers must not cross the network in clear text."
+    )
+    tlsEnabled: Boolean,
+    @field @ConfigField(
+      envVar = "QOD_REST_TLS_CERT_CHAIN",
+      description =
+        "Path to the TLS certificate chain PEM (shared with the FlightSQL edge by default)."
+    )
+    tlsCertChain: String,
+    @field @ConfigField(
+      envVar = "QOD_REST_TLS_PRIVATE_KEY",
+      description = "Path to the TLS private key PEM (PKCS8)."
+    )
+    tlsPrivateKey: String,
+    @field @ConfigField(
+      envVar = "QOD_REST_DEFAULT_LIMIT",
+      description = "Rows returned by /rows when the request gives no limit."
+    )
+    defaultLimit: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_ROWS",
+      description =
+        "Server row cap for /rows and the listings; a request limit or a token's maxRows can only lower it."
+    )
+    maxRows: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_RESPONSE_BYTES",
+      description =
+        "Largest /rows body, in bytes; a page that would exceed it is cut at a row boundary and flagged X-QoD-Truncated."
+    )
+    maxResponseBytes: Long,
+    @field @ConfigField(
+      envVar = "QOD_REST_STMT_TIMEOUT_SEC",
+      description =
+        "Bounded wait per statement, in seconds (a token's stmtTimeoutMs can only lower it); past it the edge answers 504, or 503 pool_resuming when the pool was cold. Must exceed PROXY_RESUME_HOLD_TIMEOUT_SEC."
+    )
+    stmtTimeoutSec: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_DATA_MAX_CONNECTIONS",
+      description =
+        "Most connections the REST data edge keeps open at once. Fewer when a tenth of the heap " +
+          "cannot hold that many: boot says so."
+    )
+    maxConnections: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_DATA_MAX_HEADER_BYTES",
+      description =
+        "Largest request line, and largest header block, the REST data edge reads, in bytes " +
+          "each. Raising it lowers how many connections fit the heap."
+    )
+    maxHeaderBytes: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_HEADER_RECEIVE_TIMEOUT_SEC",
+      description = "Seconds a client has to send its request headers before the connection closes."
+    )
+    headerReceiveTimeoutSec: Int,
+    @field @ConfigField(
+      envVar = "QOD_REST_IDLE_TIMEOUT_SEC",
+      description = "Seconds an idle keep-alive connection stays open."
+    )
+    idleTimeoutSec: Int
+)
+
+object RestEdgeConfig:
+
+  /** Boot validation, in the `Either[String, Unit]` style of `HaPreconditions.validate`: only the
+    * numbers, and a port another door already binds. `otherPorts` are the `(door, port)` pairs of
+    * the listeners that are on. A disabled edge is never checked, so a stale override on a
+    * switched-off block cannot stop a boot.
+    *
+    * `resumeHoldTimeoutSec` is the FlightSQL edge's resume hold, which the router applies to the
+    * REST edge's statements too. The edge's own wait must outlast it: otherwise a request to a
+    * hibernated pool always ends on the edge's clock while the router is still holding, and the
+    * client never sees the router's retryable answer. Refused rather than clamped, so the two
+    * values an operator set are never silently replaced.
+    */
+  def validate(
+      cfg: RestEdgeConfig,
+      otherPorts: List[(String, Int)],
+      resumeHoldTimeoutSec: Long
+  ): Either[String, Unit] =
+    def atLeast(value: Int, min: Int, env: String): Option[String] =
+      Option.when(value < min)(s"$env must be >= $min, got $value")
+    if !cfg.enabled then Right(())
+    else
+      val problems = List(
+        Option.when(cfg.port < 1 || cfg.port > 65535)(
+          s"QOD_REST_PORT must be in 1..65535, got ${cfg.port}"
+        ),
+        atLeast(cfg.defaultLimit, 1, "QOD_REST_DEFAULT_LIMIT"),
+        Option.when(cfg.maxRows < cfg.defaultLimit)(
+          s"QOD_REST_MAX_ROWS (${cfg.maxRows}) must be >= QOD_REST_DEFAULT_LIMIT " +
+            s"(${cfg.defaultLimit})"
+        ),
+        Option.when(cfg.maxResponseBytes < 1024)(
+          s"QOD_REST_MAX_RESPONSE_BYTES must be >= 1024, got ${cfg.maxResponseBytes}"
+        ),
+        atLeast(cfg.stmtTimeoutSec, 1, "QOD_REST_STMT_TIMEOUT_SEC"),
+        Option.when(cfg.stmtTimeoutSec >= 1 && cfg.stmtTimeoutSec.toLong <= resumeHoldTimeoutSec)(
+          s"QOD_REST_STMT_TIMEOUT_SEC (${cfg.stmtTimeoutSec}) must be greater than " +
+            s"PROXY_RESUME_HOLD_TIMEOUT_SEC ($resumeHoldTimeoutSec)"
+        ),
+        atLeast(cfg.maxConnections, 1, "QOD_REST_DATA_MAX_CONNECTIONS"),
+        // Below 1 KiB a request line plus one bearer token no longer fits.
+        atLeast(cfg.maxHeaderBytes, 1024, "QOD_REST_DATA_MAX_HEADER_BYTES"),
+        atLeast(cfg.headerReceiveTimeoutSec, 1, "QOD_REST_HEADER_RECEIVE_TIMEOUT_SEC"),
+        atLeast(cfg.idleTimeoutSec, 1, "QOD_REST_IDLE_TIMEOUT_SEC"),
+        otherPorts.collectFirst {
+          case (door, p) if p == cfg.port =>
+            s"QOD_REST_PORT ${cfg.port} is already bound by the $door listener"
+        }
+      ).flatten
+      problems.headOption.map(p => s"quack-rest: $p").toLeft(())

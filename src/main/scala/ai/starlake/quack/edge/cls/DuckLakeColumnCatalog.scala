@@ -19,7 +19,9 @@ import java.time.Duration
   */
 final class DuckLakeColumnCatalog(
     fetch: (String, String, String, String) => IO[List[String]],
-    instruments: Option[StatementInstruments] = None
+    instruments: Option[StatementInstruments] = None,
+    /** [[ColumnCatalog.historyStable]]'s answer; false (fail closed) when not wired. */
+    history: (String, String, String, String) => IO[Boolean] = (_, _, _, _) => IO.pure(false)
 ) extends ColumnCatalog:
 
   private val cache: Cache[(String, String, String, String), List[String]] =
@@ -28,6 +30,30 @@ final class DuckLakeColumnCatalog(
       .expireAfterWrite(Duration.ofSeconds(5))
       .maximumSize(4096)
       .build()
+
+  private val stableCache: Cache[(String, String, String, String), java.lang.Boolean] =
+    Caffeine
+      .newBuilder()
+      .expireAfterWrite(Duration.ofSeconds(5))
+      .maximumSize(4096)
+      .build()
+
+  /** Cached like [[columnsOf]]; a failed lookup answers false, cached for a tick. */
+  override def historyStable(
+      tenant: String,
+      catalog: String,
+      schemaName: String,
+      tableName: String
+  ): IO[Boolean] =
+    val key = (tenant, catalog, schemaName, tableName)
+    Option(stableCache.getIfPresent(key)) match
+      case Some(cached) => IO.pure(cached.booleanValue)
+      case None         =>
+        history(tenant, catalog, schemaName, tableName).attempt.map { r =>
+          val stable = r.getOrElse(false)
+          stableCache.put(key, stable)
+          stable
+        }
 
   def columnsOf(
       tenant: String,

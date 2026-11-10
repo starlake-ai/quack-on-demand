@@ -82,20 +82,29 @@ private[starlake] object ParserInput:
     * identifier or a comment is not a clause, and a parenthesis inside one does not count; an
     * unbalanced group runs to the end of the input (DuckDB rejects it).
     */
-  def stripTimeTravel(sql: String): String =
-    if sql == null then sql
+  def stripTimeTravel(sql: String): String = timeTravelClauses(sql)._1
+
+  /** [[stripTimeTravel]] plus the clauses it removed, in source order: each one's offset in the
+    * STRIPPED text and its verbatim text. The trivia around a clause is kept, so the offset sits
+    * right after the trivia that followed the table reference (and its alias).
+    */
+  def timeTravelClauses(sql: String): (String, List[(Int, String)]) =
+    if sql == null then (sql, Nil)
     else
-      val view = SqlLexer.engineView(sql)
-      val toks = SqlLexer.tokens(sql)
-      val out  = new StringBuilder
-      var i    = 0
+      val view    = SqlLexer.engineView(sql)
+      val toks    = SqlLexer.tokens(sql)
+      val out     = new StringBuilder
+      val removed = List.newBuilder[(Int, String)]
+      var i       = 0
       while i < toks.length do
         timeTravelEnd(view, toks, i) match
-          case Some(next) => i = next
-          case None       =>
+          case Some(next) =>
+            removed += out.length -> sql.substring(toks(i).start, toks(next - 1).end)
+            i = next
+          case None =>
             out.append(sql.substring(toks(i).start, toks(i).end))
             i += 1
-      out.toString
+      (out.toString, removed.result())
 
   /** When token `i` opens a time-travel clause, the index of the first token after it. */
   private def timeTravelEnd(view: String, toks: Vector[Token], i: Int): Option[Int] =

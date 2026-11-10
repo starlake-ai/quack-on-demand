@@ -1144,3 +1144,86 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       Rewritten("SELECT upper('***') FROM customer")
     run("SELECT c_id FROM customer WHERE `c_email` LIKE '%a%'") should not be Passthrough
   }
+
+  // ---- time travel --------------------------------------------------------------------------
+  //
+  // jsqlparser cannot parse DuckLake's `AT (VERSION => n)`, and takes `AT (TIMESTAMP => ...)` only
+  // before an alias while DuckDB takes it only after one. The clause is stripped with the ACL
+  // parser's scanner and put back on the same table reference, so a snapshot read by a column
+  // policy holder is masked at that snapshot.
+
+  private val ordersCat: ColumnCatalog =
+    new ColumnCatalog.MapCatalog(
+      Map(
+        ("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_phone", "c_ssn"),
+        ("acme_tpch", "tpch1", "orders")   -> List("o_id", "o_cust", "o_note")
+      )
+    )
+
+  private def masked(sql: String, rewriter: ColumnPolicyRewriter = rw): String =
+    rewriter
+      .rewrite(sql, StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx)
+      .unsafeRunSync() match
+      case Rewritten(out) => out
+      case other          => fail(s"expected Rewritten, got $other")
+
+  "a time-travel read" should "mask the column and keep AT (VERSION => n) on the table" in {
+    val sql = masked("SELECT c_id, c_email FROM tpch1.customer AT (VERSION => 7)")
+    sql should include("'***' AS c_email")
+    sql should include("FROM tpch1.customer AT (VERSION => 7)")
+  }
+
+  it should "render the clause after the alias, where DuckDB expects it" in {
+    val sql = masked("SELECT c.c_email FROM customer AS c AT (VERSION => 7) WHERE c.c_id > 1")
+    sql should include("'***'")
+    sql should include("FROM customer AS c AT (VERSION => 7) WHERE")
+  }
+
+  it should "keep each table's own clause when several tables carry one" in {
+    val sql = masked(
+      "SELECT c.c_email, o.o_note FROM customer c AT (VERSION => 7) " +
+        "JOIN orders o AT (VERSION => 9) ON c.c_id = o.o_cust",
+      new ColumnPolicyRewriter(ordersCat, enabled = true)
+    )
+    sql should include("'***'")
+    sql should include("customer c AT (VERSION => 7)")
+    sql should include("orders o AT (VERSION => 9)")
+  }
+
+  it should "keep the clause on the base table inside a derived table, never on the derived table" in {
+    val sql = masked("SELECT d.c_email FROM (SELECT c_email FROM customer AT (VERSION => 7)) d")
+    sql should include("'***'")
+    sql should include("FROM customer AT (VERSION => 7))")
+    sql should not include ") d AT"
+  }
+
+  it should "keep the caller's spelling of the clause and an AT (TIMESTAMP => expr) form" in {
+    masked("SELECT c_email FROM customer x at(version=>7)") should
+      include("FROM customer x at(version=>7)")
+    val ts = "AT (TIMESTAMP => TIMESTAMP '2026-01-01 10:00:00')"
+    masked(s"SELECT c_email FROM customer x $ts") should include(s"FROM customer x $ts")
+  }
+
+  it should "resolve the client's positional projection under the clause" in {
+    val sql = masked("SELECT #1, #2 FROM customer AT (VERSION => 7)")
+    sql should include("'***' AS c_email")
+    sql should include("FROM customer AT (VERSION => 7)")
+  }
+
+  it should "pass through, clause intact in the caller's text, when nothing is masked" in {
+    rw.rewrite(
+      "SELECT c_id FROM customer AT (VERSION => 7)",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() shouldBe Passthrough
+  }
+
+  it should "fail closed when the clause follows a derived table instead of a table" in {
+    rw.rewrite(
+      "SELECT d.c_email FROM (SELECT c_email FROM customer) d AT (VERSION => 7)",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() shouldBe PassthroughParseFailed
+  }

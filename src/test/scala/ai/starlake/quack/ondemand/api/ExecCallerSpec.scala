@@ -32,6 +32,14 @@ class ExecCallerSpec extends AnyFlatSpec with Matchers:
     c.restriction shouldBe TokenRestriction.Unrestricted
   }
 
+  it should "default to the FlightSQL source, the MCP OPA edge and no preferred node" in {
+    // Every call site that predates the REST data edge keeps its audit origin, OPA tag and routing.
+    val c = ExecCaller.unrestricted("conn-1", "alice", superuserAdmissible = false)
+    c.source shouldBe "flightsql"
+    c.edge shouldBe "mcp"
+    c.preferredNode shouldBe None
+  }
+
   "effectiveMaxRows" should "take the smallest of the server cap, the token cap and the request" in {
     val capped = ExecCaller
       .unrestricted("c", "u", superuserAdmissible = false)

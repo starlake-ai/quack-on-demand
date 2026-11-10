@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
+  (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
+  `QOD_REST_ENABLED=true` opens a listener of its own on `:31339` (`QOD_REST_PORT`, TLS on by default
+  and reusing the FlightSQL edge's PEM pair, `QOD_REST_TLS_ENABLED`) with four `GET` endpoints under
+  `/api/v1/tenant/{tenant}/database/{db}`: `/schemas`, `/schemas/{s}/tables`,
+  `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, answering JSON (an array of
+  objects, exact decimals) or CSV (RFC 4180) by `format=` or `Accept`. `/rows` takes `select`,
+  column filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, each
+  negatable with `not.`), `order`, `limit`/`offset` and, on DuckLake tables,
+  `asOf`/`asOfTag`/`asOfTs`; every DuckLake table page carries `X-QoD-Snapshot`, and sending it
+  back as `asOf` keeps paging stable under concurrent writes. Views are read at the current state,
+  without `X-QoD-Snapshot`, and answer `asOf*` with `400 invalid_selector`. Each request becomes
+  one `SELECT` through the same routed executor as MCP `run_sql`, so grants, row and column
+  policies, pool permissions, audit and statement history (origin and OPA `client.edge`
+  `rest-data`) and metering apply unchanged; the schema probe (`SELECT * ... LIMIT 0`) is not
+  recorded, so a request refused at the probe leaves no audit row. An object the caller may not
+  read answers the same `404` as a missing one, and so does a table holding a column under a deny
+  policy, which the probe cannot read (the table listing still names it). A reserved parameter
+  name in any case with a filter-shaped value (`limit=eq.5`, `Format=not.eq.x`) answers
+  `400 reserved_column`. Credentials are personal access tokens only (never the static API
+  key, a cookie or a password; a superuser token is refused): a token with no `tools` restriction
+  may use the edge, and one restricted with `qod auth pat create --tool ...` must list the reserved
+  name `rest`. Rows are capped by `min(limit or QOD_REST_DEFAULT_LIMIT, QOD_REST_MAX_ROWS, the
+  token's maxRows)` and bodies by `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB, cut at a row boundary),
+  with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
+  `min(QOD_REST_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
+  that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
+  a request to a cold pool that the edge's own wait cuts short. Boot refuses a
+  `QOD_REST_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
+  `Retry-After`. CSV values are written as stored, with no spreadsheet formula escaping, and
+  `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to.
+  Schema and table segments take any name DuckDB can hold (`order-items`, `2024_sales`), so every
+  listed object is readable, and a filter value the column's real type rejects (a malformed UUID,
+  whose column the probe sees as text) answers `400 invalid_filter` rather than `502`. A principal
+  under a column or row policy reads a table at a snapshot only when the table, under that name,
+  has always been the same table with the same column names: those policies match today's names,
+  so a table or column renamed, dropped or recreated since is refused, in every statement kind and
+  on every door.
+  Responses are `Cache-Control: private` with `Vary:
+  Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
+  endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a
+  `<release>-rest` Service (`service.restData`) and its NetworkPolicy port; the image exposes
+  `31339`. There is no per-client rate limit, authentication throttle or per-user concurrency cap
+  yet: an internet-facing edge must sit behind a reverse proxy or WAF that rate-limits per client
+  and per `Authorization` value.
+  The edge keeps at most `QOD_REST_DATA_MAX_CONNECTIONS` (512) connections open, and no more than
+  fit a tenth of the heap at `QOD_REST_DATA_MAX_HEADER_BYTES` (16 KiB per request line and per
+  header block), as boot says when that is fewer; `QOD_REST_MAX_CONNECTIONS` and
+  `QOD_REST_MAX_HEADER_BYTES` stay the manager REST port's.
+
 ## 0.12.2
 
 ### Fixed

@@ -7,6 +7,7 @@ import ai.starlake.quack.model.{
   Role,
   RoleDistribution,
   RunningNode,
+  SessionCatalog,
   Tenant,
   TenantDbKind
 }
@@ -1006,6 +1007,126 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case Some(_) =>
         sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
         defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("delta_lake"), Some("myschema")))
+
+  // The parser defaults the router resolves names against are the ones SessionCatalog resolves for
+  // the pool, for every kind and metastore shape. The REST edge qualifies its generated names from
+  // the same resolver; if the router derived the catalog on its own, the policy rewriters could
+  // qualify against one catalog while the node read another.
+  it should "resolve the parser defaults through SessionCatalog for every kind and shape" in:
+    val admin   = ai.starlake.quack.ondemand.state.NoopDbAdmin
+    val backend = new QuackBackend:
+      def allowsLocalFiles   = true
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          25500 + n.size,
+          "tok",
+          Some(6L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
+    val sup = new PoolSupervisor(
+      backend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      dbAdmin = admin
+    )
+    sup.createTenant(Tenant("zeta")).unsafeRunSync()
+    // DuckLake pre-init against pgPort 0 fails fast and is swallowed by design (see the schema
+    // skew test below), so no live Postgres is needed for the ducklake shapes.
+    val pg = Map("pgHost" -> "127.0.0.1", "pgPort" -> "0", "pgUser" -> "u", "pgPassword" -> "p")
+    final case class Shape(
+        suffix: String,
+        kind: TenantDbKind,
+        metastore: Map[String, String],
+        dataPath: String,
+        defaultDatabase: Option[String],
+        expectedDb: Option[String],
+        expectedSchema: Option[String]
+    )
+    val shapes = List(
+      Shape("mem", TenantDbKind.InMemory, Map.empty, "", None, Some("memory"), Some("main")),
+      Shape(
+        "memov",
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        Some("fedpg"),
+        Some("fedpg"),
+        Some("main")
+      ),
+      Shape(
+        "file",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "zeta_file", "schemaName" -> "main"),
+        "/tmp/qod-session-catalog.duckdb",
+        None,
+        Some("zeta_file"),
+        Some("main")
+      ),
+      Shape(
+        "filealias",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "zeta_filealias", "schemaName" -> "main", "catalogAlias" -> "zeta_parent"),
+        "/tmp/qod-session-catalog-alias.duckdb",
+        None,
+        Some("zeta_parent"),
+        Some("main")
+      ),
+      Shape(
+        "lake",
+        TenantDbKind.DuckLake,
+        pg + ("schemaName" -> "curated"),
+        "/tmp/qod-session-catalog-lake",
+        None,
+        Some("zeta_lake"),
+        Some("curated")
+      ),
+      Shape(
+        "lakealias",
+        TenantDbKind.DuckLake,
+        pg ++ Map("schemaName" -> "main", "catalogAlias" -> "zeta_lake"),
+        "/tmp/qod-session-catalog-lake-alias",
+        None,
+        Some("zeta_lake"),
+        Some("main")
+      )
+    )
+    val router = defaultsRouter(sup)
+    shapes.foreach { s =>
+      withClue(s"${s.suffix}: ") {
+        sup
+          .createTenantDb(
+            tenantName = "zeta",
+            suffix = s.suffix,
+            kind = s.kind,
+            metastore = s.metastore,
+            dataPath = s.dataPath,
+            defaultDatabase = s.defaultDatabase,
+            writerTrusted = true
+          )
+          .unsafeRunSync() shouldBe a[Right[?, ?]]
+        val key = PoolKey("zeta", s"zeta_${s.suffix}", s"p${s.suffix}")
+        sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+        val st = sup.get(key).get
+        router.defaultsOf(key) shouldBe ((
+          SessionCatalog.database(st.kindWire, st.metastore, st.defaultDatabase),
+          SessionCatalog.schema(st.kindWire, st.metastore, st.defaultSchema)
+        ))
+        router.defaultsOf(key) shouldBe ((s.expectedDb, s.expectedSchema))
+      }
+    }
 
   // Issue #112: the gateway's parser default (`defaultsOf`, the tenant-db's own defaultSchema
   // override) and the schema of the USE prelude wrapWithDefaultSchema sends must agree, or the
@@ -2623,6 +2744,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         se.pool shouldBe poolKey.pool
       case other => fail(s"expected StatementExecuted, got $other")
 
+  it should "emit SessionOpened under the source the caller of execute names" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    router.execute("evt-src", "alice", poolKey, "SELECT 1", source = "rest-data").unsafeRunSync()
+    received.toArray.toList.collect { case ManagerEvent.SessionOpened(_, u, via) =>
+      (u, via)
+    } shouldBe List(("alice", "rest-data"))
+
   it should "emit StatementExecuted with ok=false when execution fails" in:
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
     val sink: ManagerEventSink = e => { received.add(e); () }
@@ -2659,7 +2789,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       resumePollInterval: FiniteDuration = 250.millis,
       refusedQueries: Int = 0,
       dataPath: String = "",
-      localFilesOff: Boolean = false
+      localFilesOff: Boolean = false,
+      distribution: RoleDistribution = RoleDistribution(0, 0, 1),
+      /** The readiness check in place of the adapter's (None: the adapter's, through `client`). */
+      nodeAnswers: Option[RunningNode => IO[Boolean]] = None,
+      /** The endpoints the statements were sent to. */
+      sent: scala.collection.mutable.ListBuffer[String] = scala.collection.mutable.ListBuffer.empty
   ) =
     // The first `refusedQueries` node calls fail as a connect refusal would: a respawned node whose
     // process does not listen yet.
@@ -2701,7 +2836,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup
       .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, dataPath, writerTrusted = true)
       .unsafeRunSync()
-    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.createPool(poolKey, distribution).unsafeRunSync()
     if failResumeStarts then failStart.set(true)
     if localFilesOff then filesOff.set(true)
 
@@ -2714,6 +2849,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO {
+          sent.synchronized(sent += endpoint)
           queries.incrementAndGet()
           if refusals.getAndDecrement() > 0 then
             QuackResponse.Failed(QuackError.Transient("connect refused (test)"))
@@ -2729,7 +2865,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       resumeHoldTimeout = resumeHoldTimeout,
       resumePollInterval = resumePollInterval,
       metadataFilterRewriter = mountedFilter,
-      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
+      nodeAnswers = nodeAnswers
     )
     (router, sup, queries)
 
@@ -2809,6 +2946,39 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val journaled = router.history.snapshot(1).head
     journaled.status shouldBe "no-node"
     journaled.error.get should include("QOD_NODE_ALLOW_LOCAL_FILES=false")
+
+  it should "send the statement to a woken node that answers, not to one still starting" in:
+    val sent             = scala.collection.mutable.ListBuffer.empty[String]
+    val (router, sup, _) = setupWithSupervisor(
+      resumePollInterval = 20.millis,
+      nodeAnswers = Some(n => IO.pure(n.port == 28001)),
+      distribution = RoleDistribution(0, 0, 2),
+      sent = sent
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    router
+      .execute("wake-8", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sent.toList match
+      case List(endpoint) => endpoint should include(":28001")
+      case other          => fail(s"expected one statement, sent to $other")
+
+  it should "count the time its readiness checks take against the hold" in:
+    val (router, sup, _) = setupWithSupervisor(
+      resumeHoldTimeout = 300.millis,
+      resumePollInterval = 50.millis,
+      nodeAnswers = Some(_ => IO.sleep(200.millis).as(false)),
+      distribution = RoleDistribution(0, 0, 2)
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val start = System.nanoTime()
+    router
+      .execute("wake-9", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    // Two nodes checked at once, each check 200 ms: about 300 ms plus one check, never one per
+    // node per poll on top of the interval.
+    (System.nanoTime() - start).nanos should be < 1.second
 
   it should "not wake a disabled pool" in:
     val (router, sup, _) = setupWithSupervisor()

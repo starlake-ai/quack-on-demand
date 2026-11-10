@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.rls
 
 import ai.starlake.acl.parser.{AstChildren, TableExtractor}
+import ai.starlake.quack.edge.policy.TimeTravelCarrier
+import ai.starlake.quack.edge.policy.TimeTravelCarrier.Carry
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
@@ -161,15 +163,24 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       // Parsed from the lexer-canonical rendering, never the raw text: JSqlParser tokenizes
       // DuckDB's escape and dollar-quoted strings differently, and a table it cannot see is a
       // table no row policy filters. A rendering refusal is input DuckDB rejects anyway.
+      // A time-travel clause is invisible to jsqlparser: carry it on its table reference, which
+      // maybeWrap keeps as the BASE table inside the filtered view, and put it back afterwards
+      // (TimeTravelCarrier). A Passthrough forwards the caller's original text, clause included.
       val parsed = ParserInput
         .render(sql)
         .toOption
-        .flatMap(in =>
-          Try(ai.starlake.sql.JSqlStatements.parseFirst(in.text)).toOption.map(_ -> in.exact)
+        .flatMap { in =>
+          TimeTravelCarrier.carry(in.text) match
+            case Carry.Absent                    => Some((in.text, Vector.empty[String], in.exact))
+            case Carry.Unplaceable               => None
+            case Carry.Carried(carried, clauses) => Some((carried, clauses, in.exact))
+        }
+        .flatMap((text, clauses, exact) =>
+          Try(ai.starlake.sql.JSqlStatements.parseFirst(text)).toOption.map((_, clauses, exact))
         )
       parsed match
-        case None                        => PassthroughParseFailed
-        case Some((stmt: Select, exact)) =>
+        case None                                 => PassthroughParseFailed
+        case Some((stmt: Select, clauses, exact)) =>
           val values  = tokenValues(eff)
           val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
           try
@@ -187,6 +198,9 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
             // The rewrite is printed from the parser input; when that is not the caller's
             // statement (ParserInput.Rendered.exact) shipping it would run a different one.
             else if !changed.get() then Passthrough
+            // A clause that cannot be put back would read the current data, not the snapshot.
+            else if clauses.nonEmpty && !TimeTravelCarrier.restore(stmt, clauses) then
+              PassthroughParseFailed
             else if exact then Rewritten(stmt.toString)
             else Refused(InexactRefusal)
           catch
@@ -206,7 +220,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
               Failed("row policy failed to apply")
         // An executing EXPLAIN classifies as its statement (Select): DuckDB runs it under EXPLAIN
         // ANALYZE, and any plan reports row counts, so one reading a policy table is refused.
-        case Some((ex: ExplainStatement, _)) =>
+        case Some((ex: ExplainStatement, _, _)) =>
           if explainReadsPolicyTable(ex, eff, ctx) then Refused(ExplainRefusal) else Passthrough
         // DESCRIBE / SHOW: no row reaches the caller. Any other kind never gets here (not Select),
         // and the protected-write guard analyses it instead.
@@ -355,6 +369,10 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       val baseTable = new Table(t.getName)
       Option(t.getSchemaName).foreach(_ => baseTable.setSchemaName(t.getSchemaName))
       Option(t.getDatabase).foreach(baseTable.setDatabase)
+      // A time-travel clause pins the BASE table: on the wrapper it would be invalid SQL, and
+      // dropping it would filter the current data instead of the snapshot.
+      baseTable.setTimeTravel(t.getTimeTravel): Unit
+      baseTable.setTimeTravelStrAfterAlias(t.getTimeTravelStrAfterAlias): Unit
 
       val inner = new PlainSelect()
       inner.addSelectItem(new AllColumns())

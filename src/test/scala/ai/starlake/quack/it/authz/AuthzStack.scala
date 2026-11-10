@@ -1,6 +1,6 @@
 package ai.starlake.quack.it.authz
 
-import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
+import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig, RestEdgeConfig}
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
@@ -74,7 +74,11 @@ final class AuthzStack(
       */
     allowLocalFiles: Boolean = true,
     /** The spawn script, for a spec that wraps the real one. */
-    spawnScript: Option[Path] = None
+    spawnScript: Option[Path] = None,
+    /** HOCON appended to the stack's overlay, so a spec can turn a block on or tune it (the REST
+      * data edge's `quack-rest`, for one). It wins over the stack's own keys.
+      */
+    extraConfig: String = ""
 ):
   import Main.given
 
@@ -136,6 +140,7 @@ final class AuthzStack(
          |  tlsEnabled = false
          |}
          |quack-native { enabled = true, host = "127.0.0.1", port = $quackPort }
+         |$extraConfig
          |""".stripMargin
     )
     val source = overlay
@@ -144,6 +149,7 @@ final class AuthzStack(
     val mgrCfg   = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
+    val restCfg  = source.at("quack-rest").loadOrThrow[RestEdgeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val metrics  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     val opa      = ai.starlake.quack.edge.config.OpaConfig
@@ -161,7 +167,8 @@ final class AuthzStack(
         opa,
         demoControlPlane = false,
         modules = modules,
-        quackCfg = Some(quackCfg)
+        quackCfg = Some(quackCfg),
+        restCfg = Some(restCfg)
       )
       .attempt
       .flatTap(o => IO { bootOutcome = Some(o) })

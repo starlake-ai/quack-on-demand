@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.cls
 
 import java.util.Locale
+import ai.starlake.quack.edge.policy.TimeTravelCarrier
+import ai.starlake.quack.edge.policy.TimeTravelCarrier.Carry
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import cats.effect.IO
@@ -98,13 +100,28 @@ final class ColumnPolicyRewriter(
         ParserInput.render(sql) match
           case Left(_)      => IO.pure(PassthroughParseFailed)
           case Right(input) =>
-            rewriteCanonical(input.text, eff, ctx).map {
+            carryTimeTravel(input.text, eff, ctx).map {
               // The rewrite is printed from the parser input, which is not the caller's statement
               // here (ParserInput.Rendered.exact): shipping it would run a different statement.
               case Rewritten(_) if !input.exact => Denied(InexactRefusal)
               case other                        => other
             }
       }
+
+  /** A time-travel clause is invisible to jsqlparser: carry it through the rewrite on its table
+    * reference and put it back afterwards (TimeTravelCarrier). A Passthrough forwards the caller's
+    * original text, clause included, so only a rewrite needs the restore.
+    */
+  private def carryTimeTravel(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
+    TimeTravelCarrier.carry(sql) match
+      case Carry.Absent                    => rewriteCanonical(sql, eff, ctx)
+      case Carry.Unplaceable               => IO.pure(PassthroughParseFailed)
+      case Carry.Carried(carried, clauses) =>
+        rewriteCanonical(carried, eff, ctx).map {
+          case Rewritten(s) =>
+            TimeTravelCarrier.restore(s, clauses).fold(PassthroughParseFailed)(Rewritten(_))
+          case other => other
+        }
 
   private def rewriteCanonical(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
     if readsOnlyCatalogFunctions(sql) then IO.pure(Passthrough)

@@ -80,17 +80,17 @@ object EdgeRewriters extends LazyLogging:
       catalogReaders: CatalogReaders,
       stmtInstruments: StatementInstruments
   ): ColumnCatalog =
+    def reader(tenant: String, cat: String) =
+      sup
+        .findTenantDbByCatalogName(tenant, cat)
+        .flatMap(td => sup.getTenantById(td.tenantId).map(t => catalogReaders.get(t.id, td.name)))
     new DuckLakeColumnCatalog(
       fetch = (tenant, cat, sch, tab) =>
-        IO.blocking {
-          sup.findTenantDbByCatalogName(tenant, cat) match
-            case None     => Nil
-            case Some(td) =>
-              sup.getTenantById(td.tenantId) match
-                case None    => Nil
-                case Some(t) => catalogReaders.get(t.id, td.name).columnNames(sch, tab)
-        },
-      instruments = Some(stmtInstruments)
+        IO.blocking(reader(tenant, cat).fold(Nil)(_.columnNames(sch, tab))),
+      instruments = Some(stmtInstruments),
+      // Not a DuckLake tenant-db (a federated or built-in catalog): no history, so false.
+      history = (tenant, cat, sch, tab) =>
+        IO.blocking(reader(tenant, cat).exists(_.nameHistoryStable(sch, tab)))
     )
 
   /** Write-path protected-read guard. Reads the same CLS / RLS enable flags the SELECT-path

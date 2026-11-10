@@ -27,6 +27,7 @@ QOD_ADMIN_PASSWORD='change-me' uvx qod@latest serve ./sales.duckdb  # set the ad
 # admin UI: http://localhost:20900/ui/
 # FlightSQL edge: localhost:31338 
 # DuckDB (native Quack): quack:localhost:9494
+# REST data edge (opt-in, QOD_REST_ENABLED=true): https://localhost:31339/api/v1
 # Ctrl-C stops the gateway and its nodes; so does `uvx qod@latest stop` from another terminal
 ```
 
@@ -62,6 +63,19 @@ SELECT * FROM quack_query('quack:localhost:9494', 'SELECT count(*) FROM tpch1.or
 ```
 
 The DuckDB client speaks plain HTTP to `localhost` and TLS to any other host; the gateway's Quack listener is plain HTTP by default (`QOD_QUACK_TLS_ENABLED=true` turns TLS on, reusing the FlightSQL edge's certificate), so from a remote machine either enable TLS or add `DISABLE_SSL true` to the `ATTACH` options. Superusers add `&superuser=true` to the token, exactly like the JDBC parameter.
+
+### REST data edge: tables as read-only HTTP resources
+
+For clients that speak HTTP and nothing else (n8n, Zapier, a spreadsheet import, a cache or CDN), `QOD_REST_ENABLED=true` opens a read-only REST listener on `:31339` (TLS on by default, reusing the FlightSQL edge's certificate). Each `GET` becomes one `SELECT` that runs through the same grants, row and column policies, audit and row caps as every other door; nothing is writable and no SQL is accepted.
+
+```bash
+# mint a token (printed once), then read rows as JSON or CSV
+qod auth pat create --name n8n --tool rest
+curl -k -H "Authorization: Bearer qod_pat_..." \
+  "https://localhost:31339/api/v1/tenant/acme/database/acme_tpch/schemas/tpch1/tables/customer/rows?select=c_custkey,c_name&c_mktsegment=eq.BUILDING&order=c_custkey&limit=100"
+```
+
+The four endpoints are `/schemas`, `/schemas/{s}/tables`, `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, all under `/api/v1/tenant/{tenant}/database/{db}`, with filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, `not.`), `order`, `limit`/`offset` and, on DuckLake tables, `asOf`/`asOfTag`/`asOfTs` (every page carries `X-QoD-Snapshot`; send it back as `asOf` for stable paging; views are read at the current state and refuse `asOf*`). Only personal access tokens are accepted, never the static API key or a password: a token with no `--tool` restriction may use the edge, a token restricted with `--tool` must list `rest`. An object the caller may not read answers `404` exactly like a missing one, and so does a table with a column under a deny policy (it stays in the table listing). A reserved parameter name (`limit`, `order`, ...) in any case with a filter-shaped value answers `400 reserved_column`. Pages are capped by rows and by `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB), cut at a row boundary with `X-QoD-Truncated`. CSV is written exactly as stored, without formula escaping. `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to. The edge has no per-client throttle or per-user concurrency cap yet: put a reverse proxy or WAF that rate-limits per client and per `Authorization` value in front of it before exposing it to the internet.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
@@ -203,6 +217,7 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 |---|---|---|
 | Arrow Flight SQL edge (`:31338`) | gRPC endpoint with TLS on by default (auto-generated self-signed cert; drop in a CA-signed one for prod) | DuckDB has no network listener. Any JDBC / ODBC / ADBC / PyArrow / Spark / DBeaver / Power BI / Tableau client connects without a DuckDB library on the client side |
 | Native Quack front door (`:9494`) | A plain DuckDB client runs `ATTACH 'quack:host:9494'` and queries remotely, result bytes relayed untouched | Turns a local DuckDB into a thin client of the shared warehouse, with hybrid local-plus-remote joins, while the base tables never leave the server |
+| REST data edge (`:31339`, opt-in) | Read-only `GET /api/v1/...` over tables and views, JSON or CSV, filters, paging and DuckLake time travel, PAT bearer only | HTTP-only tools read governed data with no driver and no SQL, through the same grants, policies, audit and caps |
 | `qod serve <target>` | One command over a `.duckdb` file, a parquet/csv directory, or an object-store prefix, control plane on a bundled embedded Postgres | Zero-install path from "files on disk" to a secured multi-user endpoint |
 | `qod sql` and MCP query | Ad-hoc SQL from the CLI or from an AI agent, with optional `--branch` targeting | Scripted and agentic access share the same auth, ACL and audit path as BI users |
 
@@ -336,7 +351,7 @@ flowchart LR
     end
 
     subgraph server["Quack on Demand · your infrastructure"]
-        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>authn + policies"]
+        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>REST data edge :31339<br/>authn + policies"]
         node["Quack nodes (qod-node)<br/>DuckDB + DuckLake<br/>per-statement authorization"]
         store[("Postgres catalog +<br/>object storage<br/>S3 · GCS · FS")]
         edge --> node
@@ -360,6 +375,7 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 | Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset: the first boot generates one and stores it in the control-plane database, and every restart and HA replica reads it, so sessions survive restarts. Rotate it with `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart |
 | Admin password | `QOD_ADMIN_PASSWORD` | none; used on first boot only (`qod start` / `qod serve` prompt for it). The Docker launchers default it to `admin` (`ADMIN_PASSWORD`) |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
+| Read-only REST data edge (`:31339`) | `QOD_REST_ENABLED` | `false` |
 
 There is no static API key: a set `QOD_API_KEY` is ignored, with a warning at boot. People log in (`qod login`,
 the admin UI) and automation uses personal access tokens (`qod auth pat create`).

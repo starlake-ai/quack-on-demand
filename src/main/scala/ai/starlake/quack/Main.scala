@@ -116,6 +116,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[QuackNativeConfig]         = ProductHint[QuackNativeConfig](camelMapping)
+  given ProductHint[RestEdgeConfig]            = ProductHint[RestEdgeConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
   given ProductHint[KeycloakAuthConfig]        = ProductHint[KeycloakAuthConfig](camelMapping)
   given ProductHint[GoogleAuthConfig]          = ProductHint[GoogleAuthConfig](camelMapping)
@@ -154,6 +155,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
   given ConfigReader[QuackNativeConfig]        = deriveReader[QuackNativeConfig]
+  given ConfigReader[RestEdgeConfig]           = deriveReader[RestEdgeConfig]
   given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
   given ConfigReader[KeycloakAuthConfig]       = deriveReader[KeycloakAuthConfig]
   given ConfigReader[GoogleAuthConfig]         = deriveReader[GoogleAuthConfig]
@@ -248,6 +250,7 @@ object Main extends IOApp with LazyLogging:
     val mgrCfg   = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
+    val restCfg  = source.at("quack-rest").loadOrThrow[RestEdgeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val opaCfg   = OpaConfig
       .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
@@ -262,7 +265,8 @@ object Main extends IOApp with LazyLogging:
         opaCfg,
         demoControlPlane = false,
         modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
-        quackCfg = Some(quackCfg)
+        quackCfg = Some(quackCfg),
+        restCfg = Some(restCfg)
       )
     }
 
@@ -286,6 +290,8 @@ object Main extends IOApp with LazyLogging:
         * pass one (demo and serve overlays set their system properties before this runs).
         */
       quackCfg: Option[QuackNativeConfig] = None,
+      /** The REST data edge block; loaded from `quack-rest` when the caller does not pass one. */
+      restCfg: Option[RestEdgeConfig] = None,
       /** What the retired-setting gate reads (`BootPreflight.checkRetiredSettings`): the process
         * environment and the raw configuration. Tests pass their own.
         */
@@ -324,6 +330,8 @@ object Main extends IOApp with LazyLogging:
       .foreach(msg => sys.error(msg))
     val quackCfgResolved: QuackNativeConfig =
       quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
+    val restCfgResolved: RestEdgeConfig =
+      restCfg.getOrElse(ConfigSource.default.at("quack-rest").loadOrThrow[RestEdgeConfig])
     HaPreconditions
       .validate(mgrCfg0.ha.enabled, mgrCfg0.runtimeType, mgrCfg0.embeddedPostgres.enabled)
       .left
@@ -360,6 +368,19 @@ object Main extends IOApp with LazyLogging:
           case Left(msg)  => sys.error(msg)
           case Right(bin) => Some(bin)
       else None
+    RestEdgeConfig
+      .validate(
+        restCfgResolved,
+        List(
+          "manager REST"          -> mgrCfg0.port,
+          "FlightSQL"             -> edgeCfg.port,
+          "node verdict listener" -> mgrCfg0.nodeAuthz.listenerPort(mgrCfg0.port)
+        ) ++
+          Option.when(quackCfgResolved.enabled)("Quack front door" -> quackCfgResolved.port),
+        edgeCfg.resumeHoldTimeoutSec
+      )
+      .left
+      .foreach(msg => sys.error(msg))
 
     // Lockout enabled with no SMTP relay would strand a locked-out user with no way
     // back in. Pure check, no DB/network required, so it runs before the Postgres
@@ -434,6 +455,7 @@ object Main extends IOApp with LazyLogging:
       opaCfg,
       modules,
       quackCfgResolved,
+      restCfgResolved,
       qodNodeBin,
       internalHost,
       internalPort,
@@ -452,6 +474,7 @@ object Main extends IOApp with LazyLogging:
       opaCfg: OpaConfig,
       modules: List[ai.starlake.quack.spi.ManagerModule],
       quackCfgResolved: QuackNativeConfig,
+      restCfgResolved: RestEdgeConfig,
       qodNodeBin: Option[java.nio.file.Path],
       internalHost: String,
       internalPort: Int,
@@ -1798,25 +1821,7 @@ object Main extends IOApp with LazyLogging:
         ai.starlake.quack.boot.RoutedExecutor(
           sup,
           classifier,
-          (caller, poolKey, sql, eff, rec) =>
-            fsRouter.execute(
-              caller.connectionId,
-              caller.identity,
-              poolKey,
-              sql,
-              effectiveSet = eff,
-              recordExecution = rec,
-              patId = caller.patId,
-              adminDispatch = false,
-              // Audit origin and SessionOpened.via stay "flightsql" (the pre-OPA default): MCP
-              // and the REST preview family share this closure and are not distinguishable from
-              // each other, but metering and audit must not move just because OPA needs a tag.
-              // Only the OPA input's client.edge is set to "mcp" here.
-              edge = "mcp",
-              // A handler's own commit message for its write (a restore, an undrop), else the
-              // verb's.
-              commitMessage = caller.commitMessage
-            )
+          ai.starlake.quack.boot.RoutedExecutor.viaRouter(fsRouter)
         )(recordExecution)
 
       val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
@@ -1866,6 +1871,38 @@ object Main extends IOApp with LazyLogging:
       val moduleStart: IO[Unit] =
         modules.traverse_(m =>
           IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtxFor(m))
+        )
+
+      // REST data edge (quack-rest): PAT bearer only, every request one SELECT through the SAME
+      // routed executor MCP run_sql uses. The data statement runs with recordExecution = true, so
+      // statement history and metering see it like any other door; the schema probe runs
+      // unrecorded, like FlightSQL's prepare-time probe. Its own listener; started after the
+      // Quack door.
+      val restEdge: Option[ai.starlake.quack.edge.rest.RestEdgeServer] =
+        Option.when(restCfgResolved.enabled) {
+          val handlers = new ai.starlake.quack.edge.rest.RestEdgeHandlers(
+            restCfgResolved,
+            sup,
+            patAuthenticator.resolve,
+            routedExecutor(recordExecution = true),
+            previewExecutor,
+            catalogReader,
+            (tenant, tenantDb, tag) =>
+              store.findSnapshotTag(tenant, tenantDb, tag).map(_.snapshotId)
+          )
+          new ai.starlake.quack.edge.rest.RestEdgeServer(
+            restCfgResolved,
+            ai.starlake.quack.edge.rest.RestEdgeServer.serverEndpoints(handlers)
+          )
+        }
+      // A REST edge bind failure aborts boot exactly like the Quack door's.
+      val dataPlaneWithRestIO: IO[FlightEdgeServer] =
+        dataPlaneIO.flatTap(_ =>
+          restEdge.fold(IO.unit)(r =>
+            r.start().adaptError { case t =>
+              new RuntimeException(s"REST data edge init failed: ${t.getMessage}", t)
+            }
+          )
         )
 
       // The executor identity of the catalog preview / data-diff / undrop / restore handlers:
@@ -2324,10 +2361,11 @@ object Main extends IOApp with LazyLogging:
               s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
                 s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"
             )
-            dataPlaneIO.attempt.flatMap {
+            dataPlaneWithRestIO.attempt.flatMap {
               case Right(edge) =>
                 logger.info("edge FlightSQL started")
                 quackDoor.foreach(_ => logger.info("Quack front door started"))
+                restEdge.foreach(_ => logger.info("REST data edge started"))
                 // Stdout banner (default log level is ERROR), once both listeners are up.
                 println(
                   Banner.startup(
@@ -2340,6 +2378,9 @@ object Main extends IOApp with LazyLogging:
                     quack = quackDoor.map(_ =>
                       (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
                     ),
+                    rest = restEdge.map(_ =>
+                      (restCfgResolved.host, restCfgResolved.port, restCfgResolved.tlsEnabled)
+                    ),
                     aclMode = opaCfg.defaultMode,
                     opaTenants = sup.listTenants().count(_.acl.isOpa(opaCfg.defaultMode)),
                     cliConfigFile = sys.env.get("QOD_CONFIG_FILE").filter(_.nonEmpty),
@@ -2350,6 +2391,7 @@ object Main extends IOApp with LazyLogging:
                   edge = edge,
                   backend = backend,
                   quackFrontDoor = quackDoor,
+                  restEdge = restEdge,
                   coordinator = coordinator,
                   eventJournal = eventJournal,
                   telemetryStore = telemetryStore,

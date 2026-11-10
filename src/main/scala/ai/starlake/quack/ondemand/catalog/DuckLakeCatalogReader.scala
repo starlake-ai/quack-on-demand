@@ -173,6 +173,57 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
           List(n, n)
         )
 
+  /** Whether `schema.name` names a view in any version of the catalog, live or dropped. The REST
+    * data edge refuses time travel on such a name: whether DuckLake honours `AT (VERSION => n)` on
+    * a view is not established, and a name that was a view at some snapshot could resolve to it.
+    */
+  def viewEverNamed(schema: String, name: String): Boolean =
+    query(
+      """SELECT 1
+        |  FROM ducklake_view v
+        |  JOIN ducklake_schema s ON s.schema_id = v.schema_id
+        | WHERE lower(s.schema_name) = lower(?) AND lower(v.view_name) = lower(?)
+        | LIMIT 1""".stripMargin,
+      schema,
+      name
+    )(_ => 1).nonEmpty
+
+  /** Whether `schema.name` has named one and the same table, under that one name, with each column
+    * under one name, in every snapshot the catalog still holds (names compared as DuckDB binds
+    * them, case-insensitively). False when the name was ever another table's (dropped and
+    * recreated, or a rename landing on it), when that table was ever named otherwise or sat in
+    * another schema, when one of its columns was ever renamed, or when a column name was ever
+    * another column's; also when nothing has that name.
+    *
+    * What makes a time-travel read safe under a column or row policy: those policies are keyed on
+    * today's names, and a snapshot read binds the names the snapshot had. When this holds, the
+    * table and every column a snapshot read can name are the ones the policies match today.
+    */
+  def nameHistoryStable(schema: String, name: String): Boolean =
+    query(
+      """WITH named AS (
+        |  SELECT DISTINCT t.table_id
+        |    FROM ducklake_table t
+        |    JOIN ducklake_schema s ON s.schema_id = t.schema_id
+        |   WHERE lower(s.schema_name) = lower(?) AND lower(t.table_name) = lower(?)
+        |), rows AS (
+        |  SELECT t.* FROM ducklake_table t WHERE t.table_id IN (SELECT table_id FROM named)
+        |), cols AS (
+        |  SELECT c.* FROM ducklake_column c WHERE c.table_id IN (SELECT table_id FROM named)
+        |)
+        |SELECT (SELECT count(*) FROM named) = 1
+        |   AND (SELECT count(DISTINCT lower(table_name)) FROM rows) = 1
+        |   AND (SELECT count(DISTINCT schema_id) FROM rows) = 1
+        |   AND (SELECT count(DISTINCT lower(s.schema_name)) FROM ducklake_schema s
+        |         WHERE s.schema_id IN (SELECT schema_id FROM rows)) = 1
+        |   AND NOT EXISTS (SELECT 1 FROM cols GROUP BY column_id
+        |                   HAVING count(DISTINCT lower(column_name)) > 1)
+        |   AND NOT EXISTS (SELECT 1 FROM cols GROUP BY lower(column_name), parent_column
+        |                   HAVING count(DISTINCT column_id) > 1)""".stripMargin,
+      schema,
+      name
+    )(_.getBoolean(1)).headOption.contains(true)
+
   def snapshotExists(id: Long): Boolean =
     query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
 

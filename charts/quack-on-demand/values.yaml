@@ -105,6 +105,15 @@ service:
     port: 9494
     nodePort: ""
     annotations: {}
+  # Read-only REST data edge (`GET /api/v1/...`, PAT bearer), created only when
+  # rest.enabled. Not `service.rest`: that key is the admin REST/UI listener
+  # above. Internet exposure requires a reverse proxy or WAF in front of it
+  # that rate-limits per client and per Authorization value.
+  restData:
+    type: ClusterIP
+    port: 31339
+    nodePort: ""
+    annotations: {}
 
 # --- Ingress (REST/UI only - FlightSQL is gRPC and not handled here) --------
 ingress:
@@ -304,6 +313,15 @@ quack:
   enabled: true
   tls:
     enabled: false
+
+# Read-only REST data edge (tables and views as GET resources, JSON or CSV,
+# personal access tokens only). Off by default. TLS on by default, reusing the
+# Flight edge's PEM pair like the Quack door. A PAT may use it unless its
+# `tools` axis is set without `rest`.
+rest:
+  enabled: false
+  tls:
+    enabled: true
 
 flightsql:
   tls:

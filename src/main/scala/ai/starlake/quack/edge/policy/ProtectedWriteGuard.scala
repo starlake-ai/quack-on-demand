@@ -10,7 +10,7 @@ import ai.starlake.quack.edge.cls.{
 }
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.{ParserInput, SqlCommentStripper}
 import cats.effect.unsafe.implicits.global
 import net.sf.jsqlparser.parser.{CCJSqlParser, CCJSqlParserUtil}
 import net.sf.jsqlparser.parser.feature.{Feature, FeatureConfiguration}
@@ -95,7 +95,9 @@ final class ProtectedWriteGuard(
           val config =
             Config.forDuckDB(ctx.defaultDatabase, ctx.defaultSchema, ctx.attachedCatalogs)
           val results = SqlParser.extract(sql, config).statements
-          ambiguousName(results).orElse(CatalogReachingCalls.readingTableMacro(sql, results)) match
+          ambiguousName(results)
+            .orElse(CatalogReachingCalls.readingTableMacro(sql, results))
+            .orElse(unstableTimeTravel(sql, eff.user.tenant.getOrElse(""), ctx)) match
             case Some(reason) => Deny(s"access denied: $reason")
             case None if kind == StatementKind.Select && !isBatch(sql) => Allow
             case None                                                  =>
@@ -113,6 +115,30 @@ final class ProtectedWriteGuard(
       .collectFirst { case a: DenyReason.AmbiguousCatalogRef =>
         ProtectedWriteGuard.ambiguousNameReason(a)
       }
+
+  /** Why a time-travel read must be refused, when it must: on every kind, a table read at a
+    * snapshot whose name has not always meant that same table with those same column names
+    * ([[ColumnCatalog.historyStable]]). The policies are keyed on today's names while the snapshot
+    * binds its own, so a table or column renamed since (or a name reused by another one) would be
+    * read past its mask and row filter. `tenant` is the principal's: a catalog name resolves among
+    * its databases only. A clause the carrier cannot pin to a table, in a statement it cannot parse
+    * or a batch, is refused too.
+    */
+  private def unstableTimeTravel(sql: String, tenant: String, ctx: SchemaContext): Option[String] =
+    if SqlParser.timeTravelClauses(sql)._2.isEmpty then None
+    else
+      ParserInput.render(sql).toOption.flatMap(in => TimeTravelCarrier.pinnedTables(in.text)) match
+        case None         => Some(TimeTravelUnplaceable)
+        case Some(tables) =>
+          tables
+            .find { (cat, sch, tab) =>
+              val c = cat.orElse(ctx.defaultDatabase)
+              val s = sch.orElse(ctx.defaultSchema)
+              (c, s) match
+                case (Some(c), Some(s)) => !catalog.historyStable(tenant, c, s, tab).unsafeRunSync()
+                case _                  => true
+            }
+            .map((_, _, tab) => timeTravelDeny(tab))
 
   /** More than one statement, as the lexer separates them (a `;` inside a literal, a quoted name or
     * a comment does not count, nor does a trailing one). `kind` describes only a batch's first
@@ -275,6 +301,14 @@ final class ProtectedWriteGuard(
 
   private def batchDeny(table: String): String =
     s"access denied: $table is protected by a column/row policy and cannot be read in a multi-statement batch; send that query on its own"
+
+  private def timeTravelDeny(table: String): String =
+    s"$table, or one of its columns, was renamed, dropped or recreated in the history the " +
+      "catalog holds; under a column or row policy it cannot be read with time travel"
+
+  private val TimeTravelUnplaceable =
+    "a time-travel clause could not be tied to its table, and column/row policies apply; " +
+      "send the statement on its own with the clause right after the table name"
 
   private val IncompleteDeny =
     "access denied: statement could not be fully analysed and reads a protected schema; query the table directly instead"
