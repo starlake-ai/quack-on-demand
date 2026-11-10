@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass
 
 import typer
@@ -27,6 +28,26 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _stderr_is_tty() -> bool:
+    return sys.stderr.isatty()
+
+
+def _new_release_notice() -> None:
+    """Warn on stderr when a newer qod is on PyPI, with the upgrade command.
+    Interactive terminals only (scripts and pipes stay quiet), cached for a day,
+    and silent on any failure, so no network access never breaks a command."""
+    try:
+        if not _stderr_is_tty():
+            return
+        from .launcher import cached_release_hint
+
+        hint = cached_release_hint(__version__)
+        if hint:
+            typer.echo(hint, err=True)
+    except Exception:
+        pass
+
+
 @app.callback()
 def _root(
     ctx: typer.Context,
@@ -47,6 +68,9 @@ def _root(
         path = config_path()
         missing = "" if path.exists() else " (not found)"
         typer.echo(f"qod: profile '{active}' from {path}{missing}", err=True)
+        # serve and start run their own uncached check (see newer_release_hint).
+        if ctx.invoked_subcommand not in ("serve", "start"):
+            _new_release_notice()
     ctx.obj = AppCtx(settings=load_settings(active), json_output=json_output, profile=active)
 
 

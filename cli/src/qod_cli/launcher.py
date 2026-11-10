@@ -6,6 +6,7 @@ matching the CLI version (they release in lockstep), verified against the
 """
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -194,30 +196,106 @@ def _version_tuple(v: str) -> tuple[int | None, ...]:
     return tuple(parts)
 
 
-def newer_release_hint(current: str, timeout_s: float = 2.0) -> str | None:
-    """One-line hint when PyPI's latest `qod` release is newer than `current`.
+PYPI_JSON_URL = "https://pypi.org/pypi/qod/json"
 
-    Purely decorative - an unpinned `uvx qod` freezes on the first version it
-    ever resolved, and this makes that trap self-announcing without turning a
-    routine `qod serve`/`qod start` into a network dependency. Returns None on
-    ANY failure (offline, timeout, malformed response) and whenever `current`
-    is a dev build (".dev0", never released to PyPI) or already current, so the
-    caller can echo-or-skip with no further error handling.
+# Opt-out for every release check (CI, air-gapped hosts that would rather not
+# pay even the bounded timeout once a day).
+NO_UPDATE_CHECK_ENV = "QOD_NO_UPDATE_CHECK"
+
+# How long a PyPI answer (or a failed attempt) is reused by cached_release_hint.
+UPDATE_CHECK_TTL_S = 24 * 3600
+
+
+def upgrade_command(prefix: str | None = None, executable: str | None = None) -> str:
+    """The command that upgrades this qod, guessed from where it is installed.
+
+    uvx runs from an ephemeral env in uv's cache (`.../uv/cache/archive-v0/...`),
+    `uv tool install` from `.../uv/tools/qod`, pipx from `.../pipx/venvs/qod`;
+    anything else is upgraded with the pip of the interpreter running qod.
     """
-    if current.endswith(".dev0"):
+    parts = [p.lower() for p in Path(prefix or sys.prefix).parts]
+    if "uv" in parts:
+        if "tools" in parts:
+            return "uv tool upgrade qod"
+        return "uvx qod@latest"
+    if "pipx" in parts:
+        return "pipx upgrade qod"
+    return f"{executable or sys.executable} -m pip install --upgrade qod"
+
+
+def _pypi_latest(timeout_s: float) -> str:
+    resp = httpx.get(PYPI_JSON_URL, timeout=timeout_s)
+    resp.raise_for_status()
+    return resp.json()["info"]["version"]
+
+
+def _hint_for(current: str, latest: str | None) -> str | None:
+    if not latest:
         return None
     try:
-        resp = httpx.get("https://pypi.org/pypi/qod/json", timeout=timeout_s)
-        resp.raise_for_status()
-        latest = resp.json()["info"]["version"]
         if _version_tuple(latest) <= _version_tuple(current):
             return None
     except Exception:
         return None
     return (
         f"note: qod {latest} is available (you have {current}); "
-        "uvx users: uvx qod@latest"
+        f"upgrade with: {upgrade_command()}"
     )
+
+
+def _check_disabled(current: str) -> bool:
+    return current.endswith(".dev0") or bool(os.environ.get(NO_UPDATE_CHECK_ENV))
+
+
+def newer_release_hint(current: str, timeout_s: float = 2.0) -> str | None:
+    """One-line hint when PyPI's latest `qod` release is newer than `current`.
+
+    Purely decorative - an unpinned `uvx qod` freezes on the first version it
+    ever resolved, and this makes that trap self-announcing without turning a
+    routine `qod serve`/`qod start` into a network dependency. Returns None on
+    ANY failure (offline, timeout, malformed response), whenever `current`
+    is a dev build (".dev0", never released to PyPI) or already current, and
+    when QOD_NO_UPDATE_CHECK is set, so the caller can echo-or-skip with no
+    further error handling.
+    """
+    if _check_disabled(current):
+        return None
+    try:
+        latest = _pypi_latest(timeout_s)
+    except Exception:
+        return None
+    return _hint_for(current, latest)
+
+
+def cached_release_hint(
+    current: str,
+    cache_file: Path | None = None,
+    timeout_s: float = 1.5,
+    now=time.time,
+) -> str | None:
+    """newer_release_hint for every command: PyPI is asked at most once per
+    UPDATE_CHECK_TTL_S, and a failed attempt is cached too, so an offline host
+    pays the bounded timeout once a day rather than on every command. Never
+    raises."""
+    if _check_disabled(current):
+        return None
+    path = cache_file or default_cache_dir() / "update-check.json"
+    try:
+        cached = json.loads(path.read_text())
+        if 0 <= now() - float(cached["checkedAt"]) < UPDATE_CHECK_TTL_S:
+            return _hint_for(current, cached.get("latest"))
+    except Exception:
+        pass
+    try:
+        latest: str | None = _pypi_latest(timeout_s)
+    except Exception:
+        latest = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"checkedAt": now(), "latest": latest}))
+    except Exception:
+        pass
+    return _hint_for(current, latest)
 
 
 def _download(url: str, dest: Path, label: str) -> str:
