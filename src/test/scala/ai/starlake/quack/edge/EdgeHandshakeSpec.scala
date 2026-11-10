@@ -63,7 +63,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       resolveTenant = raw =>
         if raw == "acme" then Some(Tenant("acme", "Acme Corporation")) else None,
       authorize = _ => authorizeResult.left.map(HandshakeDenial.Denied(_)),
-      versions = ai.starlake.quack.edge.authz.PolicyClock.zero
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
 
   "authenticate" should "bind a validated basic credential to its pool" in:
@@ -82,7 +83,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       lookupPool = (_, _) => Right("acme_db"),
       resolveTenant = _ => Some(Tenant("acme", "Acme Corporation")),
       authorize = _ => Left(HandshakeDenial.Denied("not reached")),
-      versions = ai.starlake.quack.edge.authz.PolicyClock.zero
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
 
   it should "call a password that could not be checked unavailable, and a wrong one unauthenticated" in:
@@ -142,6 +144,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         Left(HandshakeDenial.Unavailable("connection refused"))
       },
       versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
       edge = "quack"
     )
     hs.authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false) shouldBe
@@ -170,7 +173,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       resolveTenant = _ => Some(Tenant("acme")),
       authorize = _ =>
         Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff)),
-      versions = ai.starlake.quack.edge.authz.PolicyClock.zero
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
     for (bearer, basic, superuser) <- List(
         (None, Some(("alice", "pw")), false),
@@ -237,7 +241,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         sup.findPoolKeyByTenantAndPoolName(tn, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),
       authorize = sup.authorizeHandshakeDetailed,
-      versions = sup.policyVersions
+      versions = sup.policyVersions,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
 
   private val JwtSecret = "edge-handshake-spec-secret-0123456789"
@@ -463,3 +468,75 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       .get
     p.tokenRoles shouldBe Set("user")
     p.groups shouldBe Set("user", "analysts")
+
+  // A management session reaching the bearer chain (the Starflow pairing) is held to what it was
+  // minted for: its own tenant, and a superuser row only when it is a superuser's.
+
+  private val sessionStore =
+    new ai.starlake.quack.ondemand.api.SessionTokenStore(secret = JwtSecret)
+
+  private def sessionToken(tenant: Option[String], superuser: Boolean, manages: Set[String]) =
+    sessionStore.mintWithScope(
+      DatabaseAuthenticator.profileFor("admin", "user", tenant),
+      ai.starlake.quack.ondemand.auth.SessionScope(superuser, manages)
+    )
+
+  private final class SessionDoor:
+    var seen: List[AzRequest] = Nil
+    val door                  = new EdgeHandshake(
+      bearerService,
+      lookupPool = (_, _) => Right("acme_db"),
+      resolveTenant = raw => Option.when(Set("acme", "other")(raw))(Tenant(raw, raw)),
+      authorize = req =>
+        seen = req :: seen
+        Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff)),
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
+      sessionLookup = sessionStore.lookupResult
+    )
+    def connect(token: String, tenant: String = "acme", asSuperuser: Boolean = false) =
+      door.authenticate(Some(token), None, Some("bi"), Some(tenant), asSuperuser)
+
+  private type AzRequest = AuthzRequest
+
+  "a management session as a bearer" should "not reach a superuser row without being a superuser's" in:
+    val d = new SessionDoor
+    d.connect(sessionToken(Some("acme"), false, Set.empty), asSuperuser = true).isRight shouldBe true
+    d.seen.map(_.superuserAdmissible) shouldBe List(false)
+
+  it should "reach a superuser row when it is a superuser's" in:
+    val d = new SessionDoor
+    d.connect(sessionToken(None, true, Set.empty), asSuperuser = true).isRight shouldBe true
+    d.seen.map(_.superuserAdmissible) shouldBe List(true)
+
+  it should "stay out of a tenant it does not belong to" in:
+    val d = new SessionDoor
+    d.connect(sessionToken(Some("other"), false, Set.empty), tenant = "acme") match
+      case Left(HandshakeFailure.Unauthorized(_)) => succeed
+      case other                                  => fail(s"expected refused, got $other")
+    d.seen shouldBe Nil
+
+  it should "enter a tenant it belongs to" in:
+    val d = new SessionDoor
+    d.connect(sessionToken(Some("acme"), false, Set.empty), tenant = "acme").isRight shouldBe true
+
+  it should "enter a tenant it manages" in:
+    val d = new SessionDoor
+    d.connect(sessionToken(None, false, Set("acme")), tenant = "acme").isRight shouldBe true
+
+  it should "enter any tenant when it is a superuser's" in:
+    val d = new SessionDoor
+    d.connect(sessionToken(None, true, Set.empty), tenant = "other").isRight shouldBe true
+
+  it should "stop working once signed out" in:
+    val d     = new SessionDoor
+    val token = sessionToken(Some("acme"), false, Set.empty)
+    sessionStore.revoke(token)
+    d.connect(token) match
+      case Left(HandshakeFailure.Unauthenticated(_)) => succeed
+      case other                                     => fail(s"expected refused, got $other")
+    d.seen shouldBe Nil
+
+  "an external JWT signed with the same key" should "keep its standing on the superuser flag" in:
+    val d = new SessionDoor
+    d.connect(bearerFor("alice", None, Nil), asSuperuser = true).isRight shouldBe true
+    d.seen.map(_.superuserAdmissible) shouldBe List(true)

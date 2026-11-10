@@ -259,7 +259,8 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         val eff = users(req.username)
         Right(AuthorizedHandshake(poolKey, "acme", "p-1", eff.user, eff))
       ,
-      versions = sup.policyVersions
+      versions = sup.policyVersions,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
     val transport = new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient())
     val frontDoor = new QuackFrontDoor(

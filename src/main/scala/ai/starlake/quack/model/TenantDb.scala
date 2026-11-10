@@ -693,6 +693,18 @@ object TenantDb {
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
       .orElse(objectStoreError(td.objectStore))
+      .orElse(sessionDefaultError("defaultSchema", td.defaultSchema))
+      .orElse(sessionDefaultError("defaultDatabase", td.defaultDatabase))
+
+  /** `defaultSchema` names what the USE prelude of every statement of the database's pools targets,
+    * and both defaults qualify names in the policy rewriters, so each is one plain identifier.
+    * Empty reads as unset.
+    */
+  private def sessionDefaultError(label: String, value: Option[String]): Option[String] =
+    value.filter(v => v.nonEmpty && !Names.isValid(v)).map { v =>
+      s"invalid $label '$v': must follow Postgres identifier rules " +
+        "(1..63 chars, start with a letter or underscore, only letters, digits, underscore)"
+    }
 
   /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
     * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)

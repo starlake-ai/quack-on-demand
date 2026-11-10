@@ -236,7 +236,8 @@ object FlightEdgeHarness:
       lookupPool,
       resolveTenant,
       authorize,
-      sup.policyVersions
+      sup.policyVersions,
+      _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
     srv.start()
 

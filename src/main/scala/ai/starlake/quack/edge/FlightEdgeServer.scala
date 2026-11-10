@@ -51,6 +51,9 @@ final class FlightEdgeServer(
     // are resolved again through `authorize` once either moves (SessionGrants), so a revoke reaches
     // an open connection on its next statement. Required: see EdgeHandshake.
     versions: ai.starlake.quack.edge.authz.PolicyClock,
+    // What the session store says of a bearer: a management session is held to its own tenant and
+    // standing (see EdgeHandshake). Required: without it a session could name any row.
+    sessionLookup: String => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult,
     // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
     // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
     // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
@@ -70,6 +73,7 @@ final class FlightEdgeServer(
       resolveTenant,
       authorize,
       versions,
+      sessionLookup,
       edge = "flightsql"
     )
 

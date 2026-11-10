@@ -1589,6 +1589,7 @@ object Main extends IOApp with LazyLogging:
             authorizeForEdge,
             // The supervisor's policy versions: a session's grants follow them (SessionGrants).
             sup.policyVersions,
+            sessionTokens.lookupResult,
             // Branch targeting (Epic 1): the `branch` connection header.
             lookupBranch = (tenant, parentDb, branch) => branchLookup(tenant, parentDb, branch)
           )
@@ -1609,6 +1610,7 @@ object Main extends IOApp with LazyLogging:
             resolveTenantForEdge,
             authorizeForEdge,
             sup.policyVersions,
+            sessionTokens.lookupResult,
             edge = "quack"
           )
           val quackSessions = new ai.starlake.quack.edge.quack.QuackSessionRegistry(

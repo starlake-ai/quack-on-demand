@@ -1749,3 +1749,35 @@ class FederatedSourceHandlersSpec
     line.linesIterator.size shouldBe 1
     line should startWith("WARN: Iceberg source acme/acme_prod/old\\u000aWARN: forged: ")
   }
+
+  private val chainConfig = IcebergRestConfig(
+    uri = "https://glue.example.com/iceberg",
+    warehouse = "123456789012",
+    authType = Some(IcebergAuthType.SigV4),
+    awsCredentials = Some(ai.starlake.quack.ondemand.federation.iceberg.AwsCredentials.CredentialChain),
+    awsRegion = Some("eu-west-1"),
+    awsScope = List("s3://lake/sales/")
+  )
+
+  "An Iceberg source using the credential chain" should "be refused to a tenant admin, nothing stored" in
+    withEnv { (fs, resolver, tdId) =>
+      val (_, admin) = bothHandlers(fs, resolver)
+      create(admin, iceReq("chain_ice", chainConfig)).left.value._2.error shouldBe "superuser_required"
+      fs.getSource(tdId, "chain_ice") shouldBe None
+    }
+
+  it should "be accepted from a superuser" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, _) = bothHandlers(fs, resolver)
+      create(su, iceReq("chain_ice", chainConfig)).isRight shouldBe true
+      fs.getSource(tdId, "chain_ice").isDefined shouldBe true
+    }
+
+  it should "stay editable by a tenant admin only when sent back unchanged" in
+    withEnv { (fs, resolver, _) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, iceReq("chain_ice", chainConfig)).isRight shouldBe true
+      create(admin, iceReq("chain_ice", chainConfig)).isRight shouldBe true
+      val moved = chainConfig.copy(awsScope = List("s3://lake/other/"))
+      create(admin, iceReq("chain_ice", moved)).left.value._2.error shouldBe "superuser_required"
+    }

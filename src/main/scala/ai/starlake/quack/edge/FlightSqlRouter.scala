@@ -1915,7 +1915,15 @@ object FlightSqlRouter:
     * the policies match one table while the engine read the other.
     */
   def usePath(st: ai.starlake.quack.ondemand.PoolState): Option[String] =
-    sessionPath(st).map(p => s"${p.catalog}.${p.schema}")
+    sessionPath(st).map(p => s"${useIdentifier(p.catalog)}.${useIdentifier(p.schema)}")
+
+  /** A plain name as it is, so the prelude's text stays what nodes and handles have always read;
+    * anything else, which only a row stored before `TenantDb.validateSafety` checked its defaults
+    * can hold, quoted: it can then name a schema, and can never be read as more SQL.
+    */
+  private def useIdentifier(name: String): String =
+    if ai.starlake.quack.model.Names.isValid(name) then name
+    else ai.starlake.quack.model.SqlLiterals.duckdbIdent(name)
 
   /** [[usePath]] as its catalog and schema: the session's current catalog and schema for every
     * statement of the pool, which a refused form is qualified with ([[RefusedForms]]).

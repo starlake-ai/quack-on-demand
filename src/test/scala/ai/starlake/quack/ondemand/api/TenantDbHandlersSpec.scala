@@ -243,6 +243,51 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     td.defaultDatabase shouldBe Some("fedpg")
     td.defaultSchema   shouldBe Some("public")
 
+  private val notPlainNames = List("sales reporting", "a.b", "a;b", "a'b", "a\"b", "1abc")
+
+  it should "refuse a defaultSchema or defaultDatabase that is not a plain identifier" in:
+    val h = freshHandlers()
+    for bad <- notPlainNames do
+      withClue(s"defaultSchema '$bad': ") {
+        val out = h.createTenantDb(
+          TenantDbRequest(tenant = "acme", name = "memb", kind = "memory", defaultSchema = Some(bad)),
+          None
+        )(_ => SessionScope.Superuser).unsafeRunSync()
+        out.left.map(_._1.code) shouldBe Left(400)
+      }
+      withClue(s"defaultDatabase '$bad': ") {
+        val out = h.createTenantDb(
+          TenantDbRequest(tenant = "acme", name = "memb", kind = "memory", defaultDatabase = Some(bad)),
+          None
+        )(_ => SessionScope.Superuser).unsafeRunSync()
+        out.left.map(_._1.code) shouldBe Left(400)
+      }
+
+  "TenantDbHandlers.update" should "refuse a defaultSchema that is not a plain identifier" in:
+    val h = freshHandlers()
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "memc", kind = "memory"), None)(
+      _ => SessionScope.Superuser
+    ).unsafeRunSync()
+    for bad <- notPlainNames do
+      withClue(s"defaultSchema '$bad': ") {
+        val out = h.update(
+          UpdateTenantDbRequest("acme", "acme_memc", defaultSchema = Some(bad)),
+          None
+        )(_ => SessionScope.Superuser).unsafeRunSync()
+        out.left.map(_._1.code) shouldBe Left(400)
+      }
+
+  it should "still clear a defaultSchema with an empty value" in:
+    val h = freshHandlers()
+    h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "memd", kind = "memory", defaultSchema = Some("public")),
+      None
+    )(_ => SessionScope.Superuser).unsafeRunSync()
+    val out = h.update(UpdateTenantDbRequest("acme", "acme_memd", defaultSchema = Some("")), None)(
+      _ => SessionScope.Superuser
+    ).unsafeRunSync()
+    out.toOption.get.db.defaultSchema shouldBe None
+
   "TenantDbHandlers.createTenantDb (initSql)" should "round-trip initSql on the response" in:
     val h = freshHandlers()
     val out = h.createTenantDb(

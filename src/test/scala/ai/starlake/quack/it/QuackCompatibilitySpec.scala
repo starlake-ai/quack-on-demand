@@ -206,7 +206,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
         sup.findPoolKeyByTenantAndPoolName(t, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),
       authorize = _ => Right(AuthorizedHandshake(poolKey, "t-1", "p-1", user, eff)),
-      versions = sup.policyVersions
+      versions = sup.policyVersions,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
     )
     val transport = new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient())
     val door      = new QuackFrontDoor(
