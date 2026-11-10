@@ -155,7 +155,9 @@ class DialectMapperTest extends AnyFunSuite with Matchers {
     .forDuckDB(Some("acme_tpch"), Some("tpch1"))
     .copy(attachedCatalogs = Set("acme_tpch", "fedpg", "memory", "system", "temp"))
 
-  test("DuckDB mapper with attachedCatalogs denies a two-part name whose head is an attached catalog") {
+  test(
+    "DuckDB mapper with attachedCatalogs denies a two-part name whose head is an attached catalog"
+  ) {
     val table  = makeTable("orders", schema = "fedpg")
     val result = DuckDBDialectMapper.toTableRef(table, attachedCfg)
     result match
@@ -165,7 +167,9 @@ class DialectMapperTest extends AnyFunSuite with Matchers {
       case other => fail(s"expected AmbiguousCatalogRef, got $other")
   }
 
-  test("DuckDB mapper with attachedCatalogs denies when the head equals the session default catalog itself") {
+  test(
+    "DuckDB mapper with attachedCatalogs denies when the head equals the session default catalog itself"
+  ) {
     val table = makeTable("customer", schema = "acme_tpch")
     DuckDBDialectMapper.toTableRef(table, attachedCfg) match
       case Left(DenyReason.AmbiguousCatalogRef(_, catalog)) => catalog shouldBe "acme_tpch"
@@ -185,7 +189,9 @@ class DialectMapperTest extends AnyFunSuite with Matchers {
       Right(TableRef("acme_tpch", "tpch1", "customer"))
   }
 
-  test("DuckDB mapper resolves everything schema-first when attachedCatalogs is empty (standalone parser)") {
+  test(
+    "DuckDB mapper resolves everything schema-first when attachedCatalogs is empty (standalone parser)"
+  ) {
     val cfg   = Config.forDuckDB(Some("acme_tpch"), Some("tpch1"))
     val table = makeTable("orders", schema = "fedpg")
     DuckDBDialectMapper.toTableRef(table, cfg) shouldBe

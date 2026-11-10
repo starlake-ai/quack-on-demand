@@ -361,7 +361,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "refuse a name the rule refuses, an internal one included, and a read-alike sibling" in {
-    val f = new Fixture
+    val f                    = new Fixture
     def create(pool: String) = f.call(
       "create_pool",
       McpSuperuserPat.principal,
@@ -458,7 +458,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
   // Task 20 Part D: the tool goes through the REST handler, so a tenant admin's initSql gets the
   // same write-time check and the same refusal.
   "create_database" should "refuse a name the rule refuses" in {
-    val f = new Fixture
+    val f   = new Fixture
     val out = f.call(
       "create_database",
       McpSuperuserPat.principal,

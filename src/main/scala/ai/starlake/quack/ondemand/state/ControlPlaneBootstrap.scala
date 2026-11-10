@@ -5,8 +5,8 @@ import com.typesafe.scalalogging.LazyLogging
 import java.sql.{DriverManager, SQLException}
 import java.util.Properties
 
-/** Ensures the control-plane database exists before anything (Liquibase, Hikari pools) touches
-  * it, so a fresh install needs no `psql` preflight in the launcher.
+/** Ensures the control-plane database exists before anything (Liquibase, Hikari pools) touches it,
+  * so a fresh install needs no `psql` preflight in the launcher.
   *
   * Classification is deliberately narrow: only a connect failure with SQLState `3D000`
   * (invalid_catalog_name, "database does not exist") triggers a `CREATE DATABASE` through
@@ -69,6 +69,8 @@ object ControlPlaneBootstrap extends LazyLogging:
               Right(true)
             catch
               case t2: Throwable =>
-                Left(s"created control-plane database '$db' but cannot connect to it: ${firstLine(t2)}")
+                Left(
+                  s"created control-plane database '$db' but cannot connect to it: ${firstLine(t2)}"
+                )
       case t: Throwable =>
         Left(firstLine(t))

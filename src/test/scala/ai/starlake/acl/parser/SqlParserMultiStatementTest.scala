@@ -11,7 +11,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   // --- Multi-statement ---
 
   test("extract tables from two SELECT statements") {
-    val sql = "SELECT * FROM t1; SELECT * FROM t2"
+    val sql    = "SELECT * FROM t1; SELECT * FROM t2"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 2
     result.statements.foreach(_ shouldBe a[StatementResult.Extracted])
@@ -22,7 +22,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   }
 
   test("handle mix of SELECT and INSERT") {
-    val sql = "SELECT * FROM t1; INSERT INTO t2 VALUES (1)"
+    val sql    = "SELECT * FROM t1; INSERT INTO t2 VALUES (1)"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 2
     result.statements(0) shouldBe a[StatementResult.Extracted]
@@ -30,7 +30,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   }
 
   test("handle invalid statement among valid ones") {
-    val sql = "SELECT * FROM t1; GARBLED NONSENSE; SELECT * FROM t2"
+    val sql    = "SELECT * FROM t1; GARBLED NONSENSE; SELECT * FROM t2"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 3
     result.statements(0) shouldBe a[StatementResult.Extracted]
@@ -43,7 +43,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   }
 
   test("handle all-invalid input") {
-    val sql = "COMPLETELY INVALID"
+    val sql    = "COMPLETELY INVALID"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 1
     result.statements.head shouldBe a[StatementResult.ParseError]
@@ -51,29 +51,29 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   }
 
   test("handle empty input") {
-    val sql = ""
+    val sql    = ""
     val result = SqlParser.extract(sql, config)
     // Empty input should produce either empty statements or a ParseError
     result.statements.foreach {
-      case _: StatementResult.ParseError  => () // acceptable
-      case _: StatementResult.Extracted   => () // acceptable if empty
-      case other                          => fail(s"Unexpected for empty input: $other")
+      case _: StatementResult.ParseError => () // acceptable
+      case _: StatementResult.Extracted  => () // acceptable if empty
+      case other                         => fail(s"Unexpected for empty input: $other")
     }
   }
 
   test("handle whitespace-only input") {
-    val sql = "   "
+    val sql    = "   "
     val result = SqlParser.extract(sql, config)
     // Whitespace-only should not crash; result depends on parser behavior
     result.statements.foreach {
-      case _: StatementResult.ParseError  => () // acceptable
-      case _: StatementResult.Extracted   => () // acceptable if empty
-      case other                          => fail(s"Unexpected for whitespace input: $other")
+      case _: StatementResult.ParseError => () // acceptable
+      case _: StatementResult.Extracted  => () // acceptable if empty
+      case other                         => fail(s"Unexpected for whitespace input: $other")
     }
   }
 
   test("extract tables across UNION in multi-statement") {
-    val sql = "SELECT * FROM a UNION SELECT * FROM b; SELECT * FROM c"
+    val sql    = "SELECT * FROM a UNION SELECT * FROM b; SELECT * FROM c"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 2
     result.allTables shouldBe Set(
@@ -84,7 +84,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   }
 
   test("handle semicolons within quoted strings") {
-    val sql = "SELECT * FROM t1 WHERE name = 'a;b'"
+    val sql    = "SELECT * FROM t1 WHERE name = 'a;b'"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 1
     result.statements.head shouldBe a[StatementResult.Extracted]
@@ -92,14 +92,14 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
   }
 
   test("statement index is correct across multi-statement") {
-    val sql = "SELECT * FROM t1; SELECT * FROM t2; SELECT * FROM t3"
+    val sql    = "SELECT * FROM t1; SELECT * FROM t2; SELECT * FROM t3"
     val result = SqlParser.extract(sql, config)
     result.statements should have size 3
     result.statements.zipWithIndex.foreach { case (stmt, expectedIdx) =>
       val actualIdx = stmt match {
         case StatementResult.Extracted(idx, _, _, _, _) => idx
-        case StatementResult.ParseError(idx, _, _)   => idx
-        case StatementResult.ControlFlow(idx, _, _)  => idx
+        case StatementResult.ParseError(idx, _, _)      => idx
+        case StatementResult.ControlFlow(idx, _, _)     => idx
       }
       actualIdx shouldBe expectedIdx
     }
@@ -107,13 +107,13 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
 
   test("sql snippet is truncated for long queries") {
     val longTable = "t" + ("x" * 250)
-    val sql = s"SELECT * FROM $longTable"
-    val result = SqlParser.extract(sql, config)
+    val sql       = s"SELECT * FROM $longTable"
+    val result    = SqlParser.extract(sql, config)
     result.statements should have size 1
     val snippet = result.statements.head match {
       case StatementResult.Extracted(_, s, _, _, _) => s
-      case StatementResult.ParseError(_, s, _)   => s
-      case StatementResult.ControlFlow(_, s, _)  => s
+      case StatementResult.ParseError(_, s, _)      => s
+      case StatementResult.ControlFlow(_, s, _)     => s
     }
     snippet.length should be <= 203 // 200 + "..."
   }
@@ -122,7 +122,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
 
   test("UnqualifiedTable error for missing database default") {
     val noDbConfig = Config.forGeneric(defaultSchema = Some("public"))
-    val result = SqlParser.extract("SELECT * FROM orders", noDbConfig)
+    val result     = SqlParser.extract("SELECT * FROM orders", noDbConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
     stmt.accesses.map(_.table) shouldBe empty
@@ -133,7 +133,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
 
   test("UnqualifiedTable error for missing schema default") {
     val noSchemaConfig = Config.forGeneric(defaultDatabase = Some("db"))
-    val result = SqlParser.extract("SELECT * FROM orders", noSchemaConfig)
+    val result         = SqlParser.extract("SELECT * FROM orders", noSchemaConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
     stmt.accesses.map(_.table) shouldBe empty
@@ -144,7 +144,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
 
   test("fully qualified table works with no defaults") {
     val noDefaultsConfig = Config.forGeneric(None, None)
-    val result = SqlParser.extract("SELECT * FROM mydb.myschema.orders", noDefaultsConfig)
+    val result           = SqlParser.extract("SELECT * FROM mydb.myschema.orders", noDefaultsConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
     stmt.accesses.map(_.table) shouldBe Set(TableRef("mydb", "myschema", "orders"))

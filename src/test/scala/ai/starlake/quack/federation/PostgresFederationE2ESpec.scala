@@ -4,7 +4,9 @@ import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Tenant, Tenant
 import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, PostgresSecretResolver}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{
-  FederatedSourceStore, LiquibaseRunner, PostgresControlPlaneStore
+  FederatedSourceStore,
+  LiquibaseRunner,
+  PostgresControlPlaneStore
 }
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -18,17 +20,15 @@ import scala.util.Try
 
 /** Full manager-side E2E spec for the federation flow.
   *
-  * Layer B (always-runnable): exercised against a live local Postgres
-  * (same one used by the rest of the suite). Cancelled cleanly when
-  * Postgres is not reachable. Covers all three TenantDbKind variants
-  * (DuckLake, DuckDbFile, InMemory). Federated grant matching is the node decider's
+  * Layer B (always-runnable): exercised against a live local Postgres (same one used by the rest of
+  * the suite). Cancelled cleanly when Postgres is not reachable. Covers all three TenantDbKind
+  * variants (DuckLake, DuckDbFile, InMemory). Federated grant matching is the node decider's
   * (`AuthzDeciderSpec`, and end to end `AuthzEndToEndCases`).
   *
-  * Layer A (gated): full DuckDB spawn. Requires `duckdb` and `psql` on
-  * PATH and Postgres reachable. Skipped via `cancel` if either is
-  * absent. Currently a placeholder with the prerequisite gate; the heavy
-  * spawn plumbing can be filled in once the CI environment ships the
-  * `quack` and `ducklake` DuckDB extensions.
+  * Layer A (gated): full DuckDB spawn. Requires `duckdb` and `psql` on PATH and Postgres reachable.
+  * Skipped via `cancel` if either is absent. Currently a placeholder with the prerequisite gate;
+  * the heavy spawn plumbing can be filled in once the CI environment ships the `quack` and
+  * `ducklake` DuckDB extensions.
   */
 class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionValues:
 
@@ -53,14 +53,16 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   private def psqlAvailable: Boolean =
     Try(Process(Seq("psql", "--version")).!!).isSuccess
 
-  /** Spin up a fresh Postgres database with the full Liquibase migration
-    * applied, then run the test body, and drop the database afterwards. */
+  /** Spin up a fresh Postgres database with the full Liquibase migration applied, then run the test
+    * body, and drop the database afterwards.
+    */
   private def withControlPlane(
       test: (PostgresControlPlaneStore, FederatedSourceStore, String, String, String) => Unit
   ): Unit =
-    if !pgReachable then cancel(
-      s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
-    )
+    if !pgReachable then
+      cancel(
+        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
+      )
     val dbName = s"qodfe_test_${System.nanoTime()}"
     TestPostgres.psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try
@@ -71,42 +73,51 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
       test(cp, fs, dbName, url, pgPass)
     finally Try(TestPostgres.dropDatabase(dbName))
 
-  /** Seed a tenant + one tenant-db of the requested kind, then run
-    * the test body with the IDs. */
+  /** Seed a tenant + one tenant-db of the requested kind, then run the test body with the IDs.
+    */
   private def withTenantAndDb(
       kind: TenantDbKind,
-      cp:   PostgresControlPlaneStore,
+      cp: PostgresControlPlaneStore,
       test: (String, String) => Unit
   ): Unit =
     val tenantId = s"t-${System.nanoTime()}"
     val tdId     = s"td-${System.nanoTime()}"
     cp.upsertTenant(Tenant(id = tenantId, displayName = tenantId, disabled = false))
     val metastore = kind match
-      case TenantDbKind.DuckLake   => Map("pgHost" -> pgHost, "pgPort" -> pgPort.toString,
-                                          "pgUser" -> pgUser, "pgPassword" -> pgPass,
-                                          "dbName" -> "fedtest", "schemaName" -> "main")
+      case TenantDbKind.DuckLake =>
+        Map(
+          "pgHost"     -> pgHost,
+          "pgPort"     -> pgPort.toString,
+          "pgUser"     -> pgUser,
+          "pgPassword" -> pgPass,
+          "dbName"     -> "fedtest",
+          "schemaName" -> "main"
+        )
       case TenantDbKind.DuckDbFile => Map("dbName" -> "mydata", "schemaName" -> "main")
       case TenantDbKind.InMemory   => Map.empty[String, String]
-    cp.upsertTenantDb(TenantDb(
-      id        = tdId,
-      tenantId  = tenantId,
-      name      = s"${tenantId}_db",
-      kind      = kind,
-      metastore = metastore,
-      dataPath  = kind match
-        case TenantDbKind.DuckLake   => "/tmp/fed-e2e-data"
-        case TenantDbKind.DuckDbFile => "/tmp/fed-e2e.duckdb"
-        case TenantDbKind.InMemory   => ""
-    ))
+    cp.upsertTenantDb(
+      TenantDb(
+        id = tdId,
+        tenantId = tenantId,
+        name = s"${tenantId}_db",
+        kind = kind,
+        metastore = metastore,
+        dataPath = kind match
+          case TenantDbKind.DuckLake   => "/tmp/fed-e2e-data"
+          case TenantDbKind.DuckDbFile => "/tmp/fed-e2e.duckdb"
+          case TenantDbKind.InMemory   => ""
+      )
+    )
     test(tenantId, tdId)
 
-  /** Build a [[FederationBlobBuilder]] backed by the real
-    * [[FederatedSourceStore]] and the [[PostgresSecretResolver]]. */
+  /** Build a [[FederationBlobBuilder]] backed by the real [[FederatedSourceStore]] and the
+    * [[PostgresSecretResolver]].
+    */
   private def blobBuilder(fs: FederatedSourceStore): FederationBlobBuilder =
     new FederationBlobBuilder(
       loadEnabled = tdId => IO.blocking(fs.listEnabledSources(tdId)),
       loadSecrets = srcId => IO.blocking(fs.listSecrets(srcId)),
-      resolver    = new PostgresSecretResolver(),
+      resolver = new PostgresSecretResolver(),
       // No tenant-db catalog alias reserved: these cases assert federation SQL round-trips
       // through the real store, and none of them collides with its own tenant-db's alias.
       catalogAliasOf = _ => IO.pure(None)
@@ -119,52 +130,54 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   "PostgresFederationE2ESpec (InMemory)" should
     "persist tenant + tenant-db, register source + secret, build blob with resolved value" in
     withControlPlane { (cp, fs, _, _, _) =>
-      withTenantAndDb(TenantDbKind.InMemory, cp, { (tenantId, tdId) =>
+      withTenantAndDb(
+        TenantDbKind.InMemory,
+        cp,
+        { (tenantId, tdId) =>
+          // 1. Register a federated Postgres source using {{alias}} and {{secret.PWD}}.
+          val src = FederatedSource(
+            id = "src-mem-1",
+            tenantDbId = tdId,
+            alias = "fedpg",
+            setupSql = "INSTALL postgres;\n" +
+              "ATTACH 'host=pg.example.com dbname=orders password={{secret.PWD}}' AS {{alias}};"
+          )
+          fs.upsertSource(src)
 
-        // 1. Register a federated Postgres source using {{alias}} and {{secret.PWD}}.
-        val src = FederatedSource(
-          id         = "src-mem-1",
-          tenantDbId = tdId,
-          alias      = "fedpg",
-          setupSql   =
-            "INSTALL postgres;\n" +
-            "ATTACH 'host=pg.example.com dbname=orders password={{secret.PWD}}' AS {{alias}};"
-        )
-        fs.upsertSource(src)
+          // 2. Register a value-backed secret.
+          val sec = FederatedSecret(
+            id = "sec-mem-1",
+            federatedSourceId = src.id,
+            name = "PWD",
+            value = Some("hunter2"),
+            externalRef = None
+          )
+          fs.upsertSecret(sec)
 
-        // 2. Register a value-backed secret.
-        val sec = FederatedSecret(
-          id                = "sec-mem-1",
-          federatedSourceId = src.id,
-          name              = "PWD",
-          value             = Some("hunter2"),
-          externalRef       = None
-        )
-        fs.upsertSecret(sec)
+          // 3. Round-trip verification via the store.
+          val readSrc = fs.getSource(tdId, "fedpg").value
+          readSrc.alias shouldBe "fedpg"
+          readSrc.setupSql should include("{{alias}}")
 
-        // 3. Round-trip verification via the store.
-        val readSrc = fs.getSource(tdId, "fedpg").value
-        readSrc.alias    shouldBe "fedpg"
-        readSrc.setupSql should include("{{alias}}")
+          val readSec = fs.getSecret(readSrc.id, "PWD").value
+          readSec.value shouldBe Some("hunter2")
 
-        val readSec = fs.getSecret(readSrc.id, "PWD").value
-        readSec.value shouldBe Some("hunter2")
+          // 4. Build the blob: {{alias}} and {{secret.PWD}} both substituted.
+          val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
+          blob should include("-- BEGIN federation: fedpg")
+          blob should include("-- END federation: fedpg")
+          blob should include("AS fedpg")
+          blob should include("hunter2")
+          blob should not include "{{alias}}"
+          blob should not include "{{secret.PWD}}"
 
-        // 4. Build the blob: {{alias}} and {{secret.PWD}} both substituted.
-        val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
-        blob should include("-- BEGIN federation: fedpg")
-        blob should include("-- END federation: fedpg")
-        blob should include("AS fedpg")
-        blob should include("hunter2")
-        blob should not include "{{alias}}"
-        blob should not include "{{secret.PWD}}"
-
-        // 5. logSafePreview redacts the value but keeps {{secret.PWD}}.
-        val preview = blobBuilder(fs).logSafePreview(tdId).unsafeRunSync().value
-        preview should include("{{secret.PWD}}")
-        preview should not include "hunter2"
-        preview should include("AS fedpg")
-      })
+          // 5. logSafePreview redacts the value but keeps {{secret.PWD}}.
+          val preview = blobBuilder(fs).logSafePreview(tdId).unsafeRunSync().value
+          preview should include("{{secret.PWD}}")
+          preview should not include "hunter2"
+          preview should include("AS fedpg")
+        }
+      )
     }
 
   // -----------------------------------------------------------------------
@@ -174,28 +187,30 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   "PostgresFederationE2ESpec (DuckDbFile)" should
     "persist tenant + tenant-db of kind duckdb-file, register source + secret, build blob" in
     withControlPlane { (cp, fs, _, _, _) =>
-      withTenantAndDb(TenantDbKind.DuckDbFile, cp, { (tenantId, tdId) =>
+      withTenantAndDb(
+        TenantDbKind.DuckDbFile,
+        cp,
+        { (tenantId, tdId) =>
+          // Verify kind round-trips correctly.
+          val storedDb = cp.listTenantDbs(tenantId).head
+          storedDb.kind shouldBe TenantDbKind.DuckDbFile
 
-        // Verify kind round-trips correctly.
-        val storedDb = cp.listTenantDbs(tenantId).head
-        storedDb.kind shouldBe TenantDbKind.DuckDbFile
+          val src = FederatedSource(
+            id = "src-file-1",
+            tenantDbId = tdId,
+            alias = "fedpg",
+            setupSql = "INSTALL postgres;\n" +
+              "ATTACH 'dbname=prod password={{secret.PWD}}' AS {{alias}} (TYPE postgres);"
+          )
+          fs.upsertSource(src)
+          fs.upsertSecret(FederatedSecret("sec-file-1", src.id, "PWD", Some("s3cr3t"), None))
 
-        val src = FederatedSource(
-          id         = "src-file-1",
-          tenantDbId = tdId,
-          alias      = "fedpg",
-          setupSql   =
-            "INSTALL postgres;\n" +
-            "ATTACH 'dbname=prod password={{secret.PWD}}' AS {{alias}} (TYPE postgres);"
-        )
-        fs.upsertSource(src)
-        fs.upsertSecret(FederatedSecret("sec-file-1", src.id, "PWD", Some("s3cr3t"), None))
-
-        val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
-        blob should include("-- BEGIN federation: fedpg")
-        blob should include("AS fedpg")
-        blob should include("s3cr3t")
-      })
+          val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
+          blob should include("-- BEGIN federation: fedpg")
+          blob should include("AS fedpg")
+          blob should include("s3cr3t")
+        }
+      )
     }
 
   // -----------------------------------------------------------------------
@@ -205,37 +220,39 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   "PostgresFederationE2ESpec (DuckLake)" should
     "persist tenant + tenant-db of kind ducklake, register source + secret, build blob" in
     withControlPlane { (cp, fs, _, _, _) =>
-      withTenantAndDb(TenantDbKind.DuckLake, cp, { (tenantId, tdId) =>
+      withTenantAndDb(
+        TenantDbKind.DuckLake,
+        cp,
+        { (tenantId, tdId) =>
+          val storedDb = cp.listTenantDbs(tenantId).head
+          storedDb.kind shouldBe TenantDbKind.DuckLake
 
-        val storedDb = cp.listTenantDbs(tenantId).head
-        storedDb.kind shouldBe TenantDbKind.DuckLake
+          val src = FederatedSource(
+            id = "src-lake-1",
+            tenantDbId = tdId,
+            alias = "fedpg",
+            setupSql = "INSTALL postgres;\n" +
+              "ATTACH 'host=fed-pg.internal dbname=sales password={{secret.PWD}}' AS {{alias}} (TYPE postgres);"
+          )
+          fs.upsertSource(src)
+          fs.upsertSecret(FederatedSecret("sec-lake-1", src.id, "PWD", Some("p4ssw0rd"), None))
 
-        val src = FederatedSource(
-          id         = "src-lake-1",
-          tenantDbId = tdId,
-          alias      = "fedpg",
-          setupSql   =
-            "INSTALL postgres;\n" +
-            "ATTACH 'host=fed-pg.internal dbname=sales password={{secret.PWD}}' AS {{alias}} (TYPE postgres);"
-        )
-        fs.upsertSource(src)
-        fs.upsertSecret(FederatedSecret("sec-lake-1", src.id, "PWD", Some("p4ssw0rd"), None))
+          // Blob: both {{alias}} and {{secret.PWD}} resolved.
+          val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
+          blob should include("-- BEGIN federation: fedpg")
+          blob should include("-- END federation: fedpg")
+          blob should include("AS fedpg")
+          blob should include("p4ssw0rd")
+          blob should not include "{{secret.PWD}}"
+          blob should not include "{{alias}}"
 
-        // Blob: both {{alias}} and {{secret.PWD}} resolved.
-        val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
-        blob should include("-- BEGIN federation: fedpg")
-        blob should include("-- END federation: fedpg")
-        blob should include("AS fedpg")
-        blob should include("p4ssw0rd")
-        blob should not include "{{secret.PWD}}"
-        blob should not include "{{alias}}"
-
-        // Preview blob: value redacted, alias expanded.
-        val preview = blobBuilder(fs).logSafePreview(tdId).unsafeRunSync().value
-        preview should include("{{secret.PWD}}")
-        preview should include("AS fedpg")
-        preview should not include "p4ssw0rd"
-      })
+          // Preview blob: value redacted, alias expanded.
+          val preview = blobBuilder(fs).logSafePreview(tdId).unsafeRunSync().value
+          preview should include("{{secret.PWD}}")
+          preview should include("AS fedpg")
+          preview should not include "p4ssw0rd"
+        }
+      )
     }
 
   // -----------------------------------------------------------------------
@@ -245,33 +262,41 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   "PostgresFederationE2ESpec (blob assembly)" should
     "produce deterministic source ordering and correct BEGIN/END markers" in
     withControlPlane { (cp, fs, _, _, _) =>
-      withTenantAndDb(TenantDbKind.InMemory, cp, { (tenantId, tdId) =>
+      withTenantAndDb(
+        TenantDbKind.InMemory,
+        cp,
+        { (tenantId, tdId) =>
+          // Register two sources with aliases that sort alphabetically: bbb < zzz.
+          val srcB = FederatedSource("src-bbb", tdId, "bbb_db", "ATTACH 'x' AS {{alias}};")
+          val srcZ = FederatedSource("src-zzz", tdId, "zzz_db", "ATTACH 'y' AS {{alias}};")
+          fs.upsertSource(srcB)
+          fs.upsertSource(srcZ)
 
-        // Register two sources with aliases that sort alphabetically: bbb < zzz.
-        val srcB = FederatedSource("src-bbb", tdId, "bbb_db",
-                                   "ATTACH 'x' AS {{alias}};")
-        val srcZ = FederatedSource("src-zzz", tdId, "zzz_db",
-                                   "ATTACH 'y' AS {{alias}};")
-        fs.upsertSource(srcB)
-        fs.upsertSource(srcZ)
-
-        val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
-        blob should include ("-- BEGIN federation: bbb_db")
-        blob should include ("-- END federation: bbb_db")
-        blob should include ("-- BEGIN federation: zzz_db")
-        blob should include ("-- END federation: zzz_db")
-        // bbb_db must appear before zzz_db.
-        blob.indexOf("BEGIN federation: bbb_db") should be < blob.indexOf("BEGIN federation: zzz_db")
-      })
+          val blob = blobBuilder(fs).build(tdId).unsafeRunSync().value
+          blob should include("-- BEGIN federation: bbb_db")
+          blob should include("-- END federation: bbb_db")
+          blob should include("-- BEGIN federation: zzz_db")
+          blob should include("-- END federation: zzz_db")
+          // bbb_db must appear before zzz_db.
+          blob.indexOf("BEGIN federation: bbb_db") should be < blob.indexOf(
+            "BEGIN federation: zzz_db"
+          )
+        }
+      )
     }
 
   it should "return None when all sources are disabled" in
     withControlPlane { (cp, fs, _, _, _) =>
-      withTenantAndDb(TenantDbKind.InMemory, cp, { (tenantId, tdId) =>
-        fs.upsertSource(FederatedSource("src-off", tdId, "off",
-                                        "ATTACH 'x' AS {{alias}};", disabled = true))
-        blobBuilder(fs).build(tdId).unsafeRunSync() shouldBe None
-      })
+      withTenantAndDb(
+        TenantDbKind.InMemory,
+        cp,
+        { (tenantId, tdId) =>
+          fs.upsertSource(
+            FederatedSource("src-off", tdId, "off", "ATTACH 'x' AS {{alias}};", disabled = true)
+          )
+          blobBuilder(fs).build(tdId).unsafeRunSync() shouldBe None
+        }
+      )
     }
 
   // -----------------------------------------------------------------------
@@ -280,18 +305,18 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
 
   "PostgresFederationE2ESpec (Layer A: full spawn)" should
     "attach a Postgres source and query its data through DuckDB (prerequisite-gated)" in {
-    if !pgReachable || !duckdbAvailable || !psqlAvailable then
-      cancel(
-        s"Layer A skipped: pgReachable=$pgReachable duckdbAvailable=$duckdbAvailable" +
-        s" psqlAvailable=$psqlAvailable - one or more prerequisites missing"
-      )
+      if !pgReachable || !duckdbAvailable || !psqlAvailable then
+        cancel(
+          s"Layer A skipped: pgReachable=$pgReachable duckdbAvailable=$duckdbAvailable" +
+            s" psqlAvailable=$psqlAvailable - one or more prerequisites missing"
+        )
 
-    // If we reach here all prerequisites are satisfied. The full spawn
-    // sequence below can only run where `quack` + `ducklake` DuckDB
-    // extensions are also installed. For now we record the intent and
-    // cancel: the extensions are not available on lean CI machines.
-    cancel(
-      "Layer A skipped: duckdb binary found but `quack` + `ducklake` extensions are not " +
-      "guaranteed on this machine. Wire the full spawn once CI ships the extension bundle."
-    )
-  }
+      // If we reach here all prerequisites are satisfied. The full spawn
+      // sequence below can only run where `quack` + `ducklake` DuckDB
+      // extensions are also installed. For now we record the intent and
+      // cancel: the extensions are not available on lean CI machines.
+      cancel(
+        "Layer A skipped: duckdb binary found but `quack` + `ducklake` extensions are not " +
+          "guaranteed on this machine. Wire the full spawn once CI ships the extension bundle."
+      )
+    }

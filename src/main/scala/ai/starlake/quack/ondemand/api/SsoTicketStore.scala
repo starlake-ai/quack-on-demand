@@ -5,28 +5,27 @@ import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
-/** Grant carried by a single-use SSO ticket: the session bearer token to hand
-  * to Starlake plus the identity it belongs to.
+/** Grant carried by a single-use SSO ticket: the session bearer token to hand to Starlake plus the
+  * identity it belongs to.
   */
 final case class SsoGrant(
-  sessionToken: String,
-  username: String,
-  tenant: Option[String],
-  admin: Boolean,
-  superuser: Boolean
+    sessionToken: String,
+    username: String,
+    tenant: Option[String],
+    admin: Boolean,
+    superuser: Boolean
 )
 
-/** In-process, single-use, short-TTL ticket store for the QoD to Starlake SSO
-  * handoff. Tickets are 128-bit random values; the grant (including the raw
-  * session token) never leaves the manager until redeemed server-to-server.
-  * Single-manager scope: like the SessionTokenStore jti denylist, this map is
-  * per-process; the 60s TTL keeps the HA gap negligible.
+/** In-process, single-use, short-TTL ticket store for the QoD to Starlake SSO handoff. Tickets are
+  * 128-bit random values; the grant (including the raw session token) never leaves the manager
+  * until redeemed server-to-server. Single-manager scope: like the SessionTokenStore jti denylist,
+  * this map is per-process; the 60s TTL keeps the HA gap negligible.
   */
 final class SsoTicketStore(
-  now: () => Instant = () => Instant.now(),
-  ttlSeconds: Long = 60
+    now: () => Instant = () => Instant.now(),
+    ttlSeconds: Long = 60
 ):
-  private val rng = new SecureRandom()
+  private val rng     = new SecureRandom()
   private val entries = new ConcurrentHashMap[String, (SsoGrant, Instant)]()
 
   private def sweep(): Unit =

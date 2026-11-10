@@ -6,11 +6,11 @@ import org.scalatest.matchers.should.Matchers
 class NamesSpec extends AnyFlatSpec with Matchers:
 
   "Names.isValid" should "accept Postgres-identifier strings" in:
-    Names.isValid("acme")        shouldBe true
-    Names.isValid("acme_corp")   shouldBe true
-    Names.isValid("_acme")       shouldBe true
-    Names.isValid("a1b2_c3")     shouldBe true
-    Names.isValid("Acme")        shouldBe true
+    Names.isValid("acme") shouldBe true
+    Names.isValid("acme_corp") shouldBe true
+    Names.isValid("_acme") shouldBe true
+    Names.isValid("a1b2_c3") shouldBe true
+    Names.isValid("Acme") shouldBe true
 
   it should "reject names not starting with a letter or underscore" in:
     Names.isValid("1acme") shouldBe false
@@ -18,13 +18,13 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     Names.isValid(".acme") shouldBe false
 
   it should "reject names containing disallowed characters" in:
-    Names.isValid("acme-corp")    shouldBe false
+    Names.isValid("acme-corp") shouldBe false
     Names.isValid("acme.eu.prod") shouldBe false
-    Names.isValid("acme corp")    shouldBe false
+    Names.isValid("acme corp") shouldBe false
 
   it should "reject empty / null / over-length names" in:
-    Names.isValid("")                          shouldBe false
-    Names.isValid(null)                        shouldBe false
+    Names.isValid("") shouldBe false
+    Names.isValid(null) shouldBe false
     Names.isValid("a" * (Names.MaxLength + 1)) shouldBe false
 
   it should "accept a name at exactly MaxLength" in:
@@ -32,8 +32,8 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     Names.isValid("a" + "b" * (Names.MaxLength - 1)) shouldBe true
 
   "Names.normalize" should "lowercase a valid input" in:
-    Names.normalize("Acme")          shouldBe "acme"
-    Names.normalize("ACME_EU_Prod")  shouldBe "acme_eu_prod"
+    Names.normalize("Acme") shouldBe "acme"
+    Names.normalize("ACME_EU_Prod") shouldBe "acme_eu_prod"
 
   it should "throw on a bad input" in:
     intercept[IllegalArgumentException](Names.normalize("1acme"))
@@ -41,15 +41,15 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     intercept[IllegalArgumentException](Names.normalize("bad name"))
 
   "Names.normalizeTenantDbName" should "leave an already-prefixed input unchanged" in:
-    Names.normalizeTenantDbName("acme", "acme_prod")    shouldBe Right("acme_prod")
+    Names.normalizeTenantDbName("acme", "acme_prod") shouldBe Right("acme_prod")
     Names.normalizeTenantDbName("acme", "acme_eu_west") shouldBe Right("acme_eu_west")
 
   it should "prepend the tenant prefix to a bare suffix" in:
-    Names.normalizeTenantDbName("acme", "prod")  shouldBe Right("acme_prod")
+    Names.normalizeTenantDbName("acme", "prod") shouldBe Right("acme_prod")
     Names.normalizeTenantDbName("tpch", "tpch1") shouldBe Right("tpch_tpch1")
 
   it should "lowercase before composing" in:
-    Names.normalizeTenantDbName("ACME", "Prod")      shouldBe Right("acme_prod")
+    Names.normalizeTenantDbName("ACME", "Prod") shouldBe Right("acme_prod")
     Names.normalizeTenantDbName("ACME", "Acme_Prod") shouldBe Right("acme_prod")
 
   it should "reject suffix == tenant (DuckDB attach restriction)" in:
@@ -59,15 +59,15 @@ class NamesSpec extends AnyFlatSpec with Matchers:
 
   it should "reject suffixes failing base validation" in:
     Names.normalizeTenantDbName("acme", "acme-prod").isLeft shouldBe true
-    Names.normalizeTenantDbName("acme", "").isLeft          shouldBe true
+    Names.normalizeTenantDbName("acme", "").isLeft shouldBe true
 
   it should "reject when the composed name exceeds MaxLength" in:
     val long = "a" * (Names.MaxLength - 4) // 4 = len("acme_")-1: composing pushes past 63
     Names.normalizeTenantDbName("acme", long).isLeft shouldBe true
 
   "Names.normalizeTenantId" should "lowercase a name of letters and digits" in:
-    Names.normalizeTenantId("Acme")   shouldBe Right("acme")
-    Names.normalizeTenantId("acme2")  shouldBe Right("acme2")
+    Names.normalizeTenantId("Acme") shouldBe Right("acme")
+    Names.normalizeTenantId("acme2") shouldBe Right("acme2")
     Names.normalizeTenantId("A1b2C3") shouldBe Right("a1b2c3")
 
   it should "refuse an underscore anywhere, saying what a tenant name holds and why" in:
@@ -84,7 +84,7 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     }
 
   it should "refuse a name past MaxLength and accept one at it" in:
-    Names.normalizeTenantId("a" * Names.MaxLength).isRight      shouldBe true
+    Names.normalizeTenantId("a" * Names.MaxLength).isRight shouldBe true
     Names.normalizeTenantId("a" * (Names.MaxLength + 1)).isLeft shouldBe true
 
   it should "keep a letter outside ASCII out" in:
@@ -96,12 +96,12 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     id should fullyMatch regex "^t-[0-9a-f]{32}$"
 
   it should "honour the requested prefix" in:
-    Names.newSurrogateId("td")   should startWith ("td-")
-    Names.newSurrogateId("p")    should startWith ("p-")
-    Names.newSurrogateId("rp")   should startWith ("rp-")
-    Names.newSurrogateId("pp")   should startWith ("pp-")
-    Names.newSurrogateId("g")    should startWith ("g-")
-    Names.newSurrogateId("fsec") should startWith ("fsec-")
+    Names.newSurrogateId("td") should startWith("td-")
+    Names.newSurrogateId("p") should startWith("p-")
+    Names.newSurrogateId("rp") should startWith("rp-")
+    Names.newSurrogateId("pp") should startWith("pp-")
+    Names.newSurrogateId("g") should startWith("g-")
+    Names.newSurrogateId("fsec") should startWith("fsec-")
 
   it should "not collide across a reasonable batch (128-bit entropy)" in:
     // Birthday math: 128-bit entropy hits 50% collision around 2^64 ids -- a

@@ -20,5 +20,9 @@ class HibernationConfigSpec extends AnyFlatSpec with Matchers:
       .withFallback(ConfigSource.default)
       .at("quack-on-demand")
       .loadOrThrow[ManagerConfig]
-    cfg.hibernation shouldBe HibernationConfig(enabled = false, sweepSeconds = 61, defaultIdleMinutes = 7)
+    cfg.hibernation shouldBe HibernationConfig(
+      enabled = false,
+      sweepSeconds = 61,
+      defaultIdleMinutes = 7
+    )
   }
