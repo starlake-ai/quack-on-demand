@@ -18,6 +18,7 @@ import sttp.model.StatusCode
   *
   * Pagination: `before` is an opaque cursor string (last row id from a prior response). An invalid
   * cursor is silently ignored (treated as absent). `limit` defaults to 50, clamped to [1, 500].
+  * `after` walks forward instead, oldest first (see [[HistoryCursor]]).
   */
 final class AuditHandlers(store: TelemetryStore):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -33,7 +34,8 @@ final class AuditHandlers(store: TelemetryStore):
       limit: Option[Int],
       before: Option[String],
       noTenant: Option[Boolean],
-      apiKey: Option[String]
+      apiKey: Option[String],
+      after: Option[String] = None
   )(scopeOf: SessionScope.Resolver): Out[AuditListResponse] = IO.blocking {
     val scope                  = scopeOf(apiKey)
     val (tenants, includeNull) =
@@ -49,8 +51,9 @@ final class AuditHandlers(store: TelemetryStore):
         else (tenant.map(Set(_)), tenant.isEmpty)
 
     for
-      f <- QueryParams.instant(from, "from")
-      t <- QueryParams.instant(to, "to")
+      f       <- QueryParams.instant(from, "from")
+      t       <- QueryParams.instant(to, "to")
+      afterId <- HistoryCursor.after(before, after)
     yield
       val rows = store.listAudit(
         AuditQuery(
@@ -63,7 +66,8 @@ final class AuditHandlers(store: TelemetryStore):
           from = f,
           to = t,
           limit = limit.getOrElse(50).max(1).min(500),
-          beforeId = before.flatMap(_.toLongOption)
+          beforeId = before.flatMap(_.toLongOption),
+          afterId = afterId
         )
       )
       AuditListResponse(
@@ -79,10 +83,12 @@ final class AuditHandlers(store: TelemetryStore):
             target = r.event.target,
             outcome = r.event.outcome,
             origin = r.event.origin,
-            detail = r.event.detail
+            detail = r.event.detail,
+            patId = r.event.patId
           )
         ),
-        nextBefore = rows.lastOption.map(_.id.toString)
+        nextBefore = if afterId.isDefined then None else rows.lastOption.map(_.id.toString),
+        nextAfter = afterId.map(a => rows.lastOption.map(_.id).getOrElse(a).toString)
       )
   }
 

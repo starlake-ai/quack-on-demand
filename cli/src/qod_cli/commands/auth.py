@@ -166,6 +166,7 @@ VERB_CEILINGS = ("RO", "RW", "DDL", "ALL")
         "stmtTimeoutMs": "--stmt-timeout-ms",
         "maxRows": "--max-rows",
         "branchOnly": "--branch-only",
+        "adminReadOnly": "--admin-read-only",
     },
 )
 def create(
@@ -203,6 +204,11 @@ def create(
         "--branch-only",
         help="Writes (INSERT/UPDATE/DELETE/DDL) only on a branch, never on the live database.",
     ),
+    admin_read_only: bool = typer.Option(
+        False,
+        "--admin-read-only",
+        help="Limit this token to a fixed list of read routes, for a monitoring agent.",
+    ),
 ):
     """Create a PAT. The token is printed ONCE; store it now.
 
@@ -212,6 +218,8 @@ def create(
     body = {"name": name, "expiresAt": expires_at, "dropAdmin": drop_admin}
     if branch_only:
         body["branchOnly"] = True
+    if admin_read_only:
+        body["adminReadOnly"] = True
     if role:
         body["roles"] = list(role)
     if database:

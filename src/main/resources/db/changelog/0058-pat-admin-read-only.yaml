@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0058-pat-admin-read-only
+      author: quack-on-demand
+      changes:
+        - addColumn:
+            tableName: qodstate_pat
+            columns:
+              - column:
+                  name: admin_read_only
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false

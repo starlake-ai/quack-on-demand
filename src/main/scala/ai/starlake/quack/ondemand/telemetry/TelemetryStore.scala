@@ -47,7 +47,9 @@ final case class AuditQuery(
     from: Option[Instant] = None,
     to: Option[Instant] = None,
     limit: Int = 50,
-    beforeId: Option[Long] = None
+    beforeId: Option[Long] = None,
+    /** Ascending keyset cursor: rows with a greater id, oldest first. Exclusive with `beforeId`. */
+    afterId: Option[Long] = None
 )
 
 final case class AuditRow(id: Long, event: AuditEvent)
@@ -91,7 +93,9 @@ final case class StatementQuery(
     from: Option[Instant] = None,
     to: Option[Instant] = None,
     limit: Int = 50,
-    beforeId: Option[Long] = None
+    beforeId: Option[Long] = None,
+    /** Ascending keyset cursor: rows with a greater id, oldest first. Exclusive with `beforeId`. */
+    afterId: Option[Long] = None
 )
 
 /** One row returned by [[TelemetryStore.searchStatements]]. */

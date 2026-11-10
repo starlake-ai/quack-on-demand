@@ -67,7 +67,11 @@ final class McpRoutes(
       if !h.startsWith("Bearer ") then None
       else
         val token = h.stripPrefix("Bearer ")
-        resolvePat(token).map(p => new McpPrincipal.Pat(p, token))
+        // MCP exposes writes as tools (manifest_import among them), so a read-only token is no
+        // credential here at all.
+        resolvePat(token)
+          .filterNot(_.restriction.adminReadOnly)
+          .map(p => new McpPrincipal.Pat(p, token))
     }
 
   private def jsonResponse(status: Status, body: Json): Response[IO] =

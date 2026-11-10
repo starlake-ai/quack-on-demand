@@ -89,7 +89,13 @@ class RecordingTelemetryStore extends TelemetryStore:
     q.to.foreach { t => filtered = filtered.filter(_._2.ts.compareTo(t) < 0) }
 
     // Newest-first, capped at limit
-    filtered.sortBy(-_._1).take(q.limit).map { case (id, e) => AuditRow(id, e) }
+    q.afterId match
+      case Some(aid) =>
+        filtered.filter(_._1 > aid).sortBy(_._1).take(q.limit).map { case (id, e) =>
+          AuditRow(id, e)
+        }
+      case None =>
+        filtered.sortBy(-_._1).take(q.limit).map { case (id, e) => AuditRow(id, e) }
 
   def purgeAudit(olderThan: Instant): Int =
     val before = rows.size
@@ -135,7 +141,13 @@ class RecordingTelemetryStore extends TelemetryStore:
 
     // Newest-first, limit clamped to [1, 500]
     val lim = math.max(1, math.min(q.limit, 500))
-    filtered.sortBy(-_._1).take(lim).map { case (id, e) => StatementRow(id, e) }
+    q.afterId match
+      case Some(aid) =>
+        filtered.filter(_._1 > aid).sortBy(_._1).take(lim).map { case (id, e) =>
+          StatementRow(id, e)
+        }
+      case None =>
+        filtered.sortBy(-_._1).take(lim).map { case (id, e) => StatementRow(id, e) }
 
   override def purgeStatements(olderThan: Instant): Int =
     val before = stmtRows.size

@@ -119,3 +119,5 @@ databaseChangeLog:
       file: db/changelog/0056-branch-three-way-merge.yaml
   - include:
       file: db/changelog/0057-own-keys-policy-version.yaml
+  - include:
+      file: db/changelog/0058-pat-admin-read-only.yaml

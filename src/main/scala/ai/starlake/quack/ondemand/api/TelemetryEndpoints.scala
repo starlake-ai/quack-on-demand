@@ -32,6 +32,7 @@ object TelemetryEndpoints:
         Option[Int],
         Option[String],
         Option[Boolean],
+        Option[String],
         Option[String]
     ),
     (sttp.model.StatusCode, ErrorResponse),
@@ -50,6 +51,7 @@ object TelemetryEndpoints:
       .in(query[Option[Int]]("limit"))
       .in(query[Option[String]]("before"))
       .in(query[Option[Boolean]]("noTenant"))
+      .in(query[Option[String]]("after"))
       .in(authToken)
       .out(jsonBody[AuditListResponse])
 
@@ -104,6 +106,7 @@ object TelemetryEndpoints:
         Option[String],
         Option[Int],
         Option[String],
+        Option[String],
         Option[String]
     ),
     (sttp.model.StatusCode, ErrorResponse),
@@ -121,6 +124,7 @@ object TelemetryEndpoints:
       .in(query[Option[String]]("q"))
       .in(query[Option[Int]]("limit"))
       .in(query[Option[String]]("before"))
+      .in(query[Option[String]]("after"))
       .in(authToken)
       .out(jsonBody[StatementSearchResponse])
 
