@@ -205,6 +205,7 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
         sup.authorizeHandshakeDetailed(r)
       },
       versions = sup.policyVersions,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
       edge = edge
     )
 

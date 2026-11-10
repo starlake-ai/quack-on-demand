@@ -106,6 +106,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       resolveTenant = raw => sup.getTenant(raw),
       authorize = req => sup.authorizeHandshakeDetailed(req),
       versions = sup.policyVersions,
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
       edge = "quack"
     )
     new QuackFrontDoor(
