@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.federation
 
 import ai.starlake.quack.model.{FederatedSource, FederatedSourceType}
-import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
+import ai.starlake.quack.ondemand.federation.iceberg.{AwsCredentials, IcebergRestConfig}
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind}
 import io.circe.Json
 
@@ -82,6 +82,23 @@ object FederatedSourceRules:
       s => Json.fromString(s.trim),
       values => Json.fromValues(values.map(settled).filterNot(nothing)),
       fields => Json.fromJsonObject(fields.mapValues(settled).filter((_, v) => !nothing(v)))
+    )
+
+  /** Whether writing `source` over `stored` has a node sign S3 requests with its own identity
+    * (IRSA, an instance role, inherited `AWS_*`) over a scope and a catalog the source names, which
+    * is the same reach an `externalRef` has, so only a superuser may. A client sending a stored
+    * source back unchanged asks for nothing new.
+    */
+  def adoptsNodeIdentity(stored: Option[FederatedSource], source: FederatedSource): Boolean =
+    usesCredentialChain(source) && !stored.exists(s =>
+      s.sourceType == source.sourceType && sameConfig(source.sourceType, s.config, source.config)
+    )
+
+  private def usesCredentialChain(source: FederatedSource): Boolean =
+    source.sourceType == FederatedSourceType.IcebergRest && source.config.exists(raw =>
+      IcebergRestConfig
+        .fromJson(raw)
+        .exists(_.awsCredentials.contains(AwsCredentials.CredentialChain))
     )
 
   /** Empty when `source` may be stored. `reserved` is the tenant-db's own catalog alias plus every

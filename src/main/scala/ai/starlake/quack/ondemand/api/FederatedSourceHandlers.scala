@@ -330,6 +330,24 @@ final class FederatedSourceHandlers(
                 existing.map(_.id).getOrElse(Names.newSurrogateId("fs"))
               toSource(id, tenantDbId, req, existing) match
                 case Left(e) => Left(e)
+                case Right(source)
+                    if superuserDenied(apiKey) &&
+                      FederatedSourceRules.adoptsNodeIdentity(existing, source) =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.FederationSourceUpsert,
+                    "denied",
+                    tenant = tenantIdResolver(tenantName),
+                    target = Some(source.alias)
+                  )
+                  Left(
+                    StatusCode.Forbidden -> ErrorResponse(
+                      "superuser_required",
+                      "awsCredentials 'credential_chain' signs with the node's own identity, so " +
+                        "only a superuser may set or change it; use static keys held as secrets"
+                    )
+                  )
                 // A stored secret, an externalRef's included, goes only where it was saved for,
                 // the rule TenantSignInWrite holds for a tenant's client secret, and for what it
                 // was saved for: a read-only source stays read-only.
