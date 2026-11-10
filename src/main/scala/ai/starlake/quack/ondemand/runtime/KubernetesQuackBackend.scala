@@ -209,6 +209,10 @@ final class KubernetesQuackBackend(
     val podSpec = Option(pod.getSpec).getOrElse(new PodSpec())
     pod.setSpec(podSpec)
     serviceAccount.foreach(podSpec.setServiceAccountName)
+    // A node never calls the Kubernetes API, and the account is usually the manager's, which reads
+    // every Secret of the namespace: no token in a pod where SQL can read files, whatever a pod
+    // template says. A token projected for IRSA or workload identity is a mount of its own.
+    podSpec.setAutomountServiceAccountToken(false)
 
     // Locate or create the quack container.
     val containers = Option(podSpec.getContainers).map(_.asScala.toList).getOrElse(Nil)

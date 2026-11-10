@@ -947,6 +947,29 @@ class KubernetesQuackBackendSpec
     val svc = server.getClient.services.inNamespace("default").withName("quack-sa1").get()
     svc.getSpec.getType shouldBe "NodePort"
 
+  it should "never mount the Kubernetes API token into a node pod, whatever a template says" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      podTemplateEnabled = true,
+      serviceAccount = Some("quack-nodes"),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    val key      = PoolKey("acme", "acme_default", "sales")
+    val template = "apiVersion: v1\nkind: Pod\nspec:\n  automountServiceAccountToken: true\n"
+    for (id, yaml) <- List("quack-notoken1" -> None, "quack-notoken2" -> Some(template)) do
+      val spec = NodeSpec(key, id, Role.Dual, metastore = Map.empty, s3 = Map.empty, podTemplateYaml = yaml)
+      val node = backend.start(spec).unsafeRunSync()
+      val pod  = server.getClient.pods.inNamespace("default").withName(node.podName.get).get()
+      withClue(s"$id: ")(pod.getSpec.getAutomountServiceAccountToken shouldBe false)
+
   it should "liveNodeIds lists only the pool's pods" in:
     val backend = new KubernetesQuackBackend(
       client = server.getClient,
