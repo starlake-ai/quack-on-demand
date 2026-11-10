@@ -913,9 +913,7 @@ final case class PatCreateRequest(
     stmtTimeoutMs: Option[Int] = None,
     maxRows: Option[Int] = None,
     // Epic 1: writes only on branches (reads unchanged). Inherited by every child token.
-    branchOnly: Boolean = false,
-    // Reaches only AdminReadOnlyRoutes, keeping the owner's scope. Inherited by every child token.
-    adminReadOnly: Boolean = false
+    branchOnly: Boolean = false
 )
 
 /** The ONLY response that ever carries the raw `token`: it is stored hashed, so a caller that loses
@@ -941,8 +939,7 @@ final case class PatScope(
     dropAdmin: Boolean = false,
     stmtTimeoutMs: Option[Int] = None,
     maxRows: Option[Int] = None,
-    branchOnly: Boolean = false,
-    adminReadOnly: Boolean = false
+    branchOnly: Boolean = false
 )
 
 /** Listing row: metadata only, deliberately without the raw token or its hash. `revoked` collapses

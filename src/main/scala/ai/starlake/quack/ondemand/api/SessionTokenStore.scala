@@ -49,8 +49,8 @@ object SessionTokenStore:
       profile: AuthenticatedProfile,
       scope: SessionScope,
       createdAt: Instant,
-      /** True for a PAT restricted with `adminReadOnly`; a login session never is. */
-      adminReadOnly: Boolean = false
+      /** True for a PAT with a ceiling of `RO`; a login session never is. */
+      readOnly: Boolean = false
   )
 
   /** Differentiated outcome of a token lookup. The legacy `get`/`isAdmin`/etc. callers collapse

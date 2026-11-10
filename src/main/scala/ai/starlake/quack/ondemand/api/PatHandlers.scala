@@ -174,8 +174,7 @@ final class PatHandlers(
       stmtTimeoutMs = req.stmtTimeoutMs,
       maxRows = req.maxRows,
       expiresAt = req.expiresAt,
-      branchOnly = req.branchOnly,
-      adminReadOnly = req.adminReadOnly
+      branchOnly = req.branchOnly
     )
 
   /** Narrow `requested` against `(parentRestriction, parentDepth)`, enforce the depth cap, and
@@ -381,8 +380,7 @@ final class PatHandlers(
       dropAdmin = r.restriction.dropAdmin,
       stmtTimeoutMs = r.restriction.stmtTimeoutMs,
       maxRows = r.restriction.maxRows,
-      branchOnly = r.restriction.branchOnly,
-      adminReadOnly = r.restriction.adminReadOnly
+      branchOnly = r.restriction.branchOnly
     )
 
   private def entryOf(r: PatRecord): PatEntry =

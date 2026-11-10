@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
-import ai.starlake.quack.ondemand.auth.AdminReadOnlyRoutes
+import ai.starlake.quack.ondemand.auth.ReadOnlyCeilingRoutes
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.state.PatStore
 import ai.starlake.quack.ondemand.telemetry.{
@@ -488,8 +488,7 @@ final class ManagerServer(
                 )
               )
                 .flatMap(_ => refuse(req, Response[IO](Status.Unauthorized)))
-          else if resolved.exists(_.adminReadOnly) &&
-            !AdminReadOnlyRoutes.admits(req.method, segments, req.uri.path.endsWithSlash)
+          else if resolved.exists(_.readOnly) && !ReadOnlyCeilingRoutes.admits(req.method, segments)
           then
             val username = resolved.map(_.profile.username).getOrElse("unknown")
             auditDenial("readonly:" + username)(
@@ -508,7 +507,7 @@ final class ManagerServer(
                   req,
                   Response[IO](Status.Forbidden)
                     .withEntity(
-                      """{"error":"token_read_only","message":"this token can only use the read routes it was issued for"}"""
+                      """{"error":"token_read_only","message":"this token is read-only"}"""
                     )
                     .withContentType(
                       org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)

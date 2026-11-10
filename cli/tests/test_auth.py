@@ -418,26 +418,6 @@ def test_pat_revoke_sends_id(runner, respx_mock):
     assert sent == {"id": "pat-1"}
 
 
-def test_pat_create_admin_read_only_flag(runner, respx_mock):
-    route = _mock_pat_create(respx_mock)
-    result = runner.invoke(app, ["auth", "pat", "create", "--name", "connector", "--admin-read-only"])
-    assert result.exit_code == 0, result.output
-    import json
-
-    sent = json.loads(route.calls.last.request.content)
-    assert sent["adminReadOnly"] is True
-
-
-def test_pat_create_omits_admin_read_only_by_default(runner, respx_mock):
-    route = _mock_pat_create(respx_mock)
-    result = runner.invoke(app, ["auth", "pat", "create", "--name", "connector"])
-    assert result.exit_code == 0, result.output
-    import json
-
-    sent = json.loads(route.calls.last.request.content)
-    assert "adminReadOnly" not in sent
-
-
 def test_manifest_export_passes_rbac_mode(runner, respx_mock):
     route = respx_mock.get(url__regex=r".*/api/manifest/export.*").mock(
         return_value=httpx.Response(200, text="roles: []\n")

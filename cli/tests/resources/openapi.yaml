@@ -9951,7 +9951,6 @@ components:
       - name
       - dropAdmin
       - branchOnly
-      - adminReadOnly
       properties:
         name:
           type: string
@@ -9989,8 +9988,6 @@ components:
           type: integer
           format: int32
         branchOnly:
-          type: boolean
-        adminReadOnly:
           type: boolean
     PatCreateResponse:
       title: PatCreateResponse
@@ -10083,7 +10080,6 @@ components:
       required:
       - dropAdmin
       - branchOnly
-      - adminReadOnly
       properties:
         roles:
           type: array
@@ -10116,8 +10112,6 @@ components:
           type: integer
           format: int32
         branchOnly:
-          type: boolean
-        adminReadOnly:
           type: boolean
     PoolCohortDto:
       title: PoolCohortDto

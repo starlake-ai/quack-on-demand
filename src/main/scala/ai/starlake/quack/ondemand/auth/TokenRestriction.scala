@@ -22,14 +22,12 @@ final case class TokenRestriction(
       * reads stay as granted. A parent's `true` cannot be lowered by a child. Enforced in the
       * routed executor (MCP / REST callers); the raw FlightSQL wire has no token concept.
       */
-    branchOnly: Boolean = false,
-    /** The token keeps its owner's scope but reaches only [[AdminReadOnlyRoutes]]: reads, for an
-      * agent that must never be able to change anything. A parent's `true` cannot be cleared by a
-      * child.
-      */
-    adminReadOnly: Boolean = false
+    branchOnly: Boolean = false
 ):
   def allowsDatabase(db: String): Boolean = databases.forall(_.contains(db))
+
+  /** A ceiling of `RO`: the token reads and never writes, in SQL, on REST and on MCP alike. */
+  def readOnly: Boolean = verbCeiling.exists(v => TokenRestriction.covers(v) == Set("Read"))
 
   /** Plain axis membership. A branch pool (`__br_<id8>`) is never named on the axis; the routed
     * executor resolves it to "any pool of the parent tenant-db" before consulting this.
@@ -121,6 +119,5 @@ object TokenRestriction:
       stmtTimeoutMs = to,
       maxRows = rows,
       expiresAt = expiry,
-      branchOnly = parent.branchOnly || child.branchOnly,
-      adminReadOnly = parent.adminReadOnly || child.adminReadOnly
+      branchOnly = parent.branchOnly || child.branchOnly
     )

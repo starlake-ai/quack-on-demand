@@ -114,7 +114,7 @@ final class PatAuthenticator(
         ),
         scope = p.scope,
         createdAt = Instant.now(),
-        adminReadOnly = p.restriction.adminReadOnly
+        readOnly = p.restriction.readOnly
       )
     }
 

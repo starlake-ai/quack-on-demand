@@ -185,8 +185,8 @@ final class PatStore(
       val ps = c.prepareStatement(
         "INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, expires_at, " +
           "parent_id, depth, roles, databases, pools, tools, verb_ceiling, drop_admin, " +
-          "stmt_timeout_ms, max_rows, branch_only, admin_read_only) " +
-          "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
+          "stmt_timeout_ms, max_rows, branch_only) " +
+          "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
           "WHERE ? IS NULL OR EXISTS (SELECT 1 FROM qodstate_pat WHERE id = ? AND user_id = ? " +
           "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) FOR UPDATE)"
       )
@@ -218,12 +218,11 @@ final class PatStore(
           case Some(m) => ps.setInt(16, m)
           case None    => ps.setNull(16, java.sql.Types.INTEGER)
         ps.setBoolean(17, effective.branchOnly)
-        ps.setBoolean(18, effective.adminReadOnly)
-        // The WHERE-clause guard: `? IS NULL` (19) short-circuits the check for a root mint,
-        // and the EXISTS probe (20, 21) re-reads liveness of the claimed parent under this user.
+        // The WHERE-clause guard: `? IS NULL` (18) short-circuits the check for a root mint,
+        // and the EXISTS probe (19, 20) re-reads liveness of the claimed parent under this user.
+        ps.setString(18, parentId.orNull)
         ps.setString(19, parentId.orNull)
-        ps.setString(20, parentId.orNull)
-        ps.setString(21, userId)
+        ps.setString(20, userId)
         ps.executeUpdate()
       finally ps.close()
     }
@@ -451,8 +450,7 @@ final class PatStore(
           Option(rs.getObject("stmt_timeout_ms")).map(_.asInstanceOf[Number].intValue),
         maxRows = Option(rs.getObject("max_rows")).map(_.asInstanceOf[Number].intValue),
         expiresAt = expiresAt,
-        branchOnly = rs.getBoolean("branch_only"),
-        adminReadOnly = rs.getBoolean("admin_read_only")
+        branchOnly = rs.getBoolean("branch_only")
       )
     )
 
@@ -475,7 +473,7 @@ object PatStore:
   private val SelectCols =
     "id, user_id, name, created_at, expires_at, last_used_at, revoked_at, parent_id, depth, " +
       "roles, databases, pools, tools, verb_ceiling, drop_admin, stmt_timeout_ms, max_rows, " +
-      "branch_only, admin_read_only"
+      "branch_only"
 
   /** Result of [[PatStore.delete]]: only an already-dead row (revoked or expired) is deletable. */
   enum DeleteOutcome:

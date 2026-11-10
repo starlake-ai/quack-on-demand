@@ -67,12 +67,13 @@ final class McpRoutes(
       if !h.startsWith("Bearer ") then None
       else
         val token = h.stripPrefix("Bearer ")
-        // MCP exposes writes as tools (manifest_import among them), so a read-only token is no
-        // credential here at all.
-        resolvePat(token)
-          .filterNot(_.restriction.adminReadOnly)
-          .map(p => new McpPrincipal.Pat(p, token))
+        resolvePat(token).map(p => new McpPrincipal.Pat(p, token))
     }
+
+  private def mayUse(principal: McpPrincipal, tool: McpToolDef): Boolean =
+    (!tool.adminOnly || principal.isAdmin) &&
+      principal.restriction.allowsTool(tool.name) &&
+      (!principal.restriction.readOnly || McpRoutes.ReadOnlyTools(tool.name))
 
   private def jsonResponse(status: Status, body: Json): Response[IO] =
     Response[IO](status)
@@ -150,10 +151,8 @@ final class McpRoutes(
         IO.pure(jsonResponse(Status.Ok, ok(rpc.id, Json.obj())))
 
       case "tools/list" =>
-        val visible = tools.filter(t =>
-          (!t.adminOnly || principal.isAdmin) && principal.restriction.allowsTool(t.name)
-        )
-        val listed = visible.map { t =>
+        val visible = tools.filter(t => mayUse(principal, t))
+        val listed  = visible.map { t =>
           Json.obj(
             "name"        -> Json.fromString(t.name),
             "description" -> Json.fromString(t.description),
@@ -172,9 +171,7 @@ final class McpRoutes(
           // shown. Unauthorized and unknown collapse to one answer (no tier-probing
           // oracle) -- a tool outside the allowlist falls into the same `case _` as a
           // name that does not exist at all.
-          case Some(tool)
-              if (!tool.adminOnly || principal.isAdmin)
-                && principal.restriction.allowsTool(tool.name) =>
+          case Some(tool) if mayUse(principal, tool) =>
             tool
               .run(principal, args)
               .map {
@@ -213,3 +210,48 @@ final class McpRoutes(
         )
       )
     )
+
+object McpRoutes:
+  /** The tools a token with a ceiling of `RO` may use. A tool not named here is closed to it, so a
+    * new tool stays closed until someone decides it only reads. `run_sql` is here because the
+    * ceiling already limits what the statement may do.
+    */
+  val ReadOnlyTools: Set[String] = Set(
+    // Data
+    "run_sql",
+    "list_databases",
+    "list_tables",
+    "describe_table",
+    "table_history",
+    "list_snapshots",
+    "my_usage",
+    "list_recoverable",
+    "list_my_s3_credentials",
+    // Branches
+    "list_branches",
+    "branch_changes",
+    "diff",
+    // Administration
+    "list_pools",
+    "get_pool_status",
+    "active_statements",
+    "maintenance_runs",
+    "get_maintenance_policy",
+    "audit_search",
+    "list_databases_admin",
+    "metastore_defaults",
+    "list_pool_permissions",
+    "list_tenants",
+    "list_tenant_locations",
+    "list_users",
+    "user_effective_permissions",
+    "list_groups",
+    "list_roles",
+    "list_group_role_memberships",
+    "manifest_export",
+    "list_pats",
+    "get_config",
+    "statement_history",
+    "usage_trends",
+    "usage_report"
+  )
