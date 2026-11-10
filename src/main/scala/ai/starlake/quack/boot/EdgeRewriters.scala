@@ -72,8 +72,8 @@ object EdgeRewriters extends LazyLogging:
     * write-path [[protectedWriteGuard]]. Both must resolve a table's columns identically so the
     * guard's Deny-mode oracle and the rewriter agree on which columns a masked SELECT exposes.
     * Resolves a DuckDB-side catalog name to its DuckLakeCatalogReader via the asking tenant's own
-    * tenant-db of that name; a name nothing of the tenant holds returns Nil so the caller's
-    * unresolvedMode decides deny-vs-pass.
+    * tenant-db of that name or attach alias; a name nothing of the tenant holds returns Nil so the
+    * caller's unresolvedMode decides deny-vs-pass.
     */
   def columnCatalog(
       sup: PoolSupervisor,

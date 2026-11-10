@@ -506,6 +506,71 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.sup.findTenantDbByCatalogName("globex", "acme_lake") shouldBe None
   }
 
+  it should "resolve a DuckLake database by the alias it is attached as, in its tenant only" in {
+    val f = new Fixture
+    f.create("lake", Map(TenantDb.CatalogAliasKey -> "sales")).isRight shouldBe true
+    f.sup.findTenantDbByCatalogName("acme", "SALES").map(_.name) shouldBe Some("acme_lake")
+    f.sup.findTenantDbByCatalogName("acme", "acme_lake").map(_.name) shouldBe Some("acme_lake")
+    f.sup.findTenantDbByCatalogName("globex", "sales") shouldBe None
+  }
+
+  it should "resolve a DuckLake database attached under a dbName that is not its row name" in {
+    val f = new Fixture
+    f.store.upsertTenantDb(
+      TenantDb(
+        id = "td-other",
+        tenantId = "acme",
+        name = "acme_lake",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map("dbName" -> "warehouse"),
+        dataPath = "/data/lake"
+      )
+    )
+    f.sup.restore()
+    f.sup.findTenantDbByCatalogName("acme", "warehouse").map(_.name) shouldBe Some("acme_lake")
+  }
+
+  it should "resolve an alias to the parent, never to a branch attached under the same alias" in {
+    val f      = new Fixture
+    val parent = f.create("lake", Map(TenantDb.CatalogAliasKey -> "sales")).toOption.get
+    val branch = TenantDb(
+      id = "td-br",
+      tenantId = "acme",
+      name = "acme_lake__br_ab12cd34",
+      kind = TenantDbKind.DuckLake,
+      metastore = parent.metastore
+        .updated("dbName", "acme_lake__br_ab12cd34")
+        .updated(TenantDb.CatalogAliasKey, "sales"),
+      dataPath = "/data/x__br_ab12cd34",
+      branchOf = Some(parent.id)
+    )
+    f.sup.registerBranchTenantDb(branch).isRight shouldBe true
+    f.sup.findTenantDbByCatalogName("acme", "sales").map(_.name) shouldBe Some("acme_lake")
+  }
+
+  it should "resolve nothing when two databases of the tenant answer to the name" in {
+    val f = new Fixture
+    f.create("one", Map(TenantDb.CatalogAliasKey -> "sales"), dataPath = "/data/one")
+      .isRight shouldBe true
+    f.create("two", Map(TenantDb.CatalogAliasKey -> "sales"), dataPath = "/data/two")
+      .isRight shouldBe true
+    f.create("three", Map(TenantDb.CatalogAliasKey -> "acme_four"), dataPath = "/data/three")
+      .isRight shouldBe true
+    f.create("four", dataPath = "/data/four").isRight shouldBe true
+    f.sup.findTenantDbByCatalogName("acme", "sales") shouldBe None
+    f.sup.findTenantDbByCatalogName("acme", "acme_four") shouldBe None
+  }
+
+  it should "not resolve a duckdb-file database by its alias, having no DuckLake catalog to read" in {
+    val f = new Fixture
+    f.create(
+      "file",
+      Map("dbName" -> "local", "schemaName" -> "main", TenantDb.CatalogAliasKey -> "sales"),
+      kind = TenantDbKind.DuckDbFile
+    ).isRight shouldBe true
+    f.sup.findTenantDbByCatalogName("acme", "sales") shouldBe None
+  }
+
   it should "cache per tenant, so no tenant is answered from another's read" in {
     val asked   = ListBuffer.empty[String]
     val columns = new ai.starlake.quack.edge.cls.DuckLakeColumnCatalog((tenant, _, _, _) =>

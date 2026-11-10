@@ -2150,16 +2150,30 @@ final class PoolSupervisor(
       tenantDbs.values.find(td => td.tenantId == t.id && td.name == nm)
     }
 
-  /** Find the tenant-db of `tenantId` whose composed Postgres `dbName` (`${tenant}_${tenantDb}`,
-    * lowercased, persisted into `TenantDb.name`) matches `catalog`. Used by the CLS rewriter's
-    * column-catalog fetcher, for the asking principal's own tenant: another tenant's catalog is not
-    * looked at, whatever a statement or an attach alias names. Matching `td.name` with
-    * `equalsIgnoreCase` stays in sync with the formula `effectiveMetastoreFor` /
-    * `spawn-quack-node.sh` use, with no drift. `None` if no tenant-db matches.
+  /** Find the tenant-db of `tenantId` that `catalog` names: its `TenantDb.name`, or for a DuckLake
+    * row the name its nodes ATTACH it under ([[TenantDb.catalogAlias]] of the effective metastore),
+    * which is the session catalog a statement on its pools is qualified against. Used by the CLS
+    * rewriter's column-catalog fetcher, for the asking principal's own tenant: another tenant's
+    * catalog is not looked at, whatever a statement or an attach alias names.
+    *
+    * A branch answers to its own name only, since it is attached under its parent's alias. `None`
+    * if no tenant-db matches, or if several do (an alias is free text and can repeat, or equal
+    * another row's name): the caller then has no column list, which fails closed, where picking one
+    * would match policies against another database's columns.
     */
   def findTenantDbByCatalogName(tenantId: String, catalog: String): Option[TenantDb] =
+    def attachedAs(td: TenantDb): Boolean =
+      td.kind == TenantDbKind.DuckLake && td.branchOf.isEmpty &&
+        TenantDb.catalogAlias(effectiveMetastoreFor(td)).equalsIgnoreCase(catalog)
     if catalog == null || catalog.isEmpty then None
-    else tenantDbs.values.find(td => td.tenantId == tenantId && td.name.equalsIgnoreCase(catalog))
+    else
+      tenantDbs.values
+        .filter(td =>
+          td.tenantId == tenantId && (td.name.equalsIgnoreCase(catalog) || attachedAs(td))
+        )
+        .toList match
+        case td :: Nil => Some(td)
+        case _         => None
 
   /** Fleet mode: the server currently hosting `nodeId`, from the in-memory topology. None for an
     * unknown id and on every other runtime.
