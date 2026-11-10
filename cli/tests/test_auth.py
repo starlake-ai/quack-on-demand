@@ -416,3 +416,27 @@ def test_pat_revoke_sends_id(runner, respx_mock):
 
     sent = json.loads(route.calls.last.request.content)
     assert sent == {"id": "pat-1"}
+
+
+def test_manifest_export_passes_rbac_mode(runner, respx_mock):
+    route = respx_mock.get(url__regex=r".*/api/manifest/export.*").mock(
+        return_value=httpx.Response(200, text="roles: []\n")
+    )
+    result = runner.invoke(app, ["manifest", "export", "--mode", "rbac", "--tenant", "acme"])
+    assert result.exit_code == 0, result.output
+    params = route.calls.last.request.url.params
+    assert (params["mode"], params["tenant"]) == ("rbac", "acme")
+
+
+def test_manifest_import_passes_rbac_mode(runner, respx_mock, tmp_path):
+    route = respx_mock.post(url__regex=r".*/api/manifest/import.*").mock(
+        return_value=httpx.Response(200, json={"roles": 0, "groups": 0})
+    )
+    bundle = tmp_path / "bundle.yaml"
+    bundle.write_text("roles: []\n")
+    result = runner.invoke(
+        app, ["manifest", "import", str(bundle), "--mode", "rbac", "--tenant", "acme"]
+    )
+    assert result.exit_code == 0, result.output
+    params = route.calls.last.request.url.params
+    assert (params["mode"], params["tenant"]) == ("rbac", "acme")

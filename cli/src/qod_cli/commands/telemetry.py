@@ -22,6 +22,7 @@ history_app = typer.Typer(help="Statement history and trends.")
         "limit": "--limit",
         "before": "--before",
         "noTenant": "--no-tenant",
+        "after": "--after",
     },
 )
 def audit_list(
@@ -36,6 +37,7 @@ def audit_list(
     limit: int = typer.Option(None, "--limit"),
     before: str = typer.Option(None, "--before", help="Keyset pagination token."),
     no_tenant: bool = typer.Option(None, "--no-tenant", help="Only rows without a tenant."),
+    after: str = typer.Option(None, "--after", help="Rows after this id, oldest first."),
 ):
     call(
         ctx,
@@ -44,6 +46,7 @@ def audit_list(
         params={
             "family": family, "tenant": tenant, "actor": actor, "action": action, "q": q,
             "from": from_, "to": to, "limit": limit, "before": before, "noTenant": no_tenant,
+            "after": after,
         },
     )
 
@@ -91,6 +94,7 @@ def usage(
         "q": "--q",
         "limit": "--limit",
         "before": "--before",
+        "after": "--after",
     },
 )
 def statements(
@@ -104,6 +108,7 @@ def statements(
     q: str = typer.Option(None, "--q"),
     limit: int = typer.Option(None, "--limit"),
     before: str = typer.Option(None, "--before"),
+    after: str = typer.Option(None, "--after", help="Rows after this id, oldest first."),
 ):
     call(
         ctx,
@@ -112,6 +117,7 @@ def statements(
         params={
             "from": from_, "to": to, "tenant": tenant, "pool": pool, "user": user,
             "status": status, "q": q, "limit": limit, "before": before,
+            "after": after,
         },
     )
 

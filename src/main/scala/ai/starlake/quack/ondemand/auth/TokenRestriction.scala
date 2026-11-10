@@ -26,6 +26,9 @@ final case class TokenRestriction(
 ):
   def allowsDatabase(db: String): Boolean = databases.forall(_.contains(db))
 
+  /** A ceiling of `RO`: the token reads and never writes, in SQL, on REST and on MCP alike. */
+  def readOnly: Boolean = verbCeiling.exists(v => TokenRestriction.covers(v) == Set("Read"))
+
   /** Plain axis membership. A branch pool (`__br_<id8>`) is never named on the axis; the routed
     * executor resolves it to "any pool of the parent tenant-db" before consulting this.
     */

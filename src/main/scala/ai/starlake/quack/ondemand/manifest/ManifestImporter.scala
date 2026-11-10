@@ -389,6 +389,52 @@ object ManifestImporter extends LazyLogging:
       catch case ApplyRefused(errs) => Left(errs)
     }
 
+  /** Makes one tenant's custom RBAC exactly `bundle`, in one transaction: its roles and groups are
+    * upserted through the usual pipeline, and the tenant's other custom roles and groups are
+    * deleted, their bindings going with them through the foreign keys. Built-ins, a group's pool
+    * grants and SCIM provisioned groups are left as they are. The caller checks
+    * [[RbacManifest.refusal]] first.
+    */
+  def applyRbac(
+      bundle: RbacManifest,
+      tenantId: String,
+      store: ControlPlaneStore
+  ): ValidationResult =
+    val m = bundle.toManifest(tenantId)
+    validate(m, store, None).flatMap { _ =>
+      try
+        store.atomically {
+          val result = applyValidated(
+            m,
+            store,
+            federatedStore = None,
+            requireEncryption = false,
+            tenantFilesRoot = None,
+            keepGroupPoolGrants = true
+          )
+          result.left.foreach(errs => throw ApplyRefused(errs))
+          removeAbsentRbac(m, tenantId, store)
+          result
+        }
+      catch case ApplyRefused(errs) => Left(errs)
+    }
+
+  private def removeAbsentRbac(
+      m: ConfigManifest,
+      tenantId: String,
+      store: ControlPlaneStore
+  ): Unit =
+    val keptRoles  = m.roles.map(_.name).toSet
+    val keptGroups = m.groups.map(_.name).toSet
+    store
+      .listRoles(tenantId)
+      .filterNot(r => r.builtin || keptRoles(r.name))
+      .foreach(r => store.deleteRole(r.id))
+    store
+      .listGroups(tenantId)
+      .filterNot(g => g.builtin || g.externalId.isDefined || keptGroups(g.name))
+      .foreach(g => store.deleteGroup(g.id))
+
   /** One line per name of `m` a new create would refuse: a backup always restores, and an operator
     * hears about them. A branch's database and pool hold `__` by design, known by the row that says
     * it is a branch, and are not reported. Nodes of a key holding such a name take a hashed id, by
@@ -433,7 +479,8 @@ object ManifestImporter extends LazyLogging:
       store: ControlPlaneStore,
       federatedStore: Option[FederatedSourceStore],
       requireEncryption: Boolean,
-      tenantFilesRoot: Option[String]
+      tenantFilesRoot: Option[String],
+      keepGroupPoolGrants: Boolean = false
   ): ValidationResult =
     locally {
       val errs = scala.collection.mutable.ListBuffer.empty[String]
@@ -911,10 +958,12 @@ object ManifestImporter extends LazyLogging:
                 if !keepRoleIds.contains(rid) then store.removeGroupRole(groupId, rid)
               }
               keepRoleIds.foreach(rid => store.addGroupRole(groupId, rid))
-              // Pool permissions: full replace, as for users.
-              store
-                .listPoolPermissionsForGroup(groupId)
-                .foreach(p => store.deletePoolPermission(p.id))
+              // Pool permissions: full replace, as for users. An RBAC-only import has none to
+              // write and must not erase the ones in place.
+              if !keepGroupPoolGrants then
+                store
+                  .listPoolPermissionsForGroup(groupId)
+                  .foreach(p => store.deletePoolPermission(p.id))
               mg.poolGrants.foreach { mpg =>
                 resolvePoolGrant(store, mpg, Some(tenantId), dbsOf, poolsOf) match
                   case Left(reason) =>

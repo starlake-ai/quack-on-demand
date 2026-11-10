@@ -496,7 +496,10 @@ final case class TenantResponse(
     opaTokenSet: Boolean = false,
     opaSendStatementText: Boolean = false,
     // The tenant's OIDC client secret is write-only: only whether one is stored is exposed.
-    clientSecretSet: Boolean = false
+    clientSecretSet: Boolean = false,
+    // qodstate_tenant.policy_version. Values come from one global sequence: compare them, never
+    // subtract them or read them as a count of RBAC changes.
+    policyVersion: Long = 0L
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
@@ -1019,11 +1022,13 @@ final case class StatementHistoryRowEntry(
     durationMs: Long,
     prepareMs: Option[Long],
     status: String,
-    error: Option[String]
+    error: Option[String],
+    patId: Option[String] = None
 )
 final case class StatementSearchResponse(
     statements: List[StatementHistoryRowEntry],
-    nextBefore: Option[String]
+    nextBefore: Option[String],
+    nextAfter: Option[String] = None
 )
 
 // ----- Usage and accounting ------------------------------------------------
@@ -1060,9 +1065,14 @@ final case class AuditEventEntry(
     target: Option[String],
     outcome: String,
     origin: String,
-    detail: Map[String, String]
+    detail: Map[String, String],
+    patId: Option[String] = None
 )
-final case class AuditListResponse(events: List[AuditEventEntry], nextBefore: Option[String])
+final case class AuditListResponse(
+    events: List[AuditEventEntry],
+    nextBefore: Option[String],
+    nextAfter: Option[String] = None
+)
 final case class AuditActionsResponse(actions: List[String])
 
 // ----- RBAC: users -------------------------------------------------------

@@ -67,19 +67,21 @@ object Endpoints:
       .out(jsonBody[ConfigListResponse])
 
   val manifestExport: PublicEndpoint[
-    Option[String],
+    (Option[String], Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     String,
     Any
   ] =
     base.get
       .in("manifest" / "export")
+      .in(query[Option[String]]("mode"))
+      .in(query[Option[String]]("tenant"))
       .in(authToken)
       .out(stringBody)
       .out(header("Content-Type", "application/yaml"))
 
   val manifestImport: PublicEndpoint[
-    (String, Option[String]),
+    (String, Option[String], Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     ManifestImportSummary,
     Any
@@ -87,5 +89,7 @@ object Endpoints:
     base.post
       .in("manifest" / "import")
       .in(stringBody)
+      .in(query[Option[String]]("mode"))
+      .in(query[Option[String]]("tenant"))
       .in(authToken)
       .out(jsonBody[ManifestImportSummary])

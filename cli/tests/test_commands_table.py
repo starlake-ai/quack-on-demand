@@ -612,6 +612,11 @@ CASES = [
         "GET", "/api/audit/list",
         {"tenant": "acme", "action": "login", "limit": "10", "noTenant": "true"}, None,
     ),
+    (["audit", "list", "--after", "42"], "GET", "/api/audit/list", {"after": "42"}, None),
+    (
+        ["history", "statements", "--after", "7"],
+        "GET", "/api/history/statements", {"after": "7"}, None,
+    ),
     (["audit", "actions"], "GET", "/api/audit/actions", {}, None),
     (
         ["usage", "--from", "2026-07-01", "--to", "2026-07-14", "--group-by", "tenant"],

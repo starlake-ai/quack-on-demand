@@ -44,9 +44,36 @@ final class PostgresTelemetryStore(
 
   val enabled = true
 
+  /** Runs an append in a transaction holding the table's append lock, so appends to one table
+    * commit one at a time, across replicas too. Ids are assigned at insert: without this, a reader
+    * walking forward with `after` could pass an id whose lower neighbor has not committed yet and
+    * never see that row.
+    */
+  private def serializedAppend(lockKey: Int)(f: Connection => Unit): Unit =
+    withConn { c =>
+      c.setAutoCommit(false)
+      try
+        val lock = c.prepareStatement("SELECT pg_advisory_xact_lock(?, ?)")
+        try
+          lock.setInt(1, PostgresTelemetryStore.AppendLockClass)
+          lock.setInt(2, lockKey)
+          lock.execute()
+        finally lock.close()
+        f(c)
+        c.commit()
+      catch
+        case t: Throwable =>
+          try c.rollback()
+          catch case _: Throwable => ()
+          throw t
+      finally c.setAutoCommit(true)
+    }
+
+  private def orderOf(afterId: Option[Long]): String = if afterId.isDefined then "ASC" else "DESC"
+
   override def appendAudit(events: List[AuditEvent]): Unit =
     if events.nonEmpty then
-      withConn { c =>
+      serializedAppend(PostgresTelemetryStore.AuditAppendLock) { c =>
         val ps = c.prepareStatement(
           "INSERT INTO qodstate_audit" +
             " (ts, family, actor, actor_realm, tenant, action, target, outcome, origin, detail, pat_id)" +
@@ -146,6 +173,9 @@ final class PostgresTelemetryStore(
       q.beforeId.foreach { v =>
         parts += (("id < ?", (ps, i) => { ps.setLong(i, v); i + 1 }))
       }
+      q.afterId.foreach { v =>
+        parts += (("id > ?", (ps, i) => { ps.setLong(i, v); i + 1 }))
+      }
       val nulls = if q.includeNullTenant then NullTenants.Include else NullTenants.Exclude
       tenantFragment(q.tenants, nulls).foreach(parts += _)
 
@@ -157,7 +187,7 @@ final class PostgresTelemetryStore(
       val sql      =
         "SELECT id, ts, family, actor, actor_realm, tenant, action, target, outcome, origin," +
           " detail::text, pat_id" +
-          s" FROM qodstate_audit$whereSql ORDER BY id DESC LIMIT $limitVal"
+          s" FROM qodstate_audit$whereSql ORDER BY id ${orderOf(q.afterId)} LIMIT $limitVal"
       val ps = c.prepareStatement(sql)
       try
         builtParts.foldLeft(1) { case (idx, (_, setter)) => setter(ps, idx) }
@@ -197,7 +227,7 @@ final class PostgresTelemetryStore(
 
   override def appendStatements(events: List[StatementEvent]): Unit =
     if events.nonEmpty then
-      withConn { c =>
+      serializedAppend(PostgresTelemetryStore.StatementAppendLock) { c =>
         val ps = c.prepareStatement(
           "INSERT INTO qodstate_stmt_history" +
             " (ts, username, tenant, pool, node_id, sql, status, duration_ms, prepare_ms, error, pat_id)" +
@@ -257,6 +287,9 @@ final class PostgresTelemetryStore(
       q.beforeId.foreach { v =>
         parts += (("id < ?", (ps, i) => { ps.setLong(i, v); i + 1 }))
       }
+      q.afterId.foreach { v =>
+        parts += (("id > ?", (ps, i) => { ps.setLong(i, v); i + 1 }))
+      }
 
       val builtParts = parts.result()
       val whereSql   =
@@ -266,7 +299,7 @@ final class PostgresTelemetryStore(
       val sql      =
         "SELECT id, ts, username, tenant, pool, node_id, sql," +
           " status, duration_ms, prepare_ms, error, pat_id" +
-          s" FROM qodstate_stmt_history$whereSql ORDER BY id DESC LIMIT $limitVal"
+          s" FROM qodstate_stmt_history$whereSql ORDER BY id ${orderOf(q.afterId)} LIMIT $limitVal"
       val ps = c.prepareStatement(sql)
       try
         builtParts.foldLeft(1) { case (idx, (_, setter)) => setter(ps, idx) }
@@ -591,3 +624,14 @@ final class PostgresTelemetryStore(
     }
 
   override def close(): Unit = if !dataSource.isClosed then dataSource.close()
+
+object PostgresTelemetryStore:
+
+  /** Class of the append locks, in the two-int advisory key space (see `PatStore.LockClass`). */
+  val AppendLockClass: Int = 0x51544c4d // "QTLM"
+
+  /** Second key of the lock serializing appends to `qodstate_audit`. */
+  val AuditAppendLock: Int = 1
+
+  /** Second key of the lock serializing appends to `qodstate_stmt_history`. */
+  val StatementAppendLock: Int = 2

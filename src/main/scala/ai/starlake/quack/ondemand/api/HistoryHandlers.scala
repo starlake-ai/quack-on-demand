@@ -83,13 +83,15 @@ final class HistoryHandlers(store: TelemetryStore):
       q: Option[String],
       limit: Option[Int],
       before: Option[String],
-      apiKey: Option[String]
+      apiKey: Option[String],
+      after: Option[String] = None
   )(scopeOf: SessionScope.Resolver): Out[StatementSearchResponse] = IO.blocking {
     val tenants = SessionScope.tenantsFilter(scopeOf(apiKey), tenant)
 
     for
-      f <- QueryParams.instant(from, "from")
-      t <- QueryParams.instant(to, "to")
+      f       <- QueryParams.instant(from, "from")
+      t       <- QueryParams.instant(to, "to")
+      afterId <- HistoryCursor.after(before, after)
     yield
       val rows = store.searchStatements(
         StatementQuery(
@@ -101,7 +103,8 @@ final class HistoryHandlers(store: TelemetryStore):
           from = f,
           to = t,
           limit = limit.getOrElse(50).max(1).min(500),
-          beforeId = before.flatMap(_.toLongOption)
+          beforeId = before.flatMap(_.toLongOption),
+          afterId = afterId
         )
       )
       StatementSearchResponse(
@@ -117,9 +120,11 @@ final class HistoryHandlers(store: TelemetryStore):
             durationMs = r.event.durationMs,
             prepareMs = r.event.prepareMs,
             status = r.event.status,
-            error = r.event.error
+            error = r.event.error,
+            patId = r.event.patId
           )
         ),
-        nextBefore = rows.lastOption.map(_.id.toString)
+        nextAfter = afterId.map(a => rows.lastOption.map(_.id).getOrElse(a).toString),
+        nextBefore = if afterId.isDefined then None else rows.lastOption.map(_.id.toString)
       )
   }

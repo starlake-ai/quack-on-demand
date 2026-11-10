@@ -1980,8 +1980,11 @@ final class PoolSupervisor(
   def snapshot(key: PoolKey): Option[PoolSnapshot] =
     pools.get(key).map(p => PoolSnapshot(p.key, p.nodes, tracker.snapshotAll))
 
-  def listTenants(): List[Tenant]             = tenants.values.toList.sortBy(_.displayName)
-  def getTenant(name: String): Option[Tenant] =
+  def listTenants(): List[Tenant] = tenants.values.toList.sortBy(_.displayName)
+
+  /** Each tenant's `policy_version`, read from the store rather than the edge's cached copy. */
+  def currentPolicyVersions(): Map[String, Long] = store.policyVersions()
+  def getTenant(name: String): Option[Tenant]    =
     val n = name.toLowerCase(Locale.ROOT)
     tenants.values.find(_.id == n)
 

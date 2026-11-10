@@ -48,7 +48,9 @@ object SessionTokenStore:
   final case class Session(
       profile: AuthenticatedProfile,
       scope: SessionScope,
-      createdAt: Instant
+      createdAt: Instant,
+      /** True for a PAT with a ceiling of `RO`; a login session never is. */
+      readOnly: Boolean = false
   )
 
   /** Differentiated outcome of a token lookup. The legacy `get`/`isAdmin`/etc. callers collapse

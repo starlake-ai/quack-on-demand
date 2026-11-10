@@ -12,6 +12,7 @@ object AuditActions:
   // AuthApiKeyFailure (anonymous / bad key): the caller is authenticated, so the
   // row carries their real username and tenant.
   val AuthAdminRequired = "auth.admin.required"
+  val AuthTokenReadOnly = "auth.token.read_only"
   val AuthLogin         = "auth.login"
   val AuthLoginFailure  = "auth.login.failure"
   val AuthLogout        = "auth.logout"
@@ -144,6 +145,7 @@ object AuditActions:
   val all: List[String] = List(
     AuthApiKeyFailure,
     AuthAdminRequired,
+    AuthTokenReadOnly,
     AuthLogin,
     AuthLoginFailure,
     AuthLogout,

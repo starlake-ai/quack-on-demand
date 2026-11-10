@@ -34,6 +34,9 @@ final class TenantHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def toResponse(t: Tenant): TenantResponse =
+    toResponse(t, sup.currentPolicyVersions())
+
+  private def toResponse(t: Tenant, policyVersions: Map[String, Long]): TenantResponse =
     TenantResponse(
       name = t.id,
       id = t.id,
@@ -47,7 +50,8 @@ final class TenantHandlers(
       opaPolicyPath = t.acl.opaPolicyPath,
       opaTokenSet = t.acl.opaToken.nonEmpty,
       opaSendStatementText = t.acl.sendStatementText,
-      clientSecretSet = t.authClientSecret.isDefined
+      clientSecretSet = t.authClientSecret.isDefined,
+      policyVersion = policyVersions.getOrElse(t.id, 0L)
     )
 
   /** Tenant creation is an inherently cross-tenant action (it mints a brand-new isolation scope),
@@ -138,8 +142,9 @@ final class TenantHandlers(
 
   def listTenants(apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
-  ): Out[TenantListResponse] = IO.delay {
-    val all      = sup.listTenants().map(toResponse)
+  ): Out[TenantListResponse] = IO.blocking {
+    val versions = sup.currentPolicyVersions()
+    val all      = sup.listTenants().map(toResponse(_, versions))
     val scope    = scopeOf(apiKey)
     val filtered =
       if scope.superuser then all else all.filter(r => scope.manageableTenants.contains(r.id))

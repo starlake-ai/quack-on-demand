@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
+import ai.starlake.quack.ondemand.auth.ReadOnlyCeilingRoutes
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.state.PatStore
 import ai.starlake.quack.ondemand.telemetry.{
@@ -487,6 +488,32 @@ final class ManagerServer(
                 )
               )
                 .flatMap(_ => refuse(req, Response[IO](Status.Unauthorized)))
+          else if resolved.exists(_.readOnly) && !ReadOnlyCeilingRoutes.admits(req.method, segments)
+          then
+            val username = resolved.map(_.profile.username).getOrElse("unknown")
+            auditDenial("readonly:" + username)(
+              audit.restAs(
+                username,
+                "tenant",
+                "auth",
+                AuditActions.AuthTokenReadOnly,
+                "denied",
+                tenant = resolved.flatMap(_.profile.tenant),
+                detail = Map("path" -> safePath)
+              )
+            )
+              .flatMap(_ =>
+                refuse(
+                  req,
+                  Response[IO](Status.Forbidden)
+                    .withEntity(
+                      """{"error":"token_read_only","message":"this token is read-only"}"""
+                    )
+                    .withContentType(
+                      org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                    )
+                )
+              )
           else
             // Per-request tenant scope check on the admitted credential's scope.
             // Body-tenant endpoints do their own check via TenantScopeCheck.reject, and the branch
@@ -875,7 +902,7 @@ final class ManagerServer(
         statementHistory.recent(limit, token)(scopeOfToken)
       },
       TelemetryEndpoints.auditList.serverLogic {
-        case (family, tenant, actor, action, q, from, to, limit, before, noTenant, token) =>
+        case (family, tenant, actor, action, q, from, to, limit, before, noTenant, after, token) =>
           auditHandlers.list(
             family,
             tenant,
@@ -887,7 +914,8 @@ final class ManagerServer(
             limit,
             before,
             noTenant,
-            token
+            token,
+            after
           )(scopeOfToken)
       },
       TelemetryEndpoints.auditActions.serverLogic(token => auditHandlers.actions(token)),
@@ -896,8 +924,8 @@ final class ManagerServer(
           history.trends(granularity, from, to, tenant, pool, token)(scopeOfToken)
       },
       TelemetryEndpoints.historyStatements.serverLogic {
-        case (from, to, tenant, pool, user, status, q, limit, before, token) =>
-          history.statements(from, to, tenant, pool, user, status, q, limit, before, token)(
+        case (from, to, tenant, pool, user, status, q, limit, before, after, token) =>
+          history.statements(from, to, tenant, pool, user, status, q, limit, before, token, after)(
             scopeOfToken
           )
       },
@@ -1249,9 +1277,11 @@ final class ManagerServer(
       ),
       Endpoints.serverConfig.serverLogic(token => serverConfig.list(token)(scopeOfToken)),
       SecurityAuditEndpoints.audit.serverLogic(token => securityAudit.run(token)(scopeOfToken)),
-      Endpoints.manifestExport.serverLogic(token => manifest.exportYaml(token)(scopeOfToken)),
-      Endpoints.manifestImport.serverLogic { case (body, token) =>
-        manifest.importYaml(body, token)(scopeOfToken)
+      Endpoints.manifestExport.serverLogic { case (mode, tenant, token) =>
+        manifest.exportYaml(token, mode, tenant)(scopeOfToken)
+      },
+      Endpoints.manifestImport.serverLogic { case (body, mode, tenant, token) =>
+        manifest.importYaml(body, token, mode, tenant)(scopeOfToken)
       },
       NodeEndpoints.activeStatements.serverLogic(token => activeStmts.list(token)(scopeOfToken)),
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
