@@ -33,6 +33,12 @@ no install step is needed at all:
 uvx qod@latest serve --demo
 ```
 
+When a newer `qod` is on PyPI, commands run in a terminal print a one-line note on
+stderr with the upgrade command for the way qod was installed (`uvx qod@latest`,
+`uv tool upgrade qod`, `pipx upgrade qod` or `<python> -m pip install --upgrade qod`).
+PyPI is asked at most once a day, and a failed attempt (no internet access) is
+silent and cached too. Set `QOD_NO_UPDATE_CHECK=1` to turn the check off.
+
 ## Demo
 
 `qod serve --demo` runs the self-contained manager demo (embedded Postgres, seeded
