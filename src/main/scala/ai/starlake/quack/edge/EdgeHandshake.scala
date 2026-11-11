@@ -10,6 +10,7 @@ import ai.starlake.quack.edge.auth.{
 import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.api.SessionTokenStore
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, AuthzRequest, HandshakeDenial}
+import ai.starlake.quack.ondemand.telemetry.{HandshakeAudit, HandshakeRefusal}
 import com.typesafe.scalalogging.LazyLogging
 
 /** Why a handshake was refused. `Unauthenticated` covers a bad or missing credential and an
@@ -71,7 +72,13 @@ final case class HandshakeBound(
   *   session is held to what it was minted for: its own or a managed tenant, and a superuser row
   *   only when it is a superuser's. Required: without it a session could name any row.
   * @param edge
-  *   the front door's name (`flightsql`, `quack`), carried into the OPA input's `client.edge`.
+  *   the front door's name (`flightsql`, `quack`), carried into the OPA input's `client.edge` and
+  *   the origin of its audit rows.
+  * @param audit
+  *   where a refused handshake is recorded (`auth.login.failure`, issue #202): a bad or missing
+  *   credential, or a principal with no access to the pool. A handshake that could not be decided
+  *   (`Unavailable`) is not a refusal and records nothing. Required: a front door that recorded
+  *   nothing would leave its failed logins out of the audit.
   */
 final class EdgeHandshake(
     authService: AuthenticationService,
@@ -80,16 +87,47 @@ final class EdgeHandshake(
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
     versions: ai.starlake.quack.edge.authz.PolicyClock,
     sessionLookup: String => SessionTokenStore.LookupResult,
+    audit: HandshakeAudit,
     edge: String = "flightsql"
 ) extends LazyLogging:
 
+  /** `client` is the address the connection came from (its host, no port), for the audit row of a
+    * refusal; None when the front door cannot tell.
+    */
   def authenticate(
       bearer: Option[String],
       basicPair: Option[(String, String)],
       poolHdr: Option[String],
       tenantHdr: Option[String],
-      superuser: Boolean
+      superuser: Boolean,
+      client: Option[String]
   ): Either[HandshakeFailure, HandshakeBound] =
+    decide(bearer, basicPair, poolHdr, tenantHdr, superuser) match
+      case Right(bound)                                                       => Right(bound)
+      case Left(EdgeHandshake.Refused(f: HandshakeFailure.Unavailable, _, _)) => Left(f)
+      case Left(EdgeHandshake.Refused(failure, reason, who))                  =>
+        audit.refused(
+          edge,
+          HandshakeRefusal(
+            user = who.user.orElse(basicPair.map(_._1)),
+            tenant = who.tenant.orElse(tenantHdr.map(_.trim)),
+            pool = who.pool.orElse(poolHdr.map(_.trim)),
+            superuser = superuser,
+            client = client,
+            reason = reason
+          )
+        )
+        Left(failure)
+
+  /** The handshake proper: a bound principal, or the refusal with its audit reason. */
+  private def decide(
+      bearer: Option[String],
+      basicPair: Option[(String, String)],
+      poolHdr: Option[String],
+      tenantHdr: Option[String],
+      superuser: Boolean
+  ): Either[EdgeHandshake.Refused, HandshakeBound] =
+    import EdgeHandshake.{Refused, Who}
     val basicUsername = basicPair.map(_._1)
     // The wire `tenant` is the tenant id, the key `lookupPool` / `authorize` operate on. It is
     // passed through as is: an unknown tenant then fails the next stage with the usual "pool not
@@ -104,13 +142,23 @@ final class EdgeHandshake(
       lookupPool = lookupPool
     )
 
+    // The target as far as the client named it, for the audit row of a refusal before the
+    // credential named its user.
+    val asNamed = Who(
+      None,
+      resolvedTenant.map(_.id).orElse(preResolved.toOption.map(_.poolKey.tenant)),
+      preResolved.toOption.map(_.poolKey.pool)
+    )
+    def unauthenticated(msg: String, reason: String, who: Who = asNamed) =
+      Refused(HandshakeFailure.Unauthenticated(msg), reason, who)
+
     // Second element: superuserAdmissible, true only when the credential was NOT validated by a
     // tenant-scoped authority. With no provider at all every connection is refused, superusers
     // included: nothing could check a credential. A booted manager never gets there, since
     // BootPreflight.checkEdgeAuthAvailable refuses an empty chain at boot.
-    val validation: Either[HandshakeFailure, (Option[AuthenticatedProfile], Boolean)] =
+    val validation: Either[Refused, (Option[AuthenticatedProfile], Boolean)] =
       if !authService.hasProviders then
-        Left(HandshakeFailure.Unauthenticated(EdgeHandshake.NoAuthenticator))
+        Left(unauthenticated(EdgeHandshake.NoAuthenticator, HandshakeAudit.NoAuthenticator))
       else
         (bearer, basicPair) match
           case (Some(token), _) =>
@@ -127,7 +175,7 @@ final class EdgeHandshake(
               .authenticateBearer(bearerScope, token)
               .map(p => (Some(p), bearerScope == AuthScope.System))
               .left
-              .map(HandshakeFailure.Unauthenticated(_))
+              .map(unauthenticated(_, HandshakeAudit.InvalidCredentials))
           case (None, Some((_, p))) =>
             preResolved match
               case Right(r) =>
@@ -146,15 +194,33 @@ final class EdgeHandshake(
                   .left
                   .map {
                     case AuthFailure.Unavailable =>
-                      HandshakeFailure.Unavailable(AuthFailure.Unavailable.message)
-                    case refused => HandshakeFailure.Unauthenticated(refused.message)
+                      Refused(
+                        HandshakeFailure.Unavailable(AuthFailure.Unavailable.message),
+                        "",
+                        asNamed
+                      )
+                    case AuthFailure.AccountLocked =>
+                      unauthenticated(
+                        AuthFailure.AccountLocked.message,
+                        HandshakeAudit.AccountLocked
+                      )
+                    case AuthFailure.PasswordChangeRequired =>
+                      unauthenticated(
+                        AuthFailure.PasswordChangeRequired.message,
+                        HandshakeAudit.PasswordChangeRequired
+                      )
+                    case refused =>
+                      unauthenticated(refused.message, HandshakeAudit.InvalidCredentials)
                   }
               case Left(err) =>
                 Left(
-                  HandshakeFailure.Unauthenticated(s"missing tenant scope for Basic auth: $err")
+                  unauthenticated(
+                    s"missing tenant scope for Basic auth: $err",
+                    HandshakeAudit.UnknownTarget
+                  )
                 )
           case _ =>
-            Left(HandshakeFailure.Unauthenticated("no credentials presented"))
+            Left(unauthenticated("no credentials presented", HandshakeAudit.NoCredentials))
 
     // The bearer as a management session, when it is one this manager signed.
     lazy val session    = bearer.map(sessionLookup)
@@ -163,14 +229,15 @@ final class EdgeHandshake(
     // The identity itself is refused, before any row is looked up or any JWT role or group is
     // resolved: an address its holder may have typed could name a superuser's row. The database
     // authenticator's profile carries no email claim, so it is never refused here.
-    val named: Either[HandshakeFailure, (Option[AuthenticatedProfile], Boolean)] =
+    val named: Either[Refused, (Option[AuthenticatedProfile], Boolean)] =
       validation.flatMap {
         case _ if session.exists(EdgeHandshake.signedOut) =>
-          Left(HandshakeFailure.Unauthenticated(EdgeHandshake.SessionSignedOut))
+          Left(unauthenticated(EdgeHandshake.SessionSignedOut, HandshakeAudit.SessionEnded))
         case (Some(p), _) if IdentityNaming.namesNoUser(p) =>
           Left(
-            HandshakeFailure.Unauthenticated(
-              "the token names no user: its user name claim is blank"
+            unauthenticated(
+              "the token names no user: its user name claim is blank",
+              HandshakeAudit.NoUserName
             )
           )
         case (Some(p), _) if !IdentityNaming.userNameMayBindRow(p) =>
@@ -178,7 +245,13 @@ final class EdgeHandshake(
             s"handshake refused: ${p.authMethod} named the user '${p.username}' by an email " +
               "claim the identity provider does not mark verified"
           )
-          Left(HandshakeFailure.Unauthenticated(IdentityNaming.UnverifiedEmailRefusal))
+          Left(
+            unauthenticated(
+              IdentityNaming.UnverifiedEmailRefusal,
+              HandshakeAudit.UnverifiedEmail,
+              asNamed.copy(user = Some(p.username))
+            )
+          )
         case v => Right(v)
       }
 
@@ -202,9 +275,13 @@ final class EdgeHandshake(
             )
             // The gate's own text for a user the tenant does not hold: no existence oracle.
             Left(
-              HandshakeFailure.Unauthorized(
-                s"permission denied: user '${resolved.user}' is not registered in tenant " +
-                  s"'${resolved.poolKey.tenant}'"
+              Refused(
+                HandshakeFailure.Unauthorized(
+                  s"permission denied: user '${resolved.user}' is not registered in tenant " +
+                    s"'${resolved.poolKey.tenant}'"
+                ),
+                HandshakeAudit.TenantForbidden,
+                Who(resolved)
               )
             )
           case Right(resolved) =>
@@ -230,14 +307,45 @@ final class EdgeHandshake(
               versions
             ) match
               case Left(HandshakeDenial.Denied(err)) =>
-                Left(HandshakeFailure.Unauthorized(s"permission denied: $err"))
+                Left(
+                  Refused(
+                    HandshakeFailure.Unauthorized(s"permission denied: $err"),
+                    HandshakeAudit.NoPoolAccess,
+                    Who(resolved)
+                  )
+                )
               case Left(HandshakeDenial.Unavailable(err)) =>
-                Left(HandshakeFailure.Unavailable(s"authorization service unavailable: $err"))
+                Left(
+                  Refused(
+                    HandshakeFailure.Unavailable(s"authorization service unavailable: $err"),
+                    "",
+                    Who(resolved)
+                  )
+                )
               case Right((_, grants)) =>
                 Right(HandshakeBound(resolved.poolKey, resolved.user, grants, profileOpt))
-          case Left(err) => Left(HandshakeFailure.Unauthenticated(err))
+          case Left(err) =>
+            Left(
+              unauthenticated(
+                err,
+                HandshakeAudit.UnknownTarget,
+                asNamed.copy(user = resolvedUsername)
+              )
+            )
 
 object EdgeHandshake:
+
+  /** Who a refused handshake named, as far as it got: the user, the tenant id and the pool. */
+  private final case class Who(user: Option[String], tenant: Option[String], pool: Option[String])
+
+  private object Who:
+    def apply(resolved: Resolved): Who =
+      Who(Some(resolved.user), Some(resolved.poolKey.tenant), Some(resolved.poolKey.pool))
+
+  /** A refusal with its audit reason ([[HandshakeAudit]]); the reason of an `Unavailable` is empty,
+    * as it is never recorded.
+    */
+  private final case class Refused(failure: HandshakeFailure, reason: String, who: Who)
 
   /** The refusal of a management session that was signed out or has expired. */
   val SessionSignedOut: String = "this session has ended: sign in again"

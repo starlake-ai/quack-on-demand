@@ -54,6 +54,9 @@ final class FlightEdgeServer(
     // What the session store says of a bearer: a management session is held to its own tenant and
     // standing (see EdgeHandshake). Required: without it a session could name any row.
     sessionLookup: String => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult,
+    // Where a refused handshake is recorded (auth.login.failure, issue #202). Required: see
+    // EdgeHandshake.
+    audit: ai.starlake.quack.ondemand.telemetry.HandshakeAudit,
     // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
     // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
     // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
@@ -74,6 +77,7 @@ final class FlightEdgeServer(
       authorize,
       versions,
       sessionLookup,
+      audit,
       edge = "flightsql"
     )
 
@@ -155,6 +159,10 @@ final class FlightEdgeServer(
         nettyBuilder.maxConcurrentCallsPerConnection(ConnectionProbation.MaxStreams)
         nettyBuilder.protocolNegotiator(probation)
         nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove))
+        // headerAuth sees only headers, and every interceptor this hint adds runs after it: the
+        // call's own executor is what runs it, so the call's client address rides that executor's
+        // tasks, for the audit row of a refused handshake (FlightEdgeServer.clientHost).
+        nettyBuilder.callExecutor(FlightEdgeServer.clientAddressExecutor(pool))
     // Arrow leaves both limits at Integer.MAX_VALUE. gRPC refuses a message over its limit with
     // RESOURCE_EXHAUSTED as soon as the length prefix arrives, before it holds any of it, and a
     // header list over its limit before any authentication runs.
@@ -278,7 +286,14 @@ final class FlightEdgeServer(
             if authHeader.isEmpty then
               authResult(s"${FlightEdgeServer.AnonymousPeerPrefix}${UUID.randomUUID()}")
             else
-              handshake.authenticate(bearer, basicPair, poolHdr, tenantHdr, superuserHdr) match
+              handshake.authenticate(
+                bearer,
+                basicPair,
+                poolHdr,
+                tenantHdr,
+                superuserHdr,
+                FlightEdgeServer.clientHost()
+              ) match
                 case Left(HandshakeFailure.Unauthenticated(msg)) =>
                   throw CallStatus.UNAUTHENTICATED.withDescription(msg).toRuntimeException()
                 case Left(HandshakeFailure.Unauthorized(msg)) =>
@@ -334,6 +349,46 @@ final class FlightEdgeServer(
       executor = null.asInstanceOf[ThreadPoolExecutor]
 
 object FlightEdgeServer:
+
+  /** The client host of the call the current thread runs, set by [[clientAddressExecutor]]. */
+  private val currentClient = new ThreadLocal[Option[String]]:
+    override def initialValue(): Option[String] = None
+
+  /** The host (no port) of the client whose call the current thread runs a task of; None outside
+    * such a task. headerAuth reads it: Arrow hands a header authenticator nothing else of the call.
+    */
+  def clientHost(): Option[String] = currentClient.get()
+
+  /** The host of a transport address, without the port, so that one client's connections share one
+    * audit key.
+    */
+  private[edge] def hostOf(address: java.net.SocketAddress): Option[String] = address match
+    case a: java.net.InetSocketAddress =>
+      Option(a.getAddress).map(_.getHostAddress).orElse(Option(a.getHostString))
+    case null  => None
+    case other => Some(other.toString)
+
+  /** gRPC's per-call executor: the call's tasks run on `pool` as before (the tasks gRPC queued
+    * before it picked this one did too), each with the call's client host set for its duration.
+    * gRPC asks for it before any interceptor runs, Arrow's header authentication included, and runs
+    * those interceptors on it.
+    */
+  private[edge] def clientAddressExecutor(
+      pool: java.util.concurrent.Executor
+  ): io.grpc.ServerCallExecutorSupplier =
+    new io.grpc.ServerCallExecutorSupplier:
+      override def getExecutor[ReqT, RespT](
+          call: io.grpc.ServerCall[ReqT, RespT],
+          metadata: io.grpc.Metadata
+      ): java.util.concurrent.Executor =
+        val host = hostOf(call.getAttributes.get(io.grpc.Grpc.TRANSPORT_ATTR_REMOTE_ADDR))
+        task =>
+          pool.execute { () =>
+            val before = currentClient.get()
+            currentClient.set(host)
+            try task.run()
+            finally currentClient.set(before)
+          }
 
   /** What the edge installs as [[ConnectionContext]]'s evict hook: a dropped session takes its
     * router session row and its prepared handles with it.

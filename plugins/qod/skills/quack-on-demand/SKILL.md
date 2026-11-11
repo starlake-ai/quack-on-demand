@@ -2037,6 +2037,8 @@ qod audit list --no-tenant
 qod audit actions
 ```
 
+With `QOD_AUDIT_HANDSHAKE_FAILURES=true` (off by default), a refused FlightSQL or native Quack handshake writes `auth.login.failure` too, with origin `flightsql` or `quack`, the user name as given, and `detail.source` (the client address) and `detail.reason` (`invalid_credentials`, `no_pool_access`, `account_locked`, ...); never the credential. At most one such row a minute is written per front door, client address and user name. A read refused while a FlightSQL client prepares it writes `sql.denied`, like any other refused statement.
+
 Filters: `family`, `tenant` (superuser: returns only that tenant's rows; null-tenant rows not included when this is set), `noTenant=true` (superuser: only null-tenant rows; wins over `tenant`), `actor`, `action` (exact), `q` (substring on action/target), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
 
 Tenant admins see only their own tenant's rows. Superusers see everything, including null-tenant rows (anonymous failures, node ops, manifest imports).

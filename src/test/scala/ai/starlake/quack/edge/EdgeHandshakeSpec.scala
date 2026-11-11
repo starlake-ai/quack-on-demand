@@ -64,17 +64,22 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         if raw == "acme" then Some(Tenant("acme", "Acme Corporation")) else None,
       authorize = _ => authorizeResult.left.map(HandshakeDenial.Denied(_)),
       versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
-      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
     )
 
   "authenticate" should "bind a validated basic credential to its pool" in:
-    val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false)
+    val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false, None)
     out.map(b => (b.poolKey, b.user, b.grants.current(), b.profile)) shouldBe Right(
       (PoolKey("acme", "acme_db", "bi"), "alice", Right(eff), Some(profile("alice", "acme")))
     )
 
   /** A handshake whose password chain answers `failure`, as a database that cannot check would. */
-  private def refusing(failure: AuthFailure) =
+  private def refusing(
+      failure: AuthFailure,
+      audit: ai.starlake.quack.ondemand.telemetry.HandshakeAudit =
+        ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
+  ) =
     val chain = new BasicAuthProvider:
       val name                                                     = "stub"
       def authenticate(scope: AuthScope, user: String, pw: String) = Left(failure)
@@ -84,12 +89,35 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       resolveTenant = _ => Some(Tenant("acme", "Acme Corporation")),
       authorize = _ => Left(HandshakeDenial.Denied("not reached")),
       versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
-      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = audit
+    )
+
+  it should "audit a refusal with its reason, and nothing it could not decide (issue #202)" in:
+    def reasons(failure: AuthFailure) =
+      val rows  = scala.collection.mutable.ListBuffer.empty[(String, Map[String, String])]
+      val audit = new ai.starlake.quack.ondemand.telemetry.HandshakeAudit(e =>
+        rows += (e.actor -> e.detail)
+      )
+      refusing(failure, audit)
+        .authenticate(None, Some(("alice", "s3cret")), Some("bi"), Some("acme"), false, Some("h"))
+      rows.toList
+    reasons(AuthFailure.Unavailable) shouldBe empty
+    reasons(AuthFailure.AccountLocked).map(_._2("reason")) shouldBe List("account_locked")
+    reasons(AuthFailure.PasswordChangeRequired).map(_._2("reason")) shouldBe
+      List("password_change_required")
+    val List((actor, detail)) = reasons(AuthFailure.InvalidCredentials("Invalid password"))
+    actor shouldBe "alice"
+    detail shouldBe Map(
+      "username" -> "alice",
+      "pool"     -> "bi",
+      "source"   -> "h",
+      "reason"   -> "invalid_credentials"
     )
 
   it should "call a password that could not be checked unavailable, and a wrong one unauthenticated" in:
     def attempt(failure: AuthFailure) =
-      refusing(failure).authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false)
+      refusing(failure).authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false, None)
     attempt(AuthFailure.Unavailable) shouldBe Left(
       HandshakeFailure.Unavailable(AuthFailure.Unavailable.message)
     )
@@ -105,12 +133,12 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         Some(("alice", "pw")),
         Some("bi"),
         Some("Acme Corporation"),
-        false
+        false, None
       )
     out.isLeft shouldBe true
 
   it should "refuse a handshake without a tenant" in:
-    val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), None, false)
+    val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), None, false, None)
     out match
       case Left(HandshakeFailure.Unauthenticated(msg)) =>
         msg should include("'tenant' header required")
@@ -118,7 +146,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
 
   it should "refuse an unknown pool" in:
     val out =
-      handshake().authenticate(None, Some(("alice", "pw")), Some("nope"), Some("acme"), false)
+      handshake().authenticate(None, Some(("alice", "pw")), Some("nope"), Some("acme"), false, None)
     out match
       case Left(HandshakeFailure.Unauthenticated(msg)) => msg should include("not found")
       case other => fail(s"expected Unauthenticated, got $other")
@@ -129,7 +157,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       Some(("alice", "pw")),
       Some("bi"),
       Some("acme"),
-      false
+      false, None
     )
     out shouldBe Left(HandshakeFailure.Unauthorized("permission denied: no grant on pool"))
 
@@ -145,14 +173,15 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       },
       versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
       sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop,
       edge = "quack"
     )
-    hs.authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false) shouldBe
+    hs.authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false, None) shouldBe
       Left(HandshakeFailure.Unavailable("authorization service unavailable: connection refused"))
     seen.map(_.edge) shouldBe Some("quack")
 
   it should "refuse a bearer no provider accepts" in:
-    val out = handshake().authenticate(Some("stale-peer-id"), None, Some("bi"), Some("acme"), false)
+    val out = handshake().authenticate(Some("stale-peer-id"), None, Some("bi"), Some("acme"), false, None)
     out match
       case Left(HandshakeFailure.Unauthenticated(msg)) => msg should include("No bearer auth")
       case other => fail(s"expected Unauthenticated, got $other")
@@ -161,7 +190,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
     // The pre-resolution decodes the body before any provider validates the token: a malformed
     // one from an unauthenticated client must be an ordinary refusal on both doors.
     val out =
-      handshake().authenticate(Some("a.!!not-base64!!.c"), None, Some("bi"), Some("acme"), false)
+      handshake().authenticate(Some("a.!!not-base64!!.c"), None, Some("bi"), Some("acme"), false, None)
     out match
       case Left(HandshakeFailure.Unauthenticated(_)) => succeed
       case other => fail(s"expected Unauthenticated, got $other")
@@ -174,7 +203,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       authorize = _ =>
         Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff)),
       versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
-      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
     )
     for (bearer, basic, superuser) <- List(
         (None, Some(("alice", "pw")), false),
@@ -183,13 +213,13 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         (None, None, false)
       )
     do
-      open.authenticate(bearer, basic, Some("bi"), Some("acme"), superuser) match
+      open.authenticate(bearer, basic, Some("bi"), Some("acme"), superuser, None) match
         case Left(HandshakeFailure.Unauthenticated(msg)) =>
           msg should include("no authenticator is configured")
         case other => fail(s"expected Unauthenticated, got $other")
 
   "authenticate" should "refuse a handshake with no credential at all" in:
-    val out = handshake().authenticate(None, None, Some("bi"), Some("acme"), false)
+    val out = handshake().authenticate(None, None, Some("bi"), Some("acme"), false, None)
     out.isLeft shouldBe true
     out.swap.toOption.get.message should include("no credentials presented")
 
@@ -242,7 +272,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       resolveTenant = raw => sup.getTenant(raw),
       authorize = sup.authorizeHandshakeDetailed,
       versions = sup.policyVersions,
-      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
+      sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
     )
 
   private val JwtSecret = "edge-handshake-spec-secret-0123456789"
@@ -281,7 +312,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       Some((SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)),
       Some(SecurityFixtures.PoolName),
       Some(SecurityFixtures.TenantId),
-      false
+      false, None
     ) match
       case Left(HandshakeFailure.Unauthorized(_)) => succeed
       case other                                  => fail(s"expected the pool refused, got $other")
@@ -306,7 +337,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         Some((SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)),
         Some(SecurityFixtures.PoolName),
         Some(SecurityFixtures.TenantId),
-        false
+        false, None
       )
     )
     eff.roles.map(_.name) should not contain "user"
@@ -328,7 +359,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         None,
         Some(SecurityFixtures.PoolName),
         Some(SecurityFixtures.TenantId),
-        false
+        false, None
       )
     )
     eff.roles.map(_.name) should contain("user")
@@ -343,7 +374,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       None,
       Some(SecurityFixtures.PoolName),
       Some(SecurityFixtures.TenantId),
-      false
+      false, None
     ) match
       case Left(HandshakeFailure.Unauthorized(_)) => succeed
       case other                                  => fail(s"expected the pool refused, got $other")
@@ -378,7 +409,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       None,
       Some(SecurityFixtures.PoolName),
       Some(SecurityFixtures.TenantId),
-      false
+      false, None
     ) match
       case Left(HandshakeFailure.Unauthorized(_)) => succeed
       case other                                  => fail(s"expected the pool refused, got $other")
@@ -400,7 +431,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         None,
         Some(SecurityFixtures.PoolName),
         Some(SecurityFixtures.TenantId),
-        false
+        false, None
       )
     )
     eff.user.username shouldBe SecurityFixtures.BobUsername
@@ -440,7 +471,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         None,
         Some(SecurityFixtures.PoolName),
         Some(SecurityFixtures.TenantId),
-        false
+        false, None
       ) match
         case Left(HandshakeFailure.Unauthorized(_)) => succeed
         case other => fail(s"expected the pool refused, got $other")
@@ -491,10 +522,11 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         seen = req :: seen
         Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff)),
       versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
-      sessionLookup = sessionStore.lookupResult
+      sessionLookup = sessionStore.lookupResult,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
     )
     def connect(token: String, tenant: String = "acme", asSuperuser: Boolean = false) =
-      door.authenticate(Some(token), None, Some("bi"), Some(tenant), asSuperuser)
+      door.authenticate(Some(token), None, Some("bi"), Some(tenant), asSuperuser, None)
 
   private type AzRequest = AuthzRequest
 

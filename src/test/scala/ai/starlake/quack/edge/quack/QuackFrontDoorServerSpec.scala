@@ -64,7 +64,7 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
   )(body: String => A): A =
     val server = new QuackFrontDoorServer(
       c,
-      handle,
+      (bytes, _) => handle(bytes),
       _ == LiveSession,
       _ => IO.unit,
       IO.unit,
@@ -560,7 +560,14 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
     val seen                       = scala.collection.mutable.ArrayBuffer.empty[Instant]
     val sweep: Instant => IO[Unit] = now => IO(seen.synchronized { seen += now; () })
     val server                     =
-      new QuackFrontDoorServer(cfg(freePort()), echo, _ => false, sweep, IO.unit, 100.millis)
+      new QuackFrontDoorServer(
+        cfg(freePort()),
+        (bytes, _) => echo(bytes),
+        _ => false,
+        sweep,
+        IO.unit,
+        100.millis
+      )
     server.start().unsafeRunSync()
     try Thread.sleep(1000)
     finally server.stop()
