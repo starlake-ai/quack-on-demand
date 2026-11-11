@@ -206,6 +206,7 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
       },
       versions = sup.policyVersions,
       sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop,
       edge = edge
     )
 
@@ -219,10 +220,10 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
     val handshake: EdgeHandshake = handshakeOf(auth, h.supervisor, asked, "flightsql")
 
     def basic(user: String, password: String, superuser: Boolean) =
-      handshake.authenticate(None, Some((user, password)), Some(Pool), Some(Acme), superuser)
+      handshake.authenticate(None, Some((user, password)), Some(Pool), Some(Acme), superuser, None)
 
     def bearer(token: String, superuser: Boolean) =
-      handshake.authenticate(Some(token), None, Some(Pool), Some(Acme), superuser)
+      handshake.authenticate(Some(token), None, Some(Pool), Some(Acme), superuser, None)
 
     /** A token from the manager-wide issuer. */
     def systemToken(claims: Map[String, Any]): String =

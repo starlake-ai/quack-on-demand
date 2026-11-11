@@ -245,6 +245,7 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       ,
       versions = sup.policyVersions,
       sessionLookup = _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit = ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop,
       edge = "quack"
     )
     new QuackFrontDoor(
