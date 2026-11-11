@@ -21,10 +21,15 @@ import scala.util.{Failure, Success, Try}
   * `X.t` catalog-first when `X` is one of them, so the protected-write guard refuses that name
   * instead of reading it schema-first (audit F20). Required: an empty set disables that refusal.
   */
+/** `pool` is the pool the statement runs on: the column catalog reads there the columns of a table
+  * only its nodes hold (a federated source, a `duckdb-file` or `memory` database). None (a caller
+  * with no pool) leaves such a table without columns, which the rewriter refuses to mask through.
+  */
 final case class SchemaContext(
     defaultDatabase: Option[String],
     defaultSchema: Option[String],
-    attachedCatalogs: Set[String]
+    attachedCatalogs: Set[String],
+    pool: Option[ai.starlake.quack.model.PoolKey] = None
 )
 
 object ColumnPolicyRewriter:
@@ -109,13 +114,16 @@ final class ColumnPolicyRewriter(
   private def rewriteCanonical(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
     if readsOnlyCatalogFunctions(sql) then IO.pure(Passthrough)
     else
-      buildSchema(sql, eff.user.tenant.getOrElse(""), ctx).map { schema =>
-        TooDeep.orElse(Denied(TooDeep.Reason))(rewriteResolved(sql, schema, eff, ctx))
+      buildSchema(sql, eff.user.tenant.getOrElse(""), ctx).map {
+        case Left(reason)           => Denied(reason)
+        case Right((schema, homes)) =>
+          TooDeep.orElse(Denied(TooDeep.Reason))(rewriteResolved(sql, schema, homes, eff, ctx))
       }
 
   private def rewriteResolved(
       sql: String,
       schema: Map[String, List[String]],
+      homes: Map[String, (String, String)],
       eff: EffectiveSet,
       ctx: SchemaContext
   ): Outcome =
@@ -128,7 +136,8 @@ final class ColumnPolicyRewriter(
           policies = eff.columnPolicies,
           defaultCatalog = ctx.defaultDatabase,
           defaultSchema = ctx.defaultSchema,
-          unresolvedMode = unresolvedMode
+          unresolvedMode = unresolvedMode,
+          homes = homes
         ) match
           case RewriteOutcome.Rewritten(s)   => Rewritten(s)
           case RewriteOutcome.Denied(reason) =>
@@ -183,32 +192,57 @@ final class ColumnPolicyRewriter(
       sql: String,
       tenant: String,
       ctx: SchemaContext
-  ): IO[Map[String, List[String]]] =
+  ): IO[Either[String, (Map[String, List[String]], Map[String, (String, String)])]] =
     Try(ai.starlake.sql.JSqlStatements.parseFirst(sql)) match
-      case Failure(_)            => IO.pure(Map.empty)
+      case Failure(_)            => IO.pure(Right((Map.empty, Map.empty)))
       case Success(stmt: Select) =>
-        val tables = collectTables(stmt, ctx)
-        tables.toList
-          .traverse { case (key, (cat, sch, tab)) =>
-            if SystemSchemaColumns.isSystemSchema(sch) then
-              IO.pure(None) // resolved via SystemSchemaColumns inside the inner rewriter
-            else catalog.columnsOf(tenant, cat, sch, tab).map(cols => Some(key -> cols))
-          }
-          .map(_.flatten.toMap)
-      case Success(_) => IO.pure(Map.empty)
+        val tables = collectTables(stmt, ctx).filterNot { case (_, (_, sch, _)) =>
+          SystemSchemaColumns.isSystemSchema(sch) // resolved via SystemSchemaColumns inside
+        }
+        sameNameElsewhere(tables) match
+          case Some(name) =>
+            IO.pure(
+              Left(
+                s"two tables named $name in different catalogs or schemas cannot be told apart " +
+                  "under column policies; read them in separate statements"
+              )
+            )
+          case None =>
+            tables.distinct
+              .traverse { case (key, (cat, sch, tab)) =>
+                catalog.columnsOf(tenant, ctx.pool, cat, sch, tab).map(cols => key -> cols)
+              }
+              .map { listed =>
+                val homes = tables.map { case (key, (cat, sch, _)) => key -> (cat, sch) }.toMap
+                Right((listed.toMap, homes))
+              }
+      case Success(_) => IO.pure(Right((Map.empty, Map.empty)))
 
-  /** Every physical table referenced ANYWHERE in the statement, keyed by its raw (bare) name: the
-    * ACL parser's walk ([[TableExtractor]]), which reaches FROM items, joins, CTE bodies, set-op
-    * arms AND expression subqueries (a table the map never mentions can neither resolve nor deny),
-    * and binds CTE names as DuckDB does. JSqlParser's own TablesNamesFinder dropped every table
-    * named like a CTE of the statement, so the dbt shape `WITH customer AS (SELECT * FROM customer)
+  /** The first bare table name the statement reads in two places: the rewriter keys a table by its
+    * bare name, so two such tables would share one column list.
+    */
+  private def sameNameElsewhere(tables: List[(String, (String, String, String))]): Option[String] =
+    def low(s: String) = s.toLowerCase(Locale.ROOT)
+    tables
+      .groupBy { case (key, _) => low(key) }
+      .collectFirst {
+        case (name, refs)
+            if refs.map { case (_, (c, s, _)) => (low(c), low(s)) }.distinct.size > 1 =>
+          name
+      }
+
+  /** Every physical table referenced ANYWHERE in the statement, with its bare name: the ACL
+    * parser's walk ([[TableExtractor]]), which reaches FROM items, joins, CTE bodies, set-op arms
+    * AND expression subqueries (a table the map never mentions can neither resolve nor deny), and
+    * binds CTE names as DuckDB does. JSqlParser's own TablesNamesFinder dropped every table named
+    * like a CTE of the statement, so the dbt shape `WITH customer AS (SELECT * FROM customer)
     * SELECT c_email FROM customer`, whose body reads the real table, could not be resolved and was
-    * denied.
+    * denied. A name missing a catalog or schema gets the session's.
     */
   private def collectTables(
       stmt: Select,
       ctx: SchemaContext
-  ): Map[String, (String, String, String)] =
+  ): List[(String, (String, String, String))] =
     val tables             = Try(TableExtractor.extract(stmt).tables).getOrElse(Nil)
     def unquote(s: String) = ai.starlake.sql.QuotedIdentifier.unquote(s)
     tables.flatMap { t =>
@@ -220,7 +254,7 @@ final class ColumnPolicyRewriter(
         case cat :: sch :: tab :: Nil =>
           Some(tab -> (cat, sch, tab))
         case _ => None
-    }.toMap
+    }
 
 /** DuckDB positional column references (`#n`, 1-based, FROM-relative) resolved to the column names
   * the policy matcher needs. The quack client pushes every scan down as `SELECT #1, #2 FROM

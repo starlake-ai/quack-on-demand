@@ -1358,7 +1358,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             policies: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy],
             defaultCatalog: Option[String],
             defaultSchema: Option[String],
-            unresolvedMode: ai.starlake.quack.edge.cls.UnresolvedMode
+            unresolvedMode: ai.starlake.quack.edge.cls.UnresolvedMode,
+            homes: Map[String, (String, String)]
         ) = ai.starlake.quack.edge.cls.RewriteOutcome.Rewritten(qualified)
       ,
       enabled = true

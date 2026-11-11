@@ -1133,7 +1133,8 @@ final class FlightSqlRouter(
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = defaultDb,
       defaultSchema = defaultSchm,
-      attachedCatalogs = attachedCatalogs
+      attachedCatalogs = attachedCatalogs,
+      pool = Some(poolKey)
     )
 
     // Protected-write guard: runs BEFORE the CLS/RLS rewriters. A non-SELECT statement whose read

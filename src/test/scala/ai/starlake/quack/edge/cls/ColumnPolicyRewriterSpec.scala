@@ -1144,3 +1144,52 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       Rewritten("SELECT upper('***') FROM customer")
     run("SELECT c_id FROM customer WHERE `c_email` LIKE '%a%'") should not be Passthrough
   }
+
+  // -------- a table only the pool's nodes hold (a federated source) --------
+
+  /** Lists `pgfed.public.users` only for the statement's pool, as the node-backed catalog does. */
+  private val poolOnlyCat: ColumnCatalog = new ColumnCatalog:
+    def columnsOf(
+        tenant: String,
+        pool: Option[ai.starlake.quack.model.PoolKey],
+        c: String,
+        s: String,
+        t: String
+    ) =
+      cats.effect.IO.pure(
+        if pool.isDefined && (c, s, t) == ("pgfed", "public", "users") then List("id", "ssn")
+        else Nil
+      )
+
+  private val maskSsn =
+    RoleColumnPolicy("cp-f", "r-1", "pgfed", "public", "users", "ssn", "mask", Some("'***'"))
+  private val fedCtx =
+    ctx.copy(
+      attachedCatalogs = Set("pgfed"),
+      pool = Some(ai.starlake.quack.model.PoolKey("acme", "fed", "bi"))
+    )
+
+  private def fed(sql: String, c: SchemaContext = fedCtx, p: RoleColumnPolicy = maskSsn) =
+    new ColumnPolicyRewriter(poolOnlyCat, enabled = true)
+      .rewrite(sql, StatementKind.Select, eff(tenantUser, List(p)), c)
+      .unsafeRunSync()
+
+  "a federated table" should "be masked once its pool lists its columns" in {
+    fed("SELECT ssn FROM pgfed.public.users") shouldBe
+      Rewritten("SELECT '***' AS ssn FROM pgfed.public.users")
+    fed("SELECT id, ssn FROM pgfed.public.users") shouldBe
+      Rewritten("SELECT id, '***' AS ssn FROM pgfed.public.users")
+    fed("SELECT * FROM pgfed.public.users") shouldBe
+      Rewritten("SELECT users.id, '***' AS ssn FROM pgfed.public.users")
+  }
+
+  it should "be refused, never forwarded, for a deny policy" in {
+    fed("SELECT ssn FROM pgfed.public.users", p = maskSsn.copy(action = "deny")) shouldBe a[Denied]
+    fed("SELECT * FROM pgfed.public.users", p = maskSsn.copy(action = "deny")) shouldBe a[Denied]
+  }
+
+  it should "be refused, never forwarded, when no pool lists its columns" in {
+    val noPool = fedCtx.copy(pool = None)
+    fed("SELECT ssn FROM pgfed.public.users", noPool) shouldBe a[Denied]
+    fed("SELECT * FROM pgfed.public.users", noPool) shouldBe PassthroughParseFailed
+  }

@@ -1306,7 +1306,20 @@ object Main extends IOApp with LazyLogging:
       // ONE catalog instance (hence one cache) shared by the SELECT-path rewriter and the
       // write-path guard, so both resolve a table's columns identically AND the metastore fetch
       // is not doubled on cold misses.
-      val columnCatalog        = EdgeRewriters.columnCatalog(sup, catalogReaders, stmtInstruments)
+      val columnCatalog = EdgeRewriters.columnCatalog(
+        sup,
+        catalogReaders,
+        stmtInstruments,
+        // A table only the pool's nodes hold is described there through the same routed system
+        // caller as the node-held catalog browser (set once the router exists; "manager starting"
+        // until then, which reads as no columns). The bound covers waking a suspended pool.
+        nodeQuery = (key, sql) => nodeCatalogQuery.get()(key, sql),
+        nodeTimeout = scala.concurrent.duration
+          .DurationInt(
+            mgrCfg.catalog.previewTimeoutSec + edgeCfg.resumeHoldTimeoutSec.toInt
+          )
+          .seconds
+      )
       val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
       val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter()
       val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
