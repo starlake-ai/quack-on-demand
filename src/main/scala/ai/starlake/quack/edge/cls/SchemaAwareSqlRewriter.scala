@@ -26,6 +26,10 @@ enum UnresolvedMode:
   *
   * `defaultCatalog` / `defaultSchema` provide qualification defaults for bare table refs
   * (`customer` -> `acme_tpch.tpch1.customer`).
+  *
+  * `homes` maps a `schema` key to the (catalog, schema) the statement names it in, when that is not
+  * the defaults (a federated source, another schema): the table resolves there too. A key with no
+  * home resolves under the defaults only, so a table named elsewhere stays unresolved.
   */
 trait SchemaAwareSqlRewriter:
   def rewrite(
@@ -34,5 +38,6 @@ trait SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy],
       defaultCatalog: Option[String],
       defaultSchema: Option[String],
-      unresolvedMode: UnresolvedMode = UnresolvedMode.Deny
+      unresolvedMode: UnresolvedMode = UnresolvedMode.Deny,
+      homes: Map[String, (String, String)] = Map.empty
   ): RewriteOutcome

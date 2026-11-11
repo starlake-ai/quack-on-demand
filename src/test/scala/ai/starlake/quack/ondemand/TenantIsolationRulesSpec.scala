@@ -573,16 +573,33 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
 
   it should "cache per tenant, so no tenant is answered from another's read" in {
     val asked   = ListBuffer.empty[String]
-    val columns = new ai.starlake.quack.edge.cls.DuckLakeColumnCatalog((tenant, _, _, _) =>
+    val columns = new ai.starlake.quack.edge.cls.CachedColumnCatalog((tenant, _, _, _, _) =>
       cats.effect.IO {
         asked += tenant
         List(s"col_of_$tenant")
       }
     )
-    columns.columnsOf("a", "c", "s", "t").unsafeRunSync() shouldBe List("col_of_a")
-    columns.columnsOf("b", "c", "s", "t").unsafeRunSync() shouldBe List("col_of_b")
-    columns.columnsOf("a", "c", "s", "t").unsafeRunSync() shouldBe List("col_of_a")
+    columns.columnsOf("a", None, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_a")
+    columns.columnsOf("b", None, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_b")
+    columns.columnsOf("a", None, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_a")
     asked.toList shouldBe List("a", "b")
+  }
+
+  it should "cache per pool, so no pool is answered from another's node" in {
+    import ai.starlake.quack.model.PoolKey
+    val asked   = ListBuffer.empty[Option[PoolKey]]
+    val columns = new ai.starlake.quack.edge.cls.CachedColumnCatalog((_, pool, _, _, _) =>
+      cats.effect.IO {
+        asked += pool
+        List(s"col_of_${pool.fold("none")(_.pool)}")
+      }
+    )
+    val p1 = Some(PoolKey("a", "db", "p1"))
+    val p2 = Some(PoolKey("a", "db", "p2"))
+    columns.columnsOf("a", p1, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_p1")
+    columns.columnsOf("a", p2, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_p2")
+    columns.columnsOf("a", p1, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_p1")
+    asked.toList shouldBe List(p1, p2)
   }
 
   // ---------- QoD's login goes only to QoD's server ----------

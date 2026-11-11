@@ -84,6 +84,7 @@ abstract class AuthzEndToEndCases(
   private val NicoPw    = "nico-e2e-pw-1"
   private val VeraPw    = "vera-e2e-pw-1"
   private val DinaPw    = "dina-e2e-pw-1"
+  private val MayaPw    = "maya-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -97,7 +98,8 @@ abstract class AuthzEndToEndCases(
     "mona"  -> MonaPw,
     "nico"  -> NicoPw,
     "vera"  -> VeraPw,
-    "dina"  -> DinaPw
+    "dina"  -> DinaPw,
+    "maya"  -> MayaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -410,7 +412,23 @@ abstract class AuthzEndToEndCases(
         "transformSql" -> s("'***'")
       )
     )
+    // A mask on a federated table: RO on pgfed.e2e.orders, its `v` masked.
+    val fedMasked = createRole("e2e_fed_masked")
+    grant("pgfed", "e2e", "orders", "RO", fedMasked)
+    stack.post(
+      "/api/role/column-policy/create",
+      obj(
+        "roleId"       -> s(fedMasked),
+        "catalogName"  -> s("pgfed"),
+        "schemaName"   -> s("e2e"),
+        "tableName"    -> s("orders"),
+        "columnName"   -> s("v"),
+        "action"       -> s("mask"),
+        "transformSql" -> s("'***'")
+      )
+    )
     List(
+      ("maya", MayaPw, "user", "e2e_fed_masked"),
       ("fran", FranPw, "user", "e2e_feed"),
       ("tess", TessPw, "admin", "e2e_feed"),
       ("mona", MonaPw, "user", "e2e_feed_masked"),
@@ -2924,6 +2942,28 @@ abstract class AuthzEndToEndCases(
     // A catalog-wide federated grant (carol's pgfed.e2e.* ALL) covers the source; *.*.* does not.
     allowed("carol", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
     refused("bob", "fed", "SELECT count(*) FROM pgfed.e2e.other", node = "pgfed.e2e.other")
+  }
+
+  "a federated table under a column mask" should "answer the masked value, never the stored one" in {
+    ready()
+    // The rewriter reads the source's columns on a node of the pool (DESCRIBE, as the system
+    // principal), so a direct select and a star are masked rather than refused.
+    allowed("maya", "fed", "SELECT v FROM pgfed.e2e.orders WHERE id = 1", Some(List("***")))
+    allowed(
+      "maya",
+      "fed",
+      "SELECT * FROM pgfed.e2e.orders WHERE id <= 2 ORDER BY id",
+      Some(List("1,***", "2,***"))
+    )
+    allowed("maya", "fed", "SELECT upper(v) FROM pgfed.e2e.orders WHERE id = 2", Some(List("***")))
+    // A predicate reads the masked value too, so it cannot probe the stored one.
+    allowed("maya", "fed", "SELECT id FROM pgfed.e2e.orders WHERE v = 'a'", Some(Nil))
+    allowed(
+      "maya",
+      "fed",
+      "SELECT id FROM pgfed.e2e.orders WHERE id <= 2 ORDER BY id",
+      Some(List("1", "2"))
+    )
   }
 
   "a catalog listing" should "show a user only the tables they hold a grant on" in {

@@ -21,7 +21,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy],
       defaultCatalog: Option[String],
       defaultSchema: Option[String],
-      unresolvedMode: UnresolvedMode = UnresolvedMode.Deny
+      unresolvedMode: UnresolvedMode = UnresolvedMode.Deny,
+      homes: Map[String, (String, String)] = Map.empty
   ): RewriteOutcome =
     if policies.isEmpty then Passthrough
     else
@@ -35,7 +36,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             policies,
             defaultCatalog,
             defaultSchema,
-            unresolvedMode
+            unresolvedMode,
+            homes
           )
 
   private def rewriteWithPolicies(
@@ -44,7 +46,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy],
       defaultCatalog: Option[String],
       defaultSchema: Option[String],
-      unresolvedMode: UnresolvedMode
+      unresolvedMode: UnresolvedMode,
+      homes: Map[String, (String, String)]
   ): RewriteOutcome =
     // Register the caller-provided tables under CURRENT_CATALOG/CURRENT_SCHEMA so SQL schema
     // qualifiers (e.g. `tpch1.customer`) match them when tpch1 IS the current schema; a table
@@ -64,6 +67,22 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           new ai.starlake.transpiler.schema.JdbcColumn(col)
         )
       }
+    }
+    // A table the statement names outside the defaults (a federated source, another schema) is
+    // registered where it is named too, so `pgfed.public.users` resolves to its own columns.
+    homes.foreach { case (tableKey, (homeCatalog, homeSchema)) =>
+      if !(homeCatalog.equalsIgnoreCase(currentCatalog) && homeSchema.equalsIgnoreCase(
+          currentSchema
+        ))
+      then
+        schema.get(tableKey).toList.flatten.foreach { col =>
+          metaData.addTable(
+            homeCatalog,
+            homeSchema,
+            tableKey,
+            new ai.starlake.transpiler.schema.JdbcColumn(col)
+          )
+        }
     }
     // Seed DuckDB's fixed system-catalog shapes under their REAL schema names so metadata
     // queries (`information_schema.schemata`, `pg_catalog.pg_tables`, ...) resolve instead of
@@ -135,7 +154,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
                 // at every nesting depth ourselves before any masking runs.
                 val nestedUnknown =
                   if unresolvedMode == UnresolvedMode.Deny then
-                    firstUnknownTable(sql, schema, currentCatalog, currentSchema)
+                    firstUnknownTable(sql, schema, currentCatalog, currentSchema, homes)
                   else None
                 nestedUnknown match
                   case Some(name) => Denied(s"unresolvable table $name")
@@ -228,7 +247,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       originalSql: String,
       schema: Map[String, List[String]],
       currentCatalog: String,
-      currentSchema: String
+      currentSchema: String,
+      homes: Map[String, (String, String)]
   ): Option[String] =
     val names =
       try
@@ -259,7 +279,15 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             case c :: Nil => c.equalsIgnoreCase(currentCatalog)
             case _        => false
           val userKnown = q1.equalsIgnoreCase(currentSchema) && knownUserTable(name) && qualifierOk
-          sysKnown || userKnown
+          // Or the table is named where the caller located it (its home, beside the defaults).
+          val homeKnown = knownUserTable(name) &&
+            homes.exists { case (k, (hc, hs)) =>
+              k.equalsIgnoreCase(name) && hs.equalsIgnoreCase(q1) && (rest match
+                case Nil      => hc.equalsIgnoreCase(currentCatalog)
+                case c :: Nil => c.equalsIgnoreCase(hc)
+                case _        => false)
+            }
+          sysKnown || userKnown || homeKnown
     names.find(n => !known(n))
 
   /** Walk the resolved statement's projection items and replace any Column whose physical (table,
