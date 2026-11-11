@@ -23,6 +23,16 @@ def no_pypi_staleness_check(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_jvm_probe(monkeypatch):
+    """`serve()`/`start()`/the demo ask the resolved JVM for its os.arch (launcher.jvm_arch),
+    which would run whatever java a test stubbed in; answer None (the host's architecture)
+    everywhere. Tests of jvm_arch itself import it before this fixture runs."""
+    from qod_cli import launcher
+
+    monkeypatch.setattr(launcher, "jvm_arch", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_env(tmp_path, monkeypatch):
     for var in list(os.environ):
         if var.startswith("QOD_"):

@@ -751,7 +751,7 @@ def demo_world(monkeypatch, tmp_path):
     monkeypatch.setattr(demo_cmd, "resolve_java", lambda: "/usr/bin/java")
     monkeypatch.setattr(launcher, "default_cache_dir", lambda: tmp_path / "cache")
     monkeypatch.setattr(launcher, "ensure_duckdb_cli", lambda c: tmp_path / "b")
-    monkeypatch.setattr(launcher, "ensure_libduckdb", lambda c: tmp_path / "v" / "lib")
+    monkeypatch.setattr(launcher, "ensure_libduckdb", lambda c, **kw: tmp_path / "v" / "lib")
     monkeypatch.setattr(launcher, "node_binary", lambda *a, **k: None)
     monkeypatch.setattr(
         launcher, "materialize_spawn_scripts", lambda d: (tmp_path / "s.sh", tmp_path / "s.ps1")

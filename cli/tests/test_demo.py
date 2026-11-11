@@ -9,6 +9,7 @@ import respx
 import pytest
 
 from qod_cli import launcher
+from qod_cli.launcher import jvm_arch as real_jvm_arch
 from tests import _duckdb_cache
 
 JAR_037 = "quack-on-demand-assembly-0.3.7.jar"
@@ -761,6 +762,97 @@ def test_ensure_libduckdb_does_not_reuse_another_versions_cache(tmp_path):
     assert route.called
     assert pathlib.Path(lib_dir) == tmp_path / "duckdb" / launcher.DUCKDB_CLI_VERSION / "lib"
     assert (pathlib.Path(lib_dir) / "libduckdb.so").read_text() != "1.5.6"
+
+
+def _pe_dll(machine: int) -> bytes:
+    """The start of a PE image: MZ header, e_lfanew at 0x3C, PE signature, Machine."""
+    head = bytearray(0x80)
+    head[:2] = b"MZ"
+    head[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    head[0x40:0x44] = b"PE\0\0"
+    head[0x44:0x46] = machine.to_bytes(2, "little")
+    return bytes(head)
+
+
+def _elf_so(machine: int) -> bytes:
+    head = bytearray(64)
+    head[:4] = b"\x7fELF"
+    head[4], head[5] = 2, 1  # 64-bit, little-endian
+    head[18:20] = machine.to_bytes(2, "little")
+    return bytes(head)
+
+
+def test_shared_library_arch_reads_pe_and_elf(tmp_path):
+    cases = {
+        "x64.dll": (_pe_dll(0x8664), "x86_64"),
+        "arm64.dll": (_pe_dll(0xAA64), "aarch64"),
+        "x64.so": (_elf_so(0x3E), "x86_64"),
+        "arm64.so": (_elf_so(0xB7), "aarch64"),
+        "empty": (b"", None),
+        "text": (b"not really a dylib", None),
+    }
+    for name, (content, arch) in cases.items():
+        (tmp_path / name).write_bytes(content)
+        assert launcher.shared_library_arch(tmp_path / name) == arch, name
+
+
+@respx.mock
+def test_ensure_libduckdb_replaces_a_cached_library_of_another_arch(tmp_path):
+    # Windows on ARM with an x64 JVM: an earlier run cached the ARM64 duckdb.dll (Python's
+    # architecture), which the amd64 JVM refuses with "%1 is not a valid Win32 application".
+    _, lib_dir = _duckdb_cache.plant(tmp_path, os_name="win32")
+    (lib_dir / "duckdb.dll").write_bytes(_pe_dll(0xAA64))
+    route = respx.get(launcher.libduckdb_url("win32", "amd64")).mock(
+        return_value=httpx.Response(200, content=_libduckdb_archive("duckdb.dll"))
+    )
+    got = launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="win32", arch="amd64")
+    assert route.called
+    assert pathlib.Path(got) == lib_dir
+    assert (lib_dir / "duckdb.dll").read_text() == "not really a dylib"
+
+
+def test_ensure_libduckdb_keeps_a_cached_library_of_the_wanted_arch(tmp_path):
+    _, lib_dir = _duckdb_cache.plant(tmp_path, os_name="win32")
+    (lib_dir / "duckdb.dll").write_bytes(_pe_dll(0x8664))
+    with respx.mock:  # no routes: reuse must not hit the network
+        got = launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="win32", arch="amd64")
+    assert pathlib.Path(got) == lib_dir
+
+
+def test_jvm_arch_reads_os_arch_from_the_jvm_settings():
+    import subprocess
+
+    out = (
+        "Property settings:\n    java.home = C:\\jdk\n    os.arch = amd64\n"
+        "    os.name = Windows 11\n\nopenjdk version \"21.0.3\"\n"
+    )
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr=out)
+
+    assert real_jvm_arch("C:\\jdk\\bin\\java.exe", run=run) == "amd64"
+    assert seen == [["C:\\jdk\\bin\\java.exe", "-XshowSettings:properties", "-version"]]
+
+
+def test_jvm_arch_is_none_when_the_jvm_cannot_be_asked():
+    import subprocess
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError(cmd[0])
+
+    assert real_jvm_arch("/no/java", run=missing) is None
+    silent = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+    assert real_jvm_arch("/bad/java", run=silent) is None
+
+
+def test_libduckdb_url_takes_the_jvm_arch_names():
+    base = f"https://github.com/duckdb/duckdb/releases/download/v{launcher.DUCKDB_CLI_VERSION}"
+    assert launcher.libduckdb_url("win32", "amd64") == f"{base}/duckdb-shared-libs-windows-amd64.tar.gz"
+    assert launcher.libduckdb_url("win32", "aarch64") == f"{base}/duckdb-shared-libs-windows-arm64.tar.gz"
+    assert launcher.libduckdb_url("darwin", "aarch64") == f"{base}/duckdb-shared-libs-osx-universal.tar.gz"
+    assert launcher.libduckdb_url("linux", "amd64") == f"{base}/duckdb-shared-libs-linux-amd64.tar.gz"
 
 
 def test_runtime_env_adds_library_path_darwin(tmp_path):
