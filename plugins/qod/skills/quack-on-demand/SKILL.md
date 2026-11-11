@@ -100,7 +100,7 @@ non-superuser role, and `admin.password` or `admin.existingSecret` is required,
 since nobody could log in without an admin; the nodes refuse tenant users every file outside their
 authorized locations, so they cannot read a node's mounted catalog password; see https://docs.starlake.ai/qod). Locally,
 `qod start` supervises the released uber-jar, downloaded and cached on first
-use (Java 21+ required; the `duckdb` CLI and node spawn scripts are
+use (Java 25+ required; the `duckdb` CLI and node spawn scripts are
 provisioned automatically):
 
 ```bash
@@ -2803,7 +2803,7 @@ The audit reads the answering replica's configuration and the shared control pla
 | `/metrics` answers `503` | A scrape took longer than 10 s to come back, and this request stopped waiting for it | Retry. A scrape that keeps failing to return points at the registry, so read the manager's log |
 | An SSO login or OIDC start fails while an identity provider is slow, or `authorization unavailable` for an OPA tenant under load | At most 128 identity provider exchanges (256 for OPA) run at once, and the rest fail at once. On Linux each exchange also leaves a TIME_WAIT socket on the manager's host, so sustained exchanges to one identity provider or OPA server above about 470 a second run out of local ports | Retry. Look for an issuer that hangs, or a flood of anonymous starts, and limit them in front of the manager. For the local ports, set `net.ipv4.tcp_tw_reuse=1` on the manager's host or container |
 | An SSO sign-in fails with `discovery_failed` | The issuer's discovery document could not be read (unreachable, over 256 KiB, or no answer within 15 s), or was refused: its `jwks_uri`, `token_endpoint` or `authorization_endpoint` is not an absolute http(s) URL, or one of its fields is over 2048 characters. A failure is remembered for 10 s | Check the issuer URL and what it serves, then retry after 10 s |
-| Boot prints `WARNING: this JDK has no HttpClient.shutdownNow ...` | The manager runs on a JDK older than 21, which cannot close the connection of an identity provider's or OPA server's refused answer | Run the manager on JDK 21 or later |
+| Boot prints `WARNING: this JDK has no HttpClient.shutdownNow ...` | The manager runs on a JDK older than 21, which cannot close the connection of an identity provider's or OPA server's refused answer | Run the manager on JDK 25 or later |
 | `400 invalid_id` on `tenant create` | The name holds something other than letters and digits, an underscore included, or does not start with a letter | Choose a name of letters and digits; a tenant that already holds an underscore keeps it, and a manifest import brings any name |
 | `409 database_name_taken` on `database create` or `update` | The Postgres database `<tenant>_<name>` on QoD's server already holds something, and the caller is not a superuser | Choose another name, or have a superuser create it if the database is really this one's |
 | `400 own_login_required` on `database create` or `update` | The metastore names another server than QoD's own (host and port, compared as text) without its own `pgUser` and `pgPassword`, or an update moves the row with its stored password left out | Send the login for that server, or leave `pgHost` and `pgPort` out to use QoD's |

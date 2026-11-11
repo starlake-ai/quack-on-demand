@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading
+
+- The manager needs Java 25 or later (it needed 21). The Docker image runs on Temurin 25. When no
+  Java 25 is found, `qod start` and `qod serve` download a Temurin 25 JRE into a cache folder of
+  its own (`<user cache>/qod/jre-25`); on Windows on ARM, which Temurin 25 does not cover, they
+  download the Microsoft Build of OpenJDK 25. `scripts/run-jar.sh` and `run-jar.ps1` need
+  `JAVA_HOME` or the `java` on `PATH` to be 25 or later. Starflow follows: `qod start
+  --with-starflow` runs it on the manager's Java, and the Compose `starflow` image is on Temurin 25.
+- A manager launched with `-cp` instead of `java -jar` passes `--enable-native-access=ALL-UNNAMED`
+  and `--sun-misc-unsafe-memory-access=allow` itself, next to the two `--add-opens`, or JDK 25
+  prints warnings at every boot.
+
+### Changed
+
+- The build runs on sbt 1.13.1 and JDK 25.
+- JDK 25 prints no warnings at boot: the jar's manifest carries `Enable-Native-Access` for the JNI
+  loads of libquackwire and libduckdb, and the image, `run-jar.sh`, `run-jar.ps1` and the qod CLI
+  pass `--sun-misc-unsafe-memory-access=allow` for the `sun.misc.Unsafe` use of Scala's lazy vals,
+  Arrow and Netty, which no manifest attribute covers.
+
 ## 0.12.2
 
 ### Fixed

@@ -60,7 +60,7 @@ def test_find_java_prefers_java_home(tmp_path, monkeypatch):
     java.write_text("")
     java.chmod(0o755)
     monkeypatch.setenv("JAVA_HOME", str(tmp_path))
-    monkeypatch.setattr(launcher, "java_major", lambda p: 21)
+    monkeypatch.setattr(launcher, "java_major", lambda p: 25)
     assert launcher.find_java() == str(java)
 
 
@@ -85,19 +85,19 @@ def test_find_java_falls_back_to_path(tmp_path, monkeypatch):
     java.chmod(0o755)
     monkeypatch.delenv("JAVA_HOME", raising=False)
     monkeypatch.setattr(launcher, "_which_java", lambda: str(java))
-    monkeypatch.setattr(launcher, "java_major", lambda p: 21)
+    monkeypatch.setattr(launcher, "java_major", lambda p: 25)
     assert launcher.find_java() == str(java)
 
 
-def test_find_java_floor_is_21(tmp_path, monkeypatch):
+def test_find_java_floor_is_25(tmp_path, monkeypatch):
     java = tmp_path / "bin" / "java"
     java.parent.mkdir(parents=True)
     java.write_text("")
     java.chmod(0o755)
     monkeypatch.setenv("JAVA_HOME", str(tmp_path))
-    monkeypatch.setattr(launcher, "java_major", lambda p: 17)
+    monkeypatch.setattr(launcher, "java_major", lambda p: 21)
     monkeypatch.setattr(launcher, "_which_java", lambda: None)
-    assert launcher.MIN_JAVA_MAJOR == 21
+    assert launcher.MIN_JAVA_MAJOR == 25
     assert launcher.find_java() is None
 
 
@@ -105,6 +105,7 @@ def test_build_jar_command_includes_arrow_flag():
     cmd = launcher.build_jar_command("/usr/bin/java", "/cache/qod.jar", ["demo", "--flag"])
     assert cmd == [
         "/usr/bin/java",
+        "--sun-misc-unsafe-memory-access=allow",
         "-Darrow.allocation.manager.type=Unsafe",
         "-jar",
         "/cache/qod.jar",
@@ -153,15 +154,15 @@ def test_latest_release_version():
 
 def test_adoptium_assets_url_platform_mapping():
     assert launcher.adoptium_assets_url("darwin", "arm64") == (
-        "https://api.adoptium.net/v3/assets/latest/21/hotspot"
+        "https://api.adoptium.net/v3/assets/latest/25/hotspot"
         "?architecture=aarch64&image_type=jre&os=mac&vendor=eclipse"
     )
     assert launcher.adoptium_assets_url("linux", "x86_64") == (
-        "https://api.adoptium.net/v3/assets/latest/21/hotspot"
+        "https://api.adoptium.net/v3/assets/latest/25/hotspot"
         "?architecture=x64&image_type=jre&os=linux&vendor=eclipse"
     )
     assert launcher.adoptium_assets_url("win32", "AMD64") == (
-        "https://api.adoptium.net/v3/assets/latest/21/hotspot"
+        "https://api.adoptium.net/v3/assets/latest/25/hotspot"
         "?architecture=x64&image_type=jre&os=windows&vendor=eclipse"
     )
 
@@ -238,6 +239,39 @@ def test_ensure_jre_checksum_mismatch_refuses(tmp_path, monkeypatch):
         launcher.ensure_jre(cache_dir=tmp_path / "jre", os_name="linux", arch="x86_64")
 
 
+@respx.mock
+def test_ensure_jre_falls_back_to_microsoft_on_windows_arm(tmp_path, monkeypatch):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("jdk-25.0.5+11/bin/java.exe", "")
+    archive = buf.getvalue()
+    link = launcher.microsoft_jdk_url("ARM64")
+    assert link == "https://aka.ms/download-jdk/microsoft-jdk-25-windows-aarch64.zip"
+    respx.get(launcher.adoptium_assets_url("win32", "ARM64")).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get(link + ".sha256sum.txt").mock(
+        return_value=httpx.Response(
+            200, text=f"{hashlib.sha256(archive).hexdigest()}  microsoft-jdk.zip\n"
+        )
+    )
+    respx.get(link).mock(return_value=httpx.Response(200, content=archive))
+    java = launcher.ensure_jre(cache_dir=tmp_path / "jre", os_name="win32", arch="ARM64")
+    assert pathlib.Path(java).name == "java.exe"
+
+
+@respx.mock
+def test_ensure_jre_without_a_build_names_the_platform(tmp_path):
+    respx.get(launcher.adoptium_assets_url("linux", "x86_64")).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    with pytest.raises(RuntimeError, match="no Temurin 25 JRE for linux/x86_64"):
+        launcher.ensure_jre(cache_dir=tmp_path / "jre", os_name="linux", arch="x86_64")
+
+
 def test_ensure_jre_reuses_extracted(tmp_path):
     java = tmp_path / "jre" / "jdk-21.0.3+9-jre" / "bin" / "java"
     java.parent.mkdir(parents=True)
@@ -249,6 +283,7 @@ def test_ensure_jre_reuses_extracted(tmp_path):
 
 
 ARROW_FLAG = "-Darrow.allocation.manager.type=Unsafe"
+UNSAFE_FLAG = "--sun-misc-unsafe-memory-access=allow"
 
 
 def _capture_exec(monkeypatch):
@@ -284,7 +319,7 @@ def test_demo_launches_local_jar_with_system_java(runner, monkeypatch, tmp_path)
     captured = _capture_exec(monkeypatch)
     result = runner.invoke(app, ["start", "--demo", "--jar", str(jar)])
     assert result.exit_code == 0, result.output
-    assert captured["cmd"] == ["/usr/bin/java", ARROW_FLAG, "-jar", str(jar), "demo"]
+    assert captured["cmd"] == ["/usr/bin/java", UNSAFE_FLAG, ARROW_FLAG, "-jar", str(jar), "demo"]
 
 
 def test_demo_passes_extra_args_to_the_jar(runner, monkeypatch, tmp_path):
@@ -317,7 +352,7 @@ def test_demo_dev_build_falls_back_to_latest_release(runner, monkeypatch, tmp_pa
     result = runner.invoke(app, ["start", "--demo"])  # CLI __version__ is a .dev0 build
     assert result.exit_code == 0, result.output
     assert asked["version"] == "0.3.8"
-    assert captured["cmd"][3] == str(jar)
+    assert captured["cmd"][captured["cmd"].index("-jar") + 1] == str(jar)
 
 
 def test_demo_version_option_pins_the_jar(runner, monkeypatch, tmp_path):
@@ -825,6 +860,7 @@ def test_build_jar_command_splices_java_opts():
         "/usr/bin/java",
         "-Xmx2g",
         "-Dfoo=bar",
+        "--sun-misc-unsafe-memory-access=allow",
         "-Darrow.allocation.manager.type=Unsafe",
         "-jar",
         "/cache/qod.jar",

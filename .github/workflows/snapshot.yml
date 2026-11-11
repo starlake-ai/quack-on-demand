@@ -91,12 +91,12 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
 
       - name: Setup sbt launcher
         uses: sbt/setup-sbt@v1
         with:
-          sbt-runner-version: '1.12.11'
+          sbt-runner-version: '1.13.1'
 
       - name: Extract version from version.sbt
         id: extract-version

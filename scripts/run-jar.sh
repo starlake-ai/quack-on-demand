@@ -359,7 +359,7 @@ fi
 # clone can build with zero prior setup. The actual sbt version used by
 # the project comes from `project/build.properties`; we just need any
 # modern launcher.
-SBT_BOOTSTRAP_VERSION="${SBT_BOOTSTRAP_VERSION:-1.12.11}"
+SBT_BOOTSTRAP_VERSION="${SBT_BOOTSTRAP_VERSION:-1.13.1}"
 SBT_BOOTSTRAP_ROOT="$REPO_DIR/.sbt-bootstrap"
 SBT_CMD="sbt"
 
@@ -614,7 +614,7 @@ echo "jar: $JAR"
 # ---- Resolve java ----
 JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 command -v "${JAVA_BIN:-java}" >/dev/null 2>&1 || {
-  echo "ERROR: java not found. Install JDK 21+ or set JAVA_HOME." >&2
+  echo "ERROR: java not found. Install JDK 25+ or set JAVA_HOME." >&2
   exit 1
 }
 echo "java: $("${JAVA_BIN:-java}" -version 2>&1 | head -1)"
@@ -870,7 +870,7 @@ preflight_ports
 # The assembly jar carries `Add-Opens` in its manifest (JEP 261), so Arrow's
 # unsafe allocator, which reflects into java.nio, needs no extra flags (Java
 # 17 and later block that reflection unless it is opened). The manager itself
-# needs JDK 21 or later. The system property pins Arrow's allocator - without
+# needs JDK 25 or later. The system property pins Arrow's allocator - without
 # it Arrow picks netty and crashes with NoSuchFieldError: chunkSize.
 #
 # Ctrl-C acts as stop-jar.sh. The JVM runs as a plain background job in
@@ -923,6 +923,7 @@ trap graceful_stop INT TERM HUP
 # means java and every node it spawns only ever see pipes, so the terminal
 # keeps its line discipline and the trap stays reachable.
 "${JAVA_BIN:-java}" \
+  --sun-misc-unsafe-memory-access=allow \
   -Darrow.allocation.manager.type=Unsafe \
   ${JAVA_OPTS:-} \
   -jar "$JAR" </dev/null > >(exec cat) 2>&1 &

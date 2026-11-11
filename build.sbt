@@ -309,16 +309,23 @@ lazy val root = (project in file("."))
     // (it needs the java.nio opens above): Main sets it too, before any Netty class loads, which is
     // all a launch from the jar has, and the forked JVMs get it so that the suite runs what
     // production runs.
+    //
+    // JDK 25 warns once per JVM about JNI loads and sun.misc.Unsafe memory access (Scala's lazy
+    // vals, Arrow, Netty); the two flags say both are intended.
     Compile / run / fork := true,
     Test / fork          := true,
     Compile / run / javaOptions ++= Seq(
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
       "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "--enable-native-access=ALL-UNNAMED",
+      "--sun-misc-unsafe-memory-access=allow",
       "-Dio.netty.tryReflectionSetAccessible=true"
     ),
     Test / javaOptions ++= Seq(
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
       "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "--enable-native-access=ALL-UNNAMED",
+      "--sun-misc-unsafe-memory-access=allow",
       "-Dio.netty.tryReflectionSetAccessible=true"
     ),
     // libquackwire links libduckdb through an rpath that only exists on the build machine, so the
@@ -343,8 +350,11 @@ lazy val root = (project in file("."))
     // For `java -jar distrib/...assembly.jar`: the Add-Opens manifest attribute
     // (JEP 261) makes the JVM apply the same opens automatically - users don't
     // have to pass --add-opens on the command line.
+    // Enable-Native-Access (JDK 22+) does the same for the JNI loads of libquackwire, libduckdb and
+    // the DuckDB JDBC driver, which JDK 25 otherwise warns about at boot.
     assembly / packageOptions += Package.ManifestAttributes(
-      "Add-Opens" -> "java.base/java.nio java.base/sun.nio.ch"
+      "Add-Opens"            -> "java.base/java.nio java.base/sun.nio.ch",
+      "Enable-Native-Access" -> "ALL-UNNAMED"
     ),
 
     // Pin the assembly's Main-Class. Without this, sbt-assembly leaves it
