@@ -2378,13 +2378,14 @@ abstract class AuthzEndToEndCases(
     stack.mcpTool(elsewhere, "undrop_table", mcpArgs) match
       case Left(err) => err should include("not permitted for this token")
       case Right(t)  => fail(s"a token scoped elsewhere recovered: $t")
-    // A read-only token may not create the table a recovery creates.
+    // A read-only token may not create the table a recovery creates: the REST guard refuses it
+    // before the route, and MCP offers it no tool outside McpRoutes.ReadOnlyTools.
     val readOnly = patOf("bob", "ud-ro", "verbCeiling" -> s("RO"))
     val (rc, rb) = stack.postStatus("/api/profile/undrop", undropBody, readOnly)
     withClue(rb)(rc shouldBe 403)
-    rb should include("verb ceiling")
+    rb should include("token_read_only")
     stack.mcpTool(readOnly, "undrop_table", mcpArgs) match
-      case Left(err) => err should include("verb ceiling")
+      case Left(err) => err should include("unknown tool: 'undrop_table'")
       case Right(t)  => fail(s"a read-only token recovered: $t")
   }
 
@@ -2466,13 +2467,14 @@ abstract class AuthzEndToEndCases(
     val (rc, rb) = stack.postStatus("/api/catalog/restore", restoreBody, elsewhere)
     withClue(rb)(rc shouldBe 403)
     rb should include("token_scope")
-    // A read-only token may preview but not restore (a restore replaces the table).
+    // A read-only token may preview but not restore (a restore replaces the table): the REST
+    // guard refuses it before the route.
     val readOnly = patOf("erin", "cat-ro", "verbCeiling" -> s("RO"))
     val (pc, pb) = stack.getStatus(s"$base/preview?asOf=$two", readOnly)
     withClue(pb)(pc shouldBe 200)
     val (wc, wb) = stack.postStatus("/api/catalog/restore", restoreBody, readOnly)
     withClue(wb)(wc shouldBe 403)
-    wb should include("verb ceiling")
+    wb should include("token_read_only")
   }
 
   "UNDROP TABLE names" should "compare without case, as DuckDB resolves them (review M6)" in {
