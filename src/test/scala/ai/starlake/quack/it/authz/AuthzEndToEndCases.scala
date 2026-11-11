@@ -85,6 +85,7 @@ abstract class AuthzEndToEndCases(
   private val VeraPw    = "vera-e2e-pw-1"
   private val DinaPw    = "dina-e2e-pw-1"
   private val MayaPw    = "maya-e2e-pw-1"
+  private val RheaPw    = "rhea-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -99,7 +100,8 @@ abstract class AuthzEndToEndCases(
     "nico"  -> NicoPw,
     "vera"  -> VeraPw,
     "dina"  -> DinaPw,
-    "maya"  -> MayaPw
+    "maya"  -> MayaPw,
+    "rhea"  -> RheaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -427,8 +429,24 @@ abstract class AuthzEndToEndCases(
         "transformSql" -> s("'***'")
       )
     )
+    // A row filter on a federated table: RO on pgfed.e2e.orders and pgfed.e2e.other, orders
+    // filtered to id 1.
+    val fedRows = createRole("e2e_fed_rows")
+    grant("pgfed", "e2e", "orders", "RO", fedRows)
+    grant("pgfed", "e2e", "other", "RO", fedRows)
+    stack.post(
+      "/api/role/row-policy/create",
+      obj(
+        "roleId"       -> s(fedRows),
+        "catalogName"  -> s("pgfed"),
+        "schemaName"   -> s("e2e"),
+        "tableName"    -> s("orders"),
+        "predicateSql" -> s("id = 1")
+      )
+    )
     List(
       ("maya", MayaPw, "user", "e2e_fed_masked"),
+      ("rhea", RheaPw, "user", "e2e_fed_rows"),
       ("fran", FranPw, "user", "e2e_feed"),
       ("tess", TessPw, "admin", "e2e_feed"),
       ("mona", MonaPw, "user", "e2e_feed_masked"),
@@ -2964,6 +2982,21 @@ abstract class AuthzEndToEndCases(
       "SELECT id FROM pgfed.e2e.orders WHERE id <= 2 ORDER BY id",
       Some(List("1", "2"))
     )
+  }
+
+  "a federated table under a row filter" should "answer only the rows the filter keeps" in {
+    ready()
+    allowed("rhea", "fed", "SELECT id, v FROM pgfed.e2e.orders ORDER BY id", Some(List("1,a")))
+    allowed("rhea", "fed", "SELECT count(*) FROM pgfed.e2e.orders", Some(List("1")))
+    allowed("rhea", "fed", "SELECT v FROM pgfed.e2e.orders WHERE id = 2", Some(Nil))
+    allowed(
+      "rhea",
+      "fed",
+      "SELECT count(*) FROM pgfed.e2e.orders o JOIN pgfed.e2e.orders p ON o.id <> p.id",
+      Some(List("0"))
+    )
+    // The filter covers orders only: another table of the source reads as it is.
+    allowed("rhea", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
   }
 
   "a catalog listing" should "show a user only the tables they hold a grant on" in {
