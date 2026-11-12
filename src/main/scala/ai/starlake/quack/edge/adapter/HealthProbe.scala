@@ -17,6 +17,9 @@ import scala.concurrent.duration.FiniteDuration
 final class HealthProbe(
     tracker: NodeLoadTracker,
     pingFn: RunningNode => IO[ProbeVerdict],
+    // Whether every node the backend starts carries a pid (QuackBackend.recordsPids): a failing node
+    // whose row has none is then another runtime's leftover, and says so (NodeUnhealthy.leftover).
+    recordsPids: Boolean,
     interval: FiniteDuration,
     afterTick: Set[String] => Unit,
     onHealthy: RunningNode => IO[Unit] = _ => IO.unit
@@ -40,7 +43,9 @@ final class HealthProbe(
               val now = System.currentTimeMillis()
               logger.debug(s"HealthProbe ${n.nodeId} -> healthy=$ok")
               tracker.setProbedAt(n.nodeId, now)
-              ProbeVerdict.cause(n, verdict) match
+              ProbeVerdict
+                .cause(n, verdict)
+                .map(c => NodeUnhealthy.leftover(n, recordsPids).getOrElse(c)) match
                 case Some(cause) => tracker.setUnhealthy(n.nodeId, cause, now)
                 case None        => tracker.setHealthy(n.nodeId, true)
               if ok then
@@ -55,7 +60,11 @@ final class HealthProbe(
                 logger.warn(s"HealthProbe ${n.nodeId} pingFn threw: ${t.getMessage}")
                 val now = System.currentTimeMillis()
                 tracker.setProbedAt(n.nodeId, now)
-                tracker.setUnhealthy(n.nodeId, NodeUnhealthy.ProbeError, now)
+                tracker.setUnhealthy(
+                  n.nodeId,
+                  NodeUnhealthy.leftover(n, recordsPids).getOrElse(NodeUnhealthy.ProbeError),
+                  now
+                )
               }
           }
         } *> IO.delay(afterTick(ns.iterator.map(_.nodeId).toSet)).attempt.map {

@@ -1,5 +1,7 @@
 package ai.starlake.quack.route
 
+import ai.starlake.quack.model.RunningNode
+
 /** Why a node is unhealthy, as the pool listing shows it: a fixed `code`, one line of `detail` and
   * `sinceMs`, the epoch milliseconds of the first failure of the run it belongs to (a later failure
   * of another kind keeps it, so it says how long the node has been out).
@@ -15,6 +17,37 @@ object NodeUnhealthy:
 
   /** The kind of failure and its line, before a time is put on it. */
   final case class Cause(code: String, detail: String)
+
+  /** Why `node` cannot be this manager's, when its row was written by another runtime against the
+    * same control plane: on a backend whose every node carries a pid (`recordsPids`, the local
+    * one), a row with none came from a fleet or Kubernetes manager that ran before. It names what
+    * the row names (the fleet server or the pod, and the address), which the listing shows anyway.
+    * Reconcile replaces such a node; this says what it was while it lasts, and in the log line of
+    * its replacement. None for a row this backend could have written.
+    */
+  def leftover(node: RunningNode, recordsPids: Boolean): Option[Cause] =
+    Option.when(recordsPids && node.pid.isEmpty) {
+      val at      = s"${node.host}:${node.port}"
+      val replace =
+        "this manager runs the local runtime, so nothing here runs it: reconcile replaces the " +
+          "node on this host"
+      (node.serverName, node.podName) match
+        case (Some(server), _) =>
+          Cause(
+            "fleet_leftover",
+            s"its row was written by a fleet manager (server $server, $at); $replace"
+          )
+        case (None, Some(pod)) =>
+          Cause(
+            "foreign_row",
+            s"its row was written by a Kubernetes manager (pod $pod, $at); $replace"
+          )
+        case (None, None) =>
+          Cause(
+            "foreign_row",
+            s"its row carries no process id, so another runtime wrote it ($at); $replace"
+          )
+    }
 
   /** Nothing answered at the node's address: no connection, or no session handle could be sent. */
   def unreachable(host: String, port: Int): Cause =

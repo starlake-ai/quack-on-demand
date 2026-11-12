@@ -64,3 +64,17 @@ class ProbeVerdictCauseSpec extends AnyFlatSpec with Matchers:
     cause(ProbeVerdict.LocalFilesNotOff("node x does not show local files off")) shouldBe
       Some(NodeUnhealthy.Cause("local_files_on", "node x does not show local files off"))
   }
+
+  "NodeUnhealthy.leftover" should "name where another runtime's row came from" in {
+    NodeUnhealthy.leftover(n.copy(serverName = Some("s1")), recordsPids = true).map(_.code) shouldBe
+      Some("fleet_leftover")
+    val pod = NodeUnhealthy.leftover(n.copy(podName = Some("qod-pod-1")), recordsPids = true).get
+    pod.code shouldBe "foreign_row"
+    pod.detail should include("Kubernetes manager (pod qod-pod-1, 127.0.0.1:23901)")
+    NodeUnhealthy.leftover(n, recordsPids = true).get.detail should include("no process id")
+  }
+
+  it should "say nothing of a row with a pid, or on a backend that records none" in {
+    NodeUnhealthy.leftover(n.copy(pid = Some(42L)), recordsPids = true) shouldBe None
+    NodeUnhealthy.leftover(n.copy(serverName = Some("s1")), recordsPids = false) shouldBe None
+  }

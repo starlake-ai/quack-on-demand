@@ -20,7 +20,8 @@
   `unhealthy · <reason> · <how long>`, with the manager's one-line explanation on hover (and under
   the badge on the pool page). `/api/pool/list` and `qod pool list` carry it on each node as
   `unhealthyReason` (`unreachable`, `probe_lost`, `probe_refused`, `handle_refused`, `unenforced`,
-  `local_files_on`, `probe_error`, `statement_failed`), `unhealthyDetail` and `unhealthySince`, and
+  `local_files_on`, `probe_error`, `statement_failed`, and `fleet_leftover` / `foreign_row` for a
+  row another runtime wrote), `unhealthyDetail` and `unhealthySince`, and
   `lastProbeAt`, the health probe's last answer. The explanation is the manager's own text, never a
   node's error, since tenant admins read it.
 
@@ -28,7 +29,8 @@
 
 - A manager on the local runtime replaces the nodes of a row another runtime wrote against the same
   control plane (a fleet manager that ran before it): such a row carries no process id and named
-  a server nothing runs any more, so its nodes stayed unhealthy forever.
+  a server nothing runs any more, so its nodes stayed unhealthy forever. The replacement is logged
+  at ERROR, naming the fleet server (or pod) and the address the row named.
 
 ### Changed
 

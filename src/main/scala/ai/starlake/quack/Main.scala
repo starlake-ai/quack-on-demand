@@ -1177,7 +1177,8 @@ object Main extends IOApp with LazyLogging:
 
     val healthProbe = new HealthProbe(
       tracker,
-      n => {
+      recordsPids = backend.recordsPids,
+      pingFn = n => {
         val initSql =
           if schemaInited.done(n.nodeId) then None
           else
@@ -1223,7 +1224,7 @@ object Main extends IOApp with LazyLogging:
           verdict
         }
       },
-      scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
+      interval = scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
       // The per-node maps only the probe writes follow the nodes it lists, on every replica (a
       // follower keeps reading the authz counters it does not export, so they are pruned here
       // too, not only on a leader's scrape).

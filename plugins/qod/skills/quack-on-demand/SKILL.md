@@ -1968,8 +1968,10 @@ Per-node fields surfaced via `/api/pool/list`:
   statement was lost, or answered with an error, often a catalog that cannot be reached;
   `handle_refused`: it refuses the manager's session handles, the detail says whether a node-key
   secret or the clocks disagree; `unenforced`; `local_files_on`; `probe_error`; `statement_failed`:
-  a statement sent there failed in transport), the manager's one line on it, and when the failures
-  began. The console shows the same on the node's badge
+  a statement sent there failed in transport; `fleet_leftover` / `foreign_row`: its row was written
+  by a fleet or Kubernetes manager that ran against the same control plane, which a local manager
+  replaces, logging it at ERROR), the manager's one line on it, and when the failures began. The
+  console shows the same on the node's badge
 - `lastProbeAt` - the health probe's last answer for the node
 
 On object-store pools the router biases toward a node that already has the query's tables cached (cache-aware placement, on by default); local-path pools stay pure least-loaded. `QOD_ROUTING_CACHE_AWARE=false` instantly reverts routing decisions to least-loaded everywhere while the locality metrics keep running.

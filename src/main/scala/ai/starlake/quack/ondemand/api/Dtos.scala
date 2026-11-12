@@ -134,8 +134,9 @@ final case class NodeInfo(
     serverState: Option[String] = None,
     // Why the node is unhealthy, while it is (None when healthy): a fixed code (unreachable,
     // probe_lost, probe_refused, handle_refused, unenforced, local_files_on, probe_error,
-    // statement_failed), one line written by the manager (never a node's own error text) and when
-    // the run of failures began, ISO-8601. lastProbeAt is the health probe's last answer for it.
+    // statement_failed, fleet_leftover, foreign_row), one line written by the manager (never a
+    // node's own error text) and when the run of failures began, ISO-8601. lastProbeAt is the
+    // health probe's last answer for it.
     unhealthyReason: Option[String] = None,
     unhealthyDetail: Option[String] = None,
     unhealthySince: Option[String] = None,
