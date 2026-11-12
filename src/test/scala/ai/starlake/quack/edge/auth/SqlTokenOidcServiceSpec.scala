@@ -49,9 +49,43 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
     url should include("scope=openid+email")
     url should include(s"state=$state")
 
+  "handoffOf" should "read back the driver handoff a start carried, and none otherwise" in:
+    val (_, key)                  = DriverHandoffSpec.driverKey()
+    val h                         = DriverHandoff(50123, key, "abcdefghijklmnopqrstuvwxyz012345")
+    val s                         = svc((_, _) => Right("{}"))
+    val Right((_, withH: String)) = s.startUrl(Some(h)): @unchecked
+    val Right((_, plain: String)) = s.startUrl(): @unchecked
+    s.handoffOf(withH) shouldBe Some(h)
+    s.handoffOf(plain) shouldBe None
+    s.handoffOf(withH.dropRight(2) + "00") shouldBe None
+    s.handoffOf("garbage") shouldBe None
+
+  it should "not read a handoff from an expired state" in:
+    val (_, key) = DriverHandoffSpec.driverKey()
+    var now      = 1000L
+    val s        = new SqlTokenOidcService(
+      cfg,
+      () => "https://gw.example",
+      "test-secret-32-chars-long-xxxxxx",
+      stubDiscovery,
+      httpExchange = (_, _) => Right("{}"),
+      nowMillis = () => now
+    )
+    val Right((_, st: String)) =
+      s.startUrl(Some(DriverHandoff(50123, key, "abcdefghijklmnopqrstuvwxyz012345"))): @unchecked
+    now = 1000L + 600_001L
+    s.handoffOf(st) shouldBe None
+
   "completeAuth" should "reject a state that does not match the cookie" in:
     val s = svc((_, _) => Right("""{"access_token":"abc"}"""))
     s.completeAuth("code", "tampered", "cookie-state") shouldBe a[Left[?, ?]]
+
+  it should "complete a login whose state carries a driver handoff" in:
+    val (_, key)                  = DriverHandoffSpec.driverKey()
+    val s                         = svc((_, _) => Right("""{"id_token":"the-jwt"}"""))
+    val Right((_, state: String)) =
+      s.startUrl(Some(DriverHandoff(50123, key, "abcdefghijklmnopqrstuvwxyz012345"))): @unchecked
+    s.completeAuth("code", state, state) shouldBe Right("the-jwt")
 
   it should "prefer the id_token over the access_token (edge validates aud == clientId)" in:
     val s = svc((_, _) => Right("""{"access_token":"opaque","id_token":"the-jwt"}"""))

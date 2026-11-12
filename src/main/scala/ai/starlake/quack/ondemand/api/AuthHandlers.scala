@@ -7,6 +7,7 @@ import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
   AuthenticationService,
   DatabaseAuthenticator,
+  DriverHandoff,
   IdentityNaming,
   OidcScope,
   OidcSsoService,
@@ -270,29 +271,51 @@ final class AuthHandlers(
       state: Option[String],
       stateCookie: Option[String],
       forwardedProto: Option[String]
-  ): IO[(StatusCode, String, CookieValueWithMeta, CookieValueWithMeta)] = IO.blocking {
+  ): IO[(StatusCode, String, Option[CookieValueWithMeta], CookieValueWithMeta)] = IO.blocking {
     oidc match
       case None =>
         (
           StatusCode.Found,
           "/ui/?error=auth_mode_disabled",
-          clearCookie(forwardedProto),
+          Some(clearCookie(forwardedProto)),
           clearStateCookie(forwardedProto)
         )
       case Some(svc) =>
+        val now = System.currentTimeMillis()
         svc.completeAuth(
           code.getOrElse(""),
           state.getOrElse(""),
           stateCookie.getOrElse(""),
-          System.currentTimeMillis()
+          now
         ) match
           case Left(err) =>
-            (
-              StatusCode.Found,
-              s"/ui/?error=${err.code}",
-              clearCookie(forwardedProto),
-              clearStateCookie(forwardedProto)
-            )
+            // A failed login started for a JDBC driver goes to the driver, which then fails at
+            // once; the browser's console session is left as it is.
+            state.flatMap(svc.handoffOf(_, now)) match
+              case Some(h) =>
+                (
+                  StatusCode.Found,
+                  DriverHandoff.errorLocation(h, err.code),
+                  None,
+                  clearStateCookie(forwardedProto)
+                )
+              case None =>
+                (
+                  StatusCode.Found,
+                  s"/ui/?error=${err.code}",
+                  Some(clearCookie(forwardedProto)),
+                  clearStateCookie(forwardedProto)
+                )
+          case Right(result) if result.handoff.isDefined =>
+            // A JDBC driver's login: the validated id_token goes to the driver, encrypted to its
+            // key, and no console session is minted. The Flight handshake makes its own checks
+            // of the identity (provisioning, pool access) when the driver presents the token.
+            val h        = result.handoff.get
+            val location = result.scope match
+              case OidcScope.Tenant(t) if tenantSsoEnabled(t) =>
+                DriverHandoff.deliver(h, result.idToken)
+              case _ => DriverHandoff.errorLocation(h, DriverHandoff.OidcNotConfigured)
+            (StatusCode.Found, location, None, clearStateCookie(forwardedProto))
           case Right(result) if result.scope match
                 case OidcScope.System    => false
                 case OidcScope.Tenant(t) => !tenantSsoEnabled(t)
@@ -300,7 +323,7 @@ final class AuthHandlers(
             (
               StatusCode.Found,
               "/ui/?error=oidc_not_configured",
-              clearCookie(forwardedProto),
+              Some(clearCookie(forwardedProto)),
               clearStateCookie(forwardedProto)
             )
           case Right(result) =>
@@ -320,11 +343,11 @@ final class AuthHandlers(
                 (
                   StatusCode.Found,
                   s"/ui/?error=${err.error}",
-                  clearCookie(forwardedProto),
+                  Some(clearCookie(forwardedProto)),
                   clearStateCookie(forwardedProto)
                 )
               case Right((cookie, _)) =>
-                (StatusCode.Found, result.returnTo, cookie, clearStateCookie(forwardedProto))
+                (StatusCode.Found, result.returnTo, Some(cookie), clearStateCookie(forwardedProto))
   }
 
   /** Public logout of the browser's SSO session: always the same redirect, with the cookie cleared.
@@ -383,21 +406,110 @@ final class AuthHandlers(
       error: Option[String],
       stateCookie: Option[String],
       forwardedProto: Option[String]
-  ): IO[(String, CookieValueWithMeta)] = IO.blocking {
-    val clear = sqlTokenStateCookie("", forwardedProto, 0L)
-    val html  =
-      if error.exists(_.nonEmpty) then SqlTokenPage.error(error.get)
-      else
-        val result = for
-          svc <- sqlToken.filter(_.enabled).toRight("OAuth is not configured")
-          c   <- code.filter(_.nonEmpty).toRight("missing authorization code")
-          s   <- state.filter(_.nonEmpty).toRight("missing state")
-          ck  <- stateCookie.filter(_.nonEmpty).toRight("missing state cookie")
-          tok <- svc.completeAuth(c, s, ck)
-        yield tok
-        result.fold(SqlTokenPage.error, SqlTokenPage.success)
-    (html, clear)
+  ): IO[(StatusCode, Option[String], String, CookieValueWithMeta)] = IO.blocking {
+    val clear   = sqlTokenStateCookie("", forwardedProto, 0L)
+    val enabled = sqlToken.filter(_.enabled)
+    val result  =
+      for
+        svc <- enabled.toRight("OAuth is not configured")
+        c   <- code.filter(_.nonEmpty).toRight("missing authorization code")
+        s   <- state.filter(_.nonEmpty).toRight("missing state")
+        ck  <- stateCookie.filter(_.nonEmpty).toRight("missing state cookie")
+        tok <- svc.completeAuth(c, s, ck)
+      yield tok
+    // A login started for a JDBC driver: the token (or the failure) goes to the driver's listener.
+    // Only a state this manager signed, and still fresh, names one.
+    enabled.flatMap(svc => state.flatMap(svc.handoffOf)) match
+      case Some(h) =>
+        val location =
+          error.filter(_.nonEmpty) match
+            case Some(e) => DriverHandoff.errorLocation(h, e)
+            case None    =>
+              result.fold(
+                _ => DriverHandoff.errorLocation(h, DriverHandoff.IdpError),
+                DriverHandoff.deliver(h, _)
+              )
+        (StatusCode.Found, Some(location), "", clear)
+      case None =>
+        val html =
+          if error.exists(_.nonEmpty) then SqlTokenPage.error(error.get)
+          else result.fold(SqlTokenPage.error, SqlTokenPage.success)
+        (StatusCode.Ok, None, html, clear)
   }
+
+  // ---- Browser login for a JDBC driver (/api/auth/driver/start) ----
+
+  /** Start a JDBC driver's browser login (`authenticator=externalbrowser`). The parameters are
+    * checked first (`400 invalid_driver_request`, naming the parameter). Then the realm: the
+    * tenant's own IdP when the tenant signs in through one (its console SSO client, whose tokens
+    * the Flight edge validates for that tenant), else the data-plane provider of the SQL-token
+    * page, else the driver is told `oidc_not_configured` at once. The handoff rides in the signed
+    * OAuth state, so the callback hands this login, and no other, to the driver.
+    */
+  def driverStart(
+      tenant: Option[String],
+      port: Option[String],
+      key: Option[String],
+      state: Option[String],
+      forwardedProto: Option[String]
+  ): Out[(StatusCode, String, Option[CookieValueWithMeta], Option[CookieValueWithMeta])] =
+    IO.blocking {
+      DriverHandoff.parse(port, key, state) match
+        case Left(reason) =>
+          Left((StatusCode.BadRequest, ErrorResponse("invalid_driver_request", reason)))
+        case Right(h) =>
+          val tenantId =
+            tenant.map(_.trim).filter(_.nonEmpty).map(t => resolveTenant(t).getOrElse(t))
+          val viaTenant =
+            for
+              t   <- tenantId.filter(tenantSsoEnabled)
+              svc <- oidc
+            yield (svc, t)
+          viaTenant match
+            case Some((svc, t)) =>
+              val seed = java.util.UUID.randomUUID().toString
+              svc.startAuth(OidcScope.Tenant(t), "/ui/", seed, Some(h)) match
+                case Right(req) =>
+                  Right(
+                    (
+                      StatusCode.Found,
+                      req.redirectLocation,
+                      Some(stateCookie(req.stateCookieValue, forwardedProto)),
+                      None
+                    )
+                  )
+                case Left(err) =>
+                  Right((StatusCode.Found, DriverHandoff.errorLocation(h, err.code), None, None))
+            case None =>
+              sqlToken.filter(_.enabled).map(_.startUrl(Some(h))) match
+                case Some(Right((url, st))) =>
+                  Right(
+                    (
+                      StatusCode.Found,
+                      url,
+                      None,
+                      Some(sqlTokenStateCookie(st, forwardedProto, 600L))
+                    )
+                  )
+                case Some(Left(_)) =>
+                  Right(
+                    (
+                      StatusCode.Found,
+                      DriverHandoff.errorLocation(h, "discovery_failed"),
+                      None,
+                      None
+                    )
+                  )
+                case None =>
+                  Right(
+                    (
+                      StatusCode.Found,
+                      DriverHandoff.errorLocation(h, DriverHandoff.OidcNotConfigured),
+                      None,
+                      None
+                    )
+                  )
+    }
 
   /** Password login. The tenant is named by its id, in any letter case (not by its display name).
     *

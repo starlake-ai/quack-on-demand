@@ -24,7 +24,9 @@ final case class OidcCallbackResult(
     profile: AuthenticatedProfile,
     scope: OidcScope,
     returnTo: String,
-    idToken: String
+    idToken: String,
+    /** The JDBC driver this login was started for, if any ([[DriverHandoff]]). */
+    handoff: Option[DriverHandoff] = None
 )
 
 /** Server-side authorization-code flow for admin-UI SSO. Provider-agnostic: endpoints come from
@@ -53,7 +55,8 @@ class OidcSsoService(
   def startAuth(
       scope: OidcScope,
       returnTo: String,
-      seed: String
+      seed: String,
+      handoff: Option[DriverHandoff] = None
   ): Either[OidcSsoError, OidcAuthRequest] =
     resolver.endpointsFor(scope, mgmt).map { ep =>
       val nonce  = codec.genNonce(seed)
@@ -62,7 +65,14 @@ class OidcSsoService(
         case OidcScope.Tenant(t) => Some(t)
         case OidcScope.System    => None
       val claims =
-        OidcStateClaims(scopeTag(scope), tenant, nonce, safeReturn(returnTo), nowMillis())
+        OidcStateClaims(
+          scopeTag(scope),
+          tenant,
+          nonce,
+          safeReturn(returnTo),
+          nowMillis(),
+          handoff.map(_.encoded)
+        )
       val state       = codec.sign(claims)
       val cookieValue = s"$state::${pkce.verifier}"
       val location    = s"${ep.authorizeUrl}?response_type=code" +
@@ -110,7 +120,15 @@ class OidcSsoService(
                         case Left(_)        => Left(OidcSsoError.IdpError)
                         case Right(profile) =>
                           if profile.claims.get("nonce").contains(claims.nonce) then
-                            Right(OidcCallbackResult(profile, scope, claims.returnTo, idToken))
+                            Right(
+                              OidcCallbackResult(
+                                profile,
+                                scope,
+                                claims.returnTo,
+                                idToken,
+                                claims.handoff.flatMap(DriverHandoff.decode)
+                              )
+                            )
                           else Left(OidcSsoError.IdpError)
                   }
                 }
@@ -129,6 +147,17 @@ class OidcSsoService(
       case NonFatal(e) =>
         logger.warn(s"OIDC id_token validation failed: ${e.getClass.getSimpleName}")
         Left(e.getClass.getSimpleName)
+
+  /** The driver handoff a state signed by this manager carries, when it is still fresh: what a
+    * failed callback reads to tell the driver at once.
+    */
+  def handoffOf(state: String, now: Long): Option[DriverHandoff] =
+    scala.util
+      .Try(codec.verify(state, now))
+      .toOption
+      .flatMap(_.toOption)
+      .flatMap(_.handoff)
+      .flatMap(DriverHandoff.decode)
 
   def endSessionUrl(scope: OidcScope, idTokenHint: Option[String]): Option[String] =
     resolver

@@ -11,7 +11,11 @@ final case class OidcStateClaims(
     tenant: Option[String],
     nonce: String,
     returnTo: String,
-    iatMillis: Long
+    iatMillis: Long,
+    /** A JDBC driver's handoff ([[DriverHandoff.encoded]]) when the login was started for one, so
+      * the callback hands the token to the driver rather than minting a console session.
+      */
+    handoff: Option[String] = None
 )
 
 final case class OidcPkce(verifier: String, challenge: String)
@@ -42,7 +46,8 @@ class OidcStateCodec(secret: String, ttlMillis: Long):
       enc(claims.tenant.getOrElse("")),
       enc(claims.nonce),
       enc(claims.returnTo),
-      claims.iatMillis.toString
+      claims.iatMillis.toString,
+      enc(claims.handoff.getOrElse(""))
     ).mkString("|")
     s"${enc(payload)}.${hmac(payload)}"
 
@@ -52,8 +57,9 @@ class OidcStateCodec(secret: String, ttlMillis: Long):
         val payload = dec(encPayload)
         if !constantTimeEq(hmac(payload), sig) then Left("state signature mismatch")
         else
+          // A state signed before the handoff field existed has five fields and no handoff.
           payload.split('|') match
-            case Array(s, t, n, r, iat) =>
+            case Array(s, t, n, r, iat, rest*) if rest.length <= 1 =>
               val iatMillis = iat.toLong
               if nowMillis - iatMillis > ttlMillis then Left("state expired")
               else
@@ -63,7 +69,8 @@ class OidcStateCodec(secret: String, ttlMillis: Long):
                     tenant = Option(dec(t)).filter(_.nonEmpty),
                     nonce = dec(n),
                     returnTo = dec(r),
-                    iatMillis = iatMillis
+                    iatMillis = iatMillis,
+                    handoff = rest.headOption.map(dec).filter(_.nonEmpty)
                   )
                 )
             case _ => Left("state payload malformed")

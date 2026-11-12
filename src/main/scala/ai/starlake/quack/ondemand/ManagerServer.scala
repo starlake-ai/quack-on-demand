@@ -153,6 +153,7 @@ final class ManagerServer(
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
       path == "/api/auth/oidc/logout" ||
       path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
+      path == "/api/auth/driver/start" ||
       // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
       // Gated on the integration flag, not just on the route being unmounted when off: with
       // SL_ENABLED=false an anonymous POST here must fall through to the same 401 (with its
@@ -945,6 +946,9 @@ final class ManagerServer(
       AuthEndpoints.sqlTokenCallback.serverLogicSuccess {
         case (code, state, error, cookie, proto) =>
           auth.sqlTokenCallback(code, state, error, cookie, proto)
+      },
+      AuthEndpoints.driverStart.serverLogic { case (tenant, port, key, state, proto) =>
+        auth.driverStart(tenant, port, key, state, proto)
       }
     )
 

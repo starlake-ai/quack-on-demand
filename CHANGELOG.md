@@ -16,6 +16,15 @@
 
 ### Added
 
+- A browser login for JDBC drivers: `GET /api/auth/driver/start?port=&key=&state=[&tenant=]`
+  is what a driver opens for `authenticator=externalbrowser` (the `qod-jdbc` wrapper around the
+  Arrow Flight SQL JDBC driver). The manager signs the driver's loopback port, its ephemeral P-256
+  public key and its state into the OAuth state, sends the browser to the tenant's own identity
+  provider (its console SSO client) or, for a tenant without one, to the data-plane provider of
+  the SQL-token page, and the callback then redirects to `http://127.0.0.1:<port>/qod/callback`
+  with the `id_token` encrypted to that key (JWE, `ECDH-ES` + `A256GCM`). The IdP needs no new
+  redirect URI, nothing is stored on the manager, and a login started for a driver mints no
+  console session. A failure reaches the driver at once as `error=<code>`.
 - The console says why a node is unhealthy: on the dashboard and the pool page its badge reads
   `unhealthy · <reason> · <how long>`, with the manager's one-line explanation on hover (and under
   the badge on the pool page). `/api/pool/list` and `qod pool list` carry it on each node as
@@ -27,6 +36,12 @@
 
 ### Fixed
 
+- A FlightSQL client that sends its identity provider's token on every call, as the Arrow Flight
+  SQL JDBC driver does with `token=`, keeps one session: each call bound a session of its own, so
+  the driver's first statement failed with "prepared statement handle does not belong to this
+  session" (a token pasted from the SQL-token page included), and every call left a session behind
+  for `QOD_SESSION_TTL_SEC`. Each call is still authenticated in full; a call with the same token,
+  tenant, pool, realm and branch lands in the session the first one bound while it lives.
 - A manager on the local runtime replaces the nodes of a row another runtime wrote against the same
   control plane (a fleet manager that ran before it): such a row carries no process id and named
   a server nothing runs any more, so its nodes stayed unhealthy forever. The replacement is logged

@@ -143,13 +143,15 @@ object AuthEndpoints:
       .out(header[String]("Location"))
       .out(setCookie(OidcSsoService.STATE_COOKIE))
 
+  // The session cookie is optional: a login started for a JDBC driver (`driver/start`) hands the
+  // token to the driver and leaves the browser's console session as it is.
   val oidcCallback: PublicEndpoint[
     (Option[String], Option[String], Option[String], Option[String]),
     Unit,
     (
         sttp.model.StatusCode,
         String,
-        sttp.model.headers.CookieValueWithMeta,
+        Option[sttp.model.headers.CookieValueWithMeta],
         sttp.model.headers.CookieValueWithMeta
     ),
     Any
@@ -162,7 +164,7 @@ object AuthEndpoints:
       .in(header[Option[String]]("X-Forwarded-Proto"))
       .out(statusCode)
       .out(header[String]("Location"))
-      .out(setCookie(SessionTokenStore.CookieName))
+      .out(setCookieOpt(SessionTokenStore.CookieName))
       .out(setCookie(OidcSsoService.STATE_COOKIE))
 
   val oidcLogout: PublicEndpoint[
@@ -196,10 +198,12 @@ object AuthEndpoints:
       .out(header[String]("Location"))
       .out(setCookie("qod_sqltoken_state"))
 
+  // 200 with the token page, or, for a login started by a JDBC driver (`driver/start`), 302 to the
+  // driver's listener on 127.0.0.1 with the token encrypted to the driver's key.
   val sqlTokenCallback: PublicEndpoint[
     (Option[String], Option[String], Option[String], Option[String], Option[String]),
     Unit,
-    (String, sttp.model.headers.CookieValueWithMeta),
+    (sttp.model.StatusCode, Option[String], String, sttp.model.headers.CookieValueWithMeta),
     Any
   ] =
     endpoint.get
@@ -209,8 +213,39 @@ object AuthEndpoints:
       .in(query[Option[String]]("error"))
       .in(cookie[Option[String]]("qod_sqltoken_state"))
       .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(statusCode)
+      .out(header[Option[String]]("Location"))
       .out(htmlBodyUtf8)
       .out(setCookie("qod_sqltoken_state"))
+
+  // Browser login for a JDBC driver (`authenticator=externalbrowser`). The driver opens this URL
+  // with its listener's port on 127.0.0.1, its ephemeral P-256 public key (base64url of a JWK) and
+  // a state of its own; the manager signs them into the OAuth state and 302s to the tenant's IdP
+  // (its console SSO client) or else the data-plane provider. The callback then 302s to
+  // `http://127.0.0.1:<port>/qod/callback` with the id_token encrypted to the key. A refused
+  // parameter is a 400; a login that cannot start goes to the listener with `error=<code>`.
+  val driverStart: PublicEndpoint[
+    (Option[String], Option[String], Option[String], Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    (
+        sttp.model.StatusCode,
+        String,
+        Option[sttp.model.headers.CookieValueWithMeta],
+        Option[sttp.model.headers.CookieValueWithMeta]
+    ),
+    Any
+  ] =
+    base.get
+      .in("auth" / "driver" / "start")
+      .in(query[Option[String]]("tenant"))
+      .in(query[Option[String]]("port"))
+      .in(query[Option[String]]("key"))
+      .in(query[Option[String]]("state"))
+      .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(statusCode)
+      .out(header[String]("Location"))
+      .out(setCookieOpt(OidcSsoService.STATE_COOKIE))
+      .out(setCookieOpt("qod_sqltoken_state"))
 
   // Starlake SSO handoff. Mounted only when `config.slIntegrationOn` (see ManagerServer).
   //

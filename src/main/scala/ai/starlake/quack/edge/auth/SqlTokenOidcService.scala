@@ -94,26 +94,43 @@ class SqlTokenOidcService(
     val raw = mac.doFinal(value.getBytes(StandardCharsets.UTF_8))
     raw.map("%02x".format(_)).mkString
 
-  /** state = "<nonce>.<issuedMillis>.<hmac>" so the callback can verify integrity + freshness. */
-  private def mintState(): String =
+  private val b64  = java.util.Base64.getUrlEncoder.withoutPadding()
+  private val b64d = java.util.Base64.getUrlDecoder
+
+  /** state = "<nonce>.<issuedMillis>.<handoff>.<hmac>" so the callback can verify integrity and
+    * freshness. `<handoff>` is `-`, or the base64url of a JDBC driver's [[DriverHandoff]] when the
+    * login was started for one.
+    */
+  private def mintState(handoff: Option[DriverHandoff]): String =
     val nonce = java.util.UUID.randomUUID().toString
-    val body  = s"$nonce.${nowMillis()}"
+    val h = handoff.fold("-")(d => b64.encodeToString(d.encoded.getBytes(StandardCharsets.UTF_8)))
+    val body = s"$nonce.${nowMillis()}.$h"
     s"$body.${sign(body)}"
 
-  private def verifyState(state: String): Boolean =
+  /** The handoff segment of a state whose signature and freshness hold, else None. */
+  private def verifiedHandoffSegment(state: String): Option[String] =
     state.split('.') match
-      case Array(nonce, ts, sig) =>
+      case Array(nonce, ts, h, sig) =>
         val fresh = ts.toLongOption.exists(t => nowMillis() - t <= 600000L) // 10 min
         val sigOk = java.security.MessageDigest.isEqual(
-          sign(s"$nonce.$ts").getBytes(StandardCharsets.UTF_8),
+          sign(s"$nonce.$ts.$h").getBytes(StandardCharsets.UTF_8),
           sig.getBytes(StandardCharsets.UTF_8)
         )
-        sigOk && fresh
-      case _ => false
+        Option.when(sigOk && fresh)(h)
+      case _ => None
 
-  def startUrl(): Either[String, (String, String)] =
+  private def verifyState(state: String): Boolean = verifiedHandoffSegment(state).isDefined
+
+  /** The JDBC driver a state signed here was started for, when the state is still valid. */
+  def handoffOf(state: String): Option[DriverHandoff] =
+    verifiedHandoffSegment(state)
+      .filter(_ != "-")
+      .flatMap(h => scala.util.Try(new String(b64d.decode(h), StandardCharsets.UTF_8)).toOption)
+      .flatMap(DriverHandoff.decode)
+
+  def startUrl(handoff: Option[DriverHandoff] = None): Either[String, (String, String)] =
     endpoints.map { case (authorize, _, clientId, _) =>
-      val state = mintState()
+      val state = mintState(handoff)
       val url   = s"$authorize?response_type=code" +
         s"&client_id=${enc(clientId)}" +
         s"&redirect_uri=${enc(redirectUri)}" +
