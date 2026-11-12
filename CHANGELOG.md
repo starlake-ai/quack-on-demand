@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.0
+
 ### Upgrading
 
 - The manager needs Java 25 or later (it needed 21). The Docker image runs on Temurin 25. When no
