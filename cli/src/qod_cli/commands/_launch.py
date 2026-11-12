@@ -194,13 +194,13 @@ def resolve_java() -> str:
         typer.echo(
             f"No Java {launcher.MIN_JAVA_MAJOR}+ found, and this system uses musl libc, "
             "which Temurin builds\n"
-            "do not support. Install a system JRE instead, e.g.: apk add openjdk21-jre",
+            "do not support. Install a system JRE instead, e.g.: apk add openjdk25-jre",
             err=True,
         )
         raise typer.Exit(1)
     typer.echo(
-        f"No Java {launcher.MIN_JAVA_MAJOR}+ found; downloading a Temurin "
-        f"{launcher.JRE_MAJOR} JRE (about 50 MB, cached for next time)...",
+        f"No Java {launcher.MIN_JAVA_MAJOR}+ found; downloading a Java "
+        f"{launcher.JRE_MAJOR} runtime (cached for next time)...",
         err=True,
     )
     return launcher.ensure_jre()

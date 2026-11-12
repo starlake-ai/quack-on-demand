@@ -3,7 +3,7 @@
 # =========================================================================
 #  Stage 1 - Build the uber-jar (UI + Scala)
 # =========================================================================
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:25-jdk AS build
 
 # sbt + node (the project's `sbt assembly` shells out to `npm run build` for
 # the React admin console).
@@ -80,7 +80,7 @@ EOF
 # =========================================================================
 #  Stage 2 - Runtime
 # =========================================================================
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:25-jre
 
 ARG DUCKDB_VERSION=2.0.0
 ARG TARGETARCH
@@ -166,6 +166,8 @@ ENV QOD_ON_DEMAND_HOST=0.0.0.0 \
 # without it Arrow picks netty and crashes with NoSuchFieldError: chunkSize.
 # Add-Opens is set in the jar manifest (Java 17 and later block the reflection
 # Arrow's unsafe allocator needs unless it is opened), so no extra --add-opens
-# flags here. The manager needs JDK 21 or later; this image has it.
+# flags here. The manager needs JDK 25 or later; this image has it.
+# --sun-misc-unsafe-memory-access=allow keeps JDK 25 from warning at every boot about the
+# sun.misc.Unsafe use of Scala's lazy vals, Arrow and Netty.
 # sh expands JAVA_OPTS; exec keeps the JVM as tini's child, so it gets the signals.
-ENTRYPOINT ["/usr/bin/tini", "--", "sh", "-c", "exec java -Darrow.allocation.manager.type=Unsafe $JAVA_OPTS -jar /app/quack-on-demand.jar \"$@\"", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "sh", "-c", "exec java --sun-misc-unsafe-memory-access=allow -Darrow.allocation.manager.type=Unsafe $JAVA_OPTS -jar /app/quack-on-demand.jar \"$@\"", "--"]

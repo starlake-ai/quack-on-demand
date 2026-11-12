@@ -24,11 +24,14 @@ GITHUB_REPO = "starlake-ai/quack-on-demand"
 # Without this flag Arrow auto-picks the netty allocator, which crashes against
 # the newer Netty bundled in the assembly (NoSuchFieldError: chunkSize).
 ARROW_ALLOCATOR_FLAG = "-Darrow.allocation.manager.type=Unsafe"
+# Scala's lazy vals, Arrow and Netty use sun.misc.Unsafe memory access, which JDK 25 warns about
+# at every boot unless it is allowed by name. The jar manifest cannot carry it.
+UNSAFE_ACCESS_FLAG = "--sun-misc-unsafe-memory-access=allow"
 
-# Matches the toolchain the jar is built and shipped with (Temurin 21 in the
+# Matches the toolchain the jar is built and shipped with (Temurin 25 in the
 # Docker image and the auto-provisioned JRE); older JVMs are refused rather
 # than risking runtime surprises on a codepath we never test.
-MIN_JAVA_MAJOR = 21
+MIN_JAVA_MAJOR = 25
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _JAVA_VERSION_RE = re.compile(r'version "(\d+)(?:\.(\d+))?')
@@ -173,7 +176,7 @@ def build_jar_command(
     import shlex
 
     opts = shlex.split(java_opts) if java_opts else []
-    return [java, *opts, ARROW_ALLOCATOR_FLAG, "-jar", jar, *args]
+    return [java, *opts, UNSAFE_ACCESS_FLAG, ARROW_ALLOCATOR_FLAG, "-jar", jar, *args]
 
 
 class IntegrityError(RuntimeError):
@@ -369,10 +372,12 @@ def ensure_jar(version: str, cache_dir: Path | None = None) -> Path:
     return jar
 
 
-# Temurin JRE auto-provisioning (used when no system JVM is found). Adoptium
-# ships glibc Linux builds only, hence the musl refusal in the demo command.
+# Java runtime auto-provisioning (used when no system JVM is found): a Temurin
+# JRE from Adoptium, which ships glibc Linux builds only, hence the musl refusal
+# in the demo command. Adoptium has no Windows on ARM build of Java 25, so that
+# platform gets the Microsoft Build of OpenJDK (a full JDK) instead.
 
-JRE_MAJOR = 21
+JRE_MAJOR = 25
 
 _ADOPTIUM_OS = {"darwin": "mac", "linux": "linux", "win32": "windows"}
 _ADOPTIUM_ARCH = {"x86_64": "x64", "amd64": "x64", "arm64": "aarch64", "aarch64": "aarch64"}
@@ -385,6 +390,36 @@ def adoptium_assets_url(os_name: str, arch: str) -> str:
         f"https://api.adoptium.net/v3/assets/latest/{JRE_MAJOR}/hotspot"
         f"?architecture={adoptium_arch}&image_type=jre&os={adoptium_os}&vendor=eclipse"
     )
+
+
+def microsoft_jdk_url(arch: str) -> str | None:
+    """The Microsoft Build of OpenJDK for platforms Adoptium has no JRE for
+    (Windows on ARM), else None."""
+    if _ADOPTIUM_ARCH.get(arch.lower()) != "aarch64":
+        return None
+    return f"https://aka.ms/download-jdk/microsoft-jdk-{JRE_MAJOR}-windows-aarch64.zip"
+
+
+def _jre_package(os_name: str, arch: str) -> tuple[str, str, str]:
+    """(download link, sha256, label) of the Java runtime to provision."""
+    resp = httpx.get(adoptium_assets_url(os_name, arch), follow_redirects=True, timeout=30)
+    resp.raise_for_status()
+    assets = resp.json()
+    if assets:
+        # /v3/assets/latest/... returns objects with a singular `binary` holding
+        # `package` directly (not `binaries[]`, which is the feature_releases shape).
+        package = assets[0]["binary"]["package"]
+        return package["link"], package["checksum"], f"Temurin {JRE_MAJOR} JRE"
+    link = microsoft_jdk_url(arch) if os_name == "win32" else None
+    if link is None:
+        raise RuntimeError(
+            f"Adoptium has no Temurin {JRE_MAJOR} JRE for {os_name}/{arch}; "
+            f"install Java {JRE_MAJOR} or later and retry"
+        )
+    sums = httpx.get(link + ".sha256sum.txt", follow_redirects=True, timeout=30)
+    sums.raise_for_status()
+    checksum = sums.text.split()[0].lower() if sums.text.split() else ""
+    return link, checksum, f"Microsoft Build of OpenJDK {JRE_MAJOR}"
 
 
 def is_musl(root: Path = Path("/")) -> bool:
@@ -406,33 +441,28 @@ def ensure_jre(
     os_name: str = sys.platform,
     arch: str | None = None,
 ) -> str:
-    """Path to a cached Temurin JRE's java, downloading it from Adoptium on
-    first use (checksum-verified from the API metadata)."""
+    """Path to a cached Java runtime's java, downloading it on first use
+    (checksum-verified from the publisher's metadata). The default cache is
+    per Java release, so a runtime cached for an older minimum is not reused."""
     import platform
     import tarfile
     import zipfile
 
-    cache_dir = cache_dir if cache_dir is not None else default_cache_dir() / "jre"
+    cache_dir = cache_dir if cache_dir is not None else default_cache_dir() / f"jre-{JRE_MAJOR}"
     cache_dir.mkdir(parents=True, exist_ok=True)
     existing = _find_extracted_java(cache_dir)
     if existing:
         return existing
 
     arch = arch if arch is not None else platform.machine()
-    resp = httpx.get(adoptium_assets_url(os_name, arch), follow_redirects=True, timeout=30)
-    resp.raise_for_status()
-    # /v3/assets/latest/... returns objects with a singular `binary` holding
-    # `package` directly (not `binaries[]`, which is the feature_releases shape).
-    package = resp.json()[0]["binary"]["package"]
+    link, checksum, label = _jre_package(os_name, arch)
 
-    suffix = ".zip" if package["link"].endswith(".zip") else ".tar.gz"
-    archive = cache_dir / f"temurin-jre{suffix}"
+    suffix = ".zip" if link.endswith(".zip") else ".tar.gz"
+    archive = cache_dir / f"jre{suffix}"
     try:
-        actual = _download(package["link"], archive, f"Temurin {JRE_MAJOR} JRE")
-        if actual != package["checksum"]:
-            raise IntegrityError(
-                f"sha256 mismatch for Temurin JRE: expected {package['checksum']}, got {actual}"
-            )
+        actual = _download(link, archive, label)
+        if actual != checksum:
+            raise IntegrityError(f"sha256 mismatch for {label}: expected {checksum}, got {actual}")
         if suffix == ".zip":
             with zipfile.ZipFile(archive) as z:
                 z.extractall(cache_dir)
@@ -447,7 +477,7 @@ def ensure_jre(
 
     java = _find_extracted_java(cache_dir)
     if java is None:
-        raise RuntimeError(f"no bin/java found after extracting the Temurin JRE in {cache_dir}")
+        raise RuntimeError(f"no bin/java found after extracting the Java runtime in {cache_dir}")
     return java
 
 

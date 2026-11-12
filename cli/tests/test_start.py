@@ -61,8 +61,9 @@ def test_start_launches_manager_without_demo_arg(runner, wired):
 
     result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
     assert result.exit_code == 0, result.output
-    assert wired["cmd"][:4] == [
+    assert wired["cmd"][:5] == [
         "/usr/bin/java",
+        "--sun-misc-unsafe-memory-access=allow",
         "-Darrow.allocation.manager.type=Unsafe",
         "-jar",
         str(wired["jar"]),

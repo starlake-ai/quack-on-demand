@@ -186,7 +186,7 @@ object BootPreflight extends LazyLogging:
       "read (a descriptor and its buffers) for as long as the client lives. On this JDK the " +
       "client goes only at a garbage collection, and on some updates the connection never does, " +
       "so anyone able to make the manager read such an answer can run it out of descriptors or " +
-      "memory. Run the manager on JDK 21 or later."
+      "memory. Run the manager on JDK 25 or later."
 
   /** Pure gate: a JDK below 21 cannot close what a client holds (`BoundedHttp.canShutdownNow`), and
     * the build can still compile on 17, so `scripts/run-jar.sh` does not refuse such a JDK. The

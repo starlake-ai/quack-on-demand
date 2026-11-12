@@ -214,7 +214,7 @@ if ($DemoExplicit -and -not ($LoadTpch -or $LoadTpcds -or $LoadSsb)) {
 }
 
 # ---- sbt bootstrap (download into .sbt-bootstrap\ when not on PATH) --------
-$SbtBootstrapVersion = Get-EnvOr 'SBT_BOOTSTRAP_VERSION' '1.12.11'
+$SbtBootstrapVersion = Get-EnvOr 'SBT_BOOTSTRAP_VERSION' '1.13.1'
 function Resolve-Sbt {
   $sbt = Get-Command sbt, sbt.bat -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($sbt) { return $sbt.Source }
@@ -399,7 +399,7 @@ Install-QodNode $NodeRelease
 # ---- Resolve java ----
 $JavaBin = if (-not [string]::IsNullOrEmpty($env:JAVA_HOME)) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { 'java' }
 if (-not (Get-Command $JavaBin -ErrorAction SilentlyContinue)) {
-  Write-Error "java not found. Install JDK 21+ or set JAVA_HOME."; exit 1
+  Write-Error "java not found. Install JDK 25+ or set JAVA_HOME."; exit 1
 }
 # `java -version` prints to stderr; the 2>&1 merge would wrap it in a terminating
 # NativeCommandError under ErrorActionPreference=Stop, so drop to Continue for
@@ -583,10 +583,10 @@ keep their memory and ports until killed. Kill them and retry
 # ---- Run ----
 # The assembly jar carries Add-Opens in its manifest (JEP 261), so Arrow's unsafe
 # allocator, which reflects into java.nio, needs no extra flags (Java 17 and later
-# block that reflection unless it is opened). The manager itself needs JDK 21 or
+# block that reflection unless it is opened). The manager itself needs JDK 25 or
 # later. The system property pins the allocator - without it Arrow picks netty and
 # crashes (NoSuchFieldError: chunkSize).
-$javaArgs = @('-Darrow.allocation.manager.type=Unsafe')
+$javaArgs = @('--sun-misc-unsafe-memory-access=allow', '-Darrow.allocation.manager.type=Unsafe')
 if (-not [string]::IsNullOrEmpty($env:JAVA_OPTS)) { $javaArgs += ($env:JAVA_OPTS -split '\s+') }
 $javaArgs += @('-jar', $Jar)
 & $JavaBin @javaArgs

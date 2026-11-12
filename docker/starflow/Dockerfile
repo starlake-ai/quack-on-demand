@@ -8,7 +8,7 @@
 #
 #   docker compose --profile starflow build starflow
 
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:25-jre
 
 ARG STARFLOW_VERSION=1.8.8
 ARG STARLAKE_SH_URL=https://raw.githubusercontent.com/starlake-ai/starflow/master/distrib/starlake.sh
