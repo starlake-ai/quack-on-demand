@@ -176,7 +176,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     // A transport failure, even of the probe's handle, is not the node refusing it.
     adapter.probe(node("p2")).unsafeRunSync() shouldBe
-      ProbeVerdict.Failed(QuackError.Transient("connection refused").toString)
+      ProbeVerdict.Failed(QuackError.Transient("connection refused"))
     tracker.snapshot("p2").totalServed shouldBe 0L
 
   it should "fail on a permanent failure without touching tracker counters" in:
@@ -190,7 +190,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     val adapter =
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.probe(node("p3")).unsafeRunSync() shouldBe
-      ProbeVerdict.Failed(QuackError.Permanent("400").toString)
+      ProbeVerdict.Failed(QuackError.Permanent("400"))
     tracker.snapshot("p3").totalServed shouldBe 0L
 
   "send with stampPrelude" should "route to queryStamped when supplied and to query when not" in:
@@ -782,7 +782,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     )
     // Once per refusal: not again on the next tick, nor after a tick that failed otherwise.
     warnings.warning("n-1", refused) shouldBe None
-    warnings.warning("n-1", ProbeVerdict.Failed("down")) shouldBe None
+    warnings.warning("n-1", ProbeVerdict.Failed(QuackError.Transient("down"))) shouldBe None
     warnings.warning("n-1", refused) shouldBe None
     // Another node is named on its own.
     warnings.warning("n-2", refused).isDefined shouldBe true
@@ -811,5 +811,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
   it should "say nothing for a node that is down or does not enforce" in:
     val warnings = new HandleRefusalWarnings
-    warnings.warning("n-1", ProbeVerdict.Failed("connection refused")) shouldBe None
+    warnings.warning(
+      "n-1",
+      ProbeVerdict.Failed(QuackError.Transient("connection refused"))
+    ) shouldBe None
     warnings.warning("n-1", ProbeVerdict.Unenforced) shouldBe None

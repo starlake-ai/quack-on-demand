@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, errorMessage } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry, ActiveStatementInfo } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { NodeHealthBadge } from '../components/NodeHealthBadge';
 import SqlHighlight from '../components/SqlHighlight';
 import { fmtBytes } from '../format';
 import { dashboardPath, poolPath, tenantHome } from '../nav/links';
@@ -287,7 +288,7 @@ export default function Nodes() {
                   <Link to={poolPath(n.tenant, n.tenantDb, n.pool)}>{n.pool}</Link>
                 </td>
                 <td><RoleBadge role={n.role} /></td>
-                <td><HealthBadge healthy={n.healthy} draining={n.draining} quarantined={n.quarantined} /></td>
+                <td><NodeHealthBadge node={n} /></td>
                 <td>
                   <code>{n.serverName ? `${n.serverName} (${n.host}:${n.port})` : `${n.host}:${n.port}`}</code>
                   {n.serverState && n.serverState !== 'reachable' && (
@@ -508,11 +509,4 @@ function StatusBadge({ status }: { status: string }) {
 function RoleBadge({ role }: { role: string }) {
   const cls = `badge role-${role.toLowerCase()}`;
   return <span className={cls}>{role}</span>;
-}
-
-function HealthBadge({ healthy, draining, quarantined }: { healthy: boolean; draining: boolean; quarantined: boolean }) {
-  if (quarantined) return <span className="badge warn">quarantined</span>;
-  if (draining) return <span className="badge warn">draining</span>;
-  if (!healthy) return <span className="badge bad">unhealthy</span>;
-  return <span className="badge good">healthy</span>;
 }

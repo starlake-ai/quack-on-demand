@@ -130,6 +130,38 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
     out.left.toOption.map(_._2.error) shouldBe Some("tenant_db_not_found")
 
+  "listPools" should "say why a node is unhealthy, since when, and drop it once healthy" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .unsafeRunSync()
+    val h = new PoolHandlers(sup, tracker)
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
+    def nodes =
+      h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get.pools.head.nodes
+    val id = nodes.head.nodeId
+    nodes.head.unhealthyReason shouldBe None
+    tracker.setProbedAt(id, 1_700_000_100_000L)
+    tracker.setUnhealthy(
+      id,
+      ai.starlake.quack.route.NodeUnhealthy.unreachable("127.0.0.1", 23901),
+      1_700_000_000_000L
+    )
+    val sick = nodes.find(_.nodeId == id).get
+    sick.healthy shouldBe false
+    sick.unhealthyReason shouldBe Some("unreachable")
+    sick.unhealthyDetail.get should include("127.0.0.1:23901")
+    sick.unhealthySince shouldBe Some("2023-11-14T22:13:20Z")
+    sick.lastProbeAt shouldBe Some("2023-11-14T22:15:00Z")
+    tracker.setHealthy(id, true)
+    val well = nodes.find(_.nodeId == id).get
+    well.unhealthyReason shouldBe None
+    well.unhealthyDetail shouldBe None
+    well.unhealthySince shouldBe None
+    well.lastProbeAt shouldBe Some("2023-11-14T22:15:00Z")
+
   "scalePool" should "fail when pool doesn't exist" in:
     val h   = freshHandlers
     val out = h

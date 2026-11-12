@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{AutoscaleBand, PoolKey, QuantitySyntax}
+import ai.starlake.quack.route.{NodeLoad, NodeUnhealthy}
 import ai.starlake.quack.ondemand.{PoolState, PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.initsql.{InitSqlChecker, InitSqlTrust}
@@ -105,7 +106,11 @@ final class PoolHandlers(
             duckdbSpillBytes = engine.map(_.spillBytes),
             catalogAttachFailures = attachFailuresOf(n.nodeId, n.startedAt),
             serverName = n.serverName,
-            serverState = n.serverName.flatMap(liveness.get)
+            serverState = n.serverName.flatMap(liveness.get),
+            unhealthyReason = PoolHandlers.unhealthyOf(load).map(_.code),
+            unhealthyDetail = PoolHandlers.unhealthyOf(load).map(_.detail),
+            unhealthySince = PoolHandlers.unhealthyOf(load).map(u => PoolHandlers.iso(u.sinceMs)),
+            lastProbeAt = load.lastProbeAtMs.map(PoolHandlers.iso)
           )
         },
         status = PoolHandlers.statusOf(p, blocked = block.isDefined),
@@ -934,6 +939,14 @@ final class PoolHandlers(
             }
 
 object PoolHandlers:
+
+  /** Why a node is unhealthy, for the listing: only while it is, so a reason a later success
+    * cleared never shows on a healthy node.
+    */
+  def unhealthyOf(load: NodeLoad): Option[NodeUnhealthy] = load.unhealthy.filter(_ => !load.healthy)
+
+  /** Epoch milliseconds as the listing writes a time. */
+  def iso(epochMs: Long): String = java.time.Instant.ofEpochMilli(epochMs).toString
 
   /** The `status` `/api/pool/list` reports for a pool, shared with `/api/profile/pools` so both
     * routes speak the same values: `disabled` for a disabled pool, `blocked` for one whose database

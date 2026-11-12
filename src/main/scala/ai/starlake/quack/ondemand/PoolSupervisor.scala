@@ -1636,10 +1636,13 @@ final class PoolSupervisor(
         // (NodeProcess: pid alive AND its start instant matches startedAt) and it either is inside
         // its startup window or accepts a connection; pid-less nodes (k8s) are live iff the labeled
         // pod list contains them. live=None means the backend can't enumerate (local mode /
-        // apiserver blip): treat as alive, heal nothing.
+        // apiserver blip): treat as alive, heal nothing. On a backend whose every node carries a
+        // pid (local), a pid-less row is another runtime's leftover (a fleet run against the same
+        // control plane) that nothing here runs: dead, so it is replaced, never left unhealthy.
         def podAlive(n: RunningNode): Boolean = n.pid match
           case Some(_) => NodeProcess.of(n).isDefined && (isStarting(n) || isReachable(n))
-          case None    => live.fold(true)(_.contains(n.nodeId))
+          case None if backend.recordsPids => false
+          case None                        => live.fold(true)(_.contains(n.nodeId))
 
         // Heal to target: rows beyond distribution.total are pruned, but ONLY rows whose pod is
         // authoritatively absent. Two guards, both deliberate:

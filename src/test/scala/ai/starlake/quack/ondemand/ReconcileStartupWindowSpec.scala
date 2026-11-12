@@ -46,8 +46,14 @@ class ReconcileStartupWindowSpec extends AnyFlatSpec with Matchers:
     def alive: Boolean = handle.exists(_.isAlive)
 
   /** The real local backend, recording every node it starts. */
-  private final class RecordingLocal(min: Int, max: Int, cmd: List[String]) extends QuackBackend:
-    def allowsLocalFiles = true
+  private final class RecordingLocal(
+      min: Int,
+      max: Int,
+      cmd: List[String],
+      pids: Boolean = true
+  ) extends QuackBackend:
+    def allowsLocalFiles              = true
+    override def recordsPids: Boolean = pids
 
     private val inner = new LocalQuackBackend(
       min,
@@ -203,6 +209,48 @@ class ReconcileStartupWindowSpec extends AnyFlatSpec with Matchers:
           stray.waitFor(10, TimeUnit.SECONDS) shouldBe true
         }
       finally kill(stray.toHandle)
+    }
+
+  it should "replace a row another runtime wrote, which carries no pid, on the local runtime" in:
+    // A fleet manager ran against the same control plane before this local one: its rows name a
+    // fleet server and no pid. Nothing here runs them, so they are dead, never left unhealthy.
+    assume(!LocalQuackBackendSpec.isWindows)
+    withPool(23195, 23197, grace = 1.minute) { (sup, _, store) =>
+      val n = sup.get(poolKey).get.nodes.head
+      store.upsertNode(
+        n.copy(pid = None, port = 23901, serverName = Some("s1"), startedAt = Instant.EPOCH),
+        store.snapshot().pools.head.id
+      )
+      val next    = new RecordingLocal(23198, 23199, LocalQuackBackendSpec.sleepCmd(60))
+      val nextSup =
+        new PoolSupervisor(next, new NodeLoadTracker, store, nodeStartupGrace = 1.minute)
+      try
+        nextSup.restore()
+        nextSup.reconcile().unsafeRunSync()
+        next.all.map(_.node.nodeId) shouldBe List(n.nodeId)
+        val row = nextSup.get(poolKey).get.nodes.head
+        row.pid shouldBe defined
+        row.port should not be 23901
+      finally
+        next.cleanup().unsafeRunSync()
+        next.all.flatMap(_.handle).foreach(kill)
+    }
+
+  it should "leave a pid-less row to the membership answer on a backend that records no pid" in:
+    // Kubernetes and fleet rows carry no pid: with no membership answer they stay as they are.
+    assume(!LocalQuackBackendSpec.isWindows)
+    withPool(23200, 23202, grace = 1.minute) { (sup, _, store) =>
+      val n = sup.get(poolKey).get.nodes.head
+      store.upsertNode(n.copy(pid = None, port = 23901), store.snapshot().pools.head.id)
+      val next =
+        new RecordingLocal(23203, 23204, LocalQuackBackendSpec.sleepCmd(60), pids = false)
+      val nextSup =
+        new PoolSupervisor(next, new NodeLoadTracker, store, nodeStartupGrace = 1.minute)
+      try
+        nextSup.restore()
+        nextSup.reconcile().unsafeRunSync()
+        next.all shouldBe empty
+      finally next.cleanup().unsafeRunSync()
     }
 
   it should "keep an unverified leftover's port out of a new manager's replacement" in:

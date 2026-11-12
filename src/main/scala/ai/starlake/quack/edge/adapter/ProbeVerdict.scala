@@ -2,6 +2,8 @@ package ai.starlake.quack.edge.adapter
 
 import ai.starlake.quack.NodeFilesConfig
 import ai.starlake.quack.edge.authz.NodeHandles
+import ai.starlake.quack.model.RunningNode
+import ai.starlake.quack.route.NodeUnhealthy
 
 import scala.collection.concurrent.TrieMap
 
@@ -24,7 +26,7 @@ enum ProbeVerdict:
   case Unenforced
 
   /** The probe statement failed for any other reason: the node is down, the statement errored. */
-  case Failed(reason: String)
+  case Failed(error: QuackError)
 
   /** This manager runs its nodes with local files off and the node did not show that it does.
     * `reason` is what the pool listing says of it ([[ProbeVerdict.localFilesNotOffReason]]).
@@ -34,6 +36,26 @@ enum ProbeVerdict:
   def healthy: Boolean = this == Ok
 
 object ProbeVerdict:
+
+  /** Why `node` is unhealthy after `verdict`, as the pool listing shows it, or None for [[Ok]]. It
+    * quotes no text of the node's (see [[NodeUnhealthy]]): a handle refusal is told by the markers
+    * qod-node's answers carry, a failure by its kind.
+    */
+  def cause(node: RunningNode, verdict: ProbeVerdict): Option[NodeUnhealthy.Cause] =
+    verdict match
+      case Ok                      => None
+      case HandleRefused(nodeText) =>
+        Some(
+          if nodeText.contains(NodeHandles.KeyMismatchRefusal) then NodeUnhealthy.HandleKeyMismatch
+          else if NodeHandles.ClockRefusals.exists(nodeText.contains) then NodeUnhealthy.HandleClock
+          else NodeUnhealthy.HandleRefused
+        )
+      case Unenforced                            => Some(NodeUnhealthy.Unenforced)
+      case LocalFilesNotOff(reason)              => Some(NodeUnhealthy.localFilesOn(reason))
+      case Failed(QuackError.Transient(_, true)) =>
+        Some(NodeUnhealthy.unreachable(node.host, node.port))
+      case Failed(QuackError.Transient(_, _)) => Some(NodeUnhealthy.ProbeLost)
+      case Failed(QuackError.Permanent(_))    => Some(NodeUnhealthy.ProbeRefused)
 
   /** Why node `nodeId` is held out of routing, as the pool's `statusDetail` and the log read it:
     * what its `enable_external_access` answered (`reading`, the cell, None when the read failed or

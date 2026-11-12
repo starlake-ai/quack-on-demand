@@ -131,7 +131,15 @@ final case class NodeInfo(
     // Fleet mode only: the server hosting the node and its liveness
     // (reachable | unreachable | dead). None on every other runtime.
     serverName: Option[String] = None,
-    serverState: Option[String] = None
+    serverState: Option[String] = None,
+    // Why the node is unhealthy, while it is (None when healthy): a fixed code (unreachable,
+    // probe_lost, probe_refused, handle_refused, unenforced, local_files_on, probe_error,
+    // statement_failed), one line written by the manager (never a node's own error text) and when
+    // the run of failures began, ISO-8601. lastProbeAt is the health probe's last answer for it.
+    unhealthyReason: Option[String] = None,
+    unhealthyDetail: Option[String] = None,
+    unhealthySince: Option[String] = None,
+    lastProbeAt: Option[String] = None
 )
 
 final case class PoolResponse(
