@@ -6,6 +6,7 @@ matching the CLI version (they release in lockstep), verified against the
 """
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -126,6 +128,27 @@ def java_major(java_path: str) -> int | None:
     return parse_java_major(proc.stderr or proc.stdout)
 
 
+def jvm_arch(java_path: str, run=subprocess.run) -> str | None:
+    """The `os.arch` of the JVM at `java_path` (`amd64`, `x86_64`, `aarch64`), or None when it
+    cannot be read. The libduckdb the CLI provisions is loaded into that JVM (libquackwire links it),
+    so it must be built for the JVM's architecture, which is not always the host's or Python's: an
+    x64 JVM emulated on Windows on ARM reports `amd64` while a native ARM64 Python reports `ARM64`."""
+    try:
+        proc = run(
+            [java_path, "-XshowSettings:properties", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (proc.stderr or "").splitlines() + (proc.stdout or "").splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip() == "os.arch" and value.strip():
+            return value.strip()
+    return None
+
+
 def _which_java() -> str | None:
     return shutil.which("java")
 
@@ -197,30 +220,106 @@ def _version_tuple(v: str) -> tuple[int | None, ...]:
     return tuple(parts)
 
 
-def newer_release_hint(current: str, timeout_s: float = 2.0) -> str | None:
-    """One-line hint when PyPI's latest `qod` release is newer than `current`.
+PYPI_JSON_URL = "https://pypi.org/pypi/qod/json"
 
-    Purely decorative - an unpinned `uvx qod` freezes on the first version it
-    ever resolved, and this makes that trap self-announcing without turning a
-    routine `qod serve`/`qod start` into a network dependency. Returns None on
-    ANY failure (offline, timeout, malformed response) and whenever `current`
-    is a dev build (".dev0", never released to PyPI) or already current, so the
-    caller can echo-or-skip with no further error handling.
+# Opt-out for every release check (CI, air-gapped hosts that would rather not
+# pay even the bounded timeout once a day).
+NO_UPDATE_CHECK_ENV = "QOD_NO_UPDATE_CHECK"
+
+# How long a PyPI answer (or a failed attempt) is reused by cached_release_hint.
+UPDATE_CHECK_TTL_S = 24 * 3600
+
+
+def upgrade_command(prefix: str | None = None, executable: str | None = None) -> str:
+    """The command that upgrades this qod, guessed from where it is installed.
+
+    uvx runs from an ephemeral env in uv's cache (`.../uv/cache/archive-v0/...`),
+    `uv tool install` from `.../uv/tools/qod`, pipx from `.../pipx/venvs/qod`;
+    anything else is upgraded with the pip of the interpreter running qod.
     """
-    if current.endswith(".dev0"):
+    parts = [p.lower() for p in Path(prefix or sys.prefix).parts]
+    if "uv" in parts:
+        if "tools" in parts:
+            return "uv tool upgrade qod"
+        return "uvx qod@latest"
+    if "pipx" in parts:
+        return "pipx upgrade qod"
+    return f"{executable or sys.executable} -m pip install --upgrade qod"
+
+
+def _pypi_latest(timeout_s: float) -> str:
+    resp = httpx.get(PYPI_JSON_URL, timeout=timeout_s)
+    resp.raise_for_status()
+    return resp.json()["info"]["version"]
+
+
+def _hint_for(current: str, latest: str | None) -> str | None:
+    if not latest:
         return None
     try:
-        resp = httpx.get("https://pypi.org/pypi/qod/json", timeout=timeout_s)
-        resp.raise_for_status()
-        latest = resp.json()["info"]["version"]
         if _version_tuple(latest) <= _version_tuple(current):
             return None
     except Exception:
         return None
     return (
         f"note: qod {latest} is available (you have {current}); "
-        "uvx users: uvx qod@latest"
+        f"upgrade with: {upgrade_command()}"
     )
+
+
+def _check_disabled(current: str) -> bool:
+    return current.endswith(".dev0") or bool(os.environ.get(NO_UPDATE_CHECK_ENV))
+
+
+def newer_release_hint(current: str, timeout_s: float = 2.0) -> str | None:
+    """One-line hint when PyPI's latest `qod` release is newer than `current`.
+
+    Purely decorative - an unpinned `uvx qod` freezes on the first version it
+    ever resolved, and this makes that trap self-announcing without turning a
+    routine `qod serve`/`qod start` into a network dependency. Returns None on
+    ANY failure (offline, timeout, malformed response), whenever `current`
+    is a dev build (".dev0", never released to PyPI) or already current, and
+    when QOD_NO_UPDATE_CHECK is set, so the caller can echo-or-skip with no
+    further error handling.
+    """
+    if _check_disabled(current):
+        return None
+    try:
+        latest = _pypi_latest(timeout_s)
+    except Exception:
+        return None
+    return _hint_for(current, latest)
+
+
+def cached_release_hint(
+    current: str,
+    cache_file: Path | None = None,
+    timeout_s: float = 1.5,
+    now=time.time,
+) -> str | None:
+    """newer_release_hint for every command: PyPI is asked at most once per
+    UPDATE_CHECK_TTL_S, and a failed attempt is cached too, so an offline host
+    pays the bounded timeout once a day rather than on every command. Never
+    raises."""
+    if _check_disabled(current):
+        return None
+    path = cache_file or default_cache_dir() / "update-check.json"
+    try:
+        cached = json.loads(path.read_text())
+        if 0 <= now() - float(cached["checkedAt"]) < UPDATE_CHECK_TTL_S:
+            return _hint_for(current, cached.get("latest"))
+    except Exception:
+        pass
+    try:
+        latest: str | None = _pypi_latest(timeout_s)
+    except Exception:
+        latest = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"checkedAt": now(), "latest": latest}))
+    except Exception:
+        pass
+    return _hint_for(current, latest)
 
 
 def _download(url: str, dest: Path, label: str) -> str:
@@ -389,6 +488,7 @@ DUCKDB_CLI_VERSION = "2.0.0"
 
 _DUCKDB_PLAT = {
     ("darwin", "arm64"): "osx-universal",
+    ("darwin", "aarch64"): "osx-universal",
     ("darwin", "x86_64"): "osx-universal",
     ("linux", "x86_64"): "linux-amd64",
     ("linux", "amd64"): "linux-amd64",
@@ -481,6 +581,30 @@ def ensure_duckdb_cli(
     return bin_dir
 
 
+_CANONICAL_ARCH = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
+# PE IMAGE_FILE_HEADER.Machine and ELF e_machine values of the two architectures DuckDB ships.
+_PE_MACHINES = {0x8664: "x86_64", 0xAA64: "aarch64"}
+_ELF_MACHINES = {0x3E: "x86_64", 0xB7: "aarch64"}
+
+
+def shared_library_arch(path: Path) -> str | None:
+    """`x86_64` or `aarch64` for a Windows (PE) or Linux (ELF) shared library, None when the file
+    is neither or names another machine (macOS ships one universal libduckdb, so it is not read)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return None
+    if head[:4] == b"\x7fELF" and len(head) >= 20:
+        order = "little" if head[5] == 1 else "big"
+        return _ELF_MACHINES.get(int.from_bytes(head[18:20], order))
+    if head[:2] == b"MZ" and len(head) >= 0x40:
+        pe = int.from_bytes(head[0x3C:0x40], "little")
+        if head[pe : pe + 4] == b"PE\0\0" and len(head) >= pe + 6:
+            return _PE_MACHINES.get(int.from_bytes(head[pe + 4 : pe + 6], "little"))
+    return None
+
+
 def libduckdb_url(os_name: str, arch: str) -> str:
     plat = _DUCKDB_PLAT[(os_name, arch.lower())]
     return (
@@ -495,16 +619,23 @@ def ensure_libduckdb(
     arch: str | None = None,
 ) -> Path:
     """lib dir holding the pinned libduckdb shared library (required by the
-    JNI native client: libquackwire links against this exact ABI)."""
+    JNI native client: libquackwire links against this exact ABI). `arch` is the
+    architecture of the JVM that loads it (jvm_arch), the host's when None. A
+    cached library built for another architecture is replaced: the JVM would
+    refuse it ("%1 is not a valid Win32 application" on Windows)."""
     import platform
 
+    arch = arch if arch is not None else platform.machine()
     lib_dir = _duckdb_dir("lib", cache_dir)
     lib_names = {"darwin": "libduckdb.dylib", "linux": "libduckdb.so", "win32": "duckdb.dll"}
     lib = lib_dir / lib_names[os_name]
     if lib.is_file():
-        return lib_dir
+        cached = shared_library_arch(lib)
+        wanted = _CANONICAL_ARCH.get(arch.lower())
+        if cached is None or wanted is None or cached == wanted:
+            return lib_dir
+        lib.unlink()
 
-    arch = arch if arch is not None else platform.machine()
     lib_dir.mkdir(parents=True, exist_ok=True)
     archive = lib_dir / "duckdb-shared-libs.tar.gz"
     try:

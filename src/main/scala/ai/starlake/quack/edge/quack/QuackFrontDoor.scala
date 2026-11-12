@@ -74,10 +74,13 @@ final class QuackFrontDoor(
   // Entry point
   // -------------------------------------------------------------------------------------------
 
-  def handle(bytes: Array[Byte]): IO[Array[Byte]] =
+  /** `client` is the address the request came from (its host), recorded on a refused handshake's
+    * audit row; None when the listener cannot tell.
+    */
+  def handle(bytes: Array[Byte], client: Option[String] = None): IO[Array[Byte]] =
     frame(bytes) match
       case Left(e) => IO.pure(encodeError(s"malformed message: ${e.message}"))
-      case Right(f) if f.header.msgType == Type.ConnectionRequest => connect(f)
+      case Right(f) if f.header.msgType == Type.ConnectionRequest => connect(f, client)
       case Right(f) if !Supported.contains(f.header.msgType)      =>
         IO.pure(encodeError("Unsupported message type for server"))
       case Right(f) =>
@@ -123,7 +126,7 @@ final class QuackFrontDoor(
   // CONNECTION_REQUEST
   // -------------------------------------------------------------------------------------------
 
-  private def connect(f: Frame): IO[Array[Byte]] =
+  private def connect(f: Frame, client: Option[String]): IO[Array[Byte]] =
     decodeConnectionRequest(f) match
       case Left(e) => IO.pure(encodeError(s"malformed CONNECTION_REQUEST: ${e.message}"))
       case Right(hello)
@@ -134,7 +137,9 @@ final class QuackFrontDoor(
         QuackCredentials.parse(hello.authString) match
           case Left(reason) => IO.pure(encodeError(s"Authentication failed: $reason"))
           case Right(c)     =>
-            IO.blocking(handshake.authenticate(c.bearer, c.basic, c.pool, c.tenant, c.superuser))
+            def attempt() =
+              handshake.authenticate(c.bearer, c.basic, c.pool, c.tenant, c.superuser, client)
+            IO.blocking(attempt())
               .flatMap {
                 case Left(HandshakeFailure.Unauthenticated(m)) =>
                   // The auth chain's own messages already start with the marker.

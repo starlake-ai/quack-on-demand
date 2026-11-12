@@ -231,6 +231,33 @@ final class FlightSqlRouter(
         )
       )
 
+  /** A schema probe (`execute` with `recordExecution = false`: the FlightSQL Prepare, a literal
+    * statement's GetFlightInfo or GetSchema) that was refused. A refused probe ends the client's
+    * statement, no Execute follows to record it, so its refusal is recorded here, once, as the
+    * client's statement (`clientSql`, never the probe's wrapper): history and `sql.denied`, like
+    * any other denial (issue #202). Any other failure records nothing, as a probe never did.
+    */
+  def recordRefusedProbe(
+      user: String,
+      poolKey: PoolKey,
+      clientSql: String,
+      effectiveSet: Option[EffectiveSet],
+      failure: RouterFailure
+  ): Unit =
+    if FlightSqlRouter.failureStatus(failure) == "denied" then
+      record(
+        user,
+        poolKey,
+        nodeId = "-",
+        clientSql,
+        durationMs = 0,
+        status = "denied",
+        error = Some(failure.reason),
+        kind = TooDeep.orElse(StatementKind.Other)(classifier.classify(clientSql)),
+        systemPrincipal = effectiveSet.exists(_.system),
+        realm = if effectiveSet.exists(_.user.tenant.isEmpty) then "system" else "tenant"
+      )
+
   /** Statement-history parity for the admin dialect: a claimed statement answered by
     * `adminExecutor` never reaches `routedExecute`'s `record` (see `execute` below), so without
     * this the UI's statement list would show nothing for GRANT/REVOKE/CREATE ROLE/etc. Always
@@ -1133,7 +1160,8 @@ final class FlightSqlRouter(
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = defaultDb,
       defaultSchema = defaultSchm,
-      attachedCatalogs = attachedCatalogs
+      attachedCatalogs = attachedCatalogs,
+      pool = Some(poolKey)
     )
 
     // Protected-write guard: runs BEFORE the CLS/RLS rewriters. A non-SELECT statement whose read

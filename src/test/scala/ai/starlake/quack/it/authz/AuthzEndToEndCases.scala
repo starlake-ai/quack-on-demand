@@ -84,6 +84,8 @@ abstract class AuthzEndToEndCases(
   private val NicoPw    = "nico-e2e-pw-1"
   private val VeraPw    = "vera-e2e-pw-1"
   private val DinaPw    = "dina-e2e-pw-1"
+  private val MayaPw    = "maya-e2e-pw-1"
+  private val RheaPw    = "rhea-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -97,7 +99,9 @@ abstract class AuthzEndToEndCases(
     "mona"  -> MonaPw,
     "nico"  -> NicoPw,
     "vera"  -> VeraPw,
-    "dina"  -> DinaPw
+    "dina"  -> DinaPw,
+    "maya"  -> MayaPw,
+    "rhea"  -> RheaPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -410,7 +414,39 @@ abstract class AuthzEndToEndCases(
         "transformSql" -> s("'***'")
       )
     )
+    // A mask on a federated table: RO on pgfed.e2e.orders, its `v` masked.
+    val fedMasked = createRole("e2e_fed_masked")
+    grant("pgfed", "e2e", "orders", "RO", fedMasked)
+    stack.post(
+      "/api/role/column-policy/create",
+      obj(
+        "roleId"       -> s(fedMasked),
+        "catalogName"  -> s("pgfed"),
+        "schemaName"   -> s("e2e"),
+        "tableName"    -> s("orders"),
+        "columnName"   -> s("v"),
+        "action"       -> s("mask"),
+        "transformSql" -> s("'***'")
+      )
+    )
+    // A row filter on a federated table: RO on pgfed.e2e.orders and pgfed.e2e.other, orders
+    // filtered to id 1.
+    val fedRows = createRole("e2e_fed_rows")
+    grant("pgfed", "e2e", "orders", "RO", fedRows)
+    grant("pgfed", "e2e", "other", "RO", fedRows)
+    stack.post(
+      "/api/role/row-policy/create",
+      obj(
+        "roleId"       -> s(fedRows),
+        "catalogName"  -> s("pgfed"),
+        "schemaName"   -> s("e2e"),
+        "tableName"    -> s("orders"),
+        "predicateSql" -> s("id = 1")
+      )
+    )
     List(
+      ("maya", MayaPw, "user", "e2e_fed_masked"),
+      ("rhea", RheaPw, "user", "e2e_fed_rows"),
       ("fran", FranPw, "user", "e2e_feed"),
       ("tess", TessPw, "admin", "e2e_feed"),
       ("mona", MonaPw, "user", "e2e_feed_masked"),
@@ -2360,13 +2396,14 @@ abstract class AuthzEndToEndCases(
     stack.mcpTool(elsewhere, "undrop_table", mcpArgs) match
       case Left(err) => err should include("not permitted for this token")
       case Right(t)  => fail(s"a token scoped elsewhere recovered: $t")
-    // A read-only token may not create the table a recovery creates.
+    // A read-only token may not create the table a recovery creates: the REST guard refuses it
+    // before the route, and MCP offers it no tool outside McpRoutes.ReadOnlyTools.
     val readOnly = patOf("bob", "ud-ro", "verbCeiling" -> s("RO"))
     val (rc, rb) = stack.postStatus("/api/profile/undrop", undropBody, readOnly)
     withClue(rb)(rc shouldBe 403)
-    rb should include("verb ceiling")
+    rb should include("token_read_only")
     stack.mcpTool(readOnly, "undrop_table", mcpArgs) match
-      case Left(err) => err should include("verb ceiling")
+      case Left(err) => err should include("unknown tool: 'undrop_table'")
       case Right(t)  => fail(s"a read-only token recovered: $t")
   }
 
@@ -2448,13 +2485,14 @@ abstract class AuthzEndToEndCases(
     val (rc, rb) = stack.postStatus("/api/catalog/restore", restoreBody, elsewhere)
     withClue(rb)(rc shouldBe 403)
     rb should include("token_scope")
-    // A read-only token may preview but not restore (a restore replaces the table).
+    // A read-only token may preview but not restore (a restore replaces the table): the REST
+    // guard refuses it before the route.
     val readOnly = patOf("erin", "cat-ro", "verbCeiling" -> s("RO"))
     val (pc, pb) = stack.getStatus(s"$base/preview?asOf=$two", readOnly)
     withClue(pb)(pc shouldBe 200)
     val (wc, wb) = stack.postStatus("/api/catalog/restore", restoreBody, readOnly)
     withClue(wb)(wc shouldBe 403)
-    wb should include("verb ceiling")
+    wb should include("token_read_only")
   }
 
   "UNDROP TABLE names" should "compare without case, as DuckDB resolves them (review M6)" in {
@@ -2924,6 +2962,43 @@ abstract class AuthzEndToEndCases(
     // A catalog-wide federated grant (carol's pgfed.e2e.* ALL) covers the source; *.*.* does not.
     allowed("carol", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
     refused("bob", "fed", "SELECT count(*) FROM pgfed.e2e.other", node = "pgfed.e2e.other")
+  }
+
+  "a federated table under a column mask" should "answer the masked value, never the stored one" in {
+    ready()
+    // The rewriter reads the source's columns on a node of the pool (DESCRIBE, as the system
+    // principal), so a direct select and a star are masked rather than refused.
+    allowed("maya", "fed", "SELECT v FROM pgfed.e2e.orders WHERE id = 1", Some(List("***")))
+    allowed(
+      "maya",
+      "fed",
+      "SELECT * FROM pgfed.e2e.orders WHERE id <= 2 ORDER BY id",
+      Some(List("1,***", "2,***"))
+    )
+    allowed("maya", "fed", "SELECT upper(v) FROM pgfed.e2e.orders WHERE id = 2", Some(List("***")))
+    // A predicate reads the masked value too, so it cannot probe the stored one.
+    allowed("maya", "fed", "SELECT id FROM pgfed.e2e.orders WHERE v = 'a'", Some(Nil))
+    allowed(
+      "maya",
+      "fed",
+      "SELECT id FROM pgfed.e2e.orders WHERE id <= 2 ORDER BY id",
+      Some(List("1", "2"))
+    )
+  }
+
+  "a federated table under a row filter" should "answer only the rows the filter keeps" in {
+    ready()
+    allowed("rhea", "fed", "SELECT id, v FROM pgfed.e2e.orders ORDER BY id", Some(List("1,a")))
+    allowed("rhea", "fed", "SELECT count(*) FROM pgfed.e2e.orders", Some(List("1")))
+    allowed("rhea", "fed", "SELECT v FROM pgfed.e2e.orders WHERE id = 2", Some(Nil))
+    allowed(
+      "rhea",
+      "fed",
+      "SELECT count(*) FROM pgfed.e2e.orders o JOIN pgfed.e2e.orders p ON o.id <> p.id",
+      Some(List("0"))
+    )
+    // The filter covers orders only: another table of the source reads as it is.
+    allowed("rhea", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
   }
 
   "a catalog listing" should "show a user only the tables they hold a grant on" in {

@@ -514,6 +514,8 @@ final class FlightProducerImpl(
                 finally result.close()
               prepared(Some(schema), Some(result.nodeId), Some(result.durationMs))
             case scala.util.Success(Left(f)) =>
+              // No Execute follows a refused Prepare: its refusal is recorded here (issue #202).
+              router.recordRefusedProbe(user, poolKey, sql, eff, f)
               listener.onError(toFlightException(f))
             case scala.util.Failure(t) =>
               listener.onError(internalError("createPreparedStatement", t))
@@ -1594,6 +1596,8 @@ final class FlightProducerImpl(
               try result.rows.getVectorSchemaRoot.getSchema
               finally result.close()
             case scala.util.Success(Left(f)) =>
+              // No DoGet follows a refused probe: its refusal is recorded here (issue #202).
+              router.recordRefusedProbe(user, poolKey, sql, eff, f)
               throw toFlightException(f)
             case scala.util.Failure(t) =>
               throw internalError("probeStatementSchema", t)

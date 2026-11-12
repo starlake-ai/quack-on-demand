@@ -119,6 +119,23 @@ def test_serve_hands_the_jvm_a_preloadable_libduckdb(runner, wired, tmp_path, mo
     assert target.is_file() and target.parent == lib_dir
 
 
+def test_serve_provisions_libduckdb_for_the_jvm_arch(runner, wired, tmp_path, monkeypatch):
+    # The libduckdb is loaded into the JVM, so its architecture is the JVM's: an x64 JVM on
+    # Windows on ARM (Python reporting ARM64) needs the amd64 build.
+    asked = {}
+    monkeypatch.setattr(launcher, "jvm_arch", lambda java: asked.setdefault("java", java) and "amd64")
+    monkeypatch.setattr(
+        launcher,
+        "ensure_libduckdb",
+        lambda cache_dir=None, **kw: asked.setdefault("arch", kw.get("arch")) and tmp_path / "lib",
+    )
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert asked == {"java": "/usr/bin/java", "arch": "amd64"}
+
+
 def test_serve_sets_no_removed_enforcement_switch(runner, wired, tmp_path, monkeypatch):
     # The manager refuses to boot with QOD_ACL_ENABLED set to any value (every node enforces):
     # serve must not export it.

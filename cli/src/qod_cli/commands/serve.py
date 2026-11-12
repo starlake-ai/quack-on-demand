@@ -878,7 +878,7 @@ def serve(
     app_home = launcher.default_cache_dir()
     try:
         duckdb_bin = launcher.ensure_duckdb_cli(app_home)
-        libduckdb = launcher.ensure_libduckdb(app_home)
+        libduckdb = launcher.ensure_libduckdb(app_home, arch=launcher.jvm_arch(java))
         node_bin = launcher.node_binary(jar_path, app_home)
     except Exception as exc:
         typer.echo(f"could not provision the node runtime: {exc}", err=True)

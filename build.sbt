@@ -312,6 +312,11 @@ lazy val root = (project in file("."))
     //
     // JDK 25 warns once per JVM about JNI loads and sun.misc.Unsafe memory access (Scala's lazy
     // vals, Arrow, Netty); the two flags say both are intended.
+    //
+    // The Flight SQL JDBC driver (tests only) shades Netty 4.2, which turns Unsafe off by default
+    // on Java 25+, and bundles only Arrow's Netty allocator, which needs it: its first connection
+    // then dies in BaseAllocator's static init. The relocated property gives that Netty Unsafe
+    // back and touches nothing else in the JVM.
     Compile / run / fork := true,
     Test / fork          := true,
     Compile / run / javaOptions ++= Seq(
@@ -326,7 +331,8 @@ lazy val root = (project in file("."))
       "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
       "--enable-native-access=ALL-UNNAMED",
       "--sun-misc-unsafe-memory-access=allow",
-      "-Dio.netty.tryReflectionSetAccessible=true"
+      "-Dio.netty.tryReflectionSetAccessible=true",
+      "-Dorg.apache.arrow.driver.jdbc.shaded.io.netty.noUnsafe=false"
     ),
     // libquackwire links libduckdb through an rpath that only exists on the build machine, so the
     // forked test JVM relies on LibDuckDbPreload finding the pinned copy (macOS SIP strips DYLD_*

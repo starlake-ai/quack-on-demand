@@ -458,7 +458,14 @@ final case class TelemetryConfig(
       description =
         "Extra destination for every audit and statement event, on top of the store: none | stdout (one JSON line per event, tagged qodEvent=audit|statement, for a log shipper; SQL literals, engine error text and unauthenticated login names are redacted). Requires store=postgres. Lines dropped under stdout backpressure count in qod_journal_dropped_total{table=stdout}."
     )
-    auditSink: String = "none"
+    auditSink: String = "none",
+    @field
+    @ConfigField(
+      envVar = "QOD_AUDIT_HANDSHAKE_FAILURES",
+      description =
+        "Record refused FlightSQL and native Quack handshakes (a bad or missing credential, a user with no access to the pool) as auth.login.failure audit events, at most one per minute per front door, client address and user name. Off by default; the client is refused either way."
+    )
+    auditHandshakeFailures: Boolean = false
 )
 
 object TelemetryConfig:

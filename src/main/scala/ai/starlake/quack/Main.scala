@@ -1306,7 +1306,20 @@ object Main extends IOApp with LazyLogging:
       // ONE catalog instance (hence one cache) shared by the SELECT-path rewriter and the
       // write-path guard, so both resolve a table's columns identically AND the metastore fetch
       // is not doubled on cold misses.
-      val columnCatalog        = EdgeRewriters.columnCatalog(sup, catalogReaders, stmtInstruments)
+      val columnCatalog = EdgeRewriters.columnCatalog(
+        sup,
+        catalogReaders,
+        stmtInstruments,
+        // A table only the pool's nodes hold is described there through the same routed system
+        // caller as the node-held catalog browser (set once the router exists; "manager starting"
+        // until then, which reads as no columns). The bound covers waking a suspended pool.
+        nodeQuery = (key, sql) => nodeCatalogQuery.get()(key, sql),
+        nodeTimeout = scala.concurrent.duration
+          .DurationInt(
+            mgrCfg.catalog.previewTimeoutSec + edgeCfg.resumeHoldTimeoutSec.toInt
+          )
+          .seconds
+      )
       val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
       val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter()
       val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
@@ -1566,6 +1579,13 @@ object Main extends IOApp with LazyLogging:
       var branchLookup
           : (String, String, String) => Either[String, ai.starlake.quack.model.PoolKey] =
         (_, _, b) => Left(s"branch '$b' not found (branching not yet wired)")
+      // Refused FlightSQL and native Quack handshakes (issue #202), when the operator asks for them
+      // (QOD_AUDIT_HANDSHAKE_FAILURES): one writer for both front doors, on the journal's queue, so
+      // a row reaches the stdout sink as every journaled one does.
+      val handshakeAudit =
+        if mgrCfg.telemetry.auditHandshakeFailures then
+          ai.starlake.quack.ondemand.telemetry.HandshakeAudit.toJournal(eventJournal)
+        else ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
       val edgeIO: IO[FlightEdgeServer] = IO.delay {
         try
           val srv = new FlightEdgeServer(
@@ -1590,6 +1610,8 @@ object Main extends IOApp with LazyLogging:
             // The supervisor's policy versions: a session's grants follow them (SessionGrants).
             sup.policyVersions,
             sessionTokens.lookupResult,
+            // Refused handshakes, as auth.login.failure (issue #202).
+            handshakeAudit,
             // Branch targeting (Epic 1): the `branch` connection header.
             lookupBranch = (tenant, parentDb, branch) => branchLookup(tenant, parentDb, branch)
           )
@@ -1611,6 +1633,7 @@ object Main extends IOApp with LazyLogging:
             authorizeForEdge,
             sup.policyVersions,
             sessionTokens.lookupResult,
+            handshakeAudit,
             edge = "quack"
           )
           val quackSessions = new ai.starlake.quack.edge.quack.QuackSessionRegistry(
@@ -1636,7 +1659,7 @@ object Main extends IOApp with LazyLogging:
           )
           new ai.starlake.quack.edge.quack.QuackFrontDoorServer(
             quackCfgResolved,
-            door.handle,
+            door.handle(_, _),
             door.isLive,
             door.sweep,
             door.closeAll()

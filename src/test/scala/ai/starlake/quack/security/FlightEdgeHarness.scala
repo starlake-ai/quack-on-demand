@@ -149,6 +149,8 @@ object FlightEdgeHarness:
     * @param edgeConfig
     *   changes the edge's configuration (the message and header limits, for one) before the server
     *   starts; the harness's own host, port and TLS settings are what it receives.
+    * @param audit
+    *   where the edge records a refused handshake (`auth.login.failure`).
     */
   def boot(
       store: InMemoryControlPlaneStore,
@@ -156,7 +158,10 @@ object FlightEdgeHarness:
       tls: Boolean = false,
       wiring: RouterWiring,
       authService: Option[AuthenticationService] = None,
-      edgeConfig: EdgeConfig => EdgeConfig = identity
+      edgeConfig: EdgeConfig => EdgeConfig = identity,
+      /** Where the edge records a refused handshake; a spec that reads those rows passes its own. */
+      audit: ai.starlake.quack.ondemand.telemetry.HandshakeAudit =
+        ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
   ): Harness =
     val port = ephemeralPort()
     val host = "127.0.0.1"
@@ -237,7 +242,8 @@ object FlightEdgeHarness:
       resolveTenant,
       authorize,
       sup.policyVersions,
-      _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid
+      _ => ai.starlake.quack.ondemand.api.SessionTokenStore.LookupResult.Invalid,
+      audit
     )
     srv.start()
 
