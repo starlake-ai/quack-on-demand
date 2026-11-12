@@ -731,6 +731,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/driver/start:
+    get:
+      operationId: getApiAuthDriverStart
+      parameters:
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: port
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            query parameter port, Invalid value for: query parameter key, Invalid
+            value for: query parameter state, Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/mode:
     get:
       operationId: getApiAuthMode
@@ -919,6 +976,10 @@ paths:
         '200':
           description: ''
           headers:
+            Location:
+              required: false
+              schema:
+                type: string
             Set-Cookie:
               required: false
               schema:

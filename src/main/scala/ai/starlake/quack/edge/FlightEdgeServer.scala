@@ -9,7 +9,11 @@ import org.apache.arrow.flight.*
 import org.apache.arrow.flight.auth2.CallHeaderAuthenticator
 import org.apache.arrow.memory.RootAllocator
 
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
+
 import java.io.File
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.{
   Executors,
@@ -195,6 +199,22 @@ final class FlightEdgeServer(
     * Credential validation lives in [[EdgeHandshake]]: every fresh handshake is validated against
     * the configured chain, and with no provider configured every handshake is refused.
     */
+  /** The session each external bearer bound, by [[FlightEdgeServer.bearerSessionKey]]. A client
+    * that sends its identity provider's token on every call, rather than the session bearer the
+    * edge answers with (the Arrow Flight SQL JDBC driver's `token=` property does so), would
+    * otherwise get a new session per call: a statement it prepared in one call is then refused in
+    * the next ("prepared statement handle does not belong to this session"), and every call leaves
+    * an entry behind for the session TTL. Each such call is still authenticated in full; only the
+    * session it lands in is kept. Bounded, and entries last no longer than a session: a missing
+    * entry binds a new session, as before.
+    */
+  private val bearerSessions: Cache[String, String] =
+    Caffeine
+      .newBuilder()
+      .maximumSize(FlightEdgeServer.MaxBearerSessions)
+      .expireAfterWrite(java.time.Duration.ofSeconds(cfg.sessionTtlSec))
+      .build[String, String]()
+
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
@@ -318,15 +338,42 @@ final class FlightEdgeServer(
                           throw CallStatus.UNAUTHENTICATED
                             .withDescription(s"branch_not_found: $err")
                             .toRuntimeException()
-                  ConnectionContext.bind(
-                    peer = peerId,
-                    key = targetKey,
-                    connectionId = connId,
-                    user = bound.user,
-                    grants = Some(bound.grants),
-                    ttlSec = cfg.sessionTtlSec
-                  )
-                  authResult(peerId)
+                  def bindNew(): String =
+                    ConnectionContext.bind(
+                      peer = peerId,
+                      key = targetKey,
+                      connectionId = connId,
+                      user = bound.user,
+                      grants = Some(bound.grants),
+                      ttlSec = cfg.sessionTtlSec
+                    )
+                    peerId
+                  bearer match
+                    case None    => authResult(bindNew())
+                    case Some(b) =>
+                      // The session this bearer bound, while it lives and names the same user
+                      // and pool; else a new one. Atomic per key, so calls racing on a first
+                      // connection share one session.
+                      val key = FlightEdgeServer.bearerSessionKey(
+                        b,
+                        tenantHdr,
+                        poolHdr,
+                        superuserHdr,
+                        branchHdr
+                      )
+                      val peer = bearerSessions
+                        .asMap()
+                        .compute(
+                          key,
+                          (_, old) =>
+                            val live = Option(old).filter(p =>
+                              ConnectionContext
+                                .entry(p)
+                                .exists(e => e.user == bound.user && e.poolKey == targetKey)
+                            )
+                            live.getOrElse(bindNew())
+                        )
+                      authResult(peer)
 
   /** Build an AuthResult that emits the peerId back as a Bearer token so the client can use it on
     * subsequent calls (this is what makes Basic+token auth in FlightSQL work).
@@ -426,6 +473,32 @@ object FlightEdgeServer:
 
   /** The peer id prefix of a call with no credentials. */
   val AnonymousPeerPrefix: String = "anonymous-"
+
+  /** At most this many external bearers keep their session (see `bearerSessions`). */
+  val MaxBearerSessions: Long = 100000L
+
+  /** One key per credential and target: the SHA-256 of the bearer with the headers that choose
+    * where it binds, so the same token sent for another pool, tenant, realm or branch binds a
+    * session of its own. The token itself is never kept.
+    */
+  def bearerSessionKey(
+      bearer: String,
+      tenant: Option[String],
+      pool: Option[String],
+      superuser: Boolean,
+      branch: Option[String]
+  ): String =
+    val parts = List(
+      bearer,
+      tenant.getOrElse(""),
+      pool.getOrElse(""),
+      superuser.toString,
+      branch.getOrElse("")
+    )
+    val digest = MessageDigest
+      .getInstance("SHA-256")
+      .digest(parts.mkString("\u0000").getBytes(StandardCharsets.UTF_8))
+    digest.map("%02x".format(_)).mkString
 
   /** The credential header of a call: `Authorization`, else `x-qod-authorization` for clients whose
     * driver or proxy strips the standard one but passes arbitrary `x-*` headers. Confirmed needed

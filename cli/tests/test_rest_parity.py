@@ -17,6 +17,7 @@ EXCLUSIONS = {
     "/api/auth/oidc/logout",      # browser session logout redirect
     "/api/auth/sql-token/start",  # opens the provider login page in a browser
     "/api/auth/sql-token/callback",  # provider redirect target
+    "/api/auth/driver/start",  # a JDBC driver's browser login (authenticator=externalbrowser)
     # Starlake SSO handoff: the manager mints a one-time ticket for the browser to
     # carry to Starlake, which redeems it server-to-server. Neither leg is a CLI
     # operation (no human at a terminal holds a ticket).

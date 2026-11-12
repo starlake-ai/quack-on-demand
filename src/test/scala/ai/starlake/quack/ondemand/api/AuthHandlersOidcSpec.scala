@@ -320,7 +320,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
           None
         )
         .unsafeRunSync()
-    (status, location, session.value, tokens)
+    (status, location, session.get.value, tokens)
 
   // ================================================================
   // 1. oidcStart (system scope, no tenant) -> 302 + state cookie
@@ -455,7 +455,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     status shouldBe StatusCode.Found
     location shouldBe "/ui/?error=oidc_not_configured"
-    session.value shouldBe ""
+    session.get.value shouldBe ""
   }
 
   // ================================================================
@@ -515,7 +515,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
           .unsafeRunSync()
       status shouldBe StatusCode.Found
       location shouldBe "/ui/?error=oidc_not_configured"
-      session.value shouldBe ""
+      session.get.value shouldBe ""
     }
 
   // ================================================================
@@ -533,7 +533,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     status shouldBe StatusCode.Found
     location shouldBe "/ui/"
-    session.value should not be empty
+    session.get.value should not be empty
     cleared.value shouldBe ""
     cleared.maxAge shouldBe Some(0L)
   }
@@ -553,7 +553,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     status shouldBe StatusCode.Found
     location shouldBe "/ui/?error=admin_required"
-    session.value shouldBe "" // no session set
+    session.get.value shouldBe "" // no session set
   }
 
   // ================================================================
@@ -593,7 +593,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     status shouldBe StatusCode.Found
     location shouldBe "/ui/?tenant=acme"
-    session.value should not be empty
+    session.get.value should not be empty
     cleared.value shouldBe ""
   }
 
@@ -613,7 +613,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     status shouldBe StatusCode.Found
     location shouldBe "/ui/?error=not_provisioned"
-    session.value shouldBe ""
+    session.get.value shouldBe ""
   }
 
   // ================================================================
@@ -630,7 +630,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     status shouldBe StatusCode.Found
     location shouldBe "/ui/?error=not_provisioned"
-    session.value shouldBe ""
+    session.get.value shouldBe ""
   }
 
   // ================================================================
@@ -1124,18 +1124,161 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     location should include("error=oauth_not_configured")
 
   "sqlTokenCallback" should "render the token on a successful exchange" in:
-    val svc        = sqlTokenSvc((_, _) => Right("""{"id_token":"the-token"}"""))
-    val (_, state) = svc.startUrl().toOption.get
-    val (html, _)  =
+    val svc                  = sqlTokenSvc((_, _) => Right("""{"id_token":"the-token"}"""))
+    val (_, state)           = svc.startUrl().toOption.get
+    val (status, _, html, _) =
       sqlTokenHandlers(Some(svc))
         .sqlTokenCallback(Some("code"), Some(state), None, Some(state), None)
         .unsafeRunSync()
+    status shouldBe StatusCode.Ok
     html should include("the-token")
     html should include("token=the-token")
 
   it should "render an error page when the IdP returns an error param" in:
-    val (html, _) = sqlTokenHandlers(None)
+    val (_, _, html, _) = sqlTokenHandlers(None)
       .sqlTokenCallback(None, None, Some("access_denied"), None, None)
       .unsafeRunSync()
     html should include("Login failed")
     html should include("access_denied")
+
+  // ---- Browser login for a JDBC driver (/api/auth/driver/start) ----
+
+  import ai.starlake.quack.edge.auth.{DriverHandoff, DriverHandoffSpec}
+
+  private val (driverPriv, driverKey) = DriverHandoffSpec.driverKey()
+  private val driverState             = "abcdefghijklmnopqrstuvwxyz012345"
+  private val driverPort              = "50123"
+
+  private def driverHandlers(
+      oidcSvc: Option[OidcSsoService],
+      sqlSvc: Option[SqlTokenOidcService],
+      loadTenant: String => Option[Tenant] = oidcTenant,
+      tokens: SessionTokenStore = new SessionTokenStore
+  ): AuthHandlers =
+    new AuthHandlers(
+      authService = dummyAuthService,
+      tokens = tokens,
+      identitySource = ManagementIdentitySource.Oidc,
+      grantsForIdentity = (_, _, _) => List(UserGrant(Some("acme"), "admin")),
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
+      oidc = oidcSvc,
+      sqlToken = sqlSvc,
+      patSessionOf = _ => None
+    )
+
+  /** An SSO service whose stub IdP echoes `nonce`, and answers `idToken` at the token endpoint. */
+  private def svcEchoing(nonce: String, idToken: String = "tenant-id-token"): OidcSsoService =
+    new OidcSsoService(
+      resolver = resolver,
+      mgmt = mgmt,
+      codec = codec,
+      roleClaim = "role",
+      publicBaseUrlOf = () => "https://qod.example.com",
+      httpExchange = (_, _) => Right(s"""{"id_token":"$idToken"}"""),
+      buildValidator = stubValidator(nonce, StubIdentity())
+    )
+
+  private def startDriver(h: AuthHandlers, tenant: Option[String]) =
+    h.driverStart(tenant, Some(driverPort), Some(driverKey), Some(driverState), None)
+      .unsafeRunSync()
+
+  private def loopback(location: String): Map[String, String] =
+    val uri = java.net.URI.create(location)
+    uri.getHost shouldBe "127.0.0.1"
+    uri.getPort shouldBe driverPort.toInt
+    uri.getPath shouldBe DriverHandoff.CallbackPath
+    val q = DriverHandoffSpec.queryOf(location)
+    q("state") shouldBe driverState
+    q
+
+  "driverStart" should "refuse a bad parameter with 400 invalid_driver_request" in:
+    val h                   = driverHandlers(Some(svcEchoing("n")), None)
+    val Left((status, err)) =
+      h.driverStart(Some("acme"), Some("80"), Some(driverKey), Some(driverState), None)
+        .unsafeRunSync(): @unchecked
+    status shouldBe StatusCode.BadRequest
+    err.error shouldBe "invalid_driver_request"
+
+  it should "send a tenant with SSO to its IdP and hand the validated id_token to the driver" in:
+    val tokens                               = new SessionTokenStore
+    val starter                              = driverHandlers(Some(svcEchoing("n")), None)
+    val Right((st, location, oidcCk, sqlCk)) = startDriver(starter, Some("acme")): @unchecked
+    st shouldBe StatusCode.Found
+    location should startWith("https://idp.example.com/authorize?")
+    sqlCk shouldBe None
+    val q  = DriverHandoffSpec.queryOf(location)
+    val cb = driverHandlers(Some(svcEchoing(q("nonce"))), None, tokens = tokens)
+    val (status, back, session, _) =
+      cb.oidcCallback(Some("code"), Some(q("state")), Some(oidcCk.get.value), None).unsafeRunSync()
+    status shouldBe StatusCode.Found
+    session shouldBe None // the browser's console session is left as it is
+    val r = loopback(back)
+    r.get("error") shouldBe None
+    DriverHandoffSpec.decrypt(r("result"), driverPriv) shouldBe "tenant-id-token"
+
+  it should "tell the driver at once when the tenant's callback fails" in:
+    val starter                    = driverHandlers(Some(svcEchoing("n")), None)
+    val Right((_, location, _, _)) = startDriver(starter, Some("acme")): @unchecked
+    val q                          = DriverHandoffSpec.queryOf(location)
+    val (_, back, session, _)      =
+      driverHandlers(Some(svcEchoing(q("nonce"))), None)
+        .oidcCallback(Some("code"), Some(q("state")), Some("wrong-cookie"), None)
+        .unsafeRunSync()
+    session shouldBe None
+    loopback(back)("error") shouldBe "invalid_state"
+
+  it should "refuse the driver when the tenant stopped signing in through its IdP meanwhile" in:
+    val starter                         = driverHandlers(Some(svcEchoing("n")), None)
+    val Right((_, location, oidcCk, _)) = startDriver(starter, Some("acme")): @unchecked
+    val q                               = DriverHandoffSpec.queryOf(location)
+    val (_, back, _, _)                 =
+      driverHandlers(Some(svcEchoing(q("nonce"))), None, loadTenant = dbTenant)
+        .oidcCallback(Some("code"), Some(q("state")), Some(oidcCk.get.value), None)
+        .unsafeRunSync()
+    loopback(back)("error") shouldBe DriverHandoff.OidcNotConfigured
+
+  it should "still mint a console session for a login started without a driver" in:
+    val seed    = "console-seed"
+    val svc     = buildSvc(seed)
+    val started = svc.startAuth(OidcScope.Tenant("acme"), "/ui/", seed).toOption.get
+    val (status, location, session, _) =
+      driverHandlers(Some(svc), None)
+        .oidcCallback(Some("c"), Some(started.stateParam), Some(started.stateCookieValue), None)
+        .unsafeRunSync()
+    status shouldBe StatusCode.Found
+    location should not include "127.0.0.1"
+    session.get.value should not be empty
+
+  it should "use the data-plane provider for a tenant without SSO, and deliver its token" in:
+    val sql = sqlTokenSvc((_, _) => Right("""{"id_token":"the-token"}"""))
+    val h   = driverHandlers(Some(svcEchoing("n")), Some(sql), dbTenant)
+    val Right((_, location, oidcCk, sqlCk)) = startDriver(h, Some("acme")): @unchecked
+    location should startWith(
+      "https://idp.example.com/auth/realms/qod/protocol/openid-connect/auth?"
+    )
+    oidcCk shouldBe None
+    val state                   = DriverHandoffSpec.queryOf(location)("state")
+    val (status, back, html, _) =
+      h.sqlTokenCallback(Some("code"), Some(state), None, Some(sqlCk.get.value), None)
+        .unsafeRunSync()
+    status shouldBe StatusCode.Found
+    html should not include "the-token"
+    DriverHandoffSpec.decrypt(loopback(back.get)("result"), driverPriv) shouldBe "the-token"
+
+  it should "pass the IdP's error code to the driver on the data-plane callback" in:
+    val sql                            = sqlTokenSvc((_, _) => Right("{}"))
+    val h                              = driverHandlers(None, Some(sql))
+    val Right((_, location, _, sqlCk)) = startDriver(h, None): @unchecked
+    val state                          = DriverHandoffSpec.queryOf(location)("state")
+    val (_, back, _, _)                =
+      h.sqlTokenCallback(None, Some(state), Some("access_denied"), sqlCk.map(_.value), None)
+        .unsafeRunSync()
+    loopback(back.get)("error") shouldBe "access_denied"
+
+  it should "tell the driver oidc_not_configured when no provider can serve the login" in:
+    val Right((status, location, oidcCk, sqlCk)) =
+      startDriver(driverHandlers(None, None, dbTenant), Some("acme")): @unchecked
+    status shouldBe StatusCode.Found
+    oidcCk shouldBe None
+    sqlCk shouldBe None
+    loopback(location)("error") shouldBe DriverHandoff.OidcNotConfigured
