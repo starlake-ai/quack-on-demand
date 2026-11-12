@@ -417,6 +417,7 @@ abstract class AuthzEndToEndCases(
     // A mask on a federated table: RO on pgfed.e2e.orders, its `v` masked.
     val fedMasked = createRole("e2e_fed_masked")
     grant("pgfed", "e2e", "orders", "RO", fedMasked)
+    grant("pgfed", "e2e2", "orders", "RO", fedMasked)
     stack.post(
       "/api/role/column-policy/create",
       obj(
@@ -556,7 +557,10 @@ abstract class AuthzEndToEndCases(
     TestPostgres.psql(
       pgDb,
       "CREATE SCHEMA e2e; CREATE TABLE e2e.orders (id int, v text); " +
-        "INSERT INTO e2e.orders VALUES (1, 'a'), (2, 'b'); CREATE TABLE e2e.other (x int)"
+        "INSERT INTO e2e.orders VALUES (1, 'a'), (2, 'b'); CREATE TABLE e2e.other (x int); " +
+        // A second `orders` in another schema, with a `v` and a column of its own (issue #201).
+        "CREATE SCHEMA e2e2; CREATE TABLE e2e2.orders (id int, v text, w text); " +
+        "INSERT INTO e2e2.orders VALUES (1, 'x', 'p'), (2, 'y', 'q')"
     )
     val base = s"/api/tenants/$Acme/tenant-dbs/$fed/federated-sources"
     stack.post(
@@ -2999,6 +3003,33 @@ abstract class AuthzEndToEndCases(
     )
     // The filter covers orders only: another table of the source reads as it is.
     allowed("rhea", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
+  }
+
+  "two federated tables of one name under a column mask" should "each read its own columns" in {
+    ready()
+    // pgfed.e2e.orders (id, v), v masked, and pgfed.e2e2.orders (id, v, w), which the mask does not
+    // name: its v reads as stored, alone or beside the masked table.
+    allowed("maya", "fed", "SELECT v FROM pgfed.e2e2.orders WHERE id = 1", Some(List("x")))
+    allowed(
+      "maya",
+      "fed",
+      "SELECT a.v, b.v, b.w FROM pgfed.e2e.orders a JOIN pgfed.e2e2.orders b ON a.id = b.id " +
+        "WHERE a.id = 1",
+      Some(List("***,x,p"))
+    )
+    allowed(
+      "maya",
+      "fed",
+      "SELECT * FROM pgfed.e2e.orders a JOIN pgfed.e2e2.orders b ON a.id = b.id ORDER BY a.id",
+      Some(List("1,***,1,x,p", "2,***,2,y,q"))
+    )
+    allowed(
+      "maya",
+      "fed",
+      "SELECT v FROM pgfed.e2e.orders WHERE id = 1 UNION ALL " +
+        "SELECT v FROM pgfed.e2e2.orders WHERE id = 1 ORDER BY 1",
+      Some(List("***", "x"))
+    )
   }
 
   "a catalog listing" should "show a user only the tables they hold a grant on" in {
