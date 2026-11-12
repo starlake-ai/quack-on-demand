@@ -194,9 +194,13 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       e,
       ctx
     ).unsafeRunSync() shouldBe a[Denied]
-    // A table the catalog does not know cannot be numbered.
-    rw.rewrite("SELECT #1 FROM unknown_table", StatementKind.Select, e, ctx)
+    // A covered table the catalog does not know cannot be numbered.
+    new ColumnPolicyRewriter(new ColumnCatalog.MapCatalog(Map.empty), enabled = true)
+      .rewrite("SELECT #1 FROM customer", StatementKind.Select, e, ctx)
       .unsafeRunSync() shouldBe a[Denied]
+    // A table no policy covers has nothing to mask (issue #201).
+    rw.rewrite("SELECT #1 FROM unknown_table", StatementKind.Select, e, ctx)
+      .unsafeRunSync() shouldBe Passthrough
     // A batch.
     rw.rewrite("SELECT #1 FROM customer; SELECT #2 FROM customer", StatementKind.Select, e, ctx)
       .unsafeRunSync() shouldBe a[Denied]
@@ -1192,4 +1196,186 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     val noPool = fedCtx.copy(pool = None)
     fed("SELECT ssn FROM pgfed.public.users", noPool) shouldBe a[Denied]
     fed("SELECT * FROM pgfed.public.users", noPool) shouldBe PassthroughParseFailed
+  }
+
+  // -------- tables of one bare name in several catalogs (issue #201) --------
+
+  /** `client_a.claims.claim` and `client_b.claims.claim` with different columns, as two clients'
+    * DuckLake databases attached under one memory hub.
+    */
+  private val clientsCat: ColumnCatalog = new ColumnCatalog.MapCatalog(
+    Map(
+      ("client_a", "claims", "claim")   -> List("id", "member_no", "amount"),
+      ("client_b", "claims", "claim")   -> List("id", "member_no", "region"),
+      ("masterdata", "ref", "provider") -> List("pid", "name")
+    )
+  )
+  private val hubCtx = SchemaContext(
+    defaultDatabase = Some("memory"),
+    defaultSchema = Some("main"),
+    attachedCatalogs = Set("client_a", "client_b", "masterdata")
+  )
+  private val maskMemberA = RoleColumnPolicy(
+    "cp-a",
+    "r-1",
+    "client_a",
+    "claims",
+    "claim",
+    "member_no",
+    "mask",
+    Some("'***'")
+  )
+
+  private def hub(sql: String, ps: List[RoleColumnPolicy] = List(maskMemberA)) =
+    new ColumnPolicyRewriter(clientsCat, enabled = true)
+      .rewrite(sql, StatementKind.Select, eff(tenantUser, ps), hubCtx)
+      .unsafeRunSync()
+
+  private def noMarker(o: Outcome) =
+    o.toString.toLowerCase(java.util.Locale.ROOT) should not include "qod_same"
+
+  "two tables of one name in different catalogs" should "be masked in a join" in {
+    val out = hub(
+      "SELECT a.member_no, a.amount, b.region FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id"
+    )
+    out shouldBe Rewritten(
+      "SELECT '***' AS member_no, a.amount, b.region FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id"
+    )
+  }
+
+  it should "expand a star with each table's own columns, qualified by its alias" in {
+    // client_a lists `amount`, client_b `region`: with one shared list, a star of one table
+    // expanded to the other's columns. Only client_a's member_no is under the mask.
+    hub(
+      "SELECT * FROM client_a.claims.claim a JOIN client_b.claims.claim b ON a.id = b.id"
+    ) shouldBe
+      Rewritten(
+        "SELECT a.id, '***' AS member_no, a.amount, b.id, b.member_no, b.region " +
+          "FROM client_a.claims.claim a JOIN client_b.claims.claim b ON a.id = b.id"
+      )
+  }
+
+  it should "mask only the table the policy names" in {
+    hub(
+      "SELECT a.member_no, b.member_no FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id"
+    ) shouldBe Rewritten(
+      "SELECT '***' AS member_no, b.member_no FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id"
+    )
+    // A policy whose catalog is `*` covers both.
+    val both = List(maskMemberA.copy(catalogName = "*"))
+    hub(
+      "SELECT a.member_no, b.member_no FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id",
+      both
+    ) shouldBe Rewritten(
+      "SELECT '***' AS member_no, '***' AS member_no FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id"
+    )
+  }
+
+  it should "mask each arm of a union and a subquery, leaving the names as written" in {
+    hub(
+      "SELECT id, member_no FROM client_a.claims.claim UNION ALL " +
+        "SELECT id, member_no FROM client_b.claims.claim"
+    ) shouldBe Rewritten(
+      "SELECT id, '***' AS member_no FROM client_a.claims.claim UNION ALL " +
+        "SELECT id, member_no FROM client_b.claims.claim"
+    )
+    hub(
+      "SELECT claim.member_no FROM client_a.claims.claim " +
+        "WHERE claim.id IN (SELECT claim.id FROM client_b.claims.claim)"
+    ) shouldBe Rewritten(
+      "SELECT '***' AS member_no FROM client_a.claims.claim " +
+        "WHERE claim.id IN (SELECT claim.id FROM client_b.claims.claim)"
+    )
+  }
+
+  it should "pass through a statement that reads no masked column" in {
+    hub(
+      "SELECT a.amount, b.region FROM client_a.claims.claim a " +
+        "JOIN client_b.claims.claim b ON a.id = b.id"
+    ) shouldBe Passthrough
+  }
+
+  it should "refuse a denied column under the caller's name for the table" in {
+    val out = hub(
+      "SELECT a.member_no FROM client_a.claims.claim a JOIN client_b.claims.claim b ON a.id = b.id",
+      List(maskMemberA.copy(action = "deny", transformSql = None))
+    )
+    out shouldBe a[Denied]
+    noMarker(out)
+  }
+
+  it should "refuse two such tables bound to one name in one FROM clause" in {
+    // DuckDB binds `FROM client_a.claims.claim, client_b.claims.claim` by catalog-qualified names.
+    val out = hub("SELECT amount, region FROM client_a.claims.claim, client_b.claims.claim")
+    out shouldBe Denied(SameNameTables.sameFromClauseRefusal("claim"))
+    hub(
+      "SELECT a.id FROM client_a.claims.claim AS claim JOIN client_b.claims.claim ON true"
+    ) shouldBe Denied(SameNameTables.sameFromClauseRefusal("claim"))
+  }
+
+  it should "refuse a column or a star qualified by catalog or schema" in {
+    hub(
+      "SELECT client_a.claims.claim.member_no FROM client_a.claims.claim " +
+        "JOIN client_b.claims.claim b ON true"
+    ) shouldBe Denied(SameNameTables.qualifiedColumnRefusal("claim"))
+    hub(
+      "SELECT claims.claim.id FROM client_a.claims.claim JOIN client_b.claims.claim b ON true"
+    ) shouldBe Denied(SameNameTables.qualifiedColumnRefusal("claim"))
+    hub(
+      "SELECT client_a.claims.claim.* FROM client_a.claims.claim JOIN client_b.claims.claim b ON true"
+    ) shouldBe Denied(SameNameTables.qualifiedColumnRefusal("claim"))
+  }
+
+  it should "leave a CTE of that name alone" in {
+    // The CTE `claim` reads client_a's table; only client_b's is a second physical `claim`.
+    val out = hub(
+      "WITH c AS (SELECT id, member_no FROM client_a.claims.claim) " +
+        "SELECT c.member_no, b.region FROM c JOIN client_b.claims.claim b ON c.id = b.id"
+    )
+    out shouldBe a[Rewritten]
+    noMarker(out)
+    out.asInstanceOf[Rewritten].sql should include("FROM client_a.claims.claim")
+    out.asInstanceOf[Rewritten].sql should include("JOIN client_b.claims.claim b")
+  }
+
+  "a table of the policy's name in another catalog" should "be read as it is" in {
+    hub("SELECT member_no FROM client_b.claims.claim") shouldBe Passthrough
+    hub("SELECT * FROM client_b.claims.claim") shouldBe Passthrough
+    // Its schema is part of the name too.
+    hub(
+      "SELECT member_no FROM client_a.claims.claim",
+      List(maskMemberA.copy(schemaName = "other"))
+    ) shouldBe Passthrough
+  }
+
+  it should "stay masked when the statement holds a construct the table walk does not read" in {
+    // `read_parquet(...)` is reported unsupported: a table the walk might have missed keeps every
+    // policy of its bare name, as before.
+    hub(
+      "SELECT b.member_no FROM client_b.claims.claim b, read_parquet('x.parquet') p"
+    ) should not be Passthrough
+  }
+
+  "one table read under its own name only" should "still be rewritten as before" in {
+    hub("SELECT member_no FROM client_a.claims.claim") shouldBe
+      Rewritten("SELECT '***' AS member_no FROM client_a.claims.claim")
+    hub(
+      "SELECT a.member_no, p.name FROM client_a.claims.claim a JOIN masterdata.ref.provider p ON true"
+    ) shouldBe Rewritten(
+      "SELECT '***' AS member_no, p.name FROM client_a.claims.claim a " +
+        "JOIN masterdata.ref.provider p ON true"
+    )
+    // A self-join of one table names it once: nothing to tell apart.
+    hub(
+      "SELECT x.member_no FROM client_a.claims.claim x JOIN client_a.claims.claim y ON x.id = y.id"
+    ) shouldBe Rewritten(
+      "SELECT '***' AS member_no FROM client_a.claims.claim x " +
+        "JOIN client_a.claims.claim y ON x.id = y.id"
+    )
   }

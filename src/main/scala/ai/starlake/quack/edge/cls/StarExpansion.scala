@@ -79,7 +79,7 @@ private[cls] object StarExpansion:
       case _ => Right(sql)
 
   /** Every AST node of `root`, at any depth, children JSqlParser keeps in collections included. */
-  private def nodes(root: AnyRef): List[AnyRef] =
+  private[cls] def nodes(root: AnyRef): List[AnyRef] =
     val seen = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
     )

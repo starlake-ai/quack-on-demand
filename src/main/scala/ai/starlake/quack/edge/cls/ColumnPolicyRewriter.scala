@@ -3,6 +3,7 @@ package ai.starlake.quack.edge.cls
 import java.util.Locale
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.ondemand.state.RoleColumnPolicy
 import cats.effect.IO
 import cats.syntax.traverse._
 import ai.starlake.acl.parser.TableExtractor
@@ -51,6 +52,19 @@ object ColumnPolicyRewriter:
   private[cls] val InexactRefusal: String =
     "column policies cannot be applied to a statement using integer division (//); " +
       "split the statement or select the division without the masked columns"
+
+  /** A policy no table matches: its table name holds a NUL, which no SQL identifier can. */
+  private[cls] val InertPolicy: ai.starlake.quack.ondemand.state.RoleColumnPolicy =
+    ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+      id = "qod-inert",
+      roleId = "",
+      catalogName = "\u0000",
+      schemaName = "\u0000",
+      tableName = "\u0000",
+      columnName = "\u0000",
+      action = ai.starlake.quack.ondemand.state.RoleColumnPolicy.ActionMask,
+      transformSql = Some("NULL")
+    )
 
   /** Inner rewriter raised a deny because the table/schema/catalog could not be resolved, not
     * because a policy matched. Same wire-level error as [[Denied]] but tagged separately so
@@ -115,16 +129,34 @@ final class ColumnPolicyRewriter(
     if readsOnlyCatalogFunctions(sql) then IO.pure(Passthrough)
     else
       buildSchema(sql, eff.user.tenant.getOrElse(""), ctx).map {
-        case Left(reason)           => Denied(reason)
-        case Right((schema, homes)) =>
-          TooDeep.orElse(Denied(TooDeep.Reason))(rewriteResolved(sql, schema, homes, eff, ctx))
+        case Left(reason) => Denied(reason)
+        case Right(r)     =>
+          TooDeep.orElse(Denied(TooDeep.Reason)) {
+            val scoped = r.policies(eff.columnPolicies)
+            // No policy covers a table of this statement. In Pass mode nothing is left to do; Deny
+            // mode still refuses a table or column the resolver cannot find, so the resolver runs
+            // with a policy no table can match.
+            val policies =
+              if scoped.nonEmpty || unresolvedMode == UnresolvedMode.Pass then scoped
+              else List(InertPolicy)
+            if policies.isEmpty then Passthrough
+            else
+              r.separation match
+                case None      => rewriteResolved(sql, r.schema, r.homes, policies, ctx)
+                case Some(sep) =>
+                  rewriteResolved(sep.sql, r.schema, r.homes, policies, ctx) match
+                    case Rewritten(out) =>
+                      sep.restore(out).fold(Denied(_), Rewritten(_))
+                    case Denied(reason) => Denied(sep.describe(reason))
+                    case other          => other
+          }
       }
 
   private def rewriteResolved(
       sql: String,
       schema: Map[String, List[String]],
       homes: Map[String, (String, String)],
-      eff: EffectiveSet,
+      policies: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy],
       ctx: SchemaContext
   ): Outcome =
     PositionalReferences.resolve(sql, schema) match
@@ -133,7 +165,7 @@ final class ColumnPolicyRewriter(
         inner.rewrite(
           sql = named,
           schema = schema,
-          policies = eff.columnPolicies,
+          policies = policies,
           defaultCatalog = ctx.defaultDatabase,
           defaultSchema = ctx.defaultSchema,
           unresolvedMode = unresolvedMode,
@@ -175,6 +207,43 @@ final class ColumnPolicyRewriter(
         )
       }
 
+  /** The statement's column lists by table key, each table named outside the defaults with where it
+    * is named, and, when it reads tables of one bare name in several places, how they were renamed
+    * apart ([[SameNameTables]]). `tables` is every table key with the catalog, schema and name it
+    * reads, and `complete` whether the walk that found them read the whole statement.
+    */
+  private final case class Resolved(
+      schema: Map[String, List[String]],
+      homes: Map[String, (String, String)],
+      separation: Option[SameNameTables.Separation],
+      tables: List[(String, (String, String, String))] = Nil,
+      complete: Boolean = false
+  ):
+
+    /** The policies the rewriter applies to this statement. The rewriter matches a policy to a
+      * column by the bare name of the column's table, so a policy is handed to it only under the
+      * key of a table it covers by catalog, schema and name (`PolicyCoverage`, the rule of the row
+      * filters and the protected-write guard): a mask on `client_a.claims.claim` does not mask
+      * `client_b.claims.claim` (issue #201). A policy whose table part is `*` stays as it is, as it
+      * matches whatever table a column is attributed to, a column it cannot place included, once it
+      * covers any table of the statement.
+      *
+      * When the walk did not read the whole statement (a construct it reports as unsupported, a
+      * name it cannot place, a parse it could not make), a table it missed would lose its policies,
+      * so every policy is applied by bare name, as before: over-masking, never a leak.
+      */
+    def policies(all: List[RoleColumnPolicy]): List[RoleColumnPolicy] =
+      if !complete then separation.map(_.policies(all)).getOrElse(all)
+      else
+        tables.flatMap { case (key, (cat, sch, tab)) =>
+          all.collect {
+            case p
+                if ai.starlake.quack.edge.policy.PolicyCoverage
+                  .covers(p.catalogName, p.schemaName, p.tableName, cat, sch, tab) =>
+              if p.tableName == RoleColumnPolicy.Wildcard then p else p.copy(tableName = key)
+          }
+        }.distinct
+
   /** Pre-parse to enumerate FROM-item tables and fetch their column lists from the catalog.
     * Failures (unparseable SQL, missing catalog entry) silently omit the table - the resolver's
     * `unresolvedMode` then decides what to do.
@@ -192,44 +261,37 @@ final class ColumnPolicyRewriter(
       sql: String,
       tenant: String,
       ctx: SchemaContext
-  ): IO[Either[String, (Map[String, List[String]], Map[String, (String, String)])]] =
+  ): IO[Either[String, Resolved]] =
     Try(ai.starlake.sql.JSqlStatements.parseFirst(sql)) match
-      case Failure(_)            => IO.pure(Right((Map.empty, Map.empty)))
+      case Failure(_)            => IO.pure(Right(Resolved(Map.empty, Map.empty, None)))
       case Success(stmt: Select) =>
-        val tables = collectTables(stmt, ctx).filterNot { case (_, (_, sch, _)) =>
+        val (found, complete) = collectTables(stmt, ctx)
+        val tables            = found.filterNot { case (_, (_, sch, _)) =>
           SystemSchemaColumns.isSystemSchema(sch) // resolved via SystemSchemaColumns inside
         }
-        sameNameElsewhere(tables) match
-          case Some(name) =>
-            IO.pure(
-              Left(
-                s"two tables named $name in different catalogs or schemas cannot be told apart " +
-                  "under column policies; read them in separate statements"
-              )
-            )
-          case None =>
-            tables.distinct
+        val clashing = SameNameTables.clashing(tables)
+        // Tables of one bare name in several catalogs or schemas are renamed apart first, so
+        // each reads its own column list (issue #201).
+        val separated =
+          if clashing.isEmpty then Right(None)
+          else SameNameTables.separate(stmt, tables, clashing).map(Some(_))
+        separated match
+          case Left(reason) => IO.pure(Left(reason))
+          case Right(sep)   =>
+            val kept = tables.collect {
+              case (t, coords @ (_, _, tab)) if !clashing.contains(tab.toLowerCase(Locale.ROOT)) =>
+                (tab, coords)
+            }
+            val keyed = kept ++ sep.toList.flatMap(_.keys)
+            keyed.distinct
               .traverse { case (key, (cat, sch, tab)) =>
                 catalog.columnsOf(tenant, ctx.pool, cat, sch, tab).map(cols => key -> cols)
               }
               .map { listed =>
-                val homes = tables.map { case (key, (cat, sch, _)) => key -> (cat, sch) }.toMap
-                Right((listed.toMap, homes))
+                val homes = kept.map { case (key, (cat, sch, _)) => key -> (cat, sch) }.toMap
+                Right(Resolved(listed.toMap, homes, sep, keyed.distinct, complete))
               }
-      case Success(_) => IO.pure(Right((Map.empty, Map.empty)))
-
-  /** The first bare table name the statement reads in two places: the rewriter keys a table by its
-    * bare name, so two such tables would share one column list.
-    */
-  private def sameNameElsewhere(tables: List[(String, (String, String, String))]): Option[String] =
-    def low(s: String) = s.toLowerCase(Locale.ROOT)
-    tables
-      .groupBy { case (key, _) => low(key) }
-      .collectFirst {
-        case (name, refs)
-            if refs.map { case (_, (c, s, _)) => (low(c), low(s)) }.distinct.size > 1 =>
-          name
-      }
+      case Success(_) => IO.pure(Right(Resolved(Map.empty, Map.empty, None)))
 
   /** Every physical table referenced ANYWHERE in the statement, with its bare name: the ACL
     * parser's walk ([[TableExtractor]]), which reaches FROM items, joins, CTE bodies, set-op arms
@@ -237,24 +299,28 @@ final class ColumnPolicyRewriter(
     * binds CTE names as DuckDB does. JSqlParser's own TablesNamesFinder dropped every table named
     * like a CTE of the statement, so the dbt shape `WITH customer AS (SELECT * FROM customer)
     * SELECT c_email FROM customer`, whose body reads the real table, could not be resolved and was
-    * denied. A name missing a catalog or schema gets the session's.
+    * denied. A name missing a catalog or schema gets the session's. The flag is false when the walk
+    * failed, reported a construct it does not read, or met a name of more than three parts.
     */
   private def collectTables(
       stmt: Select,
       ctx: SchemaContext
-  ): List[(String, (String, String, String))] =
-    val tables             = Try(TableExtractor.extract(stmt).tables).getOrElse(Nil)
+  ): (List[(net.sf.jsqlparser.schema.Table, (String, String, String))], Boolean) =
+    val extraction         = Try(TableExtractor.extract(stmt)).toOption
+    val tables             = extraction.map(_.tables).getOrElse(Nil)
     def unquote(s: String) = ai.starlake.sql.QuotedIdentifier.unquote(s)
-    tables.flatMap { t =>
+    val placed             = tables.flatMap { t =>
       t.getNameParts.asScala.toList.reverse.map(unquote) match
         case tab :: Nil =>
-          Some(tab -> (ctx.defaultDatabase.getOrElse(""), ctx.defaultSchema.getOrElse(""), tab))
+          Some(t -> (ctx.defaultDatabase.getOrElse(""), ctx.defaultSchema.getOrElse(""), tab))
         case sch :: tab :: Nil =>
-          Some(tab -> (ctx.defaultDatabase.getOrElse(""), sch, tab))
+          Some(t -> (ctx.defaultDatabase.getOrElse(""), sch, tab))
         case cat :: sch :: tab :: Nil =>
-          Some(tab -> (cat, sch, tab))
+          Some(t -> (cat, sch, tab))
         case _ => None
     }
+    val complete = extraction.exists(_.unsupported.isEmpty) && placed.size == tables.size
+    (placed, complete)
 
 /** DuckDB positional column references (`#n`, 1-based, FROM-relative) resolved to the column names
   * the policy matcher needs. The quack client pushes every scan down as `SELECT #1, #2 FROM

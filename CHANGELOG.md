@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed
+
+- A column mask or deny applies only to the table its catalog, schema and table name cover, as row
+  filters already did: a mask on `client_a.claims.claim.member_no` no longer masks
+  `client_b.claims.claim.member_no`, which it matched by table name alone (#201). A policy whose
+  catalog or schema is `*` still covers every table of that name. When the table walk meets a
+  construct it does not read, the rewriter keeps matching by table name for that statement.
+
+### Fixed
+
+- A principal holding a column policy can read two tables of the same name from different catalogs
+  or schemas in one statement (`client_a.claims.claim a JOIN client_b.claims.claim b`, a `UNION ALL`
+  of both, a subquery over one): each table is masked with its own columns, as when it is read alone
+  (#201). Two shapes are still refused, with the rewrite to use: both tables in one FROM clause
+  without aliases, and a column or star of such a table qualified by its schema or catalog
+  (`client_a.claims.claim.member_no`).
+
 ## 0.13.0
 
 ### Upgrading
