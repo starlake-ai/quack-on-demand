@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.adapter
 
-import ai.starlake.quack.route.NodeLoad
+import ai.starlake.quack.route.{NodeLoad, NodeUnhealthy}
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
@@ -98,8 +98,26 @@ final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
   def latencyPercentiles(nodeId: String): (Double, Double, Double) =
     Option(percentiles.get(nodeId)).map(_.percentiles()).getOrElse((0.0, 0.0, 0.0))
 
+  /** Healthy clears why it was not; unhealthy with no cause keeps the one already recorded. A
+    * failure with a known cause goes through [[setUnhealthy]] instead.
+    */
   def setHealthy(nodeId: String, healthy: Boolean): Unit =
-    update(nodeId)(_.copy(healthy = healthy))
+    update(nodeId)(l =>
+      l.copy(healthy = healthy, unhealthy = if healthy then None else l.unhealthy)
+    )
+
+  /** Unhealthy for `cause`, at `nowMs`. A node already unhealthy keeps the start of its run of
+    * failures and takes the latest cause.
+    */
+  def setUnhealthy(nodeId: String, cause: NodeUnhealthy.Cause, nowMs: Long): Unit =
+    update(nodeId) { l =>
+      val since = l.unhealthy.filter(_ => !l.healthy).fold(nowMs)(_.sinceMs)
+      l.copy(healthy = false, unhealthy = Some(NodeUnhealthy(cause.code, cause.detail, since)))
+    }
+
+  /** The health probe answered for this node at `nowMs`. */
+  def setProbedAt(nodeId: String, nowMs: Long): Unit =
+    update(nodeId)(_.copy(lastProbeAtMs = Some(nowMs)))
 
   /** The health probe's hold on a node that did not show local files off, or None to lift it. */
   def setLocalFilesNotOff(nodeId: String, reason: Option[String]): Unit =

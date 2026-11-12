@@ -18,7 +18,12 @@ final case class NodeLoad(
     // Why the health probe holds this node out of routing: the manager runs its nodes with local
     // files off and this one did not show it (`QuackHttpAdapter.healthProbe`). Only the probe writes
     // it, so a statement that succeeds, which sets `healthy`, does not let the node back.
-    localFilesNotOff: Option[String] = None
+    localFilesNotOff: Option[String] = None,
+    // Why the node is unhealthy, while it is: the last failure seen, stamped with the start of the
+    // run of failures. Cleared with `healthy` (see `NodeLoadTracker.setHealthy`).
+    unhealthy: Option[NodeUnhealthy] = None,
+    // Epoch milliseconds of the health probe's last answer for this node, None before its first.
+    lastProbeAtMs: Option[Long] = None
 ):
   def routable: Boolean = healthy && !draining && !quarantined && localFilesNotOff.isEmpty
 

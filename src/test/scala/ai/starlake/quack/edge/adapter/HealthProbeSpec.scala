@@ -17,9 +17,10 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
 
   "HealthProbe" should "mark a healthy node healthy and a failing node unhealthy" in:
     val tracker = new NodeLoadTracker
-    val results = Map("ok" -> true, "bad" -> false)
+    val results = Map("ok" -> ProbeVerdict.Ok, "bad" -> ProbeVerdict.Unenforced)
     val probe   = new HealthProbe(
       tracker = tracker,
+      recordsPids = false,
       pingFn = n => IO.pure(results(n.nodeId)),
       interval = 50.millis,
       afterTick = _ => ()
@@ -33,10 +34,11 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
 
   it should "run onHealthy only for nodes that ping healthy" in:
     val tracker = new NodeLoadTracker
-    val results = Map("ok" -> true, "bad" -> false)
+    val results = Map("ok" -> ProbeVerdict.Ok, "bad" -> ProbeVerdict.Unenforced)
     val seen    = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
     val probe   = new HealthProbe(
       tracker = tracker,
+      recordsPids = false,
       pingFn = n => IO.pure(results(n.nodeId)),
       interval = 50.millis,
       afterTick = _ => (),
@@ -52,7 +54,8 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val probe   = new HealthProbe(
       tracker = tracker,
-      pingFn = _ => IO.pure(true),
+      recordsPids = false,
+      pingFn = _ => IO.pure(ProbeVerdict.Ok),
       interval = 50.millis,
       afterTick = _ => (),
       onHealthy = _ => IO.raiseError(new RuntimeException("scrape blew up"))
@@ -69,7 +72,8 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
     @volatile var listed = List(node("a"), node("b"))
     val probe            = new HealthProbe(
       tracker = tracker,
-      pingFn = n => IO.delay { pinged.add(n.nodeId); true },
+      recordsPids = false,
+      pingFn = n => IO.delay { pinged.add(n.nodeId); ProbeVerdict.Ok },
       interval = 50.millis,
       afterTick = ids => {
         // Every id handed over was pinged first in the same tick.
@@ -89,3 +93,86 @@ class HealthProbeSpec extends AnyFlatSpec with Matchers:
     seen.forall(_._2) shouldBe true
     // The loop kept ticking although afterTick threw every time.
     seen.size should be >= 3
+
+  it should "record why a node is unhealthy, keep when it began, and clear it on recovery" in:
+    val tracker                         = new NodeLoadTracker
+    @volatile var verdict: ProbeVerdict =
+      ProbeVerdict.Failed(QuackError.Transient("Connection refused", notSent = true))
+    val probe = new HealthProbe(
+      tracker = tracker,
+      recordsPids = false,
+      pingFn = _ => IO.delay(verdict),
+      interval = 30.millis,
+      afterTick = _ => ()
+    )
+    val n     = node("n").copy(port = 23901)
+    val fiber = probe.start(() => List(n)).unsafeRunSync()
+    Thread.sleep(120)
+    val first = tracker.snapshot("n")
+    first.healthy shouldBe false
+    first.unhealthy.map(_.code) shouldBe Some("unreachable")
+    first.unhealthy.get.detail should include("127.0.0.1:23901")
+    first.lastProbeAtMs shouldBe defined
+    // Another kind of failure: the latest cause, the same start.
+    verdict = ProbeVerdict.Unenforced
+    Thread.sleep(120)
+    val second = tracker.snapshot("n")
+    second.unhealthy.map(_.code) shouldBe Some("unenforced")
+    second.unhealthy.map(_.sinceMs) shouldBe first.unhealthy.map(_.sinceMs)
+    second.lastProbeAtMs.get should be > first.lastProbeAtMs.get
+    verdict = ProbeVerdict.Ok
+    Thread.sleep(120)
+    fiber.cancel.unsafeRunSync()
+    tracker.snapshot("n").healthy shouldBe true
+    tracker.snapshot("n").unhealthy shouldBe None
+
+  it should "record probe_error when the probe raises" in:
+    val tracker = new NodeLoadTracker
+    val probe   = new HealthProbe(
+      tracker = tracker,
+      recordsPids = false,
+      pingFn = _ => IO.raiseError(new RuntimeException("boom")),
+      interval = 30.millis,
+      afterTick = _ => ()
+    )
+    val fiber = probe.start(() => List(node("n"))).unsafeRunSync()
+    Thread.sleep(100)
+    fiber.cancel.unsafeRunSync()
+    tracker.snapshot("n").unhealthy.map(_.code) shouldBe Some("probe_error")
+    tracker.snapshot("n").unhealthy.get.detail should not include "boom"
+
+  it should "say a failing node whose row has no pid is a fleet leftover on the local runtime" in:
+    val tracker  = new NodeLoadTracker
+    val refused  = ProbeVerdict.Failed(QuackError.Transient("Connection refused", notSent = true))
+    val leftover = node("left").copy(pid = None, port = 23901, serverName = Some("s1"))
+    val probe    = new HealthProbe(
+      tracker = tracker,
+      recordsPids = true,
+      pingFn = _ => IO.pure(refused),
+      interval = 30.millis,
+      afterTick = _ => ()
+    )
+    val fiber = probe.start(() => List(leftover, node("own"))).unsafeRunSync()
+    Thread.sleep(100)
+    fiber.cancel.unsafeRunSync()
+    val left = tracker.snapshot("left").unhealthy.get
+    left.code shouldBe "fleet_leftover"
+    left.detail should include("fleet manager (server s1, 127.0.0.1:23901)")
+    left.detail should include("reconcile replaces")
+    // A row of this backend's own (it carries a pid) fails as any node does.
+    tracker.snapshot("own").unhealthy.map(_.code) shouldBe Some("unreachable")
+
+  it should "not call a pid-less row a leftover on a backend that records no pid" in:
+    val tracker = new NodeLoadTracker
+    val probe   = new HealthProbe(
+      tracker = tracker,
+      recordsPids = false,
+      pingFn = _ => IO.pure(ProbeVerdict.Failed(QuackError.Transient("refused", notSent = true))),
+      interval = 30.millis,
+      afterTick = _ => ()
+    )
+    val fiber =
+      probe.start(() => List(node("pod").copy(pid = None, podName = Some("p")))).unsafeRunSync()
+    Thread.sleep(100)
+    fiber.cancel.unsafeRunSync()
+    tracker.snapshot("pod").unhealthy.map(_.code) shouldBe Some("unreachable")

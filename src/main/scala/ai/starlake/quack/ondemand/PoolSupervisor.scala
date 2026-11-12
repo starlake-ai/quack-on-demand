@@ -46,7 +46,7 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission
 }
 import ai.starlake.quack.ondemand.storage.ManagedPrefix
-import ai.starlake.quack.route.PoolSnapshot
+import ai.starlake.quack.route.{NodeUnhealthy, PoolSnapshot}
 import ai.starlake.quack.spi.ManagerEvent
 import cats.effect.{IO, Outcome, Ref}
 import cats.effect.unsafe.implicits.global
@@ -1636,10 +1636,13 @@ final class PoolSupervisor(
         // (NodeProcess: pid alive AND its start instant matches startedAt) and it either is inside
         // its startup window or accepts a connection; pid-less nodes (k8s) are live iff the labeled
         // pod list contains them. live=None means the backend can't enumerate (local mode /
-        // apiserver blip): treat as alive, heal nothing.
+        // apiserver blip): treat as alive, heal nothing. On a backend whose every node carries a
+        // pid (local), a pid-less row is another runtime's leftover (a fleet run against the same
+        // control plane) that nothing here runs: dead, so it is replaced, never left unhealthy.
         def podAlive(n: RunningNode): Boolean = n.pid match
           case Some(_) => NodeProcess.of(n).isDefined && (isStarting(n) || isReachable(n))
-          case None    => live.fold(true)(_.contains(n.nodeId))
+          case None if backend.recordsPids => false
+          case None                        => live.fold(true)(_.contains(n.nodeId))
 
         // Heal to target: rows beyond distribution.total are pruned, but ONLY rows whose pod is
         // authoritatively absent. Two guards, both deliberate:
@@ -1715,11 +1718,17 @@ final class PoolSupervisor(
                     rewrite *> backend.adopt(at).as((kept :+ at, noFree, stranded))
                   }
                 else
-                  val msg =
+                  // A row another runtime wrote says where it came from, so the log tells a
+                  // fleet leftover from a node that died here, at ERROR (the default level): it
+                  // is replaced once, and it explains a node that was unhealthy until now.
+                  val leftover = NodeUnhealthy.leftover(n, backend.recordsPids)
+                  val msg      = leftover.fold(
                     s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
                       "is dead; respawning"
+                  )(c => s"reconcile: $key/${n.nodeId}: ${c.detail}")
                   // Already kept on its dead server by an earlier pass: a per-pass retry, not news.
                   if alreadyKept.exists(_.contains(n.nodeId)) then logger.info(msg)
+                  else if leftover.isDefined then logger.error(msg)
                   else logger.warn(msg)
                   // The tracker entry is cleared only when a fresh node replaces this one (or its
                   // row goes): a kept node keeps its full state, healthy = false included, so it

@@ -1177,7 +1177,8 @@ object Main extends IOApp with LazyLogging:
 
     val healthProbe = new HealthProbe(
       tracker,
-      n => {
+      recordsPids = backend.recordsPids,
+      pingFn = n => {
         val initSql =
           if schemaInited.done(n.nodeId) then None
           else
@@ -1192,7 +1193,7 @@ object Main extends IOApp with LazyLogging:
             }
         val probeSql = initSql.map(s => s"$s; SELECT 1").getOrElse("SELECT 1")
         // tracker still holds the PREVIOUS tick's healthy flag here: HealthProbe.start only
-        // calls tracker.setHealthy(n.nodeId, ok) after this pingFn IO completes, so reading it
+        // records the verdict after this pingFn IO completes, so reading it
         // now is a transition check (was healthy, now failing) without restructuring HealthProbe
         // to expose one itself.
         val wasHealthy = tracker.snapshot(n.nodeId).healthy
@@ -1220,10 +1221,10 @@ object Main extends IOApp with LazyLogging:
                 "an ENCRYPTION_KEY that does not match the file fails the boot ATTACH, which " +
                 "presents identically to an occupied node port"
             )
-          ok
+          verdict
         }
       },
-      scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
+      interval = scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
       // The per-node maps only the probe writes follow the nodes it lists, on every replica (a
       // follower keeps reading the authz counters it does not export, so they are pruned here
       // too, not only on a leader's scrape).

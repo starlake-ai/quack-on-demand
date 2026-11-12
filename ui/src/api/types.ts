@@ -52,6 +52,15 @@ export interface NodeInfo {
   // Absent on the local/Kubernetes backends, which have no fleet servers.
   serverName?: string | null;
   serverState?: string | null;
+  // Why the node is unhealthy, while it is: a fixed code (unreachable, probe_lost, probe_refused,
+  // handle_refused, unenforced, local_files_on, probe_error, statement_failed, fleet_leftover,
+  // foreign_row), the manager's
+  // one-line explanation and when the failures began (ISO-8601). lastProbeAt: the health probe's
+  // last answer for the node.
+  unhealthyReason?: string | null;
+  unhealthyDetail?: string | null;
+  unhealthySince?: string | null;
+  lastProbeAt?: string | null;
 }
 
 export interface PoolResponse {

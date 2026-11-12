@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { DeleteIcon } from './Icons';
 import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
 import { Modal } from './Modal';
+import { NodeHealthBadge } from './NodeHealthBadge';
 import Tabs from './Tabs';
 import { dashboardPath, poolsPath } from '../nav/links';
 import { initSqlToSend } from '../api/initSql';
@@ -500,13 +501,7 @@ export default function PoolDetailBody({
               </td>
               <td>{n.port}</td>
               <td>
-                <span className={
-                  n.quarantined ? 'badge warn' :
-                  n.draining ? 'badge warn' :
-                  n.healthy ? 'badge good' : 'badge bad'
-                }>
-                  {n.quarantined ? 'quarantined' : n.draining ? 'draining' : n.healthy ? 'healthy' : 'unhealthy'}
-                </span>
+                <NodeHealthBadge node={n} showDetail />
               </td>
               <td>
                 <input

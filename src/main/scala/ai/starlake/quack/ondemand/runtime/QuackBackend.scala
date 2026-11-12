@@ -29,6 +29,14 @@ trait QuackBackend:
     */
   def allowsLocalFiles: Boolean
 
+  /** True when every node this backend starts carries its process id (the local backend). A node
+    * row with none was then written by another runtime against the same control plane (a fleet or
+    * Kubernetes manager that ran before this one), so nothing this backend runs serves it:
+    * reconcile reads such a row as dead and replaces it, where a backend that records no pid reads
+    * it by [[liveNodeIds]].
+    */
+  def recordsPids: Boolean = false
+
   /** True for the fleet backend (bare servers joined via `qod fleet join`). Surfaced to the UI so
     * it shows the Fleet servers page only where servers can exist.
     */

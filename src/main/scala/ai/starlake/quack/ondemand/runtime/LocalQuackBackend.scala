@@ -201,6 +201,9 @@ final class LocalQuackBackend(
   private def held(nodeId: String): Option[ProcessHandle] =
     processes.get(nodeId).map(_.toHandle).orElse(adoptedProcs.get(nodeId))
 
+  /** Every node this backend starts carries its pid ([[start]]). */
+  override def recordsPids: Boolean = true
+
   /** A node's process from an earlier manager generation that this backend never adopted (it was
     * not listening when reconcile first saw it) is not reached by `release`, so a replacement would
     * orphan it. Stop it here, but only when its identity is verified ([[NodeProcess]]).

@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.adapter
 
 import ai.starlake.quack.edge.authz.{MintedHandle, NodeHandles, NodeKeys, NodePrincipal}
 import ai.starlake.quack.model.RunningNode
+import ai.starlake.quack.route.NodeUnhealthy
 import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 
@@ -163,8 +164,9 @@ final class QuackHttpAdapter(
     tracker.onFinish(node.nodeId, out.latency)
     out match
       case NodeOutcome.Ok(_, _, _)        => tracker.setHealthy(node.nodeId, true)
-      case NodeOutcome.Transient(_, _, _) => tracker.setHealthy(node.nodeId, false)
-      case NodeOutcome.Permanent(_, _)    => ()
+      case NodeOutcome.Transient(_, _, _) =>
+        tracker.setUnhealthy(node.nodeId, NodeUnhealthy.StatementLost, System.currentTimeMillis())
+      case NodeOutcome.Permanent(_, _) => ()
 
   /** Liveness and enforcement probe, as the system principal: [[ProbeVerdict.Ok]] iff `sql` runs
     * AND the node refuses a statement with no session handle (the canary). A node that refuses the
@@ -180,7 +182,7 @@ final class QuackHttpAdapter(
       case QuackResponse.Ok(_, _, close) => IO(close()) *> canary(node)
       case QuackResponse.Failed(QuackHttpClient.HandleRefused(nodeText), _) =>
         IO.pure(ProbeVerdict.HandleRefused(nodeText))
-      case QuackResponse.Failed(err, _) => IO.pure(ProbeVerdict.Failed(err.toString))
+      case QuackResponse.Failed(err, _) => IO.pure(ProbeVerdict.Failed(err))
     }
 
   /** The health loop's probe of `node`: [[probe]], then, where this manager runs its nodes with
