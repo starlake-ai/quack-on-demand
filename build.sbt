@@ -309,6 +309,11 @@ lazy val root = (project in file("."))
     // (it needs the java.nio opens above): Main sets it too, before any Netty class loads, which is
     // all a launch from the jar has, and the forked JVMs get it so that the suite runs what
     // production runs.
+    //
+    // The Flight SQL JDBC driver (tests only) shades Netty 4.2, which turns Unsafe off by default
+    // on Java 25+, and bundles only Arrow's Netty allocator, which needs it: its first connection
+    // then dies in BaseAllocator's static init. The relocated property gives that Netty Unsafe
+    // back and touches nothing else in the JVM.
     Compile / run / fork := true,
     Test / fork          := true,
     Compile / run / javaOptions ++= Seq(
@@ -319,7 +324,8 @@ lazy val root = (project in file("."))
     Test / javaOptions ++= Seq(
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
       "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
-      "-Dio.netty.tryReflectionSetAccessible=true"
+      "-Dio.netty.tryReflectionSetAccessible=true",
+      "-Dorg.apache.arrow.driver.jdbc.shaded.io.netty.noUnsafe=false"
     ),
     // libquackwire links libduckdb through an rpath that only exists on the build machine, so the
     // forked test JVM relies on LibDuckDbPreload finding the pinned copy (macOS SIP strips DYLD_*
