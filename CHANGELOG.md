@@ -13,6 +13,30 @@
 - A manager launched with `-cp` instead of `java -jar` passes `--enable-native-access=ALL-UNNAMED`
   and `--sun-misc-unsafe-memory-access=allow` itself, next to the two `--add-opens`, or JDK 25
   prints warnings at every boot.
+- A database's `defaultSchema` and `defaultDatabase` must be plain identifiers, like
+  `schemaName`: a create, update, manifest import or branch registration with another value answers
+  `400`. A row stored earlier with one keeps serving, but any update to it, or a manifest import of
+  it, must correct the value first.
+- A personal access token minted with `verbCeiling: RO` is now read-only on admin REST and MCP too
+  (see Breaking). Replace a token that administers QoD under `RO` with one without that ceiling.
+
+### Breaking
+
+- `verbCeiling: RO` means read-only everywhere (#197). Such a token gets every `GET` and the four
+  reads exposed as `POST`, and anything else answers `403 token_read_only` and writes an audit row;
+  it can no longer import a manifest or mint a child token. Over MCP it gets only the read-only
+  tools (`McpRoutes.ReadOnlyTools`, `run_sql` included, which the ceiling already bounds); another
+  tool reads as unknown.
+
+### Security
+
+- A management session presented on the data plane as a bearer (when `JWT_SECRET_KEY` equals the
+  session secret) follows the session store: its own tenant or one it administers, and a superuser
+  row only for a superuser's session (#198).
+- Only a superuser sets or changes an Iceberg source's `credential_chain`: a tenant admin gets
+  `403 superuser_required`. A stored source sent back unchanged is still accepted (#198).
+- Kubernetes node pods no longer mount the service account's API token, and a pod template cannot
+  turn it back on. Tokens projected for IRSA or workload identity are separate mounts and stay (#198).
 
 ### Added
 
@@ -33,6 +57,19 @@
   row another runtime wrote), `unhealthyDetail` and `unhealthySince`, and
   `lastProbeAt`, the health probe's last answer. The explanation is the manager's own text, never a
   node's error, since tenant admins read it.
+- Hooks for a control plane connector (#197): manifest import and export take `mode=rbac&tenant=`,
+  which replaces the tenant's custom roles and groups with the file's (built-ins, existing group pool
+  grants and SCIM groups are left alone, and a file naming a SCIM group is refused);
+  `GET /api/tenant/list` carries each tenant's `policyVersion`; the audit history takes an ascending
+  `after` cursor, and its rows carry `patId`. The CLI gains `--mode`, `--tenant` and
+  `--after`.
+- `QOD_AUDIT_HANDSHAKE_FAILURES=true` (`telemetry.auditHandshakeFailures`, off by default) writes
+  `auth.login.failure` for a refused FlightSQL or native Quack handshake: the front door, the user
+  name as given, the tenant and pool, the client address and a fixed reason, never the credential; at
+  most one row a minute per front door, address and user name (#211).
+- The qod CLI tells you on stderr, in a terminal, when PyPI has a newer `qod`, with the upgrade
+  command for how it was installed (`uv tool upgrade qod`, `uvx qod@latest`, `pipx upgrade qod`, or
+  pip). It asks PyPI at most once a day; `QOD_NO_UPDATE_CHECK=1` turns it off (#206).
 
 ### Fixed
 
@@ -46,10 +83,25 @@
   control plane (a fleet manager that ran before it): such a row carries no process id and named
   a server nothing runs any more, so its nodes stayed unhealthy forever. The replacement is logged
   at ERROR, naming the fleet server (or pod) and the address the row named.
+- Column masks apply to a federated table, to a `duckdb-file` or `memory` database's tables and to a
+  DuckLake table read from another schema: `SELECT v` and `SELECT *` were refused and only values
+  inside expressions came back masked, and a mask on one table refused reads of tables it does not
+  cover. Row filters on a federated table apply too. One known limit stays: a column-policy holder is
+  refused one statement reading two tables of the same name from different catalogs or schemas (#204,
+  #205).
+- A DuckLake database attached under a custom `catalogAlias` gets its column list again, so column
+  policies on it no longer refuse `SELECT *` (#199).
+- A read refused while a FlightSQL client prepares it writes its `sql.denied` row and history entry;
+  no Execute follows such a refusal, so it went unrecorded (#211).
+- `qod serve` and `qod start` provision libduckdb for the JVM's architecture, not Python's: an x64
+  JVM on Windows on ARM failed to load `quackwire.dll`. A cached library of the wrong architecture is
+  downloaded again (#209).
 
 ### Changed
 
 - The build runs on sbt 1.13.1 and JDK 25.
+- The console's Workbench link is disabled for superusers, with the tooltip "Not available to
+  superusers" (#193).
 - JDK 25 prints no warnings at boot: the jar's manifest carries `Enable-Native-Access` for the JNI
   loads of libquackwire and libduckdb, and the image, `run-jar.sh`, `run-jar.ps1` and the qod CLI
   pass `--sun-misc-unsafe-memory-access=allow` for the `sun.misc.Unsafe` use of Scala's lazy vals,
