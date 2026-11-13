@@ -185,6 +185,24 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Rewritten, got $other")
   }
 
+  it should "qualify a join's expanded star by each table's alias (#217)" in {
+    val multi = Map(
+      "customer" -> List("c_id", "c_email"),
+      "orders"   -> List("o_id", "o_customer")
+    )
+    def run(sql: String) =
+      rw.rewrite(sql, multi, List(maskEmail), Some("acme_tpch"), Some("tpch1"))
+    run("SELECT * FROM orders o JOIN customer c ON c.c_id = o.o_customer") shouldBe
+      RewriteOutcome.Rewritten(
+        "SELECT o.o_id, o.o_customer, c.c_id, '***' AS c_email " +
+          "FROM orders o JOIN customer c ON c.c_id = o.o_customer"
+      )
+    run("SELECT * FROM orders o, customer") shouldBe
+      RewriteOutcome.Rewritten(
+        "SELECT o.o_id, o.o_customer, customer.c_id, '***' AS c_email FROM orders o, customer"
+      )
+  }
+
   it should "resolve unqualified c_email in a multi-join to the customer table" in {
     val multi = Map(
       "customer" -> List("c_id", "c_email"),

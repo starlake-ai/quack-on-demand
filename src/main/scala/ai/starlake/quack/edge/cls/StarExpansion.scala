@@ -29,12 +29,14 @@ import scala.util.Try
   * visitor sees a plain projection and masks it like any other.
   *
   * Only shapes whose column list is exact are expanded: `t.*` naming one base table of the FROM
-  * clause, or `*` over a FROM clause of exactly one base table, the table's columns known and the
-  * name not a CTE of the statement, and only modifiers whose result is exact: a column-list EXCLUDE
-  * / EXCEPT and REPLACE. A star carrying any other modifier (RENAME, APPLY, a pattern EXCLUDE), an
-  * alias, or one that cannot be expanded is refused when the select reads a table a column policy
-  * names; elsewhere it is left to the resolver, which masks nothing there. The pattern forms (`*
-  * LIKE`, COLUMNS(..)) are not modifiers: the residual check refuses them.
+  * clause, `*` over a FROM clause of exactly one base table, or an unmodified `*` over a join of
+  * base tables only (no USING, NATURAL, SEMI or ANTI join, which merge or drop columns; issue
+  * #217), the tables' columns known and their names not a CTE of the statement, and only modifiers
+  * whose result is exact: a column-list EXCLUDE / EXCEPT and REPLACE. A star carrying any other
+  * modifier (RENAME, APPLY, a pattern EXCLUDE), an alias, or one that cannot be expanded is refused
+  * when the select reads a table a column policy names; elsewhere it is left to the resolver, which
+  * masks nothing there. The pattern forms (`* LIKE`, COLUMNS(..)) are not modifiers: the residual
+  * check refuses them.
   */
 private[cls] object StarExpansion:
 
@@ -126,8 +128,9 @@ private[cls] object StarExpansion:
           case t: Table => Option(t.getName)
           case _        => None)
     def columnsOf(t: Table): Option[List[String]] =
-      val name = unquote(Option(t.getName).getOrElse(""))
-      if ctes.contains(lower(name)) then None
+      val name    = unquote(Option(t.getName).getOrElse(""))
+      val renames = Option(t.getAlias).flatMap(a => Option(a.getAliasColumns)).exists(!_.isEmpty)
+      if ctes.contains(lower(name)) || renames then None
       else schema.find(_._1.equalsIgnoreCase(name)).map(_._2).filter(_.nonEmpty)
     def isPolicyTable(t: Table): Boolean =
       val name = unquote(Option(t.getName).getOrElse(""))
@@ -138,30 +141,49 @@ private[cls] object StarExpansion:
       case t: Table => isPolicyTable(t)
       case _        => false
     }
+    // A bare `*` over several base tables is each table's columns in FROM order, unless a join
+    // merges or drops columns (USING, NATURAL, SEMI, ANTI) or two tables share a binding name.
+    val joinedTables: Option[List[Table]] =
+      val tables   = fromItems.collect { case t: Table => t }
+      val bindings = tables.flatMap(binding).map(b => lower(unquote(b)))
+      val plain    = joins.forall { j =>
+        !j.isNatural && !j.isSemi && !j.isAnti &&
+        Option(j.getUsingColumns).forall(_.isEmpty)
+      }
+      Option.when(
+        tables.size > 1 && tables.size == fromItems.size && plain &&
+          bindings.distinct.size == tables.size
+      )(tables)
     val items = Option(ps.getSelectItems).map(_.asScala.toList).getOrElse(Nil)
     val expanded: List[Either[String, Option[List[SelectItem[?]]]]] = items.map { si =>
       si.getExpression match
         case star: AllColumns =>
-          val modified              = !unmodified(star) || si.getAlias != null
-          val target: Option[Table] = star match
+          val modified                     = !unmodified(star) || si.getAlias != null
+          val targets: Option[List[Table]] = star match
             case atc: AllTableColumns =>
               val q = Option(atc.getTable)
                 .filter(_.getSchemaName == null)
                 .map(t => lower(unquote(t.getName)))
               q.flatMap { name =>
                 fromItems.filter(fi => binding(fi).exists(b => lower(unquote(b)) == name)) match
-                  case List(t: Table) => Some(t)
+                  case List(t: Table) => Some(List(t))
                   case _              => None
               }
             case _ =>
               fromItems match
-                case List(t: Table) => Some(t)
-                case _              => None
-          val aliased = target.exists(_.getAlias != null)
+                case List(t: Table) => Some(List(t))
+                case _              => joinedTables.filter(_ => !modified)
+          val aliased = targets.exists(_.exists(_.getAlias != null))
           if !modified && !aliased then Right(None)
           else
-            target.flatMap(t => columnsOf(t).map(t -> _)) match
-              case Some((t, cols)) if si.getAlias == null => columnList(star, t, cols).map(Some(_))
+            val known =
+              targets.map(_.map(t => columnsOf(t).map(t -> _))).filter(_.forall(_.isDefined))
+            known.map(_.flatten) match
+              case Some(pairs) if si.getAlias == null =>
+                val lists = pairs.map((t, cols) => columnList(star, t, cols))
+                lists.collectFirst { case Left(reason) => reason } match
+                  case Some(reason) => Left(reason)
+                  case None         => Right(Some(lists.flatMap(_.toOption).flatten))
               case _ => if modified && policyScope then Left(Refusal) else Right(None)
         case _ => Right(None)
     }

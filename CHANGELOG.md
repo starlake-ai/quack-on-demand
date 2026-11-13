@@ -18,6 +18,12 @@
   (#201). Two shapes are still refused, with the rewrite to use: both tables in one FROM clause
   without aliases, and a column or star of such a table qualified by its schema or catalog
   (`client_a.claims.claim.member_no`).
+- A principal holding a column policy can run `SELECT *` over a join of aliased tables
+  (`FROM masterdata.ref.provider p JOIN client_a.claims.claim a ON true`): the star now expands to
+  each table's columns qualified by its alias, where it named the table, which DuckDB refuses once
+  the table has an alias (`Referenced table "provider" not found`) (#217). A join with USING,
+  NATURAL, SEMI or ANTI, or one that also reads a subquery or a table function, is expanded as
+  before.
 
 ## 0.13.0
 
