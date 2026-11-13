@@ -395,6 +395,69 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     ).unsafeRunSync() shouldBe PassthroughParseFailed
   }
 
+  // -------- an alias on a parenthesized table --------
+  //
+  // `(customer) AS z` puts the alias on the parentheses, not on the table: the resolver reports
+  // the columns as z's, so the visitor never masked them, and a statement reading them was sent
+  // as written with the raw values.
+
+  private val withIds = new ColumnCatalog.MapCatalog(
+    Map(
+      ("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email"),
+      ("acme_tpch", "tpch1", "ids")      -> List("id")
+    )
+  )
+
+  List(
+    "SELECT * FROM (customer) AS z",
+    "SELECT z.c_email FROM (customer) AS z",
+    "SELECT z.* FROM (customer) AS z",
+    "SELECT * FROM (customer) z",
+    "SELECT * FROM (customer c) AS z",
+    "SELECT z.c_email FROM (customer c) AS z",
+    "SELECT * FROM ((customer) AS y) AS z",
+    "SELECT * FROM (customer) AS z JOIN ids i ON i.id = z.c_id",
+    "SELECT * FROM ids i JOIN (customer) AS z ON i.id = z.c_id",
+    "SELECT * FROM (customer JOIN ids i ON i.id = c_id) AS z",
+    "SELECT * FROM (SELECT * FROM (customer) AS z) s",
+    "SELECT * FROM (SELECT z.c_email FROM (customer) AS z) s",
+    "SELECT lower(z.c_email) FROM (customer) AS z",
+    "SELECT c_id FROM (customer) AS z WHERE z.c_email = 'a@b.c'",
+    "SELECT c_id FROM ids WHERE id IN (SELECT z.c_id FROM (customer) AS z WHERE z.c_email > '')",
+    "WITH w AS (SELECT * FROM (customer) AS z) SELECT * FROM w"
+  ).foreach { sql =>
+    it should s"never send a masked column unmasked through a parenthesized alias: $sql" in {
+      val r = new ColumnPolicyRewriter(withIds, enabled = true)
+      r.rewrite(sql, StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx)
+        .unsafeRunSync() match
+        case Denied(_)      => succeed
+        case Rewritten(out) =>
+          out should include("'***'")
+          out.toLowerCase should not include regex("""\bz\.c_email\b""")
+        case other => fail(s"expected the column masked or the statement refused, got $other")
+    }
+  }
+
+  it should "still mask a parenthesized table read through its own alias" in {
+    val r = new ColumnPolicyRewriter(withIds, enabled = true)
+    r.rewrite(
+      "SELECT c.c_email FROM (customer c) AS z",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() shouldBe Rewritten("SELECT '***' AS c_email FROM (customer c) AS z")
+  }
+
+  it should "leave a parenthesized alias over an unmasked table alone" in {
+    val r = new ColumnPolicyRewriter(withIds, enabled = true)
+    r.rewrite(
+      "SELECT z.id FROM (ids) AS z",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() shouldBe Passthrough
+  }
+
   // -------- deny semantics --------
 
   private val denySsn =

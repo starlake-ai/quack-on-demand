@@ -990,10 +990,16 @@ private[cls] object ResidualColumns:
           )
         )
       case pfi: ParenthesedFromItem =>
-        sourcesOf(pfi.getFromItem, ctes) ++
+        val inner = sourcesOf(pfi.getFromItem, ctes) ++
           Option(pfi.getJoins).toList
             .flatMap(_.asScala)
             .flatMap(j => sourcesOf(j.getFromItem, ctes))
+        // `(customer) AS z`: the alias sits on the parentheses, not on the table, and names every
+        // source inside them, so `z.c_email` reads customer's column. Without it the qualifier
+        // bound nowhere and a covered column went out unmasked.
+        Option(pfi.getAlias).map(a => lower(unquote(a.getName))) match
+          case Some(alias) => inner.map(s => s.copy(names = s.names + alias))
+          case None        => inner
       case other =>
         // A table function, VALUES, PIVOT, ...: columns unknown, never a policy table.
         val alias = other match

@@ -370,6 +370,23 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     withClue(err)(rc shouldBe 0)
     out shouldBe "7,***"
 
+  it should "never return a masked column read through an alias on a parenthesized table" in:
+    assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
+    List(
+      "SELECT * FROM (customer) AS z WHERE c_custkey = 7",
+      "SELECT z.c_name FROM (customer) AS z WHERE c_custkey = 7",
+      "SELECT z.* FROM (customer) AS z WHERE c_custkey = 7",
+      "SELECT * FROM (customer) AS z JOIN ids i ON i.id = z.c_custkey WHERE c_custkey = 7",
+      "SELECT * FROM (SELECT * FROM (customer) AS z) s WHERE c_custkey = 7"
+    ).foreach { sql =>
+      val (rc, out, err) =
+        cli(s"SELECT * FROM quack_query('$endpoint', '$sql', token := '$Token');")
+      withClue(s"$sql: rc=$rc out=$out err=$err") {
+        out should not include "name7"
+        if rc == 0 then out should include("***") else err should include("access denied")
+      }
+    }
+
   it should "sync only the tables the principal is granted (issue #114)" in:
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
     // The manager narrowed the attach-time sync to alice's grants, so `secret` was never
