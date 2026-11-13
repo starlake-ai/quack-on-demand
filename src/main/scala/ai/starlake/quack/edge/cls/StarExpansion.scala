@@ -64,6 +64,12 @@ private[cls] object StarExpansion:
     "a star over a table with a column whose name holds a dot cannot be expanded under column " +
       "policies; name the columns instead"
 
+  // The same split turns a column qualified by a dotted alias (`"x.y".c_email`) into one that binds
+  // nowhere: the resolver masks nothing and the caller's own star would be sent (issue #217 review).
+  private val DottedAliasRefusal =
+    "a star over a table whose alias or name holds a dot cannot be expanded under column " +
+      "policies; use an alias without a dot, or name the columns"
+
   /** Right(the statement to resolve: `sql` itself when no star was expanded), or Left(reason). */
   def expand(
       sql: String,
@@ -130,7 +136,8 @@ private[cls] object StarExpansion:
     def columnsOf(t: Table): Option[List[String]] =
       val name    = unquote(Option(t.getName).getOrElse(""))
       val renames = Option(t.getAlias).flatMap(a => Option(a.getAliasColumns)).exists(!_.isEmpty)
-      if ctes.contains(lower(name)) || renames then None
+      val pivoted = t.getPivot != null || t.getUnPivot != null
+      if ctes.contains(lower(name)) || renames || pivoted then None
       else schema.find(_._1.equalsIgnoreCase(name)).map(_._2).filter(_.nonEmpty)
     def isPolicyTable(t: Table): Boolean =
       val name = unquote(Option(t.getName).getOrElse(""))
@@ -143,7 +150,7 @@ private[cls] object StarExpansion:
     }
     // A bare `*` over several base tables is each table's columns in FROM order, unless a join
     // merges or drops columns (USING, NATURAL, SEMI, ANTI) or two tables share a binding name.
-    val joinedTables: Option[List[Table]] =
+    lazy val joinedTables: Option[List[Table]] =
       val tables   = fromItems.collect { case t: Table => t }
       val bindings = tables.flatMap(binding).map(b => lower(unquote(b)))
       val plain    = joins.forall { j =>
@@ -154,9 +161,12 @@ private[cls] object StarExpansion:
         tables.size > 1 && tables.size == fromItems.size && plain &&
           bindings.distinct.size == tables.size
       )(tables)
-    val items = Option(ps.getSelectItems).map(_.asScala.toList).getOrElse(Nil)
+    val dottedBinding = fromItems.exists(fi => binding(fi).exists(_.contains('.')))
+    val items         = Option(ps.getSelectItems).map(_.asScala.toList).getOrElse(Nil)
     val expanded: List[Either[String, Option[List[SelectItem[?]]]]] = items.map { si =>
       si.getExpression match
+        case _: AllColumns if dottedBinding =>
+          if policyScope then Left(DottedAliasRefusal) else Right(None)
         case star: AllColumns =>
           val modified                     = !unmodified(star) || si.getAlias != null
           val targets: Option[List[Table]] = star match
@@ -181,9 +191,12 @@ private[cls] object StarExpansion:
             known.map(_.flatten) match
               case Some(pairs) if si.getAlias == null =>
                 val lists = pairs.map((t, cols) => columnList(star, t, cols))
+                // A join's star is expanded beyond the policy scope only to fix its qualifiers, so
+                // what it cannot expand there it leaves as written.
                 lists.collectFirst { case Left(reason) => reason } match
-                  case Some(reason) => Left(reason)
-                  case None         => Right(Some(lists.flatMap(_.toOption).flatten))
+                  case Some(_) if pairs.size > 1 && !policyScope => Right(None)
+                  case Some(reason)                              => Left(reason)
+                  case None => Right(Some(lists.flatMap(_.toOption).flatten))
               case _ => if modified && policyScope then Left(Refusal) else Right(None)
         case _ => Right(None)
     }

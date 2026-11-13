@@ -21,9 +21,10 @@
 - A principal holding a column policy can run `SELECT *` over a join of aliased tables
   (`FROM masterdata.ref.provider p JOIN client_a.claims.claim a ON true`): the star now expands to
   each table's columns qualified by its alias, where it named the table, which DuckDB refuses once
-  the table has an alias (`Referenced table "provider" not found`) (#217). A join with USING,
-  NATURAL, SEMI or ANTI, or one that also reads a subquery or a table function, is expanded as
-  before.
+  the table has an alias (`Referenced table "provider" not found`) (#217). A star over a join with
+  USING, NATURAL, SEMI or ANTI, or one that also reads a subquery or a table function, still fails
+  with that error: list the columns instead. A star over a table whose alias holds a dot
+  (`AS "x.y"`) is refused under column policies; it was passed through unmasked.
 
 ## 0.13.0
 

@@ -203,6 +203,44 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       )
   }
 
+  it should "refuse a star over a table aliased with a dot instead of passing it through" in {
+    // JSqlParser splits `"x.y"` when the expansion is parsed again: the qualifier bound nowhere,
+    // nothing was masked and the caller's own star went to the node.
+    val multi = Map(
+      "customer" -> List("c_id", "c_email"),
+      "orders"   -> List("o_id", "o_customer")
+    )
+    for
+      mode <- List(UnresolvedMode.Pass, UnresolvedMode.Deny)
+      sql  <- List(
+        "SELECT * FROM customer AS \"x.y\"",
+        "SELECT * FROM customer AS \"x.y\" JOIN orders o ON true",
+        "SELECT * FROM customer AS `x.y` JOIN orders o ON true"
+      )
+    do
+      rw.rewrite(sql, multi, List(maskEmail), Some("acme_tpch"), Some("tpch1"), mode) shouldBe
+        a[RewriteOutcome.Denied]
+  }
+
+  it should "leave a join's star as written where its columns are not each table's in order" in {
+    val multi = Map(
+      "customer" -> List("c_id", "c_email"),
+      "orders"   -> List("o_id", "c_id"),
+      "items"    -> List("i_id", "price.usd")
+    )
+    List(
+      "SELECT * FROM customer c JOIN orders o USING (c_id)",
+      "SELECT * FROM customer c NATURAL JOIN orders o",
+      "SELECT * FROM customer c SEMI JOIN orders o ON o.c_id = c.c_id",
+      "SELECT * FROM customer c ANTI JOIN orders o ON o.c_id = c.c_id",
+      "SELECT * FROM customer c, orders c",
+      "SELECT * FROM customer c(a, b) JOIN orders o ON true",
+      "SELECT * FROM customer c JOIN (SELECT 1 AS x) s ON true",
+      // No policy table: a dotted column is no reason to refuse.
+      "SELECT * FROM orders o JOIN items i ON true"
+    ).foreach(sql => StarExpansion.expand(sql, multi, List(maskEmail)) shouldBe Right(sql))
+  }
+
   it should "resolve unqualified c_email in a multi-join to the customer table" in {
     val multi = Map(
       "customer" -> List("c_id", "c_email"),
