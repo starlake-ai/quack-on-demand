@@ -1379,3 +1379,17 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         "JOIN client_a.claims.claim y ON x.id = y.id"
     )
   }
+
+  "a star over a join of aliased tables" should "qualify each column by its table's alias (#217)" in {
+    hub("SELECT * FROM masterdata.ref.provider p JOIN client_a.claims.claim a ON true") shouldBe
+      Rewritten(
+        "SELECT p.pid, p.name, a.id, '***' AS member_no, a.amount " +
+          "FROM masterdata.ref.provider p JOIN client_a.claims.claim a ON true"
+      )
+    hub(
+      "SELECT * FROM client_a.claims.claim x JOIN client_a.claims.claim y ON x.id = y.id"
+    ) shouldBe Rewritten(
+      "SELECT x.id, '***' AS member_no, x.amount, y.id, '***' AS member_no, y.amount " +
+        "FROM client_a.claims.claim x JOIN client_a.claims.claim y ON x.id = y.id"
+    )
+  }
