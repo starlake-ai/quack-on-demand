@@ -25,6 +25,10 @@
   USING, NATURAL, SEMI or ANTI, or one that also reads a subquery or a table function, still fails
   with that error: list the columns instead. A star over a table whose alias holds a dot
   (`AS "x.y"`) is refused under column policies; it was passed through unmasked.
+- Security (GHSA-f3pg-95vc-xw8g): a principal holding a column policy could read masked columns raw
+  through an alias written after parentheses around a table (`SELECT * FROM (customer) AS z`, also
+  `z.<col>`, `z.*`, in a join, a subquery or a CTE, and in a filter). The alias now names every
+  table inside the parentheses, so such a statement is refused. Row policies were not affected.
 
 ## 0.13.0
 
