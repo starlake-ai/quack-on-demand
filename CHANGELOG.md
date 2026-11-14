@@ -9,6 +9,17 @@
   `client_b.claims.claim.member_no`, which it matched by table name alone (#201). A policy whose
   catalog or schema is `*` still covers every table of that name. When the table walk meets a
   construct it does not read, the rewriter keeps matching by table name for that statement.
+- Under HA, DuckLake maintenance runs on follower replicas (#210). The leader still decides when a
+  run is due, and takes a queued run only once it has waited `QOD_MAINT_LEADER_GRACE_SEC` (0, the
+  default, means three `QOD_MAINT_TICK_SEC` ticks), so it runs maintenance only when no follower
+  took it in time. `QOD_MAINT_MAX_CONCURRENT` is now a limit per replica. Maintenance metrics are
+  recorded on the replica that ran the job: sum them across replicas. A single manager is
+  unchanged.
+- A maintenance run whose replica stops responding is failed within three ticks, and its `__maint`
+  node is stopped, on Kubernetes and fleet servers (it was left running before, and the run was
+  failed only after `QOD_MAINT_RUN_TIMEOUT_MIN`). `QOD_MAINT_RUN_TIMEOUT_MIN` now caps a run's total
+  time from its start, waiting for its database's lock included, rather than the time between two
+  steps.
 
 ### Fixed
 

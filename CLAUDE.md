@@ -882,6 +882,18 @@ sessions with the same secret without any configuration: an unset
 backend is refused at config load. See
 docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
 
+Managed DuckLake maintenance is split (issue #210): the leader enqueues runs and reaps dead ones
+(`MaintenanceReaper`), every replica drains, and the leader claims only runs queued longer than
+`QOD_MAINT_LEADER_GRACE_SEC` (0 = three `QOD_MAINT_TICK_SEC` ticks), so followers run maintenance
+while they have room (`QOD_MAINT_MAX_CONCURRENT` is per replica) and the leader takes the rest. The
+executing replica writes the run's `node_id` before starting its `__maint` node and bumps
+`heartbeat_at` every tick (`MaintenanceLiveness`); a run silent for three ticks is failed and its
+node stopped by the leader, one past `QOD_MAINT_RUN_TIMEOUT_MIN` from its start is failed and its
+node stopped by its own replica. Neither is requeued. Residual: with `QOD_FLEET_EPHEMERAL=local` a
+follower whose JVM dies on a host that stays up leaves its node running until swept on that host.
+Maintenance metrics are recorded where a run executes (a reaped run's on the leader): sum them
+across replicas.
+
 ### `qod serve` boot provisioning (`ServeProvisionHook`)
 
 `qod serve` has the manager provision its tenant, database and pool, so it holds no credential
