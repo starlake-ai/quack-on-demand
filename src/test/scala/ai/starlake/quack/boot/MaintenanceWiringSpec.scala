@@ -160,6 +160,8 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
       leader = true
       tick.unsafeRunSync() // first leader tick: warm-up
       store.findMaintenanceRun(r.id).map(_.status) shouldBe Some("running")
+      tick.unsafeRunSync() // still inside the window
+      store.findMaintenanceRun(r.id).map(_.status) shouldBe Some("running")
       Thread.sleep(3200)
       tick.unsafeRunSync()
       store.findMaintenanceRun(r.id).map(r => (r.status, r.error)) shouldBe
