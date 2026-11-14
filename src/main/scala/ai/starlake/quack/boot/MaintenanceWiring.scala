@@ -2,7 +2,7 @@ package ai.starlake.quack.boot
 
 import ai.starlake.quack.MaintenanceConfig
 import ai.starlake.quack.edge.adapter.{QuackHttpAdapter, QuackResponse}
-import ai.starlake.quack.model.{PoolKey, TenantDb}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, PinnedSetResolver}
@@ -53,50 +53,47 @@ final class MaintenanceWiring(
 
   private val pinnedSetResolver = new PinnedSetResolver(store)
 
+  /** Start a maintenance node and wait until it accepts connections. `start()` returns at fork time
+    * on the local backend; the node only listens once DuckDB finishes INSTALL/LOAD + ATTACH, so the
+    * chain's first statement would otherwise die with ConnectException.
+    */
+  private def startNode(spec: NodeSpec): IO[Option[RunningNode]] =
+    val (t, td) = (spec.poolKey.tenant, spec.poolKey.tenantDb)
+    backend
+      .start(spec)
+      .flatMap { node =>
+        NodeReadiness
+          .awaitReachable(
+            node.host,
+            node.port,
+            timeout =
+              scala.concurrent.duration.DurationInt(maintenance.nodeReadyTimeoutSec).seconds,
+            isAlive = () => backend.isAlive(node.nodeId)
+          )
+          .flatMap { ready =>
+            if ready then IO.pure(Some(node))
+            else
+              IO.delay(
+                logger.warn(
+                  s"maintenance: node ${node.nodeId} for $t/$td did not " +
+                    s"accept connections within ${maintenance.nodeReadyTimeoutSec}s; stopping it"
+                )
+              ) *> backend
+                .stop(node.poolKey, node.nodeId)
+                .handleErrorWith(_ => IO.unit)
+                .as(None)
+          }
+      }
+      .handleErrorWith { e =>
+        IO.delay(logger.warn(s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"))
+          .as(None)
+      }
+
   private val runner =
     new MaintenanceRunner(
       store = store,
-      spawn = (t, td) =>
-        sup.maintenanceNodeSpec(t, td) match
-          case Some(spec) =>
-            backend
-              .start(spec)
-              .flatMap { node =>
-                // start() returns at fork time (local backend); the node only listens
-                // once DuckDB finishes INSTALL/LOAD + ATTACH. Gate here or the chain's
-                // first statement dies with ConnectException.
-                NodeReadiness
-                  .awaitReachable(
-                    node.host,
-                    node.port,
-                    timeout = scala.concurrent.duration
-                      .DurationInt(maintenance.nodeReadyTimeoutSec)
-                      .seconds,
-                    isAlive = () => backend.isAlive(node.nodeId)
-                  )
-                  .flatMap { ready =>
-                    if ready then IO.pure(Some(node))
-                    else
-                      IO.delay(
-                        logger.warn(
-                          s"maintenance: node ${node.nodeId} for $t/$td did not " +
-                            "accept connections within " +
-                            s"${maintenance.nodeReadyTimeoutSec}s; stopping it"
-                        )
-                      ) *> backend
-                        .stop(node.poolKey, node.nodeId)
-                        .handleErrorWith(_ => IO.unit)
-                        .as(None)
-                  }
-              }
-              .handleErrorWith { e =>
-                IO.delay(
-                  logger.warn(
-                    s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"
-                  )
-                ).as(None)
-              }
-          case None => IO.pure(None),
+      specOf = (t, td) => sup.maintenanceNodeSpec(t, td),
+      start = startNode,
       stop = node => backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit),
       // Right(rows returned): ducklake_cleanup_old_files returns one row per file it deleted.
       exec = (node, sql) =>

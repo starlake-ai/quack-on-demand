@@ -11,6 +11,90 @@ import java.time.Instant
 
 class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
 
+  private val maintKey  = PoolKey("acme", "acme_db", "__maint")
+  private val maintSpec = NodeSpec(maintKey, "maint-n1", Role.Dual, Map.empty, Map.empty)
+  private val maintNode = RunningNode(
+    "maint-n1",
+    maintKey,
+    Role.Dual,
+    "127.0.0.1",
+    21999,
+    "tok",
+    None,
+    None,
+    Instant.EPOCH,
+    maxConcurrent = 1
+  )
+
+  private def minimalRunner(
+      store: ControlPlaneStore,
+      specOf: (String, String) => Option[NodeSpec],
+      start: NodeSpec => IO[Option[RunningNode]]
+  ): MaintenanceRunner =
+    new MaintenanceRunner(
+      store = store,
+      specOf = specOf,
+      start = start,
+      stop = _ => IO.unit,
+      exec = (_, _) => IO.pure(Right(0L)),
+      snapshotsOlderThan = (_, _, _) => Nil,
+      pinnedSnapshotsOf = (_, _) => Set.empty,
+      expiryFloorOf = (_, _) => None,
+      hasLiveBranchOf = (_, _) => false,
+      totalBytesOf = (_, _) => 0L,
+      effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+      catalogAlias = (_, _) => "acme_db",
+      audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
+    )
+
+  "executeRun" should "write the node id on the row before the node starts" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    var seen: Option[String] = None
+    val runner               = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ =>
+        IO {
+          seen = store.findMaintenanceRun(r.id).flatMap(_.nodeId)
+          Some(maintNode)
+        }
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    seen shouldBe Some("maint-n1")
+  }
+
+  it should "start no node for a run reaped before its node id is written" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    store.finishMaintenanceRun(r.id, "failed", RunCounters(), Some(MaintenanceRun.ReapedSilent))
+    var started = 0
+    val runner  = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO { started += 1; Some(maintNode) }
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    started shouldBe 0
+    store.findMaintenanceRun(r.id).flatMap(_.error) shouldBe Some(MaintenanceRun.ReapedSilent)
+  }
+
+  it should "mark the run failed when the node spec lookup throws" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    val runner = minimalRunner(
+      store,
+      specOf = (_, _) => sys.error("lookup boom"),
+      start = _ => IO.pure(Some(maintNode))
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    store.findMaintenanceRun(r.id).map(x => (x.status, x.error)) shouldBe
+      Some(("failed", Some("node spawn failed")))
+  }
+
   private class Fixture(
       pinnedSnaps: Set[Long] = Set.empty,
       totalBytes: List[Long] = List(100L, 100L), // sampled before/after the chain
@@ -52,9 +136,12 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       maxConcurrent = 1
     )
 
+    val spec = NodeSpec(node.poolKey, node.nodeId, Role.Dual, Map.empty, Map.empty)
+
     val runner = new MaintenanceRunner(
       store = store,
-      spawn = (_, _) => IO { started += 1; Some(node) },
+      specOf = (_, _) => Some(spec),
+      start = _ => IO { started += 1; Some(node) },
       stop = node => IO { stopped = stopped :+ node.nodeId },
       exec = (_, sql) =>
         IO {
@@ -156,7 +243,8 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     // A probe store call made while the run executes each statement: can the lock be taken now?
     val probe = new MaintenanceRunner(
       store = f.store,
-      spawn = (_, _) => IO.pure(Some(f.node)),
+      specOf = (_, _) => Some(f.spec),
+      start = _ => IO.pure(Some(f.node)),
       stop = _ => IO.unit,
       exec = (_, sql) =>
         IO {
@@ -269,7 +357,8 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     store.claimQueuedMaintenanceRun(minAgeSec = 0)
     val runner = new MaintenanceRunner(
       store = store,
-      spawn = (_, _) => IO.pure(None),
+      specOf = (_, _) => None,
+      start = _ => IO.pure(None),
       stop = _ => IO.unit,
       exec = (_, _) => IO.pure(Right(0L)),
       snapshotsOlderThan = (_, _, _) => Nil,
@@ -335,7 +424,8 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     )
     val runner = new MaintenanceRunner(
       store = store,
-      spawn = (_, _) => IO.pure(Some(node)),
+      specOf = (_, _) => Some(NodeSpec(node.poolKey, node.nodeId, Role.Dual, Map.empty, Map.empty)),
+      start = _ => IO.pure(Some(node)),
       stop = node => IO { stopped = stopped :+ node.nodeId },
       exec = (_, sql) => IO { executed = executed :+ sql; Right(0L) },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
