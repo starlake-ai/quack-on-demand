@@ -37,7 +37,7 @@ object MaintenanceLiveness extends LazyLogging:
       every: FiniteDuration,
       stopNode: (PoolKey, String) => IO[Unit]
   ): IO[Unit] =
-    IO.sleep(every) *> IO.blocking(store.touchMaintenanceRun(run.id)).attempt.flatMap {
+    IO.sleep(every) *> IO.interruptible(store.touchMaintenanceRun(run.id)).attempt.flatMap {
       case Right(true)  => watch(store, run, every, stopNode)
       case Right(false) => lost(store, run, every, stopNode)
       case Left(e)      =>
@@ -53,7 +53,7 @@ object MaintenanceLiveness extends LazyLogging:
       every: FiniteDuration,
       stopNode: (PoolKey, String) => IO[Unit]
   ): IO[Unit] =
-    IO.blocking(store.findMaintenanceRun(run.id)).attempt.flatMap {
+    IO.interruptible(store.findMaintenanceRun(run.id)).attempt.flatMap {
       case Right(Some(row)) if MaintenanceRun.isReaped(row.error) =>
         IO.delay(
           logger.warn(

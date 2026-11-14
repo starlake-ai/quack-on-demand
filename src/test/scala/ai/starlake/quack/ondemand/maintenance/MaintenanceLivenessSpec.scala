@@ -93,6 +93,23 @@ class MaintenanceLivenessSpec extends AnyFlatSpec with Matchers:
     workDone shouldBe true
   }
 
+  it should "stop the node before cancelling, so an uninterruptible statement ends" in {
+    val store = new InMemoryControlPlaneStore()
+    val run   = claimed(store)
+    store.setMaintenanceRunNode(run.id, "maint-n1")
+    val latch = new java.util.concurrent.CountDownLatch(1)
+    val reap  = IO.sleep(120.millis) *> IO(
+      store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(MaintenanceRun.ReapedSilent))
+    )
+    (reap.start *> MaintenanceLiveness.guard(
+      store,
+      run,
+      every,
+      (_, _) => IO(latch.countDown()) // stopping the node fails the in-flight statement
+    )(IO.blocking(latch.await()))).timeout(5.seconds).unsafeRunSync()
+    latch.getCount shouldBe 0L
+  }
+
   /** Every call delegates to the in-memory store, except the liveness write, which throws. */
   private class FailingTouchStore(inner: InMemoryControlPlaneStore) extends ControlPlaneStore:
     export inner.{touchMaintenanceRun as _, *}

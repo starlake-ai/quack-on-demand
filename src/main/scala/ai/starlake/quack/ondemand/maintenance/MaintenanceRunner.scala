@@ -87,9 +87,17 @@ final class MaintenanceRunner(
           IO.blocking(store.setMaintenanceRunNode(run.id, spec.nodeId)).flatMap { owned =>
             if !owned then finishIfNotSwept(run, "failed", RunCounters(), startedAt)(false)
             else
-              start(spec).flatMap {
-                case None       => spawnFailed
-                case Some(node) => runOn(run, node, startedAt)
+              // Uncancelable start: a cancel (the liveness watcher ending a reaped run) that lands
+              // while the node starts waits for the start to finish, then stops the node it
+              // returned, so no node outlives its run. `onCancel` covers a cancel that arrives
+              // before `runOn` installs its own `guarantee(stop(node))`; a second stop is a no-op.
+              IO.uncancelable { poll =>
+                start(spec).flatMap {
+                  case None       => poll(spawnFailed)
+                  case Some(node) =>
+                    poll(runOn(run, node, startedAt))
+                      .onCancel(stop(node).handleErrorWith(_ => IO.unit))
+                }
               }
           }
       }

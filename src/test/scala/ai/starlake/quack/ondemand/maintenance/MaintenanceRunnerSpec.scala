@@ -8,6 +8,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
+import scala.concurrent.duration.*
 
 class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
 
@@ -29,13 +30,14 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
   private def minimalRunner(
       store: ControlPlaneStore,
       specOf: (String, String) => Option[NodeSpec],
-      start: NodeSpec => IO[Option[RunningNode]]
+      start: NodeSpec => IO[Option[RunningNode]],
+      stop: RunningNode => IO[Unit] = _ => IO.unit
   ): MaintenanceRunner =
     new MaintenanceRunner(
       store = store,
       specOf = specOf,
       start = start,
-      stop = _ => IO.unit,
+      stop = stop,
       exec = (_, _) => IO.pure(Right(0L)),
       snapshotsOlderThan = (_, _, _) => Nil,
       pinnedSnapshotsOf = (_, _) => Set.empty,
@@ -63,6 +65,25 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     )
     runner.executeRun(r.copy(status = "running")).unsafeRunSync()
     seen shouldBe Some("maint-n1")
+  }
+
+  it should "stop a node whose start was still in flight when the run was cancelled" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    var stopped = List.empty[String]
+    val runner  = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO.sleep(300.millis).as(Some(maintNode)),
+      stop = n => IO { stopped = stopped :+ n.nodeId }
+    )
+    (for
+      fib <- runner.executeRun(r.copy(status = "running")).start
+      _   <- IO.sleep(100.millis) // inside start
+      _   <- fib.cancel           // waits for the start to finish, then for the stop
+    yield ()).timeout(5.seconds).unsafeRunSync()
+    stopped shouldBe List("maint-n1")
   }
 
   it should "start no node for a run reaped before its node id is written" in {
