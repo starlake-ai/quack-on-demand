@@ -7,7 +7,12 @@ import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, PinnedSetResolver}
 import ai.starlake.quack.ondemand.ha.PoolLocker
-import ai.starlake.quack.ondemand.maintenance.{MaintenanceRunner, MaintenanceScheduler, PolicyMath}
+import ai.starlake.quack.ondemand.maintenance.{
+  MaintenanceLiveness,
+  MaintenanceRunner,
+  MaintenanceScheduler,
+  PolicyMath
+}
 import ai.starlake.quack.ondemand.runtime.{NodeReadiness, QuackBackend}
 import ai.starlake.quack.ondemand.state.PostgresControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
@@ -160,10 +165,19 @@ final class MaintenanceWiring(
         case None      => IO.unit
         case Some(run) =>
           inFlight.incrementAndGet()
-          poolLocks
-            .withLock(PoolKey(run.tenant, run.tenantDb, "__maint")) {
-              runner.executeRun(run)
-            }
+          // The liveness heartbeat covers the lock wait too, so a run queued behind another
+          // replica's run on the same lake is not reaped as silent.
+          MaintenanceLiveness
+            .guard(
+              store,
+              run,
+              scala.concurrent.duration.DurationInt(maintenance.tickSec).seconds,
+              (key, nodeId) => backend.stop(key, nodeId)
+            )(
+              poolLocks.withLock(PoolKey(run.tenant, run.tenantDb, "__maint")) {
+                runner.executeRun(run)
+              }
+            )
             .guarantee(IO.delay(inFlight.decrementAndGet()).void)
             .handleErrorWith(t =>
               IO.delay(
