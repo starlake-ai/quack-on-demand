@@ -153,7 +153,7 @@ final class MaintenanceWiring(
     if !isLeader() then IO.unit
     else if inFlight.get() >= maintenance.maxConcurrent then IO.unit
     else
-      IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
+      IO.blocking(store.claimQueuedMaintenanceRun(minAgeSec = 0)).flatMap {
         case None      => IO.unit
         case Some(run) =>
           inFlight.incrementAndGet()

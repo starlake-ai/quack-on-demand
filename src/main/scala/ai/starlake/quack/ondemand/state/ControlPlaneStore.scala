@@ -7,6 +7,7 @@ import ai.starlake.quack.model.{
   MaintenancePolicy,
   MaintenanceRun,
   Pool,
+  ReapedRun,
   RunCounters,
   RunningNode,
   SnapshotTag,
@@ -493,10 +494,30 @@ trait ControlPlaneStore:
       operations: Option[String]
   ): MaintenanceRun
 
-  /** Atomically transition the oldest `"queued"` row to `"running"` and return it. `None` when
-    * nothing is queued. Exactly one caller wins the race across concurrent nodes/replicas.
+  /** Atomically transition the oldest `"queued"` row queued at least `minAgeSec` seconds ago
+    * (database clock) to `"running"` and return it. `None` when no such row exists. `minAgeSec = 0`
+    * takes any queued row. Exactly one caller wins the race across concurrent replicas.
     */
-  def claimQueuedMaintenanceRun(): Option[MaintenanceRun]
+  def claimQueuedMaintenanceRun(minAgeSec: Int): Option[MaintenanceRun]
+
+  def findMaintenanceRun(id: Long): Option[MaintenanceRun]
+
+  /** Liveness heartbeat: bump `heartbeatAt` of a `"running"` row. `false` when the row is no longer
+    * running (finished by its owner, or reaped).
+    */
+  def touchMaintenanceRun(id: Long): Boolean
+
+  /** Record the id of the node a `"running"` row is about to start. `false` (nothing written) when
+    * the row is no longer running.
+    */
+  def setMaintenanceRunNode(id: Long, nodeId: String): Boolean
+
+  /** Fail every `"running"` row whose heartbeat is older than `livenessTimeoutSec`
+    * ([[MaintenanceRun.ReapedSilent]], `silent = true`), then every remaining `"running"` row
+    * started more than `runTimeoutSec` ago ([[MaintenanceRun.ReapedTimeout]]), both on the database
+    * clock. Returns the rows as left.
+    */
+  def reapMaintenanceRuns(livenessTimeoutSec: Int, runTimeoutSec: Long): List[ReapedRun]
 
   /** Returns `true` when the row was still `"running"` and got its heartbeat bumped; `false` when a
     * concurrent sweep already failed the row out from under this caller (the run should stop

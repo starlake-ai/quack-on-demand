@@ -87,7 +87,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
 
     def enqueueAndRun(scope: String = "tenantdb", ops: Option[String] = None): MaintenanceRun =
       val r = store.enqueueMaintenanceRun("acme", "acme_db", scope, "manual", ops)
-      store.claimQueuedMaintenanceRun()
+      store.claimQueuedMaintenanceRun(minAgeSec = 0)
       runner.executeRun(r.copy(status = "running")).unsafeRunSync()
       store.listMaintenanceRuns("acme", "acme_db", 10, None).head
 
@@ -181,7 +181,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
     )
     val r = f.store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-    f.store.claimQueuedMaintenanceRun()
+    f.store.claimQueuedMaintenanceRun(minAgeSec = 0)
     probe.executeRun(r.copy(status = "running")).unsafeRunSync()
     lockedAt.toList match
       case List(sql) => sql should include("expire_snapshots")
@@ -266,7 +266,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
   it should "mark the run failed when the node cannot spawn" in {
     val store = new InMemoryControlPlaneStore()
     val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-    store.claimQueuedMaintenanceRun()
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
     val runner = new MaintenanceRunner(
       store = store,
       spawn = (_, _) => IO.pure(None),
@@ -349,7 +349,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     )
 
     val r = inner.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-    inner.claimQueuedMaintenanceRun()
+    inner.claimQueuedMaintenanceRun(minAgeSec = 0)
     runner.executeRun(r.copy(status = "running")).unsafeRunSync()
     (executed, stopped, inner.listMaintenanceRuns("acme", "acme_db", 10, None).head)
 

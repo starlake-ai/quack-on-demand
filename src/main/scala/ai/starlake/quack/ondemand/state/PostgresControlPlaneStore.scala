@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
   Pool,
   PoolCohort,
   PoolKey,
+  ReapedRun,
   Role,
   RoleDistribution,
   RunCounters,
@@ -2947,13 +2948,13 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
-  def claimQueuedMaintenanceRun(): Option[MaintenanceRun] = withConn { c =>
+  def claimQueuedMaintenanceRun(minAgeSec: Int): Option[MaintenanceRun] = withConn { c =>
     val ps = c.prepareStatement(
       s"""UPDATE qodstate_maintenance_run
         |SET status = 'running', started_at = NOW(), heartbeat_at = NOW()
         |WHERE id = (
         |  SELECT id FROM qodstate_maintenance_run
-        |  WHERE status = 'queued'
+        |  WHERE status = 'queued' AND queued_at <= NOW() - make_interval(secs => ?)
         |  ORDER BY id
         |  FOR UPDATE SKIP LOCKED
         |  LIMIT 1
@@ -2961,9 +2962,45 @@ final class PostgresControlPlaneStore(
         |RETURNING $maintenanceRunColumns""".stripMargin
     )
     try
+      ps.setDouble(1, minAgeSec.toDouble)
       val rs = ps.executeQuery()
       try if rs.next() then Some(readMaintenanceRun(rs)) else None
       finally rs.close()
+    finally ps.close()
+  }
+
+  def findMaintenanceRun(id: Long): Option[MaintenanceRun] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"SELECT $maintenanceRunColumns FROM qodstate_maintenance_run WHERE id = ?"
+    )
+    try
+      ps.setLong(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readMaintenanceRun(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def touchMaintenanceRun(id: Long): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_maintenance_run SET heartbeat_at = NOW()
+        |WHERE id = ? AND status = 'running'""".stripMargin
+    )
+    try
+      ps.setLong(1, id)
+      ps.executeUpdate() > 0
+    finally ps.close()
+  }
+
+  def setMaintenanceRunNode(id: Long, nodeId: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_maintenance_run SET node_id = ?
+        |WHERE id = ? AND status = 'running'""".stripMargin
+    )
+    try
+      ps.setString(1, nodeId)
+      ps.setLong(2, id)
+      ps.executeUpdate() > 0
     finally ps.close()
   }
 
@@ -3092,6 +3129,28 @@ final class PostgresControlPlaneStore(
       ps.executeUpdate()
     finally ps.close()
   }
+
+  def reapMaintenanceRuns(livenessTimeoutSec: Int, runTimeoutSec: Long): List[ReapedRun] =
+    withConn { c =>
+      // One statement per case. The silent case runs first, so a row both silent and over time
+      // is reported silent: its owner is gone and only the reaper can stop its node.
+      def reap(column: String, ageSec: Long, error: String, silent: Boolean): List[ReapedRun] =
+        val ps = c.prepareStatement(
+          s"""UPDATE qodstate_maintenance_run
+            |SET status = 'failed', finished_at = NOW(), error = ?
+            |WHERE status = 'running' AND $column < NOW() - make_interval(secs => ?)
+            |RETURNING $maintenanceRunColumns""".stripMargin
+        )
+        try
+          ps.setString(1, error)
+          ps.setDouble(2, ageSec.toDouble)
+          val rs = ps.executeQuery()
+          try drain(rs)(readMaintenanceRun).map(ReapedRun(_, silent))
+          finally rs.close()
+        finally ps.close()
+      reap("heartbeat_at", livenessTimeoutSec.toLong, MaintenanceRun.ReapedSilent, silent = true) ++
+        reap("started_at", runTimeoutSec, MaintenanceRun.ReapedTimeout, silent = false)
+    }
 
   // ---------------- Managed prefix (tombstone registry) ------------------
 
