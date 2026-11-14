@@ -299,7 +299,7 @@ final case class MaintenanceConfig(
     tickSec: Int = 60,
     @field @ConfigField(
       envVar = "QOD_MAINT_MAX_CONCURRENT",
-      description = "Max maintenance runs executing concurrently across the manager."
+      description = "Max maintenance runs executing concurrently on each replica (under HA, every replica drains)."
     )
     maxConcurrent: Int = 2,
     @field @ConfigField(
@@ -310,7 +310,7 @@ final case class MaintenanceConfig(
     @field @ConfigField(
       envVar = "QOD_MAINT_RUN_TIMEOUT_MIN",
       description =
-        "Minutes without a heartbeat before a running maintenance run is swept as failed."
+        "Minutes a maintenance run may take from its start (lock wait included) before the leader fails it as timed out; its replica then stops its node."
     )
     runTimeoutMin: Int = 60,
     @field @ConfigField(
@@ -339,11 +339,12 @@ final case class MaintenanceConfig(
   /** The leader's grace in seconds: the set value, or three ticks when 0. */
   def effectiveLeaderGraceSec: Int = if leaderGraceSec == 0 then 3 * tickSec else leaderGraceSec
 
-// runTimeoutMin must exceed the longest single chain step (flush/expire/merge/rewrite/cleanup/
-// orphans): the sweep only checks time-since-last-heartbeat, and a heartbeat is only written
-// between steps, not during one. A step that legitimately runs longer than runTimeoutMin gets
-// swept out from under a still-healthy run, racing MaintenanceRunner's own finishMaintenanceRun
-// call (see the "AND status = 'running'" guard on both UPDATEs in PostgresControlPlaneStore).
+// runTimeoutMin caps a run's total time from started_at. Liveness is separate: the executing
+// replica bumps heartbeat_at every tickSec from a side fiber (MaintenanceLiveness), and the
+// leader's MaintenanceReaper fails a run silent for 3 x tickSec, so a long chain step is never
+// mistaken for a dead replica. Both UPDATEs that end a run keep the "AND status = 'running'"
+// guard in PostgresControlPlaneStore, so the owner's finish and the reaper never overwrite
+// each other.
 
 /** Catalog browser read surface (Spec 00 time-travel viewer). */
 final case class CatalogConfig(

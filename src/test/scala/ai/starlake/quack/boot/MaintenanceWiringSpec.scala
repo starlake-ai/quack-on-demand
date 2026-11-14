@@ -144,3 +144,22 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
       w.drainTick.unsafeRunSync()
       statusOf(store) should not be "queued"
     }
+
+  "reapTick" should "reap a silent run on the leader only, re-evaluated on every run" in {
+    var leader = false
+    withWiring(MaintenanceConfig(), () => leader, haEnabled = true) { (w, store, sql) =>
+      val r = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+      store.claimQueuedMaintenanceRun(minAgeSec = 0)
+      sql(
+        s"UPDATE qodstate_maintenance_run SET heartbeat_at = now() - interval '10 minutes' " +
+          s"WHERE id = ${r.id}"
+      )
+      val tick = w.reapTick
+      tick.unsafeRunSync() // follower: reaps nothing
+      store.findMaintenanceRun(r.id).map(_.status) shouldBe Some("running")
+      leader = true
+      tick.unsafeRunSync()
+      store.findMaintenanceRun(r.id).map(r => (r.status, r.error)) shouldBe
+        Some(("failed", Some(ai.starlake.quack.model.MaintenanceRun.ReapedSilent)))
+    }
+  }

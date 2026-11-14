@@ -3118,18 +3118,6 @@ final class PostgresControlPlaneStore(
       finally ps.close()
     }
 
-  def sweepStaleMaintenanceRuns(heartbeatOlderThan: java.time.Instant): Int = withConn { c =>
-    val ps = c.prepareStatement(
-      """UPDATE qodstate_maintenance_run
-        |SET status = 'failed', finished_at = NOW(), error = 'stale: heartbeat timeout'
-        |WHERE status = 'running' AND heartbeat_at < ?""".stripMargin
-    )
-    try
-      ps.setTimestamp(1, Timestamp.from(heartbeatOlderThan))
-      ps.executeUpdate()
-    finally ps.close()
-  }
-
   def reapMaintenanceRuns(livenessTimeoutSec: Int, runTimeoutSec: Long): List[ReapedRun] =
     withConn { c =>
       // One statement per case. The silent case runs first, so a row both silent and over time

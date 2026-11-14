@@ -550,11 +550,6 @@ trait ControlPlaneStore:
   /** Most recent `queuedAt` among runs not triggered manually -- feeds cadence scheduling. */
   def lastNonManualMaintenanceRunAt(tenant: String, tenantDb: String): Option[java.time.Instant]
 
-  /** Fail any `"running"` row whose heartbeat is older than `heartbeatOlderThan` (a worker died
-    * mid-run). Returns the number of rows swept.
-    */
-  def sweepStaleMaintenanceRuns(heartbeatOlderThan: java.time.Instant): Int
-
   /** Release any pooled connections / heap resources. Default impl is a no-op (in-memory stores
     * hold no I/O resources); [[PostgresControlPlaneStore.close]] drains the Hikari pool. Called
     * from Main's shutdown hook so JVM exit returns connections cleanly to the broker.

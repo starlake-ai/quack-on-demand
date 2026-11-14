@@ -886,22 +886,6 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       .map(_.queuedAt)
       .maxOption
 
-  def sweepStaleMaintenanceRuns(heartbeatOlderThan: Instant): Int =
-    val stale = maintenanceRuns.values.filter { r =>
-      r.status == "running" && r.heartbeatAt.exists(_.isBefore(heartbeatOlderThan))
-    }.toList
-    stale.foreach { r =>
-      maintenanceRuns.put(
-        r.id,
-        r.copy(
-          status = "failed",
-          finishedAt = Some(Instant.now()),
-          error = Some("stale: heartbeat timeout")
-        )
-      )
-    }
-    stale.size
-
   // ---------------- Managed prefix (tombstone registry) ----------------
   private val managedPrefixes = TrieMap.empty[String, ManagedPrefixRow]
 

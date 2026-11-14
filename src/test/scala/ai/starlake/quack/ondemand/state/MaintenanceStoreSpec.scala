@@ -134,32 +134,20 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
       s.lastNonManualMaintenanceRunAt("acme", "acme_db") shouldBe defined
     }
 
-  it should "sweep stale running rows to failed" in withStore { s =>
-    val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
-    s.claimQueuedMaintenanceRun(minAgeSec = 0)
-    // heartbeat is set by claim; sweeping with a future cutoff must catch it
-    s.sweepStaleMaintenanceRuns(java.time.Instant.now().plusSeconds(3600)) shouldBe 1
-    s.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
-  }
-
-  it should "refuse to overwrite a run already swept to failed (finish loses the race)" in
-    withStore { s =>
+  it should "refuse to overwrite a run already reaped (finish loses the race)" in
+    withStoreSql { (s, sql) =>
       val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
       s.claimQueuedMaintenanceRun(minAgeSec = 0)
-      s.sweepStaleMaintenanceRuns(java.time.Instant.now().plusSeconds(3600)) shouldBe 1
-      s.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
+      backdate(sql, r.id, "heartbeat_at", "10 minutes")
+      s.reapMaintenanceRuns(livenessTimeoutSec = 180, runTimeoutSec = 3600L).map(_.run.id) shouldBe
+        List(r.id)
 
-      // The runner, unaware it was swept, tries to record its own (successful) finish.
-      s.finishMaintenanceRun(
-        r.id,
-        "succeeded",
-        RunCounters(filesMerged = 1),
-        None
-      ) shouldBe false
-      // The sweep's outcome is not clobbered by the late finish.
+      // The runner, unaware it was reaped, tries to record its own (successful) finish.
+      s.finishMaintenanceRun(r.id, "succeeded", RunCounters(filesMerged = 1), None) shouldBe false
+      // The reaper's outcome is not clobbered by the late finish.
       val after = s.listMaintenanceRuns("acme", "acme_db", 10, None).head
       after.status shouldBe "failed"
-      after.error shouldBe Some("stale: heartbeat timeout")
+      after.error shouldBe Some(MaintenanceRun.ReapedSilent)
     }
 
   it should "paginate runs by keyset" in withStore { s =>

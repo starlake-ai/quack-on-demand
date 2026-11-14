@@ -9,6 +9,7 @@ import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, PinnedSetResol
 import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.maintenance.{
   MaintenanceLiveness,
+  MaintenanceReaper,
   MaintenanceRunner,
   MaintenanceScheduler,
   PolicyMath
@@ -51,7 +52,6 @@ final class MaintenanceWiring(
             )
             Map.empty,
       minIntervalMinutes = maintenance.minIntervalMin,
-      runTimeoutMinutes = maintenance.runTimeoutMin,
       staggerOf = PolicyMath.staggerMinutes,
       tickSeconds = maintenance.tickSec,
       isLeader = isLeader
@@ -148,6 +148,24 @@ final class MaintenanceWiring(
   private[boot] def claimMinAgeSec: Int =
     if haEnabled && isLeader() then maintenance.effectiveLeaderGraceSec else 0
 
+  private val reaper =
+    new MaintenanceReaper(
+      store = store,
+      livenessTimeoutSec = 3 * maintenance.tickSec,
+      runTimeoutSec = maintenance.runTimeoutMin * 60L,
+      stopNode = (key, nodeId) => backend.stop(key, nodeId),
+      audit = audit,
+      metrics = metrics
+    )
+
+  /** Leader only (a single manager always leads): fail runs whose owner went silent or that ran too
+    * long, see [[MaintenanceReaper]]. IO.defer for the same reason as [[drainTick]]: the leader
+    * check must run on every pass of the bound IO.
+    */
+  private[boot] def reapTick: IO[Unit] = IO.defer {
+    if isLeader() then reaper.reapOnce else IO.unit
+  }
+
   /** One drain pass: while below maxConcurrent in-flight, claim queued runs old enough for this
     * replica ([[claimMinAgeSec]]) and fork each execution under the tenant-db's __maint advisory
     * lock so two replicas never run the same lake at once. Keeps claiming until nothing claimable
@@ -192,11 +210,13 @@ final class MaintenanceWiring(
 
   def drainFiber: IO[FiberIO[Unit]] =
     if maintenance.enabled then
-      (drainTick
-        .handleErrorWith(e =>
+      (reapTick.handleErrorWith(e =>
+        IO(logger.error(s"maintenance reap tick failed: ${e.getMessage}"))
+      ) *>
+        drainTick.handleErrorWith(e =>
           IO(logger.error(s"maintenance drain-loop tick failed: ${e.getMessage}"))
-        )
-        *> IO.sleep(
+        ) *>
+        IO.sleep(
           scala.concurrent.duration.DurationInt(maintenance.tickSec).seconds
         )).foreverM.void.start
     else IO.unit.start
