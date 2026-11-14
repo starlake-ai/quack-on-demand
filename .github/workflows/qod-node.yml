@@ -329,7 +329,14 @@ jobs:
           echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
           ls -l "$home/lib" "$home/bin"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust release from native/qod-search/rust-toolchain.toml
+        id: rust
+        shell: bash
+        run: echo "toolchain=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' native/qod-search/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
 
       - name: Build and test with QOD_NODE_SEARCH=ON (development build)
         run: |
@@ -353,14 +360,15 @@ jobs:
         if: runner.os == 'Linux'
         env:
           MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+          RUST_TOOLCHAIN: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
-          build='curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . "$HOME/.cargo/env" && \
+          build='curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" && . "$HOME/.cargo/env" && \
             rustc --version && \
             cmake -S native/qod-node -B native/qod-node/build-search-release -DCMAKE_BUILD_TYPE=Release \
               -DQOD_NODE_RELATIVE_RPATH=ON -DQOD_NODE_SEARCH=ON -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME" && \
             cmake --build native/qod-node/build-search-release --config Release --target qod-node search_link_test'
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DUCKDB_HOME \
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DUCKDB_HOME -e RUST_TOOLCHAIN \
             -v "$PWD:$PWD" -v "$DUCKDB_HOME:$DUCKDB_HOME:ro" -w "$PWD" "$MANYLINUX_IMAGE" bash -euc "$build"
           source scripts/release/glibc-floor.sh
           glibc_floor_check native/qod-node/build-search-release/qod-node
@@ -418,7 +426,14 @@ jobs:
           echo "DUCKDB_HOME=$(cygpath -m "$home")" >> "$GITHUB_ENV"
           ls -l "$home/lib" "$home/bin"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust release from native/qod-search/rust-toolchain.toml
+        id: rust
+        shell: bash
+        run: echo "toolchain=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' native/qod-search/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
 
       # The static build needs its DuckDB version and source id given: no libduckdb to probe. The
       # CMakeLists builds the crate with +crt-static here, to match the static CRT of the DuckDB libraries.

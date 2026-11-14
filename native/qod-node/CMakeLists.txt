@@ -201,9 +201,25 @@ if(QOD_NODE_SEARCH)
   if(CMAKE_VERSION VERSION_LESS 3.22)
     message(FATAL_ERROR "QOD_NODE_SEARCH needs CMake 3.22 (Corrosion v0.6.1)")
   endif()
+  # The Rust release is pinned in native/qod-search/rust-toolchain.toml. Corrosion picks rustup's
+  # default toolchain and never reads that file, so its channel becomes Rust_TOOLCHAIN (a -D wins), and
+  # a configure without that release installed fails, naming it.
+  file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/../qod-search/rust-toolchain.toml _qod_rust_channel
+       REGEX "^channel *= *\"[^\"]+\"")
+  string(REGEX REPLACE "^channel *= *\"([^\"]+)\".*" "\\1" _qod_rust_channel "${_qod_rust_channel}")
+  if(NOT _qod_rust_channel)
+    message(FATAL_ERROR "no channel in native/qod-search/rust-toolchain.toml")
+  endif()
+  if(NOT DEFINED Rust_TOOLCHAIN)
+    set(Rust_TOOLCHAIN "${_qod_rust_channel}" CACHE STRING "rustup toolchain for qod_search_core")
+  endif()
   include(FetchContent)
   FetchContent_Declare(Corrosion GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git GIT_TAG v0.6.1)
   FetchContent_MakeAvailable(Corrosion)
+  if(NOT Rust_VERSION VERSION_EQUAL _qod_rust_channel)
+    message(FATAL_ERROR "qod_search_core is pinned to Rust ${_qod_rust_channel} (rust-toolchain.toml); "
+                        "Corrosion found ${Rust_VERSION} (toolchain ${Rust_TOOLCHAIN})")
+  endif()
   corrosion_import_crate(MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../qod-search/Cargo.toml
                          CRATES qod_search_core CRATE_TYPES staticlib PROFILE release LOCKED)
   if(MSVC AND QOD_NODE_DUCKDB_STATIC)
