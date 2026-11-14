@@ -58,7 +58,7 @@ export default function CohortEditor({ cohorts, onChange }: Props) {
         Cohorts (size = {size}; inferred WriteOnly = {totals.wo}, ReadOnly = {totals.ro}, Dual = {totals.dual})
       </legend>
       {cohorts.map((c, i) => (
-        <div key={i} style={{ border: '1px solid #ccc', padding: 8, marginBottom: 8 }}>
+        <div key={i} style={{ border: '1px solid var(--color-rule-2)', padding: 8, marginBottom: 8 }}>
           <div
             className="row"
             style={{ gap: 12, justifyContent: 'space-between', alignItems: 'center' }}
@@ -140,9 +140,9 @@ export default function CohortEditor({ cohorts, onChange }: Props) {
 export function PlacementUnsupportedWarning() {
   return (
     <p style={{
-      color: '#8a4b00',
-      background: '#fff4e0',
-      border: '1px solid #f0c270',
+      color: 'var(--color-accent)',
+      background: 'var(--color-accent-soft)',
+      border: '1px solid var(--color-accent)',
       padding: '6px 10px',
       marginTop: 6,
     }}>

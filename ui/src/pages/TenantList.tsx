@@ -189,7 +189,7 @@ export default function TenantList() {
   return (
     <div>
       <header style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <h2>Tenants</h2>
+        <h1>Tenants</h1>
         <button type="button" className="link-button" onClick={openCreate}>+ New tenant</button>
       </header>
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -203,7 +203,7 @@ export default function TenantList() {
         </thead>
         <tbody>
           {tenants.map(t => (
-            <tr key={t.id} style={{ borderTop: '1px solid #eee', opacity: t.disabled ? 0.55 : 1 }}>
+            <tr key={t.id} style={{ borderTop: '1px solid var(--color-rule)', opacity: t.disabled ? 0.55 : 1 }}>
               <td>
                 <Link to={tenantHome(t.id)}>{t.displayName}</Link>
                 {t.disabled && <span className="subtle"> (disabled)</span>}

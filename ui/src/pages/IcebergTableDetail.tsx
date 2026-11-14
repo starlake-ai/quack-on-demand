@@ -198,19 +198,19 @@ export default function IcebergTableDetail() {
             <table style={{ borderCollapse: 'collapse' }}>
               <tbody>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Catalog</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Catalog</td>
                   <td><code>{detail.alias}</code></td>
                 </tr>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Namespace</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Namespace</td>
                   <td><code>{detail.schema}</code></td>
                 </tr>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Current snapshot</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Current snapshot</td>
                   <td>
                     {detail.currentSnapshot
                       ? <code>{detail.currentSnapshot}</code>
-                      : <em style={{ color: '#888' }}>no snapshot yet</em>}
+                      : <em style={{ color: 'var(--color-muted)' }}>no snapshot yet</em>}
                   </td>
                 </tr>
               </tbody>
@@ -228,7 +228,7 @@ export default function IcebergTableDetail() {
                 id: 'columns',
                 label: 'Columns',
                 body: detail.columns.length === 0
-                  ? <em style={{ color: '#888' }}>no columns</em>
+                  ? <em style={{ color: 'var(--color-muted)' }}>no columns</em>
                   : (
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <thead>
@@ -241,7 +241,7 @@ export default function IcebergTableDetail() {
                       </thead>
                       <tbody>
                         {detail.columns.map(c => (
-                          <tr key={c.ordinal} style={{ borderTop: '1px solid #eee' }}>
+                          <tr key={c.ordinal} style={{ borderTop: '1px solid var(--color-rule)' }}>
                             <td align="right">{c.ordinal}</td>
                             <td>{c.name}</td>
                             <td><code>{c.typeName}</code></td>
@@ -256,7 +256,7 @@ export default function IcebergTableDetail() {
                 id: 'files',
                 label: 'Files',
                 body: detail.files.length === 0
-                  ? <em style={{ color: '#888' }}>no files</em>
+                  ? <em style={{ color: 'var(--color-muted)' }}>no files</em>
                   : (
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <thead>
@@ -270,7 +270,7 @@ export default function IcebergTableDetail() {
                       </thead>
                       <tbody>
                         {detail.files.map(f => (
-                          <tr key={f.path} style={{ borderTop: '1px solid #eee' }}>
+                          <tr key={f.path} style={{ borderTop: '1px solid var(--color-rule)' }}>
                             <td><code style={{ wordBreak: 'break-all' }}>{f.path}</code></td>
                             <td>{f.content}</td>
                             <td><code>{f.format}</code></td>
@@ -401,7 +401,7 @@ export default function IcebergTableDetail() {
                     </div>
                     {historyError && <p style={{ color: 'red' }}>Error: {historyError}</p>}
                     {history.length === 0 && !historyLoading && !historyError && (
-                      <em style={{ color: '#888' }}>no snapshots</em>
+                      <em style={{ color: 'var(--color-muted)' }}>no snapshots</em>
                     )}
                     {history.length > 0 && (
                       <div style={{ overflowX: 'auto' }}>
@@ -420,10 +420,10 @@ export default function IcebergTableDetail() {
                           </thead>
                           <tbody>
                             {history.map(h => (
-                              <tr key={h.snapshotId} style={{ borderTop: '1px solid #eee' }}>
+                              <tr key={h.snapshotId} style={{ borderTop: '1px solid var(--color-rule)' }}>
                                 <td><code>{h.snapshotId}</code>{h.current ? ' (current)' : ''}</td>
                                 <td>{new Date(h.committedAt).toLocaleString()}</td>
-                                <td>{h.operation ?? <em style={{ color: '#888' }}>--</em>}</td>
+                                <td>{h.operation ?? <em style={{ color: 'var(--color-muted)' }}>--</em>}</td>
                                 <td align="right">{h.addedRecords?.toLocaleString() ?? '--'}</td>
                                 <td align="right">{h.deletedRecords?.toLocaleString() ?? '--'}</td>
                                 <td align="right">{h.addedDataFiles?.toLocaleString() ?? '--'}</td>

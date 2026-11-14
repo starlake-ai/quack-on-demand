@@ -24,13 +24,13 @@ const chipBtn: CSSProperties = {
 
 function statusChip(status: string) {
   const palette: Record<string, { bg: string; fg: string }> = {
-    open:      { bg: 'rgba(59, 130, 246, 0.15)', fg: 'var(--link)' },
-    proposed:  { bg: 'rgba(251, 191, 36, 0.15)', fg: 'var(--warn)' },
-    merged:    { bg: 'rgba(34, 197, 94, 0.15)',  fg: 'var(--good)' },
-    discarded: { bg: 'rgba(107, 114, 128, 0.15)',fg: 'var(--text-mute)' },
-    expired:   { bg: 'rgba(107, 114, 128, 0.15)',fg: 'var(--text-mute)' },
-    failed:    { bg: 'rgba(239, 68, 68, 0.15)',  fg: 'var(--bad)' },
-    abandoned: { bg: 'rgba(107, 114, 128, 0.15)',fg: 'var(--text-mute)' },
+    open:      { bg: 'var(--color-cool-soft)', fg: 'var(--link)' },
+    proposed:  { bg: 'var(--color-accent-soft)', fg: 'var(--warn)' },
+    merged:    { bg: 'var(--color-ok-soft)',  fg: 'var(--good)' },
+    discarded: { bg: 'var(--color-paper-3)',fg: 'var(--text-mute)' },
+    expired:   { bg: 'var(--color-paper-3)',fg: 'var(--text-mute)' },
+    failed:    { bg: 'var(--color-bad-soft)',  fg: 'var(--bad)' },
+    abandoned: { bg: 'var(--color-paper-3)',fg: 'var(--text-mute)' },
   };
   const c = palette[status] ?? palette.discarded;
   return (
@@ -43,14 +43,14 @@ function statusChip(status: string) {
 
 function kindChip(t: BranchTableChange) {
   const palette: Record<string, string> = {
-    created:   'rgba(34, 197, 94, 0.15)',
-    dropped:   'rgba(239, 68, 68, 0.15)',
-    recreated: 'rgba(251, 191, 36, 0.15)',
-    modified:  'rgba(59, 130, 246, 0.15)',
-    altered:   'rgba(239, 68, 68, 0.15)',
+    created:   'var(--color-ok-soft)',
+    dropped:   'var(--color-bad-soft)',
+    recreated: 'var(--color-accent-soft)',
+    modified:  'var(--color-cool-soft)',
+    altered:   'var(--color-bad-soft)',
   };
   return (
-    <span style={{ background: palette[t.kind] ?? 'rgba(148,163,184,0.15)', borderRadius: 4, padding: '0 6px', fontSize: '0.85em', fontWeight: 600 }}>
+    <span style={{ background: palette[t.kind] ?? 'var(--color-paper-3)', borderRadius: 4, padding: '0 6px', fontSize: '0.85em', fontWeight: 600 }}>
       {t.kind}
     </span>
   );
@@ -58,7 +58,7 @@ function kindChip(t: BranchTableChange) {
 
 function mergeCell(t: BranchTableChange, conflicts: BranchConflictEntry[]) {
   const cell = branchMergeCell(t, conflicts);
-  return cell.refused ? <span style={{ color: '#b91c1c' }}>{cell.text}</span> : cell.text;
+  return cell.refused ? <span style={{ color: 'var(--color-bad)' }}>{cell.text}</span> : cell.text;
 }
 
 function fmtTs(s?: string | null): string {
@@ -109,7 +109,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
 
   const cell = (v: unknown, j: number, style?: CSSProperties) => (
     <td key={j} style={style}>
-      {v === null || v === undefined ? <em style={{ color: '#888' }}>null</em> : String(v)}
+      {v === null || v === undefined ? <em style={{ color: 'var(--color-muted)' }}>null</em> : String(v)}
     </td>
   );
 
@@ -139,7 +139,7 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
       </div>
       {error && <div className="login-err">Error: {error}</div>}
       <div style={{ overflow: 'auto', flex: 1 }}>
-        {diff && diff.rows.length === 0 && !loading && <em style={{ color: '#888' }}>no row changes</em>}
+        {diff && diff.rows.length === 0 && !loading && <em style={{ color: 'var(--color-muted)' }}>no row changes</em>}
         {diff && diff.rows.length > 0 && (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -159,20 +159,20 @@ function BranchDiffModal({ tenant, tenantDb, branch, schema, table, onClose }: {
                 if (e.changeType === 'update') {
                   return (
                     <Fragment key={i}>
-                      <tr style={{ borderTop: '1px solid var(--border)', background: 'rgba(251, 191, 36, 0.1)' }}>
+                      <tr style={{ borderTop: '1px solid var(--border)', background: 'var(--color-accent-soft)' }}>
                         <td rowSpan={2}>update</td>
                         <td rowSpan={2} align="right">{e.snapshotId}</td>
                         {(e.before ?? []).map((v, j) => cell(v, j, { opacity: 0.6, textDecoration: 'line-through' }))}
                       </tr>
-                      <tr style={{ background: 'rgba(251, 191, 36, 0.1)' }}>
+                      <tr style={{ background: 'var(--color-accent-soft)' }}>
                         {(e.after ?? []).map((v, j) => cell(v, j))}
                       </tr>
                     </Fragment>
                   );
                 }
                 const bg = e.changeType === 'insert'
-                  ? 'rgba(34, 197, 94, 0.1)'
-                  : e.changeType === 'delete' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(148, 163, 184, 0.1)';
+                  ? 'var(--color-ok-soft)'
+                  : e.changeType === 'delete' ? 'var(--color-bad-soft)' : 'var(--color-paper-3)';
                 return (
                   <tr key={i} style={{ borderTop: '1px solid var(--border)', background: bg }}>
                     <td>{e.changeType}</td>
@@ -247,10 +247,10 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
             </span>
             {changes.mergeable
               ? <span style={{ color: 'var(--good)', fontWeight: 600 }}>no table conflict</span>
-              : <span style={{ color: '#b91c1c', fontWeight: 600 }}>not mergeable as is</span>}
+              : <span style={{ color: 'var(--color-bad)', fontWeight: 600 }}>not mergeable as is</span>}
           </div>
           {changes.tables.length === 0
-            ? <em style={{ color: '#888' }}>no table changes</em>
+            ? <em style={{ color: 'var(--color-muted)' }}>no table changes</em>
             : (
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
@@ -299,7 +299,7 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
           )}
           {changes.conflicts.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <strong style={{ color: '#b91c1c' }}>Table conflicts with main</strong>
+              <strong style={{ color: 'var(--color-bad)' }}>Table conflicts with main</strong>
               <ul style={{ margin: '4px 0' }}>
                 {changes.conflicts.map(c => (
                   <li key={`${c.schema}.${c.table}`}><code>{c.schema}.{c.table}</code>: {c.reason}</li>
@@ -309,7 +309,7 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
           )}
           {changes.unsupported.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <strong style={{ color: '#b91c1c' }}>Cannot be merged</strong>
+              <strong style={{ color: 'var(--color-bad)' }}>Cannot be merged</strong>
               <ul style={{ margin: '4px 0' }}>
                 {changes.unsupported.map(u => <li key={u}><code>{u}</code></li>)}
               </ul>
@@ -560,7 +560,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
 
       {!rows && !error && <p className="subtle">Loading branches...</p>}
       {rows && rows.length === 0 && (
-        <em style={{ color: '#888' }}>
+        <em style={{ color: 'var(--color-muted)' }}>
           {showAll ? 'no branches' : 'no live branches; agents create them with create_branch or `qod branch create`'}
         </em>
       )}
@@ -610,7 +610,7 @@ export default function BranchPanel({ tenant, tenantDb }: { tenant: string; tena
                   </tr>
                   {isOpen && (
                     <tr>
-                      <td colSpan={7} style={{ background: 'rgba(148,163,184,0.06)' }}>
+                      <td colSpan={7} style={{ background: 'var(--color-paper-3)' }}>
                         <BranchDetail
                           tenant={tenant}
                           tenantDb={tenantDb}

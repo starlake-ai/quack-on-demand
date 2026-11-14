@@ -21,7 +21,7 @@ export function Modal({ maxWidth = 560, height, scrollBackdrop = false, onClose,
       className="modal-backdrop"
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+        position: 'fixed', inset: 0, background: 'var(--color-scrim)',
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
         zIndex: 100, paddingTop: '4rem',
         ...(scrollBackdrop ? { overflowY: 'auto' as const, paddingBottom: '2rem' } : {}),

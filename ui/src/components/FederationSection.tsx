@@ -402,8 +402,7 @@ function DetailItem({
       <div style={{
         fontSize: '.7rem',
         color: 'var(--text-mute)',
-        textTransform: 'uppercase',
-        letterSpacing: '.06em',
+        fontWeight: 500,
       }}>{label}</div>
       <div style={{
         fontFamily: mono ? 'var(--mono)' : undefined,
@@ -824,8 +823,8 @@ function SecretEditor({
                 <div style={{
                   marginTop: '.4rem',
                   padding: '.4rem .65rem',
-                  background: 'rgba(248, 113, 113, 0.08)',
-                  border: '1px solid rgba(248, 113, 113, 0.4)',
+                  background: 'var(--color-bad-soft)',
+                  border: '1px solid var(--color-bad)',
                   borderRadius: 'var(--radius)',
                   color: 'var(--bad)',
                   fontSize: '.85em',
@@ -1625,7 +1624,7 @@ export default function FederationSection({
                           <div style={{ marginTop: '.4rem' }}>
                             <div style={{
                               fontSize: '.75rem', color: 'var(--text-mute)',
-                              textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                              fontWeight: 500, marginBottom: '.25rem',
                             }}>
                               Iceberg REST catalog
                             </div>
@@ -1658,7 +1657,7 @@ export default function FederationSection({
                           <div style={{ marginTop: '.4rem' }}>
                             <div style={{
                               fontSize: '.75rem', color: 'var(--text-mute)',
-                              textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                              fontWeight: 500, marginBottom: '.25rem',
                             }}>
                               {s.sourceType === 'mysql' ? 'MySQL database' : 'Postgres database'}
                             </div>
@@ -1678,7 +1677,7 @@ export default function FederationSection({
                           <div style={{ marginTop: '.4rem' }}>
                             <div style={{
                               fontSize: '.75rem', color: 'var(--text-mute)',
-                              textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                              fontWeight: 500, marginBottom: '.25rem',
                             }}>
                               Setup SQL
                             </div>
@@ -1703,7 +1702,7 @@ export default function FederationSection({
                         <div style={{ marginTop: '.9rem' }}>
                           <div style={{
                             fontSize: '.75rem', color: 'var(--text-mute)',
-                            textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                            fontWeight: 500, marginBottom: '.25rem',
                           }}>
                             Secrets
                           </div>

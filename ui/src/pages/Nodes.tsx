@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, errorMessage } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry, ActiveStatementInfo } from '../api/types';
@@ -8,6 +8,7 @@ import SqlHighlight from '../components/SqlHighlight';
 import { fmtBytes } from '../format';
 import { dashboardPath, poolPath, tenantHome } from '../nav/links';
 import { useTenantScope } from '../nav/TenantScope';
+import NodeId from '../components/NodeId';
 
 interface Row extends NodeInfo {
   tenant:   string;
@@ -39,6 +40,9 @@ export default function Nodes() {
   const [history, setHistory] = useState<StatementHistoryEntry[]>([]);
   const showServer = history.some(h => h.serverName);
   const [expanded, setExpanded] = useState<number | null>(null);
+  // Node row showing its latency percentiles, keyed by tenant/db/pool/node so a
+  // poll that reorders or filters the rows cannot open a different one.
+  const [nodeExpanded, setNodeExpanded] = useState<string | null>(null);
   // Row index whose Copy button was just clicked, for the brief "Copied"
   // feedback. Cleared on a timeout.
   const [copied, setCopied] = useState<number | null>(null);
@@ -194,7 +198,7 @@ export default function Nodes() {
 
       {nodeFilter && (
         <div className="card" style={{ padding: '8px 12px', marginBottom: '1rem' }}>
-          Filtered to node <code>{nodeFilter}</code>
+          Filtered to node <NodeId id={nodeFilter} />
           <button
             onClick={clearNodeFilter}
             style={{ marginLeft: 12, fontSize: '0.85rem' }}
@@ -258,32 +262,47 @@ export default function Nodes() {
               <th style={{ textAlign: 'right' }}>QPS</th>
               <th style={{ textAlign: 'right' }}>Total served</th>
               <th style={{ textAlign: 'right' }}>Avg</th>
-              <th style={{ textAlign: 'right' }}>p50</th>
               <th style={{ textAlign: 'right' }}>p95</th>
-              <th style={{ textAlign: 'right' }}>p99</th>
               <th style={{ textAlign: 'right' }}>Mem</th>
               <th style={{ textAlign: 'right' }}>Spill</th>
               <th style={{ textAlign: 'right' }}>Max conc.</th>
-              {superuser && <th>Actions</th>}
+              {superuser && <th className="actions">Actions</th>}
             </tr>
           </thead>
           <tbody>
             {visible.length === 0 ? (
-              <tr><td colSpan={superuser ? 16 : 15} className="empty">No nodes running.</td></tr>
-            ) : visible.map(n => (
-              <tr key={`${n.tenant}/${n.tenantDb}/${n.pool}/${n.nodeId}`}>
+              <tr><td colSpan={superuser ? 14 : 13} className="empty">No nodes running.</td></tr>
+            ) : visible.map(n => {
+              const rowKey = `${n.tenant}/${n.tenantDb}/${n.pool}/${n.nodeId}`;
+              const isOpen = nodeExpanded === rowKey;
+              const toggle = () => setNodeExpanded(isOpen ? null : rowKey);
+              return (
+              <Fragment key={rowKey}>
+              <tr
+                // A click on a link or a button keeps its own meaning; anywhere else opens the row.
+                onClick={e => { if (!(e.target as HTMLElement).closest('a, button')) toggle(); }}
+                style={{ cursor: 'pointer' }}
+              >
                 <td>
+                  <button
+                    type="button"
+                    className="row-toggle"
+                    aria-expanded={isOpen}
+                    aria-label={`${isOpen ? 'Hide' : 'Show'} latency percentiles of ${n.nodeId}`}
+                    onClick={toggle}
+                  >
+                    {isOpen ? '▾' : '▸'}
+                  </button>
                   <Link
                     to={dashboardPath(scope, n.nodeId)}
-                    style={{ textDecoration: 'none' }}
                   >
-                    <code>{n.nodeId}</code>
+                    <NodeId id={n.nodeId} />
                   </Link>
                 </td>
                 <td>
                   <Link to={tenantHome(n.tenant)}>{n.tenant}</Link>
                   {' / '}
-                  <code style={{ color: '#666' }}>{n.tenantDb}</code>
+                  <code style={{ color: 'var(--color-muted)' }}>{n.tenantDb}</code>
                   {' / '}
                   <Link to={poolPath(n.tenant, n.tenantDb, n.pool)}>{n.pool}</Link>
                 </td>
@@ -299,9 +318,7 @@ export default function Nodes() {
                 <td style={{ textAlign: 'right' }}>{n.qps.toFixed(1)}</td>
                 <td style={{ textAlign: 'right' }}>{n.totalServed.toLocaleString()}</td>
                 <td style={{ textAlign: 'right' }}>{n.avgDurationMs.toFixed(1)} ms</td>
-                <td style={{ textAlign: 'right' }}>{n.p50Ms.toFixed(0)} ms</td>
                 <td style={{ textAlign: 'right' }}>{n.p95Ms.toFixed(0)} ms</td>
-                <td style={{ textAlign: 'right' }}>{n.p99Ms.toFixed(0)} ms</td>
                 <td
                   style={{ textAlign: 'right' }}
                   title="DuckDB buffer-manager memory in use (health-probe scrape)"
@@ -325,7 +342,7 @@ export default function Nodes() {
                 </td>
                 <td style={{ textAlign: 'right' }}>{n.maxConcurrent === 0 ? '∞' : n.maxConcurrent}</td>
                 {superuser && (
-                  <td style={{ whiteSpace: 'nowrap' }}>
+                  <td className="actions">
                     <button type="button" className="copy-btn" onClick={() => void toggleQuarantine(n)}>
                       {n.quarantined ? 'Unquarantine' : 'Quarantine'}
                     </button>{' '}
@@ -335,12 +352,25 @@ export default function Nodes() {
                   </td>
                 )}
               </tr>
-            ))}
+              {isOpen && (
+                <tr className="expanded-row">
+                  <td colSpan={superuser ? 14 : 13}>
+                    <dl className="catalog-facts" aria-label={`Latency percentiles of ${n.nodeId}`}>
+                      <div><dt>p50</dt><dd>{n.p50Ms.toFixed(0)} ms</dd></div>
+                      <div><dt>p95</dt><dd>{n.p95Ms.toFixed(0)} ms</dd></div>
+                      <div><dt>p99</dt><dd>{n.p99Ms.toFixed(0)} ms</dd></div>
+                    </dl>
+                  </td>
+                </tr>
+              )}
+              </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
       <p className="subtle" style={{ textAlign: 'right' }}>
-        Refreshing every {POLL_MS / 1000}s · QPS computed from delta; percentiles over a rolling 256-sample window per node.
+        Refreshing every {POLL_MS / 1000}s. Click a node for its p50, p95 and p99. QPS is computed from the delta; percentiles cover a rolling 256-sample window per node.
       </p>
 
       <div className="card" style={{ marginTop: '1rem' }}>
@@ -351,7 +381,7 @@ export default function Nodes() {
           )}
         </div>
         {visibleActive.length === 0 ? (
-          <p style={{ color: '#888' }}>Nothing running right now.</p>
+          <p style={{ color: 'var(--color-muted)' }}>Nothing running right now.</p>
         ) : (
           <table>
             <thead>
@@ -368,7 +398,7 @@ export default function Nodes() {
                   <tr key={a.id} onClick={() => setActiveExpanded(isOpen ? null : a.id)} style={{ cursor: 'pointer' }}>
                     <td>{a.user}</td>
                     <td>{a.tenant} / {a.pool}</td>
-                    <td><code>{a.nodeId}</code></td>
+                    <td><NodeId id={a.nodeId} /></td>
                     <td style={{ textAlign: 'right' }}>{fmtElapsed(liveElapsed)}</td>
                     <td style={isOpen
                       ? { whiteSpace: 'pre-wrap' }
@@ -428,10 +458,9 @@ export default function Nodes() {
                       <td>
                         <Link
                           to={dashboardPath(scope, h.nodeId)}
-                          style={{ textDecoration: 'none' }}
                           onClick={e => e.stopPropagation()}
                         >
-                          <code>{h.nodeId}</code>
+                          <NodeId id={h.nodeId} />
                         </Link>
                       </td>
                       {showServer && <td><code>{h.serverName ?? ''}</code></td>}
@@ -476,7 +505,7 @@ export default function Nodes() {
         </table>
       </div>
       <p className="subtle" style={{ textAlign: 'right' }}>
-        Click a row to expand · last 200 statements · ring buffer (oldest evicted)
+        Click a row to expand. The last 200 statements, oldest dropped first.
       </p>
     </>
   );

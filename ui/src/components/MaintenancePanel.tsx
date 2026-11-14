@@ -37,11 +37,11 @@ function runDuration(r: MaintenanceRunEntry): string {
 
 function statusChip(status: string) {
   const palette: Record<string, { bg: string; fg: string }> = {
-    succeeded: { bg: 'rgba(34, 197, 94, 0.15)',  fg: '#15803d' },
-    partial:   { bg: 'rgba(251, 191, 36, 0.15)', fg: '#a16207' },
-    failed:    { bg: 'rgba(239, 68, 68, 0.15)',  fg: '#b91c1c' },
-    running:   { bg: 'rgba(59, 130, 246, 0.15)', fg: '#1d4ed8' },
-    queued:    { bg: 'rgba(107, 114, 128, 0.15)',fg: '#4b5563' },
+    succeeded: { bg: 'var(--color-ok-soft)',  fg: 'var(--color-ok)' },
+    partial:   { bg: 'var(--color-accent-soft)', fg: 'var(--color-accent)' },
+    failed:    { bg: 'var(--color-bad-soft)',  fg: 'var(--color-bad)' },
+    running:   { bg: 'var(--color-cool-soft)', fg: 'var(--color-cool)' },
+    queued:    { bg: 'var(--color-paper-3)',fg: 'var(--color-muted)' },
   };
   const c = palette[status] ?? palette.queued;
   return (
@@ -305,7 +305,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
         </p>
       )}
       {policyError && <p style={{ color: 'red' }}>Policy error: {policyError}</p>}
-      {savedNote && <p style={{ color: 'var(--ok, #15803d)' }}>{savedNote}</p>}
+      {savedNote && <p style={{ color: 'var(--color-ok)' }}>{savedNote}</p>}
 
       <form onSubmit={handleSave}>
         <fieldset>
@@ -397,7 +397,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
 
       <h4 style={{ marginTop: '1.5rem' }}>Scope overrides</h4>
       {overrides.length === 0
-        ? <em style={{ color: '#888' }}>no schema or table overrides</em>
+        ? <em style={{ color: 'var(--color-muted)' }}>no schema or table overrides</em>
         : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -410,7 +410,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
             </thead>
             <tbody>
               {overrides.map(p => (
-                <tr key={p.id} style={{ borderTop: '1px solid #eee' }}>
+                <tr key={p.id} style={{ borderTop: '1px solid var(--color-rule)' }}>
                   <td>
                     <code>
                       {p.scopeKind === 'table'
@@ -445,7 +445,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
       {!runs
         ? <p>Loading runs...</p>
         : runs.length === 0
-          ? <em style={{ color: '#888' }}>no maintenance runs yet</em>
+          ? <em style={{ color: 'var(--color-muted)' }}>no maintenance runs yet</em>
           : (
             <>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -466,7 +466,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
                 </thead>
                 <tbody>
                   {runs.map(r => (
-                    <tr key={r.id} style={{ borderTop: '1px solid #eee' }} title={r.error ?? undefined}>
+                    <tr key={r.id} style={{ borderTop: '1px solid var(--color-rule)' }} title={r.error ?? undefined}>
                       <td align="right">{r.id}</td>
                       <td>{r.trigger}</td>
                       <td><code style={{ fontSize: '0.85em' }}>{r.scope}</code></td>
@@ -582,7 +582,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
             </div>
           </fieldset>
           {runError && <p style={{ color: 'red' }}>Run error: {runError}</p>}
-          {runNote && <p style={{ color: 'var(--ok, #15803d)' }}>{runNote}</p>}
+          {runNote && <p style={{ color: 'var(--color-ok)' }}>{runNote}</p>}
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
             <button
               type="submit"

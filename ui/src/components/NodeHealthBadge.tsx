@@ -37,7 +37,7 @@ export function NodeHealthBadge({ node, showDetail = false }: { node: Health; sh
     <span>
       <span className="badge bad" title={unhealthyTitle(node)} style={{ cursor: 'help' }}>{label}</span>
       {showDetail && node.unhealthyDetail && (
-        <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 360, whiteSpace: 'normal' }}>
+        <div className="muted" style={{ fontSize: 13, marginTop: 4, maxWidth: 360, whiteSpace: 'normal' }}>
           {node.unhealthyDetail}
         </div>
       )}

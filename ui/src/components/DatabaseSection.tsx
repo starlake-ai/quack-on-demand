@@ -375,12 +375,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                     borderRadius: 3,
                     fontSize: '0.8em',
                     fontWeight: 600,
-                    background: d.kind === 'ducklake' ? '#dbeafe'
-                              : d.kind === 'duckdb-file' ? '#fef9c3'
-                              : '#f3e8ff',
-                    color: d.kind === 'ducklake' ? '#1d4ed8'
-                         : d.kind === 'duckdb-file' ? '#854d0e'
-                         : '#6b21a8',
+                    background: d.kind === 'ducklake' ? 'var(--color-cool-soft)'
+                              : d.kind === 'duckdb-file' ? 'var(--color-paper-3)'
+                              : 'var(--color-paper-3)',
+                    color: d.kind === 'ducklake' ? 'var(--color-cool)'
+                         : d.kind === 'duckdb-file' ? 'var(--color-ink-2)'
+                         : 'var(--color-ink-2)',
                   }}>{d.kind ?? 'ducklake'}</span>
                   {d.encrypted && <span className="subtle" style={{ marginLeft: 6 }}>encrypted</span>}
                 {d.initSql && d.initSqlTrusted === false && (

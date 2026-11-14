@@ -110,7 +110,7 @@ export default function UserSection({
     if (poolTok === '*') {
       return (
         <Link to={tenantHome(tenantName)} title="every pool in this tenant">
-          <code>{tenantName}/*</code>
+          <span>{tenantName}/*</span>
         </Link>
       );
     }
@@ -428,10 +428,10 @@ export default function UserSection({
                       onClick={() => setExpandedId(isExpanded ? null : u.id)}
                     >
                       <span className="caret">{isExpanded ? '▾' : '▸'}</span>
-                      <code>{u.username}</code>
+                      <span>{u.username}</span>
                     </button>
                   </td>
-                  <td>{u.tenant ? <code>{u.tenant}</code> : <em>(superuser)</em>}</td>
+                  <td>{u.tenant ? u.tenant : <em>(superuser)</em>}</td>
                   <td>
                     <input
                       type="checkbox"

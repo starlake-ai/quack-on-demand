@@ -119,7 +119,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
         </p>
       )}
       {snaps.length === 0
-        ? <em style={{ color: '#888' }}>no snapshots</em>
+        ? <em style={{ color: 'var(--color-muted)' }}>no snapshots</em>
         : (
           <>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -144,13 +144,13 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                   const isDrop = s.changes?.includes('dropped_table');
                   const tableAsOf = isDrop ? s.snapshotId - 1 : s.snapshotId;
                   return (
-                    <tr key={s.snapshotId} style={{ borderTop: '1px solid #eee' }}>
+                    <tr key={s.snapshotId} style={{ borderTop: '1px solid var(--color-rule)' }}>
                       <td align="right">{s.snapshotId}</td>
                       <td>{new Date(s.committedAt).toLocaleString()}</td>
                       <td>
                         {s.author
                           ? s.author
-                          : <em style={{ color: '#888' }}>unknown</em>}
+                          : <em style={{ color: 'var(--color-muted)' }}>unknown</em>}
                       </td>
                       <td
                         title={s.commitMessage ?? undefined}
@@ -159,7 +159,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                           whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'middle',
                         }}
                       >
-                        {s.commitMessage ?? <span style={{ color: '#888' }}>--</span>}
+                        {s.commitMessage ?? <span style={{ color: 'var(--color-muted)' }}>--</span>}
                       </td>
                       <td><code style={{ fontSize: '0.85em' }}>{s.changes || '--'}</code></td>
                       <td align="right">{s.rowsAdded.toLocaleString()}</td>
@@ -182,7 +182,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                             key={t.name}
                             style={{
                               display: 'inline-flex', alignItems: 'center', gap: 6,
-                              border: '1px solid #ccc', borderRadius: 12,
+                              border: '1px solid var(--color-rule-2)', borderRadius: 12,
                               padding: '1px 8px', marginRight: 6, fontSize: '0.85em',
                               opacity: t.exists ? 1 : 0.5,
                             }}
@@ -190,12 +190,12 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                             {t.name}
                             {t.protected && (
                               <span style={{
-                                background: 'rgba(251, 191, 36, 0.15)', border: '1px solid var(--warn)',
+                                background: 'var(--color-accent-soft)', border: '1px solid var(--warn)',
                                 color: 'var(--warn)', borderRadius: 4, padding: '0 4px', fontSize: '0.9em',
                               }}>hold</span>
                             )}
                             {!t.exists && (
-                              <span style={{ color: '#888', fontSize: '0.9em' }}>missing</span>
+                              <span style={{ color: 'var(--color-muted)', fontSize: '0.9em' }}>missing</span>
                             )}
                           </span>
                         ))}

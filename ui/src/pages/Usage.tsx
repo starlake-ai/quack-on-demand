@@ -18,10 +18,10 @@ const CHART_HEIGHT = 260;
 
 // Stacked-segment palette; groups beyond the first 8 are aggregated into "other".
 const PALETTE = [
-  '#60a5fa', '#34d399', '#fbbf24', '#f87171',
-  '#a78bfa', '#f472b6', '#2dd4bf', '#fb923c',
+  'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)',
+  'var(--chart-5)', 'var(--chart-6)', 'var(--chart-7)', 'var(--chart-8)',
 ];
-const C_OTHER = '#9ca3af';
+const C_OTHER = 'var(--chart-other)';
 const MAX_CHART_GROUPS = 8;
 
 type GroupBy = 'tenant' | 'pool' | 'user';
@@ -251,8 +251,8 @@ export default function Usage() {
       {rows.length > 0 && (
         <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
           <BarChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-            <XAxis dataKey="tick" tick={{ fontSize: 11 }} />
-            <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+            <XAxis dataKey="tick" tick={{ fontSize: 13 }} />
+            <YAxis tick={{ fontSize: 13 }} allowDecimals={false} />
             <Tooltip />
             <Legend />
             {labels.map((label, i) => (

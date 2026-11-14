@@ -242,7 +242,7 @@ export default function DataPathEditor(p: Props) {
       )}
 
       <details style={{ marginTop: '0.5rem' }}>
-        <summary style={{ cursor: 'pointer', color: '#666' }}>Advanced extras</summary>
+        <summary style={{ cursor: 'pointer', color: 'var(--color-muted)' }}>Advanced extras</summary>
         <p className="subtle" style={{ marginBottom: 4 }}>
           Extra <code>key=value</code> pairs, one per line, for backend options not listed above.
         </p>

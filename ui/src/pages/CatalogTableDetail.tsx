@@ -335,8 +335,8 @@ export default function CatalogTableDetail() {
       </div>
 
       <div style={{ marginBottom: 16, fontSize: '0.9rem' }}>
-        <Link to={tenantHome(tenant!)}>Open tenant {tenant} →</Link>
-        <span style={{ color: '#bbb', margin: '0 8px' }}>·</span>
+        <Link to={tenantHome(tenant!)}>Open tenant {tenant}</Link>
+        <span style={{ margin: '0 12px' }} />
         <Link to={dashboardPath({ kind: 'tenant', tenant: tenant! })}>Live nodes for this tenant</Link>
       </div>
 
@@ -350,34 +350,34 @@ export default function CatalogTableDetail() {
             <table style={{ borderCollapse: 'collapse' }}>
               <tbody>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Rows</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Rows</td>
                   <td>
                     {detail.table.rowCount < 0
-                      ? <em style={{ color: '#888' }}>--</em>
+                      ? <em style={{ color: 'var(--color-muted)' }}>--</em>
                       : detail.table.rowCount.toLocaleString()}
                   </td>
                 </tr>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Data files</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Data files</td>
                   <td>{detail.table.dataFileCount}</td>
                 </tr>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Total parquet size</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Total parquet size</td>
                   <td>{fmtBytes(detail.dataFiles.reduce((s, f) => s + f.sizeBytes, 0))}</td>
                 </tr>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555' }}>Folder</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)' }}>Folder</td>
                   <td>
                     {detail.table.folder
-                      ? <code style={{ fontSize: '0.9em', color: '#444' }}>{detail.table.folder}</code>
-                      : <em style={{ color: '#888' }}>--</em>}
+                      ? <code style={{ fontSize: '0.9em', color: 'var(--color-ink-2)' }}>{detail.table.folder}</code>
+                      : <em style={{ color: 'var(--color-muted)' }}>--</em>}
                   </td>
                 </tr>
                 <tr>
-                  <td style={{ paddingRight: 16, color: '#555', verticalAlign: 'top' }}>Tags</td>
+                  <td style={{ paddingRight: 16, color: 'var(--color-muted)', verticalAlign: 'top' }}>Tags</td>
                   <td>
                     {resolvedId == null
-                      ? <em style={{ color: '#888' }}>select a snapshot above to view and manage its tags</em>
+                      ? <em style={{ color: 'var(--color-muted)' }}>select a snapshot above to view and manage its tags</em>
                       : (
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                           {snapshotTags.map(t => (
@@ -385,14 +385,14 @@ export default function CatalogTableDetail() {
                               key={t.name}
                               style={{
                                 display: 'inline-flex', alignItems: 'center', gap: 6,
-                                border: '1px solid #ccc', borderRadius: 12,
+                                border: '1px solid var(--color-rule-2)', borderRadius: 12,
                                 padding: '1px 8px', fontSize: '0.85em',
                               }}
                             >
                               {t.name}
                               {t.protected && (
                                 <span style={{
-                                  background: 'rgba(251, 191, 36, 0.15)', border: '1px solid var(--warn)',
+                                  background: 'var(--color-accent-soft)', border: '1px solid var(--warn)',
                                   color: 'var(--warn)', borderRadius: 4, padding: '0 4px', fontSize: '0.9em',
                                 }}>hold</span>
                               )}
@@ -449,7 +449,7 @@ export default function CatalogTableDetail() {
                 id: 'columns',
                 label: 'Columns',
                 body: detail.columns.length === 0
-                  ? <em style={{ color: '#888' }}>no columns</em>
+                  ? <em style={{ color: 'var(--color-muted)' }}>no columns</em>
                   : (
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <thead>
@@ -463,7 +463,7 @@ export default function CatalogTableDetail() {
                       </thead>
                       <tbody>
                         {detail.columns.map(c => (
-                          <tr key={c.ordinal} style={{ borderTop: '1px solid #eee' }}>
+                          <tr key={c.ordinal} style={{ borderTop: '1px solid var(--color-rule)' }}>
                             <td align="right">{c.ordinal}</td>
                             <td>{c.name}</td>
                             <td><code>{c.typeName}</code></td>
@@ -479,7 +479,7 @@ export default function CatalogTableDetail() {
                 id: 'files',
                 label: 'Parquet files',
                 body: detail.dataFiles.length === 0
-                  ? <em style={{ color: '#888' }}>no parquet files</em>
+                  ? <em style={{ color: 'var(--color-muted)' }}>no parquet files</em>
                   : (
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <thead>
@@ -492,7 +492,7 @@ export default function CatalogTableDetail() {
                       </thead>
                       <tbody>
                         {detail.dataFiles.map(f => (
-                          <tr key={f.path} style={{ borderTop: '1px solid #eee' }}>
+                          <tr key={f.path} style={{ borderTop: '1px solid var(--color-rule)' }}>
                             <td><code style={{ wordBreak: 'break-all' }}>{f.path}</code></td>
                             <td align="right">{fmtBytes(f.sizeBytes)}</td>
                             <td align="right">{f.rowCount.toLocaleString()}</td>
@@ -582,7 +582,7 @@ export default function CatalogTableDetail() {
                         </p>
                         {diff.added.length === 0 && diff.removed.length === 0 &&
                           diff.typeChanged.length === 0 && diff.nullabilityChanged.length === 0
-                          ? <em style={{ color: '#888' }}>no schema differences</em>
+                          ? <em style={{ color: 'var(--color-muted)' }}>no schema differences</em>
                           : (
                             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                               <thead>
@@ -594,28 +594,28 @@ export default function CatalogTableDetail() {
                               </thead>
                               <tbody>
                                 {diff.added.map(c => (
-                                  <tr key={`added-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(34, 197, 94, 0.1)' }}>
+                                  <tr key={`added-${c.name}`} style={{ borderTop: '1px solid var(--color-rule)', background: 'var(--color-ok-soft)' }}>
                                     <td>added</td>
                                     <td>{c.name}</td>
                                     <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
                                   </tr>
                                 ))}
                                 {diff.removed.map(c => (
-                                  <tr key={`removed-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(239, 68, 68, 0.1)' }}>
+                                  <tr key={`removed-${c.name}`} style={{ borderTop: '1px solid var(--color-rule)', background: 'var(--color-bad-soft)' }}>
                                     <td>removed</td>
                                     <td>{c.name}</td>
                                     <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
                                   </tr>
                                 ))}
                                 {diff.typeChanged.map(c => (
-                                  <tr key={`type-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                                  <tr key={`type-${c.column}`} style={{ borderTop: '1px solid var(--color-rule)', background: 'var(--color-accent-soft)' }}>
                                     <td>type changed</td>
                                     <td>{c.column}</td>
                                     <td><code>{c.fromType}</code> {'->'} <code>{c.toType}</code></td>
                                   </tr>
                                 ))}
                                 {diff.nullabilityChanged.map(c => (
-                                  <tr key={`null-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                                  <tr key={`null-${c.column}`} style={{ borderTop: '1px solid var(--color-rule)', background: 'var(--color-accent-soft)' }}>
                                     <td>nullability changed</td>
                                     <td>{c.column}</td>
                                     <td>{c.fromNullable ? 'nullable' : 'not null'} {'->'} {c.toNullable ? 'nullable' : 'not null'}</td>
@@ -633,13 +633,13 @@ export default function CatalogTableDetail() {
                         {dataDiff && (
                           <div>
                             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
-                              <span style={{ background: 'rgba(34, 197, 94, 0.15)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
+                              <span style={{ background: 'var(--color-ok-soft)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
                                 +{dataDiff.summary.inserted.toLocaleString()} inserted
                               </span>
-                              <span style={{ background: 'rgba(239, 68, 68, 0.15)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
+                              <span style={{ background: 'var(--color-bad-soft)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
                                 -{dataDiff.summary.deleted.toLocaleString()} deleted
                               </span>
-                              <span style={{ background: 'rgba(251, 191, 36, 0.15)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
+                              <span style={{ background: 'var(--color-accent-soft)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
                                 ~{dataDiff.summary.updated.toLocaleString()} updated
                               </span>
                               <label style={{ fontSize: '0.85rem' }}>Change type{' '}
@@ -661,7 +661,7 @@ export default function CatalogTableDetail() {
                               </span>
                             </div>
                             {dataDiff.rows.length === 0
-                              ? <em style={{ color: '#888' }}>no row changes</em>
+                              ? <em style={{ color: 'var(--color-muted)' }}>no row changes</em>
                               : (
                                 <div style={{ overflowX: 'auto' }}>
                                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -682,32 +682,32 @@ export default function CatalogTableDetail() {
                                         const cell = (v: unknown, j: number, style?: CSSProperties) => (
                                           <td key={j} style={style}>
                                             {v === null || v === undefined
-                                              ? <em style={{ color: '#888' }}>null</em>
+                                              ? <em style={{ color: 'var(--color-muted)' }}>null</em>
                                               : String(v)}
                                           </td>
                                         );
                                         if (e.changeType === 'update') {
                                           return (
                                             <Fragment key={i}>
-                                              <tr style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                                              <tr style={{ borderTop: '1px solid var(--color-rule)', background: 'var(--color-accent-soft)' }}>
                                                 <td rowSpan={2}>update</td>
                                                 <td rowSpan={2} align="right">{e.snapshotId}</td>
                                                 {(e.before ?? []).map((v, j) =>
                                                   cell(v, j, { opacity: 0.6, textDecoration: 'line-through' }))}
                                               </tr>
-                                              <tr style={{ background: 'rgba(251, 191, 36, 0.1)' }}>
+                                              <tr style={{ background: 'var(--color-accent-soft)' }}>
                                                 {(e.after ?? []).map((v, j) => cell(v, j))}
                                               </tr>
                                             </Fragment>
                                           );
                                         }
                                         const bg = e.changeType === 'insert'
-                                          ? 'rgba(34, 197, 94, 0.1)'
+                                          ? 'var(--color-ok-soft)'
                                           : e.changeType === 'delete'
-                                            ? 'rgba(239, 68, 68, 0.1)'
-                                            : 'rgba(148, 163, 184, 0.1)';
+                                            ? 'var(--color-bad-soft)'
+                                            : 'var(--color-paper-3)';
                                         return (
-                                          <tr key={i} style={{ borderTop: '1px solid #eee', background: bg }}>
+                                          <tr key={i} style={{ borderTop: '1px solid var(--color-rule)', background: bg }}>
                                             <td>{e.changeType}</td>
                                             <td align="right">{e.snapshotId}</td>
                                             {(e.row ?? []).map((v, j) => cell(v, j))}

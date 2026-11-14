@@ -8,6 +8,7 @@ import type {
   TenantResponse,
 } from '../api/types';
 import { poolPath, tenantHome } from '../nav/links';
+import NodeId from './NodeId';
 
 /** Inline per-user effective-permissions drilldown rendered as a card
   * beneath the user's row in the Users table. Loads
@@ -283,7 +284,7 @@ export default function EffectivePermsCard({
                       <code>{n.tenant}/{n.pool}</code>
                     </Link>
                   </td>
-                  <td><code>{n.nodeId}</code></td>
+                  <td><NodeId id={n.nodeId} /></td>
                   <td><code>{n.role}</code></td>
                   <td className="subtle">{n.host}:{n.port}</td>
                   <td className="subtle">

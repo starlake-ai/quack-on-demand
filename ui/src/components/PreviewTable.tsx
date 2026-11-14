@@ -9,7 +9,7 @@ export interface PreviewTableColumn {
   * UI. Not exported: callers never need it directly, only through this table. */
 function renderCell(v: unknown): ReactNode {
   return v === null || v === undefined
-    ? <em style={{ color: '#888' }}>null</em>
+    ? <em style={{ color: 'var(--color-muted)' }}>null</em>
     : String(v);
 }
 
@@ -45,7 +45,7 @@ export default function PreviewTable({
         </p>
       )}
       {rows.length === 0
-        ? <em style={{ color: '#888' }}>{emptyLabel}</em>
+        ? <em style={{ color: 'var(--color-muted)' }}>{emptyLabel}</em>
         : (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>

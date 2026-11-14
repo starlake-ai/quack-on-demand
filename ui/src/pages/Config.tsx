@@ -111,7 +111,7 @@ export default function Config() {
   return (
     <>
       <h1>Configuration</h1>
-      <p style={{ color: 'var(--text-mute)', maxWidth: 880 }}>
+      <p style={{ color: 'var(--text-mute)', maxWidth: '72ch' }}>
         Resolved values from <code>application.conf</code> (post env-var
         substitution). To change a value, set the listed environment variable
         and restart the manager. Sensitive values are masked
@@ -124,7 +124,7 @@ export default function Config() {
           placeholder="Filter by path, env var, or description"
           value={filter}
           onChange={e => setFilter(e.target.value)}
-          style={{ maxWidth: 480, fontFamily: 'var(--mono)' }}
+          style={{ maxWidth: 480 }}
         />
 
         {loading && <p>Loading…</p>}
@@ -151,7 +151,7 @@ export default function Config() {
       </div>
       <div className="card" style={{ marginTop: '1rem' }}>
         <h2 style={{ marginTop: 0 }}>Manifest</h2>
-        <p style={{ color: 'var(--text-mute)', maxWidth: 880 }}>
+        <p style={{ color: 'var(--text-mute)', maxWidth: '72ch' }}>
           The full control-plane state (tenants, tenant-dbs, federated sources,
           pools, users, roles, groups, pool grants) round-trips through a single
           YAML file. User passwords are never exported; existing hashes are

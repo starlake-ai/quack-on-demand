@@ -4,6 +4,7 @@ import { api, ApiError, errorMessage } from '../api/client';
 import type { FleetServer } from '../api/types';
 import { fmtBytes } from '../format';
 import { poolPath } from '../nav/links';
+import NodeId from '../components/NodeId';
 
 const POLL_MS = 5000;
 
@@ -142,7 +143,7 @@ export default function Servers() {
                   <td>
                     {s.cpus != null ? `${s.cpus} cores` : '-'} / {fmtBytes(s.memoryBytes)}
                   </td>
-                  <td>{s.assignedNodeId ? <code>{s.assignedNodeId}</code> : <span className="subtle">-</span>}</td>
+                  <td>{s.assignedNodeId ? <NodeId id={s.assignedNodeId} /> : <span className="subtle">-</span>}</td>
                   <td>
                     {s.tenant ? (
                       <Link to={poolPath(s.tenant, s.tenantDb ?? '', s.pool ?? '')}>

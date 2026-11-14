@@ -16,6 +16,7 @@ import type { TrendBucketEntry, StatementHistoryRowEntry } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { useTenantScope } from '../nav/TenantScope';
 import SqlHighlight from '../components/SqlHighlight';
+import NodeId from '../components/NodeId';
 
 // Granularity thresholds: ranges <= 48 h use per-hour buckets, else per-day.
 type Range = '1h' | '24h' | '7d' | '30d';
@@ -169,13 +170,13 @@ function toChartData(agg: AggBucket[]): {
 const CHART_HEIGHT = 220;
 
 // Color palette drawn from existing design tokens.
-const C_OK      = '#34d399'; // --good
-const C_DENIED  = '#fbbf24'; // --warn
-const C_ERROR   = '#f87171'; // --bad
-const C_RATE    = '#f87171'; // --bad
-const C_P50     = '#60a5fa'; // --link
-const C_P95     = '#f59e0b'; // --accent
-const C_P99     = '#f87171'; // --bad
+const C_OK      = 'var(--color-ok)';
+const C_DENIED  = 'var(--color-accent)';
+const C_ERROR   = 'var(--color-bad)';
+const C_RATE    = 'var(--color-bad)';
+const C_P50     = 'var(--color-cool)';
+const C_P95     = 'var(--color-ink-2)';
+const C_P99     = 'var(--color-bad)';
 
 const STATUS_OPTIONS = [
   { label: 'All statuses', value: '' },
@@ -394,8 +395,8 @@ export default function History() {
             <div className="card-title">Throughput (statements / bucket)</div>
             <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
               <BarChart data={throughput} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-                <XAxis dataKey="tick" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <XAxis dataKey="tick" tick={{ fontSize: 13 }} />
+                <YAxis tick={{ fontSize: 13 }} allowDecimals={false} />
                 <Tooltip />
                 <Legend />
                 <Bar dataKey="ok"     name="ok"     stackId="s" fill={C_OK}     />
@@ -409,8 +410,8 @@ export default function History() {
             <div className="card-title">Error rate (%)</div>
             <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
               <LineChart data={errorRate} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-                <XAxis dataKey="tick" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} unit="%" />
+                <XAxis dataKey="tick" tick={{ fontSize: 13 }} />
+                <YAxis tick={{ fontSize: 13 }} domain={[0, 100]} unit="%" />
                 <Tooltip formatter={v => `${String(v ?? '')}%`} />
                 <Line type="monotone" dataKey="rate" name="error rate" stroke={C_RATE} dot={false} />
               </LineChart>
@@ -424,8 +425,8 @@ export default function History() {
             ) : (
               <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
                 <LineChart data={latency} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-                  <XAxis dataKey="tick" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} unit=" ms" />
+                  <XAxis dataKey="tick" tick={{ fontSize: 13 }} />
+                  <YAxis tick={{ fontSize: 13 }} unit=" ms" />
                   <Tooltip formatter={(v) => (v === null || v === undefined ? 'n/a' : `${Number(v)} ms`)} />
                   <Legend />
                   <Line type="monotone" dataKey="p50" name="p50" stroke={C_P50} dot={false} connectNulls />
@@ -504,7 +505,7 @@ export default function History() {
                   <td>{h.username}</td>
                   <td>{h.tenant}</td>
                   <td>{h.pool}</td>
-                  <td><code>{h.nodeId}</code></td>
+                  <td><NodeId id={h.nodeId} /></td>
                   <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     <div>{h.durationMs} ms</div>
                     {h.prepareMs != null && (
@@ -554,7 +555,7 @@ export default function History() {
       )}
 
       <p className="subtle" style={{ textAlign: 'right' }}>
-        Newest first, 50 per page · click a row to expand SQL
+        Newest first, 50 per page. Click a row to expand its SQL.
       </p>
     </>
   );

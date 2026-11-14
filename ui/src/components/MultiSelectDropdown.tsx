@@ -69,24 +69,25 @@ export default function MultiSelectDropdown({
           padding: '.5rem 1.8rem .5rem .65rem',
           background: 'var(--bg-elev)',
           color: selected.length === 0 ? 'var(--text-mute)' : 'var(--text)',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
+          border: '1px solid var(--color-muted)',
+          borderRadius: 'var(--radius-control)',
           font: 'inherit',
-          fontFamily: 'var(--mono)',
+          fontWeight: 400,
           boxSizing: 'border-box',
           lineHeight: 1.4,
-          height: '2.4rem',
+          height: '2.6rem',
           textAlign: 'left',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
           cursor: disabled ? 'not-allowed' : 'pointer',
           opacity: disabled ? 0.6 : 1,
+          // The same drawn caret as a native <select> (styles.css), in the muted ink.
           backgroundImage:
-            "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%239aa0a6' d='M6 8L0 0h12z'/></svg>\")",
+            'linear-gradient(45deg, transparent 50%, var(--color-muted) 50%), linear-gradient(135deg, var(--color-muted) 50%, transparent 50%)',
           backgroundRepeat: 'no-repeat',
-          backgroundPosition: 'right .65rem center',
-          backgroundSize: '10px 7px',
+          backgroundPosition: 'right calc(.65rem + 5px) center, right .65rem center',
+          backgroundSize: '5px 5px, 5px 5px',
         }}
       >
         {summary}

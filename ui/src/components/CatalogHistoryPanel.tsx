@@ -8,14 +8,14 @@ const PAGE = 50;
 const OPERATIONS = ['create', 'insert', 'delete', 'update', 'alter', 'drop', 'maintenance', 'unknown'];
 
 const OP_COLORS: Record<string, string> = {
-  create: 'rgba(34, 197, 94, 0.15)',
-  insert: 'rgba(34, 197, 94, 0.15)',
-  update: 'rgba(251, 191, 36, 0.15)',
-  alter: 'rgba(251, 191, 36, 0.15)',
-  delete: 'rgba(239, 68, 68, 0.15)',
-  drop: 'rgba(239, 68, 68, 0.15)',
-  maintenance: 'rgba(148, 163, 184, 0.2)',
-  unknown: 'rgba(148, 163, 184, 0.2)',
+  create: 'var(--color-ok-soft)',
+  insert: 'var(--color-ok-soft)',
+  update: 'var(--color-accent-soft)',
+  alter: 'var(--color-accent-soft)',
+  delete: 'var(--color-bad-soft)',
+  drop: 'var(--color-bad-soft)',
+  maintenance: 'var(--color-paper-3)',
+  unknown: 'var(--color-paper-3)',
 };
 
 /** datetime-local input value ("2026-07-09T10:00") to the ISO instant the API expects. */
@@ -122,7 +122,7 @@ export default function CatalogHistoryPanel({
 
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
       {commits.length === 0 && !loading && !error && (
-        <em style={{ color: '#888' }}>no commits match</em>
+        <em style={{ color: 'var(--color-muted)' }}>no commits match</em>
       )}
 
       {commits.length > 0 && (
@@ -141,7 +141,7 @@ export default function CatalogHistoryPanel({
             {commits.map((c, i) => (
               <Fragment key={c.snapshotId}>
                 <tr
-                  style={{ borderTop: '1px solid #eee', cursor: 'pointer' }}
+                  style={{ borderTop: '1px solid var(--color-rule)', cursor: 'pointer' }}
                   onClick={() => setExpanded(expanded === c.snapshotId ? null : c.snapshotId)}
                 >
                   <td>{new Date(c.committedAt).toLocaleString()}</td>
@@ -151,13 +151,13 @@ export default function CatalogHistoryPanel({
                       {c.operation}
                     </span>
                   </td>
-                  <td>{c.author ?? <em style={{ color: '#888' }} title="written before author stamping was enabled">unknown</em>}</td>
+                  <td>{c.author ?? <em style={{ color: 'var(--color-muted)' }} title="written before author stamping was enabled">unknown</em>}</td>
                   <td>{c.commitMessage ?? ''}</td>
                   <td align="right"><code>{delta(c)}</code></td>
                   <td>{c.schemaChanged ? 'changed' : ''}</td>
                 </tr>
                 {expanded === c.snapshotId && (
-                  <tr style={{ background: 'rgba(148, 163, 184, 0.06)' }}>
+                  <tr style={{ background: 'var(--color-paper-3)' }}>
                     <td colSpan={6} style={{ padding: '8px 12px' }}>
                       <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', fontSize: '0.9rem' }}>
                         <span>snapshot <code>{c.snapshotId}</code></span>

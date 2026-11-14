@@ -10,6 +10,7 @@ import { NodeHealthBadge } from './NodeHealthBadge';
 import Tabs from './Tabs';
 import { dashboardPath, poolsPath } from '../nav/links';
 import { initSqlToSend } from '../api/initSql';
+import NodeId from './NodeId';
 
 
 /** Header (title + Back button) + the four-tab body for one pool. No
@@ -483,13 +484,12 @@ export default function PoolDetailBody({
         </thead>
         <tbody>
           {data.nodes.map(n => (
-            <tr key={n.nodeId} style={{ borderTop: '1px solid #eee' }}>
+            <tr key={n.nodeId} style={{ borderTop: '1px solid var(--color-rule)' }}>
               <td>
                 <Link
                   to={dashboardPath({ kind: 'tenant', tenant: data.tenant }, n.nodeId)}
-                  style={{ textDecoration: 'none' }}
                 >
-                  <code>{n.nodeId}</code>
+                  <NodeId id={n.nodeId} />
                 </Link>
               </td>
               <td>{n.role}</td>
@@ -516,7 +516,7 @@ export default function PoolDetailBody({
                     }
                   }}
                 />
-                <span style={{ marginLeft: 4, color: '#888' }}>
+                <span style={{ marginLeft: 4, color: 'var(--color-muted)' }}>
                   {n.maxConcurrent === 0 ? '(unlimited)' : ''}
                 </span>
               </td>
@@ -595,7 +595,7 @@ export default function PoolDetailBody({
           `SELECT * FROM quack_query('quack:${quackHost}:${cfg.quackPort}', 'SELECT 1', token := '${quackToken}'${quackSslArg});`;
         return (
           <>
-            <p style={{ color: '#888', marginTop: 0 }}>
+            <p style={{ color: 'var(--color-muted)', marginTop: 0 }}>
               Route clients through the FlightSQL edge for capacity-aware,
               role-respecting load balancing. Pass the target as
               {' '}<code>?tenant=…&amp;pool=…</code> URL params; the owning
@@ -623,7 +623,7 @@ export default function PoolDetailBody({
               </tbody>
             </table>
             {cfg.quackEnabled && cfg.quackPort ? (
-              <p style={{ color: '#888' }}>
+              <p style={{ color: 'var(--color-muted)' }}>
                 The DuckDB rows use the native Quack protocol front door: any DuckDB with the
                 {' '}<code>quack</code> extension (CLI, Python, embedded) connects directly, joins
                 the attached catalog with its local tables, and gets the same routing, ACL,
@@ -649,7 +649,7 @@ export default function PoolDetailBody({
     <div className="card">
       <div className="card-title">Node placement</div>
       {(!data.cohorts || data.cohorts.length === 0) ? (
-        <p style={{ color: '#888' }}>
+        <p style={{ color: 'var(--color-muted)' }}>
           No placement plan: every node is scheduled wherever the cluster's
           default scheduler chooses (or, in local mode, as a child process).
           To pin nodes to specific Kubernetes node labels, recreate the pool
@@ -657,7 +657,7 @@ export default function PoolDetailBody({
         </p>
       ) : (
         <>
-          <p style={{ color: '#888', marginTop: 0 }}>
+          <p style={{ color: 'var(--color-muted)', marginTop: 0 }}>
             The pool was created with {data.cohorts.length} cohort
             {data.cohorts.length === 1 ? '' : 's'}. Each cohort's nodes are
             scheduled only on Kubernetes nodes whose labels match every
@@ -686,14 +686,14 @@ export default function PoolDetailBody({
                     </td>
                     <td>
                       {selectorEntries.length === 0
-                        ? <span style={{ color: '#888' }}>(none)</span>
+                        ? <span style={{ color: 'var(--color-muted)' }}>(none)</span>
                         : selectorEntries.map(([k, v]) => (
                             <div key={k}><code>{k}={v}</code></div>
                           ))}
                     </td>
                     <td>
                       {tolerations.length === 0
-                        ? <span style={{ color: '#888' }}>(none)</span>
+                        ? <span style={{ color: 'var(--color-muted)' }}>(none)</span>
                         : tolerations.map((t, ti) => (
                             <div key={ti}>
                               <code>
@@ -719,7 +719,7 @@ export default function PoolDetailBody({
     <div className="card">
       <div className="card-title">Storage</div>
       {Object.keys(data.metastore).length === 0 ? (
-        <p style={{ color: '#888' }}>(no effective metastore - manager defaults apply)</p>
+        <p style={{ color: 'var(--color-muted)' }}>(no effective metastore - manager defaults apply)</p>
       ) : (
         <table>
           <tbody>

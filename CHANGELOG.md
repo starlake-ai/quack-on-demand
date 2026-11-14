@@ -9,8 +9,19 @@
   `client_b.claims.claim.member_no`, which it matched by table name alone (#201). A policy whose
   catalog or schema is `*` still covers every table of that name. When the table walk meets a
   construct it does not read, the rewriter keeps matching by table name for that statement.
+- The admin console has a new look: graphite surfaces in three steps, hairline panels with no
+  shadows, Host Grotesk for text and Atkinson Hyperlegible Mono for ids, figures and SQL, amber for
+  the primary action and the current selection, blue for units and readings. Text is larger (a 16px
+  base, up from 14px). Both fonts ship inside the jar; the console loads nothing from a font CDN.
+  Layout, routes and behaviour are unchanged, except on the dashboard's node table: p50 and p99
+  moved into a row that opens on a click (or with the caret, from the keyboard), and node ids wrap
+  only after a `--` separator.
 
 ### Fixed
+
+- The console no longer scrolls sideways on a phone: the main column kept its desktop centring and
+  grew to the width of the widest table. A table wider than its panel now scrolls inside the panel,
+  with its Edit / Delete or Quarantine / Restart buttons pinned on the right.
 
 - A principal holding a column policy can read two tables of the same name from different catalogs
   or schemas in one statement (`client_a.claims.claim a JOIN client_b.claims.claim b`, a `UNION ALL`

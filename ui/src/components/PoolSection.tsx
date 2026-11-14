@@ -214,7 +214,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             {pools.map(p => (
               <tr
                 key={`${p.tenantDb}/${p.pool}`}
-                style={{ borderTop: '1px solid #eee', opacity: p.disabled ? 0.55 : 1 }}
+                style={{ borderTop: '1px solid var(--color-rule)', opacity: p.disabled ? 0.55 : 1 }}
               >
                 <td><code>{p.tenantDb}</code></td>
                 <td>
@@ -281,7 +281,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             <p className="subtle" style={{ marginTop: 0 }}>
               The pool inherits the metastore, data path, and object-store
               config from the database. Pool names must be unique within the
-              tenant -- the server resolves <code>(tenant, pool)</code> to
+              tenant: the server resolves <code>(tenant, pool)</code> to
               the owning database at handshake time.
             </p>
             <form onSubmit={handleCreate}>

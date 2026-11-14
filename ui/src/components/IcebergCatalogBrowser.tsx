@@ -58,7 +58,7 @@ function IcebergAliasBody({
     <div style={{ padding: '.75rem 1rem', background: 'var(--bg-elev)' }}>
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
       {schemas.length === 0 ? (
-        <em style={{ color: '#888' }}>no namespaces</em>
+        <em style={{ color: 'var(--color-muted)' }}>no namespaces</em>
       ) : (
         <>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -74,9 +74,9 @@ function IcebergAliasBody({
             <>
               <h4 style={{ marginTop: 0 }}>Tables in <code>{schema}</code></h4>
               {tablesLoading
-                ? <em style={{ color: '#888' }}>Loading...</em>
+                ? <em style={{ color: 'var(--color-muted)' }}>Loading...</em>
                 : tables.length === 0
-                ? <em style={{ color: '#888' }}>no tables</em>
+                ? <em style={{ color: 'var(--color-muted)' }}>no tables</em>
                 : (
                   <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                     {tables.map(t => (
@@ -151,7 +151,7 @@ export default function IcebergCatalogBrowser({
             const attached = s.attachStatus === 'attached';
             const isOpen = expandedAlias === s.alias;
             const row = (
-              <tr key={s.alias} style={{ borderTop: '1px solid #eee' }}>
+              <tr key={s.alias} style={{ borderTop: '1px solid var(--color-rule)' }}>
                 <td>
                   {attached ? (
                     <button
