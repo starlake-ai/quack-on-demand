@@ -319,8 +319,25 @@ final case class MaintenanceConfig(
         "Seconds to wait for the ephemeral maintenance node to accept connections after spawn " +
           "before the run is failed as 'node spawn failed'. Covers cold-start extension installs."
     )
-    nodeReadyTimeoutSec: Int = 180
-)
+    nodeReadyTimeoutSec: Int = 180,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_LEADER_GRACE_SEC",
+      description =
+        "Under HA, seconds a queued maintenance run waits before the leader may take it: " +
+          "followers take runs at once, the leader only those no follower took in time. 0 (the " +
+          "default) means three ticks (3 x QOD_MAINT_TICK_SEC); a set value must be at least " +
+          "QOD_MAINT_TICK_SEC. A single manager takes every run at once."
+    )
+    leaderGraceSec: Int = 0
+):
+  require(
+    leaderGraceSec == 0 || leaderGraceSec >= tickSec,
+    s"maintenance.leaderGraceSec (QOD_MAINT_LEADER_GRACE_SEC) must be 0 or at least " +
+      s"maintenance.tickSec ($tickSec), got $leaderGraceSec"
+  )
+
+  /** The leader's grace in seconds: the set value, or three ticks when 0. */
+  def effectiveLeaderGraceSec: Int = if leaderGraceSec == 0 then 3 * tickSec else leaderGraceSec
 
 // runTimeoutMin must exceed the longest single chain step (flush/expire/merge/rewrite/cleanup/
 // orphans): the sweep only checks time-since-last-heartbeat, and a heartbeat is only written

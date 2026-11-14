@@ -14,10 +14,10 @@ import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.{FiberIO, IO}
 import com.typesafe.scalalogging.LazyLogging
 
-/** Managed maintenance (EPIC Spec 09), extracted from Main.bootManager: leader-gated
-  * cadence/threshold enqueue (scheduler) + the drain loop that claims queued runs and executes them
-  * under a per-tenant-db advisory lock (runner). Both fibers are no-ops when the config flag is
-  * off, so cancellation stays uniform in Main's fiber teardown.
+/** Managed maintenance (EPIC Spec 09, issue #210): leader-gated cadence/threshold enqueue
+  * (scheduler), and the drain loop every replica runs, HA followers first, that claims queued runs
+  * and executes them under a per-tenant-db advisory lock (runner). Both fibers are no-ops when the
+  * config flag is off, so cancellation stays uniform in Main's fiber teardown.
   */
 final class MaintenanceWiring(
     store: PostgresControlPlaneStore,
@@ -28,6 +28,7 @@ final class MaintenanceWiring(
     catalogReader: (String, String) => DuckLakeCatalogReader,
     maintenance: MaintenanceConfig,
     isLeader: () => Boolean,
+    haEnabled: Boolean,
     audit: AuditRecorder,
     metrics: MaintenanceMetrics
 ) extends LazyLogging:
@@ -135,22 +136,27 @@ final class MaintenanceWiring(
 
   private val inFlight = new java.util.concurrent.atomic.AtomicInteger(0)
 
-  /** One drain pass: while leader and below maxConcurrent in-flight, claim queued runs and fork
-    * each execution under the tenant-db's __maint advisory lock so two replicas (or a replica and a
-    * stray retry) never run the same lake at once. Keeps claiming until the queue is empty or
-    * capacity is reached, so `tickSec` (in [[drainFiber]]) only spaces empty polls.
+  /** Seconds a queued run must have waited before this replica may claim it (issue #210): none for
+    * a single manager or an HA follower, `effectiveLeaderGraceSec` for the HA leader, so followers
+    * take runs first and the leader takes only what none took in time.
+    */
+  private[boot] def claimMinAgeSec: Int =
+    if haEnabled && isLeader() then maintenance.effectiveLeaderGraceSec else 0
+
+  /** One drain pass: while below maxConcurrent in-flight, claim queued runs old enough for this
+    * replica ([[claimMinAgeSec]]) and fork each execution under the tenant-db's __maint advisory
+    * lock so two replicas never run the same lake at once. Keeps claiming until nothing claimable
+    * is left or capacity is reached, so `tickSec` (in [[drainFiber]]) only spaces empty polls.
     *
-    * IO.defer around the leader check: `drainFiber` binds this to a single IO value once (see its
-    * `foreverM`), so the leadership (and in-flight) branch must be re-evaluated on every run rather
-    * than baked in at construction time -- otherwise a replica that boots before winning the
-    * advisory lock latches "not leader" forever, and one that boots as leader keeps draining after
-    * demotion. Mirrors [[AutoscaleWiring.sweep]].
+    * IO.defer around the whole pass: `drainFiber` binds this to a single IO value once (see its
+    * `foreverM`), so the claim mode (and in-flight) must be re-evaluated on every run rather than
+    * baked in at construction time: a replica that boots as follower and is later promoted must
+    * start waiting out the grace, and a demoted one must stop. Mirrors [[AutoscaleWiring.sweep]].
     */
   private[boot] def drainTick: IO[Unit] = IO.defer {
-    if !isLeader() then IO.unit
-    else if inFlight.get() >= maintenance.maxConcurrent then IO.unit
+    if inFlight.get() >= maintenance.maxConcurrent then IO.unit
     else
-      IO.blocking(store.claimQueuedMaintenanceRun(minAgeSec = 0)).flatMap {
+      IO.blocking(store.claimQueuedMaintenanceRun(claimMinAgeSec)).flatMap {
         case None      => IO.unit
         case Some(run) =>
           inFlight.incrementAndGet()

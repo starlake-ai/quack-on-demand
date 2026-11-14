@@ -2416,6 +2416,7 @@ object Main extends IOApp with LazyLogging:
                   catalogReader = catalogReader,
                   maintenance = mgrCfg.maintenance,
                   isLeader = () => coordinator.forall(_.isLeader),
+                  haEnabled = mgrCfg.ha.enabled,
                   audit = auditRecorder,
                   metrics = new MaintenanceMetrics.Micrometer(metricsReg.composite)
                 )

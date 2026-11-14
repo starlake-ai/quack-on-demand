@@ -22,12 +22,11 @@ import org.scalatest.matchers.should.Matchers
 
 import scala.util.Try
 
-/** Regression coverage for the same construction-time leader-gate latching bug fixed in
-  * [[AutoscaleWiringSpec]]'s "re-evaluate the leader gate on every run" case: `drainFiber` used to
-  * build its forever loop from a `def drainTick` called exactly ONCE (to feed `.foreverM`), so the
-  * `if !isLeader()` head was baked in at fiber construction instead of being re-checked every tick.
-  * A replica that boots as follower and later wins leadership would never drain the maintenance
-  * queue; one that boots as leader would keep draining after demotion.
+/** Pins the claim mode (HA follower at once, HA leader after the grace, single manager at once) and
+  * that it is re-evaluated on every run: `drainFiber` binds `drainTick` to one IO value once (to
+  * feed `.foreverM`), so a mode baked in at construction would latch a replica that is later
+  * promoted or demoted (the bug fixed in [[AutoscaleWiringSpec]]'s "re-evaluate the leader gate on
+  * every run" case).
   *
   * Needs a real Postgres (via [[TestPostgres]]) because [[MaintenanceWiring]] takes a concrete
   * [[PostgresControlPlaneStore]] directly (not the
@@ -55,8 +54,8 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
   /** Fresh DB + migrated schema, a fully-stubbed [[MaintenanceWiring]] wired against it. Mirrors
     * [[ai.starlake.quack.ondemand.state.MaintenanceStoreSpec]]'s live-Postgres fixture.
     */
-  private def withWiring(cfg: MaintenanceConfig, isLeaderFn: () => Boolean)(
-      test: (MaintenanceWiring, PostgresControlPlaneStore) => Unit
+  private def withWiring(cfg: MaintenanceConfig, isLeaderFn: () => Boolean, haEnabled: Boolean)(
+      test: (MaintenanceWiring, PostgresControlPlaneStore, String => Unit) => Unit
   ): Unit =
     if !TestPostgres.reachable then
       cancel(
@@ -89,31 +88,59 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
           throw new NotImplementedError("not exercised: no node in this fixture"),
         maintenance = cfg,
         isLeader = isLeaderFn,
+        haEnabled = haEnabled,
         audit = AuditRecorder.noop,
         metrics = MaintenanceMetrics.noop
       )
-      try test(wiring, store)
+      try test(wiring, store, sql => TestPostgres.psql(dbName, sql))
       finally store.close()
     finally Try(TestPostgres.dropDatabase(dbName))
 
-  "drainTick" should "re-evaluate the leader gate on every run, not just once when it is bound" in {
-    var leader = false
-    withWiring(MaintenanceConfig(), () => leader) { (w, store) =>
+  private def statusOf(store: PostgresControlPlaneStore): String =
+    store.listMaintenanceRuns("acme", "acme_db", 10, None).head.status
+
+  "drainTick" should "re-evaluate the claim mode on every run, not just once when it is bound" in {
+    var leader = true
+    withWiring(MaintenanceConfig(), () => leader, haEnabled = true) { (w, store, _) =>
       store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
 
       val tick = w.drainTick // bind ONCE, like AutoscaleWiringSpec's `val s = w.sweep()`
 
-      tick.unsafeRunSync() // not leader yet: must not claim
-      store
-        .listMaintenanceRuns("acme", "acme_db", 10, None)
-        .head
-        .status shouldBe "queued"
+      tick.unsafeRunSync() // HA leader, fresh run: inside the grace, not claimed
+      statusOf(store) shouldBe "queued"
 
-      leader = true
-      tick.unsafeRunSync() // SAME bound IO, now leader: must claim fresh, not stay latched
-      store
-        .listMaintenanceRuns("acme", "acme_db", 10, None)
-        .head
-        .status should not be "queued"
+      leader = false
+      tick.unsafeRunSync() // SAME bound IO, now a follower: claims at once
+      statusOf(store) should not be "queued"
     }
   }
+
+  it should "let an HA follower claim a fresh run" in
+    withWiring(MaintenanceConfig(), () => false, haEnabled = true) { (w, store, _) =>
+      store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+      w.claimMinAgeSec shouldBe 0
+      w.drainTick.unsafeRunSync()
+      statusOf(store) should not be "queued"
+    }
+
+  it should "let the HA leader claim a run only once it waited past the grace" in
+    withWiring(MaintenanceConfig(), () => true, haEnabled = true) { (w, store, sql) =>
+      val r = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+      w.claimMinAgeSec shouldBe 180 // three default ticks
+      w.drainTick.unsafeRunSync()
+      statusOf(store) shouldBe "queued"
+      sql(
+        s"UPDATE qodstate_maintenance_run SET queued_at = now() - interval '181 seconds' " +
+          s"WHERE id = ${r.id}"
+      )
+      w.drainTick.unsafeRunSync()
+      statusOf(store) should not be "queued"
+    }
+
+  it should "let a single manager claim a fresh run" in
+    withWiring(MaintenanceConfig(), () => true, haEnabled = false) { (w, store, _) =>
+      store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+      w.claimMinAgeSec shouldBe 0
+      w.drainTick.unsafeRunSync()
+      statusOf(store) should not be "queued"
+    }
