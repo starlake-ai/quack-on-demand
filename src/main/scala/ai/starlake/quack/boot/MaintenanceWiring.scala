@@ -159,11 +159,12 @@ final class MaintenanceWiring(
     )
 
   /** Leader only (a single manager always leads): fail runs whose owner went silent or that ran too
-    * long, see [[MaintenanceReaper]]. IO.defer for the same reason as [[drainTick]]: the leader
-    * check must run on every pass of the bound IO.
+    * long, see [[MaintenanceReaper]]. It reaps nothing for three ticks after this replica becomes
+    * leader and after a failed pass (the reaper's quiet window). IO.defer for the same reason as
+    * [[drainTick]]: the leader check must run on every pass of the bound IO.
     */
   private[boot] def reapTick: IO[Unit] = IO.defer {
-    if isLeader() then reaper.reapOnce else IO.unit
+    IO.realTimeInstant.flatMap(now => reaper.tick(isLeader(), now))
   }
 
   /** One drain pass: while below maxConcurrent in-flight, claim queued runs old enough for this
@@ -174,7 +175,8 @@ final class MaintenanceWiring(
     * IO.defer around the whole pass: `drainFiber` binds this to a single IO value once (see its
     * `foreverM`), so the claim mode (and in-flight) must be re-evaluated on every run rather than
     * baked in at construction time: a replica that boots as follower and is later promoted must
-    * start waiting out the grace, and a demoted one must stop. Mirrors [[AutoscaleWiring.sweep]].
+    * start waiting out the grace, and a demoted one must stop waiting it out. Mirrors
+    * [[AutoscaleWiring.sweep]].
     */
   private[boot] def drainTick: IO[Unit] = IO.defer {
     if inFlight.get() >= maintenance.maxConcurrent then IO.unit

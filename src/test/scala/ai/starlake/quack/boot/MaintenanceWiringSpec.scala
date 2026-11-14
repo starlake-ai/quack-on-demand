@@ -147,7 +147,7 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
 
   "reapTick" should "reap a silent run on the leader only, re-evaluated on every run" in {
     var leader = false
-    withWiring(MaintenanceConfig(), () => leader, haEnabled = true) { (w, store, sql) =>
+    withWiring(MaintenanceConfig(tickSec = 1), () => leader, haEnabled = true) { (w, store, sql) =>
       val r = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
       store.claimQueuedMaintenanceRun(minAgeSec = 0)
       sql(
@@ -158,6 +158,9 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
       tick.unsafeRunSync() // follower: reaps nothing
       store.findMaintenanceRun(r.id).map(_.status) shouldBe Some("running")
       leader = true
+      tick.unsafeRunSync() // first leader tick: warm-up
+      store.findMaintenanceRun(r.id).map(_.status) shouldBe Some("running")
+      Thread.sleep(3200)
       tick.unsafeRunSync()
       store.findMaintenanceRun(r.id).map(r => (r.status, r.error)) shouldBe
         Some(("failed", Some(ai.starlake.quack.model.MaintenanceRun.ReapedSilent)))

@@ -1,8 +1,9 @@
 package ai.starlake.quack.ondemand.maintenance
 
 import ai.starlake.quack.model._
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, InMemoryControlPlaneStore}
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -17,19 +18,49 @@ import java.time.Instant
   */
 class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
 
-  private class Fixture(stopFails: Boolean = false):
-    val store   = new InMemoryControlPlaneStore()
-    var stopped = List.empty[(PoolKey, String)]
-    val reaper  = new MaintenanceReaper(
-      store = store,
+  /** Delegates to the in-memory store, except the first reap call, which throws. */
+  private class ReapFailsOnceStore(inner: InMemoryControlPlaneStore) extends ControlPlaneStore:
+    export inner.{reapMaintenanceRuns as _, *}
+    private var failed = false
+
+    override def reapMaintenanceRuns(
+        livenessTimeoutSec: Int,
+        runTimeoutSec: Long
+    ): List[ReapedRun] =
+      if !failed then
+        failed = true
+        throw new java.sql.SQLException("control plane unreachable")
+      else inner.reapMaintenanceRuns(livenessTimeoutSec, runTimeoutSec)
+
+  private class Fixture(stopFails: Boolean = false, failFirstReap: Boolean = false):
+    val store                        = new InMemoryControlPlaneStore()
+    val reapStore: ControlPlaneStore =
+      if failFirstReap then new ReapFailsOnceStore(store) else store
+    var stopped   = List.empty[(PoolKey, String)]
+    var recorded  = List.empty[(String, String)]
+    val telemetry = new RecordingTelemetryStore
+    val reaper    = new MaintenanceReaper(
+      store = reapStore,
       livenessTimeoutSec = 180,
       runTimeoutSec = 3600L,
       stopNode = (k, id) =>
         IO { stopped = stopped :+ (k -> id) } *>
           (if stopFails then IO.raiseError(new RuntimeException("api server down")) else IO.unit),
-      audit = AuditRecorder.noop,
-      metrics = MaintenanceMetrics.noop
+      audit = new AuditRecorder(telemetry, _ => None),
+      metrics = new MaintenanceMetrics:
+        def recordRun(
+            tenant: String,
+            tenantDb: String,
+            result: String,
+            durationSeconds: Double,
+            bytesReclaimed: Long,
+            filesCompacted: Int,
+            snapshotsExpired: Int
+        ): Unit = recorded = recorded :+ (tenantDb -> result)
     )
+
+    def audited: List[(String, String)] =
+      telemetry.events.toList.map(e => (e.outcome, e.detail.getOrElse("reason", "")))
 
     def running(db: String, node: Option[String]): MaintenanceRun =
       store.enqueueMaintenanceRun("acme", db, "tenantdb", "cadence", None)
@@ -49,6 +80,8 @@ class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
     f.reaper.reapOnce.unsafeRunSync()
     f.rowOf(r) shouldBe ("failed", Some(MaintenanceRun.ReapedSilent))
     f.stopped shouldBe List(PoolKey("acme", "acme_db", "__maint") -> "maint-n1")
+    f.recorded shouldBe List("acme_db" -> "failed")
+    f.audited shouldBe List(("failed", MaintenanceRun.ReapedSilent))
   }
 
   it should "fail an over-time run without stopping its node" in {
@@ -58,6 +91,8 @@ class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
     f.reaper.reapOnce.unsafeRunSync()
     f.rowOf(r) shouldBe ("failed", Some(MaintenanceRun.ReapedTimeout))
     f.stopped shouldBe empty
+    f.recorded shouldBe List("acme_db" -> "failed")
+    f.audited shouldBe List(("failed", MaintenanceRun.ReapedTimeout))
   }
 
   it should "stop nothing for a silent run that recorded no node" in {
@@ -87,4 +122,61 @@ class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
     f.rowOf(a)._1 shouldBe "failed"
     f.rowOf(b)._1 shouldBe "failed"
     f.stopped.map(_._2).toSet shouldBe Set("maint-a", "maint-b")
+  }
+
+  "tick" should "reap nothing for one liveness timeout after becoming leader" in {
+    val f  = new Fixture()
+    val t0 = Instant.now()
+    val r  = f.running("acme_db", Some("maint-n1"))
+    f.store.setMaintenanceRunTimes(r.id, heartbeatAt = Some(t0.minusSeconds(600)))
+    f.reaper.tick(true, t0).unsafeRunSync()
+    f.reaper.tick(true, t0.plusSeconds(179)).unsafeRunSync()
+    f.rowOf(r)._1 shouldBe "running"
+    f.stopped shouldBe empty
+    f.reaper.tick(true, t0.plusSeconds(181)).unsafeRunSync()
+    f.rowOf(r) shouldBe ("failed", Some(MaintenanceRun.ReapedSilent))
+    f.stopped.map(_._2) shouldBe List("maint-n1")
+  }
+
+  it should "reap nothing while not leader" in {
+    val f  = new Fixture()
+    val t0 = Instant.now()
+    val r  = f.running("acme_db", Some("maint-n1"))
+    f.store.setMaintenanceRunTimes(r.id, heartbeatAt = Some(t0.minusSeconds(600)))
+    f.reaper.tick(false, t0).unsafeRunSync()
+    f.reaper.tick(false, t0.plusSeconds(400)).unsafeRunSync()
+    f.rowOf(r)._1 shouldBe "running"
+  }
+
+  it should "start a new quiet window after a failed pass" in {
+    val f  = new Fixture(failFirstReap = true)
+    val t0 = Instant.now()
+    val r  = f.running("acme_db", Some("maint-n1"))
+    f.store.setMaintenanceRunTimes(r.id, heartbeatAt = Some(t0.minusSeconds(600)))
+    f.reaper.tick(true, t0).unsafeRunSync() // warm-up
+    an[java.sql.SQLException] should be thrownBy f.reaper
+      .tick(true, t0.plusSeconds(200))
+      .unsafeRunSync()
+    f.reaper.tick(true, t0.plusSeconds(300)).unsafeRunSync()
+    f.rowOf(r)._1 shouldBe "running"
+    f.reaper.tick(true, t0.plusSeconds(381)).unsafeRunSync()
+    f.rowOf(r)._1 shouldBe "failed"
+  }
+
+  it should "start a new quiet window after leadership is lost and won back" in {
+    val f  = new Fixture()
+    val t0 = Instant.now()
+    val a  = f.running("a_db", Some("maint-a"))
+    f.store.setMaintenanceRunTimes(a.id, heartbeatAt = Some(t0.minusSeconds(600)))
+    f.reaper.tick(true, t0).unsafeRunSync()
+    f.reaper.tick(true, t0.plusSeconds(181)).unsafeRunSync()
+    f.rowOf(a)._1 shouldBe "failed"
+    f.reaper.tick(false, t0.plusSeconds(200)).unsafeRunSync()
+    val b = f.running("b_db", Some("maint-b"))
+    f.store.setMaintenanceRunTimes(b.id, heartbeatAt = Some(t0.minusSeconds(600)))
+    f.reaper.tick(true, t0.plusSeconds(201)).unsafeRunSync()
+    f.reaper.tick(true, t0.plusSeconds(300)).unsafeRunSync()
+    f.rowOf(b)._1 shouldBe "running"
+    f.reaper.tick(true, t0.plusSeconds(382)).unsafeRunSync()
+    f.rowOf(b)._1 shouldBe "failed"
   }

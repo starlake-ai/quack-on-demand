@@ -299,7 +299,8 @@ final case class MaintenanceConfig(
     tickSec: Int = 60,
     @field @ConfigField(
       envVar = "QOD_MAINT_MAX_CONCURRENT",
-      description = "Max maintenance runs executing concurrently on each replica (under HA, every replica drains)."
+      description = "Max maintenance runs executing concurrently on each replica " +
+        "(under HA, every replica drains)."
     )
     maxConcurrent: Int = 2,
     @field @ConfigField(
@@ -310,9 +311,10 @@ final case class MaintenanceConfig(
     @field @ConfigField(
       envVar = "QOD_MAINT_RUN_TIMEOUT_MIN",
       description =
-        "Minutes a maintenance run may take from its start (lock wait included) before the leader fails it as timed out; its replica then stops its node."
+        "Minutes a maintenance run may take from its start (lock wait included) before the " +
+          "leader fails it as timed out; its replica then stops its node."
     )
-    runTimeoutMin: Int = 60,
+    runTimeoutMin: Int = 240,
     @field @ConfigField(
       envVar = "QOD_MAINT_NODE_READY_TIMEOUT_SEC",
       description =
@@ -331,7 +333,7 @@ final case class MaintenanceConfig(
     leaderGraceSec: Int = 0
 ):
   require(
-    leaderGraceSec == 0 || leaderGraceSec >= tickSec,
+    leaderGraceSec >= 0 && (leaderGraceSec == 0 || leaderGraceSec >= tickSec),
     s"maintenance.leaderGraceSec (QOD_MAINT_LEADER_GRACE_SEC) must be 0 or at least " +
       s"maintenance.tickSec ($tickSec), got $leaderGraceSec"
   )

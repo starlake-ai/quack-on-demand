@@ -8,12 +8,16 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
 
+import java.time.Instant
+
 /** The HA leader's sweep of running maintenance runs (issue #210), a singleton duty. A run whose
   * liveness heartbeat ([[MaintenanceLiveness]]) is older than `livenessTimeoutSec` lost its
   * replica: it is failed and its `__maint` node stopped here, since nothing else will. A run
   * started more than `runTimeoutSec` ago is failed too, but its node is left to its live owner,
   * whose heartbeat sees the row change and stops it, so no replica kills a node under a live run.
-  * Neither is requeued: the next cadence or threshold tick queues a fresh run.
+  * Neither is requeued: the next cadence or threshold tick queues a fresh run. The drain fiber
+  * calls [[tick]], whose quiet window (after becoming leader and after a failed pass) keeps a
+  * control-plane outage from getting live runs reaped.
   */
 final class MaintenanceReaper(
     store: ControlPlaneStore,
@@ -23,6 +27,28 @@ final class MaintenanceReaper(
     audit: AuditRecorder,
     metrics: MaintenanceMetrics
 ) extends LazyLogging:
+
+  // Only the drain fiber calls `tick`, one pass at a time; volatile for the reads of other threads.
+  @volatile private var wasLeader: Boolean  = false
+  @volatile private var quietUntil: Instant = Instant.EPOCH
+
+  /** One reaper pass for this replica (issue #210). A non-leader reaps nothing. Right after this
+    * replica becomes leader, and after a pass that failed (the control plane unreachable), it reaps
+    * nothing for `livenessTimeoutSec`: owners whose heartbeats went stale during an outage get the
+    * time to write one before any of their runs reads as silent.
+    */
+  def tick(leader: Boolean, now: Instant): IO[Unit] =
+    if !leader then IO.delay { wasLeader = false }
+    else if !wasLeader then
+      IO.delay {
+        wasLeader = true
+        quietUntil = now.plusSeconds(livenessTimeoutSec.toLong)
+      }
+    else if now.isBefore(quietUntil) then IO.unit
+    else
+      reapOnce.handleErrorWith { e =>
+        IO.delay { quietUntil = now.plusSeconds(livenessTimeoutSec.toLong) } *> IO.raiseError(e)
+      }
 
   def reapOnce: IO[Unit] =
     IO.blocking(store.reapMaintenanceRuns(livenessTimeoutSec, runTimeoutSec))

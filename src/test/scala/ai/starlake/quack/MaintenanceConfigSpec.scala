@@ -32,4 +32,6 @@ class MaintenanceConfigSpec extends AnyFlatSpec with Matchers:
 
   it should "refuse a negative grace" in {
     an[IllegalArgumentException] should be thrownBy MaintenanceConfig(leaderGraceSec = -1)
+    an[IllegalArgumentException] should be thrownBy
+      MaintenanceConfig(tickSec = -5, leaderGraceSec = -1)
   }

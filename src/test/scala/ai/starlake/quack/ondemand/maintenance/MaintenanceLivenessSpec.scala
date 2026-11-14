@@ -97,8 +97,9 @@ class MaintenanceLivenessSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     val run   = claimed(store)
     store.setMaintenanceRunNode(run.id, "maint-n1")
-    val latch = new java.util.concurrent.CountDownLatch(1)
-    val reap  = IO.sleep(120.millis) *> IO(
+    val latch    = new java.util.concurrent.CountDownLatch(1)
+    var released = false
+    val reap     = IO.sleep(120.millis) *> IO(
       store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(MaintenanceRun.ReapedSilent))
     )
     (reap.start *> MaintenanceLiveness.guard(
@@ -106,8 +107,12 @@ class MaintenanceLivenessSpec extends AnyFlatSpec with Matchers:
       run,
       every,
       (_, _) => IO(latch.countDown()) // stopping the node fails the in-flight statement
-    )(IO.blocking(latch.await()))).timeout(5.seconds).unsafeRunSync()
-    latch.getCount shouldBe 0L
+    )(
+      // Recorded inside the blocking call: the guard cancels this work once the node is
+      // stopped, which drops any continuation after it.
+      IO.blocking { released = latch.await(2, java.util.concurrent.TimeUnit.SECONDS) }
+    )).timeout(5.seconds).unsafeRunSync()
+    released shouldBe true
   }
 
   /** Every call delegates to the in-memory store, except the liveness write, which throws. */

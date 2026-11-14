@@ -31,14 +31,15 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       store: ControlPlaneStore,
       specOf: (String, String) => Option[NodeSpec],
       start: NodeSpec => IO[Option[RunningNode]],
-      stop: RunningNode => IO[Unit] = _ => IO.unit
+      stop: RunningNode => IO[Unit] = _ => IO.unit,
+      exec: (RunningNode, String) => IO[Either[String, Long]] = (_, _) => IO.pure(Right(0L))
   ): MaintenanceRunner =
     new MaintenanceRunner(
       store = store,
       specOf = specOf,
       start = start,
       stop = stop,
-      exec = (_, _) => IO.pure(Right(0L)),
+      exec = exec,
       snapshotsOlderThan = (_, _, _) => Nil,
       pinnedSnapshotsOf = (_, _) => Set.empty,
       expiryFloorOf = (_, _) => None,
@@ -84,6 +85,40 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       _   <- fib.cancel           // waits for the start to finish, then for the stop
     yield ()).timeout(5.seconds).unsafeRunSync()
     stopped shouldBe List("maint-n1")
+  }
+
+  it should "record node spawn failed with the node id set when the node does not start" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    val runner = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO.pure(None)
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    store.findMaintenanceRun(r.id).map(x => (x.status, x.error, x.nodeId)) shouldBe
+      Some(("failed", Some("node spawn failed"), Some("maint-n1")))
+  }
+
+  it should "stop the node when the run is cancelled during its chain" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    var stopped = List.empty[String]
+    val runner  = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO.pure(Some(maintNode)),
+      stop = n => IO { stopped = stopped :+ n.nodeId },
+      exec = (_, _) => IO.never
+    )
+    (for
+      fib <- runner.executeRun(r.copy(status = "running")).start
+      _   <- IO.sleep(200.millis)
+      _   <- fib.cancel
+    yield ()).timeout(5.seconds).unsafeRunSync()
+    stopped.distinct shouldBe List("maint-n1")
   }
 
   it should "start no node for a run reaped before its node id is written" in {

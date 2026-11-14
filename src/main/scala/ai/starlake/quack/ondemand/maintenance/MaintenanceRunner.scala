@@ -20,7 +20,8 @@ final class MaintenanceRunner(
     // (tenant, tenantDb) -> the maintenance node's spec, its id chosen; None when the database
     // cannot get one (gone, or blocked).
     specOf: (String, String) => Option[NodeSpec],
-    // Start the node and wait until it accepts connections; None when it did not.
+    // Start the node and wait until it accepts connections; None when it did not. It must
+    // not raise (a failure to start is None), as the uncancelable start relies on it.
     start: NodeSpec => IO[Option[RunningNode]],
     stop: RunningNode => IO[Unit],
     exec: (RunningNode, String) => IO[Either[String, Long]], // Right(rows the statement returned)
@@ -135,9 +136,10 @@ final class MaintenanceRunner(
 
   /** [[finish]] records the audit trail + metrics for a run's terminal state -- but only when this
     * caller actually won the transition to that state. A `false` from `store.finishMaintenanceRun`
-    * means a concurrent sweep already failed the row (stale heartbeat) between this run's last
-    * liveness check and now; overwriting that with a success audit would misreport what happened,
-    * so this path only logs and skips.
+    * means the row was reaped (silent or over time) by the leader's `MaintenanceReaper`, or a
+    * concurrent sweep already failed it (stale heartbeat), between this run's last liveness check
+    * and now; overwriting that with a success audit would misreport what happened, so this path
+    * only logs and skips.
     */
   private def finishIfNotSwept(
       run: MaintenanceRun,
