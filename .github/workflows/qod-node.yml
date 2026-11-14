@@ -20,6 +20,7 @@ name: qod-node
 on:
   push:
     paths:
+      - 'native/qod-search/**'
       - 'native/qod-node/**'
       - 'scripts/spawn-quack-node.ps1'
       - 'scripts/release/glibc-floor.sh'
@@ -27,6 +28,7 @@ on:
       - '.github/workflows/qod-node.yml'
   pull_request:
     paths:
+      - 'native/qod-search/**'
       - 'native/qod-node/**'
       - 'scripts/spawn-quack-node.ps1'
       - 'scripts/release/glibc-floor.sh'
@@ -260,6 +262,181 @@ jobs:
           name: qod-node-${{ matrix.platform }}
           path: native/qod-node/build/Release/qod-node.exe
           if-no-files-found: error
+
+  # Search Phase 0 (spec Q2): qod-node with the Rust qod_search_core (native/qod-search) linked through
+  # Corrosion (-DQOD_NODE_SEARCH=ON), on the six platforms, to learn whether it builds, links and stays
+  # under the glibc floor. Evidence only: continue-on-error, and nothing here is uploaded. qod-node's own
+  # main does not call the library yet, so qod-node's size here is the base size; search_link_test calls
+  # it, so its size minus sql_script_test's is about the size Tantivy adds.
+  search-link-unix:
+    name: search link probe ${{ matrix.platform }}
+    continue-on-error: true
+    # Not inside release.yml / snapshot.yml: in a called workflow github.workflow is the caller's name.
+    # Only by hand or on a search/ branch, so a merge to main does not run the probe on every push.
+    if: github.workflow == 'qod-node' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/search/'))
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            duckdb_platform: linux-amd64
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64:2026.11.07-1
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+            duckdb_platform: linux-arm64
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64:2026.11.07-1
+          - runner: macos-15-intel
+            platform: osx-x86_64
+            duckdb_platform: osx-universal
+          - runner: macos-15
+            platform: osx-aarch64
+            duckdb_platform: osx-universal
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release library, full headers, CLI)
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/libs" "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/libs.tar.gz" "$base/duckdb-shared-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/libs.tar.gz" -C "$tmp/libs"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp"/libs/libduckdb.* "$home/lib/"
+          cp "$tmp/cli/duckdb" "$home/bin/duckdb"
+          # The archives carry only the C headers; the hooks need the internal ones of the same tag.
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and test with QOD_NODE_SEARCH=ON (development build)
+        run: |
+          set -euo pipefail
+          rustc --version
+          cmake -S native/qod-node -B native/qod-node/build-search -DCMAKE_BUILD_TYPE=Release \
+            -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+          cmake --build native/qod-node/build-search --config Release --target qod-node search_link_test sql_script_test
+          ctest --test-dir native/qod-node/build-search -C Release -R search_link --output-on-failure
+          ls -l native/qod-node/build-search/qod-node native/qod-node/build-search/search_link_test \
+            native/qod-node/build-search/sql_script_test
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            # The C code a crate compiles (zstd-sys) takes its deployment target from the SDK unless
+            # CMAKE_OSX_DEPLOYMENT_TARGET is set; the binary records the lowest macOS it starts on.
+            otool -l native/qod-node/build-search/search_link_test | grep -E 'minos|sdk'
+          fi
+
+      # The shipped Linux binaries are built in manylinux_2_28 (scripts/release/glibc-floor.sh). The test
+      # program is built there too, as it is the binary that holds Tantivy's code.
+      - name: manylinux_2_28 build with Rust (glibc floor)
+        if: runner.os == 'Linux'
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+        run: |
+          set -euo pipefail
+          build='curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . "$HOME/.cargo/env" && \
+            rustc --version && \
+            cmake -S native/qod-node -B native/qod-node/build-search-release -DCMAKE_BUILD_TYPE=Release \
+              -DQOD_NODE_RELATIVE_RPATH=ON -DQOD_NODE_SEARCH=ON -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME" && \
+            cmake --build native/qod-node/build-search-release --config Release --target qod-node search_link_test'
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DUCKDB_HOME \
+            -v "$PWD:$PWD" -v "$DUCKDB_HOME:$DUCKDB_HOME:ro" -w "$PWD" "$MANYLINUX_IMAGE" bash -euc "$build"
+          source scripts/release/glibc-floor.sh
+          glibc_floor_check native/qod-node/build-search-release/qod-node
+          glibc_floor_check native/qod-node/build-search-release/search_link_test
+          native/qod-node/build-search-release/search_link_test
+          ls -l native/qod-node/build-search-release/qod-node native/qod-node/build-search-release/search_link_test
+
+  search-link-windows:
+    name: search link probe ${{ matrix.platform }}
+    continue-on-error: true
+    # Not inside release.yml / snapshot.yml: in a called workflow github.workflow is the caller's name.
+    # Only by hand or on a search/ branch, so a merge to main does not run the probe on every push.
+    if: github.workflow == 'qod-node' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/search/'))
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows-x86_64
+            duckdb_platform: windows-amd64
+            cmake_arch: x64
+          - runner: windows-11-arm
+            platform: windows-aarch64
+            duckdb_platform: windows-arm64
+            cmake_arch: ARM64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release static libraries, full headers, CLI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # POSIX path for bash and tar (GNU tar reads the "D:" of a Windows path as a remote host).
+          home="$(cygpath -u "$RUNNER_TEMP")/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/static.tar.gz" "$base/duckdb-static-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/static.tar.gz" -C "$home/lib"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp/cli/duckdb.exe" "$home/bin/duckdb.exe"
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          # Mixed form (D:/a/...) for CMake and later steps.
+          echo "DUCKDB_HOME=$(cygpath -m "$home")" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The static build needs its DuckDB version and source id given: no libduckdb to probe. The
+      # CMakeLists builds the crate with +crt-static here, to match the static CRT of the DuckDB libraries.
+      - name: Build and test with QOD_NODE_SEARCH=ON (Visual Studio 2022, static DuckDB)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cli="$(cygpath -u "$DUCKDB_HOME")/bin/duckdb.exe"
+          read -r version source_id < <("$cli" -noheader -list -c "SELECT library_version, source_id FROM pragma_version()" | tr '|' ' ')
+          echo "DuckDB $version ($source_id)"
+          cmake -S native/qod-node -B native/qod-node/build-search -A ${{ matrix.cmake_arch }} \
+            -DQOD_NODE_DUCKDB_STATIC=ON -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DDUCKDB_HOME="$DUCKDB_HOME" \
+            -DQOD_NODE_DUCKDB_VERSION="$version" -DQOD_NODE_DUCKDB_SOURCE_ID="$source_id"
+          cmake --build native/qod-node/build-search --config Release --target qod-node search_link_test sql_script_test
+          ctest --test-dir native/qod-node/build-search -C Release -R search_link --output-on-failure
+          ls -l native/qod-node/build-search/Release/qod-node.exe native/qod-node/build-search/Release/search_link_test.exe \
+            native/qod-node/build-search/Release/sql_script_test.exe
 
   # The rolling `snapshot` pre-release (QOD_VERSION=latest-snapshot) carries the Windows qod-node.exe
   # of main, under the release asset names. Only for a push to main: a release takes its own from

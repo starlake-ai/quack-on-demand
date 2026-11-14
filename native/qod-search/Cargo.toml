@@ -1,0 +1,18 @@
+[package]
+name = "qod_search_core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The version Task 5 pinned (bench/search/phase0/tantivy-probe), exactly.
+tantivy = "=0.27.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

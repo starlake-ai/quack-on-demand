@@ -22,6 +22,7 @@ endif()
 option(QOD_NODE_DUCKDB_STATIC "Link the official DuckDB release static libraries" OFF)
 option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary (vendored builds)" OFF)
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
+option(QOD_NODE_PROBES "With QOD_NODE_TESTS, also build the Phase 0 probe programs (ctest -L probe)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
 set(QOD_NODE_PROTOCOL 6)
@@ -191,6 +192,29 @@ target_compile_definitions(qod_node_core PRIVATE
   "QOD_NODE_DUCKDB_VERSION=\"${duckdb_version}\""
   "QOD_NODE_DUCKDB_SOURCE_ID=\"${duckdb_source}\"")
 
+# Search Phase 0 (spec Q2): link the Rust qod_search_core through Corrosion. OFF by default; nothing in
+# qod-node calls it yet. Corrosion adds the system libraries the Rust standard library needs (rustc
+# --print native-static-libs: ws2_32, userenv, bcrypt, ntdll on MSVC; libSystem pieces on macOS; pthread,
+# dl, m on Linux) to the imported target's link interface.
+option(QOD_NODE_SEARCH "Link qod_search_core (Rust) into qod-node" OFF)
+if(QOD_NODE_SEARCH)
+  if(CMAKE_VERSION VERSION_LESS 3.22)
+    message(FATAL_ERROR "QOD_NODE_SEARCH needs CMake 3.22 (Corrosion v0.6.1)")
+  endif()
+  include(FetchContent)
+  FetchContent_Declare(Corrosion GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git GIT_TAG v0.6.1)
+  FetchContent_MakeAvailable(Corrosion)
+  corrosion_import_crate(MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../qod-search/Cargo.toml
+                         CRATES qod_search_core CRATE_TYPES staticlib PROFILE release LOCKED)
+  if(MSVC AND QOD_NODE_DUCKDB_STATIC)
+    # The DuckDB release static libraries use the static CRT (MultiThreaded, above); Rust on MSVC links
+    # the dynamic one unless told otherwise, and the two cannot share one binary.
+    corrosion_add_target_rustflags(qod_search_core -Ctarget-feature=+crt-static)
+  endif()
+  target_include_directories(qod_node_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../qod-search/include)
+  target_link_libraries(qod_node_core PUBLIC qod_search_core)
+endif()
+
 add_executable(qod-node src/main.cpp)
 target_link_libraries(qod-node PRIVATE qod_node_core)
 if(NOT QOD_NODE_DUCKDB_STATIC)
@@ -253,6 +277,23 @@ if(QOD_NODE_TESTS)
   qod_node_test(enforcement_extension_test)
   add_test(NAME enforcement_extensions COMMAND enforcement_extension_test)
   set_tests_properties(enforcement_extensions PROPERTIES SKIP_RETURN_CODE 77)
+  # Search Phase 0 probe (spec Q3, Q11): prints what post_bind sees of a DuckLake scan and how an in-out
+  # function runs across threads. Exits 77 when ducklake cannot be loaded here. Off by default (network
+  # INSTALL, a 20M-row table, no assertions) and Unix only: -DQOD_NODE_PROBES=ON, then ctest -L probe.
+  if(QOD_NODE_PROBES AND NOT WIN32)
+    qod_node_test(search_probe_test)
+    add_test(NAME search_probe COMMAND search_probe_test)
+    set_tests_properties(search_probe PROPERTIES SKIP_RETURN_CODE 77 LABELS probe)
+    # Search Phase 0 probe (spec Q7): a bundle sealed with AES-GCM under its source data file's DuckLake
+    # key, through DuckDB's EncryptionState. Exits 77 when ducklake or httpfs cannot be loaded here.
+    qod_node_test(search_encryption_probe_test)
+    add_test(NAME search_encryption_probe COMMAND search_encryption_probe_test)
+    set_tests_properties(search_encryption_probe PROPERTIES SKIP_RETURN_CODE 77 LABELS probe)
+  endif()
+  if(QOD_NODE_SEARCH)
+    qod_node_test(search_link_test)
+    add_test(NAME search_link COMMAND search_link_test)
+  endif()
   find_package(Threads REQUIRED)
   # A real HTTP server on 127.0.0.1 for the decide client's tests, on every platform.
   add_library(qod_node_test_http STATIC tests/test_http_server.cpp)
