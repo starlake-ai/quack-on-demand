@@ -134,6 +134,32 @@ int main() {
 	ExpectValue(con, "SELECT sum(rows) FROM qod_search_drain_parallel((SELECT r FROM near_cap))", 2000000);
 	ExpectValue(con, "SELECT max_rowid FROM qod_search_drain((SELECT r FROM near_cap))", 134217727);
 
+	// A UNION input runs the call in two pipelines, so qod_search_drain gets a second local state despite
+	// MaxThreads() = 1 (review C1). It refuses that with an ordinary error, never one that invalidates
+	// the database: every connection answers afterwards.
+	{
+		auto result = con.Query("SELECT rows FROM qod_search_drain((SELECT rowid FROM near_cap WHERE rowid < 10 UNION ALL "
+		                        "SELECT rowid FROM near_cap WHERE rowid >= 10 AND rowid < 20))");
+		auto error = result->HasError() ? result->GetError() : std::string();
+		Check(result->HasError() && error.find("qod_search_drain_sink") != std::string::npos &&
+		          error.find("INTERNAL") == std::string::npos,
+		      "qod_search_drain of a UNION input refused as an ordinary error: " + FirstLine(error));
+		Connection other(db);
+		ExpectValue(con, "SELECT 42", 42);
+		ExpectValue(other, "SELECT 42", 42);
+		ExpectValue(other, "SELECT sum(rows) FROM qod_search_drain_parallel((SELECT rowid FROM near_cap WHERE rowid < 10 "
+		                   "UNION ALL SELECT rowid FROM near_cap WHERE rowid >= 10 AND rowid < 20))",
+		            20);
+	}
+
+	// The bitset never grows past the cap's 2^21 words (16 MiB): two rowids just under the cap would
+	// otherwise double it to 32 MiB (review M1).
+	Check(!con.Query("SET memory_limit = '40MB'")->HasError(), "SET memory_limit = '40MB'");
+	ExpectValue(con, "SELECT rows FROM qod_search_drain((SELECT 134217600::BIGINT UNION ALL SELECT 134217727::BIGINT "
+	                 "ORDER BY 1))",
+	            2);
+	Check(!con.Query("RESET memory_limit")->HasError(), "RESET memory_limit");
+
 	std::cout << (g_failures == 0 ? "search_drain_cap: all checks passed" : "search_drain_cap: failures")
 	          << std::endl;
 	return g_failures == 0 ? 0 : 1;

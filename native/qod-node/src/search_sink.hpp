@@ -24,8 +24,9 @@
 namespace qod {
 namespace search {
 
-//! The largest rowid + 1 a drain probe's input may carry: 2^27 (a 16 MiB bitset per local state,
-//! 256 MiB for 16 local states; the 100M drain table's rowids are below 1e8 < 2^27). A value at or
+//! The largest rowid + 1 a drain probe's input may carry: 2^27 (a bitset of at most 16 MiB per local
+//! state, its growth clamped there, 256 MiB for 16 local states; 24 MiB for one while it grows; the
+//! 100M drain table's rowids are below 1e8 < 2^27). A value at or
 //! above it fails the statement (kRowidOutOfRange) before any allocation for it. Probes only:
 //! qod_search sizes nothing by an input value (Task 8), so a real table's rowids are not capped.
 constexpr uint64_t kMaxRowidExclusive = uint64_t(1) << 27;
@@ -71,7 +72,8 @@ struct SinkFunctionInfo : public duckdb::TableFunctionInfo {
 };
 
 //! Registers `function` through `loader` as sink-executed: sets its `in_out_function` and
-//! `in_out_function_final` to callbacks that throw (kNotThroughSink), sets its `function_info` to a
+//! `in_out_function_final` to callbacks that throw an ExecutorException (kNotThroughSink), never an
+//! internal error, which would invalidate the database; sets its `function_info` to a
 //! SinkFunctionInfo holding `factory`, then registers it. No global state.
 void RegisterSinkFunction(duckdb::ExtensionLoader &loader, duckdb::TableFunction function,
                           SinkProgramFactory factory);
@@ -82,7 +84,8 @@ void RegisterSinkFunction(duckdb::ExtensionLoader &loader, duckdb::TableFunction
 void RegisterSearchSink(duckdb::DatabaseInstance &db);
 
 constexpr const char *kNotThroughSink = "QoD: search_internal: not planned through the search sink";
-constexpr const char *kUnsupportedShape = "QoD: search_internal: unsupported plan shape";
+//! The prefix of a shape refusal, followed by "<function> with <what>" (an InvalidInputException).
+constexpr const char *kUnsupportedShape = "QoD: search_unsupported_plan: ";
 
 //! Test hooks (tests only). Counters are atomics bumped by the operator; the snapshot is a plain copy.
 struct SinkCounters {

@@ -105,7 +105,7 @@ public:
 		auto state = make_uniq<SinkGlobalState>();
 		state->program = factory(context, *bind_data);
 		if (!state->program) {
-			throw InternalException("QoD: search_internal: no sink program");
+			throw ExecutorException("QoD: search_internal: no sink program");
 		}
 		return std::move(state);
 	}
@@ -147,7 +147,7 @@ public:
 		context.InterruptCheck();
 		auto &global = input.global_state.Cast<SinkGlobalState>();
 		if (global.finished.exchange(true)) {
-			// Never seen (S3): not an InternalException, which would invalidate the whole database.
+			// Never seen (S3): an ordinary error, as an internal one would invalidate the whole database.
 			throw ExecutorException("QoD: search_internal: finalize ran twice");
 		}
 		std::lock_guard<std::mutex> guard(global.mutex);
@@ -242,11 +242,12 @@ public:
 	}
 	PhysicalOperator &CreatePlan(ClientContext &, PhysicalPlanGenerator &planner) override {
 		if (!bind_data || children.size() != 1) {
-			throw InternalException(kUnsupportedShape);
+			throw ExecutorException("QoD: search_internal: the search sink was planned twice or without its input");
 		}
 		auto &child = planner.CreatePlan(*children[0]);
 		if (child.types != input_types) {
-			throw InternalException(kUnsupportedShape);
+			throw InvalidInputException(std::string(kUnsupportedShape) + function_name +
+			                            " with an input whose column types changed in planning");
 		}
 		auto &op = planner.Make<PhysicalQodSearchSink>(types, estimated_cardinality, factory, std::move(bind_data),
 		                                               column_ids, projection_ids, function_name);
@@ -275,26 +276,33 @@ optional_ptr<SinkFunctionInfo> SinkInfoOf(LogicalOperator &op) {
 }
 
 //! The one shape the sink reproduces exactly: one input, no projected input, no ordinality, no filter,
-//! every column a real output column.
-bool SupportedShape(LogicalGet &get) {
-	if (get.children.size() != 1 || !get.projected_input.empty() || get.ordinality_idx.IsValid() ||
-	    get.source_ordinality != OrdinalityType::WITHOUT_ORDINALITY || get.table_filters.HasFilters() ||
-	    get.table_filters.HasMultiColumnFilters() || (get.dynamic_filters && get.dynamic_filters->HasFilters()) ||
-	    get.input_table_types.size() != 1) {
-		return false;
+//! every column a real output column. Empty when it holds, else what differs, for the refusal's text.
+std::string UnsupportedShape(LogicalGet &get) {
+	if (!get.projected_input.empty()) {
+		return "a LATERAL or correlated input";
+	}
+	if (get.ordinality_idx.IsValid() || get.source_ordinality != OrdinalityType::WITHOUT_ORDINALITY) {
+		return "WITH ORDINALITY";
+	}
+	if (get.children.size() != 1 || get.input_table_types.size() != 1) {
+		return "an input other than one subquery of one column";
+	}
+	if (get.table_filters.HasFilters() || get.table_filters.HasMultiColumnFilters() ||
+	    (get.dynamic_filters && get.dynamic_filters->HasFilters())) {
+		return "a filter pushed into the call";
 	}
 	for (auto &id : get.GetColumnIds()) {
 		if (!id.HasPrimaryIndex() || id.IsVirtualColumn() || id.HasChildren() || id.IsPushdownExtract() ||
 		    id.GetPrimaryIndex() >= get.returned_types.size()) {
-			return false;
+			return "a column the call does not output";
 		}
 	}
 	for (auto &projection : get.projection_ids) {
 		if (projection.GetIndex() >= get.GetColumnIds().size()) {
-			return false;
+			return "a column the call does not output";
 		}
 	}
-	return true;
+	return "";
 }
 
 void Swap(unique_ptr<LogicalOperator> &slot) {
@@ -303,8 +311,11 @@ void Swap(unique_ptr<LogicalOperator> &slot) {
 		auto &get = slot->Cast<LogicalGet>();
 		// The column ids as planning would leave them (an empty list gets the GET's first column).
 		get.ResolveOperatorTypes();
-		if (!SupportedShape(get)) {
-			throw InternalException(kUnsupportedShape);
+		auto shape = UnsupportedShape(get);
+		if (!shape.empty()) {
+			// A user's query, not an assertion: an ordinary error, no stack trace.
+			throw InvalidInputException(std::string(kUnsupportedShape) + get.function.GetName().GetIdentifierName() +
+			                            " with " + shape);
 		}
 		auto swapped = make_uniq<LogicalQodSearchSink>(
 		    std::move(get.bind_data), get.table_index, get.GetColumnIds(), get.projection_ids, get.returned_types,
@@ -338,9 +349,9 @@ public:
 	}
 };
 
-// An unswapped call fails. ExecutorException, not the InternalException of the plan: DuckDB 2.0
-// invalidates the whole database on an InternalException raised during execution
-// (ClientContext::FailQueryInternal), which would stop the node for every tenant.
+// An unswapped call fails, with an ordinary error: DuckDB 2.0 invalidates the whole database on an
+// internal error raised during execution (ClientContext::FailQueryInternal), which would stop the node
+// for every tenant. No search path raises one (CTest search_no_internal_exception).
 OperatorResultType NotThroughSink(ExecutionContext &, TableFunctionInput &, DataChunk &, DataChunk &) {
 	throw ExecutorException(kNotThroughSink);
 }

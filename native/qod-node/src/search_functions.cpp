@@ -47,7 +47,8 @@ public:
 		}
 		auto word = static_cast<size_t>(static_cast<uint64_t>(rowid) >> 6);
 		if (word >= size) {
-			Grow(std::max<size_t>({word + 1, size * 2, size_t(1024)}));
+			// Doubling, clamped to the cap's own size (2^21 words, 16 MiB; review M1).
+			Grow(std::min<size_t>(kMaxWords, std::max<size_t>({word + 1, size * 2, size_t(1024)})));
 		}
 		words[word] |= 1ull << (static_cast<uint64_t>(rowid) & 63);
 	}
@@ -70,6 +71,8 @@ public:
 	}
 
 private:
+	static constexpr size_t kMaxWords = static_cast<size_t>(search::kMaxRowidExclusive / 64);
+
 	void Grow(size_t new_size) {
 		if (use_vector) {
 			vector_words.resize(new_size, 0);
@@ -166,7 +169,11 @@ unique_ptr<LocalTableFunctionState> DrainInitLocal(ExecutionContext &context, Ta
 	auto &global = global_p->Cast<DrainGlobal>();
 	auto index = global.locals++;
 	if (global.single && index >= 1) {
-		throw InternalException("QoD: search_internal: more than one local state");
+		// A UNION input runs the call in one pipeline per branch, each with a local state of its own,
+		// whatever MaxThreads() says (review C1). The probe keeps its one-row contract and refuses it, with
+		// an ordinary error: an internal one raised during execution would invalidate the database.
+		throw ExecutorException("QoD: qod_search_drain reads its input in one pipeline, and this input (a UNION) "
+		                        "runs in several: use qod_search_drain_sink");
 	}
 	return make_uniq<DrainLocal>(context.client);
 }

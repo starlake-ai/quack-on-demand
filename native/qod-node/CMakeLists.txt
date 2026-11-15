@@ -230,7 +230,8 @@ if(QOD_NODE_SEARCH)
   target_include_directories(qod_node_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../qod-search/include)
   target_link_libraries(qod_node_core PUBLIC qod_search_core)
   # The search table functions (search_functions.cpp; Phase 0 part 2 Task 5's drain probes so far),
-  # registered by main.cpp under QOD_NODE_SEARCH: PUBLIC, so qod-node and the tests see it too.
+  # registered by main.cpp under QOD_NODE_SEARCH (the compile definition below is PUBLIC, so qod-node and
+  # the tests see it too).
   target_sources(qod_node_core PRIVATE src/search_functions.cpp)
   # The custom sink operator a search call's input drain runs in (Phase 0 part 2 Task 7a, spec 7.6).
   target_sources(qod_node_core PRIVATE src/search_sink.cpp)
@@ -345,6 +346,10 @@ if(QOD_NODE_TESTS)
       # No thread-local state in the sink or the search functions (Q3: a final can run on another thread).
       add_test(NAME search_sink_no_tls COMMAND sh -c
         "! grep -n thread_local ${CMAKE_CURRENT_SOURCE_DIR}/src/search_sink.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/search_functions.cpp")
+      # No InternalException on any search path: DuckDB 2.0 invalidates the whole database on one raised
+      # during execution, and prints one with a stack trace (review C1, I3).
+      add_test(NAME search_no_internal_exception COMMAND sh -c
+        "! grep -n InternalException ${CMAKE_CURRENT_SOURCE_DIR}/src/search_*.cpp")
     endif()
     if(QOD_NODE_PROBES AND NOT WIN32)
       # Search Phase 0 part 2, Task 5 (spec 7.6, 7.4): the drain under MaxThreads() = 1 against the part

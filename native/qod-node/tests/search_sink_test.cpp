@@ -7,7 +7,7 @@
 // principal installed. A test-only qod_test_sink_sum(TABLE) -> (s HUGEINT), registered through
 // RegisterSinkFunction, sums the rowids it set, each bit once.
 //
-//   search_sink_test         the light cases S1, S2, S4 to S8 and S11 to S15 (every CI platform)
+//   search_sink_test         the light cases S1, S2, S4 to S8, S11 to S15 and S15b (every CI platform)
 //   search_sink_test --slow  S3 (240 runs under the Q3 load) and S9 (cancellation over 100M rows)
 //
 // S8 and S15 as restated by the owner's ruling of 2026-11-15 (P7a): DuckDB 2.0 rebinds a prepared
@@ -441,15 +441,23 @@ void S13(Connection &client) {
 	auto lateral = Run(client, "SELECT * FROM range(3) r, LATERAL qod_search_drain_sink((SELECT rowid FROM t WHERE i = "
 	                           "r.range))");
 	auto c = SinkCountersForTest();
-	bool lateral_refused = Holds(lateral.error, "unsupported plan shape") || Holds(lateral.error, "Binder Error") ||
-	                       Holds(lateral.error, "Not implemented") || Holds(lateral.error, "not supported");
+	// A user's query: an ordinary error naming the shape, never DuckDB's internal-error form.
+	auto ordinary = [](const std::string &error) {
+		return !Holds(error, "INTERNAL") && !Holds(error, "Stack Trace") && !Holds(error, "assertion failure");
+	};
+	bool lateral_refused =
+	    (Holds(lateral.error, "QoD: search_unsupported_plan: qod_search_drain_sink with a LATERAL or correlated input") ||
+	     Holds(lateral.error, "Binder Error")) &&
+	    ordinary(lateral.error);
 	Check(lateral_refused && c.plans == 0 && !Holds(lateral.error, "not planned through"),
 	      "S13 LATERAL refused, never unswapped: " + FirstLine(lateral.error));
 	ResetSinkCountersForTest();
 	auto ordinality = Run(client, "SELECT * FROM qod_search_drain_sink((SELECT rowid FROM t)) WITH ORDINALITY");
 	c = SinkCountersForTest();
-	bool ordinality_refused = Holds(ordinality.error, "unsupported plan shape") ||
-	                          Holds(ordinality.error, "Binder Error") || Holds(ordinality.error, "not supported");
+	bool ordinality_refused =
+	    (Holds(ordinality.error, "QoD: search_unsupported_plan: qod_search_drain_sink with WITH ORDINALITY") ||
+	     Holds(ordinality.error, "Binder Error")) &&
+	    ordinary(ordinality.error);
 	Check(ordinality_refused && c.plans == 0 && !Holds(ordinality.error, "not planned through"),
 	      "S13 WITH ORDINALITY refused, never unswapped: " + FirstLine(ordinality.error));
 	auto count = One(client, "SELECT count(*) FROM qod_search_drain_sink((SELECT rowid FROM t))");
@@ -502,8 +510,11 @@ void S15(DuckDB &db, Connection &client) {
 			(chunk && chunk->size() == 1 && chunk->GetValue(0, 0).ToString() == "1999900") ? other_ok++ : other_bad++;
 		}
 	});
-	int fresh = 0, executes = 6;
-	for (int i = 0; i < executes && !prepared->HasError(); i++) {
+	int fresh = 0, executes = 0;
+	// At least 6 executions here, and on until the other connection has run 20 of its own (review M4), so
+	// that AddressSanitizer sees the two overlap; at most 200.
+	for (int i = 0; (i < 6 || other_ok.load() + other_bad.load() < 20) && i < 200 && !prepared->HasError(); i++) {
+		executes++;
 		auto decisions = g_plan_decisions.load();
 		auto swaps = SinkCountersForTest().swaps;
 		auto result = prepared->Execute();
@@ -517,9 +528,38 @@ void S15(DuckDB &db, Connection &client) {
 	Check(!prepared->HasError() && fresh == executes,
 	      "S15 every EXECUTE takes a fresh verdict and a fresh swap: " + std::to_string(fresh) + " of " +
 	          std::to_string(executes));
-	Check(other_ok > 0 && other_bad == 0, "S15 the other connection's prepared sink statements: " +
+	Check(other_ok >= 20 && other_bad == 0, "S15 the other connection's prepared sink statements: " +
 	                                          std::to_string(other_ok.load()) + " right, " +
 	                                          std::to_string(other_bad.load()) + " wrong");
+}
+
+//! S15b (review I2): a prepared sink statement whose input reads no table is not rebound (DuckDB sets
+//! always_require_rebind only for a plan reading a database), so its physical plan, and the bind data
+//! the operator owns, run again at every EXECUTE: one swap in all, a fresh global sink and source state
+//! and one Finalize per EXECUTE, the right values each time. Run under AddressSanitizer in Step 5.
+void S15b(Connection &client) {
+	ResetSinkCountersForTest();
+	auto decisions = g_plan_decisions.load();
+	auto prepared = client.Prepare(
+	    "SELECT rows, max_rowid FROM qod_search_drain_sink((SELECT 5::BIGINT UNION ALL SELECT 7::BIGINT))");
+	std::string results;
+	const int executes = 3;
+	for (int i = 0; i < executes && !prepared->HasError(); i++) {
+		auto result = prepared->Execute();
+		if (result->HasError()) {
+			results += "ERROR " + FirstLine(result->GetError()) + ";";
+			continue;
+		}
+		auto chunk = result->Fetch();
+		results += chunk && chunk->size() == 1
+		               ? chunk->GetValue(0, 0).ToString() + "|" + chunk->GetValue(1, 0).ToString() + ";"
+		               : "ROWS;";
+	}
+	auto c = SinkCountersForTest();
+	Check(!prepared->HasError() && results == "2|7;2|7;2|7;" && c.swaps == 1 && c.plans == 1 && c.finalizes == 3,
+	      "S15b a prepared sink statement that reads no table reuses its plan: " + results + " swaps " +
+	          std::to_string(c.swaps) + ", plans " + std::to_string(c.plans) + ", finalizes " +
+	          std::to_string(c.finalizes) + ", plan decisions " + std::to_string(g_plan_decisions.load() - decisions));
 }
 
 //! Not in the plan's table: DuckDB's own serializer check tolerates a NotImplementedException from
@@ -621,6 +661,7 @@ int main(int argc, char **argv) {
 		S14(client);
 		S8(client);
 		S15(db, client);
+		S15b(client);
 		SerializerCheck(db);
 	}
 	std::cout << (g_failures == 0 ? "search_sink: all checks passed" : "search_sink: failures") << std::endl;
