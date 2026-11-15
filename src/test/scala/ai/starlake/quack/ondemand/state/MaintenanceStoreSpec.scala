@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{MaintenancePolicy, Names, RunCounters}
+import ai.starlake.quack.model.{MaintenancePolicy, MaintenanceRun, Names, RunCounters}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -15,8 +15,10 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
 
   TestPostgres.dropStrayTestDatabases("qodmaint")
 
-  /** Fresh DB + migrated schema, with the store wired against it. */
-  private def withStore(test: PostgresControlPlaneStore => Unit): Unit =
+  /** Fresh DB + migrated schema, with the store wired against it and a way to run raw SQL on that
+    * database (to move a run's timestamps, as only the database clock decides ages).
+    */
+  private def withStoreSql(test: (PostgresControlPlaneStore, String => Unit) => Unit): Unit =
     if !TestPostgres.reachable then
       cancel(
         s"local Postgres not reachable at ${TestPostgres.pgHost}:${TestPostgres.pgPort} " +
@@ -27,8 +29,15 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
     try
       val url = TestPostgres.dbUrl(dbName)
       new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
-      test(new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass))
+      test(
+        new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass),
+        sql => TestPostgres.psql(dbName, sql)
+      )
     finally Try(TestPostgres.dropDatabase(dbName))
+
+  /** Fresh DB + migrated schema, with the store wired against it. */
+  private def withStore(test: PostgresControlPlaneStore => Unit): Unit =
+    withStoreSql((s, _) => test(s))
 
   private def pol(
       scopeKind: String = "tenantdb",
@@ -83,7 +92,7 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
       orphanMinAgeDays = None,
       cron = None
     )
-    val upserted = s.upsertMaintenancePolicy(policyAllNone)
+    val upserted  = s.upsertMaintenancePolicy(policyAllNone)
     val retrieved = s.findMaintenancePolicy(upserted.id).get
     retrieved.enabled shouldBe None
     retrieved.retentionDays shouldBe None
@@ -107,10 +116,10 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
       val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
       r.status shouldBe "queued"
       s.hasActiveMaintenanceRun("acme", "acme_db") shouldBe true
-      val claimed = s.claimQueuedMaintenanceRun()
+      val claimed = s.claimQueuedMaintenanceRun(minAgeSec = 0)
       claimed.map(_.id) shouldBe Some(r.id)
       claimed.map(_.status) shouldBe Some("running")
-      s.claimQueuedMaintenanceRun() shouldBe None // nothing else queued
+      s.claimQueuedMaintenanceRun(minAgeSec = 0) shouldBe None // nothing else queued
       s.heartbeatMaintenanceRun(r.id, RunCounters(filesMerged = 3)) shouldBe true
       s.finishMaintenanceRun(
         r.id,
@@ -125,32 +134,20 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
       s.lastNonManualMaintenanceRunAt("acme", "acme_db") shouldBe defined
     }
 
-  it should "sweep stale running rows to failed" in withStore { s =>
-    val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
-    s.claimQueuedMaintenanceRun()
-    // heartbeat is set by claim; sweeping with a future cutoff must catch it
-    s.sweepStaleMaintenanceRuns(java.time.Instant.now().plusSeconds(3600)) shouldBe 1
-    s.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
-  }
-
-  it should "refuse to overwrite a run already swept to failed (finish loses the race)" in
-    withStore { s =>
+  it should "refuse to overwrite a run already reaped (finish loses the race)" in
+    withStoreSql { (s, sql) =>
       val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
-      s.claimQueuedMaintenanceRun()
-      s.sweepStaleMaintenanceRuns(java.time.Instant.now().plusSeconds(3600)) shouldBe 1
-      s.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
+      s.claimQueuedMaintenanceRun(minAgeSec = 0)
+      backdate(sql, r.id, "heartbeat_at", "10 minutes")
+      s.reapMaintenanceRuns(livenessTimeoutSec = 180, runTimeoutSec = 3600L).map(_.run.id) shouldBe
+        List(r.id)
 
-      // The runner, unaware it was swept, tries to record its own (successful) finish.
-      s.finishMaintenanceRun(
-        r.id,
-        "succeeded",
-        RunCounters(filesMerged = 1),
-        None
-      ) shouldBe false
-      // The sweep's outcome is not clobbered by the late finish.
+      // The runner, unaware it was reaped, tries to record its own (successful) finish.
+      s.finishMaintenanceRun(r.id, "succeeded", RunCounters(filesMerged = 1), None) shouldBe false
+      // The reaper's outcome is not clobbered by the late finish.
       val after = s.listMaintenanceRuns("acme", "acme_db", 10, None).head
       after.status shouldBe "failed"
-      after.error shouldBe Some("stale: heartbeat timeout")
+      after.error shouldBe Some(MaintenanceRun.ReapedSilent)
     }
 
   it should "paginate runs by keyset" in withStore { s =>
@@ -164,14 +161,110 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
 
   it should "round-trip operations CSV with explicit operations list" in withStore { s =>
     val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", Some("flush,merge"))
-    s.claimQueuedMaintenanceRun()
+    s.claimQueuedMaintenanceRun(minAgeSec = 0)
     val listed = s.listMaintenanceRuns("acme", "acme_db", limit = 10, before = None)
     listed.head.operations shouldBe Some("flush,merge")
   }
 
   it should "round-trip operations CSV with empty string" in withStore { s =>
     val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", Some(""))
-    s.claimQueuedMaintenanceRun()
+    s.claimQueuedMaintenanceRun(minAgeSec = 0)
     val listed = s.listMaintenanceRuns("acme", "acme_db", limit = 10, before = None)
     listed.head.operations shouldBe Some("")
+  }
+
+  private def backdate(sql: String => Unit, id: Long, column: String, by: String): Unit =
+    sql(
+      s"UPDATE qodstate_maintenance_run SET $column = now() - interval '$by' WHERE id = $id"
+    )
+
+  "claimQueuedMaintenanceRun" should "claim a fresh run with a minimum age of zero" in
+    withStore { s =>
+      val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      s.claimQueuedMaintenanceRun(minAgeSec = 0).map(_.id) shouldBe Some(r.id)
+    }
+
+  it should "skip a run younger than the minimum age and take it once older" in
+    withStoreSql { (s, sql) =>
+      val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      s.claimQueuedMaintenanceRun(minAgeSec = 120) shouldBe None
+      backdate(sql, r.id, "queued_at", "121 seconds")
+      s.claimQueuedMaintenanceRun(minAgeSec = 120).map(_.id) shouldBe Some(r.id)
+    }
+
+  "findMaintenanceRun" should "answer None for an unknown id" in withStore { s =>
+    s.findMaintenanceRun(424242L) shouldBe None
+  }
+
+  "touchMaintenanceRun and setMaintenanceRunNode" should
+    "write a running row and refuse a row that is no longer running" in withStoreSql { (s, sql) =>
+      val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      s.claimQueuedMaintenanceRun(minAgeSec = 0)
+      s.setMaintenanceRunNode(r.id, "maint-n1") shouldBe true
+      s.findMaintenanceRun(r.id).flatMap(_.nodeId) shouldBe Some("maint-n1")
+
+      backdate(sql, r.id, "heartbeat_at", "1 hour")
+      s.touchMaintenanceRun(r.id) shouldBe true
+      val beat = s.findMaintenanceRun(r.id).flatMap(_.heartbeatAt).get
+      beat.isAfter(java.time.Instant.now().minusSeconds(60)) shouldBe true
+
+      s.finishMaintenanceRun(r.id, "failed", RunCounters(), Some(MaintenanceRun.ReapedSilent))
+      s.touchMaintenanceRun(r.id) shouldBe false
+      s.setMaintenanceRunNode(r.id, "maint-n2") shouldBe false
+      s.findMaintenanceRun(r.id).flatMap(_.nodeId) shouldBe Some("maint-n1")
+    }
+
+  "reapMaintenanceRuns" should "fail a silent run and an over-time run, each with its own error" in
+    withStoreSql { (s, sql) =>
+      val silent  = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      val slow    = s.enqueueMaintenanceRun("acme", "other_db", "tenantdb", "cadence", None)
+      val healthy = s.enqueueMaintenanceRun("acme", "third_db", "tenantdb", "cadence", None)
+      val queued  = s.enqueueMaintenanceRun("acme", "fourth_db", "tenantdb", "cadence", None)
+      // Claims go in id order: silent, slow, healthy. `queued` stays queued.
+      (1 to 3).foreach(_ => s.claimQueuedMaintenanceRun(minAgeSec = 0))
+      s.setMaintenanceRunNode(silent.id, "maint-silent")
+      s.setMaintenanceRunNode(slow.id, "maint-slow")
+      backdate(sql, silent.id, "heartbeat_at", "10 minutes")
+      backdate(sql, slow.id, "started_at", "2 hours")
+
+      val reaped = s.reapMaintenanceRuns(livenessTimeoutSec = 180, runTimeoutSec = 3600L)
+
+      reaped.map(r => (r.run.id, r.silent, r.run.nodeId)).toSet shouldBe Set(
+        (silent.id, true, Some("maint-silent")),
+        (slow.id, false, Some("maint-slow"))
+      )
+      s.findMaintenanceRun(silent.id).map(r => (r.status, r.error)) shouldBe
+        Some(("failed", Some(MaintenanceRun.ReapedSilent)))
+      s.findMaintenanceRun(slow.id).map(r => (r.status, r.error)) shouldBe
+        Some(("failed", Some(MaintenanceRun.ReapedTimeout)))
+      s.findMaintenanceRun(healthy.id).map(_.status) shouldBe Some("running")
+      s.findMaintenanceRun(queued.id).map(_.status) shouldBe Some("queued")
+    }
+
+  it should "owe a node stop for a silent run naming a node, and for nothing else" in
+    withStoreSql { (s, sql) =>
+      val silent   = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      val nodeless = s.enqueueMaintenanceRun("acme", "other_db", "tenantdb", "cadence", None)
+      val slow     = s.enqueueMaintenanceRun("acme", "third_db", "tenantdb", "cadence", None)
+      (1 to 3).foreach(_ => s.claimQueuedMaintenanceRun(minAgeSec = 0))
+      s.setMaintenanceRunNode(silent.id, "maint-silent")
+      s.setMaintenanceRunNode(slow.id, "maint-slow")
+      backdate(sql, silent.id, "heartbeat_at", "10 minutes")
+      backdate(sql, nodeless.id, "heartbeat_at", "10 minutes")
+      backdate(sql, slow.id, "started_at", "2 hours")
+      s.reapMaintenanceRuns(livenessTimeoutSec = 180, runTimeoutSec = 3600L).size shouldBe 3
+
+      s.maintenanceRunsAwaitingNodeStop().map(r => (r.id, r.nodeId)) shouldBe
+        List((silent.id, Some("maint-silent")))
+      s.clearMaintenanceRunNodeStop(silent.id)
+      s.maintenanceRunsAwaitingNodeStop() shouldBe empty
+    }
+
+  it should "report a run both silent and over time as silent" in withStoreSql { (s, sql) =>
+    val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+    s.claimQueuedMaintenanceRun(minAgeSec = 0)
+    backdate(sql, r.id, "heartbeat_at", "10 minutes")
+    backdate(sql, r.id, "started_at", "2 hours")
+    s.reapMaintenanceRuns(livenessTimeoutSec = 180, runTimeoutSec = 3600L)
+      .map(x => (x.run.id, x.silent)) shouldBe List((r.id, true))
   }

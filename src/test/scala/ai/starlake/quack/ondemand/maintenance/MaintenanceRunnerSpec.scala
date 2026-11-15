@@ -8,8 +8,148 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
+import scala.concurrent.duration.*
 
 class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
+
+  private val maintKey  = PoolKey("acme", "acme_db", "__maint")
+  private val maintSpec = NodeSpec(maintKey, "maint-n1", Role.Dual, Map.empty, Map.empty)
+  private val maintNode = RunningNode(
+    "maint-n1",
+    maintKey,
+    Role.Dual,
+    "127.0.0.1",
+    21999,
+    "tok",
+    None,
+    None,
+    Instant.EPOCH,
+    maxConcurrent = 1
+  )
+
+  private def minimalRunner(
+      store: ControlPlaneStore,
+      specOf: (String, String) => Option[NodeSpec],
+      start: NodeSpec => IO[Option[RunningNode]],
+      stop: RunningNode => IO[Unit] = _ => IO.unit,
+      exec: (RunningNode, String) => IO[Either[String, Long]] = (_, _) => IO.pure(Right(0L))
+  ): MaintenanceRunner =
+    new MaintenanceRunner(
+      store = store,
+      specOf = specOf,
+      start = start,
+      stop = stop,
+      exec = exec,
+      snapshotsOlderThan = (_, _, _) => Nil,
+      pinnedSnapshotsOf = (_, _) => Set.empty,
+      expiryFloorOf = (_, _) => None,
+      hasLiveBranchOf = (_, _) => false,
+      totalBytesOf = (_, _) => 0L,
+      effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+      catalogAlias = (_, _) => "acme_db",
+      audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
+    )
+
+  "executeRun" should "write the node id on the row before the node starts" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    var seen: Option[String] = None
+    val runner               = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ =>
+        IO {
+          seen = store.findMaintenanceRun(r.id).flatMap(_.nodeId)
+          Some(maintNode)
+        }
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    seen shouldBe Some("maint-n1")
+  }
+
+  it should "stop a node whose start was still in flight when the run was cancelled" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    var stopped = List.empty[String]
+    val runner  = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO.sleep(300.millis).as(Some(maintNode)),
+      stop = n => IO { stopped = stopped :+ n.nodeId }
+    )
+    (for
+      fib <- runner.executeRun(r.copy(status = "running")).start
+      _   <- IO.sleep(100.millis) // inside start
+      _   <- fib.cancel           // waits for the start to finish, then for the stop
+    yield ()).timeout(5.seconds).unsafeRunSync()
+    stopped shouldBe List("maint-n1")
+  }
+
+  it should "record node spawn failed with the node id set when the node does not start" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    val runner = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO.pure(None)
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    store.findMaintenanceRun(r.id).map(x => (x.status, x.error, x.nodeId)) shouldBe
+      Some(("failed", Some("node spawn failed"), Some("maint-n1")))
+  }
+
+  it should "stop the node when the run is cancelled during its chain" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    var stopped = List.empty[String]
+    val runner  = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO.pure(Some(maintNode)),
+      stop = n => IO { stopped = stopped :+ n.nodeId },
+      exec = (_, _) => IO.never
+    )
+    (for
+      fib <- runner.executeRun(r.copy(status = "running")).start
+      _   <- IO.sleep(200.millis)
+      _   <- fib.cancel
+    yield ()).timeout(5.seconds).unsafeRunSync()
+    stopped.distinct shouldBe List("maint-n1")
+  }
+
+  it should "start no node for a run reaped before its node id is written" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    store.finishMaintenanceRun(r.id, "failed", RunCounters(), Some(MaintenanceRun.ReapedSilent))
+    var started = 0
+    val runner  = minimalRunner(
+      store,
+      specOf = (_, _) => Some(maintSpec),
+      start = _ => IO { started += 1; Some(maintNode) }
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    started shouldBe 0
+    store.findMaintenanceRun(r.id).flatMap(_.error) shouldBe Some(MaintenanceRun.ReapedSilent)
+  }
+
+  it should "mark the run failed when the node spec lookup throws" in {
+    val store = new InMemoryControlPlaneStore()
+    val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
+    val runner = minimalRunner(
+      store,
+      specOf = (_, _) => sys.error("lookup boom"),
+      start = _ => IO.pure(Some(maintNode))
+    )
+    runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+    store.findMaintenanceRun(r.id).map(x => (x.status, x.error)) shouldBe
+      Some(("failed", Some("node spawn failed")))
+  }
 
   private class Fixture(
       pinnedSnaps: Set[Long] = Set.empty,
@@ -52,9 +192,12 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       maxConcurrent = 1
     )
 
+    val spec = NodeSpec(node.poolKey, node.nodeId, Role.Dual, Map.empty, Map.empty)
+
     val runner = new MaintenanceRunner(
       store = store,
-      spawn = (_, _) => IO { started += 1; Some(node) },
+      specOf = (_, _) => Some(spec),
+      start = _ => IO { started += 1; Some(node) },
       stop = node => IO { stopped = stopped :+ node.nodeId },
       exec = (_, sql) =>
         IO {
@@ -87,7 +230,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
 
     def enqueueAndRun(scope: String = "tenantdb", ops: Option[String] = None): MaintenanceRun =
       val r = store.enqueueMaintenanceRun("acme", "acme_db", scope, "manual", ops)
-      store.claimQueuedMaintenanceRun()
+      store.claimQueuedMaintenanceRun(minAgeSec = 0)
       runner.executeRun(r.copy(status = "running")).unsafeRunSync()
       store.listMaintenanceRuns("acme", "acme_db", 10, None).head
 
@@ -156,7 +299,8 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     // A probe store call made while the run executes each statement: can the lock be taken now?
     val probe = new MaintenanceRunner(
       store = f.store,
-      spawn = (_, _) => IO.pure(Some(f.node)),
+      specOf = (_, _) => Some(f.spec),
+      start = _ => IO.pure(Some(f.node)),
       stop = _ => IO.unit,
       exec = (_, sql) =>
         IO {
@@ -181,7 +325,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
     )
     val r = f.store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-    f.store.claimQueuedMaintenanceRun()
+    f.store.claimQueuedMaintenanceRun(minAgeSec = 0)
     probe.executeRun(r.copy(status = "running")).unsafeRunSync()
     lockedAt.toList match
       case List(sql) => sql should include("expire_snapshots")
@@ -266,10 +410,11 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
   it should "mark the run failed when the node cannot spawn" in {
     val store = new InMemoryControlPlaneStore()
     val r     = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-    store.claimQueuedMaintenanceRun()
+    store.claimQueuedMaintenanceRun(minAgeSec = 0)
     val runner = new MaintenanceRunner(
       store = store,
-      spawn = (_, _) => IO.pure(None),
+      specOf = (_, _) => None,
+      start = _ => IO.pure(None),
       stop = _ => IO.unit,
       exec = (_, _) => IO.pure(Right(0L)),
       snapshotsOlderThan = (_, _, _) => Nil,
@@ -335,7 +480,8 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     )
     val runner = new MaintenanceRunner(
       store = store,
-      spawn = (_, _) => IO.pure(Some(node)),
+      specOf = (_, _) => Some(NodeSpec(node.poolKey, node.nodeId, Role.Dual, Map.empty, Map.empty)),
+      start = _ => IO.pure(Some(node)),
       stop = node => IO { stopped = stopped :+ node.nodeId },
       exec = (_, sql) => IO { executed = executed :+ sql; Right(0L) },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
@@ -349,7 +495,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     )
 
     val r = inner.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
-    inner.claimQueuedMaintenanceRun()
+    inner.claimQueuedMaintenanceRun(minAgeSec = 0)
     runner.executeRun(r.copy(status = "running")).unsafeRunSync()
     (executed, stopped, inner.listMaintenanceRuns("acme", "acme_db", 10, None).head)
 

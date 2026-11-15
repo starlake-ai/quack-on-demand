@@ -8,14 +8,14 @@ import com.typesafe.scalalogging.LazyLogging
 import java.time.Instant
 
 /** Leader-gated enqueue side of Spec 09 (spec section 4): cadence cron + small-file thresholds,
-  * dedup against active runs, min-interval guard, stale-run sweep. Pure decisions live in tickOnce
-  * so the spec drives it synchronously; start() wraps it in the duty-fiber loop.
+  * dedup against active runs, min-interval guard (the stale-run sweep is [[MaintenanceReaper]]'s).
+  * Pure decisions live in tickOnce so the spec drives it synchronously; start() wraps it in the
+  * duty-fiber loop.
   */
 final class MaintenanceScheduler(
     store: ControlPlaneStore,
     smallFileCountsOf: (String, String, Long) => Map[(String, String), Int],
     minIntervalMinutes: Int,
-    runTimeoutMinutes: Int,
     staggerOf: (String, String) => Int,
     tickSeconds: Int = 60,
     isLeader: () => Boolean = () => true
@@ -33,7 +33,6 @@ final class MaintenanceScheduler(
     s.contains('\'') || s.contains(';') || s.contains('\\') || s.contains('.')
 
   def tickOnce(now: Instant): Unit =
-    store.sweepStaleMaintenanceRuns(now.minusSeconds(runTimeoutMinutes * 60L))
     store.listTenants().foreach { t =>
       // Branch catalogs (Epic 1) are never maintained: expiring or cleaning a branch could delete
       // the parent's files it shares. Their lifecycle is the branch teardown.

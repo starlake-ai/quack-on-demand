@@ -69,7 +69,7 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     * piling up concurrently.
     */
   private def drainActiveRun(store: InMemoryControlPlaneStore): Unit =
-    store.claimQueuedMaintenanceRun().foreach { r =>
+    store.claimQueuedMaintenanceRun(minAgeSec = 0).foreach { r =>
       store.finishMaintenanceRun(r.id, "succeeded", ai.starlake.quack.model.RunCounters(), None)
       ()
     }

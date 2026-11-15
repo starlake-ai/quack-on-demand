@@ -294,12 +294,15 @@ final case class MaintenanceConfig(
     enabled: Boolean = true,
     @field @ConfigField(
       envVar = "QOD_MAINT_TICK_SEC",
-      description = "Seconds between maintenance scheduler ticks (cadence + threshold checks)."
+      description = "Seconds between maintenance scheduler ticks (cadence + threshold checks). " +
+        "Under HA, the executing replica writes a run's liveness heartbeat every tick, and the " +
+        "leader fails a run silent for three ticks (at least 60 s) and stops its node."
     )
     tickSec: Int = 60,
     @field @ConfigField(
       envVar = "QOD_MAINT_MAX_CONCURRENT",
-      description = "Max maintenance runs executing concurrently across the manager."
+      description = "Max maintenance runs executing concurrently on each replica " +
+        "(under HA, every replica drains)."
     )
     maxConcurrent: Int = 2,
     @field @ConfigField(
@@ -310,23 +313,52 @@ final case class MaintenanceConfig(
     @field @ConfigField(
       envVar = "QOD_MAINT_RUN_TIMEOUT_MIN",
       description =
-        "Minutes without a heartbeat before a running maintenance run is swept as failed."
+        "Minutes a maintenance run may take from its start (lock wait included) before the " +
+          "leader fails it as timed out; its replica then stops its node."
     )
-    runTimeoutMin: Int = 60,
+    runTimeoutMin: Int = 240,
     @field @ConfigField(
       envVar = "QOD_MAINT_NODE_READY_TIMEOUT_SEC",
       description =
         "Seconds to wait for the ephemeral maintenance node to accept connections after spawn " +
           "before the run is failed as 'node spawn failed'. Covers cold-start extension installs."
     )
-    nodeReadyTimeoutSec: Int = 180
-)
+    nodeReadyTimeoutSec: Int = 180,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_LEADER_GRACE_SEC",
+      description =
+        "Under HA, seconds a queued maintenance run waits before the leader may take it: " +
+          "followers take runs at once, the leader only those no follower took in time. 0 (the " +
+          "default) means three ticks (3 x QOD_MAINT_TICK_SEC); a set value must be at least " +
+          "QOD_MAINT_TICK_SEC. A single manager takes every run at once."
+    )
+    leaderGraceSec: Int = 0
+):
+  require(
+    leaderGraceSec >= 0 && (leaderGraceSec == 0 || leaderGraceSec >= tickSec),
+    s"maintenance.leaderGraceSec (QOD_MAINT_LEADER_GRACE_SEC) must be 0 or at least " +
+      s"maintenance.tickSec ($tickSec), got $leaderGraceSec"
+  )
 
-// runTimeoutMin must exceed the longest single chain step (flush/expire/merge/rewrite/cleanup/
-// orphans): the sweep only checks time-since-last-heartbeat, and a heartbeat is only written
-// between steps, not during one. A step that legitimately runs longer than runTimeoutMin gets
-// swept out from under a still-healthy run, racing MaintenanceRunner's own finishMaintenanceRun
-// call (see the "AND status = 'running'" guard on both UPDATEs in PostgresControlPlaneStore).
+  /** The leader's grace in seconds: the set value, or three ticks when 0. */
+  def effectiveLeaderGraceSec: Int = if leaderGraceSec == 0 then 3 * tickSec else leaderGraceSec
+
+  /** Seconds without a liveness heartbeat after which the leader fails a running run and stops its
+    * node: three ticks, never under [[MaintenanceConfig.MinLivenessTimeoutSec]], so a short tick
+    * cannot turn a stall of a few seconds in the owner's control-plane writes into a kill.
+    */
+  def livenessTimeoutSec: Int = math.max(3 * tickSec, MaintenanceConfig.MinLivenessTimeoutSec)
+
+object MaintenanceConfig:
+  val MinLivenessTimeoutSec: Int = 60
+
+// runTimeoutMin caps a run's total time from started_at. Liveness is separate: the executing
+// replica bumps heartbeat_at every tickSec from a side fiber (MaintenanceLiveness), and the
+// leader's MaintenanceReaper fails a run silent for livenessTimeoutSec (3 x tickSec, at least
+// 60 s) and stops its node, so a long chain step is never
+// mistaken for a dead replica. Both UPDATEs that end a run keep the "AND status = 'running'"
+// guard in PostgresControlPlaneStore, so the owner's finish and the reaper never overwrite
+// each other.
 
 /** Catalog browser read surface (Spec 00 time-travel viewer). */
 final case class CatalogConfig(

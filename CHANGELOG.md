@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Upgrading
+
+- `QOD_MAINT_RUN_TIMEOUT_MIN` now caps a maintenance run's whole chain, from its start and
+  waiting for its database's lock included, and the replica running it stops its node when the
+  cap is reached, on a single manager too; before, it only bounded the time between two steps and
+  a long step ran to its end. Its default rises from 60 to 240 minutes. Set it above the longest
+  full maintenance chain of your largest database.
+- During a rolling upgrade of an HA cluster, a maintenance run still executing on a replica of
+  the earlier release can be failed as `stale` by an upgraded leader (the earlier release writes
+  no liveness heartbeat during a step). No node is stopped for it, and the next cadence or
+  threshold tick queues the run again.
+
 ### Changed
 
 - A column mask or deny applies only to the table its catalog, schema and table name cover, as row
@@ -9,6 +21,18 @@
   `client_b.claims.claim.member_no`, which it matched by table name alone (#201). A policy whose
   catalog or schema is `*` still covers every table of that name. When the table walk meets a
   construct it does not read, the rewriter keeps matching by table name for that statement.
+- Under HA, DuckLake maintenance runs on follower replicas (#210). The leader still decides when a
+  run is due, and takes a queued run only once it has waited `QOD_MAINT_LEADER_GRACE_SEC` (0, the
+  default, means three `QOD_MAINT_TICK_SEC` ticks), so it runs maintenance only when no follower
+  took it in time. `QOD_MAINT_MAX_CONCURRENT` is now a limit per replica. Maintenance metrics are
+  recorded on the replica that ran the job: sum them across replicas. A single manager is
+  unchanged. An HA deployment running a single replica waits out the grace on every run.
+- A maintenance run whose replica stops responding is failed within three ticks (at least 60 s),
+  and its `__maint` node is stopped, on Kubernetes and fleet servers; a stop that fails is tried
+  again on every reaper pass until it succeeds (it was left running before, and the run was
+  failed only after `QOD_MAINT_RUN_TIMEOUT_MIN`). `QOD_MAINT_RUN_TIMEOUT_MIN` now caps a run's total
+  time from its start, waiting for its database's lock included, rather than the time between two
+  steps.
 
 ### Fixed
 

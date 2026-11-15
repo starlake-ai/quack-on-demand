@@ -88,3 +88,24 @@ final case class MaintenanceRun(
     counters: RunCounters,
     error: Option[String]
 )
+
+object MaintenanceRun:
+
+  /** Error of a run the HA leader's reaper failed because the replica executing it stopped writing
+    * its liveness heartbeat: that replica is gone, so only the reaper can stop the run's node.
+    */
+  val ReapedSilent = "stale: the executing replica stopped heartbeating"
+
+  /** Error of a run the reaper failed because it ran longer than `runTimeoutMin` from its start:
+    * its owner is alive and stops its own node when it sees the row change.
+    */
+  val ReapedTimeout = "timeout: ran longer than runTimeoutMin"
+
+  /** Whether a run's error is one of the reaper's. */
+  def isReaped(error: Option[String]): Boolean =
+    error.exists(e => e == ReapedSilent || e == ReapedTimeout)
+
+/** One run the reaper failed, with the row as it left it. `silent`: failed as
+  * [[MaintenanceRun.ReapedSilent]].
+  */
+final case class ReapedRun(run: MaintenanceRun, silent: Boolean)
