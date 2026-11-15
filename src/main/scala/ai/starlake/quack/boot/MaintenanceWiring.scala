@@ -33,6 +33,9 @@ final class MaintenanceWiring(
     poolLocks: PoolLocker,
     catalogReader: (String, String) => DuckLakeCatalogReader,
     maintenance: MaintenanceConfig,
+    // `maintenance.livenessTimeoutSec` in production; a test passes a shorter one to watch the
+    // reaper's quiet window end without waiting out its 60 s floor.
+    livenessTimeoutSec: Int,
     isLeader: () => Boolean,
     haEnabled: Boolean,
     audit: AuditRecorder,
@@ -151,7 +154,7 @@ final class MaintenanceWiring(
   private val reaper =
     new MaintenanceReaper(
       store = store,
-      livenessTimeoutSec = 3 * maintenance.tickSec,
+      livenessTimeoutSec = livenessTimeoutSec,
       runTimeoutSec = maintenance.runTimeoutMin * 60L,
       stopNode = (key, nodeId) => backend.stop(key, nodeId),
       audit = audit,
@@ -159,9 +162,10 @@ final class MaintenanceWiring(
     )
 
   /** Leader only (a single manager always leads): fail runs whose owner went silent or that ran too
-    * long, see [[MaintenanceReaper]]. It reaps nothing for three ticks after this replica becomes
-    * leader and after a failed pass (the reaper's quiet window). IO.defer for the same reason as
-    * [[drainTick]]: the leader check must run on every pass of the bound IO.
+    * long, see [[MaintenanceReaper]]. It reaps nothing for its liveness timeout (three ticks, at
+    * least 60 s) after this replica becomes leader and after a failed pass (the quiet window).
+    * IO.defer for the same reason as [[drainTick]]: the leader check must run on every pass of the
+    * bound IO.
     */
   private[boot] def reapTick: IO[Unit] = IO.defer {
     IO.realTimeInstant.flatMap(now => reaper.tick(isLeader(), now))

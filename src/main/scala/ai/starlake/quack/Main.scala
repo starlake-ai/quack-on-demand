@@ -2415,6 +2415,7 @@ object Main extends IOApp with LazyLogging:
                   poolLocks = poolLocks,
                   catalogReader = catalogReader,
                   maintenance = mgrCfg.maintenance,
+                  livenessTimeoutSec = mgrCfg.maintenance.livenessTimeoutSec,
                   isLeader = () => coordinator.forall(_.isLeader),
                   haEnabled = mgrCfg.ha.enabled,
                   audit = auditRecorder,

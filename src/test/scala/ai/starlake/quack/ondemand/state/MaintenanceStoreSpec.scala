@@ -241,6 +241,25 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
       s.findMaintenanceRun(queued.id).map(_.status) shouldBe Some("queued")
     }
 
+  it should "owe a node stop for a silent run naming a node, and for nothing else" in
+    withStoreSql { (s, sql) =>
+      val silent   = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      val nodeless = s.enqueueMaintenanceRun("acme", "other_db", "tenantdb", "cadence", None)
+      val slow     = s.enqueueMaintenanceRun("acme", "third_db", "tenantdb", "cadence", None)
+      (1 to 3).foreach(_ => s.claimQueuedMaintenanceRun(minAgeSec = 0))
+      s.setMaintenanceRunNode(silent.id, "maint-silent")
+      s.setMaintenanceRunNode(slow.id, "maint-slow")
+      backdate(sql, silent.id, "heartbeat_at", "10 minutes")
+      backdate(sql, nodeless.id, "heartbeat_at", "10 minutes")
+      backdate(sql, slow.id, "started_at", "2 hours")
+      s.reapMaintenanceRuns(livenessTimeoutSec = 180, runTimeoutSec = 3600L).size shouldBe 3
+
+      s.maintenanceRunsAwaitingNodeStop().map(r => (r.id, r.nodeId)) shouldBe
+        List((silent.id, Some("maint-silent")))
+      s.clearMaintenanceRunNodeStop(silent.id)
+      s.maintenanceRunsAwaitingNodeStop() shouldBe empty
+    }
+
   it should "report a run both silent and over time as silent" in withStoreSql { (s, sql) =>
     val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
     s.claimQueuedMaintenanceRun(minAgeSec = 0)

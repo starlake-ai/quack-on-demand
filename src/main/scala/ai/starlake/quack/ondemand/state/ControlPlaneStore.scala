@@ -515,9 +515,17 @@ trait ControlPlaneStore:
   /** Fail every `"running"` row whose heartbeat is older than `livenessTimeoutSec`
     * ([[MaintenanceRun.ReapedSilent]], `silent = true`), then every remaining `"running"` row
     * started more than `runTimeoutSec` ago ([[MaintenanceRun.ReapedTimeout]]), both on the database
-    * clock. Returns the rows as left.
+    * clock. Returns the rows as left. A silent row naming a node is also marked as owing a node
+    * stop, in the same statement, so the stop survives a failed call and a leader that dies before
+    * making it ([[maintenanceRunsAwaitingNodeStop]]).
     */
   def reapMaintenanceRuns(livenessTimeoutSec: Int, runTimeoutSec: Long): List[ReapedRun]
+
+  /** Reaped runs whose node no replica has stopped yet, oldest first. */
+  def maintenanceRunsAwaitingNodeStop(): List[MaintenanceRun]
+
+  /** Record that a reaped run's node was stopped, so no later reaper pass stops it again. */
+  def clearMaintenanceRunNodeStop(id: Long): Unit
 
   /** Returns `true` when the row was still `"running"` and got its heartbeat bumped; `false` when a
     * concurrent sweep already failed the row out from under this caller (the run should stop

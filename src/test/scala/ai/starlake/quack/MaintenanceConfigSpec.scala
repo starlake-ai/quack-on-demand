@@ -35,3 +35,12 @@ class MaintenanceConfigSpec extends AnyFlatSpec with Matchers:
     an[IllegalArgumentException] should be thrownBy
       MaintenanceConfig(tickSec = -5, leaderGraceSec = -1)
   }
+
+  it should "time a silent run out after three ticks, never under 60 s" in {
+    MaintenanceConfig(tickSec = 60).livenessTimeoutSec shouldBe 180
+    MaintenanceConfig(tickSec = 30).livenessTimeoutSec shouldBe 90
+    MaintenanceConfig(tickSec =
+      5
+    ).livenessTimeoutSec shouldBe MaintenanceConfig.MinLivenessTimeoutSec
+    MaintenanceConfig(tickSec = 1).livenessTimeoutSec shouldBe 60
+  }

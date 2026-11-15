@@ -3122,10 +3122,13 @@ final class PostgresControlPlaneStore(
     withConn { c =>
       // One statement per case. The silent case runs first, so a row both silent and over time
       // is reported silent: its owner is gone and only the reaper can stop its node.
+      // A silent row's node stop is owed in the same UPDATE (issue #210), so no crash between the
+      // reap and the stop can leave the node running unrecorded.
       def reap(column: String, ageSec: Long, error: String, silent: Boolean): List[ReapedRun] =
-        val ps = c.prepareStatement(
+        val stopOwed = if silent then "node_id IS NOT NULL" else "FALSE"
+        val ps       = c.prepareStatement(
           s"""UPDATE qodstate_maintenance_run
-            |SET status = 'failed', finished_at = NOW(), error = ?
+            |SET status = 'failed', finished_at = NOW(), error = ?, node_stop_pending = $stopOwed
             |WHERE status = 'running' AND $column < NOW() - make_interval(secs => ?)
             |RETURNING $maintenanceRunColumns""".stripMargin
         )
@@ -3139,6 +3142,29 @@ final class PostgresControlPlaneStore(
       reap("heartbeat_at", livenessTimeoutSec.toLong, MaintenanceRun.ReapedSilent, silent = true) ++
         reap("started_at", runTimeoutSec, MaintenanceRun.ReapedTimeout, silent = false)
     }
+
+  def maintenanceRunsAwaitingNodeStop(): List[MaintenanceRun] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"""SELECT $maintenanceRunColumns FROM qodstate_maintenance_run
+        |WHERE node_stop_pending ORDER BY id""".stripMargin
+    )
+    try
+      val rs = ps.executeQuery()
+      try drain(rs)(readMaintenanceRun)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def clearMaintenanceRunNodeStop(id: Long): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      "UPDATE qodstate_maintenance_run SET node_stop_pending = FALSE WHERE id = ?"
+    )
+    try
+      ps.setLong(1, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
 
   // ---------------- Managed prefix (tombstone registry) ------------------
 

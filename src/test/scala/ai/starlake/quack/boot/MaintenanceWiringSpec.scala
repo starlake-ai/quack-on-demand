@@ -54,7 +54,12 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
   /** Fresh DB + migrated schema, a fully-stubbed [[MaintenanceWiring]] wired against it. Mirrors
     * [[ai.starlake.quack.ondemand.state.MaintenanceStoreSpec]]'s live-Postgres fixture.
     */
-  private def withWiring(cfg: MaintenanceConfig, isLeaderFn: () => Boolean, haEnabled: Boolean)(
+  private def withWiring(
+      cfg: MaintenanceConfig,
+      isLeaderFn: () => Boolean,
+      haEnabled: Boolean,
+      livenessTimeoutSec: Option[Int] = None
+  )(
       test: (MaintenanceWiring, PostgresControlPlaneStore, String => Unit) => Unit
   ): Unit =
     if !TestPostgres.reachable then
@@ -87,6 +92,7 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
         catalogReader = (_, _) =>
           throw new NotImplementedError("not exercised: no node in this fixture"),
         maintenance = cfg,
+        livenessTimeoutSec = livenessTimeoutSec.getOrElse(cfg.livenessTimeoutSec),
         isLeader = isLeaderFn,
         haEnabled = haEnabled,
         audit = AuditRecorder.noop,
@@ -147,7 +153,12 @@ class MaintenanceWiringSpec extends AnyFlatSpec with Matchers:
 
   "reapTick" should "reap a silent run on the leader only, re-evaluated on every run" in {
     var leader = false
-    withWiring(MaintenanceConfig(tickSec = 1), () => leader, haEnabled = true) { (w, store, sql) =>
+    withWiring(
+      MaintenanceConfig(tickSec = 1),
+      () => leader,
+      haEnabled = true,
+      livenessTimeoutSec = Some(3)
+    ) { (w, store, sql) =>
       val r = store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
       store.claimQueuedMaintenanceRun(minAgeSec = 0)
       sql(

@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.maintenance
 import ai.starlake.quack.model._
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import cats.effect.Ref
 import com.typesafe.scalalogging.LazyLogging
@@ -359,40 +359,14 @@ final class MaintenanceRunner(
       c: RunCounters,
       startedAt: Instant
   ): IO[Unit] =
-    for
-      finishedAt <- IO.realTimeInstant
-      _          <- auditRun(run, status, c)
-      _          <- IO
-        .delay(
-          metrics.recordRun(
-            tenant = run.tenant,
-            tenantDb = run.tenantDb,
-            result = status,
-            durationSeconds =
-              math.max(0L, finishedAt.toEpochMilli - startedAt.toEpochMilli) / 1000.0,
-            bytesReclaimed = c.bytesReclaimed,
-            filesCompacted = c.filesMerged + c.filesRewritten,
-            snapshotsExpired = c.snapshotsExpired
-          )
-        )
-        .handleErrorWith(_ => IO.unit)
-    yield ()
-
-  private def auditRun(run: MaintenanceRun, status: String, c: RunCounters): IO[Unit] =
-    IO.blocking(
-      audit.restAs(
-        "system",
-        "system",
-        "control-plane",
-        AuditActions.MaintenanceRun,
+    IO.realTimeInstant.flatMap { finishedAt =>
+      MaintenanceRunRecord.write(
+        audit,
+        metrics,
+        run,
         status,
-        tenant = Some(run.tenant),
-        target = Some(s"${run.tenantDb}/${run.scope}"),
-        detail = Map(
-          "trigger"                -> run.trigger,
-          "snapshotsExpired"       -> c.snapshotsExpired.toString,
-          "snapshotsSkippedPinned" -> c.snapshotsSkippedPinned.toString,
-          "bytesReclaimed"         -> c.bytesReclaimed.toString
-        )
+        c,
+        durationSeconds = math.max(0L, finishedAt.toEpochMilli - startedAt.toEpochMilli) / 1000.0,
+        reason = None
       )
-    ).handleErrorWith(_ => IO.unit)
+    }

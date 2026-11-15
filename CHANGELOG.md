@@ -27,8 +27,9 @@
   took it in time. `QOD_MAINT_MAX_CONCURRENT` is now a limit per replica. Maintenance metrics are
   recorded on the replica that ran the job: sum them across replicas. A single manager is
   unchanged. An HA deployment running a single replica waits out the grace on every run.
-- A maintenance run whose replica stops responding is failed within three ticks, and its `__maint`
-  node is stopped, on Kubernetes and fleet servers (it was left running before, and the run was
+- A maintenance run whose replica stops responding is failed within three ticks (at least 60 s),
+  and its `__maint` node is stopped, on Kubernetes and fleet servers; a stop that fails is tried
+  again on every reaper pass until it succeeds (it was left running before, and the run was
   failed only after `QOD_MAINT_RUN_TIMEOUT_MIN`). `QOD_MAINT_RUN_TIMEOUT_MIN` now caps a run's total
   time from its start, waiting for its database's lock included, rather than the time between two
   steps.

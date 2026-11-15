@@ -888,14 +888,16 @@ Managed DuckLake maintenance is split (issue #210): the leader enqueues runs and
 while they have room (`QOD_MAINT_MAX_CONCURRENT` is per replica) and the leader takes the rest. An
 HA deployment running a single replica waits out the grace on every run. The executing replica
 writes the run's `node_id` before starting its `__maint` node and bumps `heartbeat_at` every tick
-(`MaintenanceLiveness`); a run silent for three ticks is failed and its node stopped by the leader,
-one past `QOD_MAINT_RUN_TIMEOUT_MIN` (default 240) from its start is failed and its node stopped by
-its own replica. Neither is requeued. The reaper reaps nothing for three ticks after its replica
+(`MaintenanceLiveness`); a run silent for three ticks (at least 60 s,
+`MaintenanceConfig.livenessTimeoutSec`) is failed and its node stopped by the leader, the stop owed
+on the row (`node_stop_pending`, Liquibase `0058`) and retried each pass until it succeeds; one past
+`QOD_MAINT_RUN_TIMEOUT_MIN` (default 240) from its start is failed and its node stopped by its own
+replica. Neither is requeued. The reaper reaps nothing for that liveness timeout after its replica
 becomes leader, and after a failed pass it probes the control plane each tick and reaps again only
-three ticks after the first probe that succeeds, so owners whose heartbeats went stale in an outage
-write again first. Residual: with `QOD_FLEET_EPHEMERAL=local` a follower whose JVM dies on a host
-that stays up leaves its node running until swept on that host. Maintenance metrics are recorded
-where a run executes (a reaped run's on the leader): sum them across replicas.
+that liveness timeout after the first probe that succeeds, so owners whose heartbeats went stale in
+an outage write again first. Residual: with `QOD_FLEET_EPHEMERAL=local` a follower whose JVM dies on
+a host that stays up leaves its node running until swept on that host. Maintenance metrics are
+recorded where a run executes (a reaped run's on the leader): sum them across replicas.
 
 ### `qod serve` boot provisioning (`ServeProvisionHook`)
 

@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.maintenance
 import ai.starlake.quack.model.{MaintenanceRun, PoolKey, ReapedRun}
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
@@ -12,11 +12,12 @@ import java.time.Instant
 
 /** The HA leader's sweep of running maintenance runs (issue #210), a singleton duty. A run whose
   * liveness heartbeat ([[MaintenanceLiveness]]) is older than `livenessTimeoutSec` lost its
-  * replica: it is failed and its `__maint` node stopped here, since nothing else will. A run
-  * started more than `runTimeoutSec` ago is failed too, but its node is left to its live owner,
-  * whose heartbeat sees the row change and stops it, so no replica kills a node under a live run.
-  * Neither is requeued: the next cadence or threshold tick queues a fresh run. The drain fiber
-  * calls [[tick]], whose quiet window (after becoming leader, and after a failed pass until
+  * replica: it is failed and its `__maint` node stopped here, since nothing else will, retried on
+  * every pass until a stop succeeds (the row's owed stop, set by the reap itself). A run started
+  * more than `runTimeoutSec` ago is failed too, but its node is left to its live owner, whose
+  * heartbeat sees the row change and stops it, so no replica kills a node under a live run. Neither
+  * is requeued: the next cadence or threshold tick queues a fresh run. The drain fiber calls
+  * [[tick]], whose quiet window (after becoming leader, and after a failed pass until
   * `livenessTimeoutSec` after the first probe that succeeds) keeps a control-plane outage from
   * getting live runs reaped.
   */
@@ -69,52 +70,56 @@ final class MaintenanceReaper(
       }
   }
 
+  /** Reap, then stop every node a silent run left, this pass's and any earlier pass's whose stop
+    * failed or never ran (a leader that died between the reap and the stop). A stop is recorded
+    * done only when it succeeds, so a failed one is tried again on the next pass. Each maintenance
+    * node id is unique to its run, so a late stop never reaches another run's node. Both lists are
+    * handled concurrently: a stop can wait for its backend's stop timeout.
+    */
   def reapOnce: IO[Unit] =
     IO.blocking(store.reapMaintenanceRuns(livenessTimeoutSec, runTimeoutSec))
-      .flatMap(_.traverse_(settle))
+      .flatMap(_.parTraverse_(settle)) *>
+      IO.blocking(store.maintenanceRunsAwaitingNodeStop()).flatMap(_.parTraverse_(stopOwed))
+
+  private def label(run: MaintenanceRun): String =
+    s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb})"
 
   private def settle(reaped: ReapedRun): IO[Unit] =
-    val run   = reaped.run
-    val label = s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb})"
-    val stop  = run.nodeId match
-      case Some(id) if reaped.silent =>
-        stopNode(PoolKey(run.tenant, run.tenantDb, "__maint"), id).handleErrorWith(e =>
-          IO.delay(logger.warn(s"$label: stopping its node $id failed: ${e.getMessage}"))
-        )
-      case _ => IO.unit
-    IO.delay(logger.warn(s"$label reaped: ${run.error.getOrElse("")}")) *> stop *> record(run)
-
-  private def record(run: MaintenanceRun): IO[Unit] =
-    val audited = IO
-      .blocking(
-        audit.restAs(
-          "system",
-          "system",
-          "control-plane",
-          AuditActions.MaintenanceRun,
-          "failed",
-          tenant = Some(run.tenant),
-          target = Some(s"${run.tenantDb}/${run.scope}"),
-          detail = Map("trigger" -> run.trigger, "reason" -> run.error.getOrElse(""))
-        )
-      )
-      .handleErrorWith(_ => IO.unit)
+    val run      = reaped.run
     val duration =
       (for
         s <- run.startedAt
         f <- run.finishedAt
       yield math.max(0L, f.toEpochMilli - s.toEpochMilli) / 1000.0).getOrElse(0.0)
-    val measured = IO
-      .delay(
-        metrics.recordRun(
-          tenant = run.tenant,
-          tenantDb = run.tenantDb,
-          result = "failed",
-          durationSeconds = duration,
-          bytesReclaimed = run.counters.bytesReclaimed,
-          filesCompacted = run.counters.filesMerged + run.counters.filesRewritten,
-          snapshotsExpired = run.counters.snapshotsExpired
-        )
+    IO.delay(logger.warn(s"${label(run)} reaped: ${run.error.getOrElse("")}")) *>
+      MaintenanceRunRecord.write(
+        audit,
+        metrics,
+        run,
+        "failed",
+        run.counters,
+        duration,
+        reason = Some(run.error.getOrElse(""))
       )
-      .handleErrorWith(_ => IO.unit)
-    audited *> measured
+
+  private def stopOwed(run: MaintenanceRun): IO[Unit] =
+    val cleared = IO.blocking(store.clearMaintenanceRunNodeStop(run.id))
+    run.nodeId match
+      case None     => cleared
+      case Some(id) =>
+        stopNode(PoolKey(run.tenant, run.tenantDb, "__maint"), id).attempt.flatMap {
+          case Right(_) =>
+            cleared.handleErrorWith(e =>
+              IO.delay(
+                logger.warn(
+                  s"${label(run)}: node $id stopped, recording it failed: ${e.getMessage}"
+                )
+              )
+            )
+          case Left(e) =>
+            IO.delay(
+              logger.warn(
+                s"${label(run)}: stopping its node $id failed, retrying next pass: ${e.getMessage}"
+              )
+            )
+        }

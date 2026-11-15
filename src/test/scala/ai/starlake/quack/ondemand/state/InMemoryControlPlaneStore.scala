@@ -802,6 +802,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
           .map { r =>
             val failed = r.copy(status = "failed", finishedAt = Some(now), error = Some(error))
             maintenanceRuns.put(r.id, failed)
+            if silent && r.nodeId.isDefined then nodeStopsPending += r.id
             ReapedRun(failed, silent)
           }
       val silentCutoff = now.minusSeconds(livenessTimeoutSec.toLong)
@@ -809,6 +810,14 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       reap(_.heartbeatAt.exists(_.isBefore(silentCutoff)), MaintenanceRun.ReapedSilent, true) ++
         reap(_.startedAt.exists(_.isBefore(startCutoff)), MaintenanceRun.ReapedTimeout, false)
     }
+
+  private val nodeStopsPending = scala.collection.mutable.SortedSet.empty[Long]
+
+  def maintenanceRunsAwaitingNodeStop(): List[MaintenanceRun] =
+    maintenanceRuns.synchronized(nodeStopsPending.toList.flatMap(maintenanceRuns.get))
+
+  def clearMaintenanceRunNodeStop(id: Long): Unit =
+    maintenanceRuns.synchronized { nodeStopsPending -= id; () }
 
   /** Test hook: move a run's timestamps, as the Postgres specs do with SQL. */
   def setMaintenanceRunTimes(

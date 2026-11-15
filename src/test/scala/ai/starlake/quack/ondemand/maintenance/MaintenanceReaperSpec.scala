@@ -14,7 +14,7 @@ import java.time.Instant
 
 /** The leader's reaper (issue #210), on the in-memory store: a silent run is failed and its node
   * stopped, an over-time run is failed and its node left to its live owner, and a stop that fails
-  * leaves the row failed and the pass going.
+  * leaves the row failed, the pass going and the stop owed to the next pass.
   */
 class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
 
@@ -44,16 +44,18 @@ class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
     val flaky: Option[ReapFailsOnceStore] =
       if failFirstReap then Some(new ReapFailsOnceStore(store)) else None
     val reapStore: ControlPlaneStore = flaky.getOrElse(store)
-    var stopped                      = List.empty[(PoolKey, String)]
-    var recorded                     = List.empty[(String, String)]
-    val telemetry                    = new RecordingTelemetryStore
-    val reaper                       = new MaintenanceReaper(
+    // Stops and records run concurrently (parTraverse_), so the lists are written under a lock.
+    @volatile var stopped   = List.empty[(PoolKey, String)]
+    @volatile var recorded  = List.empty[(String, String)]
+    @volatile var failStops = stopFails
+    val telemetry           = new RecordingTelemetryStore
+    val reaper              = new MaintenanceReaper(
       store = reapStore,
       livenessTimeoutSec = 180,
       runTimeoutSec = 3600L,
       stopNode = (k, id) =>
-        IO { stopped = stopped :+ (k -> id) } *>
-          (if stopFails then IO.raiseError(new RuntimeException("api server down")) else IO.unit),
+        IO(synchronized { stopped = stopped :+ (k -> id) }) *>
+          (if failStops then IO.raiseError(new RuntimeException("api server down")) else IO.unit),
       audit = new AuditRecorder(telemetry, _ => None),
       metrics = new MaintenanceMetrics:
         def recordRun(
@@ -64,7 +66,7 @@ class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
             bytesReclaimed: Long,
             filesCompacted: Int,
             snapshotsExpired: Int
-        ): Unit = recorded = recorded :+ (tenantDb -> result)
+        ): Unit = synchronized { recorded = recorded :+ (tenantDb -> result) }
     )
 
     def audited: List[(String, String)] =
@@ -133,6 +135,44 @@ class MaintenanceReaperSpec extends AnyFlatSpec with Matchers:
     f.rowOf(a)._1 shouldBe "failed"
     f.rowOf(b)._1 shouldBe "failed"
     f.stopped.map(_._2).toSet shouldBe Set("maint-a", "maint-b")
+  }
+
+  it should "try a failed stop again on the next pass, and no more once it succeeded" in {
+    val f = new Fixture(stopFails = true)
+    val r = f.running("acme_db", Some("maint-n1"))
+    f.store.setMaintenanceRunTimes(r.id, heartbeatAt = Some(longAgo))
+    f.reaper.reapOnce.unsafeRunSync()
+    f.stopped.map(_._2) shouldBe List("maint-n1")
+    f.store.maintenanceRunsAwaitingNodeStop().map(_.id) shouldBe List(r.id)
+
+    f.failStops = false
+    f.reaper.reapOnce.unsafeRunSync()
+    f.stopped.map(_._2) shouldBe List("maint-n1", "maint-n1")
+    f.store.maintenanceRunsAwaitingNodeStop() shouldBe empty
+
+    f.reaper.reapOnce.unsafeRunSync()
+    f.stopped.map(_._2) shouldBe List("maint-n1", "maint-n1")
+    // Reaped once, so recorded once, however many passes the stop took.
+    f.recorded shouldBe List("acme_db" -> "failed")
+  }
+
+  it should "stop the node a reap left owed when its leader died before stopping it" in {
+    val f = new Fixture()
+    val r = f.running("acme_db", Some("maint-n1"))
+    f.store.setMaintenanceRunTimes(r.id, heartbeatAt = Some(longAgo))
+    // The previous leader's reap committed, then it died: no stop, no record.
+    f.store.reapMaintenanceRuns(180, 3600L).map(_.run.id) shouldBe List(r.id)
+    f.reaper.reapOnce.unsafeRunSync()
+    f.stopped shouldBe List(PoolKey("acme", "acme_db", "__maint") -> "maint-n1")
+    f.store.maintenanceRunsAwaitingNodeStop() shouldBe empty
+  }
+
+  it should "owe no stop for an over-time run, whose live owner stops its own node" in {
+    val f = new Fixture()
+    val r = f.running("acme_db", Some("maint-n1"))
+    f.store.setMaintenanceRunTimes(r.id, startedAt = Some(longAgo))
+    f.reaper.reapOnce.unsafeRunSync()
+    f.store.maintenanceRunsAwaitingNodeStop() shouldBe empty
   }
 
   "tick" should "reap nothing for one liveness timeout after becoming leader" in {
