@@ -97,14 +97,38 @@ final class ColumnPolicyRewriter(
 ):
   import ColumnPolicyRewriter._
 
+  /** [[rewrite]] with the search flag read from `sql` itself (the protected-write guard's oracle,
+    * the specs). The router passes the flag it read once from the client's own text.
+    */
   def rewrite(
       sql: String,
       kind: StatementKind,
       eff: EffectiveSet,
       ctx: SchemaContext
   ): IO[Outcome] =
+    rewrite(sql, kind, eff, ctx, searchFlagged(sql))
+
+  /** `searchStatement`: the client's statement calls a search function
+    * ([[ai.starlake.quack.edge.search.SearchFunctions.callsSearch]]); read only for a principal
+    * holding a column policy.
+    */
+  def rewrite(
+      sql: String,
+      kind: StatementKind,
+      eff: EffectiveSet,
+      ctx: SchemaContext,
+      searchStatement: => Boolean
+  ): IO[Outcome] =
     if !enabled then IO.pure(Passthrough)
     else if eff.user.tenant.isEmpty then IO.pure(Passthrough)
+    else if eff.columnPolicies.nonEmpty && searchStatement then
+      // Search spec 4.3 (owner ruling 2026-11-14): a column-policy holder's statement that the
+      // search detector flags is denied as a real search call is, whatever its kind, before the
+      // row-policy wrap of rule 3 runs. The detector over-includes (a literal, a CTE or alias
+      // column list, a truncated scan), and the wrap of such a statement repeats a real `rowid`
+      // column under a name (`rowid_1`) no column policy covers, so passing it would read the
+      // masked column raw.
+      IO.pure(PassthroughParseFailed)
     else if kind != StatementKind.Select then IO.pure(Passthrough)
     else if eff.columnPolicies.isEmpty then IO.pure(Passthrough)
     else
@@ -124,6 +148,10 @@ final class ColumnPolicyRewriter(
               case other                        => other
             }
       }
+
+  /** The search detector, guarded: a scan that overflows counts as flagged (fail closed). */
+  private def searchFlagged(sql: String): Boolean =
+    TooDeep.orElse(true)(ai.starlake.quack.edge.search.SearchFunctions.callsSearch(sql))
 
   private def rewriteCanonical(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
     if readsOnlyCatalogFunctions(sql) then IO.pure(Passthrough)

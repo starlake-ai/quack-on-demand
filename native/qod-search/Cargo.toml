@@ -6,13 +6,21 @@ publish = false
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 # The version Task 5 pinned (bench/search/phase0/tantivy-probe), exactly.
 tantivy = "=0.27.0"
+# The bundle's region checksums (search spec 6.2). Already in the lock through tantivy.
+crc32fast = "1"
+# meta.json of the per-call union (spec 5.2), written from Tantivy's own serde types. Already in the
+# lock through tantivy.
+serde_json = "1"
 
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+# A panic unwinds to the C ABI, where every function catches it and returns an error (OWNER RULING
+# 2026-11-15, search spec 9): Tantivy's asserts and index panics are reachable from crafted bundle
+# bytes. A stack overflow or an allocation failure still aborts.
+panic = "unwind"

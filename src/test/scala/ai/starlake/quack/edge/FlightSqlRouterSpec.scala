@@ -3654,3 +3654,129 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     tracker.snapshot(first.nodeId).copy(draining = false) shouldBe
       ai.starlake.quack.route.NodeLoad.empty
 
+  // ---- search spec 4.2, the star rule (owner ruling 2026-11-14) ----
+
+  private val searchStarSql =
+    "SELECT p.* FROM qod_search((SELECT rowid FROM main.customer), 'main.customer', ['c_email'], " +
+      "'x') h JOIN main.customer p ON p.rowid = h.rowid"
+
+  "a search statement with a star projection" should
+    "be refused before the policy steps, for every principal, with its code" in:
+      val principals = List(
+        "superuser"         -> Some(superuserSet),
+        "unbound"           -> None,
+        "plain tenant user" -> Some(wildcardAllSet),
+        "column policy"     -> Some(effWithPolicies(List(maskCustomerEmail))),
+        "row policy"        -> Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      for (label, eff) <- principals do
+        val (router, capturedSql, _) =
+          setupWithRewriter(
+            rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+              new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+                Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+              ),
+              enabled = true
+            ),
+            protectedWriteGuard = guardKnowingCustomer
+          )
+        val out = router.execute("star-1", "alice", poolKey, searchStarSql, eff).unsafeRunSync()
+        withClue(label) {
+          val failure = out.left.toOption.get
+          failure shouldBe a[RouterFailure.AccessDenied]
+          // The star screen's text, not the column-policy step's parse_failed nor a guard's.
+          failure.reason shouldBe
+            s"access denied: ${ai.starlake.quack.edge.search.SearchStarScreen.Message}"
+          failure.reason should include("search_star_unsupported")
+          capturedSql() shouldBe ""
+        }
+
+  it should "let the same statement with listed columns reach the next steps" in:
+    val listed   = searchStarSql.replace("SELECT p.*", "SELECT p.c_id, h.score")
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+      ),
+      enabled = true
+    )
+    // A superuser: no policy step applies, the statement is sent.
+    val (router, capturedSql, _) = setupWithRewriter(rewriter = rewriter)
+    router
+      .execute("star-2", "alice", poolKey, listed, Some(superuserSet))
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql() should include("qod_search(")
+    // A column-policy holder: past the star screen, the column-policy step denies a search call.
+    val (router2, capturedSql2, _) = setupWithRewriter(rewriter = rewriter)
+    val denied            = router2
+      .execute("star-3", "alice", poolKey, listed, Some(effWithPolicies(List(maskCustomerEmail))))
+      .unsafeRunSync()
+    denied.left.toOption.get.reason should include("column policy rewrite could not parse")
+    capturedSql2() shouldBe ""
+
+  it should "journal one denied history row and one failed StatementExecuted" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    router
+      .execute("star-4", "alice", poolKey, searchStarSql, Some(superuserSet))
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = router.history.snapshot(1).head
+    latest.status shouldBe "denied"
+    latest.error shouldBe Some(ai.starlake.quack.edge.search.SearchStarScreen.Message)
+    val executed = received.toArray.toList.collect { case e: ManagerEvent.StatementExecuted => e }
+    executed.map(_.ok) shouldBe List(false)
+
+  // Review C1: a mask expression holding a search name lands in the column-policy rewriter's
+  // output; the row-policy wrap's search flag is read from the client's own text, so it never
+  // keeps rowid (no `rowid_1` repeat of the real rowid column) for a statement the client wrote
+  // with no search name.
+  "a search name in a mask expression" should "never switch the wrap to keep rowid" in:
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "rpages") -> List("id", "rowid", "secret"))
+      ),
+      enabled = true
+    )
+    val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      tenantUser,
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      List(
+        ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+          "cp-r1",
+          "r-1",
+          "*",
+          "main",
+          "rpages",
+          "rowid",
+          "deny",
+          None
+        ),
+        ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+          "cp-r2",
+          "r-1",
+          "*",
+          "main",
+          "rpages",
+          "secret",
+          "mask",
+          Some("'hidden (see qod_search(x))'")
+        )
+      ),
+      List(
+        ai.starlake.quack.ondemand.state
+          .RoleRowPolicy("rp-r", "r-1", "*", "main", "rpages", "id = 3")
+      )
+    )
+    val (router, capturedSql, _) = setupWithRewriter(rewriter = rewriter)
+    router
+      .execute("c1-1", "alice", poolKey, "SELECT secret, rowid_1 FROM main.rpages", Some(eff))
+      .unsafeRunSync() match
+      case Right(qr) => qr.close()
+      case Left(_)   => ()
+    val sent = capturedSql()
+    info(s"sent: $sent")
+    sent should include("(SELECT * FROM main.rpages WHERE (id = 3))")
+    sent should not include "*, rowid"

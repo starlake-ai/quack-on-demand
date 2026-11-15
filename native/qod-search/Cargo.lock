@@ -599,6 +599,8 @@ dependencies = [
 name = "qod_search_core"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
+ "serde_json",
  "tantivy",
 ]
 

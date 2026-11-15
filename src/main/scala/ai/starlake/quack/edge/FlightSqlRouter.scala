@@ -392,7 +392,13 @@ final class FlightSqlRouter(
         * ([[QuackHttpAdapter.sendStampRequired]]). A statement that is not a write leaves it
         * unused.
         */
-      commitMessage: Option[String] = None
+      commitMessage: Option[String] = None,
+      /** The client's own statement when `sql` is a wrapper the gateway built around it (the Flight
+        * SQL schema probe `SELECT * FROM (<sql>) AS _qod_probe LIMIT 0`): the search star screen
+        * and the search flag of the policy rewriters read it, never the wrapper (search spec 4.2
+        * rules 3 and 10). None: `sql` is the client's statement.
+        */
+      screenSql: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
     adminExecutor match
       case Some(exec) if adminDispatch && ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
@@ -442,7 +448,8 @@ final class FlightSqlRouter(
               patId = patId,
               evaluate = Some(adapterEvaluate),
               purpose = DecidePurpose.Live,
-              commitMessage = commitMessage
+              commitMessage = commitMessage,
+              screenSql = screenSql
             ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
             // The session state follows the request's first statement: `BEGIN; ...; COMMIT`
             // would leave it "in a transaction" (pinned, writes unstamped) though the request
@@ -679,7 +686,9 @@ final class FlightSqlRouter(
       purpose: DecidePurpose,
       /** [[execute]]'s `commitMessage`: the message a stamped write carries in place of the verb's.
         */
-      commitMessage: Option[String] = None
+      commitMessage: Option[String] = None,
+      /** [[execute]]'s `screenSql`: the client's own statement when `sql` is a gateway wrapper. */
+      screenSql: Option[String] = None
   ): IO[Either[RouterFailure, Routed[A]]] =
     if purpose == DecidePurpose.DryRun && !FlightSqlRouter.dryRunnable(effectiveSet) then
       IO.pure(Left(FlightSqlRouter.dryRunRefused))
@@ -702,7 +711,8 @@ final class FlightSqlRouter(
         evaluate,
         failInTransaction,
         purpose,
-        commitMessage
+        commitMessage,
+        screenSql
       )
 
   /** [[executeWith]] past its dry-run principal check. */
@@ -724,8 +734,12 @@ final class FlightSqlRouter(
       evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]],
       failInTransaction: Option[FlightSqlRouter.TransactionFence],
       purpose: DecidePurpose,
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      screenSql: Option[String]
   ): IO[Either[RouterFailure, Routed[A]]] =
+    // The client's own statement: what every step that reads the search flag or screens stars
+    // judges, whichever rewrite of it runs (search spec 4.2 rules 3 and 10).
+    val clientStatement = screenSql.getOrElse(sql)
     def run(
         statement: String,
         pin: Option[String],
@@ -750,7 +764,8 @@ final class FlightSqlRouter(
         purpose,
         detail = detail,
         pinLost = failInTransaction,
-        commitMessage = commitMessage
+        commitMessage = commitMessage,
+        screenSql = clientStatement
       )
     // The client's statement answered with `failure` before anything ran it: its history row.
     def refused(failure: RouterFailure): IO[Either[RouterFailure, Routed[A]]] =
@@ -947,7 +962,9 @@ final class FlightSqlRouter(
       internal = true,
       pinLost = pinLost,
       // An internal read-back is never stamped.
-      commitMessage = None
+      commitMessage = None,
+      // The gateway's own statement, judged as written.
+      screenSql = statement
     ).flatMap {
       case Left(failure) => IO.pure(Left(failure))
       case Right(routed) => IO(routed.close()).as(Right((routed.value, routed.nodeId)))
@@ -973,7 +990,8 @@ final class FlightSqlRouter(
       internal: Boolean = false,
       detail: Map[String, String] = Map.empty,
       pinLost: Option[FlightSqlRouter.TransactionFence],
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      screenSql: String
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Backstop behind the analysis steps' own TooDeep guards: the screens, gates and rewriters run
     // synchronously here, before any IO, so a walk none of them guards that overflows is denied
@@ -1001,7 +1019,8 @@ final class FlightSqlRouter(
         internal,
         detail,
         pinLost,
-        commitMessage
+        commitMessage,
+        screenSql
       )
     )
 
@@ -1096,7 +1115,8 @@ final class FlightSqlRouter(
       internal: Boolean,
       detail: Map[String, String],
       pinLost: Option[FlightSqlRouter.TransactionFence],
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      screenSql: String
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
     val s    = openSession(connectionId, user, poolKey, recordExecution, source)
@@ -1156,6 +1176,23 @@ final class FlightSqlRouter(
           maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
           Left(RouterFailure.AccessDenied(s"access denied: $reason"))
 
+    // Whether the client's own statement calls a search function (search spec 4.2 rule 3), read
+    // once from that text, never from a rewriter's output (a mask expression can carry a search
+    // name) or a gateway-built wrapper (the schema probe's star), for the star screen and both
+    // policy rewriters. An overflowing scan counts as a call (fail closed).
+    val searchStatement =
+      TooDeep.orElse(true)(ai.starlake.quack.edge.search.SearchFunctions.callsSearch(screenSql))
+
+    // Search spec 4.2, the star rule (owner ruling 2026-11-14): a statement calling a search
+    // function holds no star projection, for every principal, superusers included, refused before
+    // the protected-write guard and the rewriters, like their own refusals (AccessDenied).
+    def searchStar(): Either[RouterFailure, Unit] =
+      ai.starlake.quack.edge.search.SearchStarScreen.refusal(screenSql, searchStatement) match
+        case None         => Right(())
+        case Some(reason) =>
+          maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+          Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = defaultDb,
@@ -1196,8 +1233,10 @@ final class FlightSqlRouter(
       case None =>
         Right(sql) // no RBAC principal bound: no policy applies
       case Some(eff) =>
-        val t0        = System.nanoTime()
-        val outcome   = columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync()
+        val t0      = System.nanoTime()
+        val outcome = columnPolicyRewriter
+          .rewrite(sql, kind, eff, schemaCtx, searchStatement)
+          .unsafeRunSync()
         val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
         stmtInstruments.recordColumnPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
@@ -1230,7 +1269,8 @@ final class FlightSqlRouter(
           defaultDatabase = defaultDb,
           defaultSchema = defaultSchm
         )
-        val outcome   = rowPolicyRewriter.rewrite(rewrittenSql, kind, eff, schemaCtxR)
+        val outcome =
+          rowPolicyRewriter.rewrite(rewrittenSql, kind, eff, schemaCtxR, searchStatement)
         val elapsedMs = (System.nanoTime() - r0) / 1_000_000L
         stmtInstruments.recordRowPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
@@ -1332,11 +1372,12 @@ final class FlightSqlRouter(
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(denial))
             Left(RouterFailure.AccessDenied(s"access denied: $denial"))
 
-    // client scan -> protected write -> CLS -> RLS -> metadata filter -> rewrite scope; every
-    // denial arm has already journaled itself. Bound to resultIO so one flatTap below emits
-    // exactly one StatementExecuted event on every exit path, including the denial arms.
+    // client scan -> search star -> protected write -> CLS -> RLS -> metadata filter -> rewrite
+    // scope; every denial arm has already journaled itself. Bound to resultIO so one flatTap below
+    // emits exactly one StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
       clientScan()
+        .flatMap(_ => searchStar())
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
         .flatMap(rlsRewritten)

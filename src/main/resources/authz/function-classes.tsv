@@ -1000,6 +1000,8 @@ printf	main	scalar	allowed
 product	main	aggregate	allowed
 qod_authz_stats	main	table	superuser
 qod_screen	main	scalar	superuser
+qod_search_drain	main	table	allowed
+qod_search_drain_parallel	main	table	allowed
 qod_session	main	table	allowed
 quack_active_connections	main	table	superuser
 quack_cancel	main	table	superuser

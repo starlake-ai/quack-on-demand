@@ -120,6 +120,10 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     "pragma_platform",
     "pragma_user_agent",
     "pragma_version",
+    // QoD Search Phase 0 prototype only (plan 2026-11-14-search-phase0-prototype, Task 5): the
+    // drain timing probes; Phase 1 removes them.
+    "qod_search_drain",
+    "qod_search_drain_parallel",
     "qod_session",
     "query",
     "query_table",

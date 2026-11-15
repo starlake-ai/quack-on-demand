@@ -84,6 +84,11 @@ ALLOWED_TABLE = {
     # judged on its grant like any read of it. The parse screen admits them only with the catalog,
     # schema and table as literals (screen_rules.cpp, ChangeFeed).
     "ducklake_table_deletions", "ducklake_table_insertions",
+    # QoD Search Phase 0 prototype only (docs/superpowers/plans/2026-11-14-search-phase0-prototype.md,
+    # Task 5): the drain timing probes of a QOD_NODE_SEARCH build. They read nothing but their TABLE
+    # input, whose reads the plan describes and the grants judge. Phase 1 removes them. rowid capped at
+    # 2^27 (Task 7a Step 1), their bitsets taken from the buffer manager, under memory_limit.
+    "qod_search_drain", "qod_search_drain_parallel",
 }
 
 # Superusers only. Listed for review; any table function no set names is superuser anyway.

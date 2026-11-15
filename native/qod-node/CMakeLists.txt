@@ -229,6 +229,15 @@ if(QOD_NODE_SEARCH)
   endif()
   target_include_directories(qod_node_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../qod-search/include)
   target_link_libraries(qod_node_core PUBLIC qod_search_core)
+  # The search table functions (search_functions.cpp; Phase 0 part 2 Task 5's drain probes so far),
+  # registered by main.cpp under QOD_NODE_SEARCH: PUBLIC, so qod-node and the tests see it too.
+  target_sources(qod_node_core PRIVATE src/search_functions.cpp)
+  # The custom sink operator a search call's input drain runs in (Phase 0 part 2 Task 7a, spec 7.6).
+  target_sources(qod_node_core PRIVATE src/search_sink.cpp)
+  # The snapshot source of a search call (Phase 0 part 2 Task 6, spec 7.1 step 2, the named exception
+  # of section 13): DuckLake's own entry points driven from C++ in the client's transaction.
+  target_sources(qod_node_core PRIVATE src/search_snapshot.cpp)
+  target_compile_definitions(qod_node_core PUBLIC QOD_NODE_SEARCH=1)
 endif()
 
 add_executable(qod-node src/main.cpp)
@@ -305,10 +314,51 @@ if(QOD_NODE_TESTS)
     qod_node_test(search_encryption_probe_test)
     add_test(NAME search_encryption_probe COMMAND search_encryption_probe_test)
     set_tests_properties(search_encryption_probe PROPERTIES SKIP_RETURN_CODE 77 LABELS probe)
+    # Search Phase 0 part 2, Task 1 (spec 7.1 step 2): option (b)'s open checks, M1 to M4, on a
+    # DuckDB-file and a Postgres DuckLake catalog. Exits 77 when ducklake or postgres cannot load.
+    qod_node_test(search_source_probe_test)
+    add_test(NAME search_source_probe COMMAND search_source_probe_test)
+    set_tests_properties(search_source_probe PROPERTIES SKIP_RETURN_CODE 77 LABELS probe)
   endif()
   if(QOD_NODE_SEARCH)
     qod_node_test(search_link_test)
     add_test(NAME search_link COMMAND search_link_test)
+    # Search Phase 0 part 2, Task 6: ResolveSnapshotView against the catalog's own answers, on a
+    # DuckDB-file catalog and (QOD_P2_PG_DSN_FILE) a Postgres one. Exits 77 when ducklake cannot load.
+    qod_node_test(search_snapshot_test)
+    add_test(NAME search_snapshot COMMAND search_snapshot_test)
+    set_tests_properties(search_snapshot PROPERTIES SKIP_RETURN_CODE 77)
+    # Search Phase 0 part 2, Task 7a Step 1: the drain probes refuse a rowid at or above 2^27 before
+    # any allocation, and their bitsets count against memory_limit.
+    qod_node_test(search_drain_cap_test)
+    add_test(NAME search_drain_cap COMMAND search_drain_cap_test)
+    # Search Phase 0 part 2, Task 7a (spec 7.6): the custom sink operator and qod_search_drain_sink, the
+    # light cases on every platform; the slow ones (240 runs under load, a 100M-row cancellation) only
+    # with QOD_NODE_PROBES.
+    qod_node_test(search_sink_test)
+    add_test(NAME search_sink COMMAND search_sink_test)
+    if(QOD_NODE_PROBES)
+      add_test(NAME search_sink_slow COMMAND search_sink_test --slow)
+      set_tests_properties(search_sink_slow PROPERTIES LABELS "probe;slow")
+    endif()
+    if(NOT WIN32)
+      # No thread-local state in the sink or the search functions (Q3: a final can run on another thread).
+      add_test(NAME search_sink_no_tls COMMAND sh -c
+        "! grep -n thread_local ${CMAKE_CURRENT_SOURCE_DIR}/src/search_sink.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/search_functions.cpp")
+    endif()
+    if(QOD_NODE_PROBES AND NOT WIN32)
+      # Search Phase 0 part 2, Task 5 (spec 7.6, 7.4): the drain under MaxThreads() = 1 against the part
+      # 2 stack's catalog (QOD_P2_DUCKLAKE_DSN_FILE), timings only. Exits 77 without the DSN file or when
+      # ducklake or postgres cannot load.
+      qod_node_test(search_drain_bench)
+      add_test(NAME search_drain_bench COMMAND search_drain_bench)
+      set_tests_properties(search_drain_bench PROPERTIES SKIP_RETURN_CODE 77 LABELS probe)
+      # Search Phase 0 part 2, Task 7a Step 2 (spec 7.6): the custom sink mechanism on the release
+      # library (hook order, the swap, Finalize after every Combine, prepared statements). Prints only.
+      qod_node_test(search_sink_probe_test)
+      add_test(NAME search_sink_probe COMMAND search_sink_probe_test)
+      set_tests_properties(search_sink_probe PROPERTIES LABELS probe)
+    endif()
   endif()
   find_package(Threads REQUIRED)
   # A real HTTP server on 127.0.0.1 for the decide client's tests, on every platform.

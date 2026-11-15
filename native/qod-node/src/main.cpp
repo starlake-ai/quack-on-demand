@@ -21,6 +21,9 @@
 #include "node_config.hpp"
 #include "node_hooks.hpp"
 #include "options.hpp"
+#ifdef QOD_NODE_SEARCH
+#include "search_functions.hpp"
+#endif
 #include "secrets.hpp"
 #include "settings_list.hpp"
 #include "spill_dir.hpp"
@@ -80,6 +83,10 @@ int ListFunctionsMode(const NodeOptions &options) {
 	// qod_session and qod_screen are functions every node has. The id and key are never used: no
 	// handle is verified in this mode.
 	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>("qod-node-list", std::string(32, '\0')));
+#ifdef QOD_NODE_SEARCH
+	// The search functions too, so the classification lists them (Search Phase 0).
+	RegisterSearchFunctions(*db.instance);
+#endif
 	duckdb::Connection con(db);
 	RunInitFiles(con, options);
 	ListFunctions(con, std::cout);
@@ -128,6 +135,10 @@ int Serve(const NodeOptions &options) {
 	// connection quack opens from here on.
 	RegisterNodeAuthz(*db.instance,
 	                  std::make_shared<NodeAuthz>(options.node_id, secrets.node_key, SystemNowMs, limits));
+#ifdef QOD_NODE_SEARCH
+	// Search Phase 0: the search table functions, after the identity checks and before any SQL.
+	RegisterSearchFunctions(*db.instance);
+#endif
 	duckdb::Connection con(db);
 
 	// Before any CREATE SECRET or ATTACH: once duckdb_secrets() has put the secret manager in use,

@@ -344,8 +344,8 @@ jobs:
           rustc --version
           cmake -S native/qod-node -B native/qod-node/build-search -DCMAKE_BUILD_TYPE=Release \
             -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DDUCKDB_HOME="$DUCKDB_HOME"
-          cmake --build native/qod-node/build-search --config Release --target qod-node search_link_test sql_script_test
-          ctest --test-dir native/qod-node/build-search -C Release -R search_link --output-on-failure
+          cmake --build native/qod-node/build-search --config Release --target qod-node search_link_test sql_script_test search_sink_test search_drain_cap_test
+          ctest --test-dir native/qod-node/build-search -C Release -R 'search_link|search_sink|search_drain_cap' --output-on-failure
           ls -l native/qod-node/build-search/qod-node native/qod-node/build-search/search_link_test \
             native/qod-node/build-search/sql_script_test
           if [[ "$RUNNER_OS" == macOS ]]; then
@@ -448,8 +448,8 @@ jobs:
           cmake -S native/qod-node -B native/qod-node/build-search -A ${{ matrix.cmake_arch }} \
             -DQOD_NODE_DUCKDB_STATIC=ON -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DDUCKDB_HOME="$DUCKDB_HOME" \
             -DQOD_NODE_DUCKDB_VERSION="$version" -DQOD_NODE_DUCKDB_SOURCE_ID="$source_id"
-          cmake --build native/qod-node/build-search --config Release --target qod-node search_link_test sql_script_test
-          ctest --test-dir native/qod-node/build-search -C Release -R search_link --output-on-failure
+          cmake --build native/qod-node/build-search --config Release --target qod-node search_link_test sql_script_test search_sink_test search_drain_cap_test
+          ctest --test-dir native/qod-node/build-search -C Release -R 'search_link|search_sink|search_drain_cap' --output-on-failure
           ls -l native/qod-node/build-search/Release/qod-node.exe native/qod-node/build-search/Release/search_link_test.exe \
             native/qod-node/build-search/Release/sql_script_test.exe
 

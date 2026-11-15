@@ -505,7 +505,16 @@ final class FlightProducerImpl(
         def probeThenPrepare(probeSql: String): Unit =
           scala.util.Try(
             router
-              .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
+              // The client's statement is what the search screens judge, not the probe's wrap.
+              .execute(
+                connId,
+                user,
+                poolKey,
+                probeSql,
+                eff,
+                recordExecution = false,
+                screenSql = Some(sql)
+              )
               .unsafeRunSync()
           ) match
             case scala.util.Success(Right(result)) =>
@@ -1589,7 +1598,16 @@ final class FlightProducerImpl(
         probeSqlOpt.map { probeSql =>
           scala.util.Try(
             router
-              .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
+              // The client's statement is what the search screens judge, not the probe's wrap.
+              .execute(
+                connId,
+                user,
+                poolKey,
+                probeSql,
+                eff,
+                recordExecution = false,
+                screenSql = Some(sql)
+              )
               .unsafeRunSync()
           ) match
             case scala.util.Success(Right(result)) =>

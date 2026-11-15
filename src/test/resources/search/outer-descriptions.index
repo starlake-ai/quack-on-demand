@@ -1,0 +1,6 @@
+duckdb	M3/M2	outer
+postgres	M3/M2	outer
+duckdb	M3/M4	outer
+postgres	M3/M4	outer
+duckdb+keep	M3/M4	outer
+postgres+keep	M3/M4	outer

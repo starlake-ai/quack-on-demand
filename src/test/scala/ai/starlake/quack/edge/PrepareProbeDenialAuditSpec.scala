@@ -197,3 +197,40 @@ class PrepareProbeDenialAuditSpec extends AnyFlatSpec with Matchers:
     store.events shouldBe empty
     router.history.size shouldBe 0
   }
+
+  // Review of fix round 2, I1: the schema probe wraps the client's statement in
+  // `SELECT * FROM (<sql>) AS _qod_probe LIMIT 0`; the search star screen judges the client's
+  // statement, never that wrap (search spec 4.2 rule 10).
+  private val searchListed =
+    "SELECT p.id, h.score FROM qod_search((SELECT rowid FROM b.s.t), 'b.s.t', ['c'], 'x') h " +
+      "JOIN b.s.t p ON p.rowid = h.rowid"
+  private val searchStar = searchListed.replace("SELECT p.id, h.score", "SELECT p.*")
+
+  private def flightInfo(producer: FlightProducerImpl, peer: String, sql: String) =
+    producer.getFlightInfoStatement(
+      FlightSql.CommandStatementQuery.newBuilder().setQuery(sql).build(),
+      context(peer),
+      FlightDescriptor.command(Array.emptyByteArray)
+    )
+
+  "A search statement listing its columns" should "pass the probes of Prepare and GetFlightInfo" in {
+    val (producer, router, journal, store, peer) = setup(() => TestArrow.okResponse())
+    prepare(producer, peer, searchListed).error.get() shouldBe null
+    flightInfo(producer, peer, searchListed) should not be null
+    journal.drainNow()
+    store.events shouldBe empty
+    router.history.size shouldBe 0
+  }
+
+  "A search statement with a star projection" should "be refused at Prepare and GetFlightInfo" in {
+    val (producer, router, journal, store, peer) = setup(() => TestArrow.okResponse())
+    val err                                      = prepare(producer, peer, searchStar).error.get()
+    err should not be null
+    err.getMessage should include(ai.starlake.quack.edge.search.SearchStarScreen.Code)
+    val thrown = the[FlightRuntimeException] thrownBy flightInfo(producer, peer, searchStar)
+    thrown.getMessage should include(ai.starlake.quack.edge.search.SearchStarScreen.Code)
+    journal.drainNow()
+    val rows = router.history.snapshot(8)
+    rows.map(_.status) shouldBe List("denied", "denied")
+    rows.map(_.sql).distinct shouldBe List(searchStar)
+  }
