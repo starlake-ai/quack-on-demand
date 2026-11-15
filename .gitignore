@@ -136,3 +136,4 @@ __pycache__/
 # Local git worktrees
 /.worktrees
 /.superpowers
+/.hallmark/
