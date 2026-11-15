@@ -1005,27 +1005,12 @@ final class FlightSqlRouter(
       )
     )
 
-  /** The catalog and schema the SQL parser resolves `poolKey`'s unqualified names against: the
-    * per-pool dbName/schemaName overrides, so they resolve to what the node actually sees at
-    * execution time.
+  /** The catalog and schema the policy rewriters, the protected-write guard and the metadata filter
+    * qualify `poolKey`'s unqualified names with: [[FlightSqlRouter.nameDefaults]], the target of
+    * the USE prelude the node resolves them under.
     */
   private[edge] def defaultsOf(poolKey: PoolKey): (Option[String], Option[String]) =
-    val maybeState = supervisor.get(poolKey)
-    val poolMeta   = maybeState.map(_.metastore).getOrElse(Map.empty)
-    val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
-    val perKindDb  = kindWire match
-      case "ducklake" | "duckdb-file" =>
-        Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty)
-      case "memory" => Some("memory")
-      case _        => None
-    val perKindSchema = kindWire match
-      case "ducklake" | "duckdb-file" => poolMeta.get("schemaName").filter(_.nonEmpty)
-      case "memory"                   => Some("main")
-      case _                          => None
-    (
-      maybeState.flatMap(_.defaultDatabase).orElse(perKindDb),
-      maybeState.flatMap(_.defaultSchema).orElse(perKindSchema)
-    )
+    FlightSqlRouter.nameDefaults(supervisor.get(poolKey))
 
   /** The router session of `connectionId`, opened (and announced, unless `recordExecution` is
     * false: probes emit nothing) on its first statement.
@@ -1110,8 +1095,7 @@ final class FlightSqlRouter(
       if effectiveSet.exists(_.system) then
         ai.starlake.quack.ondemand.telemetry.StatementValueMask.sql(clientSql)
       else clientSql
-    // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
-    // table refs resolve to what the node actually sees at execution time.
+    // The policy steps qualify unqualified names exactly as the node's USE prelude resolves them.
     val maybeState               = supervisor.get(poolKey)
     val poolMeta                 = maybeState.map(_.metastore).getOrElse(Map.empty)
     val kindWire                 = maybeState.map(_.kindWire).getOrElse("ducklake")
@@ -1933,14 +1917,21 @@ object FlightSqlRouter:
     * the pool carries it as its `path` (NodeKeys), and the node judges secure views against it
     * (CONTRACT Addendum 4 item 22), so both read it here.
     *
-    * The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`. The gateway's
-    * parser default (`defaultsOf`) reads the same field, so reading a different one here made the
-    * gateway and the engine disagree about which schema is current for the same statement: the
-    * gateway qualified unqualified refs against `defaultSchema` while the engine ran
-    * `USE <db>.<schemaName>`. With the demo's settings (defaultSchema=tpch1, schemaName=main) that
-    * surfaced as issue #112, where a native `quack:` client pushes down a schema-relative name and
-    * the node could not resolve it. Where two schemas hold a same-named table it would instead let
-    * the policies match one table while the engine read the other.
+    * It is the one place a pool's unqualified names are resolved: the policy rewriters, the
+    * protected-write guard, the metadata filter and [[RefusedForms]] read it through
+    * [[nameDefaults]] / [[sessionPath]], so they cannot qualify a name with another catalog or
+    * schema than the node resolves it in. The catalog is the database's catalog alias
+    * (`TenantDb.catalogAlias`: `catalogAlias`, else `dbName`, which `effectiveMetastoreFor` fills
+    * with the database's name, or `memory` for kind=memory), never the tenant-db's
+    * `defaultDatabase`, which may only name that catalog: `TenantDb.defaultDatabaseError` refuses
+    * any other value on every write, and a stored one is ignored (`DefaultDatabaseReport`).
+    *
+    * The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`, for the same
+    * reason (issue #112): reading a different field here made the gateway qualify unqualified refs
+    * against `defaultSchema` while the engine ran `USE <db>.<schemaName>`. With the demo's settings
+    * (defaultSchema=tpch1, schemaName=main) a native `quack:` client pushing down a schema-relative
+    * name could not resolve it, and where two schemas hold a same-named table the policies matched
+    * one table while the engine read the other.
     */
   def usePath(st: ai.starlake.quack.ondemand.PoolState): Option[String] =
     sessionPath(st).map(p => s"${useIdentifier(p.catalog)}.${useIdentifier(p.schema)}")
@@ -1952,6 +1943,17 @@ object FlightSqlRouter:
   private def useIdentifier(name: String): String =
     if ai.starlake.quack.model.Names.isValid(name) then name
     else ai.starlake.quack.model.SqlLiterals.duckdbIdent(name)
+
+  /** [[sessionPath]] as the policy steps' default catalog and schema (`defaultsOf`): what an
+    * unqualified table name is qualified with, both None for a pool with no session path (the
+    * prelude sends no USE then, and a policy matches only a name the statement qualifies).
+    */
+  def nameDefaults(
+      st: Option[ai.starlake.quack.ondemand.PoolState]
+  ): (Option[String], Option[String]) =
+    st.flatMap(sessionPath) match
+      case Some(p) => (Some(p.catalog), Some(p.schema))
+      case None    => (None, None)
 
   /** [[usePath]] as its catalog and schema: the session's current catalog and schema for every
     * statement of the pool, which a refused form is qualified with ([[RefusedForms]]).

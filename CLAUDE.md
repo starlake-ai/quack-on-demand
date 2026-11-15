@@ -319,6 +319,23 @@ front door transaction the evaluation runs on the transaction's own link, and a 
 NULL or a non-text value aborts the transaction, as DuckDB would; a gateway refusal of it leaves the
 transaction open).
 
+**One session path.** A pool's unqualified table names resolve in one place,
+`FlightSqlRouter.sessionPath`: `<catalog alias>.<schema>`, the alias being `TenantDb.catalogAlias` of
+the resolved metastore (`catalogAlias`, else `dbName`, which `effectiveMetastoreFor` fills with the
+database's name, or `memory` for kind=memory) and the schema the tenant-db's `defaultSchema`, else
+`schemaName`, else `main` (issue #112). The USE prelude sends it, every handle signs it as `path`, and
+the policy steps (column and row rewriters, `ProtectedWriteGuard` / `RewriteScope`, the metadata
+filter, `RefusedForms`) qualify with it through `FlightSqlRouter.nameDefaults` (`defaultsOf`); nothing
+reads a tenant-db's `defaultDatabase` for resolution (`PoolState` has no such field), so the gateway
+and the node can never qualify one name differently. A `defaultDatabase` may only name the alias:
+`database/create` and `database/update` (REST and MCP alike) refuse any other value with `400
+default_database_mismatch` (`TenantDb.defaultDatabaseError`, compared ignoring case; an update leaving a
+stored one and the catalog alone passes). A manifest import keeps the row and drops such a value, one
+ERROR per row naming tenant and database (`ManifestImporter.defaultDatabasesDropped`), so a backup
+always restores. A stored one is ignored, left out of a manifest export with one ERROR, and reported
+at boot with one stderr `WARN:` line per row (`DefaultDatabaseReport`). Reach a federated catalog's
+tables by their alias.
+
 Files by path, for non-superusers (decisions 15, 18, 23). **S3 only with keys of the user's own.**
 Every user registers credentials for a scope `s3://<bucket>/` or `s3://<bucket>/<prefix>/` (whole
 segments, a lowercase bucket, never an access point alias) from their profile session or PAT: REST

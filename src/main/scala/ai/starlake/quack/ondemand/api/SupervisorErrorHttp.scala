@@ -28,4 +28,11 @@ object SupervisorErrorHttp:
       Some(StatusCode.Conflict -> ErrorResponse("data_path_taken", m))
     case SupervisorError.LocalFilesOff(m) =>
       Some(StatusCode.BadRequest -> ErrorResponse(PoolSupervisor.LocalFilesOffCode, m))
+    case SupervisorError.DefaultDatabaseMismatch(m) =>
+      Some(
+        StatusCode.BadRequest -> ErrorResponse(
+          ai.starlake.quack.model.TenantDb.DefaultDatabaseMismatchCode,
+          m
+        )
+      )
     case _ => None

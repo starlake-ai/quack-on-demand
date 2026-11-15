@@ -628,6 +628,18 @@ final class PoolSupervisor(
     then stamped.updated(TenantDb.CreateDatabaseKey, "true")
     else stamped.removed(TenantDb.CreateDatabaseKey)
 
+  /** Why `td`'s `defaultDatabase` cannot stand ([[TenantDb.defaultDatabaseError]]): it names
+    * another catalog than the one its nodes resolve unqualified names in, read from the row's
+    * resolved metastore exactly as `FlightSqlRouter.sessionPath` reads a pool's. Nothing at runtime
+    * reads the value (the policy steps qualify with the session path), so a stored one is only
+    * reported (`DefaultDatabaseReport`); a write is refused, so no row says what nodes do not do.
+    */
+  def defaultDatabaseRefusal(td: TenantDb): Option[String] =
+    TenantDb.defaultDatabaseError(
+      td.defaultDatabase,
+      TenantDb.catalogAlias(effectiveMetastoreFor(td))
+    )
+
   /** The row's resolved data path, from the row itself, never a lookup by name (the security
     * audit). Empty when it resolves to none.
     */
@@ -988,10 +1000,9 @@ final class PoolSupervisor(
             initSql = p.initSql,
             initSqlTrusted = p.initSqlTrusted,
             extraSetupSql = extraSetupSql,
-            // Session defaults for SQL validation / policy-rewrite. Omitting these degraded every
-            // restored pool to the metastore's schemaName ("main"), so schema-qualified refs
-            // stopped matching tenant-db grants after a restart / NOTIFY rehydration.
-            defaultDatabase = td.defaultDatabase,
+            // The session schema for the USE prelude and the policy rewriters. Omitting it degraded
+            // every restored pool to the metastore's schemaName ("main") after a restart / NOTIFY
+            // rehydration.
             defaultSchema = td.defaultSchema,
             cpu = p.cpu,
             memory = p.memory,
@@ -2730,6 +2741,9 @@ final class PoolSupervisor(
                             .map(SupervisorError.OwnLoginRequired(_))
                         )
                         .orElse(TenantDb.validate(td, defaultMetastore).map(invalid))
+                        .orElse(
+                          defaultDatabaseRefusal(td).map(SupervisorError.DefaultDatabaseMismatch(_))
+                        )
                         .orElse(localFilesCreateRefusal(td))
                     refused match
                       case Some(err) => Left(err)
@@ -2997,7 +3011,19 @@ final class PoolSupervisor(
         // An update that leaves a row as blocked as it found it stays open: it may be the fix.
         val blockedByUpdate =
           if localFilesBlock(td).isDefined then None else localFilesCreateRefusal(merged)
-        (choice, TenantDb.validateSafety(merged), refused.orElse(blockedByUpdate)) match
+        // A defaultDatabase the row would hold that names another catalog than its nodes resolve
+        // in: refused when the update sends one, or when it moves the catalog away from a stored
+        // value that matched. A row stored with such a value keeps taking updates that leave both
+        // alone, as nothing reads the value (`defaultDatabaseRefusal`).
+        val defaultDatabaseMismatch =
+          defaultDatabaseRefusal(merged)
+            .filter(_ => patch.defaultDatabase.isDefined || defaultDatabaseRefusal(td).isEmpty)
+            .map(SupervisorError.DefaultDatabaseMismatch(_))
+        (
+          choice,
+          TenantDb.validateSafety(merged),
+          refused.orElse(defaultDatabaseMismatch).orElse(blockedByUpdate)
+        ) match
           case (Some(err), _, _) => IO.pure(Left(err))
           case (_, Some(msg), _) =>
             IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
@@ -3078,7 +3104,6 @@ final class PoolSupervisor(
                           s3 = merged.objectStore,
                           dbInitSql = merged.initSql,
                           dbInitSqlTrusted = merged.initSqlTrusted,
-                          defaultDatabase = merged.defaultDatabase,
                           defaultSchema = merged.defaultSchema
                         )
                       )
@@ -3329,7 +3354,6 @@ final class PoolSupervisor(
                     dbInitSqlTrusted = td.initSqlTrusted,
                     initSql = initSql,
                     initSqlTrusted = poolEntity.initSqlTrusted,
-                    defaultDatabase = td.defaultDatabase,
                     defaultSchema = td.defaultSchema,
                     cpu = cpu,
                     memory = memory,

@@ -706,6 +706,36 @@ object TenantDb {
         "(1..63 chars, start with a letter or underscore, only letters, digits, underscore)"
     }
 
+  /** The catalog a database's nodes resolve its unqualified table names in: the catalog of the USE
+    * prelude (`FlightSqlRouter.sessionPath`, which the policy rewriters read too), `catalogAlias`,
+    * else `dbName`, else what `PoolSupervisor.effectiveMetastoreFor` fills `dbName` with: the
+    * database's own name, or DuckDB's `memory` catalog for kind=memory. `metastore` is the row's
+    * own map (or its resolved one, which reads the same).
+    */
+  def sessionCatalog(kind: TenantDbKind, name: String, metastore: Map[String, String]): String =
+    catalogAlias(metastore, fallback = if kind == TenantDbKind.InMemory then "memory" else name)
+
+  /** The REST error code of [[defaultDatabaseError]]. */
+  val DefaultDatabaseMismatchCode: String = "default_database_mismatch"
+
+  /** The refusal of a `defaultDatabase` naming another catalog than `sessionCatalog`, the one the
+    * database's nodes resolve unqualified names in. Empty reads as unset. Compared ignoring ASCII
+    * case, as DuckDB compares catalog names. The value is never quoted back.
+    */
+  def defaultDatabaseError(
+      defaultDatabase: Option[String],
+      sessionCatalog: String
+  ): Option[String] =
+    defaultDatabase
+      .filter(_.nonEmpty)
+      .filterNot(_.equalsIgnoreCase(sessionCatalog))
+      .map(_ =>
+        "defaultDatabase must be left unset or name the database's own catalog (its " +
+          "catalogAlias, else its dbName, else the database's name; memory for kind=memory): " +
+          "unqualified table names resolve there on its nodes, and its row and column policies " +
+          "follow them. Name a table of another catalog by its catalog."
+      )
+
   /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
     * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)
     * so both share one source of truth.
