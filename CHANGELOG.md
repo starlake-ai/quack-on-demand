@@ -13,6 +13,15 @@
   the earlier release can be failed as `stale` by an upgraded leader (the earlier release writes
   no liveness heartbeat during a step). No node is stopped for it, and the next cadence or
   threshold tick queues the run again.
+- A database's `defaultDatabase` may only name the database's own catalog (its `catalogAlias`,
+  else its `dbName`, else its name; `memory` for `kind=memory`), where its nodes resolve
+  unqualified table names. `database/create` and `database/update` (REST, CLI
+  `--default-database`, console, MCP) refuse any other value with `400 default_database_mismatch`.
+  A manifest import keeps such a database and drops the value, logging one ERROR per database. A
+  database stored with another value keeps working: the value is ignored, a manifest export leaves
+  it out, and each boot prints one `WARN:` line for it. Clear it with
+  `qod database update --default-database ''`. A `memory` database that pointed `defaultDatabase`
+  at a federated alias names that catalog's tables by their alias (`fedpg.public.orders`).
 
 ### Changed
 
@@ -53,6 +62,10 @@
   through an alias written after parentheses around a table (`SELECT * FROM (customer) AS z`, also
   `z.<col>`, `z.*`, in a join, a subquery or a CTE, and in a filter). The alias now names every
   table inside the parentheses, so such a statement is refused. Row policies were not affected.
+- Security: row and column policies applied to the wrong catalog when a
+  database's `defaultDatabase` differed from its catalog alias. The policy rewriters now qualify
+  unqualified names with the catalog and schema the node resolves them in, whatever
+  `defaultDatabase` says.
 
 ## 0.13.0
 

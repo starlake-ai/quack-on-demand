@@ -54,6 +54,10 @@ package ai.starlake.quack.ondemand
   *   - [[ai.starlake.quack.ondemand.SupervisorError.LocalFilesOff LocalFilesOff]]: the database's
   *     data path is local and nodes have local files off (`QOD_NODE_ALLOW_LOCAL_FILES=false`); REST
   *     400 `local_files_off`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.DefaultDatabaseMismatch DefaultDatabaseMismatch]]:
+  *     a `defaultDatabase` names another catalog than the one the database's nodes resolve
+  *     unqualified names in (`TenantDb.defaultDatabaseError`); REST 400
+  *     `default_database_mismatch`.
   */
 enum SupervisorError(val message: String):
   case NotFound(msg: String)                        extends SupervisorError(msg)
@@ -74,3 +78,4 @@ enum SupervisorError(val message: String):
   case SuperuserChoice(msg: String)                 extends SupervisorError(msg)
   case DataPathTaken(msg: String)                   extends SupervisorError(msg)
   case LocalFilesOff(msg: String)                   extends SupervisorError(msg)
+  case DefaultDatabaseMismatch(msg: String)         extends SupervisorError(msg)

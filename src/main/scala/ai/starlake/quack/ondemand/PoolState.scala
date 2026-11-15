@@ -31,8 +31,11 @@ final case class PoolState(
     initSql: String = "",
     /** Whether [[initSql]] was written by a superuser or the manager (`Pool.initSqlTrusted`). */
     initSqlTrusted: Boolean = false,
-    defaultDatabase: Option[String] = None, // tenant-db-level override for SQL validation context
-    defaultSchema: Option[String] = None,   // tenant-db-level override for SQL validation context
+    /** The tenant-db's `defaultSchema`: the schema of the pool's session path
+      * (`FlightSqlRouter.sessionPath`), which the USE prelude and the policy steps both read. The
+      * tenant-db's `defaultDatabase` has no field here: the session's catalog is the catalog alias.
+      */
+    defaultSchema: Option[String] = None,
     cpu: String = "",
     memory: String = "",
     podTemplateYaml: String = ""

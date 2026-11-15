@@ -236,11 +236,11 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind            = "memory",
       metastore       = Map.empty,
       dataPath        = "",
-      defaultDatabase = Some("fedpg"),
+      defaultDatabase = Some("memory"),
       defaultSchema   = Some("public")
     ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val td = out.toOption.get
-    td.defaultDatabase shouldBe Some("fedpg")
+    td.defaultDatabase shouldBe Some("memory")
     td.defaultSchema   shouldBe Some("public")
 
   private val notPlainNames = List("sales reporting", "a.b", "a;b", "a'b", "a\"b", "1abc")

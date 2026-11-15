@@ -9,6 +9,9 @@ app = typer.Typer(help="Tenant databases (DuckLake catalogs).")
 _INIT_SQL_HELP = ("SQL each node runs at start. A tenant admin's may hold only SET/RESET of allowlisted "
                   "settings to literals, read-only PRAGMAs and INSTALL/LOAD of allowlisted extensions; "
                   "a superuser's is not restricted.")
+_DEFAULT_DATABASE_HELP = ("Leave unset, or name the database's own catalog (its catalogAlias, else dbName, "
+                          "else its name; memory for kind=memory): unqualified names resolve there. "
+                          "Name a table of another catalog by its catalog.")
 
 
 @app.command("list")
@@ -59,7 +62,7 @@ def create(
         help="KEY=VALUE, repeatable. A tenant admin sends it only with a remote --data-path, "
         "complete for its scheme.",
     ),
-    default_database: str = typer.Option(None, "--default-database"),
+    default_database: str = typer.Option(None, "--default-database", help=_DEFAULT_DATABASE_HELP),
     default_schema: str = typer.Option(None, "--default-schema"),
     init_sql: str = typer.Option("", "--init-sql", help=_INIT_SQL_HELP),
     managed_storage: bool = typer.Option(
@@ -149,7 +152,9 @@ def update(
         "changes it only on a database holding complete keys of its own, which stay complete, "
         "and sends the secret with any change.",
     ),
-    default_database: str = typer.Option(None, "--default-database"),
+    default_database: str = typer.Option(
+        None, "--default-database", help=_DEFAULT_DATABASE_HELP + " Empty clears it."
+    ),
     default_schema: str = typer.Option(None, "--default-schema"),
     init_sql: str = typer.Option(None, "--init-sql", help=_INIT_SQL_HELP),
 ):

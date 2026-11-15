@@ -708,6 +708,9 @@ object Main extends IOApp with LazyLogging:
     // cannot check), with how a superuser vouches for it. In the background: one check per row.
     locally {
       val snap = store.snapshot()
+      // A defaultDatabase naming another catalog than the database's own, stored before writes
+      // refused one: ignored (the policy steps qualify with the session path), reported per row.
+      ai.starlake.quack.ondemand.DefaultDatabaseReport.report(snap.tenantDbs)
       manifestFedStore.foreach { fs =>
         scala.util
           .Try {
@@ -1475,15 +1478,11 @@ object Main extends IOApp with LazyLogging:
       )
       sup.onRestore(() => federatedSourceCaches.clear())
 
-      // Mirrors attachedCatalogsOf's metastore resolution so the routing parser
-      // resolves unqualified table refs the same way the policy steps do.
+      // The pool's session path, so the routing parser resolves unqualified table refs the way
+      // the node's USE prelude and the policy steps do (FlightSqlRouter.nameDefaults).
       val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
-        val ms = sup.effectiveMetastoreFor(key.tenant, key.tenantDb)
-        ai.starlake.acl.model.Config.forDuckDB(
-          Some(TenantDb.catalogAlias(ms, key.tenantDb)),
-          Some(ms.getOrElse("schemaName", "main")),
-          attachedCatalogsOf(key)
-        )
+        val (db, schema) = ai.starlake.quack.edge.FlightSqlRouter.nameDefaults(sup.get(key))
+        ai.starlake.acl.model.Config.forDuckDB(db, schema, attachedCatalogsOf(key))
       val routingInstruments =
         new ai.starlake.quack.observability.metrics.RoutingInstruments(metricsReg.composite)
       val routingRefsCache = new ai.starlake.quack.route.RoutingRefsCache()
