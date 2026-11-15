@@ -7,7 +7,7 @@
 
 # Quack on Demand
 
-**The open-source serving layer for DuckDB and DuckLake.** Multi-tenant DuckDB serving with table, row, and column level security, and Arrow Flight SQL on the wire.
+**The open-source, agent-safe data plane for DuckDB and DuckLake.** One governed endpoint for people, BI tools and AI agents: table, row and column level security decided inside the engine, branch-based writes a human merges, and Arrow Flight SQL, ADBC, MCP and native DuckDB on the wire, on any cloud or on-prem.
 
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/starlake-ai/quack-on-demand?label=release)](https://github.com/starlake-ai/quack-on-demand/releases/latest)
@@ -69,7 +69,7 @@ The DuckDB client speaks plain HTTP to `localhost` and TLS to any other host; th
 
 DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the engine. Between them and a room full of analysts sits the part DuckLake [explicitly leaves out](https://ducklake.select/faq) by design: concurrent users, authentication, authorization, and connection routing.
 
-Quack on Demand is that part. It turns a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. Think self-hosted MotherDuck, scoped to serving, on your own infrastructure. Single binary.
+Quack on Demand is that part. It turns a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. AI agents get the same identity and grants over MCP, and write on branches that a human merges. It runs on your own infrastructure, on any cloud or on-prem, and your bucket stays yours. Single binary.
 
 ## Who is this for?
 
