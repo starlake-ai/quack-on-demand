@@ -467,8 +467,8 @@ void S14(Connection &client) {
 	if (!Holds(at_cap.error, "rowid out of range")) {
 		return; // never ask the allocator for 2^40 bits
 	}
-	auto far = Run(client, "SELECT * FROM qod_search_drain_sink((SELECT (1::BIGINT << 40)))");
-	Check(Holds(far.error, "rowid out of range"), "S14 2^40 refused: " + FirstLine(far.error));
+	auto beyond = Run(client, "SELECT * FROM qod_search_drain_sink((SELECT (1::BIGINT << 40)))");
+	Check(Holds(beyond.error, "rowid out of range"), "S14 2^40 refused: " + FirstLine(beyond.error));
 	auto grown = PeakRss() > before ? PeakRss() - before : 0;
 	Check(grown < (uint64_t(64) << 20), "S14 peak RSS grew by " + std::to_string(grown >> 20) + " MiB (limit 64)");
 }
