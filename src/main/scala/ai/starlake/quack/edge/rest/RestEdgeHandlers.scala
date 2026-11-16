@@ -1,8 +1,8 @@
 package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.RestEdgeConfig
-import ai.starlake.quack.edge.{QueryResult, RouterFailure}
-import ai.starlake.quack.model.{Names, PoolKey, SessionCatalog, TenantDb, TenantDbKind}
+import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
+import ai.starlake.quack.model.{Names, PoolKey, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
   BoundedWait,
@@ -306,10 +306,11 @@ final class RestEdgeHandlers(
         if p.restriction.allowsPool(key.pool) then Right(())
         else Left(RestError.AclDenied("this pool is not permitted for this token"))
       state <- sup.get(key).toRight(RestError.PoolUnavailable)
-      // The one session-catalog resolver the router validates against, fed the pool's
-      // EFFECTIVE metastore; the edge never derives the catalog itself.
-      catalog <- SessionCatalog
-        .database(state.kindWire, state.metastore, state.defaultDatabase)
+      // The router's own session path (the USE prelude's catalog, which the policy steps qualify
+      // unqualified names with): the edge never derives the catalog itself.
+      catalog <- FlightSqlRouter
+        .sessionPath(state)
+        .map(_.catalog)
         .toRight(RestError.PoolUnavailable)
     yield Target(RestAuth.callerFor(p), td, key, catalog, state.suspended || !routable(key)))
 

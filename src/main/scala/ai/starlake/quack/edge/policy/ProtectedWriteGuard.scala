@@ -135,7 +135,8 @@ final class ProtectedWriteGuard(
               val c = cat.orElse(ctx.defaultDatabase)
               val s = sch.orElse(ctx.defaultSchema)
               (c, s) match
-                case (Some(c), Some(s)) => !catalog.historyStable(tenant, ctx.pool, c, s, tab).unsafeRunSync()
+                case (Some(c), Some(s)) =>
+                  !catalog.historyStable(tenant, ctx.pool, c, s, tab).unsafeRunSync()
                 case _                  => true
             }
             .map((_, _, tab) => timeTravelDeny(tab))
