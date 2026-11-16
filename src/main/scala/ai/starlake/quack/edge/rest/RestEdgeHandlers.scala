@@ -73,15 +73,25 @@ object RestEdgeHandlers:
   * Two executors, both the routed executor: `executor` records its statements (history, metering,
   * audit) and runs every statement but one; `probeExecutor` does not record and runs only the
   * schema probe, which is plumbing rather than the caller's statement, as FlightSQL's prepare-time
-  * probe is. A consequence for audit: a request refused AT the probe (an ungranted table, a deny
-  * column policy over `SELECT *`) leaves no data-denial row; the client sees the same 404 as for a
-  * missing table and the access log keeps the request. Denials of the recorded statements (the
-  * listings, the data statement) are audited as usual.
+  * probe is. A probe the router refuses is recorded once all the same (`recordRefusedProbe`, as
+  * FlightSQL does since #211): history and a `data-denial` audit event, while the client sees the
+  * same 404 as for a missing table.
+  *
+  * Nothing about an object is answered before the caller has seen it: a table or detail request
+  * first probes the object at the current state, and only then looks at the view history, the kind
+  * of database and the snapshot selector, whose own answers (400, 410, 422) would otherwise tell an
+  * invisible object from an absent one. Until then every refusal is the 404, the target's own
+  * (no such database or pool, a pool the token excludes) included.
+  *
+  * Snapshots: a read is pinned to a snapshot only when the client asks for one (`asOf*`); a read at
+  * the current state carries no `AT` clause, so the time-travel guard of a policy holder never
+  * judges it. Its `X-QoD-Snapshot` is the catalog's latest snapshot when that did not move while
+  * the statement ran (read before and after), so it names the state the page was read at; under
+  * concurrent writes it is left out.
   *
   * Views: DuckLake's behaviour on `AT (VERSION => n)` over a view is not established, so a name
-  * that is or was a view is read at the current state with no snapshot pin, no `X-QoD-Snapshot` and
-  * no caching, and `asOf*` on it is a 400 `invalid_selector`. That answer comes after the probe, so
-  * an invisible view is still the plain 404.
+  * that is or was a view carries no `X-QoD-Snapshot` and no caching, and `asOf*` on it is a 400
+  * `invalid_selector`, answered after the probe.
   *
   * Messages never carry a parameter value, node text never reaches a body or a WARN line (only the
   * DEBUG level holds it) and every denial of an object is the same 404 as its absence.
@@ -95,7 +105,11 @@ final class RestEdgeHandlers(
     catalogReader: (String, String) => DuckLakeCatalogReader,
     tagSnapshot: (String, String, String) => Option[Long],
     /** Overrides `cfg.stmtTimeoutSec` (a test seam); a token's `stmtTimeoutMs` still lowers it. */
-    stmtTimeout: Option[FiniteDuration] = None
+    stmtTimeout: Option[FiniteDuration] = None,
+    /** Records a probe the router refused (`FlightSqlRouter.recordRefusedProbe`); the probe runs on
+      * the unrecording executor, so nothing else would.
+      */
+    recordRefusedProbe: (ExecCaller, PoolKey, String, RouterFailure) => Unit = (_, _, _, _) => ()
 ) extends LazyLogging:
 
   import RestEdgeHandlers.*
@@ -116,6 +130,17 @@ final class RestEdgeHandlers(
       poolKey: PoolKey,
       catalog: String,
       cold: Boolean
+  )
+
+  /** An object the caller has seen ([[locate]]): what the data statement reads (`at`, pinned only
+    * on the client's `asOf*`), the probe's columns there, the node that answered, and whether the
+    * name is or was a view.
+    */
+  private final case class Located(
+      at: RestSql.Target,
+      columns: Vector[ProbedColumn],
+      node: String,
+      view: Boolean
   )
 
   // ---- the four routes -----------------------------------------------------------------------
@@ -168,16 +193,16 @@ final class RestEdgeHandlers(
         tbl  <- lift(objectSegment(name))
         q    <- lift(parseQuery(Route.Table, req.rawQuery))
         fmt  <- lift(RestFormat.negotiate(q.format, req.accept))
-        t    <- resolveTarget(p, tenant, tenantDb, q.pool)
-        view <- viewNamed(tenant, t.td, sch, tbl, req.requestId)
-        snap <- if view then lift(Right(None)) else snapshotOf(tenant, t.td, q, req.requestId)
-        at = RestSql.Target(t.catalog, sch, tbl, snap)
-        pr   <- probe(t, at, req)
-        _    <- if pr._1.isEmpty then fail(RestError.NotFound) else lift(Right(()))
-        _    <- refuseViewTimeTravel(view, q)
-        kind <- io(objectTypeOf(t, sch, tbl, req))
+        t      <- resolveTarget(p, tenant, tenantDb, q.pool)
+        before <- io(latestSnapshot(tenant, t.td, req.requestId))
+        loc    <- locate(tenant, t, sch, tbl, q, req)
+        after  <- io(latestSnapshot(tenant, t.td, req.requestId))
+        _      <- if loc.columns.isEmpty then fail(RestError.NotFound) else lift(Right(()))
+        kind   <- io(objectTypeOf(t, sch, tbl, req))
       yield
-        val cols = pr._1.map(c => List(Json.fromString(c.name), Json.fromString(c.kind.sqlType)))
+        val snap = shownSnapshot(loc, before, after)
+        val cols =
+          loc.columns.map(c => List(Json.fromString(c.name), Json.fromString(c.kind.sqlType)))
         val body = fmt match
           case RestFormat.Json =>
             Json
@@ -189,7 +214,7 @@ final class RestEdgeHandlers(
               .noSpaces
           case RestFormat.Csv => csv(List("name", "type"), cols)
         RestOk(
-          baseHeaders(fmt, pinned(t, q, snap)) ++
+          baseHeaders(fmt, pinned(t, q, loc)) ++
             snap.map(id => Header("X-QoD-Snapshot", id.toString)),
           BodyBytes.of(body)
         )
@@ -204,24 +229,23 @@ final class RestEdgeHandlers(
         tbl  <- lift(objectSegment(name))
         q    <- lift(parseQuery(Route.Rows, req.rawQuery))
         f    <- lift(RestFormat.negotiate(q.format, req.accept))
-        t    <- resolveTarget(p, tenant, tenantDb, q.pool)
-        view <- viewNamed(tenant, t.td, sch, tbl, req.requestId)
-        sn   <- if view then lift(Right(None)) else snapshotOf(tenant, t.td, q, req.requestId)
-        at = RestSql.Target(t.catalog, sch, tbl, sn)
-        pr <- probe(t, at, req)
-        _  <- refuseViewTimeTravel(view, q)
-        rq <- lift(RestResolver.resolve(q, pr._1))
+        t   <- resolveTarget(p, tenant, tenantDb, q.pool)
+        loc <- locate(tenant, t, sch, tbl, q, req)
+        rq  <- lift(RestResolver.resolve(q, loc.columns))
         // min(limit ?: defaultLimit, maxRows, token maxRows); the statement fetches one more.
         limit = t.caller.effectiveMaxRows(cfg.maxRows, q.limit.getOrElse(cfg.defaultLimit))
         // Same node as the probe: a soft pin, a vanished node falls back as usual.
-        pinnedCaller = t.caller.copy(preferredNode = Some(pr._2))
-        sql          = RestSql.render(at, rq, limit)
-        enc <- execute(
+        pinnedCaller = t.caller.copy(preferredNode = Some(loc.node))
+        sql          = RestSql.render(loc.at, rq, limit)
+        before <- io(latestSnapshot(tenant, t.td, req.requestId))
+        enc    <- execute(
           t.copy(caller = pinnedCaller),
           sql,
           dataFailure(req.requestId, filtered = rq.filters.nonEmpty),
           req
         )(reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes)))
+        after <- io(latestSnapshot(tenant, t.td, req.requestId))
+        sn = shownSnapshot(loc, before, after)
       yield
         val range =
           if enc.rows == 0 then "*/*" else s"${q.offset}-${q.offset.toLong + enc.rows - 1}/*"
@@ -229,7 +253,7 @@ final class RestEdgeHandlers(
         // cut the page.
         val truncated = enc.cut || (enc.more && q.limit.forall(_ > limit))
         RestOk(
-          baseHeaders(f, pinned(t, q, sn)) ++
+          baseHeaders(f, pinned(t, q, loc)) ++
             sn.map(id => Header("X-QoD-Snapshot", id.toString)) ++
             List(Header("Content-Range", range)) ++
             Option.when(truncated)(Header("X-QoD-Truncated", "true")),
@@ -285,10 +309,11 @@ final class RestEdgeHandlers(
   // ---- step 3: target ------------------------------------------------------------------------
 
   /** MCP `run_sql`'s rules (`McpDataTools.poolKeyFor`): the database must exist, be on the token's
-    * `databases` axis and not be a branch, all three failing alike with 404; a named pool must
-    * serve that database; no pool means `PoolPicks.readPoolKey`. The `pools` axis is checked on the
-    * RESOLVED key, as `McpDataTools.allowedPool` does ahead of the executor that enforces it again,
-    * so an out-of-scope pool is a 403 `acl_denied` rather than the probe's catch-all 404.
+    * `databases` axis and not be a branch; a named pool must serve that database; no pool means
+    * `PoolPicks.readPoolKey`. The `pools` axis is checked on the RESOLVED key, as
+    * `McpDataTools.allowedPool` does ahead of the executor that enforces it again. Nothing here has
+    * seen a grant yet, so every miss (no such database, no pool, a pool the token excludes, a pool
+    * with no state) is the same 404 as an object the caller may not read.
     */
   private def resolveTarget(
       p: PatPrincipal,
@@ -302,42 +327,62 @@ final class RestEdgeHandlers(
         .filter(td => td.branchOf.isEmpty && p.restriction.allowsDatabase(td.name))
         .toRight(RestError.NotFound)
       key <- poolKeyFor(tenant, td.name, pool)
-      _   <-
-        if p.restriction.allowsPool(key.pool) then Right(())
-        else Left(RestError.AclDenied("this pool is not permitted for this token"))
-      state <- sup.get(key).toRight(RestError.PoolUnavailable)
+      _     <- Either.cond(p.restriction.allowsPool(key.pool), (), RestError.NotFound)
+      state <- sup.get(key).toRight(RestError.NotFound)
       // The router's own session path (the USE prelude's catalog, which the policy steps qualify
       // unqualified names with): the edge never derives the catalog itself.
       catalog <- FlightSqlRouter
         .sessionPath(state)
         .map(_.catalog)
-        .toRight(RestError.PoolUnavailable)
+        .toRight(RestError.NotFound)
     yield Target(RestAuth.callerFor(p), td, key, catalog, state.suspended || !routable(key)))
 
   /** Whether the pool has a node the router may pick right now (the router's own resume test). */
   private def routable(key: PoolKey): Boolean =
     sup.snapshot(key).exists(snap => snap.nodes.exists(n => snap.loadOf(n.nodeId).routable))
 
-  /** MCP `run_sql`'s own resolution ([[PoolPicks.forDatabase]]); a pool not serving the database is
-    * as absent as one that does not exist.
+  /** MCP `run_sql`'s own resolution ([[PoolPicks.forDatabase]]); a database with no pool, and a
+    * pool not serving it, are as absent as one that does not exist.
     */
   private def poolKeyFor(
       tenant: String,
       db: String,
       pool: Option[String]
   ): Either[RestError, PoolKey] =
-    PoolPicks.forDatabase(sup, tenant, db, pool).left.map {
-      case PoolPicks.Miss.NoPool => RestError.PoolUnavailable
-      case _                     => RestError.NotFound
-    }
+    PoolPicks.forDatabase(sup, tenant, db, pool).left.map(_ => RestError.NotFound)
 
   private def listingCap(t: Target): Int = t.caller.effectiveMaxRows(cfg.maxRows, cfg.maxRows)
 
   // ---- step 4: snapshot ----------------------------------------------------------------------
 
-  /** The preview endpoint's rules: time travel needs DuckLake (`invalid_kind` otherwise); on
-    * DuckLake the selector goes through `SnapshotSelector.resolve` and, with none, the latest
-    * snapshot is pinned so the probe and the data statement read the same one.
+  /** The object, in the order that keeps every answer about it behind its grant: the probe at the
+    * current state first (a missing, ungranted or deny-column object is the 404, and nothing else
+    * is looked up), then the database's kind, the view history and the snapshot selector, and, for
+    * `asOf*`, a second probe at that snapshot, whose columns are the ones the data statement reads.
+    */
+  private def locate(
+      tenant: String,
+      t: Target,
+      sch: String,
+      tbl: String,
+      q: RestQuery,
+      req: RestRequest
+  ): Step[Located] =
+    val current = RestSql.Target(t.catalog, sch, tbl, None)
+    for
+      now <- probe(t, current, req)
+      _   <-
+        if q.timeTravel && t.td.kind != TenantDbKind.DuckLake then fail(RestError.InvalidKind)
+        else lift(Right(()))
+      view <- viewNamed(tenant, t.td, sch, tbl, req.requestId)
+      _    <- refuseViewTimeTravel(view, q)
+      snap <- if q.timeTravel then snapshotOf(tenant, t.td, q, req.requestId) else lift(Right(None))
+      at = current.copy(snapshot = snap)
+      seen <- if snap.isEmpty then lift(Right(now)) else probe(t, at, req)
+    yield Located(at, seen._1, seen._2, view)
+
+  /** The snapshot a client's `asOf*` names, by the preview endpoint's rules
+    * (`SnapshotSelector.resolve`), on DuckLake only (the caller checked the kind).
     */
   private def snapshotOf(
       tenant: String,
@@ -345,8 +390,7 @@ final class RestEdgeHandlers(
       q: RestQuery,
       rid: String
   ): Step[Option[Long]] =
-    if td.kind != TenantDbKind.DuckLake then
-      if q.timeTravel then fail(RestError.InvalidKind) else lift(Right(None))
+    if td.kind != TenantDbKind.DuckLake then fail(RestError.InvalidKind)
     else
       EitherT(
         IO.blocking {
@@ -362,7 +406,7 @@ final class RestEdgeHandlers(
               exists = (id: Long) => reader.snapshotExists(id)
             )
             .map {
-              case SnapshotSelector.Resolution.Current   => reader.maxSnapshotId()
+              case SnapshotSelector.Resolution.Current   => None
               case SnapshotSelector.Resolution.At(id, _) => Some(id)
             }
             .left
@@ -372,6 +416,29 @@ final class RestEdgeHandlers(
           Left(RestError.UpstreamError)
         }
       )
+
+  /** The DuckLake catalog's latest snapshot, read around a statement at the current state (see
+    * [[shownSnapshot]]); None on another kind, or when the lookup fails (the header is then left
+    * out, the read itself having answered).
+    */
+  private def latestSnapshot(tenant: String, td: TenantDb, rid: String): IO[Option[Long]] =
+    if td.kind != TenantDbKind.DuckLake then IO.pure(None)
+    else
+      IO.blocking(catalogReader(tenant, td.name).maxSnapshotId()).handleError { t =>
+        logger.debug(s"rest [$rid] latest snapshot lookup failed: ${t.getClass.getName}")
+        None
+      }
+
+  /** The snapshot a page was read at: the one `asOf*` pinned, else, for a table, the latest one
+    * when it did not move while the statement ran (`before`, `after`), so a client can send it back
+    * as `asOf` for the next page. None for a view, or when a commit landed meanwhile.
+    */
+  private def shownSnapshot(
+      loc: Located,
+      before: Option[Long],
+      after: Option[Long]
+  ): Option[Long] =
+    loc.at.snapshot.orElse(if loc.view then None else before.filter(b => after.contains(b)))
 
   /** Whether `schema.name` is, or was, a view of a DuckLake database (see the class Scaladoc on
     * views). Other kinds have no time travel, so the question does not arise there.
@@ -401,20 +468,27 @@ final class RestEdgeHandlers(
   /** Immutable content: a DuckLake read pinned by `asOf` or `asOfTag` to a snapshot it was served
     * at.
     */
-  private def pinned(t: Target, q: RestQuery, snapshot: Option[Long]): Boolean =
-    t.td.kind == TenantDbKind.DuckLake && q.pinned && snapshot.isDefined
+  private def pinned(t: Target, q: RestQuery, loc: Located): Boolean =
+    t.td.kind == TenantDbKind.DuckLake && q.pinned && loc.at.snapshot.isDefined
 
   // ---- steps 5 and 7: probe and execution ----------------------------------------------------
 
   /** The probe's columns (the column contract after policy) and the node that answered. Runs on the
-    * unrecording executor (class Scaladoc).
+    * unrecording executor (class Scaladoc); a refusal is recorded once, then answered as the 404.
     */
   private def probe(
       t: Target,
       at: RestSql.Target,
       req: RestRequest
   ): Step[(Vector[ProbedColumn], String)] =
-    execute(t, RestSql.probe(at), hiddenFailure(req.requestId), req, probeExecutor)(
+    val sql = RestSql.probe(at)
+    def refused(f: RouterFailure): RestError =
+      try recordRefusedProbe(t.caller, t.poolKey, sql, f)
+      catch
+        case e: Exception =>
+          logger.warn(s"rest [${req.requestId}] recording a refused probe failed: ${e.getClass}")
+      hiddenFailure(req.requestId)(f)
+    execute(t, sql, refused, req, probeExecutor)(
       reading(r => (ProbedColumn.fromArrow(r.rows.getVectorSchemaRoot.getSchema), r.nodeId))
     )
 

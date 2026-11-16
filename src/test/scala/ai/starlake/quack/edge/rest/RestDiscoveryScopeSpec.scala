@@ -28,8 +28,8 @@ import java.sql.Connection
   * rewrote it. Table grants are qod-node's decision: this node answers a read of an ungranted table
   * with the refusal qod-node sends ([[refusingUngranted]]), so what is pinned here is how the edge
   * answers that refusal; `RestEdgeEndToEndSpec` has the real decision on live nodes. That DuckDB
-  * has no DuckLake extension, so the node drops the `AT (VERSION => n)` the edge sends on the
-  * DuckLake kind before executing; what the pipeline does with that clause is pinned by
+  * has no DuckLake extension, so the node drops the `AT (VERSION => n)` the edge sends for `asOf*`
+  * on the DuckLake kind before executing; what the pipeline does with that clause is pinned by
   * RestTimeTravelPolicySpec.
   */
 class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
@@ -153,7 +153,8 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       kc: KindCase,
       permissions: List[RolePermission] = Nil,
       columnPolicies: List[RoleColumnPolicy] = Nil,
-      rowPolicies: List[RoleRowPolicy] = Nil
+      rowPolicies: List[RoleRowPolicy] = Nil,
+      recorded: Option[scala.collection.mutable.ListBuffer[(String, String)]] = None
   )(body: RestEdgeHandlers => A): A =
     withDuckDb(kc.catalog) { conn =>
       seed(conn, kc.catalog)
@@ -185,7 +186,19 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
           executor(record = true),
           executor(record = false),
           (_, _) => reader,
-          (_, _, _) => None
+          (_, _, _) => None,
+          recordRefusedProbe = { (caller, key, sql, failure) =>
+            h.router.recordRefusedProbe(
+              caller.identity,
+              key,
+              sql,
+              Some(eff),
+              failure,
+              source = caller.source,
+              patId = caller.patId
+            )
+            recorded.foreach(r => r.synchronized(r += ((sql, failure.getClass.getSimpleName))))
+          }
         )
       )
     }
@@ -264,6 +277,50 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
+  // Time travel, the kind of database and the view history are looked at only once the probe at the
+  // current state has seen the object: before that, a selector's own answer (410 for an expired
+  // snapshot, 422 for an unknown one, 400 on a view or another kind) would tell an invisible object
+  // from an absent one.
+  "an ungranted object and a missing one" should "get byte-identical 404s under every time-travel selector" in {
+    val selectors =
+      List("asOf=999999999", "asOf=1", "asOfTs=1970-01-01T00:00:00Z", "asOfTag=nope", "asOf=3")
+    for kc <- AllKinds; q <- selectors do
+      withClue(s"${kc.kind} $q: ") {
+        withHandlers(kc, permissions = grants(kc)) { h =>
+          def same(a: Out, b: Out): Unit =
+            a.isLeft shouldBe true
+            a shouldBe b
+            a.left.toOption.get._1 shouldBe StatusCode.NotFound
+          for name <- List("orders", "v_customer") do
+            same(
+              h.rows("acme", db(kc), "main", name, req(q)).unsafeRunSync(),
+              h.rows("acme", db(kc), "main", "no_such_table", req(q)).unsafeRunSync()
+            )
+            same(
+              h.table("acme", db(kc), "main", name, req(q)).unsafeRunSync(),
+              h.table("acme", db(kc), "main", "no_such_table", req(q)).unsafeRunSync()
+            )
+        }
+      }
+  }
+
+  "a probe the node refuses" should "be recorded once, while the client gets the 404" in {
+    for kc <- AllKinds do
+      withClue(s"${kc.kind}: ") {
+        val recorded = scala.collection.mutable.ListBuffer.empty[(String, String)]
+        withHandlers(kc, permissions = grants(kc), recorded = Some(recorded)) { h =>
+          h.rows("acme", db(kc), "main", "orders", req()).unsafeRunSync().left.map(_._1) shouldBe
+            Left(StatusCode.NotFound)
+          recorded.toList.map(_._2) shouldBe List("AccessDenied")
+          recorded.head._1 should include("\"orders\"")
+          recorded.clear()
+          // A granted read records nothing of its probe.
+          h.rows("acme", db(kc), "main", "customer", req()).unsafeRunSync().isRight shouldBe true
+          recorded shouldBe empty
+        }
+      }
+  }
+
   // ---- column and row policies --------------------------------------------------------------
 
   private val denySsn =
@@ -315,9 +372,9 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
-  // DuckLake statements always carry `AT (VERSION => n)` (the edge pins a snapshot), which the
-  // policy rewriters carry through (TimeTravelCarrier): the policies apply on every kind.
-  "a row policy" should "filter /rows on every kind, DuckLake's pinned snapshot included" in {
+  // A read at the current state carries no `AT` clause; what the rewriters do with the clause an
+  // `asOf*` read carries is pinned by RestTimeTravelPolicySpec.
+  "a row policy" should "filter /rows on every kind" in {
     val onlyTwo = RoleRowPolicy("rp-d", "r-1", "*", "main", "customer", "c_id = 2")
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {

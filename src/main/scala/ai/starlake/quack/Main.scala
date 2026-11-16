@@ -1901,8 +1901,8 @@ object Main extends IOApp with LazyLogging:
       // REST data edge (quack-rest): PAT bearer only, every request one SELECT through the SAME
       // routed executor MCP run_sql uses. The data statement runs with recordExecution = true, so
       // statement history and metering see it like any other door; the schema probe runs
-      // unrecorded, like FlightSQL's prepare-time probe. Its own listener; started after the
-      // Quack door.
+      // unrecorded, like FlightSQL's prepare-time probe, and is recorded only when refused. Its own
+      // listener; started after the Quack door.
       val restEdge: Option[ai.starlake.quack.edge.rest.RestEdgeServer] =
         Option.when(restCfgResolved.enabled) {
           val handlers = new ai.starlake.quack.edge.rest.RestEdgeHandlers(
@@ -1913,7 +1913,18 @@ object Main extends IOApp with LazyLogging:
             previewExecutor,
             catalogReader,
             (tenant, tenantDb, tag) =>
-              store.findSnapshotTag(tenant, tenantDb, tag).map(_.snapshotId)
+              store.findSnapshotTag(tenant, tenantDb, tag).map(_.snapshotId),
+            // The probe runs unrecorded; a refused one is recorded once, as FlightSQL's (#211).
+            recordRefusedProbe = (caller, key, sql, failure) =>
+              fsRouter.recordRefusedProbe(
+                caller.identity,
+                key,
+                sql,
+                None,
+                failure,
+                source = caller.source,
+                patId = caller.patId
+              )
           )
           new ai.starlake.quack.edge.rest.RestEdgeServer(
             restCfgResolved,

@@ -247,7 +247,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       cfg: RestEdgeConfig = baseCfg,
       dataRows: Int = 3,
       respond: Option[AtomicInteger => Responder] = None,
-      stmtTimeout: Option[FiniteDuration] = None
+      stmtTimeout: Option[FiniteDuration] = None,
+      catalog: DuckLakeCatalogReader = reader
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
@@ -267,7 +268,7 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         pats.get,
         executor(recorded = true),
         executor(recorded = false),
-        (_, _) => reader,
+        (_, _) => catalog,
         tags,
         stmtTimeout = stmtTimeout
       ),
@@ -327,18 +328,34 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     }
   }
 
-  it should "send the probe and the data statement with the same AT id, echoed in X-QoD-Snapshot" in {
+  it should "read the current state with no AT, showing the snapshot the page was read at" in {
     val fx  = fixture()
     val out = okOf(rows(fx, "customer"))
-    fx.calls.map(_.sql).foreach(_ should include("AT (VERSION => 7)"))
+    fx.calls.map(_.sql).foreach(_ should not include "AT (")
     header(out.headers, "X-QoD-Snapshot") shouldBe Some("7")
+  }
+
+  it should "pin only on asOf*: the probe at the current state, then probe and data at the snapshot" in {
     val pinned = fixture()
-    val out2   = okOf(rows(pinned, "customer", "asOf=3"))
-    pinned.calls.map(_.sql).foreach(_ should include("AT (VERSION => 3)"))
-    header(out2.headers, "X-QoD-Snapshot") shouldBe Some("3")
+    val out    = okOf(rows(pinned, "customer", "asOf=3"))
+    pinned.calls.map(_.sql.contains("AT (VERSION => 3)")) shouldBe List(false, true, true)
+    pinned.calls.take(2).foreach(_.sql should endWith("LIMIT 0"))
+    header(out.headers, "X-QoD-Snapshot") shouldBe Some("3")
     val tagged = fixture()
     header(okOf(rows(tagged, "customer", "asOfTag=v1")).headers, "X-QoD-Snapshot") shouldBe
       Some("4")
+  }
+
+  it should "leave X-QoD-Snapshot out when a commit landed while the page was read" in {
+    val moving = new DuckLakeCatalogReader(null):
+      private val next                           = new AtomicInteger(7)
+      override def maxSnapshotId(): Option[Long] = Some(next.getAndIncrement().toLong)
+      override def viewEverNamed(schema: String, name: String): Boolean = false
+    val fx  = fixture(catalog = moving)
+    val out = okOf(rows(fx, "customer"))
+    json(out.body).asArray.map(_.size) shouldBe Some(3)
+    header(out.headers, "X-QoD-Snapshot") shouldBe None
+    header(out.headers, "Cache-Control") shouldBe Some("private, no-cache")
   }
 
   it should "pin the data statement to the node that answered the probe" in {
@@ -669,11 +686,16 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     fx.calls shouldBe empty
   }
 
-  "time travel on a database that is not DuckLake" should "get invalid_kind and no AT" in
+  "time travel on a database that is not DuckLake" should "get invalid_kind after the probe" in
     List("acme_file", "acme_mem").foreach { db =>
       val fx = fixture()
       errOf(rows(fx, "customer", "asOf=3", db = db))._3.error shouldBe "invalid_kind"
-      fx.calls shouldBe empty
+      fx.calls.size shouldBe 1
+      fx.calls.head.sql should endWith("LIMIT 0")
+      fx.calls.head.sql should not include "AT ("
+      // An object the caller cannot see is the 404, whatever the selector says.
+      val hidden = fixture()
+      errOf(rows(hidden, "hidden", "asOf=3", db = db))._1 shouldBe StatusCode.NotFound
       val plain = fixture()
       val out   = okOf(rows(plain, "customer", db = db))
       plain.calls.map(_.sql).foreach(_ should not include "AT (")
@@ -694,10 +716,11 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     errOf(rows(fx, "customer", "pool=nope"))._1 shouldBe StatusCode.NotFound
   }
 
-  it should "refuse a pool outside the token's pools axis with acl_denied" in {
+  it should "answer a pool outside the token's pools axis like a missing one, before any statement" in {
     val fx = fixture(TokenRestriction.Unrestricted.copy(pools = Some(Set("batch"))))
     val e  = errOf(rows(fx, "customer", "pool=sales"))
-    (e._1, e._3.error) shouldBe (StatusCode.Forbidden, "acl_denied")
+    (e._1, e._3.error) shouldBe (StatusCode.NotFound, "not_found")
+    e shouldBe errOf(rows(fx, "customer", "pool=nope"))
     fx.calls shouldBe empty
   }
 
