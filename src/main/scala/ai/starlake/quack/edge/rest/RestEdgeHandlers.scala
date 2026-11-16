@@ -80,8 +80,8 @@ object RestEdgeHandlers:
   * Nothing about an object is answered before the caller has seen it: a table or detail request
   * first probes the object at the current state, and only then looks at the view history, the kind
   * of database and the snapshot selector, whose own answers (400, 410, 422) would otherwise tell an
-  * invisible object from an absent one. Until then every refusal is the 404, the target's own
-  * (no such database or pool, a pool the token excludes) included.
+  * invisible object from an absent one. Until then every refusal is the 404, the target's own (no
+  * such database or pool, a pool the token excludes) included.
   *
   * Snapshots: a read is pinned to a snapshot only when the client asks for one (`asOf*`); a read at
   * the current state carries no `AT` clause, so the time-travel guard of a policy holder never
@@ -191,12 +191,12 @@ final class RestEdgeHandlers(
   def table(tenant: String, tenantDb: String, schema: String, name: String, req: RestRequest): Out =
     respond(Route.Table, req) {
       for
-        p    <- authenticate(tenant, req)
-        _    <- lift(segment(tenantDb))
-        sch  <- lift(schemaSegment(schema))
-        tbl  <- lift(objectSegment(name))
-        q    <- lift(parseQuery(Route.Table, req.rawQuery))
-        fmt  <- lift(RestFormat.negotiate(q.format, req.accept))
+        p      <- authenticate(tenant, req)
+        _      <- lift(segment(tenantDb))
+        sch    <- lift(schemaSegment(schema))
+        tbl    <- lift(objectSegment(name))
+        q      <- lift(parseQuery(Route.Table, req.rawQuery))
+        fmt    <- lift(RestFormat.negotiate(q.format, req.accept))
         t      <- resolveTarget(p, tenant, tenantDb, q.pool)
         before <- io(latestSnapshot(tenant, t.td, req.requestId))
         loc    <- locate(tenant, t, sch, tbl, q, req)
@@ -227,12 +227,12 @@ final class RestEdgeHandlers(
   def rows(tenant: String, tenantDb: String, schema: String, name: String, req: RestRequest): Out =
     respond(Route.Rows, req) {
       for
-        p    <- authenticate(tenant, req)
-        _    <- lift(segment(tenantDb))
-        sch  <- lift(schemaSegment(schema))
-        tbl  <- lift(objectSegment(name))
-        q    <- lift(parseQuery(Route.Rows, req.rawQuery))
-        f    <- lift(RestFormat.negotiate(q.format, req.accept))
+        p   <- authenticate(tenant, req)
+        _   <- lift(segment(tenantDb))
+        sch <- lift(schemaSegment(schema))
+        tbl <- lift(objectSegment(name))
+        q   <- lift(parseQuery(Route.Rows, req.rawQuery))
+        f   <- lift(RestFormat.negotiate(q.format, req.accept))
         t   <- resolveTarget(p, tenant, tenantDb, q.pool)
         loc <- locate(tenant, t, sch, tbl, q, req)
         rq  <- lift(RestResolver.resolve(q, loc.columns))
@@ -241,8 +241,8 @@ final class RestEdgeHandlers(
         // Same node as the probe: a soft pin, a vanished node falls back as usual.
         pinnedCaller = t.caller.copy(preferredNode = Some(loc.node))
         sql          = RestSql.render(loc.at, rq, limit)
-        room <- io(pageBudget.reserve(req.requestId, timeoutFor(t.caller)))
-        _    <- if room then lift(Right(())) else fail(RestError.Busy)
+        room   <- io(pageBudget.reserve(req.requestId, timeoutFor(t.caller)))
+        _      <- if room then lift(Right(())) else fail(RestError.Busy)
         before <- io(latestSnapshot(tenant, t.td, req.requestId))
         enc    <- execute(
           t.copy(caller = pinnedCaller),
@@ -333,7 +333,7 @@ final class RestEdgeHandlers(
         .findTenantDb(tenant, tenantDb)
         .filter(td => td.branchOf.isEmpty && p.restriction.allowsDatabase(td.name))
         .toRight(RestError.NotFound)
-      key <- poolKeyFor(tenant, td.name, pool)
+      key   <- poolKeyFor(tenant, td.name, pool)
       _     <- Either.cond(p.restriction.allowsPool(key.pool), (), RestError.NotFound)
       state <- sup.get(key).toRight(RestError.NotFound)
       // The router's own session path (the USE prelude's catalog, which the policy steps qualify
@@ -488,7 +488,7 @@ final class RestEdgeHandlers(
       at: RestSql.Target,
       req: RestRequest
   ): Step[(Vector[ProbedColumn], String)] =
-    val sql = RestSql.probe(at)
+    val sql                                  = RestSql.probe(at)
     def refused(f: RouterFailure): RestError =
       try recordRefusedProbe(t.caller, t.poolKey, sql, f)
       catch

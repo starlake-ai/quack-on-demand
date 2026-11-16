@@ -15,9 +15,9 @@ import scala.concurrent.duration.FiniteDuration
   *
   * A data statement first reserves a page's worst case ([[reserve]], waiting at most the request's
   * own statement bound, else `503 edge_busy`), keeps only what its body holds once it is encoded
-  * ([[settle]]), and gives that back when the response has been written or has failed
-  * ([[release]], from [[RestEdgeServer]]). A reservation whose release never comes (a connection
-  * that broke before its body was pulled) is given back after `holdAtMost`. Counted in KiB.
+  * ([[settle]]), and gives that back when the response has been written or has failed ([[release]],
+  * from [[RestEdgeServer]]). A reservation whose release never comes (a connection that broke
+  * before its body was pulled) is given back after `holdAtMost`. Counted in KiB.
   */
 final class RestPageBudget private (
     val totalKiB: Long,

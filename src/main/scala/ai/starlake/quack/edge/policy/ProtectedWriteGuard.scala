@@ -137,7 +137,7 @@ final class ProtectedWriteGuard(
               (c, s) match
                 case (Some(c), Some(s)) =>
                   !catalog.historyStable(tenant, ctx.pool, c, s, tab).unsafeRunSync()
-                case _                  => true
+                case _ => true
             }
             .map((_, _, tab) => timeTravelDeny(tab))
 

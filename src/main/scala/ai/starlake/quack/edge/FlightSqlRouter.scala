@@ -252,10 +252,10 @@ final class FlightSqlRouter(
 
   /** A schema probe (`execute` with `recordExecution = false`: the FlightSQL Prepare, a literal
     * statement's GetFlightInfo or GetSchema, the REST data edge's `SELECT * ... LIMIT 0`) that was
-    * refused. A refused probe ends the client's
-    * statement, no Execute follows to record it, so its refusal is recorded here, once, as the
-    * client's statement (`clientSql`, never the probe's wrapper): history and `sql.denied`, like
-    * any other denial (issue #202). Any other failure records nothing, as a probe never did.
+    * refused. A refused probe ends the client's statement, no Execute follows to record it, so its
+    * refusal is recorded here, once, as the client's statement (`clientSql`, never the probe's
+    * wrapper): history and `sql.denied`, like any other denial (issue #202). Any other failure
+    * records nothing, as a probe never did.
     */
   def recordRefusedProbe(
       user: String,
@@ -263,7 +263,8 @@ final class FlightSqlRouter(
       clientSql: String,
       effectiveSet: Option[EffectiveSet],
       failure: RouterFailure,
-      /** The door, as `execute`'s `source` (the REST data edge records its probes as `rest-data`). */
+      /** The door, as `execute`'s `source` (the REST data edge records its probes as `rest-data`).
+        */
       source: String = "flightsql",
       patId: Option[String] = None
   ): Unit =

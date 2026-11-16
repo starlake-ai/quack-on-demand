@@ -15,11 +15,10 @@ import ai.starlake.quack.model.SqlLiterals
   *
   * Every statement is one SELECT. The data statement orders by column NAME, never an ordinal: a
   * positional reference is a statement shape column masking cannot bind to a column by name, and
-  * the edge does not produce one at all. It reads `*` when the client named no column, as the
-  * probe does, and lists the columns the client named otherwise: a quoted name holding a dot, an
-  * `@`, a bracket or a quote is one name to DuckDB and more to the policy rewriters' parser, which
-  * refuses it for a principal holding column or row policies, so a whole-row read must not write
-  * one.
+  * the edge does not produce one at all. It reads `*` when the client named no column, as the probe
+  * does, and lists the columns the client named otherwise: a quoted name holding a dot, an `@`, a
+  * bracket or a quote is one name to DuckDB and more to the policy rewriters' parser, which refuses
+  * it for a principal holding column or row policies, so a whole-row read must not write one.
   */
 object RestSql:
 

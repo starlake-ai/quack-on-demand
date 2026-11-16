@@ -26,7 +26,8 @@ final class BodyBytes private[rest] (array: Array[Byte], val length: Int):
   /** The bytes decoded back to text, for logs and specs. */
   def text: String = new String(array, 0, length, UTF_8)
 
-  /** What the body holds of the heap: its whole backing array, which may be up to twice `length`. */
+  /** What the body holds of the heap: its whole backing array, which may be up to twice `length`.
+    */
   def capacity: Int = array.length
 
 object BodyBytes:

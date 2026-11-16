@@ -24,8 +24,8 @@ object BoundedWait:
 
   /** Run `run`, waiting at most `limit` for it. In time, its outcome is returned unchanged (a
     * raised error is re-raised). Past the limit, `Left(onTimeout)` is returned at once, `run`'s
-    * fiber is cancelled in the background, and a `Right` that arrives afterwards anyway is handed to
-    * `abandon` (else `close`). The same applies when the waiting caller is itself cancelled (an
+    * fiber is cancelled in the background, and a `Right` that arrives afterwards anyway is handed
+    * to `abandon` (else `close`). The same applies when the waiting caller is itself cancelled (an
     * outer timeout, a disconnect), a result already delivered but not yet returned included. A late
     * `Left` or a late error is dropped: it holds nothing to release.
     *

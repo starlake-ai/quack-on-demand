@@ -24,8 +24,8 @@ final class CachedColumnCatalog(
     /** [[ColumnCatalog.historyStable]]'s answer, DuckLake metadata only (never a node DESCRIBE);
       * false (fail closed) when not wired.
       */
-    history: (String, Option[PoolKey], String, String, String) => IO[Boolean] =
-      (_, _, _, _, _) => IO.pure(false)
+    history: (String, Option[PoolKey], String, String, String) => IO[Boolean] = (_, _, _, _, _) =>
+      IO.pure(false)
 ) extends ColumnCatalog:
 
   private val cache: Cache[(String, Option[PoolKey], String, String, String), List[String]] =
