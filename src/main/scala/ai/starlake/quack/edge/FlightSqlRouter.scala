@@ -35,6 +35,18 @@ final case class QueryResult(
     durationMs: Long
 )
 
+object QueryResults:
+
+  /** Releases `qr` without letting it take effect: a stamped write's reader is disarmed before the
+    * close, so the connection goes without its COMMIT and the write rolls back. For a caller that
+    * told its client the statement failed (a timeout) and must not let it land afterwards.
+    */
+  def abandon(qr: QueryResult): Unit =
+    qr.rows match
+      case c: ai.starlake.quack.edge.adapter.CommitOnClose => c.disarm()
+      case _                                               => ()
+    qr.close()
+
 /** Transport-neutral sibling of [[QueryResult]] returned by [[FlightSqlRouter.executeWith]]:
   * `value` is whatever the caller's node call produced (an Arrow reader for the Flight edge, raw
   * response bytes plus the node connection for the native Quack relay). The caller MUST invoke

@@ -1,6 +1,6 @@
 package ai.starlake.quack.boot
 
-import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
+import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, QueryResults, RouterFailure}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{BoundedWait, CatalogPreviewHandlers, ExecCaller}
@@ -194,19 +194,16 @@ object RoutedExecutor:
           // narrows `narrowed` but the SQL admin dialect's own authorization does not know about
           // that ceiling, so a claimed admin statement must stay on the pre-dialect routed path.
           val run = route(caller, poolKey, sql, narrowed, recordExecution)
-          // BOUNDED WAIT, not a cancellation: past this many milliseconds the
-          // caller of this executor gets a failure back, but the underlying
-          // IO.blocking node call keeps running unobserved and may still
-          // complete -- the same caveat as previewTimeoutSec above, and the
-          // same best-effort gap FlightSqlRouter already has between register
-          // and attachCancel. Durable cancellation (bracketing the connection
-          // inside QuackHttpClient) is deliberately deferred to a later
-          // sub-project; do not describe this branch as killing or aborting
-          // the statement.
+          // BOUNDED WAIT, not a node-side cancellation: past this many milliseconds the caller of
+          // this executor gets a failure back, while the node keeps executing the statement until
+          // it answers -- the same caveat as previewTimeoutSec above. Nothing it did takes effect
+          // afterwards (below); do not describe this branch as killing the statement on the node.
           // BoundedWait rather than timeoutTo: timeoutTo cannot interrupt the IO.blocking node
-          // call, so it sat on the call past the limit and then dropped the result without
-          // closing it (its Arrow reader and its kill-registry entry stayed open). A result that
-          // arrives late is now closed exactly once.
+          // call, so it sat on the call past the limit. BoundedWait answers at the limit and
+          // cancels the call in the background: once the node answers, the cancel's release path
+          // closes a stamped write's inner reader without its COMMIT, so the write rolls back. A
+          // result that escapes that path is abandoned (QueryResults.abandon), never closed, as a
+          // close would COMMIT a write the caller was told failed.
           caller.restriction.stmtTimeoutMs match
             case Some(ms) if ms > 0 =>
               BoundedWait.closingLate(
@@ -217,7 +214,8 @@ object RoutedExecutor:
                 ),
                 ai.starlake.quack.edge.RouterFailure
                   .Unavailable(s"statement exceeded this token's ${ms}ms limit"),
-                _.close()
+                _.close(),
+                abandon = Some(QueryResults.abandon)
               )
             case _ => run
       }

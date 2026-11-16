@@ -9,105 +9,124 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.*
 
-/** A token timeout is a bounded wait over a statement that keeps running, so a result that arrives
-  * after the caller gave up has nobody left to close it. These cases pin that the helper closes it
-  * exactly once, and that a result delivered in time is the caller's to close, never the helper's.
+/** A token timeout is a bounded wait over a statement whose result may take effect when it is
+  * closed: a stamped write's close COMMITs. These cases pin that a result the caller gave up on
+  * never takes effect (the statement's fiber is cancelled, so its own release path rolls it back,
+  * and one that escapes that path is abandoned, never closed), and that a result delivered in time
+  * is the caller's to close, never the helper's.
   *
   * Real short durations, as the rest of the suite does for IO timing (there is no cats-effect
   * testkit on the classpath).
   */
 class BoundedWaitSpec extends AnyFlatSpec with Matchers:
 
+  /** A stamped write's result: `commits` counts closes (a close COMMITs), `releases` the release
+    * path a cancel takes (the inner reader closed, the write rolled back), `abandons` the helper's
+    * `abandon`.
+    */
   private final class Res(val id: Int):
-    val closes = new AtomicInteger(0)
+    val commits  = new AtomicInteger(0)
+    val releases = new AtomicInteger(0)
+    val abandons = new AtomicInteger(0)
+    def ends: Int = commits.get() + releases.get() + abandons.get()
 
-  private def closeRes(r: Res): Unit = r.closes.incrementAndGet(): Unit
+  private def closeRes(r: Res): Unit   = r.commits.incrementAndGet(): Unit
+  private def abandonRes(r: Res): Unit = r.abandons.incrementAndGet(): Unit
 
-  /** Waits (bounded) for a late close to land; the worker fiber finishes in the background. */
-  private def awaitCloses(r: Res, n: Int): Unit =
+  private def bounded(
+      run: IO[Either[String, Res]],
+      limit: FiniteDuration,
+      onDelivered: Res => IO[Unit] = _ => IO.unit
+  ): IO[Either[String, Res]] =
+    BoundedWait.closingLate(run, limit, "timeout", closeRes, onDelivered, Some(abandonRes))
+
+  /** A node call shaped like `QuackHttpClient`'s: an uninterruptible wait for the node (`node`), then
+    * the result handed over at a cancellation point that runs the release path when a cancel is
+    * pending (`handOver`).
+    */
+  private def nodeCall(res: Res, node: IO[Unit]): IO[Either[String, Res]] =
+    IO.uncancelable { poll =>
+      node *> poll(IO.pure[Either[String, Res]](Right(res)))
+        .onCancel(IO(res.releases.incrementAndGet()).void)
+    }
+
+  /** Waits (bounded) for `r` to reach `n` ends; the worker fiber finishes in the background. */
+  private def awaitEnds(r: Res, n: Int): Unit =
     val deadline = System.nanoTime() + 5.seconds.toNanos
-    while r.closes.get() < n && System.nanoTime() < deadline do Thread.sleep(5)
+    while r.ends < n && System.nanoTime() < deadline do Thread.sleep(5)
 
   "BoundedWait.closingLate" should "return a result delivered in time without closing it" in:
     val res = new Res(1)
-    val out = BoundedWait
-      .closingLate(IO.pure(Right(res)), 1.second, "timeout", closeRes)
-      .unsafeRunSync()
-    out shouldBe Right(res)
+    bounded(IO.pure(Right(res)), 1.second).unsafeRunSync() shouldBe Right(res)
     Thread.sleep(50)
-    res.closes.get() shouldBe 0
+    res.ends shouldBe 0
 
   it should "pass a failure delivered in time through untouched" in:
-    val out = BoundedWait
-      .closingLate[String, Res](IO.pure(Left("denied")), 1.second, "timeout", closeRes)
-      .unsafeRunSync()
-    out shouldBe Left("denied")
+    bounded(IO.pure(Left("denied")), 1.second).unsafeRunSync() shouldBe Left("denied")
 
   it should "re-raise an error raised in time" in:
     val boom = new RuntimeException("boom")
-    val out  = BoundedWait
-      .closingLate[String, Res](IO.raiseError(boom), 1.second, "timeout", closeRes)
-      .attempt
-      .unsafeRunSync()
-    out shouldBe Left(boom)
+    bounded(IO.raiseError(boom), 1.second).attempt.unsafeRunSync() shouldBe Left(boom)
 
-  it should "answer the timeout and close a late result exactly once" in:
+  it should "answer the timeout and roll a late write back, never committing it" in:
     val res = new Res(2)
-    val out = BoundedWait
-      .closingLate(IO.sleep(200.millis).as(Right(res)), 20.millis, "timeout", closeRes)
-      .unsafeRunSync()
-    out shouldBe Left("timeout")
-    awaitCloses(res, 1)
+    bounded(nodeCall(res, IO.sleep(200.millis)), 20.millis).unsafeRunSync() shouldBe Left("timeout")
+    awaitEnds(res, 1)
     Thread.sleep(50)
-    res.closes.get() shouldBe 1
+    res.commits.get() shouldBe 0
+    res.releases.get() shouldBe 1
+    res.abandons.get() shouldBe 0
 
   it should "not wait on an uncancelable blocking node call past the limit" in:
     // QuackHttpClient.query is IO.blocking, which cancellation cannot interrupt: a plain
     // timeoutTo would sit on it until the node answered. The bounded wait must not.
     val release = new CountDownLatch(1)
     val res     = new Res(3)
-    val run     = IO.blocking { release.await(); Right(res) }
     val t0      = System.nanoTime()
-    val out     = BoundedWait.closingLate(run, 30.millis, "timeout", closeRes).unsafeRunSync()
+    val out     = bounded(nodeCall(res, IO.blocking(release.await())), 30.millis).unsafeRunSync()
     val waited  = (System.nanoTime() - t0).nanos
     out shouldBe Left("timeout")
     waited should be < 2.seconds
-    res.closes.get() shouldBe 0
+    res.ends shouldBe 0
     release.countDown()
-    awaitCloses(res, 1)
+    awaitEnds(res, 1)
     Thread.sleep(50)
-    res.closes.get() shouldBe 1
+    res.commits.get() shouldBe 0
+    res.ends shouldBe 1
+
+  it should "never commit a late result whose call has no cancellation point" in:
+    // A run masked whole: its result can only reach the worker after the caller gave up, where it
+    // is abandoned (or dropped by the cancel), never closed, which would COMMIT.
+    val res = new Res(4)
+    val run = IO.sleep(150.millis).as[Either[String, Res]](Right(res)).uncancelable
+    bounded(run, 20.millis).unsafeRunSync() shouldBe Left("timeout")
+    Thread.sleep(400)
+    res.commits.get() shouldBe 0
+    res.releases.get() shouldBe 0
+    res.abandons.get() should be <= 1
 
   it should "never close a late failure and never surface a late error" in:
-    val lateLeft = BoundedWait
-      .closingLate[String, Res](IO.sleep(100.millis).as(Left("late")), 10.millis, "t", closeRes)
-      .unsafeRunSync()
-    lateLeft shouldBe Left("t")
-    val lateError = BoundedWait
-      .closingLate[String, Res](
-        IO.sleep(100.millis) *> IO.raiseError(new RuntimeException("late boom")),
-        10.millis,
-        "t",
-        closeRes
-      )
-      .unsafeRunSync()
-    lateError shouldBe Left("t")
+    bounded(IO.sleep(100.millis).as(Left("late")), 10.millis).unsafeRunSync() shouldBe Left("timeout")
+    bounded(
+      IO.sleep(100.millis) *> IO.raiseError(new RuntimeException("late boom")),
+      10.millis
+    ).unsafeRunSync() shouldBe Left("timeout")
     Thread.sleep(200)
 
-  it should "close the result when the waiting caller is itself cancelled" in:
-    val res     = new Res(4)
+  it should "roll the write back when the waiting caller is itself cancelled" in:
+    val res     = new Res(5)
     val release = new CountDownLatch(1)
-    val run     = IO.blocking { release.await(); Right(res) }
-    val waiting = BoundedWait.closingLate(run, 10.seconds, "timeout", closeRes)
-    // An outer timeout (preview's previewTimeoutSec) cancels the bounded wait mid-flight.
+    val waiting = bounded(nodeCall(res, IO.blocking(release.await())), 10.seconds)
+    // An outer timeout (a restore's restoreTimeoutSec) cancels the bounded wait mid-flight.
     val out = waiting.timeoutTo(30.millis, IO.pure(Left("outer"))).unsafeRunSync()
     out shouldBe Left("outer")
     release.countDown()
-    awaitCloses(res, 1)
+    awaitEnds(res, 1)
     Thread.sleep(50)
-    res.closes.get() shouldBe 1
+    res.commits.get() shouldBe 0
+    res.ends shouldBe 1
 
-  it should "hand every result to exactly one owner when it races the deadline" in:
+  it should "end every result exactly once, committing only those returned, when it races" in:
     val seed = System.nanoTime()
     info(s"seed=$seed")
     val rnd = new scala.util.Random(seed)
@@ -115,37 +134,28 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
       val res   = new Res(i)
       val delay = rnd.nextInt(6).millis
       val limit = rnd.nextInt(6).millis + 1.milli
-      val out   = BoundedWait
-        .closingLate(IO.sleep(delay).as(Right(res)), limit, "timeout", closeRes)
-        .unsafeRunSync()
+      val out   = bounded(nodeCall(res, IO.sleep(delay)), limit).unsafeRunSync()
       // The caller owns a delivered result and closes it itself, as the routed executor's callers do.
       out.foreach(closeRes)
-      res
+      (res, out.isRight)
     }
-    all.foreach(awaitCloses(_, 1))
+    all.foreach((r, _) => awaitEnds(r, 1))
     Thread.sleep(50)
     withClue(s"seed=$seed: ") {
-      all.map(_.closes.get()).distinct shouldBe List(1)
+      all.map(_._1.ends).distinct shouldBe List(1)
+      all.foreach((r, returned) => r.commits.get() shouldBe (if returned then 1 else 0))
     }
 
   it should "show a result delivered in time to onDelivered before returning it, and a late one never" in:
     val seen = new java.util.concurrent.atomic.AtomicReference[Option[Res]](None)
     val res  = new Res(7)
-    BoundedWait
-      .closingLate(IO.pure(Right(res)), 1.second, "timeout", closeRes, r => IO(seen.set(Some(r))))
-      .unsafeRunSync() shouldBe Right(res)
+    bounded(IO.pure(Right(res)), 1.second, r => IO(seen.set(Some(r)))).unsafeRunSync() shouldBe
+      Right(res)
     seen.get shouldBe Some(res)
     val late = new Res(8)
     seen.set(None)
-    BoundedWait
-      .closingLate(
-        IO.sleep(300.millis).as(Right(late)),
-        50.millis,
-        "timeout",
-        closeRes,
-        r => IO(seen.set(Some(r)))
-      )
+    bounded(nodeCall(late, IO.sleep(300.millis)), 50.millis, r => IO(seen.set(Some(r))))
       .unsafeRunSync() shouldBe Left("timeout")
-    awaitCloses(late, 1)
-    late.closes.get() shouldBe 1
+    awaitEnds(late, 1)
+    late.commits.get() shouldBe 0
     seen.get shouldBe None
