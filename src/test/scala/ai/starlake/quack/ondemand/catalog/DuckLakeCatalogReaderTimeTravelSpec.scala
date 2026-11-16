@@ -122,6 +122,31 @@ class DuckLakeCatalogReaderTimeTravelSpec extends AnyFlatSpec with Matchers with
       reader.nameHistoryStable("tpch1", "nation") shouldBe false
     }
 
+  it should "fail for a table dropped since, and for one with a column dropped since" in
+    withCatalog(
+      "tt",
+      extraSql = extra +
+        """ALTER TABLE lake.tpch1.region DROP COLUMN r_comment;
+          |DROP TABLE lake.tpch1.nation;
+          |""".stripMargin
+    ) { (reader, _) =>
+      reader.nameHistoryStable("tpch1", "nation") shouldBe false
+      reader.nameHistoryStable("tpch1", "region") shouldBe false
+    }
+
+  it should "fail for a name that was ever a view's" in
+    withCatalog(
+      "tt",
+      extraSql = extra +
+        """CREATE VIEW lake.tpch1.shadow AS SELECT * FROM lake.tpch1.nation;
+          |DROP VIEW lake.tpch1.shadow;
+          |CREATE TABLE lake.tpch1.shadow (s_key INTEGER);
+          |""".stripMargin
+    ) { (reader, _) =>
+      reader.nameHistoryStable("tpch1", "shadow") shouldBe false
+      reader.nameHistoryStable("tpch1", "region") shouldBe true
+    }
+
   "viewEverNamed" should "find a view whatever the case it is asked in, as DuckDB binds it" in
     withCatalog(
       "tt",
