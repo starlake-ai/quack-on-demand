@@ -40,9 +40,9 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
   ): IO[Either[String, Res]] =
     BoundedWait.closingLate(run, limit, "timeout", closeRes, onDelivered, Some(abandonRes))
 
-  /** A node call shaped like `QuackHttpClient`'s: an uninterruptible wait for the node (`node`), then
-    * the result handed over at a cancellation point that runs the release path when a cancel is
-    * pending (`handOver`).
+  /** A node call shaped like `QuackHttpClient`'s: an uninterruptible wait for the node (`node`),
+    * then the result handed over at a cancellation point that runs the release path when a cancel
+    * is pending (`handOver`).
     */
   private def nodeCall(res: Res, node: IO[Unit]): IO[Either[String, Res]] =
     IO.uncancelable { poll =>
@@ -70,7 +70,8 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
 
   it should "answer the timeout and roll a late write back, never committing it" in:
     val res = new Res(2)
-    bounded(nodeCall(res, IO.sleep(200.millis)), 20.millis).unsafeRunSync() shouldBe Left("timeout")
+    bounded(nodeCall(res, IO.sleep(200.millis)), 20.millis).unsafeRunSync() shouldBe
+      Left("timeout")
     awaitEnds(res, 1)
     Thread.sleep(50)
     res.commits.get() shouldBe 0
@@ -106,7 +107,8 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     res.abandons.get() should be <= 1
 
   it should "never close a late failure and never surface a late error" in:
-    bounded(IO.sleep(100.millis).as(Left("late")), 10.millis).unsafeRunSync() shouldBe Left("timeout")
+    bounded(IO.sleep(100.millis).as(Left("late")), 10.millis).unsafeRunSync() shouldBe
+      Left("timeout")
     bounded(
       IO.sleep(100.millis) *> IO.raiseError(new RuntimeException("late boom")),
       10.millis

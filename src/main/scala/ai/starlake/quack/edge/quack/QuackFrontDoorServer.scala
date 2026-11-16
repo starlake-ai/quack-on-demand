@@ -180,7 +180,7 @@ object QuackFrontDoorServer:
     * listener with TLS on needs a proxy or firewall in front that limits this.
     */
   @nowarn("cat=deprecation")
-  private def readDeadline(deadline: FiniteDuration): SocketGroup[IO] =
+  private[edge] def readDeadline(deadline: FiniteDuration): SocketGroup[IO] =
     val network                            = Network[IO]
     def bounded(s: Socket[IO]): Socket[IO] = new Socket[IO]:
       def address                                          = s.address

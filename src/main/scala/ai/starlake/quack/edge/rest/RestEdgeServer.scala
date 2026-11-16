@@ -2,7 +2,7 @@ package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.RestEdgeConfig
 import ai.starlake.quack.edge.{BoundedBody, CertGen, ConnectionBudget}
-import ai.starlake.quack.edge.quack.PemKeyStore
+import ai.starlake.quack.edge.quack.{PemKeyStore, QuackFrontDoorServer}
 import ai.starlake.quack.ondemand.api.ErrorResponse
 import ai.starlake.quack.ondemand.api.Dtos.given
 import cats.data.{Kleisli, OptionT}
@@ -22,9 +22,12 @@ import org.typelevel.ci.CIStringSyntax
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
 
+import java.io.IOException
 import java.net.InetAddress
 import java.util.UUID
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.SSLException
 import scala.concurrent.duration.*
 import scala.util.Try
 
@@ -39,6 +42,10 @@ import scala.util.Try
   *     `withMaxHeaderSize` (bounds the request line, so the URI, too, and the header block, each),
   *     the header receive timeout (slowloris), the idle timeout and `withMaxConnections`, which
   *     takes no more connections than fit a tenth of the heap ([[ConnectionBudget]]);
+  *   - with TLS on, a deadline on every socket read ([[QuackFrontDoorServer.readDeadline]], the
+  *     idle timeout by default): Ember runs the TLS handshake before its header and idle timeouts
+  *     start, so a connection that never speaks would otherwise hold its slot for ever, and
+  *     `maxConnections` of them would lock every client out;
   *   - a fresh `X-Request-Id` per request, set on the request the handlers read (a client's own is
   *     replaced, never echoed) and on every response, including the ones Ember itself generates for
   *     an unparseable or oversized request head;
@@ -47,7 +54,8 @@ import scala.util.Try
 final class RestEdgeServer(
     cfg: RestEdgeConfig,
     endpoints: List[ServerEndpoint[Any, IO]],
-    newRequestId: () => String = () => UUID.randomUUID().toString
+    newRequestId: () => String = () => UUID.randomUUID().toString,
+    tlsReadDeadline: Option[FiniteDuration] = None
 ) extends LazyLogging:
 
   import RestEdgeServer.*
@@ -161,6 +169,10 @@ final class RestEdgeServer(
         PemKeyStore.load(cfg.tlsCertChain, cfg.tlsPrivateKey, StorePass)
       }.flatMap(ks => Network[IO].tlsContext.fromKeyStore(ks, StorePass).map(Some(_)))
 
+  /** Every TLS socket read's deadline: the idle timeout, which changes nothing for a client in use.
+    */
+  private def readDeadline: FiniteDuration = tlsReadDeadline.getOrElse(cfg.idleTimeoutSec.seconds)
+
   def resource: Resource[IO, org.http4s.server.Server] =
     for
       tls <- Resource.eval(tlsContext)
@@ -186,7 +198,19 @@ final class RestEdgeServer(
         .withRequestLineParseErrorHandler(headParseFailure)
         .withErrorHandler(emberErrors)
         .withShutdownTimeout(1.second)
-      built = tls.fold(base)(ctx => base.withTLS(ctx, TLSParameters.Default))
+      built = tls.fold(base)(ctx =>
+        base
+          .withTLS(ctx, TLSParameters.Default)
+          .withSocketGroup(QuackFrontDoorServer.readDeadline(readDeadline))
+          // A client needs no credential to make a connection fail (silent, no TLS, dropped in the
+          // handshake): logged at DEBUG, as text, never with a stack.
+          .withConnectionErrorHandler {
+            case _: TimeoutException =>
+              IO(logger.debug("REST data edge: closed a TLS connection that went silent"))
+            case e @ (_: SSLException | _: IOException) =>
+              IO(logger.debug(s"REST data edge: a TLS connection failed: ${e.toString}"))
+          }
+      )
       server <- built.build
     yield server
 

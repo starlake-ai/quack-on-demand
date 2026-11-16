@@ -109,7 +109,9 @@ object EdgeRewriters extends LazyLogging:
       history = (tenant, pool, cat, sch, tab) =>
         IO.blocking(
           duckLakeHistoryRow(sup, tenant, pool, cat)
-            .flatMap(td => sup.getTenantById(td.tenantId).map(t => catalogReaders.get(t.id, td.name)))
+            .flatMap(td =>
+              sup.getTenantById(td.tenantId).map(t => catalogReaders.get(t.id, td.name))
+            )
             .exists(_.nameHistoryStable(sch, tab))
         )
     )

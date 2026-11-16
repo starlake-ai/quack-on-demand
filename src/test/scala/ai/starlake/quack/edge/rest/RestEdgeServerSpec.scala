@@ -17,6 +17,7 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.cert.X509Certificate
 import javax.net.ssl.{SSLContext, TrustManager, X509TrustManager}
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** What only the wire can show about the REST data edge (plus a TLS smoke): the transport gates,
@@ -31,7 +32,12 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     try s.getLocalPort
     finally s.close()
 
-  private def cfg(port: Int, tls: Boolean = false, certDir: String = "") = RestEdgeConfig(
+  private def cfg(
+      port: Int,
+      tls: Boolean = false,
+      certDir: String = "",
+      maxConnections: Int = 8
+  ) = RestEdgeConfig(
     enabled = true,
     host = "127.0.0.1",
     port = port,
@@ -42,7 +48,7 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     maxRows = 100,
     maxResponseBytes = 1L << 20,
     stmtTimeoutSec = 5,
-    maxConnections = 8,
+    maxConnections = maxConnections,
     maxHeaderBytes = 16384,
     headerReceiveTimeoutSec = 1,
     idleTimeoutSec = 5
@@ -71,8 +77,10 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     }
   )
 
-  private def withServer[A](c: RestEdgeConfig)(body: String => A): A =
-    val server = new RestEdgeServer(c, canned)
+  private def withServer[A](c: RestEdgeConfig, tlsReadDeadline: Option[FiniteDuration] = None)(
+      body: String => A
+  ): A =
+    val server = new RestEdgeServer(c, canned, tlsReadDeadline = tlsReadDeadline)
     server.start().unsafeRunSync()
     try body(s"${if c.tlsEnabled then "https" else "http"}://127.0.0.1:${c.port}")
     finally server.stop()
@@ -266,6 +274,38 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
       )
       resp.statusCode() shouldBe 200
       resp.headers().firstValue("strict-transport-security").orElse("") should include("max-age=")
+    }
+  }
+
+  it should "close a connection that never speaks, and then serve a client" in {
+    // One slot: Ember's header and idle timeouts start only after the TLS handshake, so without the
+    // read deadline a silent connection would hold it for ever.
+    val dir = java.nio.file.Files.createTempDirectory("qod-rest-tls-silent").toString
+    CertGen.ensureCertFiles(s"$dir/server-cert.pem", s"$dir/server-key.pem")
+    val trustAll = new X509TrustManager:
+      def checkClientTrusted(c: Array[X509Certificate], a: String): Unit = ()
+      def checkServerTrusted(c: Array[X509Certificate], a: String): Unit = ()
+      def getAcceptedIssuers: Array[X509Certificate]                     = Array.empty
+    val ctx = SSLContext.getInstance("TLS")
+    ctx.init(null, Array[TrustManager](trustAll), new java.security.SecureRandom())
+    val tlsClient = HttpClient.newBuilder().sslContext(ctx).build()
+    withServer(
+      cfg(freePort(), tls = true, certDir = dir, maxConnections = 1),
+      tlsReadDeadline = Some(1.second)
+    ) { base =>
+      val uri    = URI.create(base)
+      val silent = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        silent.setSoTimeout(5000)
+        val start = System.nanoTime()
+        silent.getInputStream.read() shouldBe -1
+        (System.nanoTime() - start) / 1000000L should be < 5000L
+      finally silent.close()
+      val resp = tlsClient.send(
+        HttpRequest.newBuilder(URI.create(s"$base$RowsPath")).GET().build(),
+        HttpResponse.BodyHandlers.ofString()
+      )
+      resp.statusCode() shouldBe 200
     }
   }
 
