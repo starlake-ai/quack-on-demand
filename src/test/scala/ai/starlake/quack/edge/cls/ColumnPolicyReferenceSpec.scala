@@ -48,6 +48,25 @@ class ColumnPolicyReferenceSpec extends AnyFlatSpec with Matchers:
   private def rewrite(sql: String, policies: List[RoleColumnPolicy] = List(maskEmail)): Outcome =
     rw.rewrite(sql, StatementKind.Select, eff(policies), ctx).unsafeRunSync()
 
+  /** The router's guard, in the context the router builds: the database's own catalog is among
+    * the attached ones (`Main`'s `attachedCatalogsOf`), so a two-part name headed by it is refused
+    * as ambiguous before any rewriter runs.
+    */
+  private val guard = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
+    new ColumnCatalog.MapCatalog(columns),
+    clsEnabled = true,
+    rlsEnabled = true
+  )
+  private def refusedByGuard(sql: String): Boolean =
+    guard.check(
+      sql,
+      StatementKind.Select,
+      eff(),
+      ctx.copy(attachedCatalogs = Set(Catalog, "memory", "system", "temp"))
+    ) match
+      case ai.starlake.quack.edge.policy.GuardOutcome.Deny(_) => true
+      case _                                                  => false
+
   /** The rewritten text with every inserted mask removed: what is left must not name c_email,
     * except as the output alias a masked projection keeps.
     */
@@ -298,9 +317,11 @@ class ColumnPolicyReferenceSpec extends AnyFlatSpec with Matchers:
             }
             checked += 1
           case Denied(_) if mayRefuse || expected.isLeft => ()
-          // The router refuses an unparseable statement fail-closed (`catalog.table` defeats the
-          // column resolver), so it never reaches a node unmasked.
+          // The router refuses an unparseable statement fail-closed, so it never reaches a node
+          // unmasked.
           case PassthroughParseFailed => refused += 1
+          // `acme_lake.customer`: the guard refuses the ambiguous two-part name first.
+          case Passthrough if refusedByGuard(sql) => refused += 1
           case other => fail(s"$sql -> $other (expected over masked values: $expected)")
       info(s"$checked rewritten statements compared, $refused refused as unparseable")
       checked should be > 1000
