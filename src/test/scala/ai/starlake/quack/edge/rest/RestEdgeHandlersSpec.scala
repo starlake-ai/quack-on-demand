@@ -310,7 +310,7 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     header(out.headers, "Content-Type") shouldBe Some("application/json")
     fx.calls.size shouldBe 2
     fx.calls.head.sql should endWith("LIMIT 0")
-    fx.calls.last.sql should startWith("SELECT \"c_id\", \"c_email\", \"c_region\" FROM")
+    fx.calls.last.sql should startWith("SELECT * FROM")
   }
 
   it should "hand the executor a rest caller for the PAT, never an unrestricted one" in {

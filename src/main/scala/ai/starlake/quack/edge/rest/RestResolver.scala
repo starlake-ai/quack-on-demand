@@ -17,7 +17,9 @@ final case class ResolvedQuery(
     filters: Vector[ResolvedFilter],
     order: Vector[ResolvedOrder],
     limit: Option[Int],
-    offset: Int
+    offset: Int,
+    /** No `select`: the whole row, which the data statement reads as `*` ([[RestSql.render]]). */
+    wholeRow: Boolean = false
 )
 
 /** Binds a parsed [[RestQuery]] to the probed schema (column names, value types): the checks that
@@ -63,7 +65,7 @@ object RestResolver:
             Left(RestError.invalidParameter("order", "column type cannot be ordered"))
           case Some(c) => Right(ResolvedOrder(c, t.descending, t.nulls))
       }
-    yield ResolvedQuery(select, filters, order, q.limit, q.offset)
+    yield ResolvedQuery(select, filters, order, q.limit, q.offset, wholeRow = q.select.isEmpty)
 
   private def resolveFilter(
       f: Filter,

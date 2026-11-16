@@ -7,8 +7,8 @@ import java.sql.DriverManager
 import scala.util.Using
 
 /** Golden SQL for every operator, the linear LIKE forms, the three-part name for each kind, `AT`,
-  * `LIMIT n+1 OFFSET`, and the absence of ordinals and `*`; plus a semantic check of the same
-  * statements in in-process DuckDB.
+  * `LIMIT n+1 OFFSET`, `*` only for a whole-row read, and the absence of ordinals; plus a semantic
+  * check of the same statements in in-process DuckDB.
   */
 class RestSqlSpec extends AnyFlatSpec with Matchers:
 
@@ -33,9 +33,11 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
     val sql = RestSql.render(file, resolved(ps*), 10)
     sql.substring(sql.indexOf(" WHERE ") + 7, sql.indexOf(" LIMIT "))
 
-  "render" should "list every probed column explicitly when select is absent" in {
+  "render" should "read the whole row as * when select is absent, and list a select" in {
     RestSql.render(file, resolved(), 100) shouldBe
-      """SELECT "id", "name", "price", "ok", "tags" FROM "mydb"."sales"."orders" LIMIT 101 OFFSET 0"""
+      """SELECT * FROM "mydb"."sales"."orders" LIMIT 101 OFFSET 0"""
+    RestSql.render(file, resolved("select" -> "id,tags"), 100) shouldBe
+      """SELECT "id", "tags" FROM "mydb"."sales"."orders" LIMIT 101 OFFSET 0"""
   }
 
   it should "carry the snapshot pin, the select list, order and offset" in {
@@ -113,11 +115,11 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
     )
   }
 
-  it should "never emit an ordinal in ORDER BY nor a * in the data statement" in {
+  it should "never emit an ordinal, in ORDER BY or in the select list" in {
     // Columns whose names are digits are still quoted identifiers, never positions.
     val numeric = Vector(ProbedColumn("1", int), ProbedColumn("2", ColumnKind.Text))
     val q       = RestQuery
-      .parse(Seq("order" -> "2.desc,1", "1" -> "eq.1"))
+      .parse(Seq("select" -> "1,2", "order" -> "2.desc,1", "1" -> "eq.1"))
       .flatMap(RestResolver.resolve(_, numeric))
       .toOption
       .get

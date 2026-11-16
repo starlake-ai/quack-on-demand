@@ -84,7 +84,9 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       s"CREATE TABLE $c.main.orders (o_id INTEGER)",
       s"CREATE VIEW $c.main.v_customer AS SELECT c_id FROM $c.main.customer",
       s"CREATE TABLE $c.sales.leads (l_id INTEGER)",
-      s"CREATE TABLE $c.hr.salaries (s_id INTEGER)"
+      s"CREATE TABLE $c.hr.salaries (s_id INTEGER)",
+      s"""CREATE TABLE $c.main.dotted ("a.b" INTEGER, c_email VARCHAR)""",
+      s"INSERT INTO $c.main.dotted VALUES (1, 'a@x.io')"
     ).foreach(exec(conn, _))
 
   private object SqlQuote:
@@ -145,7 +147,12 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
 
   private val customerColumns = new ColumnCatalog.MapCatalog(
     AllKinds
-      .map(kc => (kc.catalog, "main", "customer") -> List("c_id", "c_email", "ssn"))
+      .flatMap(kc =>
+        List(
+          (kc.catalog, "main", "customer") -> List("c_id", "c_email", "ssn"),
+          (kc.catalog, "main", "dotted")   -> List("a.b", "c_email")
+        )
+      )
       .toMap
   )
 
@@ -368,6 +375,27 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
           h.table("acme", db(kc), "main", "customer", req()).unsafeRunSync() shouldBe missing
           h.rows("acme", db(kc), "main", "customer", req()).unsafeRunSync().left.map(_._1) shouldBe
             Left(StatusCode.NotFound)
+        }
+      }
+  }
+
+  // DuckDB reads `"a.b"` as one name and the policy rewriters' parser as two, so a policy holder's
+  // statement that writes it is refused (DottedIdentifierScreen). With no `select` the edge reads
+  // the whole row as `*`, as its probe does, and writes no such name.
+  "a column whose name holds a dot" should "be served to a policy holder reading the whole row" in {
+    val maskDotted =
+      RoleColumnPolicy("cp-dot", "r-1", "*", "main", "dotted", "c_email", "mask", Some("'***'"))
+    for kc <- AllKinds do
+      withClue(s"${kc.kind}: ") {
+        withHandlers(
+          kc,
+          permissions = grant(kc.catalog, "main", "dotted") :: grants(kc),
+          columnPolicies = List(maskDotted)
+        ) { h =>
+          h.rows("acme", db(kc), "main", "dotted", req())
+            .unsafeRunSync()
+            .map(ok => parse(ok.body).toOption.get) shouldBe
+            Right(Json.arr(Json.obj("a.b" -> Json.fromInt(1), "c_email" -> Json.fromString("***"))))
         }
       }
   }
