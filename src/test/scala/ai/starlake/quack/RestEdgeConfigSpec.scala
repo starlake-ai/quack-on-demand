@@ -28,7 +28,7 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
     defaults.tlsPrivateKey shouldBe "certs/server-key.pem"
     defaults.defaultLimit shouldBe 1000
     defaults.maxRows shouldBe 100000
-    defaults.maxResponseBytes shouldBe 64L * 1024 * 1024
+    defaults.maxResponseBytes shouldBe 16L * 1024 * 1024
     defaults.stmtTimeoutSec shouldBe 90
     defaults.maxConnections shouldBe 512
     defaults.maxHeaderBytes shouldBe 16384
@@ -57,11 +57,13 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
   it should "refuse each out-of-range number, naming its env var" in {
     val on    = defaults.copy(enabled = true)
     val cases = List(
-      on.copy(port = 0)                    -> "QOD_REST_PORT",
-      on.copy(port = 65536)                -> "QOD_REST_PORT",
-      on.copy(defaultLimit = 0)            -> "QOD_REST_DEFAULT_LIMIT",
-      on.copy(maxRows = 999)               -> "QOD_REST_MAX_ROWS",
-      on.copy(maxResponseBytes = 1023)     -> "QOD_REST_MAX_RESPONSE_BYTES",
+      on.copy(port = 0)                -> "QOD_REST_PORT",
+      on.copy(port = 65536)            -> "QOD_REST_PORT",
+      on.copy(defaultLimit = 0)        -> "QOD_REST_DEFAULT_LIMIT",
+      on.copy(maxRows = 999)           -> "QOD_REST_MAX_ROWS",
+      on.copy(maxResponseBytes = 1023) -> "QOD_REST_MAX_RESPONSE_BYTES",
+      on.copy(maxResponseBytes = RestEdgeConfig.MaxResponseBytes + 1) ->
+        "QOD_REST_MAX_RESPONSE_BYTES",
       on.copy(stmtTimeoutSec = 0)          -> "QOD_REST_STMT_TIMEOUT_SEC",
       on.copy(maxConnections = 0)          -> "QOD_REST_DATA_MAX_CONNECTIONS",
       on.copy(maxHeaderBytes = 1023)       -> "QOD_REST_DATA_MAX_HEADER_BYTES",

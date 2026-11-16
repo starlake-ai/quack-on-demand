@@ -380,22 +380,23 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
   }
 
   // DuckDB reads `"a.b"` as one name and the policy rewriters' parser as two, so a policy holder's
-  // statement that writes it is refused (DottedIdentifierScreen). With no `select` the edge reads
-  // the whole row as `*`, as its probe does, and writes no such name.
+  // statement that writes it is refused (DottedIdentifierScreen), whichever table the policy is on.
+  // With no `select` the edge reads the whole row as `*`, as its probe does, and writes no such
+  // name.
   "a column whose name holds a dot" should "be served to a policy holder reading the whole row" in {
-    val maskDotted =
-      RoleColumnPolicy("cp-dot", "r-1", "*", "main", "dotted", "c_email", "mask", Some("'***'"))
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {
         withHandlers(
           kc,
           permissions = grant(kc.catalog, "main", "dotted") :: grants(kc),
-          columnPolicies = List(maskDotted)
+          columnPolicies = List(maskEmail)
         ) { h =>
           h.rows("acme", db(kc), "main", "dotted", req())
             .unsafeRunSync()
             .map(ok => parse(ok.body).toOption.get) shouldBe
-            Right(Json.arr(Json.obj("a.b" -> Json.fromInt(1), "c_email" -> Json.fromString("***"))))
+            Right(
+              Json.arr(Json.obj("a.b" -> Json.fromInt(1), "c_email" -> Json.fromString("a@x.io")))
+            )
         }
       }
   }

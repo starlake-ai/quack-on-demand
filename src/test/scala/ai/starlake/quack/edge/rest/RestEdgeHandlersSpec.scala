@@ -759,14 +759,18 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
   "a statement past the timeout" should "get 504 and have its late result closed exactly once" in {
     val release                          = new CountDownLatch(1)
     val closes                           = new AtomicInteger()
+    // Shaped like the node call (QuackHttpClient): an uninterruptible wait for the node, then the
+    // result handed over at a cancellation point whose release path closes it.
     val slow: AtomicInteger => Responder = _ =>
       sql =>
-        IO.blocking(release.await(10, TimeUnit.SECONDS)) *>
-          IO(
-            Right(
-              QueryResult(TestArrow.oneRowReader(), () => closes.incrementAndGet(): Unit, "n", 1L)
-            )
+        IO.uncancelable { poll =>
+          IO.blocking(release.await(10, TimeUnit.SECONDS)) *> IO {
+            QueryResult(TestArrow.oneRowReader(), () => closes.incrementAndGet(): Unit, "n", 1L)
+          }.flatMap(qr =>
+            poll(IO.pure[Either[RouterFailure, QueryResult]](Right(qr)))
+              .onCancel(IO(qr.close()))
           )
+        }
     val fx = fixture(respond = Some(slow), stmtTimeout = Some(200.millis))
     val e  = errOf(rows(fx, "customer"))
     (e._1, e._3.error) shouldBe (StatusCode.GatewayTimeout, "statement_timeout")
