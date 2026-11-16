@@ -1766,7 +1766,7 @@ final case class RestEdgeConfig(
     @field @ConfigField(
       envVar = "QOD_REST_MAX_RESPONSE_BYTES",
       description =
-        "Largest /rows body, in bytes; a page that would exceed it is cut at a row boundary and flagged X-QoD-Truncated."
+        "Largest /rows body, in bytes (at most 64 MiB); a page that would exceed it is cut at a row boundary and flagged X-QoD-Truncated."
     )
     maxResponseBytes: Long,
     @field @ConfigField(
@@ -1803,6 +1803,12 @@ final case class RestEdgeConfig(
 
 object RestEdgeConfig:
 
+  /** The largest `QOD_REST_MAX_RESPONSE_BYTES`: a page is held whole in the heap until it is
+    * written (twice its size while it is encoded), and the edge's page budget reserves that much
+    * per data statement (`RestPageBudget`).
+    */
+  val MaxResponseBytes: Long = 64L * 1024 * 1024
+
   /** Boot validation, in the `Either[String, Unit]` style of `HaPreconditions.validate`: only the
     * numbers, and a port another door already binds. `otherPorts` are the `(door, port)` pairs of
     * the listeners that are on. A disabled edge is never checked, so a stale override on a
@@ -1832,8 +1838,9 @@ object RestEdgeConfig:
           s"QOD_REST_MAX_ROWS (${cfg.maxRows}) must be >= QOD_REST_DEFAULT_LIMIT " +
             s"(${cfg.defaultLimit})"
         ),
-        Option.when(cfg.maxResponseBytes < 1024)(
-          s"QOD_REST_MAX_RESPONSE_BYTES must be >= 1024, got ${cfg.maxResponseBytes}"
+        Option.when(cfg.maxResponseBytes < 1024 || cfg.maxResponseBytes > MaxResponseBytes)(
+          s"QOD_REST_MAX_RESPONSE_BYTES must be in 1024..$MaxResponseBytes, got " +
+            cfg.maxResponseBytes
         ),
         atLeast(cfg.stmtTimeoutSec, 1, "QOD_REST_STMT_TIMEOUT_SEC"),
         Option.when(cfg.stmtTimeoutSec >= 1 && cfg.stmtTimeoutSec.toLong <= resumeHoldTimeoutSec)(

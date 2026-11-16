@@ -248,7 +248,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       dataRows: Int = 3,
       respond: Option[AtomicInteger => Responder] = None,
       stmtTimeout: Option[FiniteDuration] = None,
-      catalog: DuckLakeCatalogReader = reader
+      catalog: DuckLakeCatalogReader = reader,
+      pageBudget: RestPageBudget = RestPageBudget.Unbounded
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
@@ -270,7 +271,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         executor(recorded = false),
         (_, _) => catalog,
         tags,
-        stmtTimeout = stmtTimeout
+        stmtTimeout = stmtTimeout,
+        pageBudget = pageBudget
       ),
       calls
     )
@@ -786,6 +788,22 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val start = System.nanoTime()
     errOf(rows(fx, "customer"))._1 shouldBe StatusCode.GatewayTimeout
     (System.nanoTime() - start).nanos should be < 3.seconds
+  }
+
+  "a page past the edge's page budget" should "get 503 edge_busy before its data statement" in {
+    val budget = RestPageBudget.forHeap(1024L * 1024, 10L * 1024 * 1024, 1.minute)
+    // Another request holds the whole budget.
+    budget.reserve("other", 1.second).unsafeRunSync() shouldBe true
+    val fx = fixture(pageBudget = budget, stmtTimeout = Some(100.millis))
+    val e  = errOf(rows(fx, "customer"))
+    (e._1, e._3.error) shouldBe (StatusCode.ServiceUnavailable, "edge_busy")
+    header(e._2, "Retry-After") shouldBe Some("5")
+    fx.calls.map(_.sql.endsWith("LIMIT 0")) shouldBe List(true)
+    // Given back, the next request is served and keeps only its body's share until written.
+    budget.release("other").unsafeRunSync()
+    okOf(rows(fx, "customer"))
+    budget.holds("rid-0001") shouldBe true
+    budget.release("rid-0001").unsafeRunSync()
   }
 
   "a resuming pool" should "get 503 pool_resuming with Retry-After" in {

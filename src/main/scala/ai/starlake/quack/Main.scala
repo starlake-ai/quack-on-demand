@@ -1905,6 +1905,16 @@ object Main extends IOApp with LazyLogging:
       // listener; started after the Quack door.
       val restEdge: Option[ai.starlake.quack.edge.rest.RestEdgeServer] =
         Option.when(restCfgResolved.enabled) {
+          // What /rows pages may hold of the heap at once; a reservation the server never gives
+          // back (a connection broken before its body was pulled) returns after this long.
+          val pageBudget = ai.starlake.quack.edge.rest.RestPageBudget.forHeap(
+            restCfgResolved.maxResponseBytes,
+            Runtime.getRuntime.maxMemory,
+            holdAtMost = scala.concurrent.duration.FiniteDuration(
+              restCfgResolved.stmtTimeoutSec.toLong + restCfgResolved.idleTimeoutSec.toLong + 60L,
+              java.util.concurrent.TimeUnit.SECONDS
+            )
+          )
           val handlers = new ai.starlake.quack.edge.rest.RestEdgeHandlers(
             restCfgResolved,
             sup,
@@ -1924,11 +1934,13 @@ object Main extends IOApp with LazyLogging:
                 failure,
                 source = caller.source,
                 patId = caller.patId
-              )
+              ),
+            pageBudget = pageBudget
           )
           new ai.starlake.quack.edge.rest.RestEdgeServer(
             restCfgResolved,
-            ai.starlake.quack.edge.rest.RestEdgeServer.serverEndpoints(handlers)
+            ai.starlake.quack.edge.rest.RestEdgeServer.serverEndpoints(handlers),
+            pageBudget = pageBudget
           )
         }
       // A REST edge bind failure aborts boot exactly like the Quack door's.

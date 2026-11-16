@@ -55,7 +55,9 @@ final class RestEdgeServer(
     cfg: RestEdgeConfig,
     endpoints: List[ServerEndpoint[Any, IO]],
     newRequestId: () => String = () => UUID.randomUUID().toString,
-    tlsReadDeadline: Option[FiniteDuration] = None
+    tlsReadDeadline: Option[FiniteDuration] = None,
+    /** The handlers' page budget: a request's share is given back once its response is written. */
+    pageBudget: RestPageBudget = RestPageBudget.Unbounded
 ) extends LazyLogging:
 
   import RestEdgeServer.*
@@ -128,6 +130,17 @@ final class RestEdgeServer(
         error(Status.InternalServerError, "upstream_error", s"upstream error (request id $rid)")
       }
       .map(decorate(_, rid))
+      .map(resp =>
+        // A page's share of the budget is given back once its body has been written (or the
+        // write failed); a request that holds none is left as it is.
+        if pageBudget.holds(rid) then
+          resp.withBodyStream(resp.body.onFinalize(pageBudget.release(rid)))
+        else resp
+      )
+      .guaranteeCase {
+        case cats.effect.Outcome.Succeeded(_) => IO.unit
+        case _                                => pageBudget.release(rid)
+      }
   }
 
   private def tooLarge: Response[IO] =

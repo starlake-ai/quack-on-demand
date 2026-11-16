@@ -109,7 +109,11 @@ final class RestEdgeHandlers(
     /** Records a probe the router refused (`FlightSqlRouter.recordRefusedProbe`); the probe runs on
       * the unrecording executor, so nothing else would.
       */
-    recordRefusedProbe: (ExecCaller, PoolKey, String, RouterFailure) => Unit = (_, _, _, _) => ()
+    recordRefusedProbe: (ExecCaller, PoolKey, String, RouterFailure) => Unit = (_, _, _, _) => (),
+    /** The heap `/rows` pages may hold at once; [[RestEdgeServer]] gives a page's share back once
+      * its response is written.
+      */
+    pageBudget: RestPageBudget = RestPageBudget.Unbounded
 ) extends LazyLogging:
 
   import RestEdgeHandlers.*
@@ -237,6 +241,8 @@ final class RestEdgeHandlers(
         // Same node as the probe: a soft pin, a vanished node falls back as usual.
         pinnedCaller = t.caller.copy(preferredNode = Some(loc.node))
         sql          = RestSql.render(loc.at, rq, limit)
+        room <- io(pageBudget.reserve(req.requestId, timeoutFor(t.caller)))
+        _    <- if room then lift(Right(())) else fail(RestError.Busy)
         before <- io(latestSnapshot(tenant, t.td, req.requestId))
         enc    <- execute(
           t.copy(caller = pinnedCaller),
@@ -244,6 +250,7 @@ final class RestEdgeHandlers(
           dataFailure(req.requestId, filtered = rq.filters.nonEmpty),
           req
         )(reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes)))
+        _     <- io(pageBudget.settle(req.requestId, enc.bytes.capacity.toLong))
         after <- io(latestSnapshot(tenant, t.td, req.requestId))
         sn = shownSnapshot(loc, before, after)
       yield
