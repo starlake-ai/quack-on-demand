@@ -1,0 +1,10 @@
+# A plan verdict carrying search populations (search spec 4.2 rule 8): AuthzDeciderSearchSpec (Scala)
+# signs it from fixed inputs with Verdicts.sign; qod-node's verdict test verifies it, so both sides agree
+# on the optional "search" key byte for byte. verdict-v1.txt (no search key) stays as it is.
+# key: verdict-v1.txt's. Verdict: verdict-v1.txt's allow fields for this description, plus search.
+key=bafdaeb38095c6be835ce8d4b771938bc7fe634c2f4a6e5ca0ea80a617340c70
+description={"control":[],"functions":[],"objects":[{"access":"read","catalog":"acme_lake","catalogType":"ducklake","columns":["body"],"kind":"table","name":"pages_1m","schema":"main","via":null}],"searches":[{"call":0,"columns":["body"],"table":"acme_lake.main.pages_1m"}],"settings":[],"statement":"PROJECTION","v":1}
+fingerprint=1abad6fb41d1fedb462bdbce4392f026ccce5ac37ee4bed12e5e543955d60758
+ctx=44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+json={"ctx":"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","decision":"allow","expiresAt":1761200060000,"fingerprint":"1abad6fb41d1fedb462bdbce4392f026ccce5ac37ee4bed12e5e543955d60758","kind":"plan","masks":[],"policyVersion":42,"principal":"u-1","reason":"","retryable":false,"rowFilters":[],"search":[{"bundleRoot":"/data/lake/","call":0,"indexId":"464d2a3f-7237-800a-a4fc-4be657841b24","population":"allowed"}],"v":1}
+allow=eyJjdHgiOiI0NDEzNmZhMzU1YjM2NzhhMTE0NmFkMTZmN2U4NjQ5ZTk0ZmI0ZmMyMWZlNzdlODMxMGMwNjBmNjFjYWFmZjhhIiwiZGVjaXNpb24iOiJhbGxvdyIsImV4cGlyZXNBdCI6MTc2MTIwMDA2MDAwMCwiZmluZ2VycHJpbnQiOiIxYWJhZDZmYjQxZDFmZWRiNDYyYmRiY2U0MzkyZjAyNmNjY2U1YWMzN2VlNGJlZDEyZTVlNTQzOTU1ZDYwNzU4Iiwia2luZCI6InBsYW4iLCJtYXNrcyI6W10sInBvbGljeVZlcnNpb24iOjQyLCJwcmluY2lwYWwiOiJ1LTEiLCJyZWFzb24iOiIiLCJyZXRyeWFibGUiOmZhbHNlLCJyb3dGaWx0ZXJzIjpbXSwic2VhcmNoIjpbeyJidW5kbGVSb290IjoiL2RhdGEvbGFrZS8iLCJjYWxsIjowLCJpbmRleElkIjoiNDY0ZDJhM2YtNzIzNy04MDBhLWE0ZmMtNGJlNjU3ODQxYjI0IiwicG9wdWxhdGlvbiI6ImFsbG93ZWQifV0sInYiOjF9.1446e26ffa3bcd26a81ea70ffcd04e33b8562ed7edaf630b0ab3795f387aca50

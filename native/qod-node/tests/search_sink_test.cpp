@@ -94,6 +94,8 @@ std::mutex g_decider_mutex;
 std::vector<std::string> g_descriptions;
 std::atomic<int> g_plan_decisions {0};
 std::atomic<bool> g_refuse {false};
+//! The sink's swap count at each plan decision, in call order (S6: every verdict precedes the swap).
+std::vector<idx_t> g_swaps_at_plan_decision;
 
 qod::DecideResult Recorder(const qod::DecideCall &call) {
 	if (call.kind == "plan") {
@@ -102,6 +104,9 @@ qod::DecideResult Recorder(const qod::DecideCall &call) {
 	{
 		std::lock_guard<std::mutex> guard(g_decider_mutex);
 		g_descriptions.push_back(call.kind + "\t" + call.description);
+		if (call.kind == "plan") {
+			g_swaps_at_plan_decision.push_back(SinkCountersForTest().swaps);
+		}
 	}
 	qod::DecideResult result;
 	result.status = g_refuse.load() ? qod::DecideResult::Status::Refuse : qod::DecideResult::Status::Allow;
@@ -117,6 +122,13 @@ std::vector<std::string> TakeDescriptions() {
 	std::lock_guard<std::mutex> guard(g_decider_mutex);
 	auto out = std::move(g_descriptions);
 	g_descriptions.clear();
+	return out;
+}
+
+std::vector<idx_t> TakeSwapsAtPlanDecisions() {
+	std::lock_guard<std::mutex> guard(g_decider_mutex);
+	auto out = std::move(g_swaps_at_plan_decision);
+	g_swaps_at_plan_decision.clear();
 	return out;
 }
 
@@ -346,14 +358,34 @@ void S5(Connection &client) {
 void S6(Connection &client) {
 	const std::string sql = "SELECT rows FROM qod_search_drain_sink((SELECT rowid FROM t WHERE i % 10 = 0))";
 	TakeDescriptions();
+	TakeSwapsAtPlanDecisions();
+	auto swaps_before = SinkCountersForTest().swaps;
 	Run(client, sql);
+	auto swaps_after = SinkCountersForTest().swaps;
 	auto with_swap = TakeDescriptions();
+	auto seen = TakeSwapsAtPlanDecisions();
+	// The evidence that the swap cannot change what is judged: every plan decision of the statement saw
+	// the swap count of before the statement, and the statement then swapped once.
+	bool before_swap = !seen.empty() && swaps_after == swaps_before + 1;
+	for (auto n : seen) {
+		before_swap = before_swap && n == swaps_before;
+	}
+	std::string seen_text;
+	for (auto n : seen) {
+		seen_text += (seen_text.empty() ? "" : ",") + std::to_string(n);
+	}
+	Check(before_swap, "S6 every plan verdict precedes the swap: swaps at the decisions [" + seen_text +
+	                       "], before " + std::to_string(swaps_before) + ", after " + std::to_string(swaps_after));
 	qod::search::SkipSwapForTest(true);
 	Run(client, sql);
 	qod::search::SkipSwapForTest(false);
 	auto without_swap = TakeDescriptions();
+	TakeSwapsAtPlanDecisions();
+	// Follows from the order above (the swap runs after every describe), so this only pins that the
+	// skip hook leaves the describes alone; the order check is the evidence.
 	Check(!with_swap.empty() && with_swap == without_swap,
-	      "S6 descriptions identical with and without the swap (" + std::to_string(with_swap.size()) + " calls)");
+	      "S6 descriptions equal with the swap and with the swap skipped (" + std::to_string(with_swap.size()) +
+	          " calls)");
 	g_refuse = true;
 	ResetSinkCountersForTest();
 	auto refused = Run(client, sql);
@@ -615,9 +647,14 @@ void S9(Connection &setup, Connection &client) {
 	auto rows = Run(client, "SELECT rows FROM qod_search_drain_sink((SELECT rowid FROM h))");
 	qod::search::InterruptAfterRowsForTest(0);
 	auto c = SinkCountersForTest();
+	// interrupts_answered counts the sink's own checks that threw: the hook interrupts and the sink checks
+	// in the same Sink call, before DuckDB's executor checks again at its next chunk, so at least one
+	// does whatever the other threads do (each of them answers at its next check, the sink's or the
+	// executor's).
 	Check(Holds(rows.error, "Interrupt") && rows.values.empty() && c.interrupt_checks > 0 &&
-	          c.max_rows_between_checks <= 65536,
+	          c.interrupts_answered >= 1 && c.max_rows_between_checks <= 65536,
 	      "S9 cancellation: " + FirstLine(rows.error) + ", interrupt checks " + std::to_string(c.interrupt_checks) +
+	          ", answered by the sink's own check " + std::to_string(c.interrupts_answered) +
 	          ", max rows between checks " + std::to_string(c.max_rows_between_checks));
 	auto after = One(client, "SELECT rows FROM qod_search_drain_sink((SELECT rowid FROM t WHERE i % 10 = 0))");
 	Check(after == "200000", "S9 the connection answers afterwards: " + after);

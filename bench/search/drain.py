@@ -14,9 +14,12 @@ pattern), with stopping.run_until_stable (section 11's rule, as in P4):
 - the tenant floor `SELECT 1`, first and last (floor_p50_ms is the mean of the two p50);
 - the 10-rowid fetch at 10M, `SELECT id, title FROM acme_lake.main.pages_10m WHERE rowid IN (...)`,
   10 random rowids drawn afresh for every execution (Q13's shape through the gateway), 10 rows;
-- per size (pages_10m, pages_100m_drain) and input (no filter, f10 = 0, f100 = 0), the three
+- per size (pages_10m, pages_100m_drain) and input (no filter, f10 = 0, f100 = 0), the four
   statements of the node-local bench (search_drain_bench.cpp):
     drain     SELECT "rows", max_rowid, drain_ms FROM qod_search_drain((<input>))
+    sink      SELECT "rows", max_rowid, drain_ms, locals FROM qod_search_drain_sink((<input>))
+              (Task 7a: the same drain in qod-node's search sink; its drain_ms p50 and its locals,
+              one value per execution, as a histogram)
     parallel  SELECT sum("rows") FROM qod_search_drain_parallel((<input>))
     count     SELECT count(*) FROM (<input>)
   with <input> = SELECT rowid FROM acme_lake.main.pages_<n> [WHERE f10 = 0 | WHERE f100 = 0]. The
@@ -24,8 +27,9 @@ pattern), with stopping.run_until_stable (section 11's rule, as in P4):
 Each execution is `cursor.execute(sql); cursor.fetchall()`, timed with time.perf_counter_ns. Every
 result is checked (row counts as expected; the fetch returns 10 rows); a mismatch or an error
 stops the run with a non-zero exit. Warm-ups: 20 per statement (5 at 100M); batches of 200 (20 at
-100M, whose single-threaded drain takes about 0.4 s a run), at most 10. One JSON object per
-statement is appended to D/drain.jsonl once the last floor is measured (default D is
+100M, whose single-threaded drain takes about 0.4 s a run), at most 10; each object records how
+its run stopped (rule_met false: the cap was hit first; batch_medians_ms; final_cv). One JSON
+object per statement is appended to D/drain.jsonl once the last floor is measured (default D is
 <p2>/results) and each is printed as it completes.
 
 --dry-run: 2 warm-ups, batches of 5, at most 3 batches, objects tagged "dry_run": true and written
@@ -45,7 +49,7 @@ import time  # noqa: E402
 import adbc_driver_flightsql.dbapi as flight  # noqa: E402
 from adbc_driver_flightsql import DatabaseOptions  # noqa: E402
 
-from stopping import percentile, run_until_stable  # noqa: E402
+from stopping import percentile, run_until_stable, stability_fields  # noqa: E402
 
 CATALOG = "acme_lake"
 TENANT, POOL, USER = "acme", "bi", "plain"
@@ -109,16 +113,24 @@ def measure(cur, make_sql, check, warmup, batch_size, max_batches):
         cur.execute(make_sql())
         check(cur.fetchall())
     extra = []
-    samples, batches = run_until_stable(timer(cur, make_sql, check, extra), batch_size, max_batches)
+    run = run_until_stable(timer(cur, make_sql, check, extra), batch_size, max_batches)
+    samples = run.samples
     out = {
         "p50_ms": round(percentile(samples, 0.50), 4),
         "p95_ms": round(percentile(samples, 0.95), 4),
         "p99_ms": round(percentile(samples, 0.99), 4),
         "mean_ms": round(statistics.mean(samples), 4),
-        "batches": batches,
+        "batches": run.batches,
+        **stability_fields(run),
         "samples": len(samples),
     }
-    if extra:
+    if extra and isinstance(extra[0], tuple):
+        out["drain_ms_p50"] = round(percentile([e[0] for e in extra], 0.50), 4)
+        histogram = {}
+        for e in extra:
+            histogram[e[1]] = histogram.get(e[1], 0) + 1
+        out["locals_histogram"] = {str(k): v for k, v in sorted(histogram.items())}
+    elif extra:
         out["drain_ms_p50"] = round(percentile(extra, 0.50), 4)
     return out
 
@@ -138,6 +150,15 @@ def drain_check(expected):
         if len(rows) != 1 or rows[0][0] != expected:
             raise Check(f"expected one row with rows = {expected}, got {rows[:2]}")
         return float(rows[0][2])
+    return check
+
+
+def sink_check(expected):
+    """The sink's row: rows as expected; returns (drain_ms, locals) for the record."""
+    def check(rows):
+        if len(rows) != 1 or rows[0][0] != expected:
+            raise Check(f"expected one row with rows = {expected}, got {rows[:2]}")
+        return (float(rows[0][2]), int(rows[0][3]))
     return check
 
 
@@ -186,6 +207,8 @@ def main():
                 statements = [
                     ("drain", f'SELECT "rows", max_rowid, drain_ms FROM qod_search_drain(({inp}))',
                      drain_check(expected)),
+                    ("sink", f'SELECT "rows", max_rowid, drain_ms, locals FROM qod_search_drain_sink(({inp}))',
+                     sink_check(expected)),
                     ("parallel", f'SELECT sum("rows") FROM qod_search_drain_parallel(({inp}))',
                      expect_rows(1, expected)),
                     ("count", f"SELECT count(*) FROM ({inp})", expect_rows(1, expected)),

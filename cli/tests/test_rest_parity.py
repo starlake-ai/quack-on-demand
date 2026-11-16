@@ -44,6 +44,8 @@ EXCLUSIONS = {
     # http4s routes, never in the OpenAPI contract; listed so a registration cannot slip in)
     "/api/internal/authz/credentials",
     "/api/internal/authz/decide",
+    # prototype only (plan Task 12), Phase 2's indexer replaces it
+    "/api/search/prototype/build-segments",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"

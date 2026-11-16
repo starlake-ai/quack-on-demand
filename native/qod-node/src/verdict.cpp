@@ -5,6 +5,7 @@
 #include "wire_text.hpp"
 
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 
 namespace qod {
@@ -52,6 +53,33 @@ Verdict VerifyVerdict(const std::string &text, const std::string &node_key, cons
 		verdict.expires_at = json.Get("expiresAt", JsonValue::Kind::INTEGER).integer;
 		no_extras = json.Get("rowFilters", JsonValue::Kind::ARRAY).array.empty() &&
 		            json.Get("masks", JsonValue::Kind::ARRAY).array.empty();
+		if (auto search = json.GetOptional("search", JsonValue::Kind::ARRAY)) {
+			if (verdict.kind != "plan") {
+				throw std::invalid_argument("a search population on a verdict that is not a plan's");
+			}
+			std::set<uint64_t> calls;
+			for (auto &item : search->array) {
+				SearchEntry entry;
+				auto call = item.Get("call", JsonValue::Kind::INTEGER).integer;
+				if (call < 0) {
+					throw std::invalid_argument("a search call below 0");
+				}
+				entry.call = static_cast<uint64_t>(call);
+				if (!calls.insert(entry.call).second) {
+					throw std::invalid_argument("two search entries for one call");
+				}
+				entry.population = item.Get("population", JsonValue::Kind::STRING).string;
+				if (entry.population != "table" && entry.population != "allowed") {
+					throw std::invalid_argument("unknown search population '" + entry.population + "'");
+				}
+				entry.index_id = item.Get("indexId", JsonValue::Kind::STRING).string;
+				entry.bundle_root = item.Get("bundleRoot", JsonValue::Kind::STRING).string;
+				if (entry.index_id.empty() || entry.bundle_root.empty()) {
+					throw std::invalid_argument("a search entry with no index record");
+				}
+				verdict.search.push_back(std::move(entry));
+			}
+		}
 	} catch (std::invalid_argument &error) {
 		throw std::invalid_argument(std::string("malformed verdict: ") + error.what());
 	}

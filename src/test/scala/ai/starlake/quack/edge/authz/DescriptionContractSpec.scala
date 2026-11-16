@@ -141,6 +141,8 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
     "read_window"           -> Allow,
     "read_window_aggregate" -> Allow,
     "view_plain"            -> Allow,
+    // a search call (search spec 4.1): its column read is an object read like any scan's
+    "search-a1" -> lacks("lake.main.pages:read"),
     // a built-in view inlines to its listing functions (no object): the node's describer refuses
     // every built-in view to a non-superuser but the own-text information_schema reads the
     // gateway filters, so the description that reaches the decider is that read's, or a superuser's

@@ -407,6 +407,33 @@ class RowPolicyRewriterSearchSpec extends AnyFlatSpec with Matchers:
       }
   }
 
+  // Review of Tasks 5 and 7a, M6: the drain probes answer the count and maximum of their input, so
+  // a column-policy holder's probe over a masked or denied BIGINT column must be denied like a search
+  // call, never rewritten (the probe's TABLE argument was not shown to carry the mask). A SELECT was
+  // already denied before the probes joined SearchFunctions.Names, by the column resolver's parse
+  // failure on a table function; a statement of another kind passed through, and is what this pins.
+  it should "deny the prototype's drain probes for a column-policy holder" in {
+    for
+      policy <- List(maskRealRowid, denyRealRowid)
+      name   <- List("qod_search_drain", "qod_search_drain_parallel", "qod_search_drain_sink")
+    do
+      val q     = s"SELECT \"rows\", max_rowid FROM $name((SELECT rowid FROM rpages))"
+      val write = s"INSERT INTO other SELECT \"rows\", 'x' FROM $name((SELECT rowid FROM rpages))"
+      val eff   = EffectiveSet(alice, Nil, Nil, Nil, Nil, List(policy), Nil)
+      withClue(s"${policy.action}: $q") {
+        clsOutcome(
+          eff,
+          q
+        ) shouldBe ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed
+        clsThenRls(eff, q).isLeft shouldBe true
+        clsOutcome(
+          eff,
+          write,
+          StatementKind.Dml
+        ) shouldBe ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed
+      }
+  }
+
   it should "deny a flagged statement of any kind for a column-policy holder" in {
     val eff = EffectiveSet(alice, Nil, Nil, Nil, Nil, List(maskRealRowid), Nil)
     clsOutcome(

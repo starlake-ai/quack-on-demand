@@ -32,6 +32,12 @@ import scala.util.control.NonFatal
   * (`paths`, the function [[NodeKeys]] carries into every handle): it runs before the statement and
   * moves nothing.
   *
+  * An allowed plan whose description holds `searches` (search spec 4.2 rule 8) carries each call's
+  * statistics population and index record ([[AuthzDecider.searchPopulations]], on the handle's
+  * pool) in the verdict's `search`; a refusal there replaces the allow. A superuser's and the
+  * system principal's search plans come here too, for the records alone (prototype only): nothing
+  * of them is judged. Dry runs carry none.
+  *
   * Answers (all `text/plain; charset=UTF-8`): 200 with a signed [[Verdict]] (allow or refuse), 401
   * when the node or the handle fails, 503 when the decision is unavailable (an expired context
   * included), 400 for a malformed request (JSON nested too deeply included), 408 for a body that
@@ -110,19 +116,30 @@ final class DecideRoute(
       val dryRun = r.kind == "plan" && entry.exists(_.context.purpose == DecidePurpose.DryRun)
       // Whatever a decision fails to read, thrown included, is unavailable: never a verdict. A
       // screen verdict expires at once; a plan verdict lives for the decider's lifetime.
-      val (decision, lifetimeMs) =
+      // An allowed plan holding search calls carries each call's population and index record
+      // (search spec 4.2 rule 8), a superuser's or the system principal's included: their search
+      // plans take this call for the record alone (prototype only).
+      val (decision, lifetimeMs, search) =
         try
           if r.kind == "plan" then
-            val d = Description
-              .decode(r.description)
-              .fold(
-                why => Decision.Refuse(s"malformed description: $why"),
-                plan =>
-                  entry match
-                    case Some(e) if dryRun => judgeDryRun(h.nonce, who, e.context, plan)
-                    case _                 => decider.decidePlan(who, plan)
-              )
-            (d, decider.lifetimeMs(who))
+            Description.decode(r.description) match
+              case Left(why) =>
+                (Decision.Refuse(s"malformed description: $why"), decider.lifetimeMs(who), Nil)
+              case Right(plan) =>
+                val d = entry match
+                  case Some(e) if dryRun => judgeDryRun(h.nonce, who, e.context, plan)
+                  case _                 => decider.decidePlan(who, plan)
+                val (decided, populations) = d match
+                  case Decision.Allow if !dryRun && plan.searches.nonEmpty =>
+                    PoolKey.parse(h.pool) match
+                      case Left(_) =>
+                        (Decision.Refuse("the handle names no pool a search can run on"), Nil)
+                      case Right(pool) =>
+                        decider
+                          .searchPopulations(who, plan, pool)
+                          .fold(refusal => (refusal, Nil), list => (Decision.Allow, list))
+                  case other => (other, Nil)
+                (decided, decider.lifetimeMs(who), populations)
           else
             val d = ScreenDescription
               .decode(r.description)
@@ -130,11 +147,11 @@ final class DecideRoute(
                 why => Decision.Refuse(s"malformed description: $why"),
                 decider.decideScreen(who, _)
               )
-            (d, 0L)
+            (d, 0L, Nil)
         catch
           case NonFatal(e) =>
             logger.warn(s"authz decide: $brief failed (${e.getClass.getSimpleName})")
-            (Decision.Unavailable(DecisionFailed), 0L)
+            (Decision.Unavailable(DecisionFailed), 0L, Nil)
       // A dry run (decision 25), plan or screen, is not traffic: never counted.
       if !entry.exists(_.context.purpose == DecidePurpose.DryRun) then
         record(h, r.kind, decision, started)
@@ -159,7 +176,8 @@ final class DecideRoute(
             policyVersion = h.policyVersion,
             fingerprint = fingerprint,
             expiresAt = clock() + lifetimeMs,
-            ctx = h.ctx
+            ctx = h.ctx,
+            search = if verdict == "allow" then search else Nil
           )
           (Status.Ok, Verdicts.sign(v, key))
 

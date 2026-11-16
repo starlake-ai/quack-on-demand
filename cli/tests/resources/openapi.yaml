@@ -7090,6 +7090,52 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/search/prototype/build-segments:
+    post:
+      description: 'Search Phase 0 prototype only: flushes a DuckLake table''s inlined
+        rows and builds the full-text bundle of each live data file for one column,
+        as the system principal. Superuser only (403 superuser_required). 400 invalid_name
+        for a table or column that is not a plain identifier; 409 search_build_nonaffine
+        or search_build_deleted_rows for a file the prototype cannot build. Phase
+        2''s indexer replaces it.'
+      operationId: postApiSearchPrototypeBuild-segments
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchBuildRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchBuildResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/statement/kill:
     post:
       operationId: postApiStatementKill
@@ -10861,6 +10907,65 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SchemaDiffNullability'
+    SearchBuildRequest:
+      title: SearchBuildRequest
+      type: object
+      required:
+      - tenant
+      - database
+      - pool
+      - table
+      - column
+      properties:
+        tenant:
+          type: string
+        database:
+          type: string
+        pool:
+          type: string
+        table:
+          type: string
+        column:
+          type: string
+    SearchBuildResponse:
+      title: SearchBuildResponse
+      type: object
+      required:
+      - flushed
+      properties:
+        flushed:
+          type: boolean
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchBuiltFile'
+        skipped:
+          type: array
+          items:
+            type: string
+    SearchBuiltFile:
+      title: SearchBuiltFile
+      type: object
+      required:
+      - path
+      - bundle
+      - docs
+      - bytes
+      - ms
+      properties:
+        path:
+          type: string
+        bundle:
+          type: string
+        docs:
+          type: integer
+          format: int64
+        bytes:
+          type: integer
+          format: int64
+        ms:
+          type: integer
+          format: int64
     SetMaxConcurrentRequest:
       title: SetMaxConcurrentRequest
       type: object

@@ -9,6 +9,8 @@
 //    written and read back through DuckDB's FileSystem and searched for a known term, and decryption
 //    with a flipped ciphertext byte, a flipped tag byte, another file's key, a random key and another AAD.
 // 4. A per-bundle subkey derived with HMAC-SHA256 from the file key (key separation from Parquet's use).
+// 5. ("== AAD" lines, Task 16) why a non-empty AAD fails: OpenSSL encrypt and decrypt sides, and an AAD seal
+//    from DuckDB's mbedtls state opened by OpenSSL with the same, a changed and no AAD.
 // The probe data goes under $QOD_SEARCH_PROBE_DIR when set (kept), else under the temp folder (removed).
 // Exits 77 (CTest skip) when ducklake or httpfs (OpenSSL) cannot be installed or loaded.
 //
@@ -317,6 +319,119 @@ void ProbeWithoutHttpfs(bool autoload) {
 			std::cout << label << ": throws: " << e.what() << std::endl;
 		}
 	}
+}
+
+//! AES-GCM seal under a given nonce (no random draw: the mbedtls state refuses one unless forced).
+Sealed SealWithNonce(EncryptionUtil &util, const std::string &key, const std::vector<data_t> &nonce_bytes,
+                     const std::vector<data_t> &plain, const std::string &aad) {
+	auto state = NewGcmState(util, key.size());
+	EncryptionNonce nonce(EncryptionTypes::GCM, EncryptionTypes::EncryptionVersion::V0_1);
+	std::copy(nonce_bytes.begin(), nonce_bytes.end(), nonce.data());
+	Sealed out;
+	out.nonce = nonce_bytes;
+	state->InitializeEncryption(nonce, const_data_ptr_cast(key.data()), const_data_ptr_cast(aad.data()), aad.size());
+	out.cipher.resize(plain.size());
+	state->Process(plain.data(), plain.size(), out.cipher.data(), out.cipher.size());
+	out.tag.resize(kTagLen);
+	state->Finalize(out.cipher.data() + out.cipher.size(), 0, out.tag.data(), out.tag.size());
+	return out;
+}
+
+//! Task 16 Step 1 (spec 6.2, Q7): why `Setting Additional Authenticated Data failed`. The API takes the AAD only
+//! in InitializeEncryption / InitializeDecryption, after the key and nonce, before any Process, then Finalize: the
+//! order is fixed by the API and the probe above already follows it. httpfs (the pinned 77392a72, crypto.cpp)
+//! passes the AAD with EVP_DecryptUpdate on both paths; on an encrypting context OpenSSL 3 refuses that call.
+//! Every line here starts with "== AAD" and prints outcomes only, never a key.
+void ProbeAad(EncryptionUtil &ssl, const std::string &key,
+              const std::vector<data_t> &plain_full) {
+	std::vector<data_t> plain(plain_full.begin(), plain_full.begin() + std::min<idx_t>(plain_full.size(), 65536));
+	const std::string aad = "qod-search-bundle/v1|index=1|data_file=1";
+	auto aad_changed = aad;
+	aad_changed.back() ^= 0x01;
+	std::vector<data_t> nonce_bytes(12);
+	{
+		EncryptionNonce probe(EncryptionTypes::GCM, EncryptionTypes::EncryptionVersion::V0_1);
+		nonce_bytes.resize(probe.size());
+		auto state = NewGcmState(ssl, key.size());
+		state->GenerateRandomData(nonce_bytes.data(), nonce_bytes.size());
+	}
+	auto outcome = [](const std::string &err) { return err.empty() ? std::string("ok") : "refused: " + err; };
+
+	// (a) OpenSSL encrypt side, AAD given at InitializeEncryption.
+	std::string ssl_encrypt_err;
+	try {
+		SealWithNonce(ssl, key, nonce_bytes, plain, aad);
+	} catch (std::exception &e) {
+		ssl_encrypt_err = e.what();
+	}
+	std::cout << "== AAD a. OpenSSL (" << TypeName(&ssl) << ") encrypt with a " << aad.size()
+	          << "-byte AAD: " << outcome(ssl_encrypt_err) << std::endl;
+	Check(ssl_encrypt_err.find("Setting Additional Authenticated Data") != std::string::npos,
+	      "AAD a: the OpenSSL encrypt side reproduces 'Setting Additional Authenticated Data failed'");
+
+	// (b) OpenSSL decrypt side, same order: a no-AAD seal opened with an AAD. The AAD call must pass (no
+	// 'Setting AAD' error) and the tag check must then refuse, since the tag was computed over no AAD.
+	auto plain_sealed = SealWithNonce(ssl, key, nonce_bytes, plain, "");
+	std::vector<data_t> out;
+	auto ssl_decrypt_err = Open(ssl, key, plain_sealed, aad, out);
+	std::cout << "== AAD b. OpenSSL decrypt with an AAD of a no-AAD seal: " << outcome(ssl_decrypt_err) << std::endl;
+	Check(!ssl_decrypt_err.empty() && ssl_decrypt_err.find("Setting Additional Authenticated Data") == std::string::npos,
+	      "AAD b: the OpenSSL decrypt side accepts the AAD call and the tag check refuses the mismatch");
+
+	// (c) A seal that carries an AAD, from DuckDB's mbedtls state (a separate instance, no httpfs, the unsafe
+	// switch on for this probe only), under the same key and nonce. Opened by OpenSSL with the same AAD it must
+	// verify; with one AAD byte changed, or with no AAD, the tag must fail.
+	DBConfig mb_config;
+	mb_config.SetOptionByName("autoload_known_extensions", Value::BOOLEAN(false));
+	mb_config.SetOptionByName("autoinstall_known_extensions", Value::BOOLEAN(false));
+	DuckDB mb_db(nullptr, &mb_config);
+	{
+		Connection mb_con(mb_db);
+		auto set = mb_con.Query("SET debug_force_mbedtls_unsafe = true");
+		if (set->HasError()) {
+			std::cout << "== AAD c. SET debug_force_mbedtls_unsafe: " << set->GetError() << std::endl;
+			failures++;
+			return;
+		}
+	}
+	shared_ptr<EncryptionUtil> mb;
+	try {
+		mb = mb_db.instance->GetEncryptionUtil(false);
+	} catch (std::exception &e) {
+		std::cout << "== AAD c. mbedtls GetEncryptionUtil: throws: " << e.what() << std::endl;
+		failures++;
+		return;
+	}
+	std::cout << "== AAD c. second instance's util: " << TypeName(mb.get()) << std::endl;
+	Sealed mb_sealed;
+	std::string mb_encrypt_err;
+	try {
+		mb_sealed = SealWithNonce(*mb, key, nonce_bytes, plain, aad);
+	} catch (std::exception &e) {
+		mb_encrypt_err = e.what();
+	}
+	std::cout << "== AAD c. mbedtls encrypt with the AAD: " << outcome(mb_encrypt_err) << std::endl;
+	Check(mb_encrypt_err.empty(), "AAD c: the mbedtls encrypt side takes the AAD");
+	if (!mb_encrypt_err.empty()) {
+		return;
+	}
+	Check(mb_sealed.cipher == plain_sealed.cipher,
+	      "AAD c: same key and nonce give the same ciphertext with or without AAD (GCM's AAD moves only the tag)");
+	Check(mb_sealed.tag != plain_sealed.tag, "AAD c: the AAD changes the tag");
+	auto ssl_open = Open(ssl, key, mb_sealed, aad, out);
+	std::cout << "== AAD d. OpenSSL decrypt of the mbedtls AAD seal, same AAD: " << outcome(ssl_open) << std::endl;
+	Check(ssl_open.empty() && out == plain, "AAD d: OpenSSL opens an AAD seal with the same AAD");
+	auto ssl_changed = Open(ssl, key, mb_sealed, aad_changed, out);
+	std::cout << "== AAD e. OpenSSL decrypt, one AAD byte changed: " << outcome(ssl_changed) << std::endl;
+	Check(!ssl_changed.empty(), "AAD e: a changed AAD byte fails the tag (OpenSSL)");
+	auto ssl_none = Open(ssl, key, mb_sealed, "", out);
+	std::cout << "== AAD f. OpenSSL decrypt, AAD left out: " << outcome(ssl_none) << std::endl;
+	Check(!ssl_none.empty(), "AAD f: an AAD seal opened without its AAD fails the tag (OpenSSL)");
+	auto mb_open = Open(*mb, key, mb_sealed, aad, out);
+	auto mb_changed = Open(*mb, key, mb_sealed, aad_changed, out);
+	std::cout << "== AAD g. mbedtls decrypt, same AAD: " << outcome(mb_open) << "; one AAD byte changed: "
+	          << outcome(mb_changed) << std::endl;
+	Check(mb_open.empty() && !mb_changed.empty(), "AAD g: mbedtls opens with the same AAD and refuses a changed one");
 }
 
 } // namespace
@@ -639,6 +754,8 @@ int main() {
 		std::cout << "HMAC: throws: " << e.what() << std::endl;
 		failures++;
 	}
+
+	ProbeAad(*util, file_key, plain);
 
 	std::cout << "failures: " << failures << std::endl;
 	return failures == 0 ? 0 : 1;

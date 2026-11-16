@@ -238,6 +238,13 @@ if(QOD_NODE_SEARCH)
   # The snapshot source of a search call (Phase 0 part 2 Task 6, spec 7.1 step 2, the named exception
   # of section 13): DuckLake's own entry points driven from C++ in the client's transaction.
   target_sources(qod_node_core PRIVATE src/search_snapshot.cpp)
+  # qod_search's lineage check (spec 4.2 rules 1, 2, 7, 9) and its bundle I/O and open-segment cache
+  # (6.2, 7.1 steps 3 and 4): Phase 0 part 2 Task 8.
+  target_sources(qod_node_core PRIVATE src/search_lineage.cpp src/search_segments.cpp)
+  # Visibility at S and the liveness cache (Phase 0 part 2 Task 10, spec 6.3, 7.5, owner ruling 3c).
+  target_sources(qod_node_core PRIVATE src/search_visibility.cpp)
+  # Part 2 Task 11 (spec 9): the fallback for unindexed files and inlined rows, with its cap.
+  target_sources(qod_node_core PRIVATE src/search_fallback.cpp)
   target_compile_definitions(qod_node_core PUBLIC QOD_NODE_SEARCH=1)
 endif()
 
@@ -329,6 +336,9 @@ if(QOD_NODE_TESTS)
     qod_node_test(search_snapshot_test)
     add_test(NAME search_snapshot COMMAND search_snapshot_test)
     set_tests_properties(search_snapshot PROPERTIES SKIP_RETURN_CODE 77)
+    # Task 10's liveness cost (QOD_P2_T6_BENCH_ROWS rows; skipped without it): a probe, never in -LE probe.
+    add_test(NAME search_snapshot_bench COMMAND search_snapshot_test --bench)
+    set_tests_properties(search_snapshot_bench PROPERTIES SKIP_RETURN_CODE 77 LABELS probe)
     # Search Phase 0 part 2, Task 7a Step 1: the drain probes refuse a rowid at or above 2^27 before
     # any allocation, and their bitsets count against memory_limit.
     qod_node_test(search_drain_cap_test)
@@ -342,10 +352,16 @@ if(QOD_NODE_TESTS)
       add_test(NAME search_sink_slow COMMAND search_sink_test --slow)
       set_tests_properties(search_sink_slow PROPERTIES LABELS "probe;slow")
     endif()
+    # Search Phase 0 part 2, Task 8: qod_search end to end on a DuckLake (lineage refusals, results against
+    # a fresh single-segment reference, the describer's reads, the sink, prepared statements, GetAllFiles
+    # re-entrancy). Exits 77 when ducklake cannot load.
+    qod_node_test(search_engine_test)
+    add_test(NAME search_engine COMMAND search_engine_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/descriptions)
+    set_tests_properties(search_engine PROPERTIES SKIP_RETURN_CODE 77)
     if(NOT WIN32)
       # No thread-local state in the sink or the search functions (Q3: a final can run on another thread).
       add_test(NAME search_sink_no_tls COMMAND sh -c
-        "! grep -n thread_local ${CMAKE_CURRENT_SOURCE_DIR}/src/search_sink.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/search_functions.cpp")
+        "! grep -n thread_local ${CMAKE_CURRENT_SOURCE_DIR}/src/search_*.cpp")
       # No InternalException on any search path: DuckDB 2.0 invalidates the whole database on one raised
       # during execution, and prints one with a stack trace (review C1, I3).
       add_test(NAME search_no_internal_exception COMMAND sh -c
@@ -371,7 +387,8 @@ if(QOD_NODE_TESTS)
   target_link_libraries(qod_node_test_http PUBLIC qod_node_core Threads::Threads)
   qod_node_test(verdict_test)
   target_link_libraries(verdict_test PRIVATE Threads::Threads)
-  add_test(NAME verdict COMMAND verdict_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/verdict-v1.txt)
+  add_test(NAME verdict COMMAND verdict_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/verdict-v1.txt
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/verdict-v1-search.txt)
   qod_node_test(http_post_test)
   target_link_libraries(http_post_test PRIVATE qod_node_test_http)
   add_test(NAME http_post COMMAND http_post_test)

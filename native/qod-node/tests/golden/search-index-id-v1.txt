@@ -1,0 +1,7 @@
+# Prototype index ids (search spec 6.2, revision 5): SearchFunctions.prototypeIndexId (Scala) and
+# PrototypeIndexId (qod-node, search_lineage.cpp) must both give these. One vector per line:
+# <table>\t<column>\t<index id>. Regenerate both sides together if the derivation changes.
+acme_lake.main.pages_1m	body	464d2a3f-7237-800a-a4fc-4be657841b24
+acme_lake.main.pages_10m	body	ebe8bcc1-df3f-82b9-b486-c3dd914a03c1
+lake.main.pages	body	e33f9c1a-fb11-8226-afbc-2583548b2b24
+acme_lake.main.other	Body	4949238d-8196-8bb5-aee0-cc21e0ab34e0

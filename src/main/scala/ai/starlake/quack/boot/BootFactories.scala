@@ -6,6 +6,7 @@ import ai.starlake.quack.edge.authz.AuthzDecider
 import ai.starlake.quack.edge.authz.location.LocationRulesSource
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.OpaAuthorizer
+import ai.starlake.quack.model.{PoolKey, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
@@ -224,5 +225,25 @@ object BootFactories extends LazyLogging:
       parentPoolsOf = sup.parentPoolNamesOf,
       locations = locationRules,
       opa = opa,
-      opaCfg = opaCfg
+      opaCfg = opaCfg,
+      searchBundleRoot = searchBundleRootOf(sup)
     )
+
+  /** Search spec 6.1's `bundle_root` for a pool, in the prototype (no index registry): the data
+    * path of the pool's DuckLake tenant-db as `effectiveMetastoreFor` resolves it, the parent's for
+    * a branch (a branch's own data path is its sibling prefix). None for any other kind, or a
+    * tenant-db with no data path. Also the bundle root of the prototype's build endpoint
+    * (`SearchPrototypeHandlers`), so bundles land where the verdicts send the nodes.
+    */
+  def searchBundleRootOf(sup: PoolSupervisor): PoolKey => Option[String] =
+    key =>
+      sup.findTenantDb(key.tenant, key.tenantDb).flatMap { td =>
+        val owner = td.branchOf.flatMap(sup.getTenantDbById).getOrElse(td)
+        Option
+          .when(owner.kind == TenantDbKind.DuckLake)(
+            sup.effectiveMetastoreFor(key.tenant, owner.name).get("dataPath")
+          )
+          .flatten
+          .map(_.trim)
+          .filter(_.nonEmpty)
+      }

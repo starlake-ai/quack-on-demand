@@ -97,7 +97,8 @@ public:
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx,
-		                      text,             handle.replica,        handle.path, handle.read_only};
+		                      text,             handle.replica,        handle.path, handle.read_only,
+		                      handle.pool};
 		installed_ = true;
 		authz_ = &authz;
 	}
@@ -229,6 +230,17 @@ public:
 		std::lock_guard<std::mutex> guard(lock_);
 		pending_ = Admitted {"",           current_.principal.id, current_.policy_version,
 		                     current_.ctx, kNeverExpires,         current_.read_only};
+	}
+
+	//! The search entries of the verdict the current statement runs under (search spec 4.2 rule 8), into
+	//! `out`; false when it runs under none.
+	bool PendingSearch(std::vector<SearchEntry> &out) {
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!pending_) {
+			return false;
+		}
+		out = pending_->search;
+		return true;
 	}
 
 	//! True when the current statement already runs under a verdict for the plan `fingerprint`
@@ -692,11 +704,15 @@ std::string RefusalMessage(const DecideResult &decided) {
 }
 
 //! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
-//! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
+//! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal. A plan holding
+//! search calls takes the decider's verdict whoever the principal (search spec 4.2 rule 8, prototype
+//! only): for a superuser or the system principal the manager judges nothing and answers each call's
+//! index record with the table population, since the record lives on the manager. Phase 1 replaces it
+//! with a signed per-node fetch of index records.
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
 	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version,
 	                   installed.ctx,         kNeverExpires,          installed.read_only};
-	if (installed.principal.superuser || installed.principal.system) {
+	if ((installed.principal.superuser || installed.principal.system) && described.search_calls == 0) {
 		return admitted;
 	}
 	DecideCall call;
@@ -715,6 +731,9 @@ Admitted Decide(Gate &gate, const Installed &installed, const Described &describ
 	// decision cache TTL) must not pin a prepared statement's verdict either.
 	auto now = gate.authz->Now();
 	admitted.expires_at = result.has_verdict ? std::min(result.verdict.expires_at, now + kMaxCachedVerdictMs) : now;
+	if (result.has_verdict) {
+		admitted.search = result.verdict.search;
+	}
 	return admitted;
 }
 
@@ -787,6 +806,11 @@ void PreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &pl
 }
 
 } // namespace
+
+bool StatementSearchEntries(ClientContext &context, std::vector<SearchEntry> &out) {
+	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
+	return session && session->PendingSearch(out);
+}
 
 bool SessionSnapshot(ClientContext &context, int64_t now_ms, Installed &out) {
 	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);

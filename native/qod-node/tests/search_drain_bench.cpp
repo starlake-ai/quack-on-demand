@@ -9,6 +9,8 @@
 //   drain:    SELECT rows, max_rowid, drain_ms FROM qod_search_drain((SELECT rowid FROM <t> [WHERE f]))
 //   parallel: SELECT sum(rows) FROM qod_search_drain_parallel((SELECT rowid FROM <t> [WHERE f]))
 //   drain_vec, parallel_vec: the same two with the bitsets in a std::vector (Task 7a Step 1)
+//   sink:     SELECT rows, max_rowid, drain_ms, locals FROM qod_search_drain_sink((SELECT rowid ...))
+//             (Task 7a Step 7; prints the p50 of drain_ms and the histogram of locals)
 //   count:    SELECT count(*) FROM (SELECT rowid FROM <t> [WHERE f])
 // each printed as `== drain <size> <filter> <function> p50=<ms> p95=<ms> rows=<n>` (nearest-rank
 // percentiles of the wall time of Connection::Query, the result materialized); the drain line adds the
@@ -33,6 +35,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -183,6 +186,8 @@ int main() {
 			std::vector<Statement> statements = {
 			    {"drain", "SELECT rows, max_rowid, drain_ms FROM qod_search_drain(" + input + ")"},
 			    {"drain_vec", "SELECT rows, max_rowid, drain_ms FROM qod_search_drain(" + input + ")"},
+			    // Task 7a Step 7: the same drain in qod-node's search sink.
+			    {"sink", "SELECT rows, max_rowid, drain_ms, locals FROM qod_search_drain_sink(" + input + ")"},
 			    {"parallel", "SELECT sum(rows) FROM qod_search_drain_parallel(" + input + ")"},
 			    {"parallel_vec", "SELECT sum(rows) FROM qod_search_drain_parallel(" + input + ")"},
 			    {"count", "SELECT count(*) FROM " + input},
@@ -191,6 +196,7 @@ int main() {
 				qod::UseVectorBitsetsForTest(st.function.size() > 4 &&
 				                             st.function.compare(st.function.size() - 4, 4, "_vec") == 0);
 				std::vector<double> wall, inner;
+				std::map<int64_t, int> locals_histogram;
 				int64_t rows = -1;
 				bool failed = false;
 				for (int i = 0; i < warmup + runs && !failed; i++) {
@@ -213,8 +219,11 @@ int main() {
 					rows = chunk->GetValue(0, 0).GetValue<int64_t>();
 					if (i >= warmup) {
 						wall.push_back(std::chrono::duration<double, std::milli>(end - start).count());
-						if (st.function.rfind("drain", 0) == 0) {
+						if (st.function.rfind("drain", 0) == 0 || st.function == "sink") {
 							inner.push_back(chunk->GetValue(2, 0).GetValue<double>());
+						}
+						if (st.function == "sink") {
+							locals_histogram[chunk->GetValue(3, 0).GetValue<int64_t>()]++;
 						}
 					}
 				}
@@ -225,7 +234,15 @@ int main() {
 				std::cout << "== drain " << size << " " << filter.first << " " << st.function
 				          << " p50=" << Ms(Percentile(wall, 0.5)) << " p95=" << Ms(Percentile(wall, 0.95))
 				          << " rows=" << rows;
-				if (st.function.rfind("drain", 0) == 0) {
+				if (st.function == "sink") {
+					std::cout << " locals_histogram=";
+					bool first = true;
+					for (auto &entry : locals_histogram) {
+						std::cout << (first ? "" : ",") << entry.first << ":" << entry.second;
+						first = false;
+					}
+				}
+				if (st.function.rfind("drain", 0) == 0 || st.function == "sink") {
 					std::cout << " drain_ms_p50=" << Ms(Percentile(inner, 0.5));
 				}
 				if (st.function.rfind("parallel", 0) == 0) {

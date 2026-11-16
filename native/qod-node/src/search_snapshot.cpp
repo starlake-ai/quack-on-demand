@@ -21,6 +21,7 @@
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/table_filter_set.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
@@ -29,6 +30,7 @@
 #include "crypto.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <cstring>
@@ -36,6 +38,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace qod::search {
 namespace {
@@ -43,7 +46,7 @@ namespace {
 using namespace duckdb;
 
 [[noreturn]] void Unavailable(const std::string &why) {
-	throw InvalidInputException("search_snapshot_unavailable: " + why);
+	throw InvalidInputException("QoD: search_snapshot_unavailable: " + why);
 }
 
 std::string Str(const Identifier &id) {
@@ -97,6 +100,10 @@ void DriveChunks(ClientContext &context, const F &function, FunctionData *bind_d
 	chunk.Initialize(Allocator::Get(context), types);
 	TableFunctionInput input(bind_data, local.get(), global.get());
 	while (true) {
+		// The client's interrupt reaches every driven scan between two chunks (Task 11, review I1).
+		if (context.IsInterrupted()) {
+			throw InterruptException();
+		}
 		chunk.Reset();
 		function.function(context, input, chunk);
 		if (chunk.size() == 0) {
@@ -223,13 +230,35 @@ std::string BlobBytes(const Value &v) {
 	return v.ToString();
 }
 
+//! The top-level columns of a DuckLake scan's bind data by DuckLake field id: DuckLake binds a scan as a
+//! multi-file read mapped by field id, each column's identifier its field id, which a rename keeps (the
+//! describer's DuckLakeFieldIds). False when the bind data is not such a read.
+bool FieldIds(FunctionData *data, std::vector<std::pair<std::string, int64_t>> &columns) {
+	auto files = dynamic_cast<MultiFileBindData *>(data);
+	if (!files || files->reader_bind.mapping != MultiFileColumnMappingMode::BY_FIELD_ID) {
+		return false;
+	}
+	for (auto &column : files->reader_bind.schema) {
+		if (column.identifier.IsNull() || column.identifier.type().id() != LogicalTypeId::INTEGER) {
+			return false;
+		}
+		columns.emplace_back(Str(column.name), IntegerValue::Get(column.identifier));
+	}
+	return true;
+}
+
 //! The target's own DuckLake scan, bound from its resolved catalog entry (GetScanFunction with the
 //! lookup it was resolved with, AT clause included) and driven with the virtual columns filename and
-//! file_row_number (and rowid when asked), in that order, each chunk handed to `sink`. `only_file`,
-//! when set, is pushed as a filter on `filename`: DuckLake's reader still opens every file's footer and
-//! delete file, but returns no row of another file (P6).
+//! file_row_number (and rowid when asked), in that order, each chunk handed to `sink`. `only_files`,
+//! when set, is pushed as a filter on `filename` (equality for one name, IN for several): DuckLake's reader
+//! still opens every file's footer and delete file, but returns no row of another file (P6).
+//! With `data_field_id` >= 0, the column of that DuckLake field id in the scan at the AT clause's snapshot is
+//! projected after the virtual columns (Task 11, review C1: by field id, never by name, so a rename between S
+//! and now cannot swap the column read): a VARCHAR column; none at S, or another type, is
+//! search_columns_unsupported.
 void ScanTarget(ClientContext &context, TableCatalogEntry &table, optional_ptr<BoundAtClause> at_clause,
-                const std::string *only_file, bool with_rowid, const std::function<void(DataChunk &)> &sink) {
+                const std::vector<std::string> *only_files, bool with_rowid, const std::function<void(DataChunk &)> &sink,
+                int64_t data_field_id = -1) {
 	QualifiedName qualified(Identifier(table.ParentCatalog().GetName()), Identifier(table.ParentSchema().name),
 	                        Identifier(table.name));
 	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified, at_clause, QueryErrorContext());
@@ -259,16 +288,57 @@ void ScanTarget(ClientContext &context, TableCatalogEntry &table, optional_ptr<B
 			Unavailable("the target's scan does not offer filename, file_row_number and rowid");
 		}
 	}
+	if (data_field_id >= 0) {
+		std::vector<std::pair<std::string, int64_t>> columns;
+		if (!FieldIds(bind_data.get(), columns)) {
+			Unavailable("the target's scan is not mapped by field id");
+		}
+		auto multi = dynamic_cast<MultiFileBindData *>(bind_data.get());
+		idx_t index = DConstants::INVALID_INDEX;
+		for (idx_t i = 0; i < columns.size(); i++) {
+			if (columns[i].second == data_field_id) {
+				index = i;
+			}
+		}
+		if (index == DConstants::INVALID_INDEX) {
+			throw InvalidInputException("QoD: search_columns_unsupported: the indexed column has no column at the "
+			                            "snapshot read (field id " +
+			                            std::to_string(data_field_id) + ")");
+		}
+		auto &type = multi->reader_bind.schema[index].type;
+		if (type.id() != LogicalTypeId::VARCHAR) {
+			throw InvalidInputException("QoD: search_columns_unsupported: the prototype indexes a VARCHAR column only");
+		}
+		column_ids.push_back(index);
+		types.push_back(type);
+	}
 	TableFilterSet filters;
-	if (only_file) {
-		filters.PushFilter(ProjectionIndex(0),
-		                   ExpressionFilter::CreateComparisonFilter(ExpressionType::COMPARE_EQUAL, Value(*only_file)));
+	if (only_files) {
+		if (only_files->size() == 1) {
+			filters.PushFilter(ProjectionIndex(0), ExpressionFilter::CreateComparisonFilter(ExpressionType::COMPARE_EQUAL,
+			                                                                                Value(only_files->front())));
+		} else {
+			vector<Value> values;
+			for (auto &name : *only_files) {
+				values.emplace_back(name);
+			}
+			auto in = ExpressionFilter::CreateInExpression(make_uniq<BoundReferenceExpression>(LogicalType::VARCHAR, 0),
+			                                               std::move(values));
+			filters.PushFilter(ProjectionIndex(0), make_uniq<ExpressionFilter>(std::move(in)));
+		}
 	}
 	DriveChunks(context, function, bind_data.get(), types, column_ids,
-	            only_file ? optional_ptr<TableFilterSet>(&filters) : nullptr, sink);
+	            only_files ? optional_ptr<TableFilterSet>(&filters) : nullptr, sink);
 }
 
+std::atomic<uint64_t> g_text_scans {0};
+
 void SetRange(std::vector<uint64_t> &words, int64_t lo, int64_t hi) { // [lo, hi)
+	// Checked before the bitset grows toward a position: DuckLake's scan returns positions within a file,
+	// and one past kMaxFilePosition (or a negative one) is refused, never allocated for.
+	if (lo < 0 || hi < lo || hi > kMaxFilePosition) {
+		Unavailable("the target scan returned a position outside [0, 2^40)");
+	}
 	auto need = static_cast<size_t>((hi + 63) >> 6);
 	if (words.size() < need) {
 		words.resize(std::max(need, words.size() * 2), 0);
@@ -294,8 +364,7 @@ void SetRange(std::vector<uint64_t> &words, int64_t lo, int64_t hi) { // [lo, hi
 	ErrorData data(e);
 	auto &message = data.RawMessage();
 	if (data.Type() == ExceptionType::INTERRUPT ||
-	    (data.Type() == ExceptionType::INVALID_INPUT && (message.rfind("search_snapshot_unavailable: ", 0) == 0 ||
-	                                                     message.rfind("search_uncommitted_writes: ", 0) == 0))) {
+	    (data.Type() == ExceptionType::INVALID_INPUT && message.rfind("QoD: search_", 0) == 0)) {
 		throw;
 	}
 	Unavailable(data.Message().substr(0, data.Message().find('\n')));
@@ -306,19 +375,43 @@ void SetRange(std::vector<uint64_t> &words, int64_t lo, int64_t hi) { // [lo, hi
 std::vector<std::pair<int64_t, int64_t>> HiddenPositions(const FileLiveness &live, int64_t record_count) {
 	std::vector<std::pair<int64_t, int64_t>> runs;
 	int64_t start = -1;
-	for (int64_t p = 0; p < record_count; p++) {
-		bool hidden = !live.IsLive(p);
-		if (hidden && start < 0) {
-			start = p;
-		} else if (!hidden && start >= 0) {
-			runs.emplace_back(start, p);
-			start = -1;
+	// Word by word: a word of all live positions closes an open run, a word of none opens one (positions
+	// past live.words are not live), and only a mixed word, or the last partial one, is read bit by bit.
+	for (int64_t base = 0; base < record_count; base += 64) {
+		auto w = static_cast<size_t>(base >> 6);
+		uint64_t word = w < live.words.size() ? live.words[w] : 0;
+		int64_t bits = std::min<int64_t>(64, record_count - base);
+		if (bits == 64 && word == ~0ull) {
+			if (start >= 0) {
+				runs.emplace_back(start, base);
+				start = -1;
+			}
+			continue;
+		}
+		if (word == 0) {
+			if (start < 0) {
+				start = base;
+			}
+			continue;
+		}
+		for (int64_t b = 0; b < bits; b++) {
+			bool hidden = !((word >> b) & 1);
+			if (hidden && start < 0) {
+				start = base + b;
+			} else if (!hidden && start >= 0) {
+				runs.emplace_back(start, base + b);
+				start = -1;
+			}
 		}
 	}
 	if (start >= 0) {
 		runs.emplace_back(start, record_count);
 	}
 	return runs;
+}
+
+void SetLiveRangeForTest(FileLiveness &live, int64_t lo, int64_t hi) {
+	SetRange(live.words, lo, hi);
 }
 
 int64_t FileIndexForScanName(const SnapshotView &view, const std::string &filename) {
@@ -341,7 +434,11 @@ std::vector<TargetRow> ScanTargetRows(ClientContext &context, LogicalGet &target
 		Unavailable("the target is not a DuckLake table");
 	}
 	std::vector<TargetRow> out;
-	ScanTarget(context, *table, target.at_clause.get(), only_file, true, [&](DataChunk &chunk) {
+	std::vector<std::string> one;
+	if (only_file) {
+		one.push_back(*only_file);
+	}
+	ScanTarget(context, *table, target.at_clause.get(), only_file ? &one : nullptr, true, [&](DataChunk &chunk) {
 		UnifiedVectorFormat names, positions, rowids;
 		chunk.data[0].ToUnifiedFormat(names);
 		chunk.data[1].ToUnifiedFormat(positions);
@@ -359,6 +456,126 @@ std::vector<TargetRow> ScanTargetRows(ClientContext &context, LogicalGet &target
 		}
 	});
 	return out;
+}
+
+int64_t FieldIdOf(FunctionData *bind_data, const std::string &column) {
+	std::vector<std::pair<std::string, int64_t>> columns;
+	if (!FieldIds(bind_data, columns)) {
+		return -1;
+	}
+	for (auto &c : columns) {
+		if (StringUtil::CIEquals(c.first, column)) {
+			return c.second;
+		}
+	}
+	return -1;
+}
+
+bool HasFieldId(FunctionData *bind_data, int64_t field_id) {
+	std::vector<std::pair<std::string, int64_t>> columns;
+	if (!FieldIds(bind_data, columns)) {
+		return false;
+	}
+	for (auto &c : columns) {
+		if (c.second == field_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int64_t CurrentFieldId(ClientContext &context, TableCatalogEntry &table, const std::string &column) {
+	if (table.ParentCatalog().GetCatalogType() != "ducklake") {
+		return -1;
+	}
+	QualifiedName qualified(Identifier(table.ParentCatalog().GetName()), Identifier(table.ParentSchema().name),
+	                        Identifier(table.name));
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified, nullptr, QueryErrorContext());
+	unique_ptr<FunctionData> bind_data;
+	table.GetScanFunction(context, bind_data, lookup);
+	return FieldIdOf(bind_data.get(), column);
+}
+
+void ScanTargetTextRows(ClientContext &context, TableCatalogEntry &table, optional_ptr<BoundAtClause> at_clause,
+                        int64_t field_id, const std::vector<std::string> *only_files, const TargetTextSink &sink) {
+	if (table.ParentCatalog().GetCatalogType() != "ducklake") {
+		Unavailable("the target is not a DuckLake table");
+	}
+	if (field_id < 0) {
+		throw InvalidInputException("QoD: search_columns_unsupported: the indexed column has no DuckLake field id");
+	}
+	std::unordered_set<std::string> allowed;
+	if (only_files) {
+		allowed.insert(only_files->begin(), only_files->end());
+	}
+	std::string last;
+	bool have_last = false;
+	g_text_scans++;
+	ScanTarget(
+	    context, table, at_clause, only_files, true,
+	    [&](DataChunk &chunk) {
+		    UnifiedVectorFormat names, positions, rowids, texts;
+		    chunk.data[0].ToUnifiedFormat(names);
+		    chunk.data[1].ToUnifiedFormat(positions);
+		    chunk.data[2].ToUnifiedFormat(rowids);
+		    chunk.data[3].ToUnifiedFormat(texts);
+		    auto name_data = names.GetData<string_t>();
+		    auto pos_data = positions.GetData<int64_t>();
+		    auto rowid_data = rowids.GetData<int64_t>();
+		    auto text_data = texts.GetData<string_t>();
+		    for (idx_t i = 0; i < chunk.size(); i++) {
+			    auto n = names.sel->get_index(i), p = positions.sel->get_index(i), r = rowids.sel->get_index(i),
+			         t = texts.sel->get_index(i);
+			    if (!names.validity.RowIsValid(n) || !positions.validity.RowIsValid(p) || !rowids.validity.RowIsValid(r)) {
+				    Unavailable("the target scan returned a row with no file, position or rowid");
+			    }
+			    auto &name = name_data[n];
+			    if (only_files && !(have_last && name.GetSize() == last.size() &&
+			                        memcmp(name.GetData(), last.data(), last.size()) == 0)) {
+				    last = name.GetString();
+				    have_last = true;
+				    if (!allowed.count(last)) {
+					    // The filter is DuckLake's to apply; a row of another file fails closed.
+					    Unavailable("the target scan returned a row of another file than the ones asked for");
+				    }
+			    }
+			    if (texts.validity.RowIsValid(t)) {
+				    sink(name, pos_data[p], rowid_data[r], text_data[t].GetData(), text_data[t].GetSize(), false);
+			    } else {
+				    sink(name, pos_data[p], rowid_data[r], nullptr, 0, true);
+			    }
+		    }
+	    },
+	    field_id);
+}
+
+std::vector<TargetRowText> ScanTargetRowsWithColumn(ClientContext &context, LogicalGet &target,
+                                                    const std::string &column, const std::string *only_file) {
+	auto table = target.GetTable();
+	if (!table) {
+		Unavailable("the target is not a table scan");
+	}
+	std::vector<std::string> one;
+	if (only_file) {
+		one.push_back(*only_file);
+	}
+	std::vector<TargetRowText> out;
+	ScanTargetTextRows(context, *table, target.at_clause.get(), FieldIdOf(target.bind_data.get(), column),
+	                   only_file ? &one : nullptr,
+	                   [&](const string_t &filename, int64_t position, int64_t rowid, const char *text, size_t len,
+	                       bool) {
+		                   TargetRowText row;
+		                   row.filename = filename.GetString();
+		                   row.file_row_number = position;
+		                   row.rowid = rowid;
+		                   row.text.assign(text ? text : "", len);
+		                   out.push_back(std::move(row));
+	                   });
+	return out;
+}
+
+uint64_t TextScansForTest() {
+	return g_text_scans.load();
 }
 
 std::vector<std::pair<int64_t, int64_t>> ReadDeletePositions(ClientContext &context, const SnapshotView &view,
@@ -443,7 +660,7 @@ SnapshotView ResolveSnapshotView(ClientContext &context, LogicalGet &target) {
 		// own inserts and deletes alike: the scan would apply some of them, the listing none).
 		auto modified = MetaTransaction::Get(context).ModifiedDatabase();
 		if (modified && modified.get() == &catalog.GetAttached()) {
-			throw InvalidInputException("search_uncommitted_writes: the transaction has written to " +
+			throw InvalidInputException("QoD: search_uncommitted_writes: the transaction has written to " +
 			                            Str(catalog.GetName()) + "; search reads committed data only, so "
 			                            "commit or roll back first");
 		}
@@ -464,10 +681,12 @@ SnapshotView ResolveSnapshotView(ClientContext &context, LogicalGet &target) {
 			auto unit = StringUtil::Lower(Str(target.at_clause->Unit()));
 			if (unit == "version") {
 				view.snapshot_id = target.at_clause->GetValue().DefaultCastAs(LogicalType::BIGINT).GetValue<int64_t>();
+			} else if (unit == "timestamp") {
+				// OWNER RULING 2026-11-14: refused for Phase 0, under spec 4.2 rule 4's code.
+				throw InvalidInputException("QoD: search_at_timestamp_unsupported: AT (TIMESTAMP => ...) is not supported by "
+				                            "search in Phase 0; use AT (VERSION => n)");
 			} else {
-				// OWNER RULING 2026-11-14: refused for Phase 0.
-				Unavailable("AT (" + StringUtil::Upper(unit) +
-				            " => ...) is not supported by search in Phase 0; use AT (VERSION => n)");
+				Unavailable("AT (" + StringUtil::Upper(unit) + " => ...) is not supported by search");
 			}
 		} else {
 			reads.push_back("ducklake_current_snapshot(" + Quote(view.catalog_alias) + ")");
@@ -487,7 +706,7 @@ SnapshotView ResolveSnapshotView(ClientContext &context, LogicalGet &target) {
 		std::map<std::string, Listed> data_by_path;
 		for (auto &file : all) {
 			if (OptionTrue(file, "transaction_local_data")) {
-				throw InvalidInputException("search_uncommitted_writes: the transaction holds uncommitted rows of " +
+				throw InvalidInputException("QoD: search_uncommitted_writes: the transaction holds uncommitted rows of " +
 				                            view.table_name);
 			}
 			if (OptionTrue(file, "inlined_data")) {
@@ -515,7 +734,7 @@ SnapshotView ResolveSnapshotView(ClientContext &context, LogicalGet &target) {
 			auto snapshot = OptionValue(file, "snapshot_id");
 			if (!snapshot || snapshot->IsNull()) {
 				// A committed data file always carries its snapshot; the transaction's own files do not.
-				throw InvalidInputException("search_uncommitted_writes: the transaction holds uncommitted files of " +
+				throw InvalidInputException("QoD: search_uncommitted_writes: the transaction holds uncommitted files of " +
 				                            view.table_name);
 			}
 			if (data_by_path.count(file.path)) {
@@ -685,6 +904,8 @@ SnapshotView ResolveSnapshotView(ClientContext &context, LogicalGet &target) {
 		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scan_start).count();
 		for (auto &live : view.liveness) {
 			live.words.resize(static_cast<size_t>((live.end + 63) >> 6));
+			// SetRange grows by doubling: release the slack, so a cached view holds what it counts (Task 10, M9).
+			live.words.shrink_to_fit();
 			int64_t bits = 0;
 			for (auto w : live.words) {
 				bits += static_cast<int64_t>(std::bitset<64>(w).count());
@@ -694,6 +915,29 @@ SnapshotView ResolveSnapshotView(ClientContext &context, LogicalGet &target) {
 			}
 		}
 		return view;
+	} catch (std::exception &e) {
+		Rethrow(e);
+	}
+}
+
+int64_t CurrentSnapshotId(ClientContext &context, LogicalGet &target) {
+	try {
+		auto table = target.GetTable();
+		if (!table) {
+			Unavailable("the target is not a table scan");
+		}
+		auto &catalog = table->ParentCatalog();
+		if (catalog.GetCatalogType() != "ducklake") {
+			Unavailable("the target is not a DuckLake table");
+		}
+		if (target.at_clause) {
+			Unavailable("CurrentSnapshotId reads no target with an AT clause");
+		}
+		auto rows = CallSystemTableFunction(context, "ducklake_current_snapshot", {Value(Str(catalog.GetName()))}, {});
+		if (rows.rows.size() != 1) {
+			Unavailable("ducklake_current_snapshot returned no row");
+		}
+		return AsInt(rows.rows[0][0]);
 	} catch (std::exception &e) {
 		Rethrow(e);
 	}

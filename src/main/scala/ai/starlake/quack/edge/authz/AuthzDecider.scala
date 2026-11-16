@@ -12,6 +12,8 @@ import ai.starlake.quack.edge.opa.{
   OpaTarget,
   OpaUser
 }
+import ai.starlake.quack.edge.policy.PolicyCoverage
+import ai.starlake.quack.edge.search.SearchFunctions
 import ai.starlake.quack.edge.sql.GrantMatch
 import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.auth.TokenRestriction
@@ -59,7 +61,11 @@ final class AuthzDecider(
     opa: OpaAuthorizer,
     opaCfg: OpaConfig,
     functionClass: (String, String, String, String) => Option[FunctionClass] = FunctionClasses.of,
-    settingClass: String => Option[SettingClass] = SettingClasses.of
+    settingClass: String => Option[SettingClass] = SettingClasses.of,
+    // The folder a pool's search index bundles live under (search spec 6.1 `bundle_root`): in the
+    // prototype, which has no index registry, the pool's tenant-db data path (its parent's for a
+    // branch). None: no index record, and every search call on the pool is refused.
+    searchBundleRoot: PoolKey => Option[String] = _ => None
 ) extends LazyLogging:
   import AuthzDecider.*
 
@@ -115,6 +121,110 @@ final class AuthzDecider(
         _ <- objects(ctx, narrowed(ctx), d, rules, dryRun)
       yield ()
     }
+
+  /** The statistics population and index record of each search call of `d` (search spec 4.2 rules 5
+    * and 8, 7.5), for a plan [[decidePlan]] allowed, on `pool`, the handle's pool. `Right(Nil)` for
+    * a plan holding no search call.
+    *
+    * A superuser or the system principal is judged nothing: each call gets its record with the
+    * table population (the prototype's record-only decide call; Phase 1 fetches records apart). Any
+    * other principal: rule 5 refuses a search column a column policy (mask or deny) covers for
+    * them; then the population is `allowed` when a row policy of theirs may cover the table (its
+    * table part is `*` or the table's name, whatever its catalog and schema), OPA tenants included
+    * (the gateway applies QoD row policies whatever the tenant's mode), else `table`. Never a
+    * caller's choice. A `Left` is a refusal or an unavailable decision; the reads of the columns
+    * themselves are object reads of `d`, judged by `decidePlan`.
+    */
+  def searchPopulations(
+      p: DecidePrincipal,
+      d: Description,
+      pool: PoolKey
+  ): Either[Decision, List[SearchPopulation]] =
+    val calls = d.searches.map(_.call)
+    if d.searches.isEmpty then Right(Nil)
+    else if calls.sorted != calls.indices.toList then
+      Left(Decision.Refuse("malformed description: search calls are not numbered 0 to n-1"))
+    else
+      val privileged = p.principal.superuser || p.principal.system
+      val judge: Either[Decision, Option[EffectiveSet]] =
+        if privileged then Right(None)
+        else
+          p.context match
+            case None                             => Left(Decision.Unavailable(ContextExpired))
+            case Some(ctx) if ctx.poolKey != pool =>
+              Left(Decision.Refuse("the handle's pool is not its context's"))
+            case Some(ctx) => Right(Some(narrowed(ctx)))
+      judge.flatMap { eff =>
+        val root =
+          try Right(searchBundleRoot(pool).map(_.trim).filter(_.nonEmpty))
+          catch
+            case NonFatal(e) =>
+              logger.warn(
+                s"authz decide: the search bundle root of $pool is unreadable " +
+                  s"(${e.getClass.getSimpleName})"
+              )
+              Left(Decision.Unavailable(SearchRecordUnavailable))
+        root.flatMap { bundleRoot =>
+          d.searches.sortBy(_.call).foldLeft[Either[Decision, List[SearchPopulation]]](Right(Nil)) {
+            (acc, s) => acc.flatMap(done => searchPopulation(eff, s, bundleRoot).map(done :+ _))
+          }
+        }
+      }
+
+  private def searchPopulation(
+      eff: Option[EffectiveSet],
+      s: DescribedSearch,
+      bundleRoot: Option[String]
+  ): Either[Decision, SearchPopulation] =
+    def refused(reason: String) = Left(Decision.Refuse(reason))
+    s.table.split('.') match
+      case Array(cat, sch, tab) if cat.nonEmpty && sch.nonEmpty && tab.nonEmpty =>
+        s.columns match
+          case List(column) if column.nonEmpty =>
+            def covers(c: String, sc: String, t: String) =
+              PolicyCoverage.covers(c, sc, t, cat, sch, tab)
+            val masked = eff.exists(
+              _.columnPolicies.exists(cp =>
+                covers(cp.catalogName, cp.schemaName, cp.tableName) &&
+                  (cp.columnName == "*" || cp.columnName.equalsIgnoreCase(column))
+              )
+            )
+            // On the table part alone, whatever the policy's catalog and schema: the RLS rewriter
+            // qualifies a bare name with the pool's defaultDatabase, the node resolves it through
+            // the catalog alias, and the two can differ, so a policy the rewriter applied may name
+            // another catalog than the one resolved here. `allowed` over an unfiltered input
+            // discloses nothing, so the over-match (a same-named table of another schema or
+            // catalog) costs only the statistics' scope.
+            val rowPolicy =
+              eff.exists(_.rowPolicies.exists(rp => rowPolicyMayCover(rp.tableName, tab)))
+            if masked then refused(s"search column $column carries a column policy")
+            else
+              bundleRoot match
+                case None =>
+                  refused(s"search_index_unavailable: no index record for ${s.table} ($column)")
+                case Some(root) =>
+                  Right(
+                    SearchPopulation(
+                      s.call,
+                      if rowPolicy then SearchPopulation.Allowed else SearchPopulation.Table,
+                      SearchFunctions.prototypeIndexId(s.table, column),
+                      root
+                    )
+                  )
+          case _ =>
+            refused(
+              s"search_columns_unsupported: a search call on ${s.table} names " +
+                s"${s.columns.size} columns; the prototype searches one"
+            )
+      case _ =>
+        refused(s"malformed description: search table '${s.table}' is not catalog.schema.table")
+
+  /** Whether a row policy whose table part is `policyTable` may cover a table named `table`, for
+    * the statistics population only: the table part as [[PolicyCoverage.covers]] reads it (`*`, or
+    * the same name ignoring case), the catalog and schema ignored.
+    */
+  private def rowPolicyMayCover(policyTable: String, table: String): Boolean =
+    PolicyCoverage.covers(RowPolicyAny, RowPolicyAny, policyTable, "", "", table)
 
   def decideScreen(p: DecidePrincipal, d: ScreenDescription): Decision =
     judged(p) { ctx =>
@@ -495,6 +605,12 @@ object AuthzDecider:
 
   /** What a dry run's plan is answered when the rules allow it: refused, so it never runs. */
   val DryRunReason: String = "dry run"
+
+  /** Any catalog or schema, for [[rowPolicyMayCover]]. */
+  private val RowPolicyAny: String = "*"
+
+  /** A search call's index record could not be read (a store failure): unavailable. */
+  val SearchRecordUnavailable: String = "the search index record could not be read; retry"
 
   /** The location rules threw while being read (a store failure): the decision is unavailable. */
   val RulesUnavailable: String = "the location rules could not be read; retry"

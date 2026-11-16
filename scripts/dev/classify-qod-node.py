@@ -88,7 +88,12 @@ ALLOWED_TABLE = {
     # Task 5): the drain timing probes of a QOD_NODE_SEARCH build. They read nothing but their TABLE
     # input, whose reads the plan describes and the grants judge. Phase 1 removes them. rowid capped at
     # 2^27 (Task 7a Step 1), their bitsets taken from the buffer manager, under memory_limit.
-    "qod_search_drain", "qod_search_drain_parallel",
+    # qod_search_drain_sink (Task 7a) is the same drain executed by qod-node's search sink, with the same
+    # cap; it too reads only its TABLE input.
+    "qod_search_drain", "qod_search_drain_parallel", "qod_search_drain_sink",
+    # qod_search (Task 8): the prototype's search. Its input is judged like any read; the table and
+    # column it searches are described as a read of that column (spec 4.2 rule 5), judged on its grant.
+    "qod_search",
 }
 
 # Superusers only. Listed for review; any table function no set names is superuser anyway.
@@ -118,6 +123,10 @@ SUPERUSER_TABLE = {
     # qod-node's authorization counters: the manager's health probe reads them as the system principal
     # (the node refuses every other principal, superusers too)
     "qod_authz_stats",
+    # QoD Search Phase 0 prototype (Task 8): builds and publishes one data file's bundle. The system
+    # principal only (spec 13): like qod_authz_stats, the node refuses every other principal at bind,
+    # superusers too.
+    "qod_search_build_segment",
 }
 
 # Whole families, superuser: DuckLake and Iceberg catalog functions (maintenance, raw catalog rows,

@@ -25,6 +25,12 @@ class SearchFunctionsSpec extends AnyFlatSpec with Matchers:
       callsSearch(s"SELECT * FROM $name((SELECT rowid FROM t), 't', ['b'], 'x') h") shouldBe true
   }
 
+  it should "trigger on each of the prototype's drain probes" in {
+    for name <- List("qod_search_drain", "qod_search_drain_parallel", "qod_search_drain_sink") do
+      callsSearch(s"SELECT \"rows\" FROM $name((SELECT rowid FROM t))") shouldBe true
+    callsSearch("SELECT qod_search_drainer(1) FROM t") shouldBe false
+  }
+
   it should "trigger on quoted, upper-case and qualified calls" in {
     callsSearch(
       "SELECT * FROM \"qod_search\"((SELECT rowid FROM t), 't', ['b'], 'x')"

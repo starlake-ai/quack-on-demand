@@ -88,13 +88,17 @@ constexpr const char *kNotThroughSink = "QoD: search_internal: not planned throu
 constexpr const char *kUnsupportedShape = "QoD: search_unsupported_plan: ";
 
 //! Test hooks (tests only). Counters are atomics bumped by the operator; the snapshot is a plain copy.
+//! interrupts_answered: interrupt checks of the sink itself that threw DuckDB's InterruptException.
 struct SinkCounters {
-	duckdb::idx_t swaps, plans, combines, finalizes, locals, interrupt_checks, max_rows_between_checks;
+	duckdb::idx_t swaps, plans, combines, finalizes, locals, interrupt_checks, max_rows_between_checks,
+	    interrupts_answered;
 };
 SinkCounters SinkCountersForTest();
 void ResetSinkCountersForTest();
 void SkipSwapForTest(bool skip);
-//! When n > 0, Consume calls context.Interrupt() once n rows have been consumed in the execution.
+//! When n > 0, the sink calls context.Interrupt() once n rows have been consumed in the execution, then
+//! runs its own interrupt check in the same call. Only while n > 0 does the sink count the execution's
+//! rows on a shared atomic.
 void InterruptAfterRowsForTest(duckdb::idx_t n);
 
 } // namespace search

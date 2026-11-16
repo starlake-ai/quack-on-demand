@@ -15,6 +15,8 @@
 // table, take no name from client text, run no statement a hook or decider sees, and a client
 // statement naming the same calls is described to the decider as the superuser-only functions it
 // calls; and the client's own writes refuse the search (search_uncommitted_writes).
+// Case E (Task 16 Step 2): an ENCRYPTED lake through the scan-only route (RunEncrypted): the view's
+// liveness, a fallback read and qod_search's top 10, with no parquet_scan of a data or delete file.
 // QOD_P2_T6_BENCH_ROWS=<n> also times ResolveSnapshotView and the target scan on a table of n rows.
 // Exits 77 when ducklake (or, for the Postgres half, postgres) cannot load.
 
@@ -22,10 +24,16 @@
 #include "decide_client.hpp"
 #include "crypto.hpp"
 #include "function_classes.hpp"
+#include "json.hpp"
 #include "node_hooks.hpp"
+#include "search_fallback.hpp"
 #include "search_functions.hpp"
+#include "search_lineage.hpp"
 #include "search_snapshot.hpp"
+#include "search_visibility.hpp"
 #include "test_handles.hpp"
+
+#include "qod_search.h"
 
 #include "duckdb.hpp"
 #include "duckdb/common/opener_file_system.hpp"
@@ -228,7 +236,14 @@ std::map<std::string, idx_t> StopCounting() {
 
 // ---- the post_bind hook: ResolveSnapshotView on the read's target scan ---------------------------
 
-enum class HookMode { Resolve, ScanAll, ScanOne };
+//! Liveness / Hit (Task 10's bench): CachedSnapshotView after clearing the cache (a miss), or with the
+//! cache as it is (a hit), each followed by LiveDocs for every file (num_docs from g_record_counts).
+//! ResolveOnly (Task 16 case E): ResolveSnapshotView alone, no ReadDeletePositions (it refuses an encrypted
+//! delete file); ScanColumn (case E): ScanTargetRowsWithColumn of `body` limited to `only_file`.
+enum class HookMode { Resolve, ScanAll, ScanOne, Liveness, Hit, ResolveOnly, ScanColumn };
+
+//! Task 10's bench: each data file's record count, by base name.
+std::map<std::string, int64_t> g_record_counts;
 
 struct HookState {
 	bool armed = false;
@@ -239,9 +254,17 @@ struct HookState {
 	std::optional<View> view;
 	std::map<std::string, std::vector<std::pair<int64_t, int64_t>>> positions; // by delete file path
 	std::vector<qod::search::TargetRow> rows;
+	std::vector<qod::search::TargetRowText> text_rows;
 	std::string error;
 	double ms = 0;                         // ResolveSnapshotView alone
 	std::map<std::string, idx_t> opens;    // files the client's FileSystem opened during it
+	// Task 10's bench (Liveness, Hit): CachedSnapshotView, then LiveDocs for every file.
+	double view_ms = 0;
+	double live_docs_ms = 0;
+	double target_scan_ms = 0;
+	bool hit = false;
+	size_t files = 0;
+	int64_t live_docs_bits = 0;
 };
 
 HookState g_hook;
@@ -273,7 +296,52 @@ void SnapshotPostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 	g_hook.armed = false;
 	auto start = std::chrono::steady_clock::now();
 	try {
-		if (g_hook.mode == HookMode::Resolve) {
+		if (g_hook.mode == HookMode::Liveness || g_hook.mode == HookMode::Hit) {
+			if (g_hook.mode == HookMode::Liveness) {
+				qod::search::ClearLivenessCacheForTest();
+			}
+			auto t0 = std::chrono::steady_clock::now();
+			bool hit = false;
+			auto view = qod::search::CachedSnapshotView(input.context, *get, hit);
+			auto t1 = std::chrono::steady_clock::now();
+			int64_t bits = 0;
+			for (size_t i = 0; i < view->files.size(); i++) {
+				auto count = g_record_counts.find(Base(view->files[i].path));
+				if (count == g_record_counts.end()) {
+					throw InvalidInputException("bench: no record count for a listed file");
+				}
+				auto docs = qod::search::LiveDocs(view->liveness[i], static_cast<uint32_t>(count->second));
+				bits += static_cast<int64_t>(docs.size()) + static_cast<int64_t>(docs.empty() ? 0 : docs.back() & 1);
+			}
+			auto t2 = std::chrono::steady_clock::now();
+			g_hook.view_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+			g_hook.live_docs_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+			g_hook.target_scan_ms = view->target_scan_ms;
+			g_hook.hit = hit;
+			g_hook.files = view->files.size();
+			g_hook.live_docs_bits = bits;
+		} else if (g_hook.mode == HookMode::ResolveOnly) {
+			StartCounting();
+			std::optional<View> resolved;
+			try {
+				resolved = qod::search::ResolveSnapshotView(input.context, *get);
+			} catch (...) {
+				g_hook.opens = StopCounting();
+				throw;
+			}
+			g_hook.opens = StopCounting();
+			g_hook.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			g_hook.view = std::move(*resolved);
+		} else if (g_hook.mode == HookMode::ScanColumn) {
+			StartCounting();
+			try {
+				g_hook.text_rows = qod::search::ScanTargetRowsWithColumn(input.context, *get, "body", &g_hook.only_file);
+			} catch (...) {
+				g_hook.opens = StopCounting();
+				throw;
+			}
+			g_hook.opens = StopCounting();
+		} else if (g_hook.mode == HookMode::Resolve) {
 			StartCounting();
 			std::optional<View> resolved;
 			try {
@@ -297,7 +365,7 @@ void SnapshotPostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 		ErrorData data(e);
 		g_hook.error = data.Message();
 	}
-	if (g_hook.mode != HookMode::Resolve) {
+	if (g_hook.mode == HookMode::ScanAll || g_hook.mode == HookMode::ScanOne || g_hook.mode == HookMode::ScanColumn) {
 		g_hook.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 	}
 }
@@ -320,7 +388,7 @@ bool RunHooked(Connection &client, const std::string &sql, std::string &outer_er
 	auto result = client.Query(sql);
 	g_hook.armed = false;
 	outer_error = result->HasError() ? FirstLine(result->GetError()) : "";
-	return g_hook.view.has_value() || mode != HookMode::Resolve;
+	return g_hook.view.has_value() || (mode != HookMode::Resolve && mode != HookMode::ResolveOnly);
 }
 
 // ---- the catalog's truth at S ------------------------------------------------------------------
@@ -735,7 +803,7 @@ void RunScenario(const std::string &kind, const std::filesystem::path &dir, cons
 	                 ->GetValue(0, 0)
 	                 .ToString();
 	RunHooked(client, "SELECT rowid FROM lake.main.pages AT (TIMESTAMP => TIMESTAMPTZ " + Quote(time3) + ")", err);
-	Check(RefusedWith("search_snapshot_unavailable: AT (TIMESTAMP => ...) is not supported by search in Phase 0"),
+	Check(RefusedWith("QoD: search_at_timestamp_unsupported: AT (TIMESTAMP => ...) is not supported by search in Phase 0"),
 	      "3 AT (TIMESTAMP => t): refused, naming AT (VERSION => n)", FirstLine(g_hook.error));
 	Check(err.empty(), "3 AT (TIMESTAMP => t): the read itself ran (the refusal is the search's only)", err);
 
@@ -872,6 +940,12 @@ void RunScenario(const std::string &kind, const std::filesystem::path &dir, cons
 	auto t_small = TruthAt(ref, s_small1, true);
 	RunHooked(client, "SELECT rowid FROM lake.main.pages AT (VERSION => " + std::to_string(s_small1) + ")", err);
 	CompareView("9b AT (VERSION => " + std::to_string(s_small1) + ") after the merge", t_small, err, false);
+	if (g_hook.view) {
+		auto beyond = HiddenBeyondDeleteFiles(*g_hook.view, t_small);
+		Check(!beyond.empty() && t_small.inlined_deletes.empty(),
+		      "9b hidden positions beyond the delete files are not the catalog's inlined deletes (rows stamped after S)",
+		      Join(beyond));
+	}
 
 	// ---- the exception's conditions (spec 13) ----
 	// a join: the target is pages; nothing names or opens other
@@ -934,7 +1008,7 @@ void RunScenario(const std::string &kind, const std::filesystem::path &dir, cons
 		try {
 			qod::search::FileIndexForScanName(v, v.files[0].path + "x");
 		} catch (std::exception &e) {
-			refused = ErrorData(e).Message().find("search_snapshot_unavailable") != std::string::npos;
+			refused = ErrorData(e).Message().find("QoD: search_snapshot_unavailable") != std::string::npos;
 		}
 		Check(refused && qod::search::FileIndexForScanName(v, v.files[0].path) == 0 &&
 		          (v.inlined_tables.empty() || qod::search::FileIndexForScanName(v, v.inlined_tables[0].table_name) == -1),
@@ -980,17 +1054,18 @@ void RunScenario(const std::string &kind, const std::filesystem::path &dir, cons
 	                                    "INSERT INTO lake.main.pages SELECT i, 'l', 'x' FROM range(50000, 50100) r(i)"},
 	                                   {"wrote another table of the lake",
 	                                    "INSERT INTO lake.main.other VALUES (7, 'w')"}}) {
-		Exec(client, "BEGIN TRANSACTION", "begin");
-		Exec(client, w.sql, w.what);
+		// The write must itself succeed, or the case would test nothing.
+		bool wrote = Exec(client, "BEGIN TRANSACTION", "begin") && Exec(client, w.sql, w.what);
 		RunHooked(client, kRead, err);
-		Check(RefusedWith("search_uncommitted_writes: "), "a transaction that " + w.what + ": refused",
-		      FirstLine(g_hook.error));
+		Check(wrote && RefusedWith("QoD: search_uncommitted_writes: "), "a transaction that " + w.what + ": refused",
+		      wrote ? FirstLine(g_hook.error) : "the write itself failed");
 		Exec(client, "ROLLBACK", "rollback");
 	}
-	Exec(client, "BEGIN TRANSACTION", "begin");
-	Exec(client, "INSERT INTO lake2.main.t VALUES (1)", "write lake2");
+	bool wrote_lake2 = Exec(client, "BEGIN TRANSACTION", "begin") &&
+	                   Exec(client, "INSERT INTO lake2.main.t VALUES (1)", "write lake2");
 	RunHooked(client, kRead, err);
-	Check(g_hook.view.has_value(), "a transaction that wrote another lake (lake2): resolves", FirstLine(g_hook.error));
+	Check(wrote_lake2 && g_hook.view.has_value(), "a transaction that wrote another lake (lake2): resolves",
+	      wrote_lake2 ? FirstLine(g_hook.error) : "the write to lake2 itself failed");
 	Exec(client, "ROLLBACK", "rollback");
 	RunHooked(client, kRead, err);
 	Check(g_hook.view.has_value(), "auto-commit after those transactions: resolves", FirstLine(g_hook.error));
@@ -998,6 +1073,43 @@ void RunScenario(const std::string &kind, const std::filesystem::path &dir, cons
 	// the reads ran in the client's transaction: the client's own read still works afterwards
 	auto count = client.Query("SELECT count(*) FROM lake.main.pages");
 	Check(!count->HasError(), "the client's own read after the calls", count->HasError() ? FirstLine(count->GetError()) : "");
+
+	// a rename between S and now (review of Task 6, Minor 8): ducklake_list_files resolves the table by
+	// name at S, so a name that meant another table at S must still give either exactly what the
+	// client's own read of the same statement returns, or search_snapshot_unavailable; never another
+	// table's files.
+	auto s_before_rename = Head(ref);
+	ok = Exec(setup, "ALTER TABLE lake.main.other RENAME TO other_old", "rename other") &&
+	     Exec(setup, "CREATE TABLE lake.main.other (id BIGINT, v VARCHAR)", "a new other") &&
+	     Exec(setup, "INSERT INTO lake.main.other SELECT i, 'n' FROM range(900, 1000) r(i)", "the new other's rows");
+	Check(ok, "rename: other renamed to other_old, a new other created with rows of its own");
+	for (std::string name : {"other_old", "other"}) {
+		auto at = "lake.main." + name + " AT (VERSION => " + std::to_string(s_before_rename) + ")";
+		Table own_rows;
+		std::string own_error;
+		bool own_ok = Try(ref, "SELECT filename, file_row_number FROM " + at, own_rows, own_error);
+		std::map<std::string, std::set<int64_t>> own_live;
+		for (idx_t r = 0; own_ok && r < own_rows.RowCount(); r++) {
+			auto file = own_rows.GetValue(0, r).ToString();
+			if (file.find(".parquet") != std::string::npos) {
+				own_live[Base(file)].insert(own_rows.GetValue(1, r).GetValue<int64_t>());
+			}
+		}
+		RunHooked(client, "SELECT rowid FROM " + at, err, HookMode::ResolveOnly, name);
+		auto label = "rename: " + name + " AT the version before the rename";
+		if (g_hook.view) {
+			auto got = Summarize(*g_hook.view).live;
+			Check(own_ok && got == own_live, label + ": resolves to exactly the client's own read of it",
+			      std::to_string(got.size()) + " files vs " + std::to_string(own_live.size()) +
+			          (own_ok ? "" : ", own read: " + FirstLine(own_error)));
+		} else if (!g_hook.error.empty()) {
+			Check(g_hook.error.find("QoD: search_snapshot_unavailable") != std::string::npos,
+			      label + ": refused with search_snapshot_unavailable", FirstLine(g_hook.error));
+		} else {
+			Check(!own_ok && !err.empty(), label + ": the read itself does not bind, so nothing resolves",
+			      err + (own_ok ? ", but the superuser's read binds" : ""));
+		}
+	}
 
 	if (kind == "postgres") {
 		// leave nothing on the part 2 Postgres
@@ -1045,8 +1157,8 @@ void RunTenant(const std::filesystem::path &dir, int &code) {
 	Exec(setup, "DELETE FROM lake.main.pages WHERE id BETWEEN 100 AND 200", "delete file");
 	Exec(setup, "INSERT INTO lake.main.pages VALUES (5000, 'i')", "inlined");
 
-	// The functions the search module registers are exactly the drain probes: nothing exposes the
-	// snapshot source.
+	// The functions the search module registers are exactly the drain probes, the search and the bundle
+	// builder (Task 8): nothing exposes the snapshot source.
 	Table functions;
 	std::string ferr;
 	bool fok = Try(setup, "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_name ILIKE 'qod%' ORDER BY 1",
@@ -1061,9 +1173,11 @@ void RunTenant(const std::filesystem::path &dir, int &code) {
 			search_functions.insert(f);
 		}
 	}
-	Check(fok && search_functions == std::set<std::string> {"qod_search_drain", "qod_search_drain_parallel",
+	Check(fok && search_functions == std::set<std::string> {"qod_search", "qod_search_build_segment",
+	                                                                 "qod_search_drain", "qod_search_drain_parallel",
 	                                                                 "qod_search_drain_sink"},
-	      "the search module registers exactly the drain probes: no SQL function exposes the snapshot source",
+	      "the search module registers exactly the drain probes, qod_search and its builder: no SQL function "
+	      "exposes the snapshot source",
 	      Join(search_functions));
 
 	Connection client(db);
@@ -1120,9 +1234,444 @@ void RunTenant(const std::filesystem::path &dir, int &code) {
 	}
 }
 
-// ---- cost: ResolveSnapshotView and the target scan on a larger table -----------------------------
+// ---- E: an encrypted lake through the scan-only route (Task 16 Step 2, owner ruling 2026-11-14) -------
+// A DuckLake attached with ENCRYPTED (DuckDB-file catalog, httpfs for OpenSSL): pages of 20,000 rows in 2
+// files, one bundle per file built on the system principal's connection from the rows of the target's own
+// scan before any delete (never read_parquet, which has no key), then a 2,001-row delete, an inlined delete,
+// a third (unindexed) file and three inlined rows. No parquet_scan of a data or delete file anywhere: the
+// liveness comes from the target's own DuckLake scan (DuckLake decrypts with its own per-file keys), the
+// fallback rows from the same scan limited by filename, and PRAGMA add_parquet_key is never used. The bundles
+// themselves are plaintext here: sealing a bundle under the HMAC subkey (spec 6.2) is Phase 2, and a
+// plaintext bundle of an encrypted lake must never be written outside a test.
 
-void RunBench(const std::filesystem::path &dir, int64_t rows) {
+std::string g_e_root;
+
+//! The case's decider: allows every plan and answers each search call as the manager's DecideRoute does
+//! (the table population, the prototype index id of the described table and column, the case's root).
+qod::DecideResult ERecorder(const qod::DecideCall &call) {
+	qod::DecideResult result;
+	result.status = qod::DecideResult::Status::Allow;
+	result.has_verdict = true;
+	result.verdict.expires_at = now_ms + 60000;
+	if (call.kind == "plan") {
+		auto described = qod::ParseJson(call.description);
+		if (auto searches = described.GetOptional("searches", qod::JsonValue::Kind::ARRAY)) {
+			for (auto &s : searches->array) {
+				qod::SearchEntry entry;
+				entry.call = static_cast<uint64_t>(s.Get("call", qod::JsonValue::Kind::INTEGER).integer);
+				entry.population = "table";
+				entry.index_id = qod::search::PrototypeIndexId(
+				    s.Get("table", qod::JsonValue::Kind::STRING).string,
+				    s.Get("columns", qod::JsonValue::Kind::ARRAY).array.at(0).string);
+				entry.bundle_root = g_e_root;
+				result.verdict.search.push_back(entry);
+			}
+		}
+	}
+	return result;
+}
+
+struct EHit {
+	int64_t rowid;
+	float score;
+};
+
+std::string ShowHits(const std::vector<EHit> &hits) {
+	std::ostringstream out;
+	for (size_t i = 0; i < hits.size() && i < 4; i++) {
+		out << (i ? " " : "") << hits[i].rowid << "@" << hits[i].score;
+	}
+	return "[" + out.str() + (hits.size() > 4 ? " ..." : "") + "] (" + std::to_string(hits.size()) + ")";
+}
+
+std::string TakeError(char *err) {
+	std::string text = err ? err : "";
+	qs_string_free(err);
+	return text;
+}
+
+//! The engine test's reference (search_engine_test.cpp Reference): a fresh single segment of the live rows
+//! the superuser's `ref` reads, searched with the TABLE population and every row allowed.
+std::vector<EHit> EReference(Connection &ref, const std::string &query, uint32_t k, std::string &error) {
+	Table rows;
+	if (!Try(ref, "SELECT rowid, body FROM lake.main.pages ORDER BY rowid", rows, error)) {
+		return {};
+	}
+	std::string path = "/qod-reference/lake.main.pages";
+	auto key = qod::Hex(qod::Sha256(path));
+	QsSource source {"00000000-0000-8000-8000-000000000000", key.c_str(), path.c_str(), 1, 1, -1, -1, -1, -1};
+	char *err = nullptr;
+	auto builder = qs_builder_new(&source, nullptr, UINT64_MAX, &err);
+	if (!builder) {
+		error = TakeError(err);
+		return {};
+	}
+	for (idx_t i = 0; i < rows.RowCount(); i++) {
+		auto text = rows.GetValue(1, i).IsNull() ? std::string() : rows.GetValue(1, i).GetValue<std::string>();
+		if (qs_builder_add(builder, i, rows.GetValue(0, i).GetValue<int64_t>(), -1, text.data(), text.size(), &err) != 0) {
+			error = TakeError(err);
+			qs_builder_finish(builder, nullptr, nullptr, nullptr, nullptr);
+			return {};
+		}
+	}
+	uint8_t *bytes = nullptr;
+	size_t len = 0;
+	uint64_t docs = 0;
+	if (qs_builder_finish(builder, &bytes, &len, &docs, &err) != 0) {
+		error = TakeError(err);
+		return {};
+	}
+	auto segment = qs_segment_open(bytes, len, &source, &err);
+	qs_bytes_free(bytes, len);
+	if (!segment) {
+		error = TakeError(err);
+		return {};
+	}
+	size_t words = (rows.RowCount() + 63) / 64;
+	std::vector<uint64_t> live(words, ~uint64_t(0));
+	std::vector<uint64_t> allowed(words, ~uint64_t(0));
+	const QsSegment *segments[] = {segment};
+	const uint64_t *lives[] = {live.data()};
+	const uint64_t *alloweds[] = {allowed.data()};
+	size_t lens[] = {words};
+	std::vector<QsHit> out(k);
+	size_t n = 0;
+	auto rc = qs_search(segments, 1, lives, lens, alloweds, lens, QS_POPULATION_TABLE, query.c_str(), "body", 1.2f, 0.75f,
+	                    k, nullptr, UINT64_MAX, out.data(), out.size(), &n, &err);
+	qs_segment_free(segment);
+	if (rc != 0) {
+		error = TakeError(err);
+		return {};
+	}
+	std::vector<EHit> hits;
+	for (size_t i = 0; i < n; i++) {
+		hits.push_back(EHit {out[i].rowid, out[i].score});
+	}
+	return hits;
+}
+
+//! Check, plus a "== E" line (what the brief's grep shows).
+//! `what` starts with the step's number ("2 ...").
+void ECheck(bool ok, const std::string &what, const std::string &detail = "") {
+	Check(ok, what, detail);
+	Say("== E" + what.substr(0, what.find(' ')) + (ok ? " ok   " : " FAIL ") + what.substr(what.find(' ') + 1) +
+	    (ok || detail.empty() ? "" : ": " + FirstLine(detail)));
+}
+
+void RunEncrypted(const std::filesystem::path &dir_p, int &code) {
+	g_kind = "E encrypted";
+	std::filesystem::remove_all(dir_p);
+	std::filesystem::create_directories(dir_p / "data");
+	std::filesystem::create_directories(dir_p / "bundles");
+	auto dir = std::filesystem::canonical(dir_p);
+	auto data = (dir / "data").string() + "/";
+	g_e_root = (dir / "bundles").string() + "/";
+
+	DuckDB db(nullptr);
+	auto authz = std::make_shared<qod::NodeAuthz>(qod_test::kNode, qod_test::kKey, [] { return now_ms; });
+	qod::RegisterNodeAuthz(*db.instance, authz, ERecorder);
+	RegisterHook(*db.instance);
+	qod::RegisterSearchFunctions(*db.instance);
+	Connection setup(db);
+	// httpfs: DuckDB's OpenSSL module; without it an encrypted database refuses writes (mbedtls is read-only).
+	for (std::string ext : {"ducklake", "parquet", "httpfs"}) {
+		if (setup.Query("INSTALL " + ext)->HasError() || setup.Query("LOAD " + ext)->HasError()) {
+			Say("== E: " + ext + " unavailable, skipped");
+			code = 77;
+			return;
+		}
+	}
+	if (!Exec(setup, "ATTACH " + Quote("ducklake:" + (dir / "enc.ducklake").string()) + " AS lake (DATA_PATH " +
+	                     Quote(data) + ", DATA_INLINING_ROW_LIMIT 10, ENCRYPTED)",
+	          "attach the encrypted lake")) {
+		code = 1;
+		return;
+	}
+	g_meta = "__ducklake_metadata_lake";
+	const std::string body = "array_to_string(list_transform(range(20 + (hash(i, 'len') % 30)::BIGINT), lambda j: 'w' "
+	                         "|| floor(pow((hash(i, j) % 4294967296)::DOUBLE / 4294967296.0, 4) * 50000)::BIGINT), ' ')";
+	auto insert = [&](int64_t from, int64_t to) {
+		return "INSERT INTO lake.main.pages SELECT i, 't' || i, " + body + " FROM range(" + std::to_string(from) + ", " +
+		       std::to_string(to) + ") r(i) ORDER BY i";
+	};
+	bool ok = Exec(setup, "CREATE TABLE lake.main.pages (id BIGINT, title VARCHAR, body VARCHAR)", "create") &&
+	          Exec(setup, insert(0, 10000), "file 1") && Exec(setup, insert(10000, 20000), "file 2");
+	if (!ok) {
+		code = 1;
+		return;
+	}
+	Connection ref(db); // untagged: reads as the superuser does
+	Connection sysc(db);
+	{
+		sysc.context->registered_state->Insert(qod::kQuackSessionKey, make_shared_ptr<FakeQuackSession>());
+		qod_test::MintSpec spec;
+		spec.principal_id = "system";
+		spec.exp = now_ms + 60000;
+		spec.system = true;
+		auto installed = sysc.Query(qod_test::Prelude(qod_test::MintWith(spec)));
+		if (installed->HasError()) {
+			ECheck(false, "0 the system principal's prelude", installed->GetError());
+			code = 1;
+			return;
+		}
+	}
+
+	// E0: the lake is encrypted, and a data file cannot be read without its key.
+	auto encrypted = Must(ref, "SELECT value FROM " + g_meta + ".ducklake_metadata WHERE key = 'encrypted'");
+	auto listed = Must(ref, "SELECT data_file, data_file_size_bytes, data_file_footer_size, "
+	                        "data_file_encryption_key IS NOT NULL FROM ducklake_list_files('lake', 'pages')");
+	bool keyed = listed->RowCount() == 2;
+	for (idx_t r = 0; r < listed->RowCount(); r++) {
+		keyed = keyed && listed->GetValue(3, r).GetValue<bool>();
+	}
+	ECheck(encrypted->RowCount() == 1 && encrypted->GetValue(0, 0).ToString() == "true" && keyed,
+	       "0 the lake is ENCRYPTED: ducklake_metadata.encrypted = true, 2 data files, each with its own key");
+	{
+		Table t;
+		std::string error;
+		auto read = Try(ref, "SELECT count(*) FROM read_parquet(" + Quote(listed->GetValue(0, 0).ToString()) + ")", t, error);
+		ECheck(!read, "0 read_parquet of a data file without its key fails (the route below never uses it)",
+		       read ? "it read " + t.GetValue(0, 0).ToString() : "");
+	}
+
+	// The bundles: one per file, from the target's own scan, before any delete (every position live).
+	std::set<std::string> built;
+	for (idx_t r = 0; r < listed->RowCount(); r++) {
+		auto path = listed->GetValue(0, r).ToString();
+		auto sql = "SELECT * FROM qod_search_build_segment((SELECT file_row_number, rowid, NULL::BIGINT, body FROM "
+		           "lake.main.pages WHERE filename = " +
+		           Quote(path) + " ORDER BY file_row_number), 'lake.main.pages', 'body', " + Quote(g_e_root) + ", " +
+		           Quote(path) + ", " + listed->GetValue(1, r).ToString() + "::UBIGINT, " +
+		           listed->GetValue(2, r).ToString() + "::UBIGINT)";
+		Table out;
+		std::string error;
+		auto ran = Try(sysc, sql, out, error);
+		ECheck(ran && out.RowCount() == 1 && out.GetValue(1, 0).GetValue<int64_t>() == 10000,
+		       "1 bundle of data file " + std::to_string(r + 1) + " built on the system principal's connection from "
+		       "the target's own scan (10,000 docs)",
+		       ran ? (out.RowCount() ? out.GetValue(1, 0).ToString() + " docs" : "no row") : error);
+		if (ran) {
+			built.insert(path);
+			Say("   E bundle " + std::to_string(r + 1) + ": " + out.GetValue(1, 0).ToString() + " docs, " +
+			    out.GetValue(2, 0).ToString() + " bytes, plaintext (sealing is Phase 2)");
+		}
+	}
+
+	// The changes after the build.
+	ok = Exec(setup, "DELETE FROM lake.main.pages WHERE id BETWEEN 12000 AND 14000", "2,001-row delete") &&
+	     Exec(setup, "DELETE FROM lake.main.pages WHERE id = 5", "inlined delete") &&
+	     Exec(setup, insert(20000, 21000), "file 3 (unindexed)") &&
+	     Exec(setup, "INSERT INTO lake.main.pages VALUES (90001, 'a', 'w1 w10 w1'), (90002, 'b', 'w10'), (90003, 'c', 'w0')",
+	          "three inlined rows");
+	if (!ok) {
+		code = 1;
+		return;
+	}
+	// Not ReadTruth: it reads the delete file with read_parquet, which an encrypted file refuses.
+	Truth live_truth;
+	live_truth.s = Head(ref);
+	ReadLiveTruth(ref, live_truth);
+	int64_t superuser_live = Int(ref, "SELECT count(*) FROM lake.main.pages");
+	auto files_now = Must(ref, "SELECT data_file, delete_file, delete_file_encryption_key IS NOT NULL FROM "
+	                           "ducklake_list_files('lake', 'pages')");
+	std::set<std::string> listed_paths;
+	std::string unindexed;
+	bool delete_keyed = false;
+	idx_t delete_files = 0;
+	for (idx_t r = 0; r < files_now->RowCount(); r++) {
+		auto path = files_now->GetValue(0, r).ToString();
+		listed_paths.insert(path);
+		if (!built.count(path)) {
+			unindexed = path;
+		}
+		if (!files_now->GetValue(1, r).IsNull()) {
+			listed_paths.insert(files_now->GetValue(1, r).ToString());
+			delete_files++;
+			delete_keyed = delete_keyed || files_now->GetValue(2, r).GetValue<bool>();
+		}
+	}
+	ECheck(files_now->RowCount() == 3 && !unindexed.empty() && delete_files == 1 && delete_keyed,
+	       "0 after the changes: 3 data files (one unindexed) and one encrypted delete file",
+	       std::to_string(files_now->RowCount()) + " files, " + std::to_string(delete_files) + " delete files");
+
+	Connection client(db);
+	WrapClientFileSystem(client);
+	client.context->registered_state->Insert(qod::kQuackSessionKey, make_shared_ptr<FakeQuackSession>());
+	qod_test::MintSpec spec;
+	spec.principal_id = "u-1";
+	spec.exp = now_ms + 60000;
+	auto installed = client.Query(qod_test::Prelude(qod_test::MintWith(spec)));
+	if (installed->HasError()) {
+		ECheck(false, "0 the tenant prelude", installed->GetError());
+		code = 1;
+		return;
+	}
+
+	// E2: ResolveSnapshotView succeeds and its liveness is the superuser's live rows at S.
+	std::string err;
+	RunHooked(client, kRead, err, HookMode::ResolveOnly);
+	if (g_hook.view) {
+		auto &v = *g_hook.view;
+		auto g = Summarize(v);
+		bool keys_known = !v.files.empty();
+		for (auto &f : v.files) {
+			keys_known = keys_known && !f.encryption_key.empty();
+		}
+		bool parquet_scan = false;
+		for (auto &r : v.reads) {
+			parquet_scan = parquet_scan || r.rfind("parquet_scan(", 0) == 0;
+		}
+		std::string why;
+		ECheck(err.empty() && v.snapshot_id == live_truth.s, "2 ResolveSnapshotView succeeds at S",
+		       err + " S " + std::to_string(v.snapshot_id) + " vs " + std::to_string(live_truth.s));
+		ECheck(g.live == live_truth.live, "2 its liveness equals the superuser's live rows at S, per file",
+		       std::to_string(LiveCount(v)) + " live in files vs " + std::to_string(live_truth.live.size()) + " files");
+		ECheck(keys_known, "2 every listed data file carries its DuckLake key from the scan's bind data");
+		ECheck(!parquet_scan && ReadsOnlyTarget(v, "pages", why), "2 no parquet_scan among its reads; every read names "
+		       "the target", why + " " + Join(v.reads));
+		ECheck(OpensOnlyTarget(v, why), "2 every file it opened is a listed file of the target", why);
+		int64_t inlined = 0;
+		for (auto &t : v.inlined_tables) {
+			inlined += t.live_rows;
+		}
+		ECheck(LiveCount(v) + inlined == superuser_live, "2 live rows in files plus inlined rows equal the superuser's count",
+		       std::to_string(LiveCount(v)) + " + " + std::to_string(inlined) + " vs " + std::to_string(superuser_live));
+	} else {
+		ECheck(false, "2 ResolveSnapshotView succeeds", FirstLine(g_hook.error + " " + err));
+	}
+
+	// E3: the unindexed file's live rows through ScanTargetRowsWithColumn (Task 11's route), filename-limited.
+	RunHooked(client, kRead, err, HookMode::ScanColumn, "pages", unindexed);
+	{
+		auto want = Must(ref, "SELECT file_row_number, rowid, body FROM lake.main.pages WHERE filename = " + Quote(unindexed) +
+		                          " ORDER BY file_row_number");
+		std::set<std::string> got_rows, want_rows;
+		bool one_file = true;
+		for (auto &row : g_hook.text_rows) {
+			one_file = one_file && row.filename == unindexed;
+			got_rows.insert(std::to_string(row.file_row_number) + "|" + std::to_string(row.rowid) + "|" + row.text);
+		}
+		for (idx_t r = 0; r < want->RowCount(); r++) {
+			want_rows.insert(want->GetValue(0, r).ToString() + "|" + want->GetValue(1, r).ToString() + "|" +
+			                 want->GetValue(2, r).ToString());
+		}
+		bool opens_listed = true;
+		for (auto &o : g_hook.opens) {
+			opens_listed = opens_listed && listed_paths.count(o.first);
+		}
+		ECheck(g_hook.error.empty() && one_file && got_rows == want_rows && want_rows.size() == 1000,
+		       "3 ScanTargetRowsWithColumn of the unindexed file returns its 1,000 live rows (position, rowid, body)",
+		       FirstLine(g_hook.error) + " got " + std::to_string(got_rows.size()) + " want " +
+		           std::to_string(want_rows.size()));
+		ECheck(opens_listed, "3 every file it opened is a listed data or delete file", Join([&] {
+			       std::vector<std::string> v;
+			       for (auto &o : g_hook.opens) {
+				       v.push_back(Base(o.first));
+			       }
+			       return v;
+		       }()));
+	}
+
+	// E4: qod_search over the table equals the reference's top 10; every open is a bundle or a listed file.
+	// The fallback's own window: the counts at its start and end (the statement's counting runs on).
+	std::map<std::string, idx_t> fallback_start, fallback_opens;
+	qod::search::FallbackScanObserverForTest([&](bool on) {
+		std::lock_guard<std::mutex> lock(g_fs_mutex);
+		if (on) {
+			fallback_start = g_fs_opens;
+		} else {
+			fallback_opens.clear();
+			for (auto &o : g_fs_opens) {
+				auto was = fallback_start.count(o.first) ? fallback_start.at(o.first) : 0;
+				if (o.second > was) {
+					fallback_opens[o.first] = o.second - was;
+				}
+			}
+		}
+	});
+	for (std::string query : {"w1 w10", "w0"}) {
+		qod::search::ClearLivenessCacheForTest();
+		fallback_opens.clear();
+		StartCounting();
+		Table rows;
+		std::string error;
+		auto ran = Try(client,
+		               "SELECT * FROM qod_search((SELECT rowid FROM lake.main.pages), 'lake.main.pages', ['body'], " +
+		                   Quote(query) + ")",
+		               rows, error);
+		auto all_opens = StopCounting();
+		std::string rerr;
+		auto want = EReference(ref, query, 10, rerr);
+		std::vector<EHit> got;
+		for (idx_t r = 0; ran && r < rows.RowCount(); r++) {
+			got.push_back(EHit {rows.GetValue(0, r).GetValue<int64_t>(), rows.GetValue(1, r).GetValue<float>()});
+		}
+		bool same = rerr.empty() && got.size() == want.size() && got.size() == 10;
+		for (size_t i = 0; same && i < got.size(); i++) {
+			same = got[i].rowid == want[i].rowid && got[i].score == want[i].score;
+		}
+		ECheck(ran && same, "4 qod_search '" + query + "' returns the reference's top 10 (rowids, order, bit-identical "
+		                    "scores)",
+		       ran ? (rerr.empty() ? "got " + ShowHits(got) + ", want " + ShowHits(want) : rerr) : error);
+		auto &opens = all_opens;
+		idx_t bundle_opens = 0, data_opens = 0;
+		std::vector<std::string> stray;
+		for (auto &o : opens) {
+			if (o.first.rfind(g_e_root, 0) == 0) {
+				bundle_opens += o.second;
+			} else if (listed_paths.count(o.first)) {
+				data_opens += o.second;
+			} else {
+				stray.push_back(o.first);
+			}
+		}
+		bool unindexed_in_fallback = fallback_opens.count(unindexed) > 0;
+		ECheck(stray.empty() && bundle_opens > 0, "4 every file the search opened is a bundle or a listed data or "
+		                                           "delete file (no other read path)",
+		       Join(stray));
+		ECheck(unindexed_in_fallback, "4 the unindexed file was opened by the fallback's DuckLake scan");
+		Say("   E4 '" + query + "': opens " + std::to_string(bundle_opens) + " of bundles, " + std::to_string(data_opens) +
+		    " of data or delete files (" + std::to_string([&] {
+			    idx_t n = 0;
+			    for (auto &o : fallback_opens) {
+				    n += listed_paths.count(o.first) ? o.second : 0;
+			    }
+			    return n;
+		    }()) +
+		    " inside the fallback's scan, the rest in the liveness scan and the input's own scan, both DuckLake scans of the target)");
+	}
+	qod::search::FallbackScanObserverForTest(nullptr);
+	Say("== E note: the bundles are plaintext in this probe; sealing under the HMAC subkey is Phase 2, and a "
+	    "plaintext bundle of an encrypted lake must never be written outside a test");
+	code = 0;
+}
+
+// ---- cost: ResolveSnapshotView and the target scan on a larger table -----------------------------
+// Task 6's bench, extended by Task 10 (owner ruling 2026-11-14, point 3c): 10 files, 1% and 10% of the
+// rows deleted (plus one inlined delete and two inlined rows, as Task 6's), median of 21 warm runs after
+// one cold one, of
+//   - miss: CachedSnapshotView with the cache cleared (ResolveSnapshotView, its target scan beside it);
+//   - LiveDocs for every file (the wiring's own cost; num_docs = the file's record count);
+//   - hit: CachedSnapshotView in the next statement, at the same S;
+// each in an auto-commit statement of its own (SELECT rowid FROM pages LIMIT 0: the hook runs at
+// post_bind, and nothing of the table is returned). Task 6's ScanTargetRows figures follow for 1% up to
+// 10M rows.
+
+double Median(std::vector<double> v) {
+	v.erase(v.begin()); // the first run is cold
+	std::sort(v.begin(), v.end());
+	return v.empty() ? 0.0 : v[v.size() / 2];
+}
+
+std::string Ms(double ms) {
+	std::ostringstream out;
+	out.setf(std::ios::fixed);
+	out.precision(ms < 1 ? 3 : 1);
+	out << ms;
+	return out.str();
+}
+
+void RunBenchAt(const std::filesystem::path &dir, int64_t rows, int percent) {
 	g_kind = "bench";
 	std::filesystem::remove_all(dir);
 	std::filesystem::create_directories(dir / "data");
@@ -1140,11 +1689,53 @@ void RunBench(const std::filesystem::path &dir, int64_t rows) {
 		                std::to_string(hi) + ") r(i)",
 		     "file");
 	}
-	Exec(setup, "DELETE FROM lake.main.pages WHERE id % 100 = 7", "1% deletes");
+	Exec(setup, percent == 1 ? "DELETE FROM lake.main.pages WHERE id % 100 = 7" : "DELETE FROM lake.main.pages WHERE id % 10 = 7",
+	     std::to_string(percent) + "% deletes");
 	Exec(setup, "DELETE FROM lake.main.pages WHERE id = 3", "inlined delete");
 	Exec(setup, "INSERT INTO lake.main.pages VALUES (-1, 'i'), (-2, 'j')", "inlined rows");
+	g_record_counts.clear();
+	auto counts = Must(setup, "SELECT path, record_count FROM " + g_meta + ".ducklake_data_file WHERE end_snapshot IS NULL");
+	for (idx_t r = 0; r < counts->RowCount(); r++) {
+		g_record_counts[Base(counts->GetValue(0, r).ToString())] = counts->GetValue(1, r).GetValue<int64_t>();
+	}
+	auto live = Int(setup, "SELECT count(*) FROM lake.main.pages");
 	Connection client(db);
 	std::string err;
+	const std::string probe = "SELECT rowid FROM lake.main.pages LIMIT 0";
+	std::vector<double> miss, scan, live_docs, miss_live, hit, hit_live;
+	size_t listed = 0;
+	bool all_hit = true, all_miss = true;
+	for (int run = 0; run < 22; run++) {
+		RunHooked(client, probe, err, HookMode::Liveness);
+		if (!g_hook.error.empty()) {
+			Say("   bench: " + FirstLine(g_hook.error));
+			return;
+		}
+		all_miss = all_miss && !g_hook.hit;
+		miss.push_back(g_hook.view_ms);
+		scan.push_back(g_hook.target_scan_ms);
+		live_docs.push_back(g_hook.live_docs_ms);
+		miss_live.push_back(g_hook.view_ms + g_hook.live_docs_ms);
+		listed = g_hook.files;
+		RunHooked(client, probe, err, HookMode::Hit);
+		if (!g_hook.error.empty()) {
+			Say("   bench: " + FirstLine(g_hook.error));
+			return;
+		}
+		all_hit = all_hit && g_hook.hit;
+		hit.push_back(g_hook.view_ms);
+		hit_live.push_back(g_hook.view_ms + g_hook.live_docs_ms);
+	}
+	Check(all_miss && all_hit, "bench: every cleared lookup missed and every following one hit");
+	Say("== t10 bench rows=" + std::to_string(rows) + " deleted=" + std::to_string(percent) + "% files=" +
+	    std::to_string(listed) + " live=" + std::to_string(live) + " (median of 21 warm, ms): miss " + Ms(Median(miss)) +
+	    " (target scan " + Ms(Median(scan)) + "), LiveDocs " + Ms(Median(live_docs)) + ", miss+LiveDocs " +
+	    Ms(Median(miss_live)) + ", hit " + Ms(Median(hit)) + ", hit+LiveDocs " + Ms(Median(hit_live)) + "; cold miss " +
+	    Ms(miss[0]) + " (target scan " + Ms(scan[0]) + ")");
+	if (percent != 1 || rows > 10000000) {
+		return;
+	}
+	// Task 6's figures, as before.
 	std::vector<double> resolve, scan_all, scan_one, inner_scan;
 	std::string inlined;
 	for (int run = 0; run < 4; run++) {
@@ -1163,16 +1754,19 @@ void RunBench(const std::filesystem::path &dir, int64_t rows) {
 			scan_one.push_back(g_hook.ms);
 		}
 	}
-	auto med = [](std::vector<double> v) {
-		v.erase(v.begin()); // the first run is cold
-		std::sort(v.begin(), v.end());
-		return v.empty() ? 0.0 : v[v.size() / 2];
-	};
 	Say("== bench rows=" + std::to_string(rows) + " files=" + std::to_string(files) +
-	    ": ResolveSnapshotView median " + std::to_string(med(resolve)) + " ms (cold " + std::to_string(resolve[0]) +
-	    ", of which its target scan for the liveness " + std::to_string(med(inner_scan)) +
-	    " ms); ScanTargetRows unfiltered (a TargetRow per row) " + std::to_string(med(scan_all)) + " ms; filename-filtered (inlined only) " +
-	    std::to_string(scan_one.empty() ? 0.0 : med(scan_one)) + " ms");
+	    ": ResolveSnapshotView median " + std::to_string(Median(resolve)) + " ms (cold " + std::to_string(resolve[0]) +
+	    ", of which its target scan for the liveness " + std::to_string(Median(inner_scan)) +
+	    " ms); ScanTargetRows unfiltered (a TargetRow per row) " + std::to_string(Median(scan_all)) +
+	    " ms; filename-filtered (inlined only) " + std::to_string(scan_one.empty() ? 0.0 : Median(scan_one)) + " ms");
+}
+
+void RunBench(const std::filesystem::path &dir, int64_t rows) {
+	for (int percent : {1, 10}) {
+		RunBenchAt(dir / ("deleted-" + std::to_string(percent)), rows, percent);
+		std::error_code ignored;
+		std::filesystem::remove_all(dir / ("deleted-" + std::to_string(percent)), ignored);
+	}
 }
 
 void OnAlarm(int) {
@@ -1184,10 +1778,93 @@ void OnAlarm(int) {
 
 } // namespace
 
-int main() {
+//! HiddenPositions (word by word) against a bit-by-bit reading of the same bitset, and SetRange's bound
+//! (review of Task 6, Minor C and E).
+void RunBitsetUnits() {
+	auto reference = [](const qod::search::FileLiveness &live, int64_t record_count) {
+		std::vector<std::pair<int64_t, int64_t>> runs;
+		int64_t start = -1;
+		for (int64_t p = 0; p < record_count; p++) {
+			bool hidden = !live.IsLive(p);
+			if (hidden && start < 0) {
+				start = p;
+			} else if (!hidden && start >= 0) {
+				runs.emplace_back(start, p);
+				start = -1;
+			}
+		}
+		if (start >= 0) {
+			runs.emplace_back(start, record_count);
+		}
+		return runs;
+	};
+	qod::search::FileLiveness live;
+	live.words = {~0ull, 0ull, 0x00000000ffffffffull, ~0ull, 0x8000000000000001ull, ~0ull, 0ull};
+	bool same = true;
+	std::string detail;
+	for (int64_t rc : {0, 1, 63, 64, 65, 128, 150, 191, 192, 255, 256, 300, 320, 448, 449, 600}) {
+		auto got = qod::search::HiddenPositions(live, rc);
+		if (got != reference(live, rc)) {
+			same = false;
+			detail += " record_count " + std::to_string(rc);
+		}
+	}
+	uint64_t x = 0x9e3779b97f4a7c15ull;
+	for (int round = 0; round < 200; round++) {
+		qod::search::FileLiveness r;
+		r.words.resize(1 + round % 9);
+		for (auto &w : r.words) {
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			w = (x % 3 == 0) ? 0 : (x % 3 == 1) ? ~0ull : x;
+		}
+		auto rc = static_cast<int64_t>(x % (64 * r.words.size() + 100));
+		if (qod::search::HiddenPositions(r, rc) != reference(r, rc)) {
+			same = false;
+			detail += " random round " + std::to_string(round);
+		}
+	}
+	Check(same, "HiddenPositions word by word equals the bit-by-bit reading (full, empty, mixed and partial words, "
+	            "record counts past the bitset)",
+	      detail);
+	auto refused = [](int64_t lo, int64_t hi) {
+		qod::search::FileLiveness l;
+		try {
+			qod::search::SetLiveRangeForTest(l, lo, hi);
+		} catch (std::exception &e) {
+			return ErrorData(e).Message().find("QoD: search_snapshot_unavailable") != std::string::npos &&
+			       l.words.empty();
+		}
+		return false;
+	};
+	qod::search::FileLiveness small;
+	qod::search::SetLiveRangeForTest(small, 3, 70);
+	Check(refused(qod::search::kMaxFilePosition, qod::search::kMaxFilePosition + 5) &&
+	          refused(5, qod::search::kMaxFilePosition + 1) && refused(-1, 4) && small.IsLive(3) &&
+	          small.IsLive(69) && !small.IsLive(70) && !small.IsLive(2),
+	      "SetRange refuses a position outside [0, 2^40) before the bitset grows, and marks [3, 70) otherwise");
+}
+
+int main(int argc, char **argv) {
 	std::signal(SIGALRM, OnAlarm);
-	alarm(600);
 	auto base = std::filesystem::temp_directory_path() / ("qod-search-snapshot-" + std::to_string(::getpid()));
+	if (argc > 1 && std::string(argv[1]) == "--bench") {
+		// Task 10's liveness cost only (CTest search_snapshot_bench, label probe): skipped without a size.
+		auto rows = std::getenv("QOD_P2_T6_BENCH_ROWS");
+		if (!rows || !*rows) {
+			Say("search_snapshot_test --bench: QOD_P2_T6_BENCH_ROWS is not set, skipped");
+			return 77;
+		}
+		alarm(3500);
+		RunBench(base / "bench", std::stoll(rows));
+		std::error_code ignored;
+		std::filesystem::remove_all(base, ignored);
+		Say("checks: " + std::to_string(g_checks) + ", failed: " + std::to_string(g_failures));
+		return g_failures == 0 ? 0 : 1;
+	}
+	alarm(600);
+	RunBitsetUnits();
 	auto dsn_env = std::getenv("QOD_P2_PG_DSN_FILE");
 	std::string dsn_file = dsn_env ? dsn_env : "";
 	int code = 0, skipped = 0;
@@ -1204,6 +1881,10 @@ int main() {
 		Say("== postgres: QOD_P2_PG_DSN_FILE not set or missing: the Postgres catalog is skipped");
 	}
 	RunTenant(base / "tenant", code);
+	RunEncrypted(base / "encrypted", code);
+	if (code == 77) {
+		Say("== E: skipped (httpfs or ducklake unavailable)");
+	}
 	auto bench = std::getenv("QOD_P2_T6_BENCH_ROWS");
 	if (bench && *bench) {
 		RunBench(base / "bench", std::stoll(bench));

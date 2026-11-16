@@ -10,6 +10,7 @@
 //   - ducklake_current_snapshot(<alias>)                                          S
 //   - ducklake_list_files(<alias>, <table>, schema => .., snapshot_version => S)  data and delete files at S
 //   - the target table's own DuckLake scan (GetScanFunction), virtual columns only  liveness at S
+//   - the same scan with the indexed column, filtered on `filename`  the fallback's rows (Task 11)
 //   - parquet_scan(<a delete file that listing named>), in ReadDeletePositions only  positions, snapshots
 // plus the target scan's own bind data (its MultiFileList, GetAllFiles), which the client's statement
 // already built. Every function is looked up in the system catalog by a fixed name (no client macro
@@ -22,9 +23,12 @@
 // the verdict); these functions do not check it.
 
 #include "duckdb.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/tableref/bound_at_clause.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -118,11 +122,18 @@ struct SnapshotView {
 //! above). Throws duckdb::InvalidInputException:
 //!   - "search_uncommitted_writes: ..." when the client's transaction has modified the target's
 //!     database (inserts and deletes alike, OWNER RULING 2026-11-14);
+//!   - "search_at_timestamp_unsupported: ..." for AT (TIMESTAMP => t) on the target scan (refused for
+//!     Phase 0, OWNER RULING 2026-11-14; spec 4.2 rule 4's code);
 //!   - "search_snapshot_unavailable: <why>" for anything else it cannot do: a target that is not a
-//!     DuckLake table scan, AT (TIMESTAMP => t) (refused for Phase 0, OWNER RULING 2026-11-14), a data
+//!     DuckLake table scan, a data
 //!     file the listing and the bind data disagree on, a scanned file neither listed nor inlined, and
 //!     any failure of the driven calls.
 SnapshotView ResolveSnapshotView(duckdb::ClientContext &context, duckdb::LogicalGet &target);
+
+//! S for a `target` with no AT clause, read as ResolveSnapshotView reads it: ducklake_current_snapshot of
+//! the target's resolved catalog, in the client's transaction (Task 10's cache key; the cache never
+//! serves a target with an AT clause). Throws search_snapshot_unavailable as ResolveSnapshotView does.
+int64_t CurrentSnapshotId(duckdb::ClientContext &context, duckdb::LogicalGet &target);
 
 //! The positions a delete file deletes, each with its own snapshot when the file has the column (-1
 //! when it has none), as the file holds them: positions stamped after S are the caller's to drop (6.3
@@ -135,8 +146,16 @@ std::vector<std::pair<int64_t, int64_t>> ReadDeletePositions(duckdb::ClientConte
 
 //! The positions of a file not live at S, as [begin, end) runs, given its row count (from the
 //! bundle): deleted at S by any means, or stamped after S in a backdated file. Not the catalog's
-//! inlined deletes (P6).
+//! inlined deletes (P6). Reads the bitset word by word.
 std::vector<std::pair<int64_t, int64_t>> HiddenPositions(const FileLiveness &live, int64_t record_count);
+
+//! One past the highest position within a file ResolveSnapshotView marks live: a scan position outside
+//! [0, kMaxFilePosition) throws search_snapshot_unavailable before the bitset grows toward it.
+constexpr int64_t kMaxFilePosition = int64_t(1) << 40;
+
+//! Test hook: marks [lo, hi) live in `live.words` as ResolveSnapshotView does (bounds checked the same
+//! way; live_count and end are left alone).
+void SetLiveRangeForTest(FileLiveness &live, int64_t lo, int64_t hi);
 
 //! Which file a `filename` the target's scan returned names: its index in `view.files`, -1 for one of
 //! `view.inlined_tables`; anything else throws search_snapshot_unavailable (never a silent miss).
@@ -156,5 +175,52 @@ struct TargetRow {
 //! every file's footer and delete file, but returns no row of another file (P6).
 std::vector<TargetRow> ScanTargetRows(duckdb::ClientContext &context, duckdb::LogicalGet &target,
                                       const std::string *only_file = nullptr);
+
+//! One row of the target's own scan at S with one data column (Task 11): TargetRow plus the column's
+//! text (empty for NULL).
+struct TargetRowText {
+	std::string filename;
+	int64_t file_row_number = -1;
+	int64_t rowid = -1;
+	std::string text;
+};
+
+//! ScanTargetRows with `column` projected after the virtual columns: the same scan of the target's own
+//! resolved entry at its AT clause (OWNER RULING ROWS_M4: never a parquet_scan of a data file by path),
+//! through the client's FileSystem and transaction, so DuckLake applies every liveness rule at S and
+//! decrypts with its own per-file keys. `column` is named as the target's scan names it at S and is projected
+//! by its DuckLake field id; a stored VARCHAR column (search_columns_unsupported otherwise). Every row is
+//! held at once: tests and small reads only; the fallback streams through ScanTargetTextRows.
+std::vector<TargetRowText> ScanTargetRowsWithColumn(duckdb::ClientContext &context, duckdb::LogicalGet &target,
+                                                    const std::string &column, const std::string *only_file);
+
+//! The DuckLake field id of `column` (matched without case) in a DuckLake scan's bind data, -1 when it has
+//! none or the bind data is not a read mapped by field id.
+int64_t FieldIdOf(duckdb::FunctionData *bind_data, const std::string &column);
+
+//! Whether a DuckLake scan's bind data holds a column of DuckLake field id `field_id`.
+bool HasFieldId(duckdb::FunctionData *bind_data, int64_t field_id);
+
+//! The DuckLake field id of `column` in `table` now: a scan of the entry bound with no AT clause (the entry
+//! the verdict judged, review C1), -1 when none.
+int64_t CurrentFieldId(duckdb::ClientContext &context, duckdb::TableCatalogEntry &table, const std::string &column);
+
+//! Each row: its file name (a data file's path or an inlined table's name), position, rowid, and the
+//! column's bytes (`text` null and `is_null` true for NULL). The bytes live only for the call.
+using TargetTextSink = std::function<void(const duckdb::string_t &filename, int64_t file_row_number, int64_t rowid,
+                                          const char *text, size_t len, bool is_null)>;
+
+//! The streaming form of ScanTargetRowsWithColumn, from the target's resolved entry and its AT clause (the
+//! LogicalGet is gone by execution; the search keeps both, SearchTarget), projecting the column of DuckLake
+//! field id `field_id` at that snapshot (none there: search_columns_unsupported). One scan for every name of
+//! `only_files` (an IN filter on `filename`; null: every file). A row of a file outside `only_files`, or with
+//! no file, position or rowid, fails closed (search_snapshot_unavailable). The client's interrupt is checked
+//! between chunks. Errors of the sink pass through as they are.
+void ScanTargetTextRows(duckdb::ClientContext &context, duckdb::TableCatalogEntry &table,
+                        duckdb::optional_ptr<duckdb::BoundAtClause> at_clause, int64_t field_id,
+                        const std::vector<std::string> *only_files, const TargetTextSink &sink);
+
+//! Test hook: how many ScanTargetTextRows scans were driven in the process.
+uint64_t TextScansForTest();
 
 } // namespace qod::search

@@ -26,7 +26,7 @@ using namespace duckdb;
 
 struct Counters {
 	std::atomic<idx_t> swaps {0}, plans {0}, combines {0}, finalizes {0}, locals {0}, interrupt_checks {0},
-	    max_rows_between_checks {0};
+	    max_rows_between_checks {0}, interrupts_answered {0};
 };
 Counters g_counters;
 std::atomic<bool> g_skip_swap {false};
@@ -50,6 +50,7 @@ constexpr idx_t kCheckEvery = 65536 - STANDARD_VECTOR_SIZE;
 struct SinkGlobalState : public GlobalSinkState {
 	std::unique_ptr<SinkProgram> program;
 	std::mutex mutex;
+	//! Rows consumed in the execution, counted only while InterruptAfterRowsForTest is armed.
 	std::atomic<idx_t> rows_seen {0};
 	std::atomic<bool> interrupted {false};
 	std::atomic<bool> finished {false};
@@ -120,17 +121,30 @@ public:
 		auto &global = input.global_state.Cast<SinkGlobalState>();
 		auto &local = input.local_state.Cast<SinkLocalState>();
 		global.program->Consume(context.client, *local.local, chunk.data[0], chunk.size());
-		auto after = global.rows_seen.fetch_add(chunk.size()) + chunk.size();
-		auto hook = g_interrupt_after.load();
-		if (hook > 0 && after >= hook && !global.interrupted.exchange(true)) {
-			context.client.Interrupt();
+		bool check_now = false;
+		auto hook = g_interrupt_after.load(std::memory_order_relaxed);
+		if (hook > 0) {
+			// Test hook only: the shared count is kept only while it is armed, off the hot path otherwise.
+			auto after = global.rows_seen.fetch_add(chunk.size()) + chunk.size();
+			if (after >= hook && !global.interrupted.exchange(true)) {
+				context.client.Interrupt();
+				// The check below runs in this same call, so it is this sink's own check that answers the
+				// interrupt: DuckDB's PipelineExecutor::Execute checks before every chunk it pulls, and
+				// would otherwise answer first (S9 shows the sink's check through interrupts_answered).
+				check_now = true;
+			}
 		}
 		local.rows_since_check += chunk.size();
-		if (local.rows_since_check >= kCheckEvery) {
+		if (check_now || local.rows_since_check >= kCheckEvery) {
 			g_counters.interrupt_checks++;
 			RaiseTo(g_counters.max_rows_between_checks, local.rows_since_check);
 			local.rows_since_check = 0;
-			context.client.InterruptCheck();
+			try {
+				context.client.InterruptCheck();
+			} catch (InterruptException &) {
+				g_counters.interrupts_answered++;
+				throw;
+			}
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
@@ -381,7 +395,7 @@ SinkCounters SinkCountersForTest() {
 	return SinkCounters {g_counters.swaps.load(),     g_counters.plans.load(),
 	                     g_counters.combines.load(),  g_counters.finalizes.load(),
 	                     g_counters.locals.load(),    g_counters.interrupt_checks.load(),
-	                     g_counters.max_rows_between_checks.load()};
+	                     g_counters.max_rows_between_checks.load(), g_counters.interrupts_answered.load()};
 }
 
 void ResetSinkCountersForTest() {
@@ -392,6 +406,7 @@ void ResetSinkCountersForTest() {
 	g_counters.locals = 0;
 	g_counters.interrupt_checks = 0;
 	g_counters.max_rows_between_checks = 0;
+	g_counters.interrupts_answered = 0;
 }
 
 void SkipSwapForTest(bool skip) {

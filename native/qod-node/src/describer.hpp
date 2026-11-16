@@ -27,6 +27,10 @@ struct Described {
 	//! rule reads (decision 24, ReadOnlyRefusal). Not part of the description: never sent, never
 	//! fingerprinted.
 	std::set<std::string> written_catalogs;
+	//! How many search calls the description's `searches` holds (search spec 4.2 rule 8): a plan holding
+	//! any takes a decide call whoever the principal, for the calls' index records. Not part of the
+	//! description beyond those entries.
+	size_t search_calls = 0;
 };
 
 //! What the describer does with one operator type or expression class. A value a DuckDB upgrade
@@ -97,6 +101,15 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 //! of current_setting(...) that fails). When the walk itself cannot resolve a name, returns: the binder's
 //! error stands.
 void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement);
+
+//! Search (Phase 0 part 2, Task 8, review I2): refuses, for any principal, a search function
+//! (qod_search, qod_search_matches, qod_knn, qod_hybrid) that `statement_text` (and an EXECUTE's prepared
+//! statement) reaches through a view, a macro, a table macro or a query() literal, transitively: rules 1
+//! and 7 judge a call on the statement's own text. Throws duckdb::PermissionException
+//! ("QoD: search_input_not_governed: ..."). For non-superusers the same refusal is part of Describe's
+//! call-name walk.
+void JudgeSearchBodies(duckdb::ClientContext &context, duckdb::LogicalOperator &plan,
+                       const std::string &statement_text);
 
 //! `given` as a description carries it, rendered as the parse screen renders it (MakeLocation): an
 //! s3:// URL naming a bucket unchanged, an absolute local path as ResolveLocalPath resolves it. Anything

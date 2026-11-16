@@ -111,7 +111,8 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       opaTenant: Boolean = false,
       opaReply: Either[String, (Int, String)] = Left("no OPA in this spec"),
       opaCacheTtlSec: Int = 0,
-      usePath: String = UsePath
+      usePath: String = UsePath,
+      searchRoot: Option[String] = Some("/data/lake/")
   ):
     val registry = new SimpleMeterRegistry
     val clock    = new AtomicLong(1_761_200_000_000L)
@@ -159,7 +160,8 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       ),
       opaCfg = OpaConfig.default,
       functionClass = (_, _, name, _) => Option.when(name == "read_parquet")(FunctionClass.File),
-      settingClass = _ => None
+      settingClass = _ => None,
+      searchBundleRoot = _ => searchRoot
     )
     val route = new DecideRoute(
       keys,
@@ -662,5 +664,102 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     val text = events.map(_.getFormattedMessage).mkString("\n")
     secrets.foreach(sv =>
       withClue("a secret value reached the log")(text.contains(sv) shouldBe false)
+    )
+  }
+
+  // ---- search spec 4.2 rule 8: populations and index records in the verdict ----
+
+  /** A plan holding `calls` search calls on acme_lake.main.`table`, reading its column `id`. */
+  private def searchPlan(table: String, calls: Int = 1): Array[Byte] =
+    CanonicalJson
+      .render(
+        Json.obj(
+          "control"   -> Json.arr(),
+          "functions" -> Json.arr(),
+          "objects"   -> Json.arr(read(table)),
+          "searches"  -> Json.arr((0 until calls).map { i =>
+            Json.obj(
+              "call"    -> Json.fromInt(i),
+              "columns" -> Json.arr(s("id")),
+              "table"   -> s(s"acme_lake.main.$table")
+            )
+          }*),
+          "settings"  -> Json.arr(),
+          "statement" -> s("PROJECTION"),
+          "v"         -> Json.fromInt(1)
+        )
+      )
+      .getBytes(UTF_8)
+
+  private def searchEntries(v: HCursor): List[(Int, String, String, String)] =
+    v.downField("search")
+      .values
+      .getOrElse(fail("the verdict carries no search"))
+      .toList
+      .map { e =>
+        val c = e.hcursor
+        (
+          c.get[Int]("call").toOption.get,
+          c.get[String]("population").toOption.get,
+          c.get[String]("indexId").toOption.get,
+          c.get[String]("bundleRoot").toOption.get
+        )
+      }
+
+  private val OrdersId = ai.starlake.quack.edge.search.SearchFunctions
+    .prototypeIndexId("acme_lake.main.orders", "id")
+
+  "a search plan's verdict" should "carry each call's population and index record" in {
+    val f             = new Fixture()
+    val (st, body, _) = f.call(request(f.handle(), "plan", searchPlan("orders", calls = 2)))
+    st shouldBe Status.Ok
+    val v = verdict(body)
+    v.get[String]("decision") shouldBe Right("allow")
+    searchEntries(v) shouldBe List(
+      (0, "table", OrdersId, "/data/lake/"),
+      (1, "table", OrdersId, "/data/lake/")
+    )
+  }
+
+  it should "answer a superuser's and the system principal's search plan, judging nothing" in {
+    val f = new Fixture()
+    for p <- List(Root, NodePrincipal.System) do
+      withClue(p.name) {
+        // customers holds no grant: nothing is judged, the record alone is answered.
+        val (st, body, _) = f.call(request(f.handle(p), "plan", searchPlan("customers")))
+        st shouldBe Status.Ok
+        val v = verdict(body)
+        v.get[String]("decision") shouldBe Right("allow")
+        v.get[Long]("expiresAt") shouldBe Right(f.clock.get() + AuthzDecider.GrantLifetimeMs)
+        searchEntries(v) shouldBe List(
+          (
+            0,
+            "table",
+            ai.starlake.quack.edge.search.SearchFunctions
+              .prototypeIndexId("acme_lake.main.customers", "id"),
+            "/data/lake/"
+          )
+        )
+      }
+  }
+
+  it should "carry no search key on a refusal, nor on a plan holding no search call" in {
+    val f         = new Fixture()
+    val (_, b, _) = f.call(request(f.handle(), "plan", searchPlan("customers")))
+    val refused   = verdict(b)
+    refused.get[String]("decision") shouldBe Right("refuse")
+    refused.downField("search").succeeded shouldBe false
+    val (_, b2, _) = f.call(request(f.handle(), "plan", plan(List(read("orders")))))
+    verdict(b2).downField("search").succeeded shouldBe false
+  }
+
+  it should "be refused when the pool has no index record" in {
+    val f             = new Fixture(searchRoot = None)
+    val (st, body, _) = f.call(request(f.handle(Root), "plan", searchPlan("orders")))
+    st shouldBe Status.Ok
+    val v = verdict(body)
+    v.get[String]("decision") shouldBe Right("refuse")
+    v.get[String]("reason") shouldBe Right(
+      "search_index_unavailable: no index record for acme_lake.main.orders (id)"
     )
   }

@@ -6,13 +6,26 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace qod {
+
+//! One search call's entry in a plan verdict (search spec 4.2 rule 8, 6.1, 7.5): the call's position in
+//! the plan's search calls (the description's `searches[].call`), its statistics population, exactly
+//! "table" or "allowed", and the index record: its id and the folder its bundles live under, which the
+//! node takes from here, never from its own data path.
+struct SearchEntry {
+	uint64_t call = 0;
+	std::string population;
+	std::string index_id;
+	std::string bundle_root;
+};
 
 //! A verified verdict: the manager's decision on one description, sent like a handle (decision 14) as
 //! `<base64url(verdict JSON)>.<lowercase hex HMAC-SHA256(node key, verdict bytes)>`, the JSON
 //! {"v":1,"kind","decision","reason","retryable","principal","policyVersion","ctx","fingerprint",
-//!  "expiresAt","rowFilters":[],"masks":[]}. Other keys are ignored.
+//!  "expiresAt","rowFilters":[],"masks":[]}, and for a plan holding search calls the optional
+//! "search":[{"call","population","indexId","bundleRoot"}]. Other keys are ignored.
 struct Verdict {
 	//! "plan" or "screen".
 	std::string kind;
@@ -29,6 +42,8 @@ struct Verdict {
 	std::string fingerprint;
 	//! Epoch milliseconds.
 	int64_t expires_at = 0;
+	//! The search calls' populations and index records, by call; empty when the verdict has no "search".
+	std::vector<SearchEntry> search;
 };
 
 //! What a verdict must answer: the request's kind and fingerprint, and the connection's installed
@@ -50,7 +65,9 @@ constexpr int64_t kMaxScreenVerdictAgeMs = 60 * 1000;
 //! shape, the version, kind, fingerprint, principal, policy version, ctx, expiry (a plan verdict while
 //! expiresAt > now; a screen verdict, which carries expiresAt = now and is used once, at once, while
 //! expiresAt >= now - kMaxScreenVerdictAgeMs), or a non-empty rowFilters or masks (reserved for part 2:
-//! refused until a node enforces them).
+//! refused until a node enforces them). A "search" key, when present, is an array of entries each with an
+//! integer `call` >= 0 (no two alike), a `population` of exactly "table" or "allowed" and non-empty
+//! `indexId` and `bundleRoot`, on a plan verdict only; anything else is a malformed verdict.
 Verdict VerifyVerdict(const std::string &text, const std::string &node_key, const VerdictExpectation &expected,
                       int64_t now_ms);
 

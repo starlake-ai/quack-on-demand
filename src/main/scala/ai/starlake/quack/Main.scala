@@ -2227,7 +2227,17 @@ object Main extends IOApp with LazyLogging:
         quackCfg = Some(quackCfgResolved),
         icebergCatalog = icebergCatalogHandlers,
         tenantLocations = Some(tenantLocationHandlers),
-        s3Credentials = Some(s3CredentialHandlers)
+        s3Credentials = Some(s3CredentialHandlers),
+        searchPrototype = Some(
+          new ai.starlake.quack.ondemand.api.SearchPrototypeHandlers(
+            ai.starlake.quack.ondemand.api.SearchPrototypeHandlers.resolverOf(
+              sup,
+              ai.starlake.quack.boot.BootFactories.searchBundleRootOf(sup)
+            ),
+            routedExecutor(recordExecution = true),
+            auditRecorder
+          )
+        )
       )
       // Nodes' verdict and credential calls: a listener of their own, bound with REST.
       val nodeInternal = new ai.starlake.quack.edge.authz.NodeInternalServer(

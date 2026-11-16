@@ -2,7 +2,7 @@
 """ParadeDB side of the QoD Search Phase 0 part 2 benchmark (spec 11; plan Task 4).
 
 Usage:
-  uv run --no-project --with 'psycopg[binary]' --with pyarrow \
+  uv run --no-project --with 'psycopg[binary]' \
     python -I run_paradedb.py <p2> [--client host|vm] [--host H] [--port P]
                               [--password-file F] [--results-dir D] [--dry-run]
 
@@ -15,7 +15,10 @@ Per run: the floor `SELECT 1` first, then per cell 20 warm-up executions, pg_sta
 the timed batches of stopping.run_until_stable (each execution `cursor.execute(sql);
 cursor.fetchall()` timed with time.perf_counter_ns), then mean_exec_time of the cell's statement
 from pg_stat_statements (server_mean_ms, ParadeDB's own timing method); the floor again last.
-Every execution's result must hold 10 rows. One JSON object per cell is appended to
+Every execution's result must hold 10 rows. Each object records how its run stopped (rule_met
+false: the cap of batches was hit before the rule held; batch_medians_ms; final_cv, the last 3
+medians' coefficient of variation), and floor_rule_met the same for the two floors. One JSON
+object per cell is appended to
 D/paradedb.jsonl once the last floor is measured (floor_p50_ms is the mean of the two floors'
 p50); each object is also printed as it completes.
 
@@ -39,7 +42,7 @@ import time  # noqa: E402
 import psycopg  # noqa: E402
 
 from cells import CELLS, paradedb_sql  # noqa: E402
-from stopping import percentile, run_until_stable  # noqa: E402
+from stopping import percentile, run_until_stable, stability_fields  # noqa: E402
 
 WARMUP = 20
 
@@ -102,11 +105,12 @@ def main():
     def floor():
         b = timer(cur, "SELECT 1")
         b(warmup)
-        s, n = run_until_stable(b, batch_size, max_batches)
-        return percentile(s, 0.50), n
+        r = run_until_stable(b, batch_size, max_batches)
+        return percentile(r.samples, 0.50), r
 
-    floor_first, nf1 = floor()
-    print(f"floor first p50={floor_first:.4f} ms batches={nf1}", flush=True)
+    floor_first, rf1 = floor()
+    print(f"floor first p50={floor_first:.4f} ms batches={rf1.batches} rule_met={rf1.met}",
+          flush=True)
 
     out = []
     for cell in CELLS:
@@ -118,7 +122,8 @@ def main():
         cur.execute(sql)
         ids = [r[0] for r in cur.fetchall()]
         cur.execute("SELECT pg_stat_statements_reset()")
-        samples, runs = run_until_stable(b, batch_size, max_batches)
+        r = run_until_stable(b, batch_size, max_batches)
+        samples = r.samples
         cur.execute(
             "SELECT calls, mean_exec_time, mean_plan_time FROM pg_stat_statements "
             "WHERE query LIKE %s AND query NOT LIKE %s",
@@ -129,7 +134,8 @@ def main():
             raise SystemExit(f"expected one pg_stat_statements row for {sql}, got {len(stat)}")
         calls, mean_exec, mean_plan = stat[0]
         obj = {"side": "paradedb", "size": cell.size, "input": cell.input, "form": cell.form,
-               "query": cell.query, **summary(samples), "runs": runs, "samples": len(samples),
+               "query": cell.query, **summary(samples), "runs": r.batches,
+               **stability_fields(r), "samples": len(samples),
                "server_mean_ms": round(mean_exec, 4),
                "server_plan_mean_ms": round(mean_plan or 0.0, 4), "server_calls": calls,
                "client": a.client, "top_ids": ids}
@@ -138,13 +144,15 @@ def main():
         print(json.dumps(obj), flush=True)
         out.append(obj)
 
-    floor_last, nf2 = floor()
-    print(f"floor last p50={floor_last:.4f} ms batches={nf2}", flush=True)
+    floor_last, rf2 = floor()
+    print(f"floor last p50={floor_last:.4f} ms batches={rf2.batches} rule_met={rf2.met}",
+          flush=True)
     fl = (floor_first + floor_last) / 2
     for obj in out:
         obj["floor_p50_ms"] = round(fl, 4)
         obj["floor_first_p50_ms"] = round(floor_first, 4)
         obj["floor_last_p50_ms"] = round(floor_last, 4)
+        obj["floor_rule_met"] = [rf1.met, rf2.met]
     os.makedirs(a.results_dir, exist_ok=True)
     name = "paradedb-dryrun.jsonl" if a.dry_run else "paradedb.jsonl"
     with open(os.path.join(a.results_dir, name), "a") as f:

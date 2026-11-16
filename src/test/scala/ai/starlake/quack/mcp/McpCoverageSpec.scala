@@ -145,7 +145,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/internal/",      // node-to-manager calls (CredentialsRoute, DecideRoute), never REST
     "POST /api/profile/s3/add", // a secret must not pass through an agent (decision 23)
     "POST /api/user/s3/",       // an admin's view of a user's S3 credentials: REST, CLI and UI
-    "POST /api/scim/",          // IdP wire protocol
+    // prototype only (plan Task 12), Phase 2's indexer replaces it
+    "POST /api/search/prototype/",
+    "POST /api/scim/", // IdP wire protocol
     "PUT /api/scim/",
     "PATCH /api/scim/",
     "DELETE /api/scim/"

@@ -28,5 +28,6 @@ object EndpointModules:
     UndropEndpoints,
     RestoreEndpoints,
     BranchEndpoints,
-    FleetEndpoints
+    FleetEndpoints,
+    SearchPrototypeEndpoints
   )

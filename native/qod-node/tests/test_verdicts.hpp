@@ -25,6 +25,8 @@ struct VerdictFields {
 	//! JSON arrays, as sent.
 	std::string row_filters = "[]";
 	std::string masks = "[]";
+	//! The "search" array as sent; empty leaves the key out.
+	std::string search;
 };
 
 //! The verdict JSON of `f`, keys in byte order like the manager's canonical JSON.
@@ -33,7 +35,8 @@ inline std::string VerdictJson(const VerdictFields &f) {
 	       std::to_string(f.expires_at) + ",\"fingerprint\":\"" + f.fingerprint + "\",\"kind\":\"" + f.kind +
 	       "\",\"masks\":" + f.masks + ",\"policyVersion\":" + std::to_string(f.policy_version) +
 	       ",\"principal\":\"" + f.principal + "\",\"reason\":\"" + f.reason +
-	       "\",\"retryable\":" + (f.retryable ? "true" : "false") + ",\"rowFilters\":" + f.row_filters + ",\"v\":1}";
+	       "\",\"retryable\":" + (f.retryable ? "true" : "false") + ",\"rowFilters\":" + f.row_filters +
+	       (f.search.empty() ? std::string() : ",\"search\":" + f.search) + ",\"v\":1}";
 }
 
 //! `json` signed with `key`, as a verdict travels.

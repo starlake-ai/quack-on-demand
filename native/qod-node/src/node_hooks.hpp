@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace qod {
 
@@ -32,7 +33,8 @@ using PlanDecider = std::function<DecideResult(const DecideCall &call)>;
 //!  - a post_bind hook: no statement on a quack client connection binds without a current principal;
 //!    every other plan bound on such a connection is described (Describe: its local refusals hold for
 //!    every principal) and runs only under a verdict, a local allow for superuser and system
-//!    principals, else `decider`'s. Plans bound on any other connection (the init connection, quack's
+//!    principals (except a plan holding search calls, which takes `decider`'s for its index records),
+//!    else `decider`'s. Plans bound on any other connection (the init connection, quack's
 //!    callback connections, DuckLake's metadata queries) are the node's own and pass;
 //!  - a pre_optimize hook: the plan is described again and decided again when it changed since
 //!    post_bind (an extension's post_bind registered later may change it);
@@ -51,5 +53,12 @@ void RegisterNodeAuthz(duckdb::DatabaseInstance &db, std::shared_ptr<NodeAuthz> 
 //! connection's last prelude succeeded whole; false otherwise (no prelude yet, expired, or the last
 //! prelude refused). What the plan verdicts' decide calls carry.
 bool SessionSnapshot(duckdb::ClientContext &context, int64_t now_ms, Installed &out);
+
+//! The search entries (search spec 4.2 rule 8: each search call's population and index record) of the
+//! verdict the current statement of `context` runs under, into `out`: what the search post_bind hook,
+//! registered after this node's own, reads once the statement was decided. False when the statement runs
+//! under no verdict (a connection off a quack session, or none admitted yet). A local allow and a verdict
+//! without "search" give true and no entries.
+bool StatementSearchEntries(duckdb::ClientContext &context, std::vector<SearchEntry> &out);
 
 } // namespace qod
