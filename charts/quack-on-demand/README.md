@@ -108,7 +108,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
 | `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PATs only. Internet exposure requires a reverse proxy or WAF that rate-limits per client and per `Authorization` value. |
-| `rest.tls.enabled` | `true` | `QOD_REST_TLS_ENABLED`; reuses the Flight edge's PEM pair. |
+| `rest.tls.enabled` | `true` | `QOD_REST_TLS_ENABLED`; reuses the Flight edge's PEM pair from `flightsql.tls.existingSecret` (`QOD_REST_TLS_CERT_CHAIN` / `QOD_REST_TLS_PRIVATE_KEY`, which `env` may then not set). Without that Secret each replica signs a certificate of its own, so clients see a different one per pod. |
 | `service.restData.type` | `ClusterIP` | The REST data edge Service (`service.rest` is the admin REST/UI one). |
 | `ingress.enabled` | `false` | REST/UI only. |
 | `serviceMonitor.enabled` | `false` | Set true when you run Prometheus Operator. |

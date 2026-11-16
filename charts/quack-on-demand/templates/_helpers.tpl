@@ -180,7 +180,7 @@ Refusals checked on every render (deployment.yaml includes this first):
 {{- if not .Values.flightsql.tls.enabled }}
 {{- fail "flightsql.tls.existingSecret is set while flightsql.tls.enabled is false: enable TLS or clear existingSecret" }}
 {{- end }}
-{{- range $k := list "PROXY_TLS_ENABLED" "PROXY_TLS_CERT_CHAIN" "PROXY_TLS_PRIVATE_KEY" "QOD_QUACK_TLS_CERT_CHAIN" "QOD_QUACK_TLS_PRIVATE_KEY" }}
+{{- range $k := list "PROXY_TLS_ENABLED" "PROXY_TLS_CERT_CHAIN" "PROXY_TLS_PRIVATE_KEY" "QOD_QUACK_TLS_CERT_CHAIN" "QOD_QUACK_TLS_PRIVATE_KEY" "QOD_REST_TLS_CERT_CHAIN" "QOD_REST_TLS_PRIVATE_KEY" }}
 {{- if hasKey ($.Values.env | default dict) $k }}
 {{- fail (printf "env.%s must stay unset while flightsql.tls.existingSecret is set: the chart sets it from flightsql.tls" $k) }}
 {{- end }}

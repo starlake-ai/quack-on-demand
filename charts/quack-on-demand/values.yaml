@@ -316,8 +316,9 @@ quack:
 
 # Read-only REST data edge (tables and views as GET resources, JSON or CSV,
 # personal access tokens only). Off by default. TLS on by default, reusing the
-# Flight edge's PEM pair like the Quack door. A PAT may use it unless its
-# `tools` axis is set without `rest`.
+# Flight edge's PEM pair (flightsql.tls.existingSecret) like the Quack door;
+# without one each replica signs a certificate of its own. A PAT may use it
+# unless its `tools` axis is set without `rest`.
 rest:
   enabled: false
   tls:
@@ -332,8 +333,9 @@ flightsql:
     # chain under certKey and the PEM key under keyKey: the chart mounts it
     # read-only at /etc/qod/flight-tls and points PROXY_TLS_CERT_CHAIN /
     # PROXY_TLS_PRIVATE_KEY (and the native front door's
-    # QOD_QUACK_TLS_CERT_CHAIN / QOD_QUACK_TLS_PRIVATE_KEY) at it. Rule: with
-    # existingSecret set the chart owns those four variables and
+    # QOD_QUACK_TLS_CERT_CHAIN / QOD_QUACK_TLS_PRIVATE_KEY, and the REST data
+    # edge's QOD_REST_TLS_CERT_CHAIN / QOD_REST_TLS_PRIVATE_KEY) at it. Rule:
+    # with existingSecret set the chart owns those six variables and
     # PROXY_TLS_ENABLED, so setting any of them under `env`, or
     # flightsql.tls.enabled false, fails the render. With existingSecret empty
     # they stay free for a mount of your own (extraVolumes). The manager reads

@@ -147,7 +147,8 @@ spec:
             {{- end }}
             {{- if .Values.flightsql.tls.existingSecret }}
             # The FlightSQL edge's pair, from flightsql.tls.existingSecret; the native front door
-            # reuses it when quack.tls.enabled is true.
+            # reuses it when quack.tls.enabled is true, and the REST data edge when rest.tls.enabled
+            # is (else each replica would sign a certificate of its own).
             - name: PROXY_TLS_CERT_CHAIN
               value: {{ include "qod.flightTlsCertPath" . | quote }}
             - name: PROXY_TLS_PRIVATE_KEY
@@ -155,6 +156,10 @@ spec:
             - name: QOD_QUACK_TLS_CERT_CHAIN
               value: {{ include "qod.flightTlsCertPath" . | quote }}
             - name: QOD_QUACK_TLS_PRIVATE_KEY
+              value: {{ include "qod.flightTlsKeyPath" . | quote }}
+            - name: QOD_REST_TLS_CERT_CHAIN
+              value: {{ include "qod.flightTlsCertPath" . | quote }}
+            - name: QOD_REST_TLS_PRIVATE_KEY
               value: {{ include "qod.flightTlsKeyPath" . | quote }}
             {{- end }}
             {{- range $k, $v := .Values.env }}
