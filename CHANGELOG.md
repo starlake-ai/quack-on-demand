@@ -13,13 +13,18 @@
   objects, exact decimals) or CSV (RFC 4180) by `format=` or `Accept`. `/rows` takes `select`,
   column filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, each
   negatable with `not.`), `order`, `limit`/`offset` and, on DuckLake tables,
-  `asOf`/`asOfTag`/`asOfTs`; every DuckLake table page carries `X-QoD-Snapshot`, and sending it
-  back as `asOf` keeps paging stable under concurrent writes. Views are read at the current state,
-  without `X-QoD-Snapshot`, and answer `asOf*` with `400 invalid_selector`. Each request becomes
+  `asOf`/`asOfTag`/`asOfTs`; a DuckLake table page carries `X-QoD-Snapshot`, the snapshot it was
+  read at (left out when a write committed while a page at the current state was read), and
+  sending it back as `asOf` keeps paging stable under concurrent writes. Only `asOf*` pins a
+  read to a snapshot. Views carry no `X-QoD-Snapshot` and answer `asOf*` with
+  `400 invalid_selector`. Each request becomes
   one `SELECT` through the same routed executor as MCP `run_sql`, so grants, row and column
   policies, pool permissions, audit and statement history (origin and OPA `client.edge`
-  `rest-data`) and metering apply unchanged; the schema probe (`SELECT * ... LIMIT 0`) is not
-  recorded, so a request refused at the probe leaves no audit row. An object the caller may not
+  `rest-data`) and metering apply unchanged; the schema probe (`SELECT * ... LIMIT 0`) is recorded
+  only when refused (history `denied` and a `data-denial` event, as FlightSQL's). Until the probe
+  has seen the object, every refusal is the same `404`: a database with no pool, a pool the
+  token's `pools` axis excludes, the database's kind, a view and a snapshot selector included. An
+  object the caller may not
   read answers the same `404` as a missing one, and so does a table holding a column under a deny
   policy, which the probe cannot read (the table listing still names it). A reserved parameter
   name in any case with a filter-shaped value (`limit=eq.5`, `Format=not.eq.x`) answers
@@ -27,7 +32,9 @@
   key, a cookie or a password; a superuser token is refused): a token with no `tools` restriction
   may use the edge, and one restricted with `qod auth pat create --tool ...` must list the reserved
   name `rest`. Rows are capped by `min(limit or QOD_REST_DEFAULT_LIMIT, QOD_REST_MAX_ROWS, the
-  token's maxRows)` and bodies by `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB, cut at a row boundary),
+  token's maxRows)` and bodies by `QOD_REST_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB, cut at a
+  row boundary), and the pages in flight share a fifth of the heap (past it a request waits up to
+  its statement bound, then answers `503 edge_busy`),
   with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
   `min(QOD_REST_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
   that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
@@ -39,9 +46,10 @@
   listed object is readable, and a filter value the column's real type rejects (a malformed UUID,
   whose column the probe sees as text) answers `400 invalid_filter` rather than `502`. A principal
   under a column or row policy reads a table at a snapshot only when the table, under that name,
-  has always been the same table with the same column names: those policies match today's names,
-  so a table or column renamed, dropped or recreated since is refused, in every statement kind and
-  on every door.
+  has always been the same table with the same column names, and never a view's: those policies
+  match today's names, so a table or column renamed, dropped or recreated since is refused, in
+  every statement kind and on every door. A `/rows` request with no `select` reads `*`, so a
+  column whose name holds a dot or a quote no longer refuses its table to such a principal.
   Responses are `Cache-Control: private` with `Vary:
   Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
   endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a

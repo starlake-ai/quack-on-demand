@@ -2599,16 +2599,25 @@ curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders/row
   `ilike` (`*` is the wildcard, at most 4), `in.(a,b,"c,d")`, `is.null|true|false`, each
   negatable with `not.` (`status=not.in.(X,Y)`). Repeating a filter ANDs it.
 - DuckLake tables only: `asOf=<snapshot id>`, `asOfTag=<tag>` or `asOfTs=<ISO-8601>`.
-  Every page of a table carries `X-QoD-Snapshot`; send it back as `asOf` on the next page
-  so writes landing in between do not shift the rows. A non-DuckLake database answers 400
-  `invalid_kind`. A view (or a name that ever was one) has no time travel: it is read at
-  the current state with no `X-QoD-Snapshot`, `asOf*` on it answers 400 `invalid_selector`,
-  and paging over a view is not stable under concurrent writes.
+  A page of a table carries `X-QoD-Snapshot`, the snapshot it was read at; send it back as
+  `asOf` on the next page so writes landing in between do not shift the rows. A page read
+  at the current state while another write committed carries none: read it again. A
+  non-DuckLake database answers 400 `invalid_kind`. A view (or a name that ever was one) has
+  no time travel: it carries no `X-QoD-Snapshot`, `asOf*` on it answers 400
+  `invalid_selector`, and paging over a view is not stable under concurrent writes. Under a
+  column or row policy, `asOf*` reads a table only when its name, and each of its column
+  names, has meant the same table and column in every snapshot the catalog holds: a table
+  renamed, recreated or dropped, or with a column renamed or dropped, answers 404 on `asOf*`
+  until those snapshots expire (reads at the current state are not affected).
+- No `select` reads the whole row (`SELECT *`). A `select` naming a column whose name holds
+  a dot, an `@`, a bracket or a quote is refused (403) to a principal under a column or row
+  policy: read the whole row instead.
 - Headers: `Content-Range: <first>-<last>/*`, and `X-QoD-Truncated: true` when a server or
   token cap (not your own `limit`) cut the page. Rows are capped at
   `min(limit, QOD_REST_MAX_ROWS, the token's maxRows)`, and a page is cut at a row
-  boundary once its body would pass `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB), also flagged
-  `X-QoD-Truncated`.
+  boundary once its body would pass `QOD_REST_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB),
+  also flagged `X-QoD-Truncated`. Pages in flight share a fifth of the manager's heap: past
+  it a request waits up to its statement bound, then answers 503 `edge_busy`.
 
 Things to know:
 
@@ -2623,10 +2632,13 @@ Things to know:
   denied, so `/tables/{t}` and `/rows` answer 404 for that table while `/tables` still lists
   it. Workaround: grant a view that leaves the denied column out (a mask, unlike a deny,
   keeps the table readable).
-- **The schema probe is not recorded.** Each request's `SELECT * ... LIMIT 0` runs without a
-  history or audit row, like the FlightSQL prepare probe, so a request refused at the probe
-  (404) leaves no `data-denial` audit row; the manager's access log still has it. The data
-  statement and the listings are recorded as usual.
+- **The schema probe is recorded only when refused.** Each request's `SELECT * ... LIMIT 0`
+  runs without a history row, like the FlightSQL prepare probe; one the caller may not read
+  is recorded once (history `denied` and a `data-denial` audit row, origin `rest-data`)
+  while the client sees the 404. The data statement and the listings are recorded as usual.
+- **Nothing about an object before you can see it.** Until the object's probe succeeds, every
+  refusal is the same 404: a database with no pool, a pool your token excludes, a database
+  kind, a view or a snapshot selector that does not resolve included.
 - **Reserved names.** `select`, `order`, `limit`, `offset`, `asOf`, `asOfTag`, `asOfTs`,
   `pool`, `format` and `branch` are parameters, never filters: any of them, in any case
   (`Limit`, `ASOF`), with a filter-shaped value (`[not.]<op>.<value>`, e.g. `limit=eq.5`)
@@ -2639,9 +2651,9 @@ Things to know:
   spreadsheet as written: the data stays exact, and a consumer that opens CSV in a
   spreadsheet must guard itself.
 - **Snapshot ids are visible.** `X-QoD-Snapshot`, and the errors of an `asOf` /
-  `asOfTag` / `asOfTs` that does not resolve, tell any token that can read one table of a
-  DuckLake database when that database was last written to, tables it cannot read
-  included.
+  `asOfTag` / `asOfTs` that does not resolve on a table you can read, tell any token that
+  can read one table of a DuckLake database when that database was last written to, tables
+  it cannot read included.
 - **Cold pools.** A hibernated pool wakes on the first request; if it is not ready within
   the resume hold (`PROXY_RESUME_HOLD_TIMEOUT_SEC`, 60 s) the answer is 503
   `pool_resuming` with `Retry-After: 5`. `QOD_REST_STMT_TIMEOUT_SEC` (90 s) must be larger
@@ -2656,8 +2668,8 @@ Things to know:
 - Errors are `{"error": "<code>", "message": "..."}`: 401 `unauthorized` (one body for every
   credential failure), 403 `forbidden` / `acl_denied`, 404 `not_found`, 400
   `invalid_filter` / `unknown_column` / `order_required` / `invalid_parameter`, 406
-  `unsupported_format`, 502 `upstream_error`, 503 `pool_resuming` / `pool_unavailable`,
-  504 `statement_timeout`. The message of a 502 carries a request id: the manager log has a
+  `unsupported_format`, 502 `upstream_error`, 503 `pool_resuming` / `pool_unavailable` /
+  `edge_busy`, 504 `statement_timeout`. The message of a 502 carries a request id: the manager log has a
   WARN line under that id with the failure class, and the node's own text at DEBUG only.
 
 ## Hardening (node enforcement, pod security, network policy, reader eviction)
