@@ -200,10 +200,9 @@ object RoutedExecutor:
           // afterwards (below); do not describe this branch as killing the statement on the node.
           // BoundedWait rather than timeoutTo: timeoutTo cannot interrupt the IO.blocking node
           // call, so it sat on the call past the limit. BoundedWait answers at the limit and
-          // cancels the call in the background: once the node answers, the cancel's release path
-          // closes a stamped write's inner reader without its COMMIT, so the write rolls back. A
-          // result that escapes that path is abandoned (QueryResults.abandon), never closed, as a
-          // close would COMMIT a write the caller was told failed.
+          // abandons a result that arrives later (QueryResults.abandon): a stamped write's reader
+          // is disarmed before it is closed, so its connection goes without the COMMIT and the
+          // write rolls back, rather than committing a write the caller was told failed.
           caller.restriction.stmtTimeoutMs match
             case Some(ms) if ms > 0 =>
               BoundedWait.closingLate(

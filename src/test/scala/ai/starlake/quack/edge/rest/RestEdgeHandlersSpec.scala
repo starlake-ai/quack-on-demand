@@ -760,7 +760,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val release                          = new CountDownLatch(1)
     val closes                           = new AtomicInteger()
     // Shaped like the node call (QuackHttpClient): an uninterruptible wait for the node, then the
-    // result handed over at a cancellation point whose release path closes it.
+    // result handed over at a cancellation point. The edge never cancels it: the late result is
+    // delivered after the wait gave up, and closed once.
     val slow: AtomicInteger => Responder = _ =>
       sql =>
         IO.uncancelable { poll =>

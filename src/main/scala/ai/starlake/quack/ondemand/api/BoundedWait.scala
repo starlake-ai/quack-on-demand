@@ -9,10 +9,12 @@ import scala.concurrent.duration.FiniteDuration
   *
   * `IO.timeoutTo` is the wrong tool for a node call. The call is `IO.blocking`, which cancellation
   * cannot interrupt, so `timeoutTo` sits on it until the node answers. Here the statement runs on
-  * its own fiber: the caller stops waiting at the limit, and the fiber is then cancelled in the
-  * background, so once the node answers, the release path a cancel takes runs (a stamped write's
-  * inner reader is closed without its COMMIT, and the write rolls back). A result that escaped that
-  * path (it was delivered after the caller gave up) is handed to `abandon`, never read.
+  * its own fiber that is never cancelled: the caller stops waiting at the limit, and whichever of
+  * the two moves second takes ownership of the result, so a result that arrives after the caller
+  * gave up is handed to `abandon` exactly once, and a result delivered in time is the caller's
+  * alone to close. The fiber is not cancelled because what runs after the node answers (the
+  * router's kill-registry entry, its load and history bookkeeping) is not written to be cancelled
+  * midway.
   *
   * `abandon` must not let a result take effect: for a stamped write it closes without the COMMIT
   * (`QueryResults.abandon`). It defaults to `close`, which is right for a result whose close does
@@ -23,11 +25,11 @@ object BoundedWait:
   private val logger = LoggerFactory.getLogger(getClass)
 
   /** Run `run`, waiting at most `limit` for it. In time, its outcome is returned unchanged (a
-    * raised error is re-raised). Past the limit, `Left(onTimeout)` is returned at once, `run`'s
-    * fiber is cancelled in the background, and a `Right` that arrives afterwards anyway is handed
-    * to `abandon` (else `close`). The same applies when the waiting caller is itself cancelled (an
-    * outer timeout, a disconnect), a result already delivered but not yet returned included. A late
-    * `Left` or a late error is dropped: it holds nothing to release.
+    * raised error is re-raised). Past the limit, `Left(onTimeout)` is returned at once and a
+    * `Right` that arrives afterwards is handed to `abandon` (else `close`). The same applies when
+    * the waiting caller is itself cancelled (an outer timeout, a disconnect), a result already
+    * delivered but not yet returned included. A late `Left` or a late error is dropped: it holds
+    * nothing to release.
     *
     * `onDelivered` sees a `Right` delivered in time before it is returned, with no cancellation
     * point in between: a caller that registers it there can close it when it is cancelled at the
@@ -46,34 +48,27 @@ object BoundedWait:
       for
         state   <- Ref[IO].of[Handoff](Handoff.Waiting)
         outcome <- Deferred[IO, Either[Throwable, Either[E, A]]]
-        // `run` stays cancelable, so a cancel runs its own release path; once it has finished, the
-        // hand-off has no cancellation point of its own.
-        worker <- IO.uncancelable { inner =>
-          inner(run).attempt.flatMap { r =>
-            state.modify {
-              case Handoff.Waiting => (Handoff.Delivered, outcome.complete(r).void)
-              case other           => (other, closeQuietly(r, drop))
-            }.flatten
-          }
+        _       <- run.attempt.flatMap { r =>
+          state.modify {
+            case Handoff.Waiting => (Handoff.Delivered, outcome.complete(r).void)
+            case other           => (other, closeQuietly(r, drop))
+          }.flatten
         }.start
-        // Not awaited: the worker may sit in an uninterruptible node call until the node answers.
-        cancelWorker = worker.cancel.start.void
         // The caller stops waiting. If the worker already delivered, the result is in `outcome`
         // and still the caller's: take it rather than drop it.
         giveUp = state.modify {
-          case Handoff.Waiting =>
-            (Handoff.Abandoned, cancelWorker.as(Right(Left(onTimeout))))
+          case Handoff.Waiting   => (Handoff.Abandoned, IO.pure(Right(Left(onTimeout))))
           case Handoff.Delivered => (Handoff.Delivered, outcome.get)
           case Handoff.Abandoned => (Handoff.Abandoned, IO.pure(Right(Left(onTimeout))))
         }.flatten
         result <- poll(outcome.get.timeoutTo(limit, giveUp)).onCancel(
           // Cancelled while waiting (an outer timeout, a disconnect): nobody will read the result
-          // now. A delivered one is abandoned here; otherwise the worker is cancelled, and a result
-          // that still escapes is abandoned by the worker.
+          // now, so whoever holds it abandons it. A delivered one is abandoned here, a later one by
+          // the worker.
           state.modify {
             case Handoff.Delivered =>
               (Handoff.Delivered, outcome.get.flatMap(closeQuietly(_, drop)))
-            case _ => (Handoff.Abandoned, cancelWorker)
+            case _ => (Handoff.Abandoned, IO.unit)
           }.flatten
         )
         value <- IO.fromEither(result)

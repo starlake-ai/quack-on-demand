@@ -11,9 +11,8 @@ import scala.concurrent.duration.*
 
 /** A token timeout is a bounded wait over a statement whose result may take effect when it is
   * closed: a stamped write's close COMMITs. These cases pin that a result the caller gave up on
-  * never takes effect (the statement's fiber is cancelled, so its own release path rolls it back,
-  * and one that escapes that path is abandoned, never closed), and that a result delivered in time
-  * is the caller's to close, never the helper's.
+  * never takes effect (it is abandoned exactly once, never closed), and that a result delivered in
+  * time is the caller's to close, never the helper's.
   *
   * Real short durations, as the rest of the suite does for IO timing (there is no cats-effect
   * testkit on the classpath).
@@ -21,8 +20,7 @@ import scala.concurrent.duration.*
 class BoundedWaitSpec extends AnyFlatSpec with Matchers:
 
   /** A stamped write's result: `commits` counts closes (a close COMMITs), `releases` the release
-    * path a cancel takes (the inner reader closed, the write rolled back), `abandons` the helper's
-    * `abandon`.
+    * path a cancel would take (it must never be cancelled), `abandons` the helper's `abandon`.
     */
   private final class Res(val id: Int):
     val commits  = new AtomicInteger(0)
@@ -68,15 +66,15 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     val boom = new RuntimeException("boom")
     bounded(IO.raiseError(boom), 1.second).attempt.unsafeRunSync() shouldBe Left(boom)
 
-  it should "answer the timeout and roll a late write back, never committing it" in:
+  it should "answer the timeout and abandon a late write exactly once, never committing it" in:
     val res = new Res(2)
     bounded(nodeCall(res, IO.sleep(200.millis)), 20.millis).unsafeRunSync() shouldBe
       Left("timeout")
     awaitEnds(res, 1)
     Thread.sleep(50)
     res.commits.get() shouldBe 0
-    res.releases.get() shouldBe 1
-    res.abandons.get() shouldBe 0
+    res.releases.get() shouldBe 0
+    res.abandons.get() shouldBe 1
 
   it should "not wait on an uncancelable blocking node call past the limit" in:
     // QuackHttpClient.query is IO.blocking, which cancellation cannot interrupt: a plain
@@ -93,18 +91,18 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     awaitEnds(res, 1)
     Thread.sleep(50)
     res.commits.get() shouldBe 0
-    res.ends shouldBe 1
+    res.abandons.get() shouldBe 1
 
   it should "never commit a late result whose call has no cancellation point" in:
     // A run masked whole: its result can only reach the worker after the caller gave up, where it
-    // is abandoned (or dropped by the cancel), never closed, which would COMMIT.
+    // is abandoned, never closed, which would COMMIT.
     val res = new Res(4)
     val run = IO.sleep(150.millis).as[Either[String, Res]](Right(res)).uncancelable
     bounded(run, 20.millis).unsafeRunSync() shouldBe Left("timeout")
     Thread.sleep(400)
     res.commits.get() shouldBe 0
     res.releases.get() shouldBe 0
-    res.abandons.get() should be <= 1
+    res.abandons.get() shouldBe 1
 
   it should "never close a late failure and never surface a late error" in:
     bounded(IO.sleep(100.millis).as(Left("late")), 10.millis).unsafeRunSync() shouldBe
@@ -115,7 +113,7 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     ).unsafeRunSync() shouldBe Left("timeout")
     Thread.sleep(200)
 
-  it should "roll the write back when the waiting caller is itself cancelled" in:
+  it should "abandon the write when the waiting caller is itself cancelled" in:
     val res     = new Res(5)
     val release = new CountDownLatch(1)
     val waiting = bounded(nodeCall(res, IO.blocking(release.await())), 10.seconds)
@@ -126,7 +124,7 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     awaitEnds(res, 1)
     Thread.sleep(50)
     res.commits.get() shouldBe 0
-    res.ends shouldBe 1
+    res.abandons.get() shouldBe 1
 
   it should "end every result exactly once, committing only those returned, when it races" in:
     val seed = System.nanoTime()
