@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{PoolKey, TenantDb, TenantDbKind}
 import ai.starlake.quack.edge.rls.RowPolicyRewriter
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.route.{StatementClassifier, StatementClassifierConfig}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -81,11 +82,12 @@ object EdgeRewriters extends LazyLogging:
     * other table (a federated source, a `duckdb-file` or `memory` database, a DuckLake view) is
     * described on a node of the statement's pool by `nodeQuery`, the manager's system caller
     * ([[ai.starlake.quack.edge.cls.PolicyColumnSources]]). A table neither lists returns Nil so the
-    * caller's unresolvedMode decides deny-vs-pass.
+    * caller's unresolvedMode decides deny-vs-pass. `readerOf` is a tenant-db's catalog reader
+    * (`CatalogReaders.get`).
     */
   def columnCatalog(
       sup: PoolSupervisor,
-      catalogReaders: CatalogReaders,
+      readerOf: (String, String) => DuckLakeCatalogReader,
       stmtInstruments: StatementInstruments,
       nodeQuery: (PoolKey, String) => IO[Either[RouterFailure, List[List[Json]]]],
       nodeTimeout: FiniteDuration
@@ -98,7 +100,7 @@ object EdgeRewriters extends LazyLogging:
             case Some(td) =>
               sup.getTenantById(td.tenantId) match
                 case None    => Nil
-                case Some(t) => catalogReaders.get(t.id, td.name).columnNames(sch, tab)
+                case Some(t) => readerOf(t.id, td.name).columnNames(sch, tab)
         },
       node = nodeQuery,
       nodeTimeout = nodeTimeout
@@ -106,15 +108,27 @@ object EdgeRewriters extends LazyLogging:
     new CachedColumnCatalog(
       fetch = sources.fetch,
       instruments = Some(stmtInstruments),
+      // Both from the one row, so a branch pool's answer is kept under the branch's own snapshot.
       history = (tenant, pool, cat, sch, tab) =>
         IO.blocking(
-          duckLakeHistoryRow(sup, tenant, pool, cat)
-            .flatMap(td =>
-              sup.getTenantById(td.tenantId).map(t => catalogReaders.get(t.id, td.name))
-            )
-            .exists(_.nameHistoryStable(sch, tab))
+          historyReader(sup, readerOf, tenant, pool, cat).exists(_.nameHistoryStable(sch, tab))
+        ),
+      latestSnapshot = (tenant, pool, cat) =>
+        IO.blocking(
+          historyReader(sup, readerOf, tenant, pool, cat).flatMap(_.maxSnapshotIdBounded())
         )
     )
+
+  /** The reader of [[duckLakeHistoryRow]]'s row. */
+  private def historyReader(
+      sup: PoolSupervisor,
+      readerOf: (String, String) => DuckLakeCatalogReader,
+      tenant: String,
+      pool: Option[PoolKey],
+      cat: String
+  ): Option[DuckLakeCatalogReader] =
+    duckLakeHistoryRow(sup, tenant, pool, cat)
+      .flatMap(td => sup.getTenantById(td.tenantId).map(t => readerOf(t.id, td.name)))
 
   /** The DuckLake row whose catalog `cat` names for a statement on `pool`: the pool's own row when
     * it attaches under `cat` (a branch attaches under its parent's alias, so its history is its

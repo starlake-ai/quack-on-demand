@@ -82,6 +82,10 @@
 
 ### Fixed
 
+- **A time-travel read under a column or row policy is checked against the catalog's latest
+  commit.** The name-history answer was kept for 5 s, so a read right after a column rename could
+  be admitted under the old names; it is now kept only until the next commit, and the check's
+  metadata reads give up after 3 s and refuse the read rather than hold the statement.
 - **One hung node no longer holds a statement that wakes its pool.** Each node's readiness check
   is waited for at most 5 s per poll round, so the statement goes to a node that answered.
 - **A refused connect to a node names no node address to clients** (the manager log has it), and

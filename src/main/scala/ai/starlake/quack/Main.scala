@@ -1327,7 +1327,7 @@ object Main extends IOApp with LazyLogging:
       // is not doubled on cold misses.
       val columnCatalog = EdgeRewriters.columnCatalog(
         sup,
-        catalogReaders,
+        catalogReaders.get,
         stmtInstruments,
         // A table only the pool's nodes hold is described there through the same routed system
         // caller as the node-held catalog browser (set once the router exists; "manager starting"

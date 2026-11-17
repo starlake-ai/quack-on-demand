@@ -199,9 +199,13 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     * What makes a time-travel read safe under a column or row policy: those policies are keyed on
     * today's names, and a snapshot read binds the names the snapshot had. When this holds, the
     * table and every column a snapshot read can name are the ones the policies match today.
+    *
+    * Read on the statement path, so bounded by [[DuckLakeCatalogReader.HistoryQueryTimeoutSec]]:
+    * past it the read throws, which the caller answers as false.
     */
   def nameHistoryStable(schema: String, name: String): Boolean =
-    query(
+    boundedQuery(
+      DuckLakeCatalogReader.HistoryQueryTimeoutSec,
       """WITH named AS (
         |  SELECT DISTINCT t.table_id
         |    FROM ducklake_table t
@@ -330,9 +334,21 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
 
   /** Newest committed snapshot id, or None on an empty (just-attached) catalog. */
   def maxSnapshotId(): Option[Long] =
-    query("SELECT max(snapshot_id) AS m FROM ducklake_snapshot") { rs =>
-      Option(rs.getObject("m")).map(_ => rs.getLong("m"))
-    }.headOption.flatten
+    query(maxSnapshotSql)(maxSnapshot).headOption.flatten
+
+  /** [[maxSnapshotId]] bounded as [[nameHistoryStable]] is: the version a name-history answer is
+    * kept under (`CachedColumnCatalog.historyStable`), read on the statement path. Every commit, a
+    * rename included, moves it.
+    */
+  def maxSnapshotIdBounded(): Option[Long] =
+    boundedQuery(DuckLakeCatalogReader.HistoryQueryTimeoutSec, maxSnapshotSql)(
+      maxSnapshot
+    ).headOption.flatten
+
+  private val maxSnapshotSql = "SELECT max(snapshot_id) AS m FROM ducklake_snapshot"
+
+  private def maxSnapshot(rs: ResultSet): Option[Long] =
+    Option(rs.getObject("m")).map(_ => rs.getLong("m"))
 
   /** Nearest snapshot committed at or before `ts` - the time-travel viewer's "as of this instant"
     * resolution. None when `ts` is before the catalog's first snapshot.
@@ -1163,10 +1179,22 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
         SchemaDiffResult(added, removed, typeChanged, nullabilityChanged)
 
   private def query[A](sql: String, params: Any*)(map: ResultSet => A): List[A] =
+    boundedQuery(0, sql, params*)(map)
+
+  /** [[query]], cut off after `timeoutSec` seconds (0: no bound). The statement timeout has the
+    * server cancel the query; a cancel needs a server that answers, so the connection's network
+    * timeout, a little longer, gives the read up when none does. Either throws.
+    */
+  private def boundedQuery[A](timeoutSec: Int, sql: String, params: Any*)(
+      map: ResultSet => A
+  ): List[A] =
     val conn = ds.getConnection
     try
+      // Hikari restores the pool's network timeout when the connection is handed back.
+      if timeoutSec > 0 then conn.setNetworkTimeout(_.run(), (timeoutSec + 2) * 1000)
       val ps = conn.prepareStatement(sql)
       try
+        if timeoutSec > 0 then ps.setQueryTimeout(timeoutSec)
         params.zipWithIndex.foreach { case (p, i) =>
           ps.setObject(i + 1, p.asInstanceOf[AnyRef])
         }
@@ -1207,6 +1235,14 @@ object DuckLakeCatalogReader:
     * DuckDB 1.5.4 and 1.5.5; `rewrite_delete` seen on 2.0.0.
     */
   val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush", "rewrite_delete")
+
+  /** Bound, in seconds, on [[DuckLakeCatalogReader.nameHistoryStable]] and
+    * [[DuckLakeCatalogReader.maxSnapshotIdBounded]]. Both run on the statement path of every
+    * time-travel read under a column or row policy, where a metadata Postgres that does not answer
+    * would otherwise hold the statement and its thread; a healthy read takes milliseconds. Past it
+    * the read fails and the time-travel read is refused, never admitted.
+    */
+  val HistoryQueryTimeoutSec: Int = 3
 
   /** Build a reader from a resolved metastore map (the same shape
     * `PoolSupervisor.metastoreFor(tenant)` produces).
