@@ -502,15 +502,73 @@ def _duckdb_cli_archive():
     return _tar_gz("duckdb", "#!/bin/sh\n")
 
 
+def _serve_duckdb_asset(monkeypatch, url, body, pinned=None):
+    """Answer `url` with `body` and pin that asset of the DuckDB release being provisioned to
+    `pinned` (the body's own sha256 by default), as the real pin names the real archive."""
+    version = launcher.duckdb_version()
+    digest = pinned or hashlib.sha256(body).hexdigest()
+    pins = {**launcher._DUCKDB_SHA256.get(version, {}), url.rsplit("/", 1)[1]: digest}
+    monkeypatch.setitem(launcher._DUCKDB_SHA256, version, pins)
+    return respx.get(url).mock(return_value=httpx.Response(200, content=body))
+
+
+def test_duckdb_assets_are_pinned_for_every_platform(monkeypatch):
+    monkeypatch.delenv("DUCKDB_VERSION", raising=False)
+    pins = launcher._DUCKDB_SHA256[launcher.DUCKDB_CLI_VERSION]
+    for os_name, arch in launcher._DUCKDB_PLAT:
+        for url in (launcher.duckdb_cli_url(os_name, arch), launcher.libduckdb_url(os_name, arch)):
+            asset = url.rsplit("/", 1)[1]
+            assert re.fullmatch(r"[0-9a-f]{64}", pins.get(asset, "")), f"no sha256 pinned for {asset}"
+    assert set(pins) == {
+        url.rsplit("/", 1)[1]
+        for os_name, arch in launcher._DUCKDB_PLAT
+        for url in (launcher.duckdb_cli_url(os_name, arch), launcher.libduckdb_url(os_name, arch))
+    }
+
+
+@respx.mock
+def test_ensure_duckdb_cli_refuses_a_checksum_mismatch_and_unpacks_nothing(tmp_path, monkeypatch):
+    url = launcher.duckdb_cli_url("linux", "x86_64")
+    _serve_duckdb_asset(monkeypatch, url, _duckdb_cli_archive(), pinned="0" * 64)
+    with pytest.raises(launcher.IntegrityError, match="is not the pinned 0{64}"):
+        launcher.ensure_duckdb_cli(cache_dir=tmp_path, os_name="linux", arch="x86_64")
+    assert list(launcher._duckdb_dir("bin", tmp_path).iterdir()) == []
+
+
+@respx.mock
+def test_ensure_libduckdb_refuses_a_checksum_mismatch_and_unpacks_nothing(tmp_path, monkeypatch):
+    url = launcher.libduckdb_url("linux", "x86_64")
+    _serve_duckdb_asset(monkeypatch, url, _libduckdb_archive("libduckdb.so"), pinned="0" * 64)
+    with pytest.raises(launcher.IntegrityError, match="is not the pinned 0{64}"):
+        launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="linux", arch="x86_64")
+    assert list(launcher._duckdb_dir("lib", tmp_path).iterdir()) == []
+
+
+def test_ensure_duckdb_refuses_an_unpinned_duckdb_version_before_downloading(tmp_path, monkeypatch):
+    monkeypatch.setenv("DUCKDB_VERSION", "9.9.9")
+    with respx.mock:  # no routes: nothing is fetched for a release with no pinned sha256
+        for ensure in (launcher.ensure_duckdb_cli, launcher.ensure_libduckdb):
+            with pytest.raises(RuntimeError, match="pins no sha256 .* DuckDB 9.9.9.*unset DUCKDB_VERSION"):
+                ensure(cache_dir=tmp_path, os_name="linux", arch="x86_64")
+    assert not (tmp_path / "duckdb" / "9.9.9").exists()
+
+
+def test_ensure_duckdb_reuses_a_hand_unpacked_release_it_pins_nothing_for(tmp_path, monkeypatch):
+    # The way out the refusal names: a release unpacked by hand into <root>/<version>/{bin,lib}.
+    monkeypatch.setenv("DUCKDB_VERSION", "9.9.9")
+    bin_dir, lib_dir = _duckdb_cache.plant(tmp_path, version="9.9.9", os_name="linux")
+    with respx.mock:  # no routes: nothing is fetched
+        assert launcher.ensure_duckdb_cli(cache_dir=tmp_path, os_name="linux", arch="x86_64") == bin_dir
+        assert launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="linux", arch="x86_64") == lib_dir
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="NTFS has no POSIX exec bit; duckdb.chmod(0o755) is a no-op on Windows",
 )
 @respx.mock
-def test_ensure_duckdb_cli_downloads_and_extracts(tmp_path):
-    respx.get(launcher.duckdb_cli_url("linux", "x86_64")).mock(
-        return_value=httpx.Response(200, content=_duckdb_cli_archive())
-    )
+def test_ensure_duckdb_cli_downloads_and_extracts(tmp_path, monkeypatch):
+    _serve_duckdb_asset(monkeypatch, launcher.duckdb_cli_url("linux", "x86_64"), _duckdb_cli_archive())
     bin_dir = launcher.ensure_duckdb_cli(cache_dir=tmp_path, os_name="linux", arch="x86_64")
     duckdb = pathlib.Path(bin_dir) / "duckdb"
     assert duckdb.is_file()
@@ -537,12 +595,12 @@ def _plant_legacy_and_other_version(tmp_path):
     reason="NTFS has no POSIX exec bit; duckdb.chmod(0o755) is a no-op on Windows",
 )
 @respx.mock
-def test_ensure_duckdb_cli_does_not_reuse_another_versions_cache(tmp_path):
+def test_ensure_duckdb_cli_does_not_reuse_another_versions_cache(tmp_path, monkeypatch):
     # An upgraded CLI must not keep the duckdb a previous release provisioned: nodes would run
     # the old engine (Quack v1) against a manager speaking v3.
     _plant_legacy_and_other_version(tmp_path)
-    route = respx.get(launcher.duckdb_cli_url("linux", "x86_64")).mock(
-        return_value=httpx.Response(200, content=_duckdb_cli_archive())
+    route = _serve_duckdb_asset(
+        monkeypatch, launcher.duckdb_cli_url("linux", "x86_64"), _duckdb_cli_archive()
     )
     bin_dir = launcher.ensure_duckdb_cli(cache_dir=tmp_path, os_name="linux", arch="x86_64")
     assert route.called
@@ -556,8 +614,8 @@ def test_ensure_duckdb_cli_honours_a_duckdb_version_override_over_the_cached_pin
 ):
     _duckdb_cache.plant(tmp_path, os_name="linux")
     monkeypatch.setenv("DUCKDB_VERSION", "2.0.1")
-    route = respx.get(launcher.duckdb_cli_url("linux", "x86_64")).mock(
-        return_value=httpx.Response(200, content=_duckdb_cli_archive())
+    route = _serve_duckdb_asset(
+        monkeypatch, launcher.duckdb_cli_url("linux", "x86_64"), _duckdb_cli_archive()
     )
     bin_dir = launcher.ensure_duckdb_cli(cache_dir=tmp_path, os_name="linux", arch="x86_64")
     assert route.called and "v2.0.1/" in str(route.calls.last.request.url)
@@ -771,9 +829,9 @@ def _libduckdb_archive(name):
 
 
 @respx.mock
-def test_ensure_libduckdb_downloads_and_extracts(tmp_path):
-    respx.get(launcher.libduckdb_url("linux", "x86_64")).mock(
-        return_value=httpx.Response(200, content=_libduckdb_archive("libduckdb.so"))
+def test_ensure_libduckdb_downloads_and_extracts(tmp_path, monkeypatch):
+    _serve_duckdb_asset(
+        monkeypatch, launcher.libduckdb_url("linux", "x86_64"), _libduckdb_archive("libduckdb.so")
     )
     lib_dir = launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="linux", arch="x86_64")
     assert (pathlib.Path(lib_dir) / "libduckdb.so").is_file()
@@ -787,11 +845,11 @@ def test_ensure_libduckdb_reuses_cached(tmp_path):
 
 
 @respx.mock
-def test_ensure_libduckdb_does_not_reuse_another_versions_cache(tmp_path):
+def test_ensure_libduckdb_does_not_reuse_another_versions_cache(tmp_path, monkeypatch):
     # A 1.5.x libduckdb lacks symbols the 2.0 libquackwire binds at load: reusing it refuses boot.
     _plant_legacy_and_other_version(tmp_path)
-    route = respx.get(launcher.libduckdb_url("linux", "x86_64")).mock(
-        return_value=httpx.Response(200, content=_libduckdb_archive("libduckdb.so"))
+    route = _serve_duckdb_asset(
+        monkeypatch, launcher.libduckdb_url("linux", "x86_64"), _libduckdb_archive("libduckdb.so")
     )
     lib_dir = launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="linux", arch="x86_64")
     assert route.called
@@ -832,13 +890,13 @@ def test_shared_library_arch_reads_pe_and_elf(tmp_path):
 
 
 @respx.mock
-def test_ensure_libduckdb_replaces_a_cached_library_of_another_arch(tmp_path):
+def test_ensure_libduckdb_replaces_a_cached_library_of_another_arch(tmp_path, monkeypatch):
     # Windows on ARM with an x64 JVM: an earlier run cached the ARM64 duckdb.dll (Python's
     # architecture), which the amd64 JVM refuses with "%1 is not a valid Win32 application".
     _, lib_dir = _duckdb_cache.plant(tmp_path, os_name="win32")
     (lib_dir / "duckdb.dll").write_bytes(_pe_dll(0xAA64))
-    route = respx.get(launcher.libduckdb_url("win32", "amd64")).mock(
-        return_value=httpx.Response(200, content=_libduckdb_archive("duckdb.dll"))
+    route = _serve_duckdb_asset(
+        monkeypatch, launcher.libduckdb_url("win32", "amd64"), _libduckdb_archive("duckdb.dll")
     )
     got = launcher.ensure_libduckdb(cache_dir=tmp_path, os_name="win32", arch="amd64")
     assert route.called

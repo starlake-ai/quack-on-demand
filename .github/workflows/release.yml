@@ -7,8 +7,11 @@ name: release
 #                        from the vendored git binaries), sha256, artifact
 #   2. github-release  - the canonical jar channel: jar + .sha256 + notes, and
 #                        the Windows qod-node-windows-<arch>.exe the launchers
-#                        download (qod-node: the qod-node workflow, called)
-#   3. pypi            - qod + qod-cli shim
+#                        download (qod-node: the qod-node workflow, called),
+#                        each with a Sigstore build provenance attestation
+#   3. pypi            - qod + qod-cli shim (qod's files attested too)
+#   3b. release-manifest - release.json: every published file's sha256 and
+#                        the release's pins (Java, DuckDB, node protocol)
 #   4. docker          - multi-arch manager image (matrix build + digest
 #                        merge), lifted from snapshot.yml and retagged for
 #                        release; the NODE image (quack-on-demand-node) is
@@ -112,6 +115,11 @@ jobs:
       - name: Guard - release-grade DuckDB pins
         run: scripts/release/check-release-pins.sh
 
+      # release-manifest writes release.json from these pins once everything is published; a
+      # mismatch must stop the release here, before any channel publishes.
+      - name: Guard - the pins release.json states agree
+        run: python3 scripts/release/release_manifest.py --check-pins
+
       - name: Verify vendored libquackwire binaries match the pin
         run: |
           set -euo pipefail
@@ -173,6 +181,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Sigstore build provenance for the jar and qod-node.exe (actions/attest).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -190,23 +201,41 @@ jobs:
           pattern: qod-node-windows-*
           path: qod-node
 
+      - name: Stage the release assets
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          mkdir release-assets
+          jar="quack-on-demand-assembly-${version}.jar"
+          cp "distrib/$jar" "distrib/$jar.sha256" release-assets/
+          for arch in x86_64 aarch64; do
+            exe="qod-node-windows-$arch.exe"
+            cp "qod-node/qod-node-windows-$arch/qod-node.exe" "release-assets/$exe"
+            ( cd release-assets && shasum -a 256 "$exe" > "$exe.sha256" )
+          done
+
+      # Signed SLSA provenance (Sigstore, keyless) binding each file's sha256 to this workflow
+      # run and the tag's commit, so authenticity does not rest on the download origin alone:
+      # gh attestation verify <file> --repo starlake-ai/qod
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release-assets/*.jar
+            release-assets/*.exe
+
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ needs.prepare.outputs.tag }}"
-          version="${{ needs.prepare.outputs.version }}"
-          jar="distrib/quack-on-demand-assembly-${version}.jar"
-          assets=("$jar" "$jar.sha256")
-          for arch in x86_64 aarch64; do
-            exe="qod-node-windows-$arch.exe"
-            cp "qod-node/qod-node-windows-$arch/qod-node.exe" "$exe"
-            shasum -a 256 "$exe" > "$exe.sha256"
-            assets+=("$exe" "$exe.sha256")
-          done
+          assets=(release-assets/*)
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag exists; (re)uploading assets."
+            # The jar is rebuilt (not byte-reproducible): an earlier release.json would name
+            # another sha256 until release-manifest writes the new one, or for good if it fails.
+            gh release delete-asset "$tag" release.json --yes 2>/dev/null || true
             gh release upload "$tag" "${assets[@]}" --clobber
           else
             gh release create "$tag" \
@@ -227,6 +256,12 @@ jobs:
     # the tag) blocks EVERY publish channel, matching release.sh's phase order.
     needs: [prepare, build-jar]
     runs-on: ubuntu-latest
+    # id-token and attestations serve actions/attest only: the publish steps pass a password,
+    # which keeps gh-action-pypi-publish off Trusted Publishing whatever the token may do.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -263,6 +298,14 @@ jobs:
           ( cd cli && python -m build --outdir "$GITHUB_WORKSPACE/pypi-dist/qod" )
           ( cd cli/shim-qod-cli && python -m build --outdir "$GITHUB_WORKSPACE/pypi-dist/shim" )
 
+      # Provenance of the files built here (gh attestation verify <file> --repo
+      # starlake-ai/qod). On a re-run whose upload skip-existing skips, the rebuilt
+      # files may differ from those PyPI serves; their attestations then match nothing published.
+      - name: Attest build provenance (qod)
+        uses: actions/attest@v4
+        with:
+          subject-path: pypi-dist/qod/*
+
       - name: Publish qod
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -276,6 +319,71 @@ jobs:
           packages-dir: pypi-dist/shim
           password: ${{ secrets.PYPI_TOKEN }}
           skip-existing: true
+
+  # -----------------------------------------------------------------------
+  # 3b. release.json - one machine-readable file naming what the release is
+  #     made of: the jar, the qod files on PyPI and the Windows qod-node with
+  #     their sha256, the Java major, the DuckDB release (and the sha256 of
+  #     each DuckDB asset the CLI downloads) and the node protocol. Built from
+  #     what was published (the release's own assets, PyPI's own digests) and
+  #     the tag's pins (scripts/release/release_manifest.py), then attested.
+  # -----------------------------------------------------------------------
+  release-manifest:
+    needs: [prepare, github-release, pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Fetch the published assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ needs.prepare.outputs.tag }}" --dir published \
+            --pattern '*.jar' --pattern '*.jar.sha256' --pattern '*.exe' --pattern '*.exe.sha256'
+
+      - name: Fetch PyPI's record of qod
+        run: |
+          set -euo pipefail
+          url="https://pypi.org/pypi/qod/${{ needs.prepare.outputs.version }}/json"
+          # A fresh upload can take a little while to show in the JSON API.
+          for _ in $(seq 1 30); do
+            curl -fsSL "$url" -o pypi.json && exit 0
+            sleep 10
+          done
+          echo "::error::$url did not answer" >&2
+          exit 1
+
+      - name: Write release.json
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          python3 scripts/release/release_manifest.py \
+            --version "$version" \
+            --commit "$(git rev-parse HEAD)" \
+            --jar "published/quack-on-demand-assembly-${version}.jar" \
+            --qod-node-exe x86_64=published/qod-node-windows-x86_64.exe \
+            --qod-node-exe aarch64=published/qod-node-windows-aarch64.exe \
+            --pypi-json pypi.json \
+            --out release.json
+          cat release.json
+
+      - name: Attest build provenance (release.json)
+        uses: actions/attest@v4
+        with:
+          subject-path: release.json
+
+      - name: Publish release.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" release.json --clobber
 
   # -----------------------------------------------------------------------
   # 4a. Docker image build (per platform, push by digest).

@@ -903,3 +903,90 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
     go("SELECT ARRAY(TABLE information_schema.tables)", e) shouldBe a[Denied]
     go("SELECT 1 WHERE 'x' = ANY (TABLE information_schema.schemata)", e) shouldBe a[Denied]
   }
+
+  // ---- clauses the replacement cannot keep: denied, never dropped ---------------------------
+
+  /** The replacement `(SELECT * FROM information_schema.tables WHERE ...) <alias>` kept the alias
+    * only: a sample, a PIVOT written after the reference or a table-function clause vanished, so
+    * the read answered as another statement. Each reason is pinned whole: it names the clause,
+    * never a value from the statement.
+    */
+  private val MetaSampleReason =
+    "a filtered system-catalog read cannot carry a sample clause (TABLESAMPLE, USING SAMPLE); " +
+      "read it without that clause"
+  private val MetaPivotReason =
+    "a filtered system-catalog read cannot carry a PIVOT or UNPIVOT clause written after the " +
+      "table; read it without that clause"
+  private val MetaFunctionReason =
+    "a filtered system-catalog read cannot carry a clause on the table function (LATERAL, WITH " +
+      "ORDINALITY, WITH OFFSET); read it without that clause"
+
+  /** (statement, the exact reason, values of the statement the reason must not carry). One test per
+    * row, so a red run shows every row that was rewritten.
+    */
+  private val metaUnkeptCases: List[(String, String, List[String])] = List(
+    (
+      "SELECT table_name FROM information_schema.tables USING SAMPLE 3",
+      MetaSampleReason,
+      List("3")
+    ),
+    (
+      "SELECT table_name FROM information_schema.tables TABLESAMPLE 10%",
+      MetaSampleReason,
+      List("10")
+    ),
+    (
+      "SELECT * FROM information_schema.tables PIVOT (count(*) FOR table_schema IN ('a'))",
+      MetaPivotReason,
+      List("table_schema", "count")
+    ),
+    ("SELECT table_name FROM duckdb_tables() USING SAMPLE 3", MetaSampleReason, List("3")),
+    ("SELECT table_name FROM duckdb_tables() TABLESAMPLE 10%", MetaSampleReason, List("10")),
+    (
+      "SELECT * FROM duckdb_tables() PIVOT (count(*) FOR schema_name IN ('a'))",
+      MetaPivotReason,
+      List("schema_name", "count")
+    ),
+    // No alias: the alias-before form (`duckdb_tables() t WITH ORDINALITY`) is denied by the
+    // position rule already, so only this one tells the new rule apart.
+    ("SELECT table_name FROM duckdb_tables() WITH ORDINALITY", MetaFunctionReason, Nil)
+  )
+
+  metaUnkeptCases.foreach { (sql, reason, values) =>
+    s"a filtered system-catalog read as `$sql`" should "be denied with the clause's reason" in {
+      val got = go(sql, eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))) match
+        case Denied(r) => r
+        case other     => fail(s"expected Denied, got $other")
+      got shouldBe reason
+      (List("information_schema.tables", "duckdb_tables") ++ values).foreach(v =>
+        got should not include v
+      )
+    }
+  }
+
+  "a time-travel clause on a filtered system-catalog read" should "stay denied" in {
+    // Denied before this rule too: the parser input strips time travel, so it is not exact.
+    go(
+      "SELECT table_name FROM information_schema.tables AT (TIMESTAMP => '2026-01-01')",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) shouldBe Denied(MetadataFilterRewriter.InexactRefusal)
+  }
+
+  "a sample on a table the filter does not narrow" should "pass untouched" in {
+    val effSet = eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    go("SELECT * FROM tpch1.customer USING SAMPLE 1", effSet) shouldBe Passthrough
+    go("SELECT * FROM tpch1.customer TABLESAMPLE 10%", effSet) shouldBe Passthrough
+  }
+
+  "a sample of a subquery over a filtered system-catalog read" should "be rewritten" in {
+    // The way out the refusal points to: the sample applies to the derived table, which the
+    // filter leaves alone, and the read inside it is narrowed as usual.
+    go(
+      "SELECT * FROM (SELECT * FROM information_schema.tables) USING SAMPLE 10%",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        sql should endWith("USING SAMPLE 10%")
+      case other => fail(s"expected Rewritten, got $other")
+  }

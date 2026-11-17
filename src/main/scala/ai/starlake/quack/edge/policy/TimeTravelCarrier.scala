@@ -56,6 +56,12 @@ object TimeTravelCarrier:
 
   private val PlaceholderIndex = (Marker + """(\d+)__""").r
 
+  /** Whether `clause`, a table's time-travel slot, holds a placeholder [[carry]] put there. The
+    * marker is reserved ([[carry]] refuses a statement that writes it), so no caller can forge one.
+    */
+  def isPlaceholder(clause: String): Boolean =
+    clause != null && PlaceholderIndex.findFirstMatchIn(clause).isDefined
+
   def carry(sql: String): Carry =
     pin(sql) match
       case Pinned.Absent                   => Carry.Absent
