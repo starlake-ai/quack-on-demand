@@ -140,6 +140,22 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     adapter.send(node("n2"), "SELECT 1", NodePrincipal.System, None).unsafeRunSync()
     tracker.snapshot("n2").healthy shouldBe false
 
+  it should "name why a send failed: nothing sent, a refused handle, or a statement lost" in:
+    def causeAfter(err: QuackError): Option[String] =
+      val client  = new FakeClient(Map("quack:127.0.0.1:0" -> (() => QuackResponse.Failed(err, 1))))
+      val tracker = new NodeLoadTracker
+      val adapter =
+        new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      adapter.send(node("nc"), "SELECT 1", NodePrincipal.System, None).unsafeRunSync()
+      tracker.snapshot("nc").unhealthy.map(_.code)
+    // A refused connect sent nothing: the node is unreachable, no statement failed on it.
+    causeAfter(QuackError.Transient("cannot connect to the Quack node", notSent = true)) shouldBe
+      Some("unreachable")
+    causeAfter(
+      QuackError.Transient(QuackHttpClient.HandleRefused("no").getMessage, notSent = true)
+    ) shouldBe Some("handle_refused")
+    causeAfter(QuackError.Transient("HTTP 503 from Quack node")) shouldBe Some("statement_failed")
+
   it should "NOT mark unhealthy on permanent failure" in:
     val client = new FakeClient(
       Map(

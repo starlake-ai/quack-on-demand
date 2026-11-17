@@ -120,7 +120,11 @@ final class FlightSqlRouter(
       * [[QuackHttpAdapter.answers]]; only a spec whose nodes answer through a scripted transport
       * rather than the adapter's client replaces it.
       */
-    val nodeAnswers: Option[ai.starlake.quack.model.RunningNode => IO[Boolean]] = None
+    val nodeAnswers: Option[ai.starlake.quack.model.RunningNode => IO[Boolean]] = None,
+    /** How long the wake hold waits for one node's readiness check in one poll round (never past
+      * the hold itself); a node that has not answered by then counts as not ready this round.
+      */
+    val readinessTimeout: FiniteDuration = 5.seconds
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -1685,6 +1689,25 @@ final class FlightSqlRouter(
   private def answers(n: ai.starlake.quack.model.RunningNode): IO[Boolean] =
     nodeAnswers.fold(adapter.answers(n))(_(n))
 
+  /** Every node's readiness check at once, each waited for at most [[readinessTimeout]] and never
+    * past `deadline`. The check is a blocking node call that cancellation cannot interrupt, so it
+    * runs on a fiber of its own and the round stops waiting for it rather than cancelling it: one
+    * hung node then costs a round its bound, not the whole hold. A late answer is dropped, which
+    * holds nothing ([[QuackHttpAdapter.answers]] closes its own result).
+    */
+  private def answering(
+      nodes: List[ai.starlake.quack.model.RunningNode],
+      deadline: FiniteDuration
+  ): IO[List[(ai.starlake.quack.model.RunningNode, Boolean)]] =
+    IO.monotonic.flatMap { now =>
+      val wait = readinessTimeout.min((deadline - now).max(Duration.Zero))
+      nodes.parTraverse { n =>
+        answers(n).start
+          .flatMap(_.joinWith(IO.pure(false)).timeoutTo(wait, IO.pure(false)))
+          .map(n -> _)
+      }
+    }
+
   private def resolveSnapshot(
       poolKey: PoolKey,
       kind: StatementKind,
@@ -1704,9 +1727,7 @@ final class FlightSqlRouter(
               case Some(snap) =>
                 val routable = snap.nodes.filter(n => snap.loadOf(n.nodeId).routable)
                 val roles    = RoleMatcher.fallback(kind, routable.map(_.role).toSet)
-                routable
-                  .filter(n => roles.contains(n.role))
-                  .parTraverse(n => answers(n).map(n -> _))
+                answering(routable.filter(n => roles.contains(n.role)), deadline)
                   .flatMap { probed =>
                     val answering = probed.collect { case (n, true) => n }
                     if answering.nonEmpty then IO.pure(Right(snap.copy(nodes = answering)))

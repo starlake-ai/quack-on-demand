@@ -2675,6 +2675,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       distribution: RoleDistribution = RoleDistribution(0, 0, 1),
       /** The readiness check in place of the adapter's (None: the adapter's, through `client`). */
       nodeAnswers: Option[RunningNode => IO[Boolean]] = None,
+      readinessTimeout: FiniteDuration = 5.seconds,
       /** The endpoints the statements were sent to. */
       sent: scala.collection.mutable.ListBuffer[String] = scala.collection.mutable.ListBuffer.empty
   ) =
@@ -2748,7 +2749,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       resumePollInterval = resumePollInterval,
       metadataFilterRewriter = mountedFilter,
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
-      nodeAnswers = nodeAnswers
+      nodeAnswers = nodeAnswers,
+      readinessTimeout = readinessTimeout
     )
     (router, sup, queries)
 
@@ -2861,6 +2863,29 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // Two nodes checked at once, each check 200 ms: about 300 ms plus one check, never one per
     // node per poll on top of the interval.
     (System.nanoTime() - start).nanos should be < 1.second
+
+  it should "not let one hung readiness check hold the waking statement" in:
+    // The check is a blocking node call, which cancellation cannot interrupt: modelled here by one
+    // that never returns. The other node answers, so the statement must not wait for the hold.
+    val sent             = scala.collection.mutable.ListBuffer.empty[String]
+    val (router, sup, _) = setupWithSupervisor(
+      resumeHoldTimeout = 30.seconds,
+      resumePollInterval = 20.millis,
+      nodeAnswers = Some(n =>
+        if n.port == 28000 then IO.uncancelable(_ => IO.never) else IO.pure(true)
+      ),
+      readinessTimeout = 200.millis,
+      distribution = RoleDistribution(0, 0, 2),
+      sent = sent
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val start = System.nanoTime()
+    router
+      .execute("wake-10", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    (System.nanoTime() - start).nanos should be < 5.seconds
+    sent.toList.map(_.contains(":28001")) shouldBe List(true)
 
   it should "not wake a disabled pool" in:
     val (router, sup, _) = setupWithSupervisor()

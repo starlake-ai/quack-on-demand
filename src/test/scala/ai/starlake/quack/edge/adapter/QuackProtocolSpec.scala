@@ -466,4 +466,7 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
           .unsafeRunSync()
       }
       err.msg should include("cannot connect")
+      // The message reaches clients: it names neither the node's address nor its port.
+      err.msg should not include "127.0.0.1"
+      err.msg should not include closed.toString
     }

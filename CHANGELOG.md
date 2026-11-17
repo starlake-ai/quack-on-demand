@@ -60,7 +60,22 @@
   The edge keeps at most `QOD_REST_DATA_MAX_CONNECTIONS` (512) connections open, and no more than
   fit a tenth of the heap at `QOD_REST_DATA_MAX_HEADER_BYTES` (16 KiB per request line and per
   header block), as boot says when that is fewer; `QOD_REST_MAX_CONNECTIONS` and
-  `QOD_REST_MAX_HEADER_BYTES` stay the manager REST port's.
+  `QOD_REST_MAX_HEADER_BYTES` stay the manager REST port's. Boot refuses a `QOD_REST_PORT` in the
+  node port range. With no `pool` named, a request goes to a pool the caller may use: among the
+  database's pools, those the token's `pools` axis allows and, when several are left, the first the
+  FlightSQL handshake admits the caller to. A UUID, JSON or ENUM column is filtered and ordered as the
+  text it is shown as (`like` and range filters work on a UUID, an ENUM sorts alphabetically), a
+  TIME WITH TIME ZONE on the local time it is shown as, and `TIME_NS` at nanosecond precision;
+  `TIMESTAMP_S` and `TIMESTAMP_MS` filters refuse more fraction digits than the type holds;
+  `is.null` applies to every column; `TIME '24:00:00'` is served.
+
+### Fixed
+
+- **One hung node no longer holds a statement that wakes its pool.** Each node's readiness check
+  is waited for at most 5 s per poll round, so the statement goes to a node that answered.
+- **A refused connect to a node names no node address to clients** (the manager log has it), and
+  marks the node `unreachable`, not `statement_failed`, since nothing was sent; a refused session
+  handle on a statement is reported as the probe reports it.
 
 ## 0.13.1
 
