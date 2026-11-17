@@ -163,9 +163,13 @@ final class QuackHttpAdapter(
   private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =
     tracker.onFinish(node.nodeId, out.latency)
     out match
-      case NodeOutcome.Ok(_, _, _)        => tracker.setHealthy(node.nodeId, true)
-      case NodeOutcome.Transient(_, _, _) =>
-        tracker.setUnhealthy(node.nodeId, NodeUnhealthy.StatementLost, System.currentTimeMillis())
+      case NodeOutcome.Ok(_, _, _)              => tracker.setHealthy(node.nodeId, true)
+      case NodeOutcome.Transient(m, _, notSent) =>
+        tracker.setUnhealthy(
+          node.nodeId,
+          ProbeVerdict.sendCause(node, m, notSent),
+          System.currentTimeMillis()
+        )
       case NodeOutcome.Permanent(_, _) => ()
 
   /** Liveness and enforcement probe, as the system principal: [[ProbeVerdict.Ok]] iff `sql` runs

@@ -213,7 +213,7 @@ services:
       no_proxy:    "localhost,127.0.0.1,postgres,seaweedfs${no_proxy:+,${no_proxy}}"
 
     ports:
-      - "${MANAGER_PORT:-20900}:20900"   # REST + UI
+      - "${MANAGER_PORT:-20900}:20900"   # REST + UI (and /data/, the REST data edge, when QOD_DATA_EDGE_ENABLED=true)
       - "${EDGE_PORT:-31338}:31338"      # FlightSQL edge
       - "${QUACK_PORT:-9494}:9494"       # native Quack protocol front door (DuckDB ATTACH)
       - "${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}:${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}"

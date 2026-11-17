@@ -57,6 +57,18 @@ object ProbeVerdict:
       case Failed(QuackError.Transient(_, _)) => Some(NodeUnhealthy.ProbeLost)
       case Failed(QuackError.Permanent(_))    => Some(NodeUnhealthy.ProbeRefused)
 
+  /** Why `node` is unhealthy after a statement sent to it failed in transport (`message`, as
+    * [[QuackError.Transient]] carries it), read as the probe reads its own failure: a refused
+    * session handle by its markers, a statement that never left (`notSent`: no connection) as
+    * unreachable, and only one that may have reached the node as a statement lost.
+    */
+  def sendCause(node: RunningNode, message: String, notSent: Boolean): NodeUnhealthy.Cause =
+    QuackError.Transient(message, notSent) match
+      case QuackHttpClient.HandleRefused(nodeText) =>
+        cause(node, HandleRefused(nodeText)).getOrElse(NodeUnhealthy.HandleRefused)
+      case _ if notSent => NodeUnhealthy.unreachable(node.host, node.port)
+      case _            => NodeUnhealthy.StatementLost
+
   /** Why node `nodeId` is held out of routing, as the pool's `statusDetail` and the log read it:
     * what its `enable_external_access` answered (`reading`, the cell, None when the read failed or
     * answered no cell), and the ways out. It quotes nothing else of the node's.

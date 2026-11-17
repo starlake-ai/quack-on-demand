@@ -2,13 +2,97 @@
 
 ## Unreleased
 
+### Added
+
+- **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
+  (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
+  `QOD_DATA_EDGE_ENABLED=true` (config block `quack-data-edge`) serves four `GET` endpoints on the
+  manager port (`:20900`, plain HTTP like the rest of the manager; TLS is the reverse proxy's) under
+  `/data/v1/tenant/{tenant}/database/{db}`: `/schemas`, `/schemas/{s}/tables`,
+  `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, answering JSON (an array of
+  objects, exact decimals) or CSV (RFC 4180) by `format=` or `Accept`. `/rows` takes `select`,
+  column filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, each
+  negatable with `not.`), `order`, `limit`/`offset` and, on DuckLake tables,
+  `asOf`/`asOfTag`/`asOfTs`; a DuckLake table page carries `X-QoD-Snapshot`, the snapshot it was
+  read at (left out when a write committed while a page at the current state was read), and
+  sending it back as `asOf` keeps paging stable under concurrent writes. Only `asOf*` pins a
+  read to a snapshot. Views carry no `X-QoD-Snapshot` and answer `asOf*` with
+  `400 invalid_selector`. Each request becomes
+  one `SELECT` through the same routed executor as MCP `run_sql`, so grants, row and column
+  policies, pool permissions, audit and statement history (origin and OPA `client.edge`
+  `rest-data`) and metering apply unchanged; the schema probe (`SELECT * ... LIMIT 0`) is recorded
+  only when refused (history `denied` and a `data-denial` event, as FlightSQL's). Until the probe
+  has seen the object, every refusal is the same `404`: a database with no pool, a pool the
+  token's `pools` axis excludes, the database's kind, a view and a snapshot selector included. An
+  object the caller may not
+  read answers the same `404` as a missing one, and so does a table holding a column under a deny
+  policy, which the probe cannot read (the table listing still names it). A reserved parameter
+  name in any case with a filter-shaped value (`limit=eq.5`, `Format=not.eq.x`) answers
+  `400 reserved_column`. Credentials are personal access tokens only (never the static API
+  key, the session cookie, Basic or a password, only `Authorization: Bearer`; a superuser token is
+  refused): a token with no `tools` restriction
+  may use the edge, and one restricted with `qod auth pat create --tool ...` must list the reserved
+  name `rest`. Rows are capped by `min(limit or QOD_DATA_EDGE_DEFAULT_LIMIT (1000),
+  QOD_DATA_EDGE_MAX_ROWS (100000), the token's maxRows)` and bodies by
+  `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB, cut at a
+  row boundary), and the pages in flight share a fifth of the heap (past it a request waits up to
+  its statement bound, then answers `503 edge_busy`),
+  with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
+  `min(QOD_DATA_EDGE_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
+  that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
+  a request to a cold pool that the edge's own wait cuts short. Boot refuses a
+  `QOD_DATA_EDGE_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
+  `Retry-After`. CSV values are written as stored, with no spreadsheet formula escaping, and
+  `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to.
+  Schema and table segments take any name DuckDB can hold (`order-items`, `2024_sales`), so every
+  listed object is readable, and a filter value the column's real type rejects (a malformed UUID,
+  whose column the probe sees as text) answers `400 invalid_filter` rather than `502`. A principal
+  under a column or row policy reads a table at a snapshot only when the table, under that name,
+  has always been the same table with the same column names, and never a view's: those policies
+  match today's names, so a table or column renamed, dropped or recreated since is refused, in
+  every statement kind and on every door. A `/rows` request with no `select` reads `*`, so a
+  column whose name holds a dot or a quote no longer refuses its table to a principal whose
+  policies are on other tables. A column policy on such a table itself still hides it (404), on
+  every door: the column rewriter cannot expand a star over that name.
+  Responses are `Cache-Control: private` with `Vary:
+  Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
+  endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains
+  `dataEdge.enabled` (off by default, `QOD_DATA_EDGE_ENABLED`); the edge needs no Service, port or
+  NetworkPolicy rule of its own. Every request under `/data/` is answered by the edge, a 404
+  included, so `/data/../api/...` never reaches a manager route; requests elsewhere go to the
+  manager as before. At most `QOD_DATA_EDGE_MAX_CONCURRENT_REQUESTS` (256) edge requests are
+  answered at once (past it `503 edge_busy`), so data traffic cannot take all of the manager
+  listener's work; its connections count against the manager port's `QOD_REST_MAX_CONNECTIONS`.
+  To publish the edge, put a reverse proxy in front of the manager port that exposes only the
+  `/data/` prefix and keeps the admin API, the console, `/mcp`, `/health`, `/ready` and `/metrics`
+  internal; the README's "Exposing the data edge" gives an nginx configuration (data routes only,
+  `GET` only, no `Cookie`, dot segments and encoded slashes refused) and the matching rule for
+  AWS ALB, GCP, Azure and a Kubernetes Ingress. Callers inside the network bypass the proxy, and a
+  NetworkPolicy cannot tell `/data/` from the admin API on the same port. There is no per-client
+  rate limit, authentication throttle or per-user concurrency cap yet: the proxy must rate-limit
+  per client and per `Authorization` value. With no `pool` named, a request goes to a pool the caller may use: among the
+  database's pools, those the token's `pools` axis allows and, when several are left, the first the
+  FlightSQL handshake admits the caller to. A UUID, JSON or ENUM column is pattern-matched, range-filtered
+  and ordered as the text it is shown as (`like` and range filters work on a UUID, an ENUM sorts
+  alphabetically), while `eq`, `neq` and `in` compare the column itself, so a UUID matches in any
+  case and its filter keeps file and row-group pruning; a
+  TIME WITH TIME ZONE on the local time it is shown as, and `TIME_NS` at nanosecond precision;
+  `TIMESTAMP_S` and `TIMESTAMP_MS` filters refuse more fraction digits than the type holds;
+  `is.null` applies to every column; `TIME '24:00:00'` is served.
+
 ### Fixed
 
-- A user with a row policy on a table is now refused when they read that table with a
-  time-travel clause (`SELECT * FROM customer AT (TIMESTAMP => '...')`). Until now the statement
-  ran against the current snapshot, filtered, and answered with no error. Time travel on a table
-  under a row policy is not supported.
-- The same user is also refused when they read that table with `TABLESAMPLE` or `USING SAMPLE`,
+- **One hung node no longer holds a statement that wakes its pool.** Each node's readiness check
+  is waited for at most 5 s per poll round, so the statement goes to a node that answered.
+- **A refused connect to a node names no node address to clients** (the manager log has it), and
+  marks the node `unreachable`, not `statement_failed`, since nothing was sent; a refused session
+  handle on a statement is reported as the probe reports it.
+- A user with a row policy on a table now reads it at the snapshot its time-travel clause names
+  (`SELECT * FROM customer AT (TIMESTAMP => '...')`, `AT (VERSION => n)`), filtered, under the
+  name-history rule of the data edge entry above. Until now the row filter dropped the clause, so
+  the statement ran against the current snapshot and answered with no error. A time-travel
+  spelling DuckDB does not take (`FOR TIMESTAMP AS OF`, `FOR SYSTEM_TIME AS OF`) is refused.
+- The same user is refused when they read that table with `TABLESAMPLE` or `USING SAMPLE`,
   or with a `PIVOT` or `UNPIVOT` written after it (`FROM customer PIVOT (...)`). Until now the
   sample or the pivot was dropped and every filtered row came back. To sample or pivot, wrap the
   table in a subquery: `FROM (SELECT * FROM customer) USING SAMPLE 10%`,

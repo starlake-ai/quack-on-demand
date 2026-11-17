@@ -2626,6 +2626,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         se.pool shouldBe poolKey.pool
       case other => fail(s"expected StatementExecuted, got $other")
 
+  it should "emit SessionOpened under the source the caller of execute names" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    router.execute("evt-src", "alice", poolKey, "SELECT 1", source = "rest-data").unsafeRunSync()
+    received.toArray.toList.collect { case ManagerEvent.SessionOpened(_, u, via) =>
+      (u, via)
+    } shouldBe List(("alice", "rest-data"))
+
   it should "emit StatementExecuted with ok=false when execution fails" in:
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
     val sink: ManagerEventSink = e => { received.add(e); () }
@@ -2662,7 +2671,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       resumePollInterval: FiniteDuration = 250.millis,
       refusedQueries: Int = 0,
       dataPath: String = "",
-      localFilesOff: Boolean = false
+      localFilesOff: Boolean = false,
+      distribution: RoleDistribution = RoleDistribution(0, 0, 1),
+      /** The readiness check in place of the adapter's (None: the adapter's, through `client`). */
+      nodeAnswers: Option[RunningNode => IO[Boolean]] = None,
+      readinessTimeout: FiniteDuration = 5.seconds,
+      /** The endpoints the statements were sent to. */
+      sent: scala.collection.mutable.ListBuffer[String] = scala.collection.mutable.ListBuffer.empty
   ) =
     // The first `refusedQueries` node calls fail as a connect refusal would: a respawned node whose
     // process does not listen yet.
@@ -2704,7 +2719,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup
       .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, dataPath, writerTrusted = true)
       .unsafeRunSync()
-    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.createPool(poolKey, distribution).unsafeRunSync()
     if failResumeStarts then failStart.set(true)
     if localFilesOff then filesOff.set(true)
 
@@ -2717,6 +2732,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO {
+          sent.synchronized(sent += endpoint)
           queries.incrementAndGet()
           if refusals.getAndDecrement() > 0 then
             QuackResponse.Failed(QuackError.Transient("connect refused (test)"))
@@ -2732,7 +2748,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       resumeHoldTimeout = resumeHoldTimeout,
       resumePollInterval = resumePollInterval,
       metadataFilterRewriter = mountedFilter,
-      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
+      nodeAnswers = nodeAnswers,
+      readinessTimeout = readinessTimeout
     )
     (router, sup, queries)
 
@@ -2812,6 +2830,62 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val journaled = router.history.snapshot(1).head
     journaled.status shouldBe "no-node"
     journaled.error.get should include("QOD_NODE_ALLOW_LOCAL_FILES=false")
+
+  it should "send the statement to a woken node that answers, not to one still starting" in:
+    val sent             = scala.collection.mutable.ListBuffer.empty[String]
+    val (router, sup, _) = setupWithSupervisor(
+      resumePollInterval = 20.millis,
+      nodeAnswers = Some(n => IO.pure(n.port == 28001)),
+      distribution = RoleDistribution(0, 0, 2),
+      sent = sent
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    router
+      .execute("wake-8", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sent.toList match
+      case List(endpoint) => endpoint should include(":28001")
+      case other          => fail(s"expected one statement, sent to $other")
+
+  it should "count the time its readiness checks take against the hold" in:
+    val (router, sup, _) = setupWithSupervisor(
+      resumeHoldTimeout = 300.millis,
+      resumePollInterval = 50.millis,
+      nodeAnswers = Some(_ => IO.sleep(200.millis).as(false)),
+      distribution = RoleDistribution(0, 0, 2)
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val start = System.nanoTime()
+    router
+      .execute("wake-9", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    // Two nodes checked at once, each check 200 ms: about 300 ms plus one check, never one per
+    // node per poll on top of the interval.
+    (System.nanoTime() - start).nanos should be < 1.second
+
+  it should "not let one hung readiness check hold the waking statement" in:
+    // The check is a blocking node call, which cancellation cannot interrupt: modelled here by one
+    // that never returns. The other node answers, so the statement must not wait for the hold.
+    val sent             = scala.collection.mutable.ListBuffer.empty[String]
+    val (router, sup, _) = setupWithSupervisor(
+      resumeHoldTimeout = 30.seconds,
+      resumePollInterval = 20.millis,
+      nodeAnswers = Some(n =>
+        if n.port == 28000 then IO.uncancelable(_ => IO.never) else IO.pure(true)
+      ),
+      readinessTimeout = 200.millis,
+      distribution = RoleDistribution(0, 0, 2),
+      sent = sent
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val start = System.nanoTime()
+    router
+      .execute("wake-10", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    (System.nanoTime() - start).nanos should be < 5.seconds
+    sent.toList.map(_.contains(":28001")) shouldBe List(true)
 
   it should "not wake a disabled pool" in:
     val (router, sup, _) = setupWithSupervisor()

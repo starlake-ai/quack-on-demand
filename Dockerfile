@@ -146,7 +146,8 @@ RUN install -d -o quack -g quack /app/certs /app/state /app/ducklake
 
 USER quack
 
-# Manager REST + UI (20900), the node verdict listener (20901), FlightSQL edge
+# Manager REST + UI (20900, also the read-only REST data edge under /data/ when
+# QOD_DATA_EDGE_ENABLED=true), the node verdict listener (20901), FlightSQL edge
 # (31338) and the native Quack protocol front door (9494, what a DuckDB client
 # ATTACHes to).
 # Local-mode Quack nodes lease ports from QOD_MIN_PORT..QOD_MAX_PORT;

@@ -102,6 +102,10 @@ final class ManagerServer(
     // never sessions), and the guard's path filter ignores non-/api paths anyway:
     // mounting it here keeps that invariant explicit.
     mcpRoutes: Option[HttpRoutes[IO]] = None,
+    /** The REST data edge (`RestEdgeRoutes`), mounted before every other route: it claims exactly
+      * the requests under `/data/`, which then never reach the API guard, MCP or the UI.
+      */
+    dataEdgeRoutes: Option[HttpRoutes[IO]] = None,
     // The native Quack front door's listener config, surfaced to the UI's connection card.
     quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None,
     // Read-only views over an external Iceberg REST catalog (history, preview, diff, files).
@@ -1450,8 +1454,9 @@ final class ManagerServer(
         )
       )
       .withHttpApp(
-        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+>
-          moduleStatic <+> rootRedirect).orNotFound
+        (dataEdgeRoutes.getOrElse(HttpRoutes.empty[IO]) <+> apiKeyGuard(apiRoutes) <+>
+          mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+> moduleStatic <+>
+          rootRedirect).orNotFound
       )
       .build
 

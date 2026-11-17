@@ -92,8 +92,8 @@ QoD calls `POST {opaUrl}/v1/data/{policyPath}/connect` and
 - `roles` and `groups` are the resolved closure, sorted. `claims` are the verified token claims
   when the session was authenticated by a token, `{}` otherwise.
 - `client.edge` is `flightsql`, `quack` (native Quack front door), `mcp` (MCP tools and the REST
-  SQL preview), `rest` (branch creation access probe) or `dry-run` (`qod tenant opa-test` without
-  `--sql`).
+  SQL preview), `rest` (branch creation access probe), `rest-data` (the read-only REST data edge's
+  connect check) or `dry-run` (`qod tenant opa-test` without `--sql`).
 
 ### statement input
 

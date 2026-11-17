@@ -30,9 +30,12 @@ private[adapter] final class StampedCommitArrowReader(
     underlying: ArrowReader,
     commitSync: () => Unit
 ) extends ArrowReader(allocator)
+    with CommitOnClose
     with LazyLogging:
 
   private val commitAttempted = AtomicBoolean(false)
+
+  def disarm(): Unit = commitAttempted.set(true)
 
   override def loadNextBatch(): Boolean =
     val more = underlying.loadNextBatch()

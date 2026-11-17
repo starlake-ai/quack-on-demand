@@ -153,6 +153,9 @@ object QuackProtocol:
     * at 1 s the period equals the lease, so a gap of one period already lapses it unless other
     * traffic renews it first.
     */
+  /** A refused or timed-out connect, as clients read it: no address, which only the log carries. */
+  val CannotConnect = "cannot connect to the Quack node"
+
   def heartbeatEvery(leaseSec: Int): FiniteDuration = math.max(1, leaseSec / 3).seconds
 
   /** "quack:host:port" -> "http://host:port/quack". The leading `quack:` scheme is what
@@ -179,7 +182,15 @@ object QuackProtocol:
         .header("Content-Type", "application/vnd.duckdb")
         .POST(HttpRequest.BodyPublishers.ofByteArray(body))
         .build()
-      val resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray())
+      // Refused or timed out while connecting: nothing reached the node, so the call is safe to
+      // retry, as the Transient contract above says (a node still starting, or one that died).
+      // The message reaches clients, so it names no node address: that goes to the log.
+      val resp =
+        try http.send(req, HttpResponse.BodyHandlers.ofByteArray())
+        catch
+          case e @ (_: java.net.ConnectException | _: java.net.http.HttpConnectTimeoutException) =>
+            logger.warn(s"cannot connect to Quack node at $uri: $e")
+            throw QuackWireError.Transient(QuackProtocol.CannotConnect)
       resp.statusCode() match
         case 200                         => resp.body()
         case sc if sc >= 500 && sc < 600 =>

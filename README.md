@@ -28,6 +28,7 @@ QOD_ADMIN_PASSWORD='change-me' uvx qod@latest serve ./sales.duckdb  # set the ad
 # admin UI: http://localhost:20900/ui/
 # FlightSQL edge: localhost:31338 
 # DuckDB (native Quack): quack:localhost:9494
+# REST data edge (opt-in, QOD_DATA_EDGE_ENABLED=true): http://localhost:20900/data/v1
 # Ctrl-C stops the gateway and its nodes; so does `uvx qod@latest stop` from another terminal
 ```
 
@@ -63,6 +64,73 @@ SELECT * FROM quack_query('quack:localhost:9494', 'SELECT count(*) FROM tpch1.or
 ```
 
 The DuckDB client speaks plain HTTP to `localhost` and TLS to any other host; the gateway's Quack listener is plain HTTP by default (`QOD_QUACK_TLS_ENABLED=true` turns TLS on, reusing the FlightSQL edge's certificate), so from a remote machine either enable TLS or add `DISABLE_SSL true` to the `ATTACH` options. Superusers add `&superuser=true` to the token, exactly like the JDBC parameter.
+
+### REST data edge: tables as read-only HTTP resources
+
+For clients that speak HTTP and nothing else (n8n, Zapier, a spreadsheet import, a cache or CDN), `QOD_DATA_EDGE_ENABLED=true` serves tables and views read-only under `/data/v1` on the manager port (`:20900`, plain HTTP like the rest of the manager; TLS is the reverse proxy's). Each `GET` becomes one `SELECT` that runs through the same grants, row and column policies, audit and row caps as every other door; nothing is writable and no SQL is accepted.
+
+```bash
+# mint a token (printed once), then read rows as JSON or CSV
+qod auth pat create --name n8n --tool rest
+curl -H "Authorization: Bearer qod_pat_..." \
+  "http://localhost:20900/data/v1/tenant/acme/database/acme_tpch/schemas/tpch1/tables/customer/rows?select=c_custkey,c_name&c_mktsegment=eq.BUILDING&order=c_custkey&limit=100"
+```
+
+The four endpoints are `/schemas`, `/schemas/{s}/tables`, `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, all under `/data/v1/tenant/{tenant}/database/{db}`, with filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, `not.`), `order`, `limit`/`offset` and, on DuckLake tables, `asOf`/`asOfTag`/`asOfTs` (a table's page carries `X-QoD-Snapshot`, the snapshot it was read at; send it back as `asOf` for stable paging; views carry none and refuse `asOf*`). Only personal access tokens are accepted, as `Authorization: Bearer`, never the session cookie, the static API key or a password; a superuser's token is refused: a token with no `--tool` restriction may use the edge, a token restricted with `--tool` must list `rest`. An object the caller may not read answers `404` exactly like a missing one, and so does a table with a column under a deny policy (it stays in the table listing). A reserved parameter name (`limit`, `order`, ...) in any case with a filter-shaped value answers `400 reserved_column`. Pages are capped by rows (`QOD_DATA_EDGE_DEFAULT_LIMIT` 1000 per page by default, `QOD_DATA_EDGE_MAX_ROWS` 100000 at most) and by `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB), cut at a row boundary with `X-QoD-Truncated`, and the pages in flight share a fifth of the manager's heap (past it, `503 edge_busy`). At most `QOD_DATA_EDGE_MAX_CONCURRENT_REQUESTS` (256) edge requests are answered at once, so data traffic cannot take all of the manager listener's work (past it, `503 edge_busy` too). A statement waits at most `QOD_DATA_EDGE_STMT_TIMEOUT_SEC` (90 s), which must exceed `PROXY_RESUME_HOLD_TIMEOUT_SEC` so a cold pool answers a retryable `503 pool_resuming`. CSV is written exactly as stored, without formula escaping. `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to. The edge has no per-client throttle or per-user concurrency cap yet: the reverse proxy in front of it must rate-limit per client and per `Authorization` value (see below).
+
+#### Exposing the data edge
+
+The data edge shares the manager port with the admin API (`/api/...`), the console (`/ui/...`), `/mcp`, `/health`, `/ready` and `/metrics`, which all stay internal. Put a reverse proxy in front of the manager port and expose only the `/data/` prefix, plus whatever else you deliberately choose to publish. The edge answers every request under `/data/` itself, a 404 included, so `/data/../api/...` or an encoded `..` never reaches a manager route; a request anywhere else falls through to the manager. The proxy terminates TLS, and it must rate-limit per client and per `Authorization` value, since the edge has no throttle of its own. Callers inside the network (another pod in the cluster, a host on the same subnet) bypass the proxy and reach the whole port: a NetworkPolicy or a firewall rule works per port, so it cannot tell `/data/` from the admin API.
+
+With nginx, allow only the four data routes, `GET` only, drop the `Cookie` header, buffer responses (a slow client then holds the proxy's buffer, not the manager's page budget), and refuse dot segments and encoded slashes by matching the raw `$request_uri`:
+
+```nginx
+# http {} context
+map $request_uri $qod_data_route {
+    default 0;
+    "~^/data/v1/tenant/[^/?#]+/database/[^/?#]+/schemas(/[^/?#]+/tables(/[^/?#]+(/rows)?)?)?(\?.*)?$" 1;
+}
+map $request_uri $qod_bad_path {
+    default 0;
+    "~*(^|/)(\.|%2e){1,2}(/|\?|$)|%2f|%5c|\x5c" 1;
+}
+# Example rates: tune them to your clients.
+limit_req_zone $binary_remote_addr zone=qod_data_ip:10m    rate=20r/s;
+limit_req_zone $http_authorization zone=qod_data_token:10m rate=10r/s;
+
+server {
+    listen 443 ssl;
+    server_name data.example.com;
+    ssl_certificate     /etc/nginx/tls/data.crt;
+    ssl_certificate_key /etc/nginx/tls/data.key;
+
+    location / {
+        return 404;
+    }
+
+    location /data/ {
+        if ($qod_data_route = 0) { return 404; }
+        if ($qod_bad_path)       { return 404; }
+        limit_except GET { deny all; }
+        limit_req zone=qod_data_ip    burst=40 nodelay;
+        limit_req zone=qod_data_token burst=20 nodelay;
+
+        proxy_set_header Cookie "";
+        proxy_buffering on;
+        proxy_read_timeout 120s;   # above QOD_DATA_EDGE_STMT_TIMEOUT_SEC (90 s)
+        proxy_pass http://<manager>:20900;   # no URI part: the request URI is passed as sent
+    }
+}
+```
+
+With a managed load balancer, route the same prefix and nothing else:
+
+- AWS ALB: a listener rule with `path-pattern` `/data/*` and `http-request-method` `GET` forwarding to the manager's target group, and a default action that returns a fixed 404.
+- GCP: a URL map path rule for the prefix `/data/` (`/data/*`) to the manager's backend service, with a default service that is not the manager.
+- Azure: an Application Gateway path rule `/data/*`, or with Application Gateway for Containers (Gateway API) an `HTTPRoute` match `PathPrefix: /data/`.
+- Kubernetes Ingress: `path: /data/` with `pathType: Prefix` (the chart's `ingress` values; its default `path: /` exposes the whole port).
+
+Managed load balancers do not refuse dot segments and encoded slashes the way the nginx `$request_uri` check does; the edge's claim of every request under `/data/` is the backstop. Rate limiting per client and per `Authorization` value then belongs to the load balancer's WAF or the controller.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
@@ -204,6 +272,7 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 |---|---|---|
 | Arrow Flight SQL edge (`:31338`) | gRPC endpoint with TLS on by default (auto-generated self-signed cert; drop in a CA-signed one for prod) | DuckDB has no network listener. Any JDBC / ODBC / ADBC / PyArrow / Spark / DBeaver / Power BI / Tableau client connects without a DuckDB library on the client side |
 | Native Quack front door (`:9494`) | A plain DuckDB client runs `ATTACH 'quack:host:9494'` and queries remotely, result bytes relayed untouched | Turns a local DuckDB into a thin client of the shared warehouse, with hybrid local-plus-remote joins, while the base tables never leave the server |
+| REST data edge (`/data/v1` on `:20900`, opt-in) | Read-only `GET /data/v1/...` over tables and views, JSON or CSV, filters, paging and DuckLake time travel, PAT bearer only | HTTP-only tools read governed data with no driver and no SQL, through the same grants, policies, audit and caps |
 | `qod serve <target>` | One command over a `.duckdb` file, a parquet/csv directory, or an object-store prefix, control plane on a bundled embedded Postgres | Zero-install path from "files on disk" to a secured multi-user endpoint |
 | `qod sql` and MCP query | Ad-hoc SQL from the CLI or from an AI agent, with optional `--branch` targeting | Scripted and agentic access share the same auth, ACL and audit path as BI users |
 
@@ -337,7 +406,7 @@ flowchart LR
     end
 
     subgraph server["Quack on Demand · your infrastructure"]
-        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>authn + policies"]
+        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>REST data edge /data/v1 :20900<br/>authn + policies"]
         node["Quack nodes (qod-node)<br/>DuckDB + DuckLake<br/>per-statement authorization"]
         store[("Postgres catalog +<br/>object storage<br/>S3 · GCS · FS")]
         edge --> node
@@ -361,6 +430,7 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 | Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset: the first boot generates one and stores it in the control-plane database, and every restart and HA replica reads it, so sessions survive restarts. Rotate it with `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart |
 | Admin password | `QOD_ADMIN_PASSWORD` | none; used on first boot only (`qod start` / `qod serve` prompt for it). The Docker launchers default it to `admin` (`ADMIN_PASSWORD`) |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
+| Read-only REST data edge (`/data/v1` on the manager port) | `QOD_DATA_EDGE_ENABLED` | `false` |
 
 There is no static API key: a set `QOD_API_KEY` is ignored, with a warning at boot. People log in (`qod login`,
 the admin UI) and automation uses personal access tokens (`qod auth pat create`).

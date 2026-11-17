@@ -41,6 +41,15 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * restore's commit fence matches it; a restore's and an undrop's lost answer is settled by it).
   * The stamp is then required: it is sent whatever `QOD_STAMP_WRITES` says, and a write whose stamp
   * fails is not sent. No credential sets it, and it never travels in client SQL.
+  *
+  * `source` is the audit origin and `SessionOpened` channel the router records: `"flightsql"` for
+  * every executor caller that predates the REST data edge, `"rest-data"` for that edge, so its
+  * statements are attributed to it in statement history and audit the way the native front door's
+  * are to `"quack"`. `edge` is the OPA input's `client.edge` on the handshake gate
+  * ([[authzRequest]]) only, independent of `source` so that tagging the OPA input never moves
+  * metering or audit. `preferredNode` is the router's SOFT pin: the REST edge sends its data
+  * statement to the node that answered its schema probe, and a vanished node falls back to the
+  * usual pick. All three default to what every call site had before they existed.
   */
 final case class ExecCaller(
     connectionId: String,
@@ -49,7 +58,10 @@ final case class ExecCaller(
     superuserAdmissible: Boolean,
     patId: Option[String] = None,
     system: Boolean = false,
-    commitMessage: Option[String] = None
+    commitMessage: Option[String] = None,
+    source: String = "flightsql",
+    edge: String = "mcp",
+    preferredNode: Option[String] = None
 ):
   /** The row cap actually applied: the server cap, the token's cap and the request's, smallest
     * wins. A token can lower the cap and can never raise it.
@@ -61,9 +73,9 @@ final case class ExecCaller(
     * `PoolSupervisor.authorizeHandshakeDetailed` before it runs a statement, and what
     * `GET /api/profile/pools` asks for each pool it lists, so "may connect" is one decision on
     * both. It carries the caller's realm (`superuserAdmissible`: only a superuser caller may bind a
-    * superuser row). Edge `mcp` lands in the OPA input's `client.edge`; the token restriction
-    * attenuates the effective set before gate 4, so an opa tenant's connect decision sees only the
-    * token's roles.
+    * superuser row). The caller's `edge` (`mcp` unless it names another) lands in the OPA input's
+    * `client.edge`; the token restriction attenuates the effective set before gate 4, so an opa
+    * tenant's connect decision sees only the token's roles.
     */
   def authzRequest(poolKey: PoolKey): AuthzRequest =
     AuthzRequest(
@@ -71,7 +83,7 @@ final case class ExecCaller(
       poolKey.pool,
       identity,
       superuserAdmissible = superuserAdmissible,
-      edge = "mcp",
+      edge = edge,
       restriction = restriction
     )
 

@@ -377,3 +377,21 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
     thread.get should not be empty
     thread.get should not fullyMatch regex("io-compute-\\d+")
   }
+
+  "the tool registry" should "refuse a tool named after a reserved PAT tool name such as rest" in {
+    // `rest` is the REST data edge's name on the PAT tools axis: an MCP tool of that name would
+    // make one allowlist entry admit two different surfaces.
+    TokenRestriction.ReservedToolNames should contain("rest")
+    val restTool = echoTool.copy(name = "rest")
+    val thrown   = intercept[IllegalArgumentException] {
+      new McpRoutes(
+        McpConfig(),
+        resolvePat,
+        List(echoTool, restTool),
+        "test",
+        RestLimitsConfig(),
+        identity
+      )
+    }
+    thrown.getMessage should include("rest")
+  }
