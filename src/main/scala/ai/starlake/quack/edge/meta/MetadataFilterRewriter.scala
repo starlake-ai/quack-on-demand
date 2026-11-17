@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.meta
 
 import java.util.Locale
 import ai.starlake.quack.edge.cls.SchemaContext
+import ai.starlake.quack.edge.policy.TableClauses
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
 import ai.starlake.sql.TooDeep
@@ -376,10 +377,15 @@ final class MetadataFilterRewriter(
       case t: Table =>
         filterableName(t) match
           case Some(meta) =>
-            replacementFor(t, meta) match
-              case Some(rep) => install(rep); substitutions += 1
-              case None      =>
-                failure = Some(s"cannot filter reference to information_schema.$meta")
+            // The replacement keeps the alias only: a clause on t (a sample, a PIVOT after the
+            // table) would vanish and the filtered read would answer as another statement.
+            TableClauses.unkept(t, t.getFullyQualifiedName) match
+              case Some(clause) => failure = Some(unkeptClauseRefusal(clause))
+              case None         =>
+                replacementFor(t, meta) match
+                  case Some(rep) => install(rep); substitutions += 1
+                  case None      =>
+                    failure = Some(s"cannot filter reference to information_schema.$meta")
           case None =>
             // `FROM duckdb_tables` with no parentheses resolves to the catalog function on the
             // node unless a table of that name shadows it, and this filter cannot know which.
@@ -389,9 +395,12 @@ final class MetadataFilterRewriter(
       case tf: TableFunction =>
         filterableFunction(tf) match
           case Some(fn) =>
-            functionReplacementFor(tf, fn) match
-              case Some(rep) => install(rep); substitutions += 1
-              case None      => failure = Some(s"cannot filter call to $fn()")
+            TableClauses.unkept(tf) match
+              case Some(clause) => failure = Some(unkeptClauseRefusal(clause))
+              case None         =>
+                functionReplacementFor(tf, fn) match
+                  case Some(rep) => install(rep); substitutions += 1
+                  case None      => failure = Some(s"cannot filter call to $fn()")
           case None =>
             // A catalog function spelled in a shape the replacement does not model (arguments,
             // a qualified name, ROWS FROM): refused rather than forwarded, since the node would
@@ -467,6 +476,12 @@ object MetadataFilterRewriter:
 
   private[meta] val AnalysisRefusal: String =
     "cannot analyse the system-catalog references in this statement"
+
+  /** A filtered system-catalog read carrying a clause its replacement cannot keep
+    * ([[TableClauses]]): `clause` is a fixed phrase, never SQL.
+    */
+  private[meta] def unkeptClauseRefusal(clause: String): String =
+    s"a filtered system-catalog read cannot carry $clause; read it without that clause"
 
   private[meta] val InexactRefusal: String =
     "a filtered system-catalog query cannot also use integer division (//) or a time-travel " +
