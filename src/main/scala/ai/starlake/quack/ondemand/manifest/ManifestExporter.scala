@@ -21,6 +21,25 @@ import java.time.Instant
   */
 object ManifestExporter extends LazyLogging:
 
+  /** `d`'s `defaultDatabase`, left out with one ERROR when it names another catalog than its nodes
+    * resolve in (`TenantDb.defaultDatabaseError`, which an import refuses), so an export always
+    * imports back. Nothing at runtime reads such a value, so leaving it out changes nothing.
+    */
+  private def exportedDefaultDatabase(tenant: String, d: TenantDb): Option[String] =
+    TenantDb.defaultDatabaseError(
+      d.defaultDatabase,
+      TenantDb.sessionCatalog(d.kind, d.name, d.metastore)
+    ) match
+      case None    => d.defaultDatabase
+      case Some(_) =>
+        logger.error(
+          s"manifest export: tenant '$tenant' tenant-db '${d.name}': defaultDatabase left out: it " +
+            "names another catalog than the database's own, which nodes resolve unqualified names " +
+            "in and which is all a database may name there. Clear it with qod database update " +
+            "--default-database ''."
+        )
+        None
+
   private val Redacted = FederatedSecret.RedactedMarker
 
   /** Export refused: user-made roles/groups carry the reserved `qod_` prefix (case-insensitive),
@@ -167,7 +186,7 @@ object ManifestExporter extends LazyLogging:
           ),
           dataPath = d.dataPath,
           objectStore = d.objectStore,
-          defaultDatabase = d.defaultDatabase,
+          defaultDatabase = exportedDefaultDatabase(t.id, d),
           defaultSchema = d.defaultSchema,
           initSql = d.initSql,
           federatedSources = fedSources,

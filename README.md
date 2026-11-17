@@ -11,6 +11,7 @@
 
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/starlake-ai/quack-on-demand?label=release)](https://github.com/starlake-ai/quack-on-demand/releases/latest)
+[![PyPI Downloads](https://static.pepy.tech/badge/YOUR_PACKAGE)](https://pepy.tech/projects/qod)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/xHj9D6Rebp)

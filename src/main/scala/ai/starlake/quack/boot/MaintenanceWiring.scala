@@ -2,22 +2,28 @@ package ai.starlake.quack.boot
 
 import ai.starlake.quack.MaintenanceConfig
 import ai.starlake.quack.edge.adapter.{QuackHttpAdapter, QuackResponse}
-import ai.starlake.quack.model.{PoolKey, TenantDb}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, PinnedSetResolver}
 import ai.starlake.quack.ondemand.ha.PoolLocker
-import ai.starlake.quack.ondemand.maintenance.{MaintenanceRunner, MaintenanceScheduler, PolicyMath}
+import ai.starlake.quack.ondemand.maintenance.{
+  MaintenanceLiveness,
+  MaintenanceReaper,
+  MaintenanceRunner,
+  MaintenanceScheduler,
+  PolicyMath
+}
 import ai.starlake.quack.ondemand.runtime.{NodeReadiness, QuackBackend}
 import ai.starlake.quack.ondemand.state.PostgresControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.{FiberIO, IO}
 import com.typesafe.scalalogging.LazyLogging
 
-/** Managed maintenance (EPIC Spec 09), extracted from Main.bootManager: leader-gated
-  * cadence/threshold enqueue (scheduler) + the drain loop that claims queued runs and executes them
-  * under a per-tenant-db advisory lock (runner). Both fibers are no-ops when the config flag is
-  * off, so cancellation stays uniform in Main's fiber teardown.
+/** Managed maintenance (EPIC Spec 09, issue #210): leader-gated cadence/threshold enqueue
+  * (scheduler), and the drain loop every replica runs, HA followers first, that claims queued runs
+  * and executes them under a per-tenant-db advisory lock (runner). Both fibers are no-ops when the
+  * config flag is off, so cancellation stays uniform in Main's fiber teardown.
   */
 final class MaintenanceWiring(
     store: PostgresControlPlaneStore,
@@ -27,7 +33,11 @@ final class MaintenanceWiring(
     poolLocks: PoolLocker,
     catalogReader: (String, String) => DuckLakeCatalogReader,
     maintenance: MaintenanceConfig,
+    // `maintenance.livenessTimeoutSec` in production; a test passes a shorter one to watch the
+    // reaper's quiet window end without waiting out its 60 s floor.
+    livenessTimeoutSec: Int,
     isLeader: () => Boolean,
+    haEnabled: Boolean,
     audit: AuditRecorder,
     metrics: MaintenanceMetrics
 ) extends LazyLogging:
@@ -45,7 +55,6 @@ final class MaintenanceWiring(
             )
             Map.empty,
       minIntervalMinutes = maintenance.minIntervalMin,
-      runTimeoutMinutes = maintenance.runTimeoutMin,
       staggerOf = PolicyMath.staggerMinutes,
       tickSeconds = maintenance.tickSec,
       isLeader = isLeader
@@ -53,50 +62,47 @@ final class MaintenanceWiring(
 
   private val pinnedSetResolver = new PinnedSetResolver(store)
 
+  /** Start a maintenance node and wait until it accepts connections. `start()` returns at fork time
+    * on the local backend; the node only listens once DuckDB finishes INSTALL/LOAD + ATTACH, so the
+    * chain's first statement would otherwise die with ConnectException.
+    */
+  private def startNode(spec: NodeSpec): IO[Option[RunningNode]] =
+    val (t, td) = (spec.poolKey.tenant, spec.poolKey.tenantDb)
+    backend
+      .start(spec)
+      .flatMap { node =>
+        NodeReadiness
+          .awaitReachable(
+            node.host,
+            node.port,
+            timeout =
+              scala.concurrent.duration.DurationInt(maintenance.nodeReadyTimeoutSec).seconds,
+            isAlive = () => backend.isAlive(node.nodeId)
+          )
+          .flatMap { ready =>
+            if ready then IO.pure(Some(node))
+            else
+              IO.delay(
+                logger.warn(
+                  s"maintenance: node ${node.nodeId} for $t/$td did not " +
+                    s"accept connections within ${maintenance.nodeReadyTimeoutSec}s; stopping it"
+                )
+              ) *> backend
+                .stop(node.poolKey, node.nodeId)
+                .handleErrorWith(_ => IO.unit)
+                .as(None)
+          }
+      }
+      .handleErrorWith { e =>
+        IO.delay(logger.warn(s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"))
+          .as(None)
+      }
+
   private val runner =
     new MaintenanceRunner(
       store = store,
-      spawn = (t, td) =>
-        sup.maintenanceNodeSpec(t, td) match
-          case Some(spec) =>
-            backend
-              .start(spec)
-              .flatMap { node =>
-                // start() returns at fork time (local backend); the node only listens
-                // once DuckDB finishes INSTALL/LOAD + ATTACH. Gate here or the chain's
-                // first statement dies with ConnectException.
-                NodeReadiness
-                  .awaitReachable(
-                    node.host,
-                    node.port,
-                    timeout = scala.concurrent.duration
-                      .DurationInt(maintenance.nodeReadyTimeoutSec)
-                      .seconds,
-                    isAlive = () => backend.isAlive(node.nodeId)
-                  )
-                  .flatMap { ready =>
-                    if ready then IO.pure(Some(node))
-                    else
-                      IO.delay(
-                        logger.warn(
-                          s"maintenance: node ${node.nodeId} for $t/$td did not " +
-                            "accept connections within " +
-                            s"${maintenance.nodeReadyTimeoutSec}s; stopping it"
-                        )
-                      ) *> backend
-                        .stop(node.poolKey, node.nodeId)
-                        .handleErrorWith(_ => IO.unit)
-                        .as(None)
-                  }
-              }
-              .handleErrorWith { e =>
-                IO.delay(
-                  logger.warn(
-                    s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"
-                  )
-                ).as(None)
-              }
-          case None => IO.pure(None),
+      specOf = (t, td) => sup.maintenanceNodeSpec(t, td),
+      start = startNode,
       stop = node => backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit),
       // Right(rows returned): ducklake_cleanup_old_files returns one row per file it deleted.
       exec = (node, sql) =>
@@ -138,29 +144,64 @@ final class MaintenanceWiring(
 
   private val inFlight = new java.util.concurrent.atomic.AtomicInteger(0)
 
-  /** One drain pass: while leader and below maxConcurrent in-flight, claim queued runs and fork
-    * each execution under the tenant-db's __maint advisory lock so two replicas (or a replica and a
-    * stray retry) never run the same lake at once. Keeps claiming until the queue is empty or
-    * capacity is reached, so `tickSec` (in [[drainFiber]]) only spaces empty polls.
+  /** Seconds a queued run must have waited before this replica may claim it (issue #210): none for
+    * a single manager or an HA follower, `effectiveLeaderGraceSec` for the HA leader, so followers
+    * take runs first and the leader takes only what none took in time.
+    */
+  private[boot] def claimMinAgeSec: Int =
+    if haEnabled && isLeader() then maintenance.effectiveLeaderGraceSec else 0
+
+  private val reaper =
+    new MaintenanceReaper(
+      store = store,
+      livenessTimeoutSec = livenessTimeoutSec,
+      runTimeoutSec = maintenance.runTimeoutMin * 60L,
+      stopNode = (key, nodeId) => backend.stop(key, nodeId),
+      audit = audit,
+      metrics = metrics
+    )
+
+  /** Leader only (a single manager always leads): fail runs whose owner went silent or that ran too
+    * long, see [[MaintenanceReaper]]. It reaps nothing for its liveness timeout (three ticks, at
+    * least 60 s) after this replica becomes leader and after a failed pass (the quiet window).
+    * IO.defer for the same reason as [[drainTick]]: the leader check must run on every pass of the
+    * bound IO.
+    */
+  private[boot] def reapTick: IO[Unit] = IO.defer {
+    IO.realTimeInstant.flatMap(now => reaper.tick(isLeader(), now))
+  }
+
+  /** One drain pass: while below maxConcurrent in-flight, claim queued runs old enough for this
+    * replica ([[claimMinAgeSec]]) and fork each execution under the tenant-db's __maint advisory
+    * lock so two replicas never run the same lake at once. Keeps claiming until nothing claimable
+    * is left or capacity is reached, so `tickSec` (in [[drainFiber]]) only spaces empty polls.
     *
-    * IO.defer around the leader check: `drainFiber` binds this to a single IO value once (see its
-    * `foreverM`), so the leadership (and in-flight) branch must be re-evaluated on every run rather
-    * than baked in at construction time -- otherwise a replica that boots before winning the
-    * advisory lock latches "not leader" forever, and one that boots as leader keeps draining after
-    * demotion. Mirrors [[AutoscaleWiring.sweep]].
+    * IO.defer around the whole pass: `drainFiber` binds this to a single IO value once (see its
+    * `foreverM`), so the claim mode (and in-flight) must be re-evaluated on every run rather than
+    * baked in at construction time: a replica that boots as follower and is later promoted must
+    * start waiting out the grace, and a demoted one must stop waiting it out. Mirrors
+    * [[AutoscaleWiring.sweep]].
     */
   private[boot] def drainTick: IO[Unit] = IO.defer {
-    if !isLeader() then IO.unit
-    else if inFlight.get() >= maintenance.maxConcurrent then IO.unit
+    if inFlight.get() >= maintenance.maxConcurrent then IO.unit
     else
-      IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
+      IO.blocking(store.claimQueuedMaintenanceRun(claimMinAgeSec)).flatMap {
         case None      => IO.unit
         case Some(run) =>
           inFlight.incrementAndGet()
-          poolLocks
-            .withLock(PoolKey(run.tenant, run.tenantDb, "__maint")) {
-              runner.executeRun(run)
-            }
+          // The liveness heartbeat covers the lock wait too, so a run queued behind another
+          // replica's run on the same lake is not reaped as silent.
+          MaintenanceLiveness
+            .guard(
+              store,
+              run,
+              scala.concurrent.duration.DurationInt(maintenance.tickSec).seconds,
+              (key, nodeId) => backend.stop(key, nodeId)
+            )(
+              poolLocks.withLock(PoolKey(run.tenant, run.tenantDb, "__maint")) {
+                runner.executeRun(run)
+              }
+            )
             .guarantee(IO.delay(inFlight.decrementAndGet()).void)
             .handleErrorWith(t =>
               IO.delay(
@@ -175,11 +216,13 @@ final class MaintenanceWiring(
 
   def drainFiber: IO[FiberIO[Unit]] =
     if maintenance.enabled then
-      (drainTick
-        .handleErrorWith(e =>
+      (reapTick.handleErrorWith(e =>
+        IO(logger.error(s"maintenance reap tick failed: ${e.getMessage}"))
+      ) *>
+        drainTick.handleErrorWith(e =>
           IO(logger.error(s"maintenance drain-loop tick failed: ${e.getMessage}"))
-        )
-        *> IO.sleep(
+        ) *>
+        IO.sleep(
           scala.concurrent.duration.DurationInt(maintenance.tickSec).seconds
         )).foreverM.void.start
     else IO.unit.start

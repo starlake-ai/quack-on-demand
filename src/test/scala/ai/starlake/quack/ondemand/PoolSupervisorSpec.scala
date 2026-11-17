@@ -3020,12 +3020,11 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup2.createTenantDb(
       tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
       metastore = Map.empty, dataPath = "",
-      defaultDatabase = Some("acme_default"), defaultSchema = Some("tpch1"),
+      defaultDatabase = Some("memory"), defaultSchema = Some("tpch1"),
       writerTrusted = true
     ).unsafeRunSync()
     sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup2.restore()
-    sup2.get(key).get.defaultDatabase shouldBe Some("acme_default")
     sup2.get(key).get.defaultSchema shouldBe Some("tpch1")
   }
 
@@ -3056,9 +3055,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
     after.kindWire shouldBe before.kindWire
     after.extraSetupSql shouldBe before.extraSetupSql
-    // The already-fixed defaultDatabase/defaultSchema carry-through (see the
-    // test above) should also hold here.
-    after.defaultDatabase shouldBe before.defaultDatabase
+    // The already-fixed defaultSchema carry-through (see the test above) should also hold here.
     after.defaultSchema shouldBe before.defaultSchema
   }
 
@@ -3523,9 +3520,9 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val (sup, backend, dbName) = updateTenantDbFixture()
     val before = backend.stopped.size
     val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
-      defaultDatabase = Some("fedpg"), defaultSchema = Some("")
+      defaultDatabase = Some("acme_secret"), defaultSchema = Some("")
     )).unsafeRunSync().toOption.get
-    out.td.defaultDatabase shouldBe Some("fedpg")
+    out.td.defaultDatabase shouldBe Some("acme_secret")
     out.td.defaultSchema shouldBe None            // empty string clears
     out.td.metastore.get("pgPassword") shouldBe Some("secret1") // untouched section preserved
     out.restartedNodes shouldBe Nil               // metadata-only: no restart

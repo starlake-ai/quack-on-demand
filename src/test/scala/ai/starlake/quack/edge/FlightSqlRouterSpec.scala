@@ -791,7 +791,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
 
-  it should "use tenantDb.defaultDatabase + defaultSchema when set" in:
+  it should "use the database's own catalog and tenantDb.defaultSchema when set" in:
     val sup = freshSupervisorAndBackend()
     val key = PoolKey("beta", "beta_mem", "p1")
     sup.createTenant(Tenant("beta")).unsafeRunSync()
@@ -802,13 +802,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         kind = TenantDbKind.InMemory,
         metastore = Map.empty,
         dataPath = "",
-        defaultDatabase = Some("fedpg"),
+        defaultDatabase = Some("memory"),
         defaultSchema = Some("public"),
         writerTrusted = true
       )
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("fedpg"), Some("public")))
+    // The catalog is the one the node's USE prelude names (a memory row's is `memory`), whatever
+    // the row's defaultDatabase: DefaultDatabaseResolutionSpec.
+    defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("memory"), Some("public")))
 
   it should "fall back to memory/main for InMemory kind when no override" in:
     val sup = freshSupervisorAndBackend()

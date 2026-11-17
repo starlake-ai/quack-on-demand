@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0058-maintenance-node-stop
+      author: qod
+      changes:
+        # Issue #210: a run the leader reaps as silent names a node only the leader will stop. The
+        # flag is set in the same UPDATE that fails the run and cleared once a stop succeeds, so a
+        # stop that fails, or a leader that dies before it, is retried by the next reaper pass.
+        - addColumn:
+            tableName: qodstate_maintenance_run
+            columns:
+              - column:
+                  name: node_stop_pending
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints: { nullable: false }
+        - sql:
+            sql: CREATE INDEX ix_qodstate_maintenance_run_node_stop ON qodstate_maintenance_run (id) WHERE node_stop_pending

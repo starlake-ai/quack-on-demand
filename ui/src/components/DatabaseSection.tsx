@@ -11,6 +11,7 @@ import DataPathEditor, {
 import FederationSection from './FederationSection';
 import { initSqlToSend } from '../api/initSql';
 import { databaseSuffixError } from '../api/databaseName';
+import { defaultDatabaseError } from '../api/defaultDatabase';
 import { editableMetastore, metastoreToSend, superuserKeys } from '../api/metastoreForm';
 import { useAuth } from '../auth/AuthContext';
 
@@ -169,6 +170,11 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     e.preventDefault();
     setError(null);
     if (nameError != null || name === prefix) return;
+    const fullName = name.startsWith(prefix) ? name : `${prefix}${name}`;
+    const ddError = defaultDatabaseError(
+      defaultDatabase, kind, kind === 'memory' ? undefined : collectMetastore(), fullName,
+    );
+    if (ddError != null) { setError(ddError); return; }
     try {
       const reqBody: Parameters<typeof api.createTenantDb>[0] = {
         tenant,
@@ -261,6 +267,10 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       `All nodes of this database restart immediately; statements running on them will fail. ` +
       `Nodes respawn with the same ids.`)) return;
     setError(null);
+    const ddError = editDefaultDb.trim() !== (editingDb.defaultDatabase ?? '')
+      ? defaultDatabaseError(editDefaultDb, editingDb.kind, editingDb.metastore, editingDb.name)
+      : null;
+    if (ddError != null) { setError(ddError); return; }
     try {
       const req: UpdateTenantDbRequest = { tenant, name: editingDb.name };
       if (editDefaultDb.trim() !== (editingDb.defaultDatabase ?? '')) req.defaultDatabase = editDefaultDb.trim();
@@ -712,7 +722,11 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           )}
 
           <fieldset style={{ marginTop: '0.5rem' }}>
-            <legend>Federated defaults (optional)</legend>
+            <legend>Session defaults (optional)</legend>
+            <p className="subtle" style={{ marginTop: 0 }}>
+              Unqualified table names resolve in this database's own catalog. The default catalog
+              may only name it; reach a federated catalog by its alias (<code>fedpg.public.t</code>).
+            </p>
             <label>
               Default catalog (optional)
               <input

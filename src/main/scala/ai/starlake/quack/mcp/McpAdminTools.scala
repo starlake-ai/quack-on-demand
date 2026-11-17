@@ -886,11 +886,14 @@ final class McpAdminTools(
         "Object-store keys. Unless you are a superuser: only with a remote data_path, complete " +
           "for its scheme."
       ),
-      "default_database" -> strProp("Default catalog name presented to clients."),
-      "default_schema"   -> strProp("Default schema presented to clients."),
-      "init_sql"         -> strProp(initSqlHelp("SQL run on each node at attach.")),
-      "managed_storage"  -> boolProp("Let the manager provision metastore + storage."),
-      "encrypted"        -> boolProp(
+      "default_database" -> strProp(
+        "Leave unset, or the database's own catalog (its catalogAlias, else dbName, else its " +
+          "name; memory for kind=memory); any other value is refused."
+      ),
+      "default_schema"  -> strProp("Default schema presented to clients."),
+      "init_sql"        -> strProp(initSqlHelp("SQL run on each node at attach.")),
+      "managed_storage" -> boolProp("Let the manager provision metastore + storage."),
+      "encrypted"       -> boolProp(
         "Encrypt this database's data at rest. Create-time only: it cannot be changed later."
       ),
       "encryption_key" -> strProp(
@@ -959,9 +962,11 @@ final class McpAdminTools(
         "Replacement object-store config (omit = unchanged). Unless you are a superuser: only on a " +
           "database holding complete keys of its own, which stay complete, with the secret sent."
       ),
-      "default_database" -> strProp("New default catalog (omit = unchanged)."),
-      "default_schema"   -> strProp("New default schema (omit = unchanged)."),
-      "init_sql"         -> strProp(initSqlHelp("New init SQL (omit = unchanged).")),
+      "default_database" -> strProp(
+        "New default catalog (omit = unchanged, empty = clear): only the database's own catalog."
+      ),
+      "default_schema" -> strProp("New default schema (omit = unchanged)."),
+      "init_sql"       -> strProp(initSqlHelp("New init SQL (omit = unchanged).")),
       tenantProp
     ),
     adminOnly = true,

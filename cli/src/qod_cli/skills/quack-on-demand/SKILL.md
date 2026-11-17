@@ -1219,16 +1219,23 @@ When creating a tenant-db, pick a `kind`:
 
 - `ducklake` (default) - Postgres metastore + object-store dataPath. Production multi-node persistence.
 - `duckdb-file` - Local `.duckdb` file at `dataPath`. Single-node only (file must exist on every node).
-- `memory` - No persistent default catalog. Use with `defaultDatabase` pointing at a federated alias.
+- `memory` - No persistent default catalog: unqualified names resolve in DuckDB's `memory` catalog. Name federated tables by their alias (`fedpg.public.orders`).
 
 For `ducklake` creates, Postgres connection keys are a superuser's to send: anything omitted resolves from the manager's `defaultMetastore` (`QOD_PG_*`) at spawn time, and the row follows later config changes.
 
 Example: create an in-memory tenant-db that only serves federated sources.
 
 ```bash
-qod database create --tenant acme --name fed --kind memory \
-  --default-database fedpg --default-schema public
+qod database create --tenant acme --name fed --kind memory
 ```
+
+`--default-database` may only name the database's own catalog (its `catalogAlias`, else `dbName`,
+else its name; `memory` for `kind=memory`), where unqualified table names resolve on its nodes and
+where its row and column policies apply to them; any other value is refused with
+`400 default_database_mismatch`. Leave it unset. A manifest import keeps such a database and drops
+the value (one ERROR line each). A database stored with another value keeps working (the value is
+ignored, and boot prints one `WARN:` line for it); clear it with
+`qod database update --tenant <t> --name <db> --default-database ''`.
 
 ### Encryption at rest (create-time only)
 

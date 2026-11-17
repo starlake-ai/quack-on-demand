@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.13.1
+
+### Upgrading
+
+- `QOD_MAINT_RUN_TIMEOUT_MIN` now caps a maintenance run's whole chain, from its start and
+  waiting for its database's lock included, and the replica running it stops its node when the
+  cap is reached, on a single manager too; before, it only bounded the time between two steps and
+  a long step ran to its end. Its default rises from 60 to 240 minutes. Set it above the longest
+  full maintenance chain of your largest database.
+- During a rolling upgrade of an HA cluster, a maintenance run still executing on a replica of
+  the earlier release can be failed as `stale` by an upgraded leader (the earlier release writes
+  no liveness heartbeat during a step). No node is stopped for it, and the next cadence or
+  threshold tick queues the run again.
+- A database's `defaultDatabase` may only name the database's own catalog (its `catalogAlias`,
+  else its `dbName`, else its name; `memory` for `kind=memory`), where its nodes resolve
+  unqualified table names. `database/create` and `database/update` (REST, CLI
+  `--default-database`, console, MCP) refuse any other value with `400 default_database_mismatch`.
+  A manifest import keeps such a database and drops the value, logging one ERROR per database. A
+  database stored with another value keeps working: the value is ignored, a manifest export leaves
+  it out, and each boot prints one `WARN:` line for it. Clear it with
+  `qod database update --default-database ''`. A `memory` database that pointed `defaultDatabase`
+  at a federated alias names that catalog's tables by their alias (`fedpg.public.orders`).
 
 ### Added
 
@@ -22,6 +43,18 @@
   jar, the JRE and SeaweedFS (#223). A `DUCKDB_VERSION` naming a release the wheel pins nothing
   for is refused before any download: unset it, or unpack that release into the cache folder the
   error names.
+- Under HA, DuckLake maintenance runs on follower replicas (#210). The leader still decides when a
+  run is due, and takes a queued run only once it has waited `QOD_MAINT_LEADER_GRACE_SEC` (0, the
+  default, means three `QOD_MAINT_TICK_SEC` ticks), so it runs maintenance only when no follower
+  took it in time. `QOD_MAINT_MAX_CONCURRENT` is now a limit per replica. Maintenance metrics are
+  recorded on the replica that ran the job: sum them across replicas. A single manager is
+  unchanged. An HA deployment running a single replica waits out the grace on every run.
+- A maintenance run whose replica stops responding is failed within three ticks (at least 60 s),
+  and its `__maint` node is stopped, on Kubernetes and fleet servers; a stop that fails is tried
+  again on every reaper pass until it succeeds (it was left running before, and the run was
+  failed only after `QOD_MAINT_RUN_TIMEOUT_MIN`). `QOD_MAINT_RUN_TIMEOUT_MIN` now caps a run's total
+  time from its start, waiting for its database's lock included, rather than the time between two
+  steps.
 
 ### Fixed
 
@@ -42,6 +75,10 @@
   through an alias written after parentheses around a table (`SELECT * FROM (customer) AS z`, also
   `z.<col>`, `z.*`, in a join, a subquery or a CTE, and in a filter). The alias now names every
   table inside the parentheses, so such a statement is refused. Row policies were not affected.
+- Security: row and column policies applied to the wrong catalog when a
+  database's `defaultDatabase` differed from its catalog alias. The policy rewriters now qualify
+  unqualified names with the catalog and schema the node resolves them in, whatever
+  `defaultDatabase` says.
 
 ## 0.13.0
 

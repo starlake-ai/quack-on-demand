@@ -323,6 +323,37 @@ object ManifestImporter extends LazyLogging:
       err <- TenantDb.metastoreKeyError(db.metastore).toList
     yield s"tenant '${t.name}' tenant-db '${db.name}': $err"
 
+  /** Whether `db`'s `defaultDatabase` names another catalog than the one its nodes resolve
+    * unqualified names in (`TenantDb.defaultDatabaseError`), which `database/create` and
+    * `database/update` refuse. An import keeps the row and drops the value, so a backup always
+    * restores; nothing reads it at runtime. A kind the manifest misspells is left to the kind
+    * check.
+    */
+  private def defaultDatabaseMismatch(db: ManifestTenantDb): Boolean =
+    TenantDbKind
+      .fromWire(db.kind)
+      .toOption
+      .exists(kind =>
+        TenantDb
+          .defaultDatabaseError(
+            db.defaultDatabase,
+            TenantDb.sessionCatalog(kind, db.name, db.metastore)
+          )
+          .isDefined
+      )
+
+  /** One ERROR line per tenant-db of `m` whose `defaultDatabase` the import dropped
+    * ([[defaultDatabaseMismatch]]), naming the tenant and the database, never the value.
+    */
+  private[manifest] def defaultDatabasesDropped(m: ConfigManifest): List[String] =
+    for
+      t  <- m.tenants
+      db <- t.tenantDbs
+      if defaultDatabaseMismatch(db)
+    yield s"database '${db.name}' of tenant '${t.name}': imported without its defaultDatabase, " +
+      "which names another catalog than the database's own (where unqualified table names " +
+      "resolve on its nodes) and which database/create and database/update refuse"
+
   /** A manifest role that names a built-in AND carries exactly its built-in content:
     * `qod_no_tables` holds nothing, `qod_all_tables` holds the single `* * * ALL` permission, and
     * neither carries a column or row policy. The description is not compared (it is never written).
@@ -385,6 +416,7 @@ object ManifestImporter extends LazyLogging:
           result
         }
         namesANewCreateWouldRefuse(m).foreach(line => logger.error(line))
+        defaultDatabasesDropped(m).foreach(line => logger.error(line))
         applied
       catch case ApplyRefused(errs) => Left(errs)
     }
@@ -741,7 +773,11 @@ object ManifestImporter extends LazyLogging:
                   metastore = metastoreWithKey,
                   dataPath = mtd.dataPath,
                   objectStore = mtd.objectStore,
-                  defaultDatabase = mtd.defaultDatabase,
+                  // Dropped when it names another catalog than the database's own: a create
+                  // or an update refuses one, and an import keeps the row (logged after commit,
+                  // defaultDatabasesDropped).
+                  defaultDatabase =
+                    mtd.defaultDatabase.filterNot(_ => defaultDatabaseMismatch(mtd)),
                   defaultSchema = mtd.defaultSchema,
                   initSql = mtd.initSql,
                   // Only a superuser imports a manifest (and the boot hook, as the manager); an

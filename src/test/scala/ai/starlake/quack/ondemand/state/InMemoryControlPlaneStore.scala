@@ -7,6 +7,7 @@ import ai.starlake.quack.model.{
   MaintenancePolicy,
   MaintenanceRun,
   Pool,
+  ReapedRun,
   RunCounters,
   RunningNode,
   SnapshotTag,
@@ -750,10 +751,15 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
     maintenanceRuns.put(run.id, run)
     run
 
-  def claimQueuedMaintenanceRun(): Option[MaintenanceRun] =
+  def claimQueuedMaintenanceRun(minAgeSec: Int): Option[MaintenanceRun] =
     maintenanceRuns.synchronized {
-      maintenanceRuns.values.filter(_.status == "queued").toList.sortBy(_.id).headOption.map {
-        run =>
+      val cutoff = Instant.now().minusSeconds(minAgeSec.toLong)
+      maintenanceRuns.values
+        .filter(r => r.status == "queued" && !r.queuedAt.isAfter(cutoff))
+        .toList
+        .sortBy(_.id)
+        .headOption
+        .map { run =>
           val claimed =
             run.copy(
               status = "running",
@@ -762,6 +768,74 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
             )
           maintenanceRuns.put(claimed.id, claimed)
           claimed
+        }
+    }
+
+  def findMaintenanceRun(id: Long): Option[MaintenanceRun] = maintenanceRuns.get(id)
+
+  def touchMaintenanceRun(id: Long): Boolean =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id) match
+        case Some(r) if r.status == "running" =>
+          maintenanceRuns.put(r.id, r.copy(heartbeatAt = Some(Instant.now())))
+          true
+        case _ => false
+    }
+
+  def setMaintenanceRunNode(id: Long, nodeId: String): Boolean =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id) match
+        case Some(r) if r.status == "running" =>
+          maintenanceRuns.put(r.id, r.copy(nodeId = Some(nodeId)))
+          true
+        case _ => false
+    }
+
+  def reapMaintenanceRuns(livenessTimeoutSec: Int, runTimeoutSec: Long): List[ReapedRun] =
+    maintenanceRuns.synchronized {
+      val now = Instant.now()
+      def reap(pick: MaintenanceRun => Boolean, error: String, silent: Boolean): List[ReapedRun] =
+        maintenanceRuns.values
+          .filter(r => r.status == "running" && pick(r))
+          .toList
+          .sortBy(_.id)
+          .map { r =>
+            val failed = r.copy(status = "failed", finishedAt = Some(now), error = Some(error))
+            maintenanceRuns.put(r.id, failed)
+            if silent && r.nodeId.isDefined then nodeStopsPending += r.id
+            ReapedRun(failed, silent)
+          }
+      val silentCutoff = now.minusSeconds(livenessTimeoutSec.toLong)
+      val startCutoff  = now.minusSeconds(runTimeoutSec)
+      reap(_.heartbeatAt.exists(_.isBefore(silentCutoff)), MaintenanceRun.ReapedSilent, true) ++
+        reap(_.startedAt.exists(_.isBefore(startCutoff)), MaintenanceRun.ReapedTimeout, false)
+    }
+
+  private val nodeStopsPending = scala.collection.mutable.SortedSet.empty[Long]
+
+  def maintenanceRunsAwaitingNodeStop(): List[MaintenanceRun] =
+    maintenanceRuns.synchronized(nodeStopsPending.toList.flatMap(maintenanceRuns.get))
+
+  def clearMaintenanceRunNodeStop(id: Long): Unit =
+    maintenanceRuns.synchronized { nodeStopsPending -= id; () }
+
+  /** Test hook: move a run's timestamps, as the Postgres specs do with SQL. */
+  def setMaintenanceRunTimes(
+      id: Long,
+      queuedAt: Option[Instant] = None,
+      startedAt: Option[Instant] = None,
+      heartbeatAt: Option[Instant] = None
+  ): Unit =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id).foreach { r =>
+        maintenanceRuns.put(
+          id,
+          r.copy(
+            queuedAt = queuedAt.getOrElse(r.queuedAt),
+            startedAt = startedAt.orElse(r.startedAt),
+            heartbeatAt = heartbeatAt.orElse(r.heartbeatAt)
+          )
+        )
       }
     }
 
@@ -820,22 +894,6 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       .filter(r => r.tenant == tenant && r.tenantDb == tenantDb && r.trigger != "manual")
       .map(_.queuedAt)
       .maxOption
-
-  def sweepStaleMaintenanceRuns(heartbeatOlderThan: Instant): Int =
-    val stale = maintenanceRuns.values.filter { r =>
-      r.status == "running" && r.heartbeatAt.exists(_.isBefore(heartbeatOlderThan))
-    }.toList
-    stale.foreach { r =>
-      maintenanceRuns.put(
-        r.id,
-        r.copy(
-          status = "failed",
-          finishedAt = Some(Instant.now()),
-          error = Some("stale: heartbeat timeout")
-        )
-      )
-    }
-    stale.size
 
   // ---------------- Managed prefix (tombstone registry) ----------------
   private val managedPrefixes = TrieMap.empty[String, ManagedPrefixRow]

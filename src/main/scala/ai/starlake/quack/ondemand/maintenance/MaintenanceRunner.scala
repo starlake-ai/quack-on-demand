@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.maintenance
 import ai.starlake.quack.model._
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import cats.effect.Ref
 import com.typesafe.scalalogging.LazyLogging
@@ -17,7 +17,12 @@ import java.time.Instant
   */
 final class MaintenanceRunner(
     store: ControlPlaneStore,
-    spawn: (String, String) => IO[Option[RunningNode]], // (tenant, tenantDb) -> node
+    // (tenant, tenantDb) -> the maintenance node's spec, its id chosen; None when the database
+    // cannot get one (gone, or blocked).
+    specOf: (String, String) => Option[NodeSpec],
+    // Start the node and wait until it accepts connections; None when it did not. It must
+    // not raise (a failure to start is None), as the uncancelable start relies on it.
+    start: NodeSpec => IO[Option[RunningNode]],
     stop: RunningNode => IO[Unit],
     exec: (RunningNode, String) => IO[Either[String, Long]], // Right(rows the statement returned)
     snapshotsOlderThan: (String, String, Instant) => List[Long],
@@ -61,50 +66,80 @@ final class MaintenanceRunner(
     }
 
   private def spawnAndRun(run: MaintenanceRun, startedAt: Instant): IO[Unit] =
-    IO.defer {
-      spawn(run.tenant, run.tenantDb).flatMap {
-        case None =>
-          IO.blocking(
-            store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some("node spawn failed"))
-          ).flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
-        case Some(node) =>
-          // `false` from the first heartbeat means a sweeper failed the run while its node was
-          // starting: the run is no longer this caller's, so no step may run (cleanup deletes
-          // files), and the sweeper's row stays as it set it.
-          IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters()))
-            .flatMap { stillOwned =>
-              if stillOwned then chain(run, node, startedAt)
-              else finishIfNotSwept(run, "failed", RunCounters(), startedAt)(false)
-            }
-            .guarantee(stop(node).handleErrorWith(_ => IO.unit))
-            .handleErrorWith { t =>
-              // Defensive: a synchronous throw from an injected lookup escapes the
-              // step-level Left handling; still record + audit the finished run.
-              //
-              // Note: this same handler also catches the case where the chain ran every
-              // step successfully and only the final store.finishMaintenanceRun call inside
-              // chain() threw (for example a transient store error). When that happens we
-              // land here with just the thrown error, not the real per-step counters the
-              // chain had already accumulated, so the run gets recorded "failed" with zero
-              // counters even though the work actually completed. This is inherent
-              // best-effort behavior given the current design (the counters live in a Ref
-              // local to chain() and are not threaded out to this handler), not a new bug
-              // introduced here; it is called out so a future change that wants exact
-              // counters in that edge case knows where to look.
-              val msg = Option(t.getMessage).getOrElse(t.toString)
-              IO.blocking(
-                store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
-              ).handleErrorWith(_ => IO.pure(false))
-                .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
-            }
+    val spawnFailed =
+      IO.blocking(
+        store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some("node spawn failed"))
+      ).flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
+    IO.blocking(specOf(run.tenant, run.tenantDb))
+      .handleErrorWith { e =>
+        IO.delay(
+          logger.warn(
+            s"maintenance: node spec lookup failed for ${run.tenant}/${run.tenantDb}: " +
+              e.getMessage
+          )
+        ).as(None)
       }
-    }
+      .flatMap {
+        case None       => spawnFailed
+        case Some(spec) =>
+          // The node's id goes on the row before the node starts, so a replica that dies past
+          // this point leaves a row naming the node for the leader's reaper (issue #210).
+          // `false`: the run was reaped already, and nothing may start for it.
+          IO.blocking(store.setMaintenanceRunNode(run.id, spec.nodeId)).flatMap { owned =>
+            if !owned then finishIfNotSwept(run, "failed", RunCounters(), startedAt)(false)
+            else
+              // Uncancelable start: a cancel (the liveness watcher ending a reaped run) that lands
+              // while the node starts waits for the start to finish, then stops the node it
+              // returned, so no node outlives its run. `onCancel` covers a cancel that arrives
+              // before `runOn` installs its own `guarantee(stop(node))`; a second stop is a no-op.
+              IO.uncancelable { poll =>
+                start(spec).flatMap {
+                  case None       => poll(spawnFailed)
+                  case Some(node) =>
+                    poll(runOn(run, node, startedAt))
+                      .onCancel(stop(node).handleErrorWith(_ => IO.unit))
+                }
+              }
+          }
+      }
+
+  private def runOn(run: MaintenanceRun, node: RunningNode, startedAt: Instant): IO[Unit] =
+    // `false` from the first heartbeat means a sweeper failed the run while its node was
+    // starting: the run is no longer this caller's, so no step may run (cleanup deletes
+    // files), and the sweeper's row stays as it set it.
+    IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters()))
+      .flatMap { stillOwned =>
+        if stillOwned then chain(run, node, startedAt)
+        else finishIfNotSwept(run, "failed", RunCounters(), startedAt)(false)
+      }
+      .guarantee(stop(node).handleErrorWith(_ => IO.unit))
+      .handleErrorWith { t =>
+        // Defensive: a synchronous throw from an injected lookup escapes the
+        // step-level Left handling; still record + audit the finished run.
+        //
+        // Note: this same handler also catches the case where the chain ran every
+        // step successfully and only the final store.finishMaintenanceRun call inside
+        // chain() threw (for example a transient store error). When that happens we
+        // land here with just the thrown error, not the real per-step counters the
+        // chain had already accumulated, so the run gets recorded "failed" with zero
+        // counters even though the work actually completed. This is inherent
+        // best-effort behavior given the current design (the counters live in a Ref
+        // local to chain() and are not threaded out to this handler), not a new bug
+        // introduced here; it is called out so a future change that wants exact
+        // counters in that edge case knows where to look.
+        val msg = Option(t.getMessage).getOrElse(t.toString)
+        IO.blocking(
+          store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
+        ).handleErrorWith(_ => IO.pure(false))
+          .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
+      }
 
   /** [[finish]] records the audit trail + metrics for a run's terminal state -- but only when this
     * caller actually won the transition to that state. A `false` from `store.finishMaintenanceRun`
-    * means a concurrent sweep already failed the row (stale heartbeat) between this run's last
-    * liveness check and now; overwriting that with a success audit would misreport what happened,
-    * so this path only logs and skips.
+    * means the row was reaped (silent or over time) by the leader's `MaintenanceReaper`, or a
+    * concurrent sweep already failed it (stale heartbeat), between this run's last liveness check
+    * and now; overwriting that with a success audit would misreport what happened, so this path
+    * only logs and skips.
     */
   private def finishIfNotSwept(
       run: MaintenanceRun,
@@ -324,40 +359,14 @@ final class MaintenanceRunner(
       c: RunCounters,
       startedAt: Instant
   ): IO[Unit] =
-    for
-      finishedAt <- IO.realTimeInstant
-      _          <- auditRun(run, status, c)
-      _          <- IO
-        .delay(
-          metrics.recordRun(
-            tenant = run.tenant,
-            tenantDb = run.tenantDb,
-            result = status,
-            durationSeconds =
-              math.max(0L, finishedAt.toEpochMilli - startedAt.toEpochMilli) / 1000.0,
-            bytesReclaimed = c.bytesReclaimed,
-            filesCompacted = c.filesMerged + c.filesRewritten,
-            snapshotsExpired = c.snapshotsExpired
-          )
-        )
-        .handleErrorWith(_ => IO.unit)
-    yield ()
-
-  private def auditRun(run: MaintenanceRun, status: String, c: RunCounters): IO[Unit] =
-    IO.blocking(
-      audit.restAs(
-        "system",
-        "system",
-        "control-plane",
-        AuditActions.MaintenanceRun,
+    IO.realTimeInstant.flatMap { finishedAt =>
+      MaintenanceRunRecord.write(
+        audit,
+        metrics,
+        run,
         status,
-        tenant = Some(run.tenant),
-        target = Some(s"${run.tenantDb}/${run.scope}"),
-        detail = Map(
-          "trigger"                -> run.trigger,
-          "snapshotsExpired"       -> c.snapshotsExpired.toString,
-          "snapshotsSkippedPinned" -> c.snapshotsSkippedPinned.toString,
-          "bytesReclaimed"         -> c.bytesReclaimed.toString
-        )
+        c,
+        durationSeconds = math.max(0L, finishedAt.toEpochMilli - startedAt.toEpochMilli) / 1000.0,
+        reason = None
       )
-    ).handleErrorWith(_ => IO.unit)
+    }

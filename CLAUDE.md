@@ -319,6 +319,23 @@ front door transaction the evaluation runs on the transaction's own link, and a 
 NULL or a non-text value aborts the transaction, as DuckDB would; a gateway refusal of it leaves the
 transaction open).
 
+**One session path.** A pool's unqualified table names resolve in one place,
+`FlightSqlRouter.sessionPath`: `<catalog alias>.<schema>`, the alias being `TenantDb.catalogAlias` of
+the resolved metastore (`catalogAlias`, else `dbName`, which `effectiveMetastoreFor` fills with the
+database's name, or `memory` for kind=memory) and the schema the tenant-db's `defaultSchema`, else
+`schemaName`, else `main` (issue #112). The USE prelude sends it, every handle signs it as `path`, and
+the policy steps (column and row rewriters, `ProtectedWriteGuard` / `RewriteScope`, the metadata
+filter, `RefusedForms`) qualify with it through `FlightSqlRouter.nameDefaults` (`defaultsOf`); nothing
+reads a tenant-db's `defaultDatabase` for resolution (`PoolState` has no such field), so the gateway
+and the node can never qualify one name differently. A `defaultDatabase` may only name the alias:
+`database/create` and `database/update` (REST and MCP alike) refuse any other value with `400
+default_database_mismatch` (`TenantDb.defaultDatabaseError`, compared ignoring case; an update leaving a
+stored one and the catalog alone passes). A manifest import keeps the row and drops such a value, one
+ERROR per row naming tenant and database (`ManifestImporter.defaultDatabasesDropped`), so a backup
+always restores. A stored one is ignored, left out of a manifest export with one ERROR, and reported
+at boot with one stderr `WARN:` line per row (`DefaultDatabaseReport`). Reach a federated catalog's
+tables by their alias.
+
 Files by path, for non-superusers (decisions 15, 18, 23). **S3 only with keys of the user's own.**
 Every user registers credentials for a scope `s3://<bucket>/` or `s3://<bucket>/<prefix>/` (whole
 segments, a lowercase bucket, never an access point alias) from their profile session or PAT: REST
@@ -881,6 +898,23 @@ sessions with the same secret without any configuration: an unset
 "Session model"), so HA no longer refuses an empty one. HA with the local
 backend is refused at config load. See
 docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
+
+Managed DuckLake maintenance is split (issue #210): the leader enqueues runs and reaps dead ones
+(`MaintenanceReaper`), every replica drains, and the leader claims only runs queued longer than
+`QOD_MAINT_LEADER_GRACE_SEC` (0 = three `QOD_MAINT_TICK_SEC` ticks), so followers run maintenance
+while they have room (`QOD_MAINT_MAX_CONCURRENT` is per replica) and the leader takes the rest. An
+HA deployment running a single replica waits out the grace on every run. The executing replica
+writes the run's `node_id` before starting its `__maint` node and bumps `heartbeat_at` every tick
+(`MaintenanceLiveness`); a run silent for three ticks (at least 60 s,
+`MaintenanceConfig.livenessTimeoutSec`) is failed and its node stopped by the leader, the stop owed
+on the row (`node_stop_pending`, Liquibase `0058`) and retried each pass until it succeeds; one past
+`QOD_MAINT_RUN_TIMEOUT_MIN` (default 240) from its start is failed and its node stopped by its own
+replica. Neither is requeued. The reaper reaps nothing for that liveness timeout after its replica
+becomes leader, and after a failed pass it probes the control plane each tick and reaps again only
+that liveness timeout after the first probe that succeeds, so owners whose heartbeats went stale in
+an outage write again first. Residual: with `QOD_FLEET_EPHEMERAL=local` a follower whose JVM dies on
+a host that stays up leaves its node running until swept on that host. Maintenance metrics are
+recorded where a run executes (a reaped run's on the leader): sum them across replicas.
 
 ### `qod serve` boot provisioning (`ServeProvisionHook`)
 

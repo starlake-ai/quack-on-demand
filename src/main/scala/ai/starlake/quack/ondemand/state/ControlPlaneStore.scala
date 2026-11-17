@@ -7,6 +7,7 @@ import ai.starlake.quack.model.{
   MaintenancePolicy,
   MaintenanceRun,
   Pool,
+  ReapedRun,
   RunCounters,
   RunningNode,
   SnapshotTag,
@@ -493,10 +494,38 @@ trait ControlPlaneStore:
       operations: Option[String]
   ): MaintenanceRun
 
-  /** Atomically transition the oldest `"queued"` row to `"running"` and return it. `None` when
-    * nothing is queued. Exactly one caller wins the race across concurrent nodes/replicas.
+  /** Atomically transition the oldest `"queued"` row queued at least `minAgeSec` seconds ago
+    * (database clock) to `"running"` and return it. `None` when no such row exists. `minAgeSec = 0`
+    * takes any queued row. Exactly one caller wins the race across concurrent replicas.
     */
-  def claimQueuedMaintenanceRun(): Option[MaintenanceRun]
+  def claimQueuedMaintenanceRun(minAgeSec: Int): Option[MaintenanceRun]
+
+  def findMaintenanceRun(id: Long): Option[MaintenanceRun]
+
+  /** Liveness heartbeat: bump `heartbeatAt` of a `"running"` row. `false` when the row is no longer
+    * running (finished by its owner, or reaped).
+    */
+  def touchMaintenanceRun(id: Long): Boolean
+
+  /** Record the id of the node a `"running"` row is about to start. `false` (nothing written) when
+    * the row is no longer running.
+    */
+  def setMaintenanceRunNode(id: Long, nodeId: String): Boolean
+
+  /** Fail every `"running"` row whose heartbeat is older than `livenessTimeoutSec`
+    * ([[MaintenanceRun.ReapedSilent]], `silent = true`), then every remaining `"running"` row
+    * started more than `runTimeoutSec` ago ([[MaintenanceRun.ReapedTimeout]]), both on the database
+    * clock. Returns the rows as left. A silent row naming a node is also marked as owing a node
+    * stop, in the same statement, so the stop survives a failed call and a leader that dies before
+    * making it ([[maintenanceRunsAwaitingNodeStop]]).
+    */
+  def reapMaintenanceRuns(livenessTimeoutSec: Int, runTimeoutSec: Long): List[ReapedRun]
+
+  /** Reaped runs whose node no replica has stopped yet, oldest first. */
+  def maintenanceRunsAwaitingNodeStop(): List[MaintenanceRun]
+
+  /** Record that a reaped run's node was stopped, so no later reaper pass stops it again. */
+  def clearMaintenanceRunNodeStop(id: Long): Unit
 
   /** Returns `true` when the row was still `"running"` and got its heartbeat bumped; `false` when a
     * concurrent sweep already failed the row out from under this caller (the run should stop
@@ -528,11 +557,6 @@ trait ControlPlaneStore:
 
   /** Most recent `queuedAt` among runs not triggered manually -- feeds cadence scheduling. */
   def lastNonManualMaintenanceRunAt(tenant: String, tenantDb: String): Option[java.time.Instant]
-
-  /** Fail any `"running"` row whose heartbeat is older than `heartbeatOlderThan` (a worker died
-    * mid-run). Returns the number of rows swept.
-    */
-  def sweepStaleMaintenanceRuns(heartbeatOlderThan: java.time.Instant): Int
 
   /** Release any pooled connections / heap resources. Default impl is a no-op (in-memory stores
     * hold no I/O resources); [[PostgresControlPlaneStore.close]] drains the Hikari pool. Called
