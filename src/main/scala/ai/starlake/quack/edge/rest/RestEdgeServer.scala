@@ -130,13 +130,15 @@ final class RestEdgeServer(
         error(Status.InternalServerError, "upstream_error", s"upstream error (request id $rid)")
       }
       .map(decorate(_, rid))
-      .map(resp =>
+      .map { resp =>
+        // At most one TLS record per chunk (slices of the body, no copy): see WriteChunkBytes.
+        val body = resp.body.chunkLimit(WriteChunkBytes).unchunks
         // A page's share of the budget is given back once its body has been written (or the
         // write failed); a request that holds none is left as it is.
-        if pageBudget.holds(rid) then
-          resp.withBodyStream(resp.body.onFinalize(pageBudget.release(rid)))
-        else resp
-      )
+        resp.withBodyStream(
+          if pageBudget.holds(rid) then body.onFinalize(pageBudget.release(rid)) else body
+        )
+      }
       .guaranteeCase {
         case cats.effect.Outcome.Succeeded(_) => IO.unit
         case _                                => pageBudget.release(rid)
@@ -257,6 +259,13 @@ final class RestEdgeServer(
 object RestEdgeServer:
 
   private val StorePass: Array[Char] = "qod-rest-tls".toCharArray
+
+  /** The largest chunk a response body reaches the socket in: one TLS record. fs2's TLS write
+    * buffer grows to the largest chunk it is handed and never shrinks, for the connection's life,
+    * so a page written as one chunk would leave each keep-alive connection holding a page of heap
+    * that neither [[RestPageBudget]] nor [[ConnectionBudget]] counts.
+    */
+  val WriteChunkBytes: Int = 16 * 1024
 
   /** The four routes bound to the handlers. */
   def serverEndpoints(h: RestEdgeHandlers): List[ServerEndpoint[Any, IO]] =

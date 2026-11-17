@@ -309,5 +309,29 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  "a page body" should "reach the socket in chunks no bigger than WriteChunkBytes, whole" in {
+    // fs2's TLS write buffer grows to the largest chunk written and never shrinks: one chunk per
+    // page would leave every keep-alive connection holding a page's worth of heap after the page
+    // budget had given it back.
+    val page = "x" * (3 * RestEdgeServer.WriteChunkBytes + 17)
+    val big  = List(
+      RestEdgeEndpoints.readRows.serverLogic { _ =>
+        val ok = RestOk(List(Header("Content-Type", "application/json")), BodyBytes.of(page))
+        IO.pure(RestEdgeServer.toTapir(Right(ok)))
+      }
+    )
+    val server = new RestEdgeServer(cfg(freePort()), big)
+    val req    = org.http4s.Request[IO](
+      org.http4s.Method.GET,
+      org.http4s.Uri.unsafeFromString(RowsPath)
+    )
+    val sizes = server.app
+      .run(req)
+      .flatMap(_.body.chunks.map(_.size).compile.toList)
+      .unsafeRunSync()
+    sizes.sum should equal(page.length)
+    sizes.max should be <= RestEdgeServer.WriteChunkBytes
+  }
+
   extension [A](o: java.util.Optional[A])
     private def toScala: Option[A] = if o.isPresent then Some(o.get) else None
