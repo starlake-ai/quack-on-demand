@@ -496,6 +496,9 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   private val TimeTravelReason =
     "a row-policy table is read with a time-travel clause (AT ...), which the row filter cannot " +
       "keep; read the table without it"
+  private val ForAsOfReason =
+    "a row-policy table is read with a time-travel clause DuckDB does not take (FOR ... AS OF), " +
+      "which the row filter cannot keep; read the table without it"
   private val SampleReason =
     "a row-policy table is read with a sample clause (TABLESAMPLE, USING SAMPLE), which the row " +
       "filter cannot keep; read the table without it"
@@ -542,8 +545,8 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       Nil
     ),
     // JSqlParser's other time-travel spellings (DuckDB refuses them; the wrap made them run).
-    ("SELECT * FROM customer FOR TIMESTAMP AS OF '2026-01-01'", TimeTravelReason, Nil),
-    ("SELECT * FROM customer FOR SYSTEM_TIME AS OF '2026-01-01'", TimeTravelReason, Nil),
+    ("SELECT * FROM customer FOR TIMESTAMP AS OF '2026-01-01'", ForAsOfReason, Nil),
+    ("SELECT * FROM customer FOR SYSTEM_TIME AS OF '2026-01-01'", ForAsOfReason, Nil),
     ("SELECT * FROM customer TABLESAMPLE 10%", SampleReason, List("10")),
     (
       "SELECT * FROM customer TABLESAMPLE reservoir(10 ROWS)",

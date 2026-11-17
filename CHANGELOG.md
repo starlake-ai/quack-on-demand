@@ -7,7 +7,8 @@
 - A user with a row policy on a table is now refused when they read that table with a
   time-travel clause (`SELECT * FROM customer AT (TIMESTAMP => '...')`). Until now the statement
   ran against the current snapshot, filtered, and answered with no error. Time travel on a table
-  under a row policy is not supported.
+  under a row policy is not supported. A `FOR TIMESTAMP AS OF` or `FOR SYSTEM_TIME AS OF` clause,
+  which DuckDB does not take, is refused naming that spelling rather than `AT (...)`.
 - The same user is also refused when they read that table with `TABLESAMPLE` or `USING SAMPLE`,
   or with a `PIVOT` or `UNPIVOT` written after it (`FROM customer PIVOT (...)`). Until now the
   sample or the pivot was dropped and every filtered row came back. To sample or pivot, wrap the
