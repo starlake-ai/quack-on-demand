@@ -939,3 +939,12 @@ tbody tr.cred-inactive td { opacity: .6; }
 .branch-head { margin-bottom: .75rem; flex-wrap: wrap; }
 .branch-list-controls { display: flex; align-items: center; gap: 1rem; }
 .branch-list-controls .checkbox-label { margin: 0; }
+
+/* "Select all" / "Clear" at the top of a MultiSelectDropdown panel, when the caller asks for them. */
+.multi-select-actions {
+  display: flex;
+  gap: 1rem;
+  padding: .4rem .75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .85em;
+}

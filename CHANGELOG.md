@@ -88,7 +88,7 @@
   for a `tools` list holding a name outside it, from a session or a PAT alike (before, a typo
   minted a token that silently reached less than asked); tokens already minted are not
   re-checked. On the profile page the free-text Tools field becomes three dropdowns (Data tools,
-  Admin tools, Other surfaces); nothing ticked still leaves the axis unrestricted, and a token
+  Admin tools, Other surfaces), each with Select all and Clear; nothing ticked still leaves the axis unrestricted, and a token
   narrowed to MCP tools without `rest` is flagged as one that will not reach the REST data edge.
 
 ### Fixed

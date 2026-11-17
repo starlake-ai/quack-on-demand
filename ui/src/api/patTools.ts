@@ -42,6 +42,17 @@ export function replaceGroup(
   return [...picked.filter(n => !inGroup.has(n)), ...values];
 }
 
+/** `picked` with every name of `group` picked, the other groups kept: the dropdown's Select all. */
+export function selectAllInGroup(catalog: PatToolEntry[], group: PatToolGroup, picked: string[]): string[] {
+  return replaceGroup(catalog, group, picked, catalog.filter(e => e.group === group).map(e => e.name));
+}
+
+/** `picked` with no name of `group` left, the other groups kept: the dropdown's Clear. Clearing
+  * every group leaves nothing picked, which is the unrestricted token ([[toolsRequest]]). */
+export function clearGroup(catalog: PatToolEntry[], group: PatToolGroup, picked: string[]): string[] {
+  return replaceGroup(catalog, group, picked, []);
+}
+
 /** The `tools` field of a create request: `undefined` (an omitted key, unrestricted) when nothing
   * is picked, since `[]` would mint a token that reaches no tool at all. */
 export function toolsRequest(picked: string[]): string[] | undefined {

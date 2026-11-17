@@ -2,7 +2,8 @@ import { FormEvent, useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
 import type { PatEntry, PatScope, PatToolEntry } from '../api/types';
 import {
-  TOOL_GROUPS, missesRest, pickedIn, replaceGroup, toolOptions, toolsRequest,
+  TOOL_GROUPS, clearGroup, missesRest, pickedIn, replaceGroup, selectAllInGroup, toolOptions,
+  toolsRequest,
 } from '../api/patTools';
 import MultiSelectDropdown from './MultiSelectDropdown';
 
@@ -380,6 +381,8 @@ export function PatSection() {
                       options={toolOptions(toolCatalog, group)}
                       selected={pickedIn(toolCatalog, group, form.toolPicks)}
                       onChange={values => set('toolPicks', replaceGroup(toolCatalog, group, form.toolPicks, values))}
+                      onSelectAll={() => set('toolPicks', selectAllInGroup(toolCatalog, group, form.toolPicks))}
+                      onClear={() => set('toolPicks', clearGroup(toolCatalog, group, form.toolPicks))}
                       placeholder="None selected"
                     />
                   ))}

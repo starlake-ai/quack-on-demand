@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { PatToolEntry } from './types';
-import { missesRest, pickedIn, replaceGroup, toolLabel, toolOptions, toolsRequest } from './patTools';
+import {
+  clearGroup, missesRest, pickedIn, replaceGroup, selectAllInGroup, toolLabel, toolOptions, toolsRequest,
+} from './patTools';
 
 const entry = (name: string, group: PatToolEntry['group'], label = name): PatToolEntry => ({
   name, label, group, readOnly: true, description: `about ${name}`,
@@ -60,5 +62,30 @@ describe('missesRest', () => {
     expect(missesRest(CATALOG, ['run_sql', 'rest'])).toBe(false);
     expect(missesRest(CATALOG, [])).toBe(false);
     expect(missesRest(CATALOG, ['rest'])).toBe(false);
+  });
+});
+
+describe('selectAllInGroup', () => {
+  it('picks every name of the group and keeps the other groups as they were', () => {
+    const picked = selectAllInGroup(CATALOG, 'data', ['create_tenant', 'rest']);
+    expect(pickedIn(CATALOG, 'data', picked)).toEqual(['list_tables', 'run_sql']);
+    expect(pickedIn(CATALOG, 'admin', picked)).toEqual(['create_tenant']);
+    expect(pickedIn(CATALOG, 'surface', picked)).toEqual(['rest']);
+  });
+
+  it('adds no name twice when part of the group was already picked', () => {
+    const picked = selectAllInGroup(CATALOG, 'data', ['run_sql']);
+    expect([...picked].sort()).toEqual(['list_tables', 'run_sql']);
+  });
+});
+
+describe('clearGroup', () => {
+  it('drops every name of the group and keeps the other groups as they were', () => {
+    const picked = clearGroup(CATALOG, 'admin', ['run_sql', 'create_tenant', 'list_users', 'rest']);
+    expect([...picked].sort()).toEqual(['rest', 'run_sql']);
+  });
+
+  it('leaves nothing picked, the unrestricted token, when only that group was picked', () => {
+    expect(toolsRequest(clearGroup(CATALOG, 'data', ['list_tables', 'run_sql']))).toBeUndefined();
   });
 });
