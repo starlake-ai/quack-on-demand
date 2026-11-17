@@ -43,9 +43,11 @@ import scala.util.Try
   *     the header receive timeout (slowloris), the idle timeout and `withMaxConnections`, which
   *     takes no more connections than fit a tenth of the heap ([[ConnectionBudget]]);
   *   - with TLS on, a deadline on every socket read ([[QuackFrontDoorServer.readDeadline]], the
-  *     idle timeout by default): Ember runs the TLS handshake before its header and idle timeouts
-  *     start, so a connection that never speaks would otherwise hold its slot for ever, and
-  *     `maxConnections` of them would lock every client out;
+  *     idle timeout by default) and one over the whole TLS handshake (the header receive timeout,
+  *     [[ai.starlake.quack.edge.quack.HandshakeClock]]): Ember runs the handshake before its header
+  *     and idle timeouts start, so a connection that never speaks, or drips a byte inside every
+  *     read deadline, would otherwise hold its slot for ever, and `maxConnections` of them would
+  *     lock every client out;
   *   - a fresh `X-Request-Id` per request, set on the request the handlers read (a client's own is
   *     replaced, never echoed) and on every response, including the ones Ember itself generates for
   *     an unparseable or oversized request head;
@@ -56,6 +58,9 @@ final class RestEdgeServer(
     endpoints: List[ServerEndpoint[Any, IO]],
     newRequestId: () => String = () => UUID.randomUUID().toString,
     tlsReadDeadline: Option[FiniteDuration] = None,
+    /** The whole TLS handshake's deadline; the header receive timeout when None (specs shorten it).
+      */
+    tlsHandshakeDeadline: Option[FiniteDuration] = None,
     /** The handlers' page budget: a request's share is given back once its response is written. */
     pageBudget: RestPageBudget = RestPageBudget.Unbounded
 ) extends LazyLogging:
@@ -188,6 +193,12 @@ final class RestEdgeServer(
     */
   private def readDeadline: FiniteDuration = tlsReadDeadline.getOrElse(cfg.idleTimeoutSec.seconds)
 
+  /** The whole TLS handshake's deadline, from the accept: the header receive timeout, the bound a
+    * client already has to send its request head once the handshake is over.
+    */
+  private def handshakeDeadline: FiniteDuration =
+    tlsHandshakeDeadline.getOrElse(cfg.headerReceiveTimeoutSec.seconds)
+
   def resource: Resource[IO, org.http4s.server.Server] =
     for
       tls <- Resource.eval(tlsContext)
@@ -216,7 +227,7 @@ final class RestEdgeServer(
       built = tls.fold(base)(ctx =>
         base
           .withTLS(ctx, TLSParameters.Default)
-          .withSocketGroup(QuackFrontDoorServer.readDeadline(readDeadline))
+          .withSocketGroup(QuackFrontDoorServer.readDeadline(readDeadline, Some(handshakeDeadline)))
           // A client needs no credential to make a connection fail (silent, no TLS, dropped in the
           // handshake): logged at DEBUG, as text, never with a stack.
           .withConnectionErrorHandler {

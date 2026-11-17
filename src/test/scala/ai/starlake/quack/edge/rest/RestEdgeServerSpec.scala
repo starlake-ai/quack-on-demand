@@ -36,7 +36,8 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
       port: Int,
       tls: Boolean = false,
       certDir: String = "",
-      maxConnections: Int = 8
+      maxConnections: Int = 8,
+      headerReceiveTimeoutSec: Int = 1
   ) = RestEdgeConfig(
     enabled = true,
     host = "127.0.0.1",
@@ -50,7 +51,7 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     stmtTimeoutSec = 5,
     maxConnections = maxConnections,
     maxHeaderBytes = 16384,
-    headerReceiveTimeoutSec = 1,
+    headerReceiveTimeoutSec = headerReceiveTimeoutSec,
     idleTimeoutSec = 5
   )
 
@@ -77,10 +78,17 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     }
   )
 
-  private def withServer[A](c: RestEdgeConfig, tlsReadDeadline: Option[FiniteDuration] = None)(
-      body: String => A
-  ): A =
-    val server = new RestEdgeServer(c, canned, tlsReadDeadline = tlsReadDeadline)
+  private def withServer[A](
+      c: RestEdgeConfig,
+      tlsReadDeadline: Option[FiniteDuration] = None,
+      tlsHandshakeDeadline: Option[FiniteDuration] = None
+  )(body: String => A): A =
+    val server = new RestEdgeServer(
+      c,
+      canned,
+      tlsReadDeadline = tlsReadDeadline,
+      tlsHandshakeDeadline = tlsHandshakeDeadline
+    )
     server.start().unsafeRunSync()
     try body(s"${if c.tlsEnabled then "https" else "http"}://127.0.0.1:${c.port}")
     finally server.stop()
@@ -306,6 +314,74 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
         HttpResponse.BodyHandlers.ofString()
       )
       resp.statusCode() shouldBe 200
+    }
+  }
+
+  it should "close a handshake that drips a byte inside every read deadline" in {
+    // The per-read deadline (2 s) never fires on a byte every 300 ms; the handshake as a whole is
+    // bounded by the header receive timeout (1 s in cfg), whatever the idle timeout.
+    val dir = java.nio.file.Files.createTempDirectory("qod-rest-tls-drip").toString
+    CertGen.ensureCertFiles(s"$dir/server-cert.pem", s"$dir/server-key.pem")
+    withServer(
+      cfg(freePort(), tls = true, certDir = dir, maxConnections = 1),
+      tlsReadDeadline = Some(2.seconds)
+    ) { base =>
+      val uri = URI.create(base)
+      val s   = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        s.setSoTimeout(300)
+        // A handshake record header announcing 16 KiB, then its body a byte at a time.
+        val drip   = Iterator(0x16, 0x03, 0x01, 0x40, 0x00) ++ Iterator.continually(0)
+        val start  = System.nanoTime()
+        var closed = false
+        while !closed && (System.nanoTime() - start) / 1000000L < 6000L do
+          try
+            s.getOutputStream.write(drip.next())
+            s.getOutputStream.flush()
+            closed = s.getInputStream.read() == -1
+          catch
+            case _: SocketTimeoutException => ()
+            case _: java.io.IOException    => closed = true
+        closed shouldBe true
+        (System.nanoTime() - start) / 1000000L should be < 4000L
+      finally s.close()
+    }
+  }
+
+  it should "leave a connection past its handshake to the read deadline alone" in {
+    // The handshake's budget (1 s) ends with the handshake: a request sent 1.5 s later on the same
+    // socket, inside the read deadline (3 s) and the header receive timeout (5 s), is served.
+    val dir = java.nio.file.Files.createTempDirectory("qod-rest-tls-after").toString
+    CertGen.ensureCertFiles(s"$dir/server-cert.pem", s"$dir/server-key.pem")
+    val trustAll = new X509TrustManager:
+      def checkClientTrusted(c: Array[X509Certificate], a: String): Unit = ()
+      def checkServerTrusted(c: Array[X509Certificate], a: String): Unit = ()
+      def getAcceptedIssuers: Array[X509Certificate]                     = Array.empty
+    val ctx = SSLContext.getInstance("TLS")
+    ctx.init(null, Array[TrustManager](trustAll), new java.security.SecureRandom())
+    List("TLSv1.2", "TLSv1.3").foreach { proto =>
+      withServer(
+        cfg(freePort(), tls = true, certDir = dir, headerReceiveTimeoutSec = 5),
+        tlsReadDeadline = Some(3.seconds),
+        tlsHandshakeDeadline = Some(1.second)
+      ) { base =>
+        val uri = URI.create(base)
+        val s   = ctx.getSocketFactory
+          .createSocket(uri.getHost, uri.getPort)
+          .asInstanceOf[javax.net.ssl.SSLSocket]
+        try
+          s.setEnabledProtocols(Array(proto))
+          s.setSoTimeout(5000)
+          s.startHandshake()
+          Thread.sleep(1500)
+          s.getOutputStream.write(
+            s"GET $RowsPath HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".getBytes(UTF_8)
+          )
+          s.getOutputStream.flush()
+          val head = new String(s.getInputStream.readNBytes(12), UTF_8)
+          withClue(proto)(head shouldBe "HTTP/1.1 200")
+        finally s.close()
+      }
     }
   }
 

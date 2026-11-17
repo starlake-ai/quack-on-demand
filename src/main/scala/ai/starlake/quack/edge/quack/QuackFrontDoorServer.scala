@@ -174,30 +174,45 @@ object QuackFrontDoorServer:
     * none: a connection that never speaks would hold its slot for ever, and `maxConnections` of
     * them would lock every client out with no traffic at all.
     *
-    * What it leaves open: the deadline is per read, not over the handshake, so a client that sends
-    * one byte just inside it, again and again, keeps its slot (spec section 12). A deadline over
-    * the whole handshake would have to lean on fs2 internals, since `TLSContext` is sealed: a
-    * listener with TLS on needs a proxy or firewall in front that limits this.
+    * The deadline is per read. With no `handshakeDeadline`, a client that sends one byte just
+    * inside it, again and again, keeps its slot through the handshake (spec section 12), and a
+    * listener needs a proxy or firewall in front that limits this. With one, the whole handshake is
+    * bounded too: [[HandshakeClock]] reads the client's TLS record headers as they pass and, until
+    * its first application-data record, bounds each read by what is left of `handshakeDeadline`
+    * from the accept. `TLSContext` is sealed, so the record layer is the one place the end of the
+    * handshake shows without fs2 internals.
     */
   @nowarn("cat=deprecation")
-  private[edge] def readDeadline(deadline: FiniteDuration): SocketGroup[IO] =
+  private[edge] def readDeadline(
+      deadline: FiniteDuration,
+      handshakeDeadline: Option[FiniteDuration] = None
+  ): SocketGroup[IO] =
     val network                            = Network[IO]
-    def bounded(s: Socket[IO]): Socket[IO] = new Socket[IO]:
-      def address                                          = s.address
-      def peerAddress                                      = s.peerAddress
-      def supportedOptions                                 = s.supportedOptions
-      def getOption[A](key: SocketOption.Key[A])           = s.getOption(key)
-      def setOption[A](key: SocketOption.Key[A], value: A) = s.setOption(key, value)
-      def read(maxBytes: Int)                              = s.read(maxBytes).timeout(deadline)
-      def readN(numBytes: Int)                             = s.readN(numBytes).timeout(deadline)
-      def reads                     = Stream.repeatEval(read(8192)).unNoneTerminate.unchunks
-      def endOfInput                = s.endOfInput
-      def endOfOutput               = s.endOfOutput
-      def write(bytes: Chunk[Byte]) = s.write(bytes)
-      def writes                    = s.writes
-      def isOpen                    = s.isOpen
-      def localAddress              = s.localAddress
-      def remoteAddress             = s.remoteAddress
+    def bounded(s: Socket[IO]): Socket[IO] =
+      val clock = handshakeDeadline.map(new HandshakeClock(_, System.nanoTime()))
+      def bound[A](read: IO[Option[Chunk[Byte]]]): IO[Option[Chunk[Byte]]] =
+        clock match
+          case None    => read.timeout(deadline)
+          case Some(c) =>
+            c.limit(deadline) match
+              case None    => IO.raiseError(new TimeoutException("TLS handshake deadline passed"))
+              case Some(t) => read.timeout(t).flatTap(r => IO(r.foreach(c.observe)))
+      new Socket[IO]:
+        def address                                          = s.address
+        def peerAddress                                      = s.peerAddress
+        def supportedOptions                                 = s.supportedOptions
+        def getOption[A](key: SocketOption.Key[A])           = s.getOption(key)
+        def setOption[A](key: SocketOption.Key[A], value: A) = s.setOption(key, value)
+        def read(maxBytes: Int)                              = bound(s.read(maxBytes))
+        def readN(numBytes: Int)      = bound(s.readN(numBytes).map(Some(_))).map(_.get)
+        def reads                     = Stream.repeatEval(read(8192)).unNoneTerminate.unchunks
+        def endOfInput                = s.endOfInput
+        def endOfOutput               = s.endOfOutput
+        def write(bytes: Chunk[Byte]) = s.write(bytes)
+        def writes                    = s.writes
+        def isOpen                    = s.isOpen
+        def localAddress              = s.localAddress
+        def remoteAddress             = s.remoteAddress
     new SocketGroup[IO]:
       def client(to: SocketAddress[Host], options: List[SocketOption]) =
         network.client(to, options).map(bounded)
@@ -207,6 +222,53 @@ object QuackFrontDoorServer:
         network
           .serverResource(address, port, options)
           .map((bound, clients) => (bound, clients.map(bounded)))
+
+/** How long a TLS connection may take over its handshake, read from the client's record layer.
+  * Every TLS record starts with a 5-byte header (content type, version, 2-byte length). The
+  * client's handshake is over once it has sent its Finished: in TLS 1.2 the record that follows its
+  * ChangeCipherSpec (type 20), in TLS 1.3 its first application-data record (type 23), which
+  * follows a ChangeCipherSpec too when the client sends one for middlebox compatibility. Until that
+  * record has fully arrived, each read gets at most what is left of `budget` since `startNanos`;
+  * afterwards only the per-read deadline applies. Waiting for the whole record keeps a client from
+  * announcing a large one and dripping it; a forged one only reaches the TLS engine, which refuses
+  * it.
+  */
+private[edge] final class HandshakeClock(budget: FiniteDuration, startNanos: Long):
+  private val header         = new Array[Byte](5)
+  private var filled         = 0
+  private var skip           = 0L
+  private var sawCcs         = false
+  private var ending         = false
+  @volatile private var done = false
+
+  /** The deadline for the next read: `perRead`, or less while the handshake lasts; None once the
+    * handshake's budget is spent.
+    */
+  def limit(perRead: FiniteDuration): Option[FiniteDuration] =
+    if done then Some(perRead)
+    else
+      val left = budget.toNanos - (System.nanoTime() - startNanos)
+      Option.when(left > 0L)(perRead.min(left.nanos))
+
+  /** Follows the record headers in `bytes`, the client's next bytes on the wire. */
+  def observe(bytes: Chunk[Byte]): Unit = synchronized {
+    var i = 0
+    while !done && i < bytes.size do
+      if skip > 0L then
+        val n = math.min(skip, (bytes.size - i).toLong).toInt
+        skip -= n
+        i += n
+      else
+        header(filled) = bytes(i)
+        filled += 1
+        i += 1
+        if filled == 5 then
+          filled = 0
+          ending = header(0) == 23 || sawCcs
+          if header(0) == 20 then sawCcs = true
+          skip = ((header(3) & 0xffL) << 8) | (header(4) & 0xffL)
+      if ending && filled == 0 && skip == 0L then done = true
+  }
 
 /** In-memory PKCS12 keystore from a PEM certificate chain and a PKCS8 private key: what fs2's
   * `TLSContext` wants, from the files `CertGen` writes (and what operators supply for the Flight
