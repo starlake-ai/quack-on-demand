@@ -210,8 +210,12 @@ object RestResultEncoder:
     val text  = local.format(IsoLocalDateTime)
     Json.fromString(if t.getTimezone != null then text + "Z" else text)
 
+  private val NanosPerDay = 86400L * 1000000000L
+
+  /** DuckDB's TIME reaches 24:00:00 inclusive, one past what `LocalTime` holds. */
   private def time(nanoOfDay: Long): Json =
-    Json.fromString(LocalTime.ofNanoOfDay(nanoOfDay).format(IsoLocalTime))
+    if nanoOfDay == NanosPerDay then Json.fromString("24:00:00")
+    else Json.fromString(LocalTime.ofNanoOfDay(nanoOfDay).format(IsoLocalTime))
 
   private def base64(bytes: Array[Byte]): Json =
     Json.fromString(Base64.getEncoder.encodeToString(bytes))

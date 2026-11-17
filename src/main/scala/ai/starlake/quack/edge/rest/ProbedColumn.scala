@@ -32,11 +32,13 @@ enum ColumnKind(val sqlType: String, val comparable: Boolean):
   case Integer(override val sqlType: String, min: BigInt, max: BigInt)
       extends ColumnKind(sqlType, true)
   case Decimal(precision: Int, scale: Int) extends ColumnKind(s"DECIMAL($precision,$scale)", true)
-  case Floating(override val sqlType: String)  extends ColumnKind(sqlType, true)
-  case Text                                    extends ColumnKind("VARCHAR", true)
-  case Bool                                    extends ColumnKind("BOOLEAN", true)
-  case Date                                    extends ColumnKind("DATE", true)
-  case Time                                    extends ColumnKind("TIME", true)
+  case Floating(override val sqlType: String) extends ColumnKind(sqlType, true)
+  case Text                                   extends ColumnKind("VARCHAR", true)
+  case Bool                                   extends ColumnKind("BOOLEAN", true)
+  case Date                                   extends ColumnKind("DATE", true)
+
+  /** `TIME` (TIME WITH TIME ZONE included, whose export is its local time) or `TIME_NS`. */
+  case Time(override val sqlType: String)      extends ColumnKind(sqlType, true)
   case Timestamp(override val sqlType: String) extends ColumnKind(sqlType, true)
   case TimestampTz                             extends ColumnKind("TIMESTAMP WITH TIME ZONE", true)
   case Opaque(override val sqlType: String)    extends ColumnKind(sqlType, false)
@@ -65,8 +67,14 @@ object ProbedColumn:
     * empirical table is pinned by `ProbedColumnSpec` against in-process DuckDB. Notable folds of
     * that export, all harmless for `CAST(<literal> AS <type>)` comparisons:
     *   - HUGEINT and UHUGEINT arrive as DECIMAL(38,0), so they filter as that type;
-    *   - UUID and JSON arrive as VARCHAR, TIME WITH TIME ZONE as TIME, BIT and VARINT as BLOB;
+    *   - UUID and JSON arrive as VARCHAR, TIME WITH TIME ZONE as TIME (its local time, the offset
+    *     dropped), BIT and VARINT as BLOB;
     *   - ENUM arrives dictionary-encoded (handled in [[fromField]]);
+    *   - TIME_NS is the one TIME export in nanoseconds, so it keeps its own type.
+    *
+    * Where a column's DuckDB type differs from the kind's (a UUID, JSON or ENUM as VARCHAR, a TIME
+    * WITH TIME ZONE as TIME), `RestSql` compares and orders the column cast to the kind's type, so
+    * a filter and an order read the value the edge shows.
     *   - an untyped `NULL` column arrives as INTEGER.
     */
   def kindOf(t: ArrowType): ColumnKind = t match
@@ -96,8 +104,10 @@ object ProbedColumn:
     case _: ArrowType.Utf8 | _: ArrowType.LargeUtf8 | _: ArrowType.Utf8View => ColumnKind.Text
     case _: ArrowType.Bool                                                  => ColumnKind.Bool
     case d: ArrowType.Date if d.getUnit == DateUnit.DAY                     => ColumnKind.Date
-    case _: ArrowType.Date       => ColumnKind.Timestamp("TIMESTAMP_MS")
-    case _: ArrowType.Time       => ColumnKind.Time
+    case _: ArrowType.Date => ColumnKind.Timestamp("TIMESTAMP_MS")
+    case t: ArrowType.Time =>
+      if t.getUnit == TimeUnit.NANOSECOND then ColumnKind.Time("TIME_NS")
+      else ColumnKind.Time("TIME")
     case ts: ArrowType.Timestamp =>
       if ts.getTimezone != null then ColumnKind.TimestampTz
       else

@@ -363,6 +363,24 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
+  // A text column is filtered and ordered as `CAST(col AS VARCHAR)`, so that a UUID, JSON or ENUM
+  // reads as the VARCHAR it is shown as; the mask must reach the column inside the cast too.
+  "a masked text column" should "be filtered and ordered on its masked value" in {
+    for kc <- AllKinds do
+      withClue(s"${kc.kind}: ") {
+        withHandlers(kc, permissions = grants(kc), columnPolicies = List(maskEmail)) { h =>
+          def ids(q: String) =
+            h.rows("acme", db(kc), "main", "customer", req(s"select=c_id&$q"))
+              .unsafeRunSync()
+              .map(ok => parse(ok.body).toOption.get)
+          ids("c_email=eq.a@x.io&order=c_id") shouldBe Right(Json.arr())
+          ids("c_email=like.a*&order=c_id") shouldBe Right(Json.arr())
+          ids("c_email=eq.***&order=c_email,c_id.desc") shouldBe
+            Right(Json.arr(Json.obj("c_id" -> Json.fromInt(2)), Json.obj("c_id" -> Json.fromInt(1))))
+        }
+      }
+  }
+
   // ColumnPolicyRewriter refuses any statement that reads a `deny` column, a star included, rather
   // than drop the column from `SELECT *`. The edge's schema probe is therefore refused, fail-closed,
   // and the whole table answers the one 404 of a missing object. Pinned so a rewriter change that

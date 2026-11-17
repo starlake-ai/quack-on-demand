@@ -68,6 +68,10 @@ class RestResultEncoderSpec extends AnyFlatSpec with Matchers:
     one("DATE '1969-12-31'") shouldBe "\"1969-12-31\""
     one("TIME '10:00:00'") shouldBe "\"10:00:00\""
     one("TIME '10:00:00.123456'") shouldBe "\"10:00:00.123456\""
+    // DuckDB's TIME reaches 24:00:00, one past what LocalTime holds.
+    one("TIME '24:00:00'") shouldBe "\"24:00:00\""
+    one("'12:00:00+02'::TIMETZ") shouldBe "\"12:00:00\""
+    one("'10:00:00.000000001'::TIME_NS") shouldBe "\"10:00:00.000000001\""
     one("TIMESTAMP '2024-01-01 10:00:00.5'") shouldBe "\"2024-01-01T10:00:00.5\""
     one("TIMESTAMP '1969-12-31 23:59:59.999999'") shouldBe "\"1969-12-31T23:59:59.999999\""
     one("'2024-01-01 10:00:00'::TIMESTAMP_S") shouldBe "\"2024-01-01T10:00:00\""

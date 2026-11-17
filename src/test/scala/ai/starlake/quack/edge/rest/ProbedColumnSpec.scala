@@ -49,6 +49,7 @@ class ProbedColumnSpec extends AnyFlatSpec with Matchers:
     ("true", "BOOLEAN", true, "true"),
     ("DATE '2024-01-01'", "DATE", true, "2024-01-01"),
     ("TIME '10:00:00'", "TIME", true, "10:00:00"),
+    ("'10:00:00.000000001'::TIME_NS", "TIME_NS", true, "10:00:00.000000001"),
     ("TIMESTAMP '2024-01-01 10:00:00'", "TIMESTAMP", true, "2024-01-01T10:00:00"),
     ("'2024-01-01 10:00:00'::TIMESTAMP_S", "TIMESTAMP_S", true, "2024-01-01T10:00:00"),
     ("'2024-01-01 10:00:00'::TIMESTAMP_MS", "TIMESTAMP_MS", true, "2024-01-01T10:00:00"),
@@ -95,6 +96,11 @@ class ProbedColumnSpec extends AnyFlatSpec with Matchers:
           }
         }
     }
+  }
+
+  it should "fold TIME WITH TIME ZONE into TIME, which RestSql casts the column to" in {
+    // Compared bare, a TIMETZ and a TIME differ even at offset +00, so the cast is the edge's.
+    probe("'10:00:00+02'::TIMETZ").kind shouldBe ColumnKind.Time("TIME")
   }
 
   it should "keep probe order and the probe's spelling" in {

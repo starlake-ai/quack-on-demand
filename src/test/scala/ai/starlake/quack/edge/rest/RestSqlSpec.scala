@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.rest
 
+import ai.starlake.quack.edge.adapter.TestArrow
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -69,14 +70,14 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
     where("id" -> "lt.1") shouldBe """"id" < CAST('1' AS INTEGER)"""
     where("id" -> "lte.1") shouldBe """"id" <= CAST('1' AS INTEGER)"""
     where("price" -> "not.eq.1.5") shouldBe """NOT ("price" = CAST('1.5' AS DECIMAL(6,2)))"""
-    where("name" -> "eq.it's") shouldBe """"name" = CAST('it''s' AS VARCHAR)"""
+    where("name" -> "eq.it's") shouldBe """CAST("name" AS VARCHAR) = CAST('it''s' AS VARCHAR)"""
   }
 
   it should "render in, is and their negations" in {
     where("id" -> "in.(1,2)") shouldBe
       """"id" IN (CAST('1' AS INTEGER), CAST('2' AS INTEGER))"""
     where("name" -> "not.in.(\"a,b\",c)") shouldBe
-      """NOT ("name" IN (CAST('a,b' AS VARCHAR), CAST('c' AS VARCHAR)))"""
+      """NOT (CAST("name" AS VARCHAR) IN (CAST('a,b' AS VARCHAR), CAST('c' AS VARCHAR)))"""
     where("name" -> "is.null") shouldBe """"name" IS NULL"""
     where("name" -> "not.is.null") shouldBe """"name" IS NOT NULL"""
     where("ok" -> "is.true") shouldBe """"ok" IS TRUE"""
@@ -84,24 +85,24 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "render like as LIKE and ilike as lower() LIKE lower(), never ILIKE or ESCAPE" in {
-    where("name" -> "like.a*b") shouldBe """"name" LIKE CAST('a%b' AS VARCHAR)"""
-    where("name" -> "ilike.*x") shouldBe """lower("name") LIKE lower(CAST('%x' AS VARCHAR))"""
-    where("name" -> "like.x\\y*") shouldBe """"name" LIKE CAST('x\y%' AS VARCHAR)"""
+    where("name" -> "like.a*b") shouldBe """CAST("name" AS VARCHAR) LIKE CAST('a%b' AS VARCHAR)"""
+    where("name" -> "ilike.*x") shouldBe """lower(CAST("name" AS VARCHAR)) LIKE lower(CAST('%x' AS VARCHAR))"""
+    where("name" -> "like.x\\y*") shouldBe """CAST("name" AS VARCHAR) LIKE CAST('x\y%' AS VARCHAR)"""
   }
 
   it should "render a pattern with a literal % or _ as equality, prefix, suffix or contains" in {
-    where("name" -> "like.5%_\\") shouldBe """"name" = CAST('5%_\' AS VARCHAR)"""
-    where("name" -> "like.5%*") shouldBe """starts_with("name", CAST('5%' AS VARCHAR))"""
-    where("name" -> "like.*_c") shouldBe """ends_with("name", CAST('_c' AS VARCHAR))"""
+    where("name" -> "like.5%_\\") shouldBe """CAST("name" AS VARCHAR) = CAST('5%_\' AS VARCHAR)"""
+    where("name" -> "like.5%*") shouldBe """starts_with(CAST("name" AS VARCHAR), CAST('5%' AS VARCHAR))"""
+    where("name" -> "like.*_c") shouldBe """ends_with(CAST("name" AS VARCHAR), CAST('_c' AS VARCHAR))"""
     where("name" -> "ilike.*it's%*") shouldBe
-      """contains(lower("name"), lower(CAST('it''s%' AS VARCHAR)))"""
+      """contains(lower(CAST("name" AS VARCHAR)), lower(CAST('it''s%' AS VARCHAR)))"""
     where("name" -> "not.ilike.a_") shouldBe
-      """NOT (lower("name") = lower(CAST('a_' AS VARCHAR)))"""
+      """NOT (lower(CAST("name" AS VARCHAR)) = lower(CAST('a_' AS VARCHAR)))"""
   }
 
   it should "AND several filters in arrival order" in {
     where("id" -> "gt.1", "name" -> "eq.x", "id" -> "lt.9") shouldBe
-      """"id" > CAST('1' AS INTEGER) AND "name" = CAST('x' AS VARCHAR) AND "id" < CAST('9' AS INTEGER)"""
+      """"id" > CAST('1' AS INTEGER) AND CAST("name" AS VARCHAR) = CAST('x' AS VARCHAR) AND "id" < CAST('9' AS INTEGER)"""
   }
 
   it should "render every order suffix by column name" in {
@@ -111,7 +112,7 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
       1
     )
     sql should include(
-      """ORDER BY "id" ASC, "name" DESC NULLS FIRST, "price" ASC NULLS LAST, "ok" ASC NULLS FIRST"""
+      """ORDER BY "id" ASC, CAST("name" AS VARCHAR) DESC NULLS FIRST, "price" ASC NULLS LAST, "ok" ASC NULLS FIRST"""
     )
   }
 
@@ -125,7 +126,7 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
       .get
     val sql = RestSql.render(file, q, 1)
     sql shouldBe
-      """SELECT "1", "2" FROM "mydb"."sales"."orders" WHERE "1" = CAST('1' AS INTEGER) ORDER BY "2" DESC, "1" ASC LIMIT 2 OFFSET 0"""
+      """SELECT "1", "2" FROM "mydb"."sales"."orders" WHERE "1" = CAST('1' AS INTEGER) ORDER BY CAST("2" AS VARCHAR) DESC, "1" ASC LIMIT 2 OFFSET 0"""
     sql should not include "*"
     """ORDER BY [0-9]""".r.findFirstIn(sql) shouldBe None
   }
@@ -141,7 +142,7 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
       " AND schema_name NOT IN ('information_schema', 'pg_catalog') ORDER BY schema_name LIMIT 51"
     RestSql.listTables("db", "s'x", 50) shouldBe
       "SELECT table_name, table_type FROM information_schema.tables" +
-      " WHERE table_catalog = 'db' AND table_schema = 's''x' ORDER BY table_name LIMIT 51"
+      " WHERE table_catalog = 'db' AND lower(table_schema) = lower('s''x') ORDER BY table_name LIMIT 51"
   }
 
   "tableType" should "match one object by name, case-insensitively, with values only as literals" in {
@@ -190,5 +191,49 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
       ids("name" -> "not.eq.a%b") shouldBe List(2, 4)
       ids("offset" -> "1") shouldBe List(2, 3, 4)
       RestSql.render(t, resolved("select" -> "id"), 2) should endWith("LIMIT 3 OFFSET 0")
+    }
+  }
+
+  "a column whose DuckDB type the export folds" should "filter and order as the value shown" in {
+    // UUID, JSON and ENUM export as text, TIME WITH TIME ZONE as its local TIME: the kinds come
+    // from the real probe, and the statements run in DuckDB.
+    val values =
+      "SELECT * FROM (VALUES" +
+        " (1, '00000000-0000-0000-0000-00000000000a'::UUID, 'z'::ENUM('z', 'b'), '12:00:00+02'::TIMETZ," +
+        " '10:00:00.000000001'::TIME_NS, '{\"a\": 1}'::JSON)," +
+        " (2, '00000000-0000-0000-0000-00000000000b'::UUID, 'b'::ENUM('z', 'b'), '13:00:00+00'::TIMETZ," +
+        " '10:00:00.000000002'::TIME_NS, '[]'::JSON)" +
+        ") v(id, u, e, tz, tns, j)"
+    val probed = Using.resource(TestArrow.readerFor(s"$values LIMIT 0")) { r =>
+      ProbedColumn.fromArrow(r.getVectorSchemaRoot.getSchema)
+    }
+    probed.map(_.kind.sqlType) shouldBe
+      Vector("INTEGER", "VARCHAR", "VARCHAR", "TIME", "TIME_NS", "VARCHAR")
+    Class.forName("org.duckdb.DuckDBDriver")
+    Using.resource(DriverManager.getConnection("jdbc:duckdb:")) { conn =>
+      val st = conn.createStatement()
+      st.execute("CREATE SCHEMA s")
+      st.execute(s"CREATE TABLE s.t AS $values")
+      val t                                     = RestSql.Target("memory", "s", "t", None)
+      def ids(ps: (String, String)*): List[Int] =
+        val q = RestQuery
+          .parse(("select" -> "id") +: ps)
+          .flatMap(RestResolver.resolve(_, probed))
+          .fold(e => fail(s"${e.code}: ${e.message}"), identity)
+        Using.resource(st.executeQuery(RestSql.render(t, q, 100))) { rs =>
+          Iterator.continually(rs.next()).takeWhile(identity).map(_ => rs.getInt(1)).toList
+        }
+      ids("u" -> "like.*a", "order" -> "id") shouldBe List(1)
+      ids("u" -> "gt.00000000-0000-0000-0000-00000000000a", "order" -> "id") shouldBe List(2)
+      ids("u" -> "eq.00000000-0000-0000-0000-00000000000b") shouldBe List(2)
+      ids("j" -> "ilike.*A*") shouldBe List(1)
+      // The ENUM's position would put z first; as the VARCHAR it is shown as, b sorts first.
+      ids("order" -> "e") shouldBe List(2, 1)
+      ids("e" -> "gt.c") shouldBe List(1)
+      // The local time the edge shows, not the UTC instant.
+      ids("tz" -> "eq.12:00:00") shouldBe List(1)
+      ids("order" -> "tz.desc") shouldBe List(2, 1)
+      ids("tns" -> "eq.10:00:00.000000002") shouldBe List(2)
+      ids("u" -> "is.null") shouldBe Nil
     }
   }

@@ -19,7 +19,7 @@ class RestResolverSpec extends AnyFlatSpec with Matchers:
     ProbedColumn("ratio", ColumnKind.Floating("DOUBLE")),
     ProbedColumn("flag", ColumnKind.Bool),
     ProbedColumn("day", ColumnKind.Date),
-    ProbedColumn("at", ColumnKind.Time),
+    ProbedColumn("at", ColumnKind.Time("TIME")),
     ProbedColumn("ts", ColumnKind.Timestamp("TIMESTAMP")),
     ProbedColumn("tsns", ColumnKind.Timestamp("TIMESTAMP_NS")),
     ProbedColumn("tstz", ColumnKind.TimestampTz),
@@ -88,9 +88,12 @@ class RestResolverSpec extends AnyFlatSpec with Matchers:
     code("day" -> "ilike.2024*") shouldBe "invalid_filter"
   }
 
-  it should "refuse a filter or an order on nested and blob columns, but let them be selected" in {
+  it should "refuse a comparison or an order on nested and blob columns, but let them be selected" in {
     ok("select" -> "tags,raw").select.map(_.name) shouldBe Vector("tags", "raw")
-    code("tags" -> "is.null") shouldBe "invalid_filter"
+    // IS NULL compares nothing, so it applies to them too.
+    ok("tags" -> "is.null", "raw" -> "not.is.null").filters should have size 2
+    code("tags" -> "is.true") shouldBe "invalid_filter"
+    code("tags" -> "in.(x)") shouldBe "invalid_filter"
     code("raw" -> "eq.x") shouldBe "invalid_filter"
     code("order" -> "tags") shouldBe "invalid_parameter"
   }
@@ -136,6 +139,22 @@ class RestResolverSpec extends AnyFlatSpec with Matchers:
     ok("ts" -> "gt.2024-01-01T10:00:00.123456").filters should have size 1
     code("ts" -> "gt.2024-01-01T10:00:00.1234567") shouldBe "invalid_filter"
     ok("tsns" -> "gt.2024-01-01T10:00:00.123456789").filters should have size 1
+    // No more fraction digits than the type holds: the CAST would round a finer one half up.
+    val coarse = Vector(
+      ProbedColumn("s", ColumnKind.Timestamp("TIMESTAMP_S")),
+      ProbedColumn("ms", ColumnKind.Timestamp("TIMESTAMP_MS")),
+      ProbedColumn("tns", ColumnKind.Time("TIME_NS"))
+    )
+    def coarseCode(p: (String, String)) =
+      RestQuery.parse(Seq(p)).flatMap(RestResolver.resolve(_, coarse)).left.map(_.code)
+    coarseCode("s" -> "gt.2024-01-01T10:00:00") shouldBe a[Right[?, ?]]
+    coarseCode("s" -> "gt.2024-01-01T10:00:00.5") shouldBe Left("invalid_filter")
+    coarseCode("ms" -> "gt.2024-01-01T10:00:00.123") shouldBe a[Right[?, ?]]
+    coarseCode("ms" -> "gt.2024-01-01T10:00:00.1234") shouldBe Left("invalid_filter")
+    coarseCode("tns" -> "gt.10:00:00.123456789") shouldBe a[Right[?, ?]]
+    // DuckDB's TIME reaches 24:00:00.
+    ok("at" -> "eq.24:00:00").filters should have size 1
+    code("at" -> "eq.24:00:01") shouldBe "invalid_filter"
     // A zone on a naive timestamp would be silently dropped by DuckDB's cast, so it is refused.
     code("ts" -> "gt.2024-01-01T10:00:00Z") shouldBe "invalid_filter"
     ok("tstz" -> "gt.2024-01-01T10:00:00Z", "tstz" -> "lt.2024-01-01T10:00:00+02:00").filters should

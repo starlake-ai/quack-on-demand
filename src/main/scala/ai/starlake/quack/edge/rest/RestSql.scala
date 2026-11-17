@@ -50,10 +50,12 @@ object RestSql:
       " AND schema_name NOT IN ('information_schema', 'pg_catalog')" +
       s" ORDER BY schema_name LIMIT ${limit.toLong + 1}"
 
-  /** The table listing of one schema; `table_type` is `BASE TABLE` or `VIEW`. */
+  /** The table listing of one schema; `table_type` is `BASE TABLE` or `VIEW`. The schema compares
+    * case-insensitively, as the other routes bind it.
+    */
   def listTables(catalog: String, schema: String, limit: Int): String =
     "SELECT table_name, table_type FROM information_schema.tables" +
-      s" WHERE table_catalog = ${lit(catalog)} AND table_schema = ${lit(schema)}" +
+      s" WHERE table_catalog = ${lit(catalog)} AND lower(table_schema) = lower(${lit(schema)})" +
       s" ORDER BY table_name LIMIT ${limit.toLong + 1}"
 
   /** The `table_type` of one object, `BASE TABLE` or `VIEW`, for the table detail: matched on its
@@ -82,16 +84,29 @@ object RestSql:
   private def cast(raw: String, c: ProbedColumn): String =
     s"CAST(${lit(raw)} AS ${c.kind.sqlType})"
 
+  /** The column as filters and orders read it: cast to the kind's type where the export folds
+    * several DuckDB types into one kind. A text column may be a UUID or JSON, which have no LIKE
+    * and (UUID) no range comparison with VARCHAR, or an ENUM, which would otherwise sort by its
+    * position while comparing as text; a TIME may be a TIME WITH TIME ZONE, which compares with
+    * TIME on its UTC instant while the edge shows its local time. The cast is a no-op on a column
+    * already of that type (DuckDB adds none).
+    */
+  private def subject(c: ProbedColumn): String = c.kind match
+    case ColumnKind.Text         => s"CAST(${ident(c.name)} AS VARCHAR)"
+    case ColumnKind.Time("TIME") => s"CAST(${ident(c.name)} AS TIME)"
+    case _                       => ident(c.name)
+
   private def orderTerm(o: ResolvedOrder): String =
     val dir = if o.descending then " DESC" else " ASC"
-    ident(o.column.name) + dir + o.nulls.fold("")(" " + _.sql)
+    subject(o.column) + dir + o.nulls.fold("")(" " + _.sql)
 
   private def predicate(f: ResolvedFilter): String =
-    val col               = ident(f.column.name)
+    val col               = subject(f.column)
     def negate(p: String) = if f.negated then s"NOT ($p)" else p
     f.predicate match
       // `is` negates inside the operator (IS NOT NULL), every other operator as NOT (...).
-      case Predicate.Is(target) => s"$col IS ${if f.negated then "NOT " else ""}${target.sql}"
+      case Predicate.Is(target) =>
+        s"${ident(f.column.name)} IS ${if f.negated then "NOT " else ""}${target.sql}"
       case Predicate.Compare(cmp, raw) => negate(s"$col ${cmp.sql} ${cast(raw, f.column)}")
       case Predicate.Items(items)      =>
         negate(items.map(cast(_, f.column)).mkString(s"$col IN (", ", ", ")"))

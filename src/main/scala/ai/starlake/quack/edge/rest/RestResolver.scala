@@ -72,7 +72,10 @@ object RestResolver:
       lookup: String => Option[ProbedColumn]
   ): Either[RestError, ResolvedFilter] =
     lookup(f.param) match
-      case None                     => Left(RestError.unknownColumn(f.param, "filter"))
+      case None => Left(RestError.unknownColumn(f.param, "filter"))
+      // IS NULL needs no comparison, so it applies to every column, an opaque one included.
+      case Some(c) if f.predicate == Predicate.Is(IsTarget.Null) =>
+        Right(ResolvedFilter(c, f.negated, f.predicate))
       case Some(c) if !c.filterable =>
         Left(RestError.invalidFilter(f.param, "column type cannot be filtered"))
       case Some(c) =>
@@ -87,14 +90,17 @@ object RestResolver:
           case _ => Right(())
         typeOk.map(_ => ResolvedFilter(c, f.negated, f.predicate))
 
-  private val IntegerRe            = "-?[0-9]{1,40}".r
-  private val DecimalRe            = "-?[0-9]{1,40}(\\.[0-9]{1,40})?".r
-  private val FloatRe              = "-?[0-9]{1,40}(\\.[0-9]{1,40})?([eE][+-]?[0-9]{1,3})?".r
-  private val FloatSpecial         = Set("NaN", "Infinity", "-Infinity")
-  private val DateRe               = "[0-9]{4}-[0-9]{2}-[0-9]{2}".r
-  private def timeRe(frac: Int)    = s"[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,$frac})?"
+  private val IntegerRe    = "-?[0-9]{1,40}".r
+  private val DecimalRe    = "-?[0-9]{1,40}(\\.[0-9]{1,40})?".r
+  private val FloatRe      = "-?[0-9]{1,40}(\\.[0-9]{1,40})?([eE][+-]?[0-9]{1,3})?".r
+  private val FloatSpecial = Set("NaN", "Infinity", "-Infinity")
+  private val DateRe       = "[0-9]{4}-[0-9]{2}-[0-9]{2}".r
+  // A fraction holds at most `frac` digits, none at all for frac 0.
+  private def timeRe(frac: Int) =
+    "[0-9]{2}:[0-9]{2}:[0-9]{2}" + (if frac > 0 then s"(\\.[0-9]{1,$frac})?" else "")
   private def naiveTsRe(frac: Int) = s"[0-9]{4}-[0-9]{2}-[0-9]{2}T${timeRe(frac)}".r
   private val OffsetRe             = "(Z|[+-][0-9]{2}:[0-9]{2})"
+  private val EndOfDay             = "24:00:00(\\.0{1,9})?".r
   private val TzTsRe               = s"[0-9]{4}-[0-9]{2}-[0-9]{2}T${timeRe(6)}$OffsetRe".r
 
   /** One value against one column kind. The value reaches SQL only as `CAST(<literal> AS <type>)`,
@@ -125,11 +131,21 @@ object RestResolver:
       case ColumnKind.Date =>
         if DateRe.matches(raw) && Try(LocalDate.parse(raw)).isSuccess then Right(())
         else fail("expected an ISO-8601 date")
-      case ColumnKind.Time =>
-        if timeRe(6).r.matches(raw) && Try(LocalTime.parse(raw)).isSuccess then Right(())
+      case ColumnKind.Time(t) =>
+        val frac = if t == "TIME_NS" then 9 else 6
+        // DuckDB's TIME reaches 24:00:00, which LocalTime does not hold.
+        if timeRe(frac).r
+            .matches(raw) && (EndOfDay.matches(raw) || Try(LocalTime.parse(raw)).isSuccess)
+        then Right(())
         else fail("expected an ISO-8601 time")
       case ColumnKind.Timestamp(t) =>
-        val frac = if t == "TIMESTAMP_NS" then 9 else 6
+        // As many fraction digits as the type holds: the CAST rounds a finer value half up, which
+        // would move gt and lte by one unit.
+        val frac = t match
+          case "TIMESTAMP_S"  => 0
+          case "TIMESTAMP_MS" => 3
+          case "TIMESTAMP_NS" => 9
+          case _              => 6
         if naiveTsRe(frac).matches(raw) && Try(LocalDateTime.parse(raw)).isSuccess then Right(())
         else fail("expected an ISO-8601 timestamp without zone")
       case ColumnKind.TimestampTz =>
