@@ -107,6 +107,19 @@ service:
     annotations: {}
 
 # --- Ingress (REST/UI only - FlightSQL is gRPC and not handled here) --------
+# Routes to the manager port (service.rest). The default `path: /` exposes the
+# whole port: the admin API (/api), the console (/ui), /mcp, /health, /ready
+# and /metrics. To expose only the read-only REST data edge (dataEdge.enabled),
+# route the `/data/` prefix alone:
+#   hosts:
+#     - host: data.example.com
+#       paths:
+#         - path: /data/
+#           pathType: Prefix
+# Ingress controllers do not reliably refuse dot segments or encoded slashes;
+# the edge answers every request under /data/ itself (a 404 included), so none
+# of those reaches a manager route. Rate-limit per client and per Authorization value at the Ingress
+# controller: the edge has no throttle of its own.
 ingress:
   enabled: false
   className: ""
@@ -304,6 +317,15 @@ quack:
   enabled: true
   tls:
     enabled: false
+
+# Read-only REST data edge (tables and views as GET resources, JSON or CSV,
+# personal access tokens only), served under /data/v1 on the manager port
+# (service.rest, plain HTTP like the rest of the manager). Off by default
+# (QOD_DATA_EDGE_ENABLED). A PAT may use it unless its `tools` axis is set
+# without `rest`. Expose it through a reverse proxy or the ingress above
+# routing only `/data/`; in-cluster callers reach the whole manager port.
+dataEdge:
+  enabled: false
 
 flightsql:
   tls:

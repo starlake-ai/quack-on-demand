@@ -9,7 +9,8 @@ import net.sf.jsqlparser.statement.select.TableFunction
   * read with one of its own, so anything else the node holds (a time-travel `AT (...)`, a
   * `TABLESAMPLE`, a PIVOT written after the table) silently vanished: the statement then answered
   * as a different one, with no error. Such a read is refused instead, naming the clause, never a
-  * value from it. Keeping the clause (time travel through the wrap) is out of scope.
+  * value from it. The one clause kept is a time-travel clause [[TimeTravelCarrier]] placed, which
+  * the row-policy rewrite moves onto the base table ([[unkeptBesidesTimeTravel]]).
   *
   * Each description is a fixed phrase that fits after "read with".
   */
@@ -49,6 +50,17 @@ object TableClauses:
   private def timeTravelOf(t: Table): String =
     val text = Option(t.getTimeTravel).orElse(Option(t.getTimeTravelStrAfterAlias)).getOrElse("")
     if text.trim.toUpperCase(java.util.Locale.ROOT).startsWith("AT") then TimeTravel else ForAsOf
+
+  /** [[unkept]] for a rewrite that keeps `t`'s time-travel clause itself (the row-policy rewrite
+    * moves a clause [[TimeTravelCarrier]] placed onto the base table): the clause is set aside
+    * while the rest of `t` is checked, then put back, so it neither refuses the read nor trips the
+    * rendering comparison. Any other clause is refused as by [[unkept]].
+    */
+  def unkeptBesidesTimeTravel(t: Table, rebuiltName: String): Option[String] =
+    val clause = t.getTimeTravel
+    t.setTimeTravel(null): Unit
+    try unkept(t, rebuiltName)
+    finally t.setTimeTravel(clause): Unit
 
   /** The clause `tf` carries that a rewrite replacing the call with a derived table under its alias
     * would lose, if any. As for a table, the last check compares renderings, so a field a later

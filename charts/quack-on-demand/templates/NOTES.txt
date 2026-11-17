@@ -50,6 +50,23 @@ Quack on Demand has been installed.
     ATTACH 'quack:localhost:{{ .Values.service.quack.port }}' AS qod (TYPE quack, TOKEN 'tenant=<tenant>&pool=<pool>&user=<user>&password=<password>');
 {{- end }}
 
+{{- if .Values.dataEdge.enabled }}
+
+# Read-only REST data edge (/data/v1 on the manager port, PAT bearer only)
+
+  With the admin UI / REST port-forward above, mint a PAT (qod auth pat create),
+  then (replace <tenant>/<db>/<schema>/<table>):
+
+    curl -H "Authorization: Bearer <qod_pat_...>" \
+      "http://localhost:{{ .Values.service.rest.port }}/data/v1/tenant/<tenant>/database/<db>/schemas/<schema>/tables/<table>/rows?limit=10"
+
+  To publish it, route only the /data/ prefix to the manager Service (a
+  reverse proxy, or ingress paths `/data/` with pathType Prefix): the default
+  ingress path `/` exposes the admin API and the console too. The proxy must
+  rate-limit per client and per Authorization value. In-cluster callers reach
+  the whole manager port, whatever the proxy allows.
+{{- end }}
+
 # Watch the Quack node pods the manager spawns
 
   kubectl --namespace {{ .Release.Namespace }} get pods -l managed-by=quack-on-demand -w

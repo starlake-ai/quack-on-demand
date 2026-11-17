@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.rls
 
 import ai.starlake.acl.parser.{AstChildren, TableExtractor}
+import ai.starlake.quack.edge.policy.TimeTravelCarrier
+import ai.starlake.quack.edge.policy.TimeTravelCarrier.Carry
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.edge.policy.TableClauses
@@ -63,9 +65,9 @@ object RowPolicyRewriter:
 
   /** The statement parses but holds a shape the rewrite cannot filter or cannot ship (a
     * parenthesized statement reading a policy table, a syntax node the walk cannot follow, DuckDB's
-    * `//` integer division, a policy table carrying a clause the wrap would drop such as `AT
-    * (TIMESTAMP => ...)`). Denied by the router with `reason`, a fixed string that never carries
-    * the SQL, so the caller learns what to change.
+    * `//` integer division, a policy table carrying a clause the wrap would drop such as a
+    * `TABLESAMPLE`; a time-travel clause TimeTravelCarrier placed is kept). Denied by the router
+    * with `reason`, a fixed string that never carries the SQL, so the caller learns what to change.
     */
   final case class Refused(reason: String) extends Outcome
 
@@ -170,15 +172,24 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       // Parsed from the lexer-canonical rendering, never the raw text: JSqlParser tokenizes
       // DuckDB's escape and dollar-quoted strings differently, and a table it cannot see is a
       // table no row policy filters. A rendering refusal is input DuckDB rejects anyway.
+      // A time-travel clause is invisible to jsqlparser: carry it on its table reference, which
+      // maybeWrap keeps as the BASE table inside the filtered view, and put it back afterwards
+      // (TimeTravelCarrier). A Passthrough forwards the caller's original text, clause included.
       val parsed = ParserInput
         .render(sql)
         .toOption
-        .flatMap(in =>
-          Try(ai.starlake.sql.JSqlStatements.parseFirst(in.text)).toOption.map(_ -> in.exact)
+        .flatMap { in =>
+          TimeTravelCarrier.carry(in.text) match
+            case Carry.Absent                    => Some((in.text, Vector.empty[String], in.exact))
+            case Carry.Unplaceable               => None
+            case Carry.Carried(carried, clauses) => Some((carried, clauses, in.exact))
+        }
+        .flatMap((text, clauses, exact) =>
+          Try(ai.starlake.sql.JSqlStatements.parseFirst(text)).toOption.map((_, clauses, exact))
         )
       parsed match
-        case None                        => PassthroughParseFailed
-        case Some((stmt: Select, exact)) =>
+        case None                                 => PassthroughParseFailed
+        case Some((stmt: Select, clauses, exact)) =>
           val values  = tokenValues(eff)
           val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
           try
@@ -196,6 +207,9 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
             // The rewrite is printed from the parser input; when that is not the caller's
             // statement (ParserInput.Rendered.exact) shipping it would run a different one.
             else if !changed.get() then Passthrough
+            // A clause that cannot be put back would read the current data, not the snapshot.
+            else if clauses.nonEmpty && !TimeTravelCarrier.restore(stmt, clauses) then
+              PassthroughParseFailed
             else if exact then Rewritten(stmt.toString)
             else Refused(InexactRefusal)
           catch
@@ -215,7 +229,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
               Failed("row policy failed to apply")
         // An executing EXPLAIN classifies as its statement (Select): DuckDB runs it under EXPLAIN
         // ANALYZE, and any plan reports row counts, so one reading a policy table is refused.
-        case Some((ex: ExplainStatement, _)) =>
+        case Some((ex: ExplainStatement, _, _)) =>
           if explainReadsPolicyTable(ex, eff, ctx) then Refused(ExplainRefusal) else Passthrough
         // DESCRIBE / SHOW: no row reaches the caller. Any other kind never gets here (not Select),
         // and the protected-write guard analyses it instead.
@@ -360,12 +374,18 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       val baseTable = new Table(t.getName)
       Option(t.getSchemaName).foreach(_ => baseTable.setSchemaName(t.getSchemaName))
       Option(t.getDatabase).foreach(baseTable.setDatabase)
-      // The rebuild keeps the name and the alias only. Anything else on t (a time-travel AT
-      // clause, a sample, a PIVOT after the table) would vanish and the filtered read would
-      // answer as another statement, so it is refused, naming the clause, never a value.
-      TableClauses
-        .unkept(t, baseTable.getFullyQualifiedName)
-        .foreach(clause => throw new Refusal(unkeptClauseRefusal(clause)))
+      // A time-travel clause TimeTravelCarrier placed pins the BASE table: on the wrapper it would
+      // be invalid SQL, and dropping it would filter the current data instead of the snapshot.
+      // Anything else on t (another time-travel spelling, a sample, a PIVOT after the table) would
+      // vanish with the rebuild and the filtered read would answer as another statement, so it is
+      // refused, naming the clause, never a value.
+      val carried =
+        TimeTravelCarrier.isPlaceholder(t.getTimeTravel) && t.getTimeTravelStrAfterAlias == null
+      val unkept =
+        if carried then TableClauses.unkeptBesidesTimeTravel(t, baseTable.getFullyQualifiedName)
+        else TableClauses.unkept(t, baseTable.getFullyQualifiedName)
+      unkept.foreach(clause => throw new Refusal(unkeptClauseRefusal(clause)))
+      if carried then baseTable.setTimeTravel(t.getTimeTravel): Unit
 
       val predicate =
         matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")

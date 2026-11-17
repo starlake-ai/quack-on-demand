@@ -16,13 +16,17 @@ spec:
   ingress:
     # REST/UI + FlightSQL edge. Empty ingressFrom = allow from anywhere
     # (e.g. already gated by an Ingress / LoadBalancer upstream).
+    # A NetworkPolicy matches the POD's port, so these name the container
+    # ports (deployment.yaml), never the Service ports, which may differ.
+    # The REST data edge (dataEdge.enabled) is served under /data/ on rest-ui:
+    # a NetworkPolicy cannot tell it from the admin API on the same port.
     - ports:
         - protocol: TCP
-          port: {{ .Values.service.rest.port }}
+          port: rest-ui
         - protocol: TCP
-          port: {{ .Values.service.flightsql.port }}
+          port: flightsql
         - protocol: TCP
-          port: {{ .Values.service.quack.port }}
+          port: quack
       {{- with .Values.networkPolicy.ingressFrom }}
       from:
         {{- toYaml . | nindent 8 }}

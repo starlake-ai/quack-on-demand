@@ -28,5 +28,8 @@ object EndpointModules:
     UndropEndpoints,
     RestoreEndpoints,
     BranchEndpoints,
-    FleetEndpoints
+    FleetEndpoints,
+    // Served under /data/v1 by RestEdgeRoutes, mounted ahead of ManagerServer's own routes and
+    // never among its API routes: registered here for the OpenAPI document only.
+    ai.starlake.quack.edge.rest.RestEdgeEndpoints
   )

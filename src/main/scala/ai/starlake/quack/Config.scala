@@ -1721,3 +1721,87 @@ final case class QuackNativeConfig(
     "QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC must not exceed QOD_QUACK_BODY_TIMEOUT_SEC, which must be " +
       "at most 86400"
   )
+
+/** The read-only REST data edge (`quack-data-edge` block): `GET /data/v1/...` on the manager's
+  * port, over PAT bearer auth, translating one request into one SELECT through the routed executor.
+  * Off by default. Exposure is the reverse proxy's: one `/data/` prefix rule.
+  */
+final case class RestEdgeConfig(
+    @field @ConfigField(
+      envVar = "QOD_DATA_EDGE_ENABLED",
+      description =
+        "Serve the read-only REST data edge under /data/v1 on the manager port (PAT bearer, GET only)."
+    )
+    enabled: Boolean,
+    @field @ConfigField(
+      envVar = "QOD_DATA_EDGE_DEFAULT_LIMIT",
+      description = "Rows returned by /rows when the request gives no limit."
+    )
+    defaultLimit: Int,
+    @field @ConfigField(
+      envVar = "QOD_DATA_EDGE_MAX_ROWS",
+      description =
+        "Server row cap for /rows and the listings; a request limit or a token's maxRows can only lower it."
+    )
+    maxRows: Int,
+    @field @ConfigField(
+      envVar = "QOD_DATA_EDGE_MAX_RESPONSE_BYTES",
+      description =
+        "Largest /rows body, in bytes (at most 64 MiB); a page that would exceed it is cut at a row boundary and flagged X-QoD-Truncated."
+    )
+    maxResponseBytes: Long,
+    @field @ConfigField(
+      envVar = "QOD_DATA_EDGE_STMT_TIMEOUT_SEC",
+      description =
+        "Bounded wait per statement, in seconds (a token's stmtTimeoutMs can only lower it); past it the edge answers 504, or 503 pool_resuming when the pool was cold. Must exceed PROXY_RESUME_HOLD_TIMEOUT_SEC."
+    )
+    stmtTimeoutSec: Int,
+    @field @ConfigField(
+      envVar = "QOD_DATA_EDGE_MAX_CONCURRENT_REQUESTS",
+      description =
+        "Most data edge requests answered at once; past it a request gets 503 edge_busy. Keeps the edge from taking all of the manager listener's work."
+    )
+    maxConcurrentRequests: Int
+)
+
+object RestEdgeConfig:
+
+  /** The largest `QOD_DATA_EDGE_MAX_RESPONSE_BYTES`: a page is held whole in the heap until it is
+    * written (twice its size while it is encoded), and the edge's page budget reserves that much
+    * per data statement (`RestPageBudget`).
+    */
+  val MaxResponseBytes: Long = 64L * 1024 * 1024
+
+  /** Boot validation, in the `Either[String, Unit]` style of `HaPreconditions.validate`: only the
+    * numbers. A disabled edge is never checked, so a stale override on a switched-off block cannot
+    * stop a boot.
+    *
+    * `resumeHoldTimeoutSec` is the FlightSQL edge's resume hold, which the router applies to the
+    * REST edge's statements too. The edge's own wait must outlast it: otherwise a request to a
+    * hibernated pool always ends on the edge's clock while the router is still holding, and the
+    * client never sees the router's retryable answer. Refused rather than clamped, so the two
+    * values an operator set are never silently replaced.
+    */
+  def validate(cfg: RestEdgeConfig, resumeHoldTimeoutSec: Long): Either[String, Unit] =
+    def atLeast(value: Int, min: Int, env: String): Option[String] =
+      Option.when(value < min)(s"$env must be >= $min, got $value")
+    if !cfg.enabled then Right(())
+    else
+      val problems = List(
+        atLeast(cfg.defaultLimit, 1, "QOD_DATA_EDGE_DEFAULT_LIMIT"),
+        Option.when(cfg.maxRows < cfg.defaultLimit)(
+          s"QOD_DATA_EDGE_MAX_ROWS (${cfg.maxRows}) must be >= QOD_DATA_EDGE_DEFAULT_LIMIT " +
+            s"(${cfg.defaultLimit})"
+        ),
+        Option.when(cfg.maxResponseBytes < 1024 || cfg.maxResponseBytes > MaxResponseBytes)(
+          s"QOD_DATA_EDGE_MAX_RESPONSE_BYTES must be in 1024..$MaxResponseBytes, got " +
+            cfg.maxResponseBytes
+        ),
+        atLeast(cfg.stmtTimeoutSec, 1, "QOD_DATA_EDGE_STMT_TIMEOUT_SEC"),
+        Option.when(cfg.stmtTimeoutSec >= 1 && cfg.stmtTimeoutSec.toLong <= resumeHoldTimeoutSec)(
+          s"QOD_DATA_EDGE_STMT_TIMEOUT_SEC (${cfg.stmtTimeoutSec}) must be greater than " +
+            s"PROXY_RESUME_HOLD_TIMEOUT_SEC ($resumeHoldTimeoutSec)"
+        ),
+        atLeast(cfg.maxConcurrentRequests, 1, "QOD_DATA_EDGE_MAX_CONCURRENT_REQUESTS")
+      ).flatten
+      problems.headOption.map(p => s"quack-data-edge: $p").toLeft(())

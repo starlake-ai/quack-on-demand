@@ -904,3 +904,78 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       ctx
     ) shouldBe a[Deny]
   }
+
+  // ---- time travel under a policy ---------------------------------------------------------------
+
+  private def guardWithHistory(stable: Set[(String, String, String)]): ProtectedWriteGuard =
+    new ProtectedWriteGuard(
+      new ColumnCatalog.MapCatalog(
+        Map(("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_region")),
+        stable
+      ),
+      clsEnabled = true,
+      rlsEnabled = true
+    )
+
+  private val customerStable = Set(("acme_tpch", "tpch1", "customer"))
+
+  "a time-travel read by a policy holder" should "be left to the rewriters when its table's names never changed" in {
+    guardWithHistory(customerStable).check(
+      "SELECT c_id FROM tpch1.customer AT (VERSION => 3)",
+      StatementKind.Select,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe Allow
+  }
+
+  it should "be denied on a name whose table or columns were renamed or reused, which the policies keyed on today's names would miss" in {
+    // `clients` was renamed to the masked `customer` since snapshot 3: no history proves it stable.
+    List(
+      "SELECT c_email FROM clients AT (VERSION => 3)"                     -> StatementKind.Select,
+      "SELECT c_email FROM tpch1.clients c AT (TIMESTAMP => now())"       -> StatementKind.Select,
+      "INSERT INTO tpch1.scratch SELECT * FROM clients AT (VERSION => 3)" -> StatementKind.Dml
+    ).foreach { (sql, kind) =>
+      guardWithHistory(customerStable).check(
+        sql,
+        kind,
+        eff(tenantUser, rows = List(rowPolicy)),
+        ctx
+      ) match
+        case Deny(reason) => reason should include("cannot be read with time travel")
+        case Allow        => fail(s"expected a denial: $sql")
+    }
+    // The same masked table, its own name stable no more (a column renamed), is denied too.
+    guardWithHistory(Set.empty).check(
+      "SELECT c_id FROM customer AT (VERSION => 3)",
+      StatementKind.Select,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }
+
+  it should "be denied when the clause cannot be tied to one table" in {
+    guardWithHistory(customerStable).check(
+      "SELECT * FROM (SELECT * FROM customer) d AT (VERSION => 3)",
+      StatementKind.Select,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) match
+      case Deny(reason) => reason should include("could not be tied to its table")
+      case Allow        => fail("expected a denial")
+  }
+
+  it should "not concern a principal with no policy, nor a superuser" in {
+    val sql = "SELECT c_email FROM clients AT (VERSION => 3)"
+    guardWithHistory(Set.empty).check(
+      sql,
+      StatementKind.Select,
+      eff(tenantUser),
+      ctx
+    ) shouldBe Allow
+    guardWithHistory(Set.empty).check(
+      sql,
+      StatementKind.Select,
+      eff(superuser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe Allow
+  }
