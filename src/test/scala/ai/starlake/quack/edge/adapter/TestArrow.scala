@@ -9,6 +9,7 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.duckdb.{DuckDBConnection, DuckDBResultSet}
 
 import java.sql.{Connection, DriverManager, ResultSet}
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Builds throw-away ArrowReader instances backed by an in-process DuckDB so tests can stub out
   * [[QuackHttpClient.query]] without standing up a real Quack node.
@@ -60,26 +61,51 @@ object TestArrow:
     * closes `conn`.
     */
   def fromResultSet(conn: Connection, rs: ResultSet): ArrowReader =
-    val exported = rs
-      .asInstanceOf[DuckDBResultSet]
+    new ClosingReader(exported(rs), conn, () => ())
+
+  /** [[readerFor]], each batch arriving `delayMs` after it is asked for, as from a node still
+    * producing it (a large sort, sparse matches); `loads` counts the batches asked for.
+    */
+  def slowReader(
+      sql: String,
+      delayMs: Long,
+      loads: AtomicInteger = new AtomicInteger()
+  ): ArrowReader =
+    val conn = shared.duplicate()
+    try
+      new ClosingReader(
+        exported(conn.createStatement().executeQuery(sql)),
+        conn,
+        () =>
+          loads.incrementAndGet()
+          Thread.sleep(delayMs)
+      )
+    catch
+      case e: Throwable =>
+        conn.close()
+        throw e
+
+  private def exported(rs: ResultSet): ArrowReader =
+    rs.asInstanceOf[DuckDBResultSet]
       .arrowExportStream(sharedAllocator, 1024L)
       .asInstanceOf[ArrowReader]
-    new ClosingReader(exported, conn)
 
-  /** `inner`, closing `conn` after it. Every read delegates, so the root, the batches and the
-    * dictionaries are the export's own.
+  /** `inner`, closing `conn` after it, running `beforeLoad` before each batch is loaded. Every read
+    * delegates, so the root, the batches and the dictionaries are the export's own.
     */
-  private final class ClosingReader(inner: ArrowReader, conn: Connection)
+  private final class ClosingReader(inner: ArrowReader, conn: Connection, beforeLoad: () => Unit)
       extends ArrowReader(sharedAllocator):
     override def getVectorSchemaRoot: VectorSchemaRoot = inner.getVectorSchemaRoot
     override def getDictionaryVectors: java.util.Map[java.lang.Long, Dictionary] =
       inner.getDictionaryVectors
     override def lookup(id: Long): Dictionary                    = inner.lookup(id)
     override def getDictionaryIds: java.util.Set[java.lang.Long] = inner.getDictionaryIds
-    override def loadNextBatch(): Boolean                        = inner.loadNextBatch()
-    override def bytesRead(): Long                               = inner.bytesRead()
-    override def close(): Unit                                   = close(true)
-    override def close(closeReadSource: Boolean): Unit           =
+    override def loadNextBatch(): Boolean                        =
+      beforeLoad()
+      inner.loadNextBatch()
+    override def bytesRead(): Long                     = inner.bytesRead()
+    override def close(): Unit                         = close(true)
+    override def close(closeReadSource: Boolean): Unit =
       try inner.close(closeReadSource)
       finally conn.close()
     override protected def closeReadSource(): Unit = ()

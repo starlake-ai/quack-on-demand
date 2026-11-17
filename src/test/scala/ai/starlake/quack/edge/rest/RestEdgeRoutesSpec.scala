@@ -339,3 +339,28 @@ class RestEdgeRoutesSpec extends AnyFlatSpec with Matchers:
     resp.body.compile.drain.unsafeRunSync()
     budget.holds(rid) shouldBe false
   }
+
+  it should "keep its page budget while a slow client reads it, past the unpulled backstop" in {
+    val page   = "x" * (3 * RestEdgeRoutes.WriteChunkBytes + 17)
+    val budget = RestPageBudget.forHeap(1024L, 64L * 1024 * 1024, 100.millis)
+    val held   = new RestEdgeRoutes(
+      cfg(),
+      List(RestEdgeEndpoints.readRows.serverLogic { case (_, _, _, _, req) =>
+        budget.reserve(req.requestId, 1.second) *>
+          budget.settle(req.requestId, page.length.toLong).as(ok(page))
+      }),
+      pageBudget = budget
+    )
+    val resp = held.routes.orNotFound.run(request(RowsPath)).unsafeRunSync()
+    val rid  = header(resp, "X-Request-Id").getOrElse("")
+    // The client stalls after the first chunk for longer than the backstop's hold.
+    val stalled = resp.body.chunks.zipWithIndex
+      .evalMap { (_, i) =>
+        if i == 0 then IO.sleep(400.millis) *> IO(budget.holds(rid)) else IO.pure(true)
+      }
+      .compile
+      .toList
+      .unsafeRunSync()
+    stalled.forall(identity) shouldBe true
+    budget.holds(rid) shouldBe false
+  }

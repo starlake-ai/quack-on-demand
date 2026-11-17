@@ -37,7 +37,8 @@
   `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB, cut at a
   row boundary), and the pages in flight share a fifth of the heap (past it a request waits up to
   its statement bound, then answers `503 edge_busy`),
-  with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
+  with `X-QoD-Truncated` when a server or token cap cut the page; each statement, the reading of
+  its `/rows` page from the node included, is bounded by
   `min(QOD_DATA_EDGE_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
   that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
   a request to a cold pool that the edge's own wait cuts short. Boot refuses a

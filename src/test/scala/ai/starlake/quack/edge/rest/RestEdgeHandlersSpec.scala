@@ -859,6 +859,47 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     budget.release("rid-0001").unsafeRunSync()
   }
 
+  it should "be given back at once when the data statement answers anything but a page" in {
+    val budget = RestPageBudget.forHeap(1024L * 1024, 10L * 1024 * 1024, 1.minute)
+    val failing: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 3)(sql)
+        else IO.pure(Left(RouterFailure.Internal("node gone")))
+    val e = errOf(rows(fixture(respond = Some(failing), pageBudget = budget), "customer"))
+    e._3.error shouldBe "upstream_error"
+    // An error body the server never pulls would otherwise hold the page: nothing gives it back.
+    budget.holds("rid-0001") shouldBe false
+  }
+
+  "a page whose rows arrive past the statement bound" should "get 504 and give its reservation back" in {
+    val budget = RestPageBudget.forHeap(1024L * 1024, 10L * 1024 * 1024, 1.minute)
+    val loads  = new AtomicInteger()
+    val closed = new AtomicInteger()
+    // The node answers at once, then sends each batch 300 ms behind (a large sort, sparse
+    // matches): ten batches, three seconds in all, past the half-second bound.
+    val slow: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 3)(sql)
+        else
+          IO {
+            val r = TestArrow.slowReader(
+              "SELECT range::INTEGER AS c_id, 'e' AS c_email, 'X' AS c_region FROM range(10240)",
+              300L,
+              loads
+            )
+            Right(QueryResult(r, () => { closed.incrementAndGet(); r.close() }, "n-data", 1L))
+          }
+    val fx    = fixture(respond = Some(slow), stmtTimeout = Some(500.millis), pageBudget = budget)
+    val start = System.nanoTime()
+    val e     = errOf(rows(fx, "customer", "limit=20000"))
+    (e._1, e._3.error) shouldBe (StatusCode.GatewayTimeout, "statement_timeout")
+    // The encoding stopped at the bound rather than pulling the whole stream.
+    (System.nanoTime() - start).nanos should be < 2.seconds
+    loads.get should be < 10
+    budget.holds("rid-0001") shouldBe false
+    closed.get shouldBe 1
+  }
+
   "a resuming pool" should "get 503 pool_resuming with Retry-After" in {
     val resuming: AtomicInteger => Responder =
       _ => _ => IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))

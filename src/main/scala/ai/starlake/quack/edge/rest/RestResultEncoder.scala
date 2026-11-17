@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.time.format.DateTimeFormatter
 import java.time.{Instant, LocalDate, LocalDateTime, LocalTime, ZoneOffset}
 import java.util.Base64
+import scala.concurrent.duration.Deadline
 import scala.jdk.CollectionConverters.*
 
 /** A buffered body: the first `length` bytes of `array`, UTF-8 text encoded once, by the encoder
@@ -59,9 +60,16 @@ object BodyBytes:
 object RestResultEncoder:
 
   /** `rows` rows were encoded; `more` says a further row existed past the cap; `cut` says the byte
-    * cap stopped the page before the row cap did (a further row then always exists).
+    * cap stopped the page before the row cap did (a further row then always exists); `overdue` says
+    * the deadline passed before the page was done, so it is incomplete and is never served.
     */
-  final case class Encoded(bytes: BodyBytes, rows: Int, more: Boolean, cut: Boolean = false):
+  final case class Encoded(
+      bytes: BodyBytes,
+      rows: Int,
+      more: Boolean,
+      cut: Boolean = false,
+      overdue: Boolean = false
+  ):
     def body: String = bytes.text
 
   /** At most `maxRows` rows and at most `maxBytes` bytes of UTF-8 body. The byte cap cuts at a row
@@ -72,34 +80,51 @@ object RestResultEncoder:
     * The page is encoded ONCE, row by row, into a single growable buffer whose bytes become the
     * response body as they are: a page near the cap is never held twice, as text and again as
     * bytes.
+    *
+    * `deadline` is checked after each batch arrives and before each row: a page it passes stops
+    * there, `overdue`. The rows come from a stream the node may still be producing (a large sort,
+    * sparse matches), and the buffer grows while it is pulled, so without it nothing would bound
+    * how long a page holds its share of the heap. A batch the node never sends is not interrupted:
+    * the check runs once it arrives.
     */
   def encode(
       format: RestFormat,
       reader: ArrowReader,
       maxRows: Int,
-      maxBytes: Long = Long.MaxValue
+      maxBytes: Long = Long.MaxValue,
+      deadline: Option[Deadline] = None
   ): Encoded = format match
-    case RestFormat.Json => json(reader, maxRows, maxBytes)
-    case RestFormat.Csv  => csv(reader, maxRows, maxBytes)
+    case RestFormat.Json => json(reader, maxRows, maxBytes, deadline)
+    case RestFormat.Csv  => csv(reader, maxRows, maxBytes, deadline)
 
-  def json(reader: ArrowReader, maxRows: Int, maxBytes: Long = Long.MaxValue): Encoded =
+  def json(
+      reader: ArrowReader,
+      maxRows: Int,
+      maxBytes: Long = Long.MaxValue,
+      deadline: Option[Deadline] = None
+  ): Encoded =
     val out   = new Utf8Buffer
     val names = fieldNames(reader)
     out.write('[')
     // The opening and closing brackets count toward the cap.
-    val (rows, more, cut) = foreachRow(reader, maxRows, maxBytes - 2, out) { (cells, n) =>
+    val page = foreachRow(reader, maxRows, maxBytes - 2, deadline, out) { (cells, n) =>
       (if n > 0 then "," else "") + Json.fromFields(names.zip(cells)).noSpaces
     }
     out.write(']')
-    Encoded(out.toBodyBytes, rows, more, cut)
+    Encoded(out.toBodyBytes, page.rows, page.more, page.cut, page.overdue)
 
-  def csv(reader: ArrowReader, maxRows: Int, maxBytes: Long = Long.MaxValue): Encoded =
-    val out               = new Utf8Buffer
-    val header            = out.append(fieldNames(reader).map(csvField).mkString("", ",", "\r\n"))
-    val (rows, more, cut) = foreachRow(reader, maxRows, maxBytes - header, out) { (cells, _) =>
+  def csv(
+      reader: ArrowReader,
+      maxRows: Int,
+      maxBytes: Long = Long.MaxValue,
+      deadline: Option[Deadline] = None
+  ): Encoded =
+    val out    = new Utf8Buffer
+    val header = out.append(fieldNames(reader).map(csvField).mkString("", ",", "\r\n"))
+    val page   = foreachRow(reader, maxRows, maxBytes - header, deadline, out) { (cells, _) =>
       cells.map(csvCell).mkString("", ",", "\r\n")
     }
-    Encoded(out.toBodyBytes, rows, more, cut)
+    Encoded(out.toBodyBytes, page.rows, page.more, page.cut, page.overdue)
 
   private def fieldNames(reader: ArrowReader): Vector[String] =
     reader.getVectorSchemaRoot.getSchema.getFields.asScala.toVector.map(_.getName)
@@ -117,47 +142,76 @@ object RestResultEncoder:
 
     def toBodyBytes: BodyBytes = new BodyBytes(buf, count)
 
+  /** What [[foreachRow]] wrote: the rows, whether another existed, whether the budget stopped the
+    * page, and whether the deadline did.
+    */
+  private final case class Page(rows: Int, more: Boolean, cut: Boolean, overdue: Boolean)
+
   /** Renders at most `maxRows` rows with `render` and writes each to `out` while the running UTF-8
     * total stays within `budget`, then peeks (loading further batches if needed) for one more row.
-    * Returns the rows written, whether another existed, and whether the budget stopped the page.
+    * A `deadline` passed when a batch arrives, or before a row, stops the page as overdue.
     */
-  private def foreachRow(reader: ArrowReader, maxRows: Int, budget: Long, out: Utf8Buffer)(
+  private def foreachRow(
+      reader: ArrowReader,
+      maxRows: Int,
+      budget: Long,
+      deadline: Option[Deadline],
+      out: Utf8Buffer
+  )(
       render: (Vector[Json], Int) => String
-  ): (Int, Boolean, Boolean) =
-    val root = reader.getVectorSchemaRoot
-    var n    = 0
-    var used = 0L
-    var more = false
-    var cut  = false
-    var done = false
+  ): Page =
+    val late    = () => deadline.exists(_.isOverdue())
+    val root    = reader.getVectorSchemaRoot
+    var n       = 0
+    var used    = 0L
+    var more    = false
+    var cut     = false
+    var overdue = false
+    var done    = false
     while !done && reader.loadNextBatch() do
-      val vectors = root.getFieldVectors.asScala.toVector
-      val cols    = vectors.map(v => encoderFor(v, reader))
-      val floors  = vectors.map(floorOf)
-      val count   = root.getRowCount
-      var i       = 0
-      while !cut && i < count && n < maxRows do
-        // A row whose floor alone passes the budget is cut before any of its cells is decoded.
-        if used + floors.foldLeft(0L)((acc, f) => acc + f(i)) > budget then cut = true
-        else
-          val bytes = render(cols.map(_(i)), n).getBytes(UTF_8)
-          if used + bytes.length > budget then cut = true
+      if late() then
+        overdue = true
+        done = true
+      else
+        val vectors = root.getFieldVectors.asScala.toVector
+        val cols    = vectors.map(v => encoderFor(v, reader))
+        val floors  = vectors.map(floorOf)
+        val count   = root.getRowCount
+        var i       = 0
+        while !cut && !overdue && i < count && n < maxRows do
+          if late() then overdue = true
+          // A row whose floor alone passes the budget is cut before any of its cells is decoded.
+          else if used + floors.foldLeft(0L)((acc, f) => acc + f(i)) > budget then cut = true
           else
-            used += out.append(bytes)
-            n += 1
-            i += 1
-      if cut then
-        more = true
-        done = true
-      else if n >= maxRows then
-        more = i < count || hasAnotherRow(reader)
-        done = true
-    (n, more, cut)
+            val bytes = render(cols.map(_(i)), n).getBytes(UTF_8)
+            if used + bytes.length > budget then cut = true
+            else
+              used += out.append(bytes)
+              n += 1
+              i += 1
+        if overdue then done = true
+        else if cut then
+          more = true
+          done = true
+        else if n >= maxRows then
+          if i < count then more = true
+          else
+            hasAnotherRow(reader, late) match
+              case Some(another) => more = another
+              case None          => overdue = true
+          done = true
+    Page(n, more, cut, overdue)
 
-  private def hasAnotherRow(reader: ArrowReader): Boolean =
-    var found = false
-    while !found && reader.loadNextBatch() do found = reader.getVectorSchemaRoot.getRowCount > 0
-    found
+  /** Whether a further row exists, loading batches until one holds a row; None when `late` says the
+    * deadline passed as a batch arrived (a sparse stream may take long to show one more row).
+    */
+  private def hasAnotherRow(reader: ArrowReader, late: () => Boolean): Option[Boolean] =
+    var found   = false
+    var stopped = false
+    while !found && !stopped && reader.loadNextBatch() do
+      if late() then stopped = true
+      else found = reader.getVectorSchemaRoot.getRowCount > 0
+    Option.unless(stopped)(found)
 
   // ---- CSV -----------------------------------------------------------------------------------
 
