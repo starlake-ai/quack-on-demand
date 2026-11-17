@@ -405,6 +405,15 @@ def test_pat_list_hits_the_list_route(runner, respx_mock):
     assert route.called
 
 
+def test_pat_tools_hits_the_catalog_route(runner, respx_mock):
+    route = respx_mock.get(f"{BASE}/api/auth/pat/tools").mock(
+        return_value=httpx.Response(200, json={"tools": []})
+    )
+    result = runner.invoke(app, ["auth", "pat", "tools"])
+    assert result.exit_code == 0
+    assert route.called
+
+
 def test_pat_revoke_sends_id(runner, respx_mock):
     route = respx_mock.post(f"{BASE}/api/auth/pat/revoke").mock(
         return_value=httpx.Response(200, json={})

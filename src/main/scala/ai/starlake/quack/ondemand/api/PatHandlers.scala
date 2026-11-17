@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import java.util.Locale
+import ai.starlake.quack.mcp.McpToolCatalog
 import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.state.{PatRecord, PatStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -8,7 +9,8 @@ import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import sttp.model.StatusCode
 
-/** Self-service personal-access-token management (`/api/auth/pat/create|list|revoke|delete`).
+/** Self-service personal-access-token management (`/api/auth/pat/create|list|revoke|delete`), and
+  * the catalog of names valid on the `tools` axis (`/api/auth/pat/tools`).
   *
   * Two credentials reach this class: a session JWT, and -- since this design's whole point is
   * letting an agent hold a credential it cannot exceed -- a PAT itself. That reverses what this
@@ -219,7 +221,8 @@ final class PatHandlers(
 
   def create(token: Option[String], req: PatCreateRequest): Out[PatCreateResponse] = IO.blocking {
     callerOf(token).flatMap { caller =>
-      val name = req.name.trim
+      val name             = req.name.trim
+      val unknownToolNames = req.tools.fold(Nil)(McpToolCatalog.unknown)
       if name.isEmpty then
         Left((StatusCode.BadRequest, ErrorResponse("invalid_name", "token name must be non-empty")))
       // Deliberately `!isAfter`, not `isBefore`: an expiry of exactly now yields a
@@ -246,6 +249,12 @@ final class PatHandlers(
             ErrorResponse("invalid_stmt_timeout_ms", "stmtTimeoutMs must be positive")
           )
         )
+      // A name the `tools` axis does not know grants nothing (MCP lists no such tool, the data
+      // edge looks only for `rest`), so a typo would mint a token that silently reaches less than
+      // asked. Refused before `narrow`, for a session and a PAT caller alike, and only here at
+      // mint: a token already stored is never re-checked, so a tool later renamed or removed
+      // leaves existing tokens as they are.
+      else if unknownToolNames.nonEmpty then Left(unknownToolError(unknownToolNames))
       else
         val requested = requestedRestriction(req)
         caller match
@@ -273,6 +282,38 @@ final class PatHandlers(
               // token's own row) except for a concurrent revoke landing in between;
               // answered with the same non-leak 404 as any other unreachable parent.
               case _ => Left(notFound)
+    }
+  }
+
+  /** `400 unknown_tool` naming at most [[PatHandlers.MaxUnknownShown]] of the unknown names. Each
+    * is shown in printable ASCII and cut at [[PatHandlers.MaxNameShown]] characters: the names are
+    * the caller's own input, echoed into a message a console renders and a log may keep.
+    */
+  private def unknownToolError(unknown: List[String]): (StatusCode, ErrorResponse) =
+    val shown = unknown.take(PatHandlers.MaxUnknownShown).map(PatHandlers.shownName)
+    val more  = unknown.size - shown.size
+    val names = shown.mkString(", ") + (if more > 0 then s" and $more more" else "")
+    (
+      StatusCode.BadRequest,
+      ErrorResponse(
+        "unknown_tool",
+        s"unknown tool name(s) on the tools axis: $names; GET /api/auth/pat/tools lists the " +
+          "valid names"
+      )
+    )
+
+  /** The names valid on the `tools` axis ([[McpToolCatalog.entries]]), for any authenticated
+    * caller: the same identity check as the other routes here, nothing scoped by it, since the
+    * catalog is the same for everyone. A non-admin is shown the admin tools too, labelled as such:
+    * they are valid names, which an admin-owned token can use.
+    */
+  def tools(token: Option[String]): Out[PatToolsResponse] = IO.blocking {
+    callerOf(token).map { _ =>
+      PatToolsResponse(
+        McpToolCatalog.entries.map(e =>
+          PatToolEntry(e.name, e.label, e.group.wire, e.readOnly, e.description)
+        )
+      )
     }
   }
 
@@ -395,3 +436,21 @@ final class PatHandlers(
       depth = r.depth,
       scope = Some(scopeOf(r))
     )
+
+object PatHandlers:
+
+  /** How many unknown names a `400 unknown_tool` names before it says how many more. */
+  val MaxUnknownShown: Int = 5
+
+  /** How long one unknown name may run in that message before it is cut. */
+  val MaxNameShown: Int = 64
+
+  /** `name` as an error message shows it, quoted: each character outside printable ASCII as `?` (a
+    * control character dropped instead would show a different name, possibly a valid one), cut at
+    * [[MaxNameShown]] characters (then `...`).
+    */
+  def shownName(name: String): String =
+    val printable = name.map(c => if c >= ' ' && c <= '~' then c else '?')
+    val cut       =
+      if printable.length > MaxNameShown then printable.take(MaxNameShown) + "..." else printable
+    s"'$cut'"

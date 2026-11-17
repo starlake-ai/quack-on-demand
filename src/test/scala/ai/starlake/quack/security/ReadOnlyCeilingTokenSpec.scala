@@ -148,6 +148,7 @@ class ReadOnlyCeilingTokenSpec
     "GET"  -> "/api/tenant/list",
     "GET"  -> "/api/manifest/export",
     "GET"  -> "/api/auth/whoami",
+    "GET"  -> "/api/auth/pat/tools",
     "POST" -> "/api/auth/pat/list"
   )
 

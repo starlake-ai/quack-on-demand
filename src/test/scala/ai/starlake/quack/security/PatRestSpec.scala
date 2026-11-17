@@ -607,3 +607,99 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
         // The fixture rows are shared by the whole suite; leave bob usable.
         setEnabled(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername, true)
     }
+
+  // ------------------------------------------------------------------
+  // 9. the tools axis catalog, and mint refusing a name outside it
+  // ------------------------------------------------------------------
+
+  private def toolEntries(body: String): List[io.circe.Json] =
+    parse(body).toOption
+      .flatMap(_.hcursor.get[List[io.circe.Json]]("tools").toOption)
+      .getOrElse(Nil)
+
+  "GET /api/auth/pat/tools" should "answer a non-admin session with every name, rest included" in
+    withHarness() { h =>
+      val bob  = tenantSession(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/auth/pat/tools", apiKey = Some(bob))
+      withClue(s"tools body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+      }
+      val entries                          = toolEntries(resp.body())
+      def str(e: io.circe.Json, k: String) = e.hcursor.get[String](k).toOption
+      val rest = entries.find(e => str(e, "name").contains("rest")).getOrElse(fail("no rest"))
+      str(rest, "group") shouldBe Some("surface")
+      str(rest, "label") shouldBe Some("REST data edge")
+      rest.hcursor.get[Boolean]("readOnly").toOption shouldBe Some(true)
+      val runSql = entries.find(e => str(e, "name").contains("run_sql")).getOrElse(fail("no sql"))
+      str(runSql, "group") shouldBe Some("data")
+      // Admin tools are listed to a non-admin too: valid names, labelled as admin.
+      entries.find(e => str(e, "name").contains("create_tenant")).flatMap(str(_, "group")) shouldBe
+        Some("admin")
+      entries.flatMap(str(_, "name")) shouldBe
+        ai.starlake.quack.mcp.McpToolCatalog.entries.map(_.name)
+    }
+
+  it should "refuse a caller with no credential" in withHarness() { h =>
+    get(h.httpClient, s"${h.baseUrl}/api/auth/pat/tools").statusCode() shouldBe 401
+  }
+
+  "POST /api/auth/pat/create" should "refuse an unknown tool name with 400 unknown_tool" in
+    withHarness() { h =>
+      val bob     = tenantSession(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)
+      val refused = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/create",
+        """{"name":"typo","tools":["run_sql","run_sqll","res\u0001t"]}""",
+        apiKey = Some(bob)
+      )
+      withClue(s"unknown-tool body: ${refused.body()}") {
+        refused.statusCode() shouldBe 400
+        errorCode(refused.body()) should contain("unknown_tool")
+        val message = field(refused.body(), "message").getOrElse(fail("no message"))
+        message should include("'run_sqll'")
+        // The control character is shown as '?', never dropped into a name that reads as valid.
+        message should include("'res?t'")
+        message should not include "'run_sql'"
+      }
+      // Nothing was minted.
+      val listed = post(h.httpClient, s"${h.baseUrl}/api/auth/pat/list", "", apiKey = Some(bob))
+      val names  = tokenEntries(listed.body()).flatMap(_.hcursor.get[String]("name").toOption)
+      names should not contain "typo"
+    }
+
+  it should "name at most a few unknown names, each cut short" in withHarness() { h =>
+    val session = rootSession(h)
+    // Sorts first, so it is among the names shown.
+    val long    = "a" * 500
+    val names   = (List(long) ++ (1 to 9).map(i => s"nope$i")).map(n => s""""$n"""")
+    val refused = post(
+      h.httpClient,
+      s"${h.baseUrl}/api/auth/pat/create",
+      s"""{"name":"many","tools":[${names.mkString(",")}]}""",
+      apiKey = Some(session)
+    )
+    withClue(s"many-unknown body: ${refused.body()}") {
+      refused.statusCode() shouldBe 400
+      errorCode(refused.body()) should contain("unknown_tool")
+      val message = field(refused.body(), "message").getOrElse(fail("no message"))
+      message should not include long
+      message should include("a" * 64 + "...")
+      message should include("and 5 more")
+    }
+  }
+
+  it should "mint with known tool names, rest included" in withHarness() { h =>
+    val bob     = tenantSession(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)
+    val created = post(
+      h.httpClient,
+      s"${h.baseUrl}/api/auth/pat/create",
+      """{"name":"known-tools","tools":["run_sql","list_tables","rest","create_tenant"]}""",
+      apiKey = Some(bob)
+    )
+    withClue(s"known-tools body: ${created.body()}") {
+      created.statusCode() shouldBe 200
+    }
+    val raw = field(created.body(), "token").getOrElse(fail("no token in create response"))
+    pats.verify(raw).flatMap(_.restriction.tools) shouldBe
+      Some(Set("run_sql", "list_tables", "rest", "create_tenant"))
+  }

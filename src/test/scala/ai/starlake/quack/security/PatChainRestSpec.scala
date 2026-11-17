@@ -138,6 +138,32 @@ class PatChainRestSpec
     child.body() should include("databases")
   }
 
+  // The catalog check runs before `narrow`: an unknown name answers unknown_tool even where the
+  // parent's tools axis would also have refused it as a widening.
+  it should "refuse a child naming an unknown tool, before narrowing" in withHarness() { h =>
+    val session   = rootSession(h)
+    val rootToken =
+      field(mint(h, session, createBody("r-tools", """"tools":["run_sql"]""")).body(), "token").get
+    val unknown = mint(h, rootToken, createBody("c-tools", """"tools":["run_sqll"]"""))
+    withClue(s"unknown-tool child body: ${unknown.body()}") {
+      unknown.statusCode() shouldBe 400
+      field(unknown.body(), "error") shouldBe Some("unknown_tool")
+    }
+    val widens = mint(h, rootToken, createBody("c-tools2", """"tools":["run_sql","rest"]"""))
+    field(widens.body(), "error") shouldBe Some("pat_scope_widens")
+    val narrow = mint(h, rootToken, createBody("c-tools3", """"tools":["run_sql"]"""))
+    withClue(s"known-tool child body: ${narrow.body()}")(narrow.statusCode() shouldBe 200)
+  }
+
+  it should "list the tools axis to a PAT caller" in withHarness() { h =>
+    val rootToken = field(mint(h, rootSession(h), createBody("r-cat")).body(), "token").get
+    val resp      = get(h.httpClient, s"${h.baseUrl}/api/auth/pat/tools", apiKey = Some(rootToken))
+    withClue(s"tools body: ${resp.body()}") {
+      resp.statusCode() shouldBe 200
+      resp.body() should include(""""name":"rest"""")
+    }
+  }
+
   // Expiry clamps rather than refusing: a child asking to outlive its parent is a
   // mistake to correct, and refusing would make "no expiry requested" an error.
   it should "clamp a child expiry to the parent's" in withHarness() { h =>

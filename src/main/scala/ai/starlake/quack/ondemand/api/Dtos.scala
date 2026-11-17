@@ -970,6 +970,22 @@ final case class PatEntry(
 
 final case class PatListResponse(tokens: List[PatEntry] = Nil)
 
+/** One name valid on a token's `tools` axis, as `GET /api/auth/pat/tools` lists it (see
+  * `McpToolCatalog`). `group` is `data` (an MCP tool any token may be offered), `admin` (an MCP
+  * tool offered only to a token whose owner is an admin) or `surface` (a reserved name of another
+  * surface, such as `rest` for the REST data edge). `label` is how a person reads the name: the
+  * name itself for an MCP tool. `readOnly` says whether a token with a ceiling of `RO` keeps it.
+  */
+final case class PatToolEntry(
+    name: String,
+    label: String,
+    group: String,
+    readOnly: Boolean,
+    description: String
+)
+
+final case class PatToolsResponse(tools: List[PatToolEntry] = Nil)
+
 final case class PatRevokeRequest(id: String)
 
 /** Outcome of a revoke: `killedStatements` counts the live statements killed synchronously on the
@@ -1958,6 +1974,8 @@ object Dtos:
   given Codec[PatScope]          = ConfiguredCodec.derived
   given Codec[PatEntry]          = ConfiguredCodec.derived
   given Codec[PatListResponse]   = ConfiguredCodec.derived
+  given Codec[PatToolEntry]      = ConfiguredCodec.derived
+  given Codec[PatToolsResponse]  = ConfiguredCodec.derived
   given Codec[PatRevokeRequest]  = ConfiguredCodec.derived
   given Codec[PatRevokeResponse] = ConfiguredCodec.derived
   given Codec[PatDeleteRequest]  = ConfiguredCodec.derived

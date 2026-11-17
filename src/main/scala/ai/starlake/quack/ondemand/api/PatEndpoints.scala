@@ -6,9 +6,9 @@ import sttp.tapir._
 import sttp.tapir.generic.auto._
 import sttp.tapir.json.circe._
 
-/** Personal-access-token self-service surface (`/api/auth/pat/create|list|revoke|delete`), split
-  * out of [[Endpoints]] to stay below the JVM's 64KB `<clinit>` ceiling (see [[RbacEndpoints]] for
-  * the rationale). Registered in [[EndpointModules.all]].
+/** Personal-access-token self-service surface (`/api/auth/pat/create|list|revoke|delete|tools`),
+  * split out of [[Endpoints]] to stay below the JVM's 64KB `<clinit>` ceiling (see
+  * [[RbacEndpoints]] for the rationale). Registered in [[EndpointModules.all]].
   *
   * Every route is strictly self-scoped: the acting identity comes from the bearer token via
   * [[Endpoints.authToken]], so there is deliberately NO tenant, user, or owner input anywhere on
@@ -85,3 +85,19 @@ object PatEndpoints:
       .in("auth" / "pat" / "delete")
       .in(authToken)
       .in(jsonBody[PatDeleteRequest])
+
+  /** The names valid on a token's `tools` axis: every MCP tool and each reserved surface name, such
+    * as `rest` for the REST data edge (see `McpToolCatalog`). The same list whether or not MCP is
+    * enabled on this manager, since a token outlives that setting. `create` refuses a name not
+    * listed here (`400 unknown_tool`). Any authenticated principal may read it.
+    */
+  val tools: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    PatToolsResponse,
+    Any
+  ] =
+    base.get
+      .in("auth" / "pat" / "tools")
+      .in(authToken)
+      .out(jsonBody[PatToolsResponse])
