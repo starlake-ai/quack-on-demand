@@ -29,7 +29,7 @@
   and the Windows `qod-node` with their sha256, the Java major the manager needs, the DuckDB
   release and the sha256 of each DuckDB asset the CLI downloads, and the qod-node protocol. The
   jar, `qod-node-windows-*.exe`, the `qod` wheel and sdist and `release.json` carry a Sigstore
-  build provenance attestation: `gh attestation verify <file> --repo starlake-ai/quack-on-demand`.
+  build provenance attestation: `gh attestation verify <file> --repo starlake-ai/qod`.
 
 ### Changed
 

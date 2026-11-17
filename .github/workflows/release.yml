@@ -216,7 +216,7 @@ jobs:
 
       # Signed SLSA provenance (Sigstore, keyless) binding each file's sha256 to this workflow
       # run and the tag's commit, so authenticity does not rest on the download origin alone:
-      # gh attestation verify <file> --repo starlake-ai/quack-on-demand
+      # gh attestation verify <file> --repo starlake-ai/qod
       - name: Attest build provenance
         uses: actions/attest@v4
         with:
@@ -299,7 +299,7 @@ jobs:
           ( cd cli/shim-qod-cli && python -m build --outdir "$GITHUB_WORKSPACE/pypi-dist/shim" )
 
       # Provenance of the files built here (gh attestation verify <file> --repo
-      # starlake-ai/quack-on-demand). On a re-run whose upload skip-existing skips, the rebuilt
+      # starlake-ai/qod). On a re-run whose upload skip-existing skips, the rebuilt
       # files may differ from those PyPI serves; their attestations then match nothing published.
       - name: Attest build provenance (qod)
         uses: actions/attest@v4
