@@ -528,21 +528,42 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   // ---- audit and history ------------------------------------------------------------------
 
-  "the audit trail" should "history the data statement, never the probe" in {
-    // The probe of an ungranted table is refused unrecorded (it is plumbing, like FlightSQL's
-    // prepare-time probe): the client gets the plain 404 and no data-denial row is written.
+  "the audit trail" should "record a refused probe once, and history a probe that ran never" in {
+    // A probe the node refuses is recorded once, as FlightSQL's refused prepare probe is (#211): a
+    // data-denial event of origin rest-data and a denied history row. A probe that runs is plumbing
+    // and leaves no row. The client gets the plain 404 either way.
+    def secretDenials(): List[Json] =
+      stack
+        .get(s"/api/audit/list?tenant=$Acme&action=sql.denied&limit=500")
+        .hcursor
+        .downField("events")
+        .as[List[Json]]
+        .fold(e => throw e, identity)
+        .filter(_.noSpaces.contains("secret"))
+    // The audit journal writes asynchronously: wait up to 5 s for `ok`.
+    def settled[A](read: => A)(ok: A => Boolean): A =
+      Iterator
+        .continually { val a = read; if !ok(a) then Thread.sleep(100); a }
+        .zipWithIndex
+        .collectFirst { case (a, i) if ok(a) || i >= 50 => a }
+        .get
+    val before = secretDenials().map(_.hcursor.get[String]("id").getOrElse(""))
     get(rowsOf("secret"), alice).status shouldBe 404
     // A filter value no other test sends, so only this request's statement is matched here.
     okResp(get(rowsOf("orders"), alice, "select=o_id&o_id=eq.70"))
-    val denials = stack
-      .get(s"/api/audit/list?tenant=$Acme&action=sql.denied&limit=500")
-      .hcursor
-      .downField("events")
-      .as[List[Json]]
-      .fold(e => throw e, identity)
-    denials.filter(_.noSpaces.contains("secret")) shouldBe empty
+    val added = settled(
+      secretDenials().filterNot(j => before.contains(j.hcursor.get[String]("id").getOrElse("")))
+    )(_.nonEmpty)
+    added should have size 1
+    added.head.hcursor.get[String]("origin") shouldBe Right("rest-data")
+    added.head.hcursor.get[String]("outcome") shouldBe Right("denied")
+    added.head.hcursor.get[String]("actor") shouldBe Right("alice")
     val recent = history()
-    recent.filter(_._4.endsWith("LIMIT 0")) shouldBe empty
+    recent.filter((_, _, status, sql) => status != "denied" && sql.endsWith("LIMIT 0")) shouldBe
+      empty
+    recent.exists((_, _, status, sql) =>
+      status == "denied" && sql.endsWith("LIMIT 0") && sql.contains("\"secret\"")
+    ) shouldBe true
     val data = recent.filter((_, _, status, sql) =>
       status == "ok" && sql.contains(s"FROM \"$lakeDb\".\"$LakeSchema\".\"orders\"") &&
         sql.contains("'70'")
