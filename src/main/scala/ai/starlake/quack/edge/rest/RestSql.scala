@@ -96,6 +96,16 @@ object RestSql:
     case ColumnKind.Time("TIME") => s"CAST(${ident(c.name)} AS TIME)"
     case _                       => ident(c.name)
 
+  /** The column as `eq`, `neq` and `in` read it. A text column compares bare: DuckDB casts the
+    * literal to the column's own type, so a UUID matches in any spelling DuckDB accepts and its
+    * filter still reaches Parquet statistics and DuckLake file pruning, which `CAST(u AS VARCHAR)`
+    * defeats (a literal that is no UUID is the node's conversion error, an `invalid_filter`). A
+    * VARCHAR, JSON or ENUM compares the same either way. Other kinds are read as [[subject]].
+    */
+  private def equalitySubject(c: ProbedColumn): String = c.kind match
+    case ColumnKind.Text => ident(c.name)
+    case _               => subject(c)
+
   private def orderTerm(o: ResolvedOrder): String =
     val dir = if o.descending then " DESC" else " ASC"
     subject(o.column) + dir + o.nulls.fold("")(" " + _.sql)
@@ -107,9 +117,12 @@ object RestSql:
       // `is` negates inside the operator (IS NOT NULL), every other operator as NOT (...).
       case Predicate.Is(target) =>
         s"${ident(f.column.name)} IS ${if f.negated then "NOT " else ""}${target.sql}"
+      case Predicate.Compare(cmp @ (Comparison.Eq | Comparison.Neq), raw) =>
+        negate(s"${equalitySubject(f.column)} ${cmp.sql} ${cast(raw, f.column)}")
       case Predicate.Compare(cmp, raw) => negate(s"$col ${cmp.sql} ${cast(raw, f.column)}")
       case Predicate.Items(items)      =>
-        negate(items.map(cast(_, f.column)).mkString(s"$col IN (", ", ", ")"))
+        val in = s"${equalitySubject(f.column)} IN ("
+        negate(items.map(cast(_, f.column)).mkString(in, ", ", ")"))
       case Predicate.Pattern(ci, form, text) =>
         // ilike folds both sides with lower() rather than ILIKE, which always runs DuckDB's
         // backtracking matcher; PatternForm records why the result is the same.

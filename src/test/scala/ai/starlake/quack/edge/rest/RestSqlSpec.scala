@@ -70,14 +70,16 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
     where("id" -> "lt.1") shouldBe """"id" < CAST('1' AS INTEGER)"""
     where("id" -> "lte.1") shouldBe """"id" <= CAST('1' AS INTEGER)"""
     where("price" -> "not.eq.1.5") shouldBe """NOT ("price" = CAST('1.5' AS DECIMAL(6,2)))"""
-    where("name" -> "eq.it's") shouldBe """CAST("name" AS VARCHAR) = CAST('it''s' AS VARCHAR)"""
+    where("name" -> "eq.it's") shouldBe """"name" = CAST('it''s' AS VARCHAR)"""
+    // Ranges on a text column read the text shown (a UUID has no range comparison with VARCHAR).
+    where("name" -> "gt.m") shouldBe """CAST("name" AS VARCHAR) > CAST('m' AS VARCHAR)"""
   }
 
   it should "render in, is and their negations" in {
     where("id" -> "in.(1,2)") shouldBe
       """"id" IN (CAST('1' AS INTEGER), CAST('2' AS INTEGER))"""
     where("name" -> "not.in.(\"a,b\",c)") shouldBe
-      """NOT (CAST("name" AS VARCHAR) IN (CAST('a,b' AS VARCHAR), CAST('c' AS VARCHAR)))"""
+      """NOT ("name" IN (CAST('a,b' AS VARCHAR), CAST('c' AS VARCHAR)))"""
     where("name" -> "is.null") shouldBe """"name" IS NULL"""
     where("name" -> "not.is.null") shouldBe """"name" IS NOT NULL"""
     where("ok" -> "is.true") shouldBe """"ok" IS TRUE"""
@@ -86,14 +88,22 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
 
   it should "render like as LIKE and ilike as lower() LIKE lower(), never ILIKE or ESCAPE" in {
     where("name" -> "like.a*b") shouldBe """CAST("name" AS VARCHAR) LIKE CAST('a%b' AS VARCHAR)"""
-    where("name" -> "ilike.*x") shouldBe """lower(CAST("name" AS VARCHAR)) LIKE lower(CAST('%x' AS VARCHAR))"""
-    where("name" -> "like.x\\y*") shouldBe """CAST("name" AS VARCHAR) LIKE CAST('x\y%' AS VARCHAR)"""
+    where(
+      "name" -> "ilike.*x"
+    ) shouldBe """lower(CAST("name" AS VARCHAR)) LIKE lower(CAST('%x' AS VARCHAR))"""
+    where(
+      "name" -> "like.x\\y*"
+    ) shouldBe """CAST("name" AS VARCHAR) LIKE CAST('x\y%' AS VARCHAR)"""
   }
 
   it should "render a pattern with a literal % or _ as equality, prefix, suffix or contains" in {
     where("name" -> "like.5%_\\") shouldBe """CAST("name" AS VARCHAR) = CAST('5%_\' AS VARCHAR)"""
-    where("name" -> "like.5%*") shouldBe """starts_with(CAST("name" AS VARCHAR), CAST('5%' AS VARCHAR))"""
-    where("name" -> "like.*_c") shouldBe """ends_with(CAST("name" AS VARCHAR), CAST('_c' AS VARCHAR))"""
+    where(
+      "name" -> "like.5%*"
+    ) shouldBe """starts_with(CAST("name" AS VARCHAR), CAST('5%' AS VARCHAR))"""
+    where(
+      "name" -> "like.*_c"
+    ) shouldBe """ends_with(CAST("name" AS VARCHAR), CAST('_c' AS VARCHAR))"""
     where("name" -> "ilike.*it's%*") shouldBe
       """contains(lower(CAST("name" AS VARCHAR)), lower(CAST('it''s%' AS VARCHAR)))"""
     where("name" -> "not.ilike.a_") shouldBe
@@ -102,7 +112,7 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
 
   it should "AND several filters in arrival order" in {
     where("id" -> "gt.1", "name" -> "eq.x", "id" -> "lt.9") shouldBe
-      """"id" > CAST('1' AS INTEGER) AND CAST("name" AS VARCHAR) = CAST('x' AS VARCHAR) AND "id" < CAST('9' AS INTEGER)"""
+      """"id" > CAST('1' AS INTEGER) AND "name" = CAST('x' AS VARCHAR) AND "id" < CAST('9' AS INTEGER)"""
   }
 
   it should "render every order suffix by column name" in {
@@ -226,6 +236,26 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
       ids("u" -> "like.*a", "order" -> "id") shouldBe List(1)
       ids("u" -> "gt.00000000-0000-0000-0000-00000000000a", "order" -> "id") shouldBe List(2)
       ids("u" -> "eq.00000000-0000-0000-0000-00000000000b") shouldBe List(2)
+      // Equality reads the bare column, as DuckDB compares the UUID itself (any case, pruning kept);
+      // only like, ranges and order go through the text the edge shows.
+      ids("u" -> "eq.00000000-0000-0000-0000-00000000000B") shouldBe List(2)
+      ids("u" -> "neq.00000000-0000-0000-0000-00000000000A", "order" -> "id") shouldBe List(2)
+      ids(
+        "u"     -> "in.(00000000-0000-0000-0000-00000000000A,00000000-0000-0000-0000-00000000000B)",
+        "order" -> "id"
+      ) shouldBe List(1, 2)
+      ids("e" -> "eq.z") shouldBe List(1)
+      ids("j" -> "eq.[]") shouldBe List(2)
+      val eqSql = RestSql.render(
+        t,
+        RestQuery
+          .parse(Seq("u" -> "eq.00000000-0000-0000-0000-00000000000b"))
+          .flatMap(RestResolver.resolve(_, probed))
+          .fold(e => fail(e.message), identity),
+        100
+      )
+      eqSql should include("\"u\" = CAST(")
+      eqSql should not include "CAST(\"u\" AS VARCHAR)"
       ids("j" -> "ilike.*A*") shouldBe List(1)
       // The ENUM's position would put z first; as the VARCHAR it is shown as, b sorts first.
       ids("order" -> "e") shouldBe List(2, 1)

@@ -65,8 +65,10 @@
   `QOD_REST_MAX_HEADER_BYTES` stay the manager REST port's. Boot refuses a `QOD_REST_PORT` in the
   node port range. With no `pool` named, a request goes to a pool the caller may use: among the
   database's pools, those the token's `pools` axis allows and, when several are left, the first the
-  FlightSQL handshake admits the caller to. A UUID, JSON or ENUM column is filtered and ordered as the
-  text it is shown as (`like` and range filters work on a UUID, an ENUM sorts alphabetically), a
+  FlightSQL handshake admits the caller to. A UUID, JSON or ENUM column is pattern-matched, range-filtered
+  and ordered as the text it is shown as (`like` and range filters work on a UUID, an ENUM sorts
+  alphabetically), while `eq`, `neq` and `in` compare the column itself, so a UUID matches in any
+  case and its filter keeps file and row-group pruning; a
   TIME WITH TIME ZONE on the local time it is shown as, and `TIME_NS` at nanosecond precision;
   `TIMESTAMP_S` and `TIMESTAMP_MS` filters refuse more fraction digits than the type holds;
   `is.null` applies to every column; `TIME '24:00:00'` is served.
