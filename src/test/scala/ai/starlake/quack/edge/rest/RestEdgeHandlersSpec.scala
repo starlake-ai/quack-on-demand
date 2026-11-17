@@ -18,7 +18,7 @@ import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ErrorResponse, Ex
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
-import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
+import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, PoolPermission, RbacUser}
 import ai.starlake.quack.route.StatementClassifier
 import ch.qos.logback.classic.{Level, Logger as LogbackLogger}
 import ch.qos.logback.classic.spi.ILoggingEvent
@@ -68,11 +68,13 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
 
   // ---- control plane ----------------------------------------------------------------------------
 
+  private lazy val store = new InMemoryControlPlaneStore()
+
   private lazy val sup: PoolSupervisor =
     val s = new PoolSupervisor(
       StubQuackBackend.noop(),
       new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
+      store,
       duckLakeInitializer = (_, _, _) => ()
     )
     def ok[A](io: IO[Either[?, A]]): A =
@@ -137,6 +139,21 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     ).unsafeRunSync()
     // Hibernated: no node, the state a request finds before the router's resume.
     ok(s.suspendPool(ColdKey, "idle"))
+    // The handshake's users: alice holds every pool of acme (a default user's tenant-wide grant),
+    // carol only `sales`, which the default pick would otherwise skip for `batch`.
+    store.upsertUserIdentity(RbacUser("u-pat-1", Some("acme"), "alice", "user"))
+    store.upsertUserIdentity(RbacUser("u-pat-carol", Some("acme"), "carol", "user"))
+    store.insertPoolPermission(PoolPermission("pp-alice", "acme", userId = Some("u-pat-1")))
+    val lakePools = store.listPools(lake.id)
+    store.insertPoolPermission(
+      PoolPermission(
+        "pp-carol",
+        "acme",
+        poolId = lakePools.find(_.name == "sales").map(_.id),
+        userId = Some("u-pat-carol")
+      )
+    )
+    s.restore()
     s
 
   private val ColdKey = PoolKey("acme", "acme_cold", "cpool")
@@ -710,6 +727,45 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     fx.calls.head.sql shouldBe "SELECT * FROM \"memory\".\"main\".\"customer\" LIMIT 0"
   }
 
+  "the default pool" should "be one the caller may use, not merely the first by name" in {
+    // batch sorts first and alice may use it; carol holds a grant on sales only.
+    def probedPool(token: String, user: RbacUser): String =
+      val probed = new java.util.concurrent.atomic.AtomicReference[String]("")
+      val h      = new RestEdgeHandlers(
+        baseCfg,
+        sup,
+        Map(
+          token -> PatPrincipal(
+            user = user,
+            patId = s"pat-$token",
+            scope = SessionScope(superuser = false, manageableTenants = Set.empty),
+            isAdmin = false,
+            restriction = TokenRestriction.Unrestricted
+          )
+        ).get,
+        (_, key, _) => IO.raiseError(new IllegalStateException(s"unexpected statement on $key")),
+        (_, key, _) =>
+          IO(probed.set(key.pool)) *> IO.pure(Left(RouterFailure.Unavailable("stop at the probe"))),
+        (_, _) => reader,
+        tags
+      )
+      h.rows("acme", "acme_lake", "main", "customer", req(auth = List(s"Bearer $token")))
+        .unsafeRunSync()
+      probed.get
+    probedPool("qod_pat_a", RbacUser("u-pat-1", Some("acme"), "alice", "user")) shouldBe "batch"
+    probedPool("qod_pat_c", RbacUser("u-pat-carol", Some("acme"), "carol", "user")) shouldBe
+      "sales"
+    // A user no pool admits gets the 404 of an ungranted object, before any statement.
+    val dave = probedPool("qod_pat_d", RbacUser("u-pat-dave", Some("acme"), "dave", "user"))
+    dave shouldBe ""
+  }
+
+  it should "follow the token's pools axis" in {
+    val fx = fixture(TokenRestriction.Unrestricted.copy(pools = Some(Set("sales"))))
+    okOf(rows(fx, "customer"))
+    fx.calls.map(_.poolKey.pool).distinct shouldBe List("sales")
+  }
+
   "the pool parameter" should "pick a named pool of the database and refuse any other" in {
     val fx = fixture()
     okOf(rows(fx, "customer", "pool=batch"))
@@ -860,7 +916,7 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val restDefaults = ConfigSource.default.at("quack-rest").loadOrThrow[RestEdgeConfig]
     val hold         =
       ConfigSource.default.at("quack-flightsql").loadOrThrow[FlightConfig].resumeHoldTimeoutSec
-    RestEdgeConfig.validate(restDefaults.copy(enabled = true), Nil, hold) shouldBe Right(())
+    RestEdgeConfig.validate(restDefaults.copy(enabled = true), Nil, hold, (21900, 22500)) shouldBe Right(())
     val cfg     = restDefaults.copy(enabled = true, host = "127.0.0.1", port = 0)
     val runtime = compressedRuntime(100)
     try

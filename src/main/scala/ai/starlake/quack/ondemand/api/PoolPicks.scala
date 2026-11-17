@@ -13,14 +13,28 @@ object PoolPicks:
   private def pick(sup: PoolSupervisor, tenant: String, tenantDb: String)(
       eligible: Role => Boolean
   ): Option[PoolKey] =
+    ranked(sup, tenant, tenantDb)(eligible).headOption
+
+  /** Every pool of `(tenant, tenantDb)` in the order [[pick]] prefers them: those with an eligible
+    * node first, then the rest, each part by name.
+    */
+  private def ranked(sup: PoolSupervisor, tenant: String, tenantDb: String)(
+      eligible: Role => Boolean
+  ): List[PoolKey] =
     val candidates = sup
       .list()
       .map(_.key)
       .filter(k => k.tenant == tenant && k.tenantDb == tenantDb)
       .sortBy(_.pool)
-    candidates
-      .find(key => sup.snapshot(key).exists(_.nodes.exists(n => eligible(n.role))))
-      .orElse(candidates.headOption)
+    val (ready, rest) =
+      candidates.partition(key => sup.snapshot(key).exists(_.nodes.exists(n => eligible(n.role))))
+    (ready ++ rest).toList
+
+  /** Every pool [[readPoolKey]] could pick, in its order of preference, so that a caller who may
+    * not use the first can take the next.
+    */
+  def readPoolKeys(sup: PoolSupervisor, tenant: String, tenantDb: String): List[PoolKey] =
+    ranked(sup, tenant, tenantDb)(r => r == Role.ReadOnly || r == Role.Dual)
 
   /** Why [[forDatabase]] found no pool. */
   enum Miss:

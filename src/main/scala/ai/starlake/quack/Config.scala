@@ -1823,7 +1823,8 @@ object RestEdgeConfig:
   def validate(
       cfg: RestEdgeConfig,
       otherPorts: List[(String, Int)],
-      resumeHoldTimeoutSec: Long
+      resumeHoldTimeoutSec: Long,
+      nodePorts: (Int, Int)
   ): Either[String, Unit] =
     def atLeast(value: Int, min: Int, env: String): Option[String] =
       Option.when(value < min)(s"$env must be >= $min, got $value")
@@ -1855,6 +1856,11 @@ object RestEdgeConfig:
         otherPorts.collectFirst {
           case (door, p) if p == cfg.port =>
             s"QOD_REST_PORT ${cfg.port} is already bound by the $door listener"
-        }
+        },
+        // A node lease would collide with the edge on its port, or the edge would hold a node's.
+        Option.when(cfg.port >= nodePorts._1 && cfg.port <= nodePorts._2)(
+          s"QOD_REST_PORT ${cfg.port} is in the node port range ${nodePorts._1}-${nodePorts._2} " +
+            "(QOD_MIN_PORT, QOD_MAX_PORT)"
+        )
       ).flatten
       problems.headOption.map(p => s"quack-rest: $p").toLeft(())

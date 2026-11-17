@@ -377,7 +377,8 @@ object Main extends IOApp with LazyLogging:
           "node verdict listener" -> mgrCfg0.nodeAuthz.listenerPort(mgrCfg0.port)
         ) ++
           Option.when(quackCfgResolved.enabled)("Quack front door" -> quackCfgResolved.port),
-        edgeCfg.resumeHoldTimeoutSec
+        edgeCfg.resumeHoldTimeoutSec,
+        (mgrCfg0.minPort, mgrCfg0.maxPort)
       )
       .left
       .foreach(msg => sys.error(msg))

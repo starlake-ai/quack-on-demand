@@ -14,6 +14,7 @@ import ai.starlake.quack.ondemand.api.{
 }
 import ai.starlake.quack.ondemand.auth.PatPrincipal
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.rbac.HandshakeDenial
 import cats.data.EitherT
 import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
@@ -333,7 +334,8 @@ final class RestEdgeHandlers(
         .findTenantDb(tenant, tenantDb)
         .filter(td => td.branchOf.isEmpty && p.restriction.allowsDatabase(td.name))
         .toRight(RestError.NotFound)
-      key   <- poolKeyFor(tenant, td.name, pool)
+      caller = RestAuth.callerFor(p)
+      key   <- poolKeyFor(p, caller, tenant, td.name, pool)
       _     <- Either.cond(p.restriction.allowsPool(key.pool), (), RestError.NotFound)
       state <- sup.get(key).toRight(RestError.NotFound)
       // The router's own session path (the USE prelude's catalog, which the policy steps qualify
@@ -342,21 +344,45 @@ final class RestEdgeHandlers(
         .sessionPath(state)
         .map(_.catalog)
         .toRight(RestError.NotFound)
-    yield Target(RestAuth.callerFor(p), td, key, catalog, state.suspended || !routable(key)))
+    yield Target(caller, td, key, catalog, state.suspended || !routable(key)))
 
   /** Whether the pool has a node the router may pick right now (the router's own resume test). */
   private def routable(key: PoolKey): Boolean =
     sup.snapshot(key).exists(snap => snap.nodes.exists(n => snap.loadOf(n.nodeId).routable))
 
-  /** MCP `run_sql`'s own resolution ([[PoolPicks.forDatabase]]); a database with no pool, and a
-    * pool not serving it, are as absent as one that does not exist.
+  /** A named pool resolves as MCP `run_sql` resolves it ([[PoolPicks.forDatabase]]); a database
+    * with no pool, and a pool not serving it, are as absent as one that does not exist.
+    *
+    * With no pool named, the pick is the caller's: among the database's pools in
+    * [[PoolPicks.readPoolKeys]]'s order, those the token's `pools` axis allows, and, when more than
+    * one is left, the first the FlightSQL handshake admits for this caller (the decision the routed
+    * executor takes on the statement, and `/api/profile/pools` on each pool). A pool the caller may
+    * not use is never picked over one they may, which would answer 404 everywhere. An unavailable
+    * decision (the tenant's OPA unreachable) answers as the statement would; none admitted is the
+    * 404 of an ungranted object.
     */
   private def poolKeyFor(
+      p: PatPrincipal,
+      caller: ExecCaller,
       tenant: String,
       db: String,
       pool: Option[String]
   ): Either[RestError, PoolKey] =
-    PoolPicks.forDatabase(sup, tenant, db, pool).left.map(_ => RestError.NotFound)
+    pool match
+      case Some(_) => PoolPicks.forDatabase(sup, tenant, db, pool).left.map(_ => RestError.NotFound)
+      case None    =>
+        PoolPicks.readPoolKeys(sup, tenant, db).filter(k => p.restriction.allowsPool(k.pool)) match
+          case Nil         => Left(RestError.NotFound)
+          case only :: Nil => Right(only)
+          case several     =>
+            several
+              .to(LazyList)
+              .map(k => k -> sup.authorizeHandshakeDetailed(caller.authzRequest(k)))
+              .collectFirst {
+                case (k, Right(_))                             => Right(k)
+                case (_, Left(HandshakeDenial.Unavailable(_))) => Left(RestError.PoolUnavailable)
+              }
+              .getOrElse(Left(RestError.NotFound))
 
   private def listingCap(t: Target): Int = t.caller.effectiveMaxRows(cfg.maxRows, cfg.maxRows)
 

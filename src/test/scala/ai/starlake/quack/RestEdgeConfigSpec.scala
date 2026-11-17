@@ -19,6 +19,9 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
   private val hold =
     ConfigSource.default.at("quack-flightsql").loadOrThrow[FlightConfig].resumeHoldTimeoutSec
 
+  /** The node port range as shipped (QOD_MIN_PORT, QOD_MAX_PORT). */
+  private val nodes = (21900, 22500)
+
   "application.conf" should "ship the quack-rest block disabled, on 31339, with TLS on" in {
     defaults.enabled shouldBe false
     defaults.host shouldBe "0.0.0.0"
@@ -46,11 +49,16 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   "RestEdgeConfig.validate" should "accept the shipped defaults once enabled" in {
-    RestEdgeConfig.validate(defaults.copy(enabled = true), others, hold) shouldBe Right(())
+    RestEdgeConfig.validate(defaults.copy(enabled = true), others, hold, nodes) shouldBe Right(())
   }
 
   it should "skip every check while the edge is disabled" in {
-    RestEdgeConfig.validate(defaults.copy(port = 20900, defaultLimit = 0), others, hold) shouldBe
+    RestEdgeConfig.validate(
+      defaults.copy(port = 20900, defaultLimit = 0),
+      others,
+      hold,
+      nodes
+    ) shouldBe
       Right(())
   }
 
@@ -72,14 +80,18 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
     )
     cases.foreach { case (cfg, env) =>
       withClue(env) {
-        RestEdgeConfig.validate(cfg, others, hold).left.toOption.getOrElse("") should include(env)
+        RestEdgeConfig
+          .validate(cfg, others, hold, nodes)
+          .left
+          .toOption
+          .getOrElse("") should include(env)
       }
     }
   }
 
   it should "refuse a port another door already binds" in {
     val msg = RestEdgeConfig
-      .validate(defaults.copy(enabled = true, port = 31338), others, hold)
+      .validate(defaults.copy(enabled = true, port = 31338), others, hold, nodes)
       .left
       .toOption
       .getOrElse("")
@@ -87,19 +99,28 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
     msg should include("FlightSQL")
   }
 
+  it should "refuse a port in the node port range" in {
+    val on = defaults.copy(enabled = true)
+    for port <- List(21900, 22000, 22500) do
+      val msg = RestEdgeConfig.validate(on.copy(port = port), Nil, hold, nodes).left.toOption
+      withClue(port)(msg.getOrElse("") should include("node port range 21900-22500"))
+    RestEdgeConfig.validate(on.copy(port = 22501), Nil, hold, nodes) shouldBe Right(())
+  }
+
   it should "refuse a statement wait that does not outlast the router's resume hold" in {
     val on = defaults.copy(enabled = true)
     hold shouldBe 60L
     on.stmtTimeoutSec.toLong should be > hold
     for wait <- List(60, 30) do
-      val msg = RestEdgeConfig.validate(on.copy(stmtTimeoutSec = wait), others, 60L).left.toOption
+      val msg =
+        RestEdgeConfig.validate(on.copy(stmtTimeoutSec = wait), others, 60L, nodes).left.toOption
       withClue(wait) {
         msg.getOrElse("") should include("QOD_REST_STMT_TIMEOUT_SEC")
         msg.getOrElse("") should include("PROXY_RESUME_HOLD_TIMEOUT_SEC")
       }
-    RestEdgeConfig.validate(on.copy(stmtTimeoutSec = 61), others, 60L) shouldBe Right(())
+    RestEdgeConfig.validate(on.copy(stmtTimeoutSec = 61), others, 60L, nodes) shouldBe Right(())
     // A lowered hold admits a lowered wait.
-    RestEdgeConfig.validate(on.copy(stmtTimeoutSec = 30), others, 20L) shouldBe Right(())
+    RestEdgeConfig.validate(on.copy(stmtTimeoutSec = 30), others, 20L, nodes) shouldBe Right(())
   }
 
   private val meta = Map("pgHost" -> "localhost", "pgPort" -> "5432", "dbName" -> "qod")
