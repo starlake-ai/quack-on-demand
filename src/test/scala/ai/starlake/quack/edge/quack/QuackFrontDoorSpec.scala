@@ -321,7 +321,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None),
       journal = journal,
       stampWrites = stamping,
       events = sink,

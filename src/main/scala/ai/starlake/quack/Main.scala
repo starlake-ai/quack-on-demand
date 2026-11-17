@@ -99,6 +99,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
   given ProductHint[NodeFilesConfig]           = ProductHint[NodeFilesConfig](camelMapping)
   given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
+  given ProductHint[SearchNodeConfig]          = ProductHint[SearchNodeConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
@@ -161,6 +162,10 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AwsAuthConfig]            = deriveReader[AwsAuthConfig]
   given ConfigReader[JwtAuthConfig]            = deriveReader[JwtAuthConfig]
   given ConfigReader[AuthenticationConfig]     = deriveReader[AuthenticationConfig]
+  // A knob outside qod-node's range refuses the boot here, at config load, naming key and variable.
+  given ConfigReader[SearchNodeConfig] = deriveReader[SearchNodeConfig].emap(c =>
+    SearchNodeConfig.refusal(c).map(pureconfig.error.UserValidationFailed(_)).toLeft(c)
+  )
   import MetricsConfigCodec.given
 
   /** Runs the subcommand `args` names (`manifest export`, `manifest import`, `admin
@@ -553,6 +558,10 @@ object Main extends IOApp with LazyLogging:
     // endpoint judges a node's statement with the context its handle was minted for.
     val mintedHandles =
       new ai.starlake.quack.edge.authz.MintedHandles(mgrCfg.nodeAuthz.handleContextsMax.toLong)
+    // The nonces of the system handles this replica mints for a search or build statement: the
+    // search record route serves the system principal only for those (review I1), bounded apart so
+    // the probes' handles, which are never recorded, cannot crowd them out.
+    val searchSystemHandles = new ai.starlake.quack.edge.authz.SearchSystemHandles()
     // What the tenant's OPA was asked and answered for each OPA dry-run statement, by handle nonce:
     // the decision endpoint records, the dry-run handler takes (decision 25).
     val dryRunResults = new ai.starlake.quack.edge.authz.DryRunResults()
@@ -1097,7 +1106,7 @@ object Main extends IOApp with LazyLogging:
     // The native client is the only client; the boot gate above already refused a platform
     // where it cannot load.
     val client  = new QuackHttpClient(arrowAllocator, nodeLeaseSec = mgrCfg.nodeLeaseSec)
-    val adapter = new QuackHttpAdapter(client, tracker, nodeKeys)
+    val adapter = new QuackHttpAdapter(client, tracker, nodeKeys, Some(searchSystemHandles))
 
     // The first successful probe of a node also runs CREATE SCHEMA IF NOT EXISTS
     // so the pool's default schema exists before wrapWithDefaultSchema ever
@@ -1261,6 +1270,7 @@ object Main extends IOApp with LazyLogging:
       // replica's own.
       mintedHandles.bindMetrics(metricsReg.composite)
       issuedHandles.bindMetrics(metricsReg.composite)
+      searchSystemHandles.bindMetrics(metricsReg.composite)
       dryRunResults.bindMetrics(metricsReg.composite)
       sup.bindEffectiveSetCacheMetrics(metricsReg.composite)
       opaDecisions.bindMetrics(metricsReg.composite)
@@ -1840,7 +1850,9 @@ object Main extends IOApp with LazyLogging:
               edge = "mcp",
               // A handler's own commit message for its write (a restore, an undrop), else the
               // verb's.
-              commitMessage = caller.commitMessage
+              commitMessage = caller.commitMessage,
+              // The bundle build's statements ask for index records as the system principal.
+              searchSystemCall = caller.system && caller.searchRecords
             )
         )(recordExecution)
 
@@ -1929,6 +1941,19 @@ object Main extends IOApp with LazyLogging:
       // (issuedHandles).
       val credentialsRoute =
         new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, servedUserS3)
+      // The node-to-manager index record fetch (POST /api/internal/search/records, search spec 13):
+      // beside the credentials route, for handles this replica minted, and only for the catalog its
+      // handle's pool attaches (the pool's tenant-db and the DuckLake table id, never a dotted name).
+      val searchRecordRoute = new ai.starlake.quack.edge.authz.SearchRecordRoute(
+        nodeKeys,
+        issuedHandles,
+        searchSystemHandles,
+        ai.starlake.quack.edge.authz.SearchRecordRoute.scopeResolver(
+          sup.findTenantDb,
+          td => TenantDb.catalogAlias(sup.effectiveMetastoreFor(td.tenantId, td.name), td.name)
+        ),
+        ai.starlake.quack.ondemand.state.SearchIndexStore.over(store)
+      )
 
       val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogPreviewHandlers(
@@ -2062,6 +2087,26 @@ object Main extends IOApp with LazyLogging:
           )
         }
 
+      // QoD Search index registry (spec 6.1): rows in the control plane, tables read through the
+      // cached catalog readers, the interim build (D7) through the routed executor.
+      val searchHandlers = new ai.starlake.quack.ondemand.api.SearchHandlers(
+        service = new ai.starlake.quack.ondemand.search.SearchIndexService(
+          tenantDbOf = sup.findTenantDb,
+          tenantDbsOf = sup.listTenantDbsByTenant,
+          metastoreOf = td => sup.effectiveMetastoreFor(td.tenantId, td.name),
+          catalog = ai.starlake.quack.ondemand.search.SearchCatalog.over(catalogReader),
+          store = ai.starlake.quack.ondemand.state.SearchIndexStore.over(store)
+        ),
+        store = ai.starlake.quack.ondemand.state.SearchIndexStore.over(store),
+        poolExists = key => sup.snapshot(key).nonEmpty,
+        aliasOf = td =>
+          TenantDb.catalogAlias(sup.effectiveMetastoreFor(td.tenantId, td.name), td.name),
+        executor = routedExecutor(recordExecution = true),
+        audit = auditRecorder,
+        callerOf = restCaller,
+        databaseRefusal = ai.starlake.quack.ondemand.api.TokenScope.databaseRefusal(sup, _, _, _)
+      )
+
       // MCP endpoint (POST /mcp): the agent-facing tool surface over the SAME handler
       // instances REST uses. Auth is a PAT only; the run_sql path goes through
       // routedExecutor(recordExecution = true) so DuckLake snapshots carry the acting
@@ -2145,7 +2190,8 @@ object Main extends IOApp with LazyLogging:
               patAuthenticator.resolve,
               dataTools.tools ++ branchTools.toList.flatMap(_.tools) ++ adminTools.tools ++
                 identityTools.tools ++ accessTools.tools ++ platformTools.tools ++
-                new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
+                new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools ++
+                new ai.starlake.quack.mcp.McpSearchTools(searchHandlers, mcpScopeOf).tools,
               serverVersion = "dev",
               limits = mgrCfg.restLimits,
               textForTenant = TenantDb.textShownToTenant(_, sup.metastoreDefaults)
@@ -2213,7 +2259,8 @@ object Main extends IOApp with LazyLogging:
             nodeKeys = nodeKeys,
             nodeExtensions = mgrCfg.nodeExtensions,
             nodeFiles = mgrCfg.nodeFiles,
-            nodeAuthzLimits = mgrCfg.nodeAuthzLimits
+            nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
+            searchNode = mgrCfg.search
           )
         ),
         patAuth = Some(patAuthenticator),
@@ -2226,14 +2273,15 @@ object Main extends IOApp with LazyLogging:
         quackCfg = Some(quackCfgResolved),
         icebergCatalog = icebergCatalogHandlers,
         tenantLocations = Some(tenantLocationHandlers),
-        s3Credentials = Some(s3CredentialHandlers)
+        s3Credentials = Some(s3CredentialHandlers),
+        search = Some(searchHandlers)
       )
       // Nodes' verdict and credential calls: a listener of their own, bound with REST.
       val nodeInternal = new ai.starlake.quack.edge.authz.NodeInternalServer(
         internalHost,
         internalPort,
         mgrCfg.nodeAuthz.internalMaxConnections,
-        List(credentialsRoute.routes, decideRoute.routes)
+        List(credentialsRoute.routes, searchRecordRoute.routes, decideRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

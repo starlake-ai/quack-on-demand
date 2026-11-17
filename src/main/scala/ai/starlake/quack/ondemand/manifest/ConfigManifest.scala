@@ -104,8 +104,33 @@ final case class ManifestTenantDb(
     // The parent tenant-db's name when this database is a branch catalog (TenantDb.branchOf): a
     // branch shares its parent's files, so it is never maintained. Absent on import keeps a stored
     // row's own value (a manifest exported before the field turns no branch into a plain database).
-    branchOf: Option[String] = None
+    branchOf: Option[String] = None,
+    // QoD Search indexes of this database (spec 6.1). None: not in the manifest, the stored indexes
+    // stay as they are (a manifest written before the field drops none). Some(list): the
+    // database's indexes become exactly `list`; an index left out is dropped and tombstoned.
+    // Exported only when the database has some.
+    searchIndexes: Option[List[ManifestSearchIndex]] = None
 )
+
+final case class ManifestSearchIndexField(column: String, fieldId: Long)
+
+/** One search index of a database: the registry row as stored, with no k1 or b (fixed through Phase
+  * 1, OWNER RULING 2026-11-16, D10), no segment row and no key. `refusedKeys` is what the entry
+  * named of `options`, `k1` and `b`, read on purpose so the import refuses them; never written.
+  */
+final case class ManifestSearchIndex(
+    indexId: String,
+    schema: String,
+    table: String,
+    tableId: Long,
+    fields: List[ManifestSearchIndexField],
+    bundleRoot: String,
+    state: String = "ready",
+    refusedKeys: List[String] = Nil
+)
+
+object ManifestSearchIndex:
+  val RefusedKeys: List[String] = List("options", "k1", "b")
 
 final case class ManifestPool(
     name: String,
@@ -336,13 +361,48 @@ object ConfigManifest:
   given Codec[ManifestPoolCohort]       = ConfiguredCodec.derived
   given Codec[ManifestFederatedSecret]  = ConfiguredCodec.derived
   given Codec[ManifestFederatedSource]  = ConfiguredCodec.derived
-  given Codec[ManifestTenantDb]         = ConfiguredCodec.derived
-  given Codec[ManifestPool]             = ConfiguredCodec.derived
-  given Codec[ManifestTenantAcl]        = ConfiguredCodec.derived
-  given Codec[ManifestTenantLocation]   = ConfiguredCodec.derived
-  given Codec[ManifestTenant]           = ConfiguredCodec.derived
-  given Codec[ManifestRole]             = ConfiguredCodec.derived
-  given Codec[ManifestGroup]            = ConfiguredCodec.derived
+  given Codec[ManifestSearchIndexField] = ConfiguredCodec.derived
+  given Codec[ManifestSearchIndex]      =
+    Codec.from(
+      Decoder.instance { c =>
+        for
+          indexId    <- c.get[String]("indexId")
+          schema     <- c.get[String]("schema")
+          table      <- c.get[String]("table")
+          tableId    <- c.get[Long]("tableId")
+          fields     <- c.get[List[ManifestSearchIndexField]]("fields")
+          bundleRoot <- c.get[String]("bundleRoot")
+          state      <- c.getOrElse[String]("state")("ready")
+        yield ManifestSearchIndex(
+          indexId,
+          schema,
+          table,
+          tableId,
+          fields,
+          bundleRoot,
+          state,
+          refusedKeys = ManifestSearchIndex.RefusedKeys.filter(k => c.downField(k).succeeded)
+        )
+      },
+      io.circe.Encoder.instance { ix =>
+        io.circe.Json.obj(
+          "indexId"    -> io.circe.Json.fromString(ix.indexId),
+          "schema"     -> io.circe.Json.fromString(ix.schema),
+          "table"      -> io.circe.Json.fromString(ix.table),
+          "tableId"    -> io.circe.Json.fromLong(ix.tableId),
+          "fields"     -> io.circe.Encoder[List[ManifestSearchIndexField]].apply(ix.fields),
+          "bundleRoot" -> io.circe.Json.fromString(ix.bundleRoot),
+          "state"      -> io.circe.Json.fromString(ix.state)
+        )
+      }
+    )
+  given Codec[ManifestTenantDb]       = ConfiguredCodec.derived
+  given Codec[ManifestPool]           = ConfiguredCodec.derived
+  given Codec[ManifestTenantAcl]      = ConfiguredCodec.derived
+  given Codec[ManifestTenantLocation] = ConfiguredCodec.derived
+  given Codec[ManifestTenant]         = ConfiguredCodec.derived
+  given Codec[ManifestRole]           = ConfiguredCodec.derived
+  given Codec[ManifestGroup]          = ConfiguredCodec.derived
   // The `role` user key was renamed to `kind`. Without this guard `withDefaults` would decode an
   // old `role: admin` entry as `kind: user`, silently demoting the account.
   given Codec[ManifestUser] =

@@ -114,3 +114,61 @@ def test_probe_version_refuses_a_qod_node_of_another_protocol():
         out = MARKER.replace(f"protocol={qod_node.NODE_PROTOCOL};", f"protocol={other};")
         with pytest.raises(qod_node.WrongProtocol, match=f"node protocol {other}"):
             qod_node.probe_version(Path("q"), run=lambda *a, **kw: _Done(out + "\n"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stand-in binaries are shell scripts")
+@pytest.mark.parametrize("suffix", [" search=on", " search=off"])
+def test_probe_version_reads_a_line_ending_with_the_search_flag(tmp_path, suffix):
+    # --build-info prints " search=on" or " search=off" after the unchanged marker (search review M17).
+    fake = tmp_path / "qod-node"
+    fake.write_text(f"#!/bin/sh\necho '{MARKER}{suffix}'\n")
+    fake.chmod(0o755)
+    assert qod_node.probe_version(fake) == "2.0.0"
+
+
+# Search spec 13: a binary linking qod_search_core ships its third-party notices. The wheel bundles the vendored
+# binaries, so when one of them is a search build the notices ride beside them. A search build holds the literal
+# its --build-info prints, " search=on" (native/qod-node/src/main.cpp), read here without running the binary
+# (scripts/release/qod-node-build-info.sh's qod_node_search_flag reads it the same way).
+NOTICES = REPO / "native" / "qod-search" / "THIRD-PARTY-NOTICES.txt"
+NOTICES_NAME = "THIRD-PARTY-NOTICES-qod-search.txt"
+
+
+def _search_builds(directory):
+    return sorted(p.relative_to(directory) for p in directory.glob("*/qod-node") if b" search=on" in p.read_bytes())
+
+
+def _notice_problems(directory, notices=NOTICES):
+    beside = directory / NOTICES_NAME
+    builds = _search_builds(directory)
+    if builds and (not beside.is_file() or beside.read_bytes() != notices.read_bytes()):
+        return [f"{', '.join(map(str, builds))} link qod_search_core: {beside} is missing or differs from {notices}"]
+    if not builds and beside.exists():
+        return [f"{beside} ships beside no search build"]
+    return []
+
+
+def test_build_info_prints_the_literal_the_bundle_check_reads():
+    main = (REPO / "native" / "qod-node" / "src" / "main.cpp").read_text()
+    assert 'std::cout << BuildInfo() << " search=on" << std::endl;' in main
+    assert 'std::cout << BuildInfo() << " search=off" << std::endl;' in main
+
+
+@pytest.mark.parametrize("directory", [VENDORED, BUNDLED], ids=["vendored", "bundled"])
+def test_a_search_build_is_bundled_with_its_notices(directory):
+    assert _notice_problems(directory) == [], "run scripts/release/refresh-qod-node-binaries.sh"
+
+
+def test_the_notices_check_refuses_a_search_build_without_them_and_stale_notices(tmp_path):
+    notices = tmp_path / "THIRD-PARTY-NOTICES.txt"
+    notices.write_text("Package: tantivy 0.27.0\n")
+    (tmp_path / "bundle" / "osx-aarch64").mkdir(parents=True)
+    binary = tmp_path / "bundle" / "osx-aarch64" / "qod-node"
+    binary.write_bytes(b"\x7fELF\0" + MARKER.encode() + b"\0 search=on\0")
+    assert _notice_problems(tmp_path / "bundle", notices)
+    (tmp_path / "bundle" / NOTICES_NAME).write_text("Package: tantivy 0.26.0\n")
+    assert _notice_problems(tmp_path / "bundle", notices)
+    (tmp_path / "bundle" / NOTICES_NAME).write_text("Package: tantivy 0.27.0\n")
+    assert _notice_problems(tmp_path / "bundle", notices) == []
+    binary.write_bytes(b"\x7fELF\0" + MARKER.encode() + b"\0 search=off\0")
+    assert _notice_problems(tmp_path / "bundle", notices), "notices beside no search build"

@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace qod {
 
@@ -51,5 +52,20 @@ void RegisterNodeAuthz(duckdb::DatabaseInstance &db, std::shared_ptr<NodeAuthz> 
 //! connection's last prelude succeeded whole; false otherwise (no prelude yet, expired, or the last
 //! prelude refused). What the plan verdicts' decide calls carry.
 bool SessionSnapshot(duckdb::ClientContext &context, int64_t now_ms, Installed &out);
+
+//! The search entries (search spec 4.2 rule 8: each search call's statistics population) of the
+//! verdict the current statement of `context` runs under, into `out`: what the search post_bind hook,
+//! registered after this node's own, reads once the statement was decided. False when the statement runs
+//! under no verdict (a connection off a quack session, or none admitted yet). A local allow and a verdict
+//! without "search" give true and no entries.
+bool StatementSearchEntries(duckdb::ClientContext &context, std::vector<SearchEntry> &out);
+
+// Test hooks: compiled only into the test programs' build of the node core (QOD_NODE_TEST_HOOKS), never into
+// qod-node.
+#ifdef QOD_NODE_TEST_HOOKS
+//! How many times the post_bind hook passed a plan bound on a connection off a quack session as the node's own
+//! (returning at once, before any description or verdict), since the process started.
+uint64_t NodeInternalPassesForTest();
+#endif // QOD_NODE_TEST_HOOKS
 
 } // namespace qod

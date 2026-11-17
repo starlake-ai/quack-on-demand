@@ -44,6 +44,7 @@ class KubernetesQuackBackendSecuritySpec
       podTemplateEnabled = podTemplateEnabled,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
 
@@ -85,6 +86,7 @@ class KubernetesQuackBackendSecuritySpec
       runAsUser = 5000L,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     backend.start(baseSpec.copy(nodeId = "quack-sec-runasuser")).unsafeRunSync()
@@ -361,7 +363,8 @@ class KubernetesQuackBackendSecuritySpec
       Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
       ai.starlake.quack.NodeExtensionsConfig.EnvNames ++
       ai.starlake.quack.NodeFilesConfig.EnvNames ++
-      ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
+      ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames ++
+      ai.starlake.quack.SearchNodeConfig.EnvNames
     val values = env.map(e => e.getName -> e.getValue).toMap
     allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
     values.get("kind") shouldBe Some("ducklake")
@@ -447,6 +450,7 @@ class KubernetesQuackBackendSecuritySpec
       readEnv = _ => None,
       nodeKeys = keys,
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // A metastore entry named like the id env var must not give the pod a second one: kubelet
@@ -497,6 +501,7 @@ class KubernetesQuackBackendSecuritySpec
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // A metastore entry spelled like one of them is not a TenantDb.NodeEnvKeys key: it reaches no
@@ -533,7 +538,8 @@ class KubernetesQuackBackendSecuritySpec
       readEnv = _ => None,
       nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal = false),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
-      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig()
     )
     backend.allowsLocalFiles shouldBe false
     // A metastore entry spelled like it reaches no pod: the pod has the name once, from the config.
@@ -564,6 +570,7 @@ class KubernetesQuackBackendSecuritySpec
       readEnv = _ => None,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // A metastore entry spelled like one reaches no pod: the pod has each name once, from config.
@@ -574,6 +581,49 @@ class KubernetesQuackBackendSecuritySpec
       "QOD_AUTHZ_CACHE_ENTRIES"     -> "0",
       "QOD_AUTHZ_DECIDE_TIMEOUT_MS" -> "750"
     )
+
+  // QoD Search, Task 16: none of the nine knobs is a secret. A metastore entry spelled like one is
+  // dropped, and the manager's own environment reaches a pod only through the cloud names readEnv
+  // forwards, never a QOD_SEARCH_ value: here readEnv answers every name it is asked.
+  it should "carry the manager's search knobs as plain env, once each, and no other QOD_SEARCH_" in:
+    val prefix = ai.starlake.quack.SearchNodeConfig.EnvPrefix
+    def searchEnv(nodeId: String): List[(String, String)] =
+      podEnv(nodeId)
+        .filter(_.getName.startsWith(prefix))
+        .map(e => e.getName -> e.getValue)
+        .sorted
+    makeBackend().start(nodeEnvSpec("quack-nodeenv-search-def", lakeMeta)).unsafeRunSync()
+    searchEnv("quack-nodeenv-search-def") shouldBe
+      ai.starlake.quack.SearchNodeConfig.nodeEnv(ai.starlake.quack.SearchNodeConfig()).toList.sorted
+    val set     = ai.starlake.quack.SearchNodeConfig(maxUnindexedRows = 1234, maxK = 50)
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = name => Some(s"inherited-$name"),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = set,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    backend
+      .start(
+        nodeEnvSpec(
+          "quack-nodeenv-search-set",
+          lakeMeta + ("QOD_SEARCH_MAX_K" -> "1") + ("QOD_SEARCH_LATER_KNOB" -> "1")
+        )
+      )
+      .unsafeRunSync()
+    searchEnv("quack-nodeenv-search-set") shouldBe
+      ai.starlake.quack.SearchNodeConfig.nodeEnv(set).toList.sorted
+    // Plain values, never a secretKeyRef.
+    podEnv("quack-nodeenv-search-set")
+      .filter(_.getName.startsWith(prefix))
+      .forall(e => e.getValueFrom == null) shouldBe true
 
   // No back-compat shape is emitted (owner decision 2026-09-21: operators restart their nodes on
   // upgrade). These two pin that adoption of a pod from an EITHER shape is still lossless for

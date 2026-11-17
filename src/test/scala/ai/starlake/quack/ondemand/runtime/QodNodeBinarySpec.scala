@@ -51,6 +51,41 @@ class QodNodeBinarySpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     QodNodeBinary.parseMarker("qod-node 1.0") shouldBe None
   }
 
+  it should "parse a --build-info line ending with search=on or search=off (search review M17)" in
+    Seq(" search=on", " search=off").foreach { suffix =>
+      QodNodeBinary.parseMarker(marker() + suffix + "\n") shouldBe
+        Some(
+          QodNodeBinary.BuildInfo(
+            QodNodeBinary.Protocol,
+            QodNodeBinary.expectedDuckdb,
+            "d54cbbe3df"
+          )
+        )
+    }
+
+  it should "pass the node image's check with search=on or search=off after it" in {
+    assume(!isWindows, "the image's check is a shell pipeline")
+    // The Dockerfile's own grep, its build arguments filled in as the image build fills them.
+    val dockerfile = Files.readString(Paths.get("docker/quack-node/Dockerfile"))
+    val Grep       =
+      "grep -q \"(qod-node-build-info:protocol=\\$\\{QOD_NODE_PROTOCOL\\};duckdb=v\\$\\{DUCKDB_VERSION\\};)\"".r
+    val pattern = Grep
+      .findFirstMatchIn(dockerfile)
+      .map(_.group(1))
+      .getOrElse(fail("no check in the Dockerfile"))
+    val filled = pattern
+      .replace("${QOD_NODE_PROTOCOL}", QodNodeBinary.Protocol.toString)
+      .replace("v${DUCKDB_VERSION}", QodNodeBinary.expectedDuckdb)
+    Seq(" search=on", " search=off").foreach { suffix =>
+      val line = marker() + suffix
+      val code =
+        new ProcessBuilder("sh", "-c", "printf '%s\\n' \"$1\" | grep -q \"$2\"", "sh", line, filled)
+          .start()
+          .waitFor()
+      withClue(line)(code shouldBe 0)
+    }
+  }
+
   it should "name the node protocol native/qod-node/CMakeLists.txt compiles in" in {
     val cmake = Files.readString(Paths.get("native/qod-node/CMakeLists.txt"))
     cmake should include(s"set(QOD_NODE_PROTOCOL ${QodNodeBinary.Protocol})")

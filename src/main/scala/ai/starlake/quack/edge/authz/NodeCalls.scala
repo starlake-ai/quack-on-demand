@@ -59,6 +59,14 @@ object NodeCalls:
   def serve(req: Request[IO], maxBodyBytes: Int)(
       refused: (String, String) => (Status, String)
   )(answer: (String, String, Array[Byte]) => (Status, String)): IO[Response[IO]] =
+    serveIO(req, maxBodyBytes)(refused)((n, s, b) => IO.blocking(answer(n, s, b)))
+
+  /** [[serve]] for a route whose answer is an IO of its own (the search record route reads the
+    * registry through one): the same checks, in the same order, before `answer` runs.
+    */
+  def serveIO(req: Request[IO], maxBodyBytes: Int)(
+      refused: (String, String) => (Status, String)
+  )(answer: (String, String, Array[Byte]) => IO[(Status, String)]): IO[Response[IO]] =
     def respond(r: (Status, String)): Response[IO]     = Response[IO](r._1).withEntity(r._2)
     def closing(r: (Status, String)): IO[Response[IO]] =
       IO.pure(respond(r).putHeaders(org.http4s.headers.Connection.close))
@@ -71,7 +79,7 @@ object NodeCalls:
         closing((Status.LengthRequired, ChunkedRefused))
       case (Some(nodeId), Some(sig)) =>
         BoundedBody.read(req, maxBodyBytes.toLong, BodyDeadline).flatMap {
-          case BoundedBody.Outcome.Read(body) => IO.blocking(answer(nodeId, sig, body)).map(respond)
+          case BoundedBody.Outcome.Read(body) => answer(nodeId, sig, body).map(respond)
           case BoundedBody.Outcome.TooLarge   => closing((Status.PayloadTooLarge, BodyTooLarge))
           case BoundedBody.Outcome.TooDeep    => closing((Status.BadRequest, BodyTooDeep))
           case BoundedBody.Outcome.TimedOut   => closing((Status.RequestTimeout, BodyTooSlow))

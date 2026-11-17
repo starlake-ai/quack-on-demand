@@ -1,0 +1,15 @@
+# The SPDX licenses a crate linked into qod_search_core may carry (search spec 13, Q10 of Phase 0).
+# scripts/release/search-third-party-notices.py refuses any package whose license expression cannot be
+# satisfied by these alone: every identifier of an AND, and at least one branch of an OR (cargo's legacy
+# "A/B" reads as "A OR B"). A license added here needs the owner's agreement: each must be Apache-2.0
+# compatible and its notice must travel in THIRD-PARTY-NOTICES.txt.
+Apache-2.0
+MIT
+BSD-2-Clause
+BSD-3-Clause
+ISC
+Unicode-3.0
+Zlib
+# An exception, not a license: "Apache-2.0 WITH LLVM-exception" passes only with it listed. compiler_builtins, in
+# the Rust standard library every staticlib carries, holds compiler-rt's code under it (owner ruling 2026-11-17).
+LLVM-exception

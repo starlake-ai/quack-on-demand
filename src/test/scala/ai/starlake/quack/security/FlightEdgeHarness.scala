@@ -58,7 +58,7 @@ object FlightEdgeHarness:
           authorize: () => String
       ): IO[QuackResponse] =
         IO(nodeQuery(sql))
-    new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
 
   // ------------------------------------------------------------------
   // Find a free port on loopback by briefly binding a ServerSocket to

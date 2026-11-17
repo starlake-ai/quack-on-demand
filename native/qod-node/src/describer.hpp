@@ -9,6 +9,7 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
+#include <functional>
 #include <set>
 #include <string>
 
@@ -27,6 +28,9 @@ struct Described {
 	//! rule reads (decision 24, ReadOnlyRefusal). Not part of the description: never sent, never
 	//! fingerprinted.
 	std::set<std::string> written_catalogs;
+	//! How many search calls the description's `searches` holds (search spec 4.2 rule 8). Not part of the
+	//! description beyond those entries.
+	size_t search_calls = 0;
 };
 
 //! What the describer does with one operator type or expression class. A value a DuckDB upgrade
@@ -97,6 +101,48 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 //! of current_setting(...) that fails). When the walk itself cannot resolve a name, returns: the binder's
 //! error stands.
 void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement);
+
+//! Search (spec 4.2 rule 1): refuses, for any principal, a search function (qod_search,
+//! qod_search_matches, qod_knn, qod_hybrid) that `statement_text` (and an EXECUTE's prepared statement)
+//! reaches through a view, a macro, a table macro or a query() literal, transitively: rules 1 and 7 judge
+//! a call on the statement's own text. Throws duckdb::InvalidInputException
+//! ("QoD: search_input_not_governed: ..."). For non-superusers the same refusal is part of Describe's
+//! call-name walk.
+void JudgeSearchBodies(duckdb::ClientContext &context, duckdb::LogicalOperator &plan,
+                       const std::string &statement_text);
+
+//! Search (6.1, ruling 21): what a read of a DuckLake table's id found.
+enum class DuckLakeIdRead { Found, None, Unreadable };
+
+//! Search: the DuckLake table id of `entry` (the target scan's entry), read as the describer reads a DuckLake
+//! read's stable id: the catalog's `ducklake_table` versions of the entry's schema and name only, on a
+//! connection of the node's. `at` -1: the version live now; else the version live at snapshot `at` (the
+//! client's S), and the entry holding the name at `at` must carry `entry`'s oid (security review m1), as
+//! DroppedDuckLakeRead checks a direct pick. Found with `table_id` set; None when no single table holds the name
+//! there, the entry is not the target's or `entry` is no DuckLake table; Unreadable when the metadata cannot be
+//! read (the caller answers search::kRecordUnavailable, retryable: review I3).
+DuckLakeIdRead DuckLakeTableIdAt(duckdb::ClientContext &context, duckdb::TableCatalogEntry &entry, int64_t at,
+                                 int64_t &table_id);
+
+//! Search (6.2, change 64): 1 when DuckLake catalog `catalog` records any `encrypted` entry (any scope) whose
+//! value is not exactly 'false', 0 when it records none such, -1 when it is not a DuckLake catalog or its
+//! metadata cannot be read. Read from the catalog's `ducklake_metadata` as DuckLakeTableIdAt reads.
+int DuckLakeEncrypted(duckdb::ClientContext &context, duckdb::Catalog &catalog);
+
+//! Search (security review M1, M2): DuckLake catalog `catalog`'s global data path (`ducklake_metadata`, key
+//! `data_path`, no scope) into `data_path`, read as DuckLakeTableIdAt reads. Found with it set; None when the
+//! catalog is no DuckLake catalog or records no single global data path; Unreadable when its metadata cannot
+//! be read.
+DuckLakeIdRead DuckLakeDataPath(duckdb::ClientContext &context, const std::string &catalog, std::string &data_path);
+
+// Test hooks: compiled only into the test programs' build of the node core (QOD_NODE_TEST_HOOKS, CMake's
+// qod_node_core_hooks), never into qod-node.
+#ifdef QOD_NODE_TEST_HOOKS
+//! Test hooks: make the two metadata reads above fail as an unreachable catalog would, and observe their
+//! texts (on the calling thread, before each runs).
+void FailSearchMetadataReadsForTest(bool table_ids, bool encryption);
+void SearchMetadataReadObserverForTest(std::function<void(const std::string &)> observer);
+#endif // QOD_NODE_TEST_HOOKS
 
 //! `given` as a description carries it, rendered as the parse screen renders it (MakeLocation): an
 //! s3:// URL naming a bucket unchanged, an absolute local path as ResolveLocalPath resolves it. Anything

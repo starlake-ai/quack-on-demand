@@ -208,9 +208,11 @@ class ReadOnlyCeilingTokenSpec
 
   it should "name only tools that exist" in withHarness() { h =>
     val all = toolNames(h, mint(TokenRestriction.Unrestricted))
-    // The harness does not mount McpBranchTools, where these three are defined.
+    // The harness does not mount McpBranchTools, where these three are defined, nor
+    // McpSearchTools (list_search_indexes).
     val branchTools = Set("list_branches", "branch_changes", "diff")
-    (McpRoutes.ReadOnlyTools -- all -- branchTools) shouldBe empty
+    val searchTools = Set("list_search_indexes")
+    (McpRoutes.ReadOnlyTools -- all -- branchTools -- searchTools) shouldBe empty
   }
 
   it should "still leave every tool to an unrestricted token" in withHarness() { h =>

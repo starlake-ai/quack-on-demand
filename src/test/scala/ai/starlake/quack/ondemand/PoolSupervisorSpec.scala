@@ -3978,3 +3978,35 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.policyVersions.current("acme") should be > before
     sup.userS3.of("u-1").map(_.scope) shouldBe List("s3://acme-etl/")
   }
+
+  "PoolSupervisor.deleteTenantDb (search indexes)" should
+    "remove the row's indexes, one tombstone each, and the tenant delete too" in:
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(
+      ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop(),
+      new NodeLoadTracker,
+      st
+    )
+    st.upsertTenant(Tenant("acme"))
+    List("lake", "logs").foreach { n =>
+      st.upsertTenantDb(
+        TenantDb(s"td-$n", "acme", n, TenantDbKind.DuckLake, Map.empty, s"s3://l/$n/")
+      )
+    }
+    sup.restore()
+    def ix(td: String, tableId: Long) =
+      ai.starlake.quack.model.SearchIndex(
+        java.util.UUID.randomUUID(), td, "main", s"t$tableId", tableId,
+        List(ai.starlake.quack.model.SearchIndexField("title", 2L)), s"s3://l/$td/",
+        ai.starlake.quack.model.SearchIndex.Ready, 0L, "alice", Instant.EPOCH
+      )
+    val lake = List(ix("td-lake", 1L), ix("td-lake", 2L))
+    val logs = ix("td-logs", 1L)
+    (logs :: lake).foreach(i => st.insertSearchIndex(i) shouldBe true)
+    sup.deleteTenantDb("acme", "lake").unsafeRunSync() shouldBe Right(())
+    st.listSearchIndexes(Set("td-lake")) shouldBe Nil
+    st.listSearchIndexTombstones().map(_.indexId).toSet shouldBe lake.map(_.indexId).toSet
+    st.listSearchIndexes(Set("td-logs")).map(_.indexId) shouldBe List(logs.indexId)
+    sup.deleteTenant("acme").unsafeRunSync() shouldBe Right(())
+    st.listAllSearchIndexes() shouldBe Nil
+    st.listSearchIndexTombstones() should have size 3

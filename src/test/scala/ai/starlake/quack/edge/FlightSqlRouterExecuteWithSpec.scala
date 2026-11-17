@@ -86,7 +86,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None),
       journal = journal,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
@@ -518,7 +518,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(
       new QuackHttpClient(TestArrow.sharedAllocator),
       new NodeLoadTracker,
-      keys
+      keys, searchSystem = None
     )
     val seen = scala.collection.mutable.ListBuffer.empty[ai.starlake.quack.edge.authz.MintedHandle]
     val authorize = adapter.authorizer(

@@ -1,0 +1,16 @@
+# The per-index search bundle MAC key and one bundle MAC, from fixed test inputs (no real
+# secret). SearchBundleMacKeySpec (Scala) writes this file with QOD_CAPTURE set and otherwise
+# compares it byte for byte; native/qod-search/tests/mac.rs and qod-node's search tests read it.
+# secret: the node-key secret's UTF-8 bytes, hex. key = HMAC-SHA256(secret,
+# "qod-search-bundle-mac/v1|" + index_id) (NodeKeys.searchBundleMacKey). path: a data file's
+# absolute path, and path_key its lowercase hex SHA-256 (spec 6.2). mac = HMAC-SHA256(key,
+# "qod-search-bundle|v3|" + index_id + "|" + path_key + "\n" + body), the 32-byte trailer of a
+# format 3 bundle whose body is `body`. Regenerate every side together if the derivation, the
+# label or the format changes.
+secret=716f642d676f6c64656e2d7365617263682d6d61632d7365637265742d6e6f742d612d7265616c2d6f6e652d30313233343536373839
+index_id=0b6c2a4e-6f1d-4c8e-9a3b-7d5e1f2c3a4b
+key=1ff43f11999eddef8593fc1d2520aed0e27eda905e868f04552079bf124f08e9
+path=s3://lake/main/pages/ducklake-0193a1b2.parquet
+path_key=911f9b54a5dec568b45754538b49c1cfbb36f6a44274fc5427d21fd3d43428a5
+body=0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc0126
+mac=53899c27dbf1607e4b0e8ea7bbe1287fda8c0788bf72031552dc4e22f8b1e1c1

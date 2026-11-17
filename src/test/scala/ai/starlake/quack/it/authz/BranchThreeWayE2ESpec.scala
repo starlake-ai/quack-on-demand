@@ -402,7 +402,7 @@ class BranchThreeWayE2ESpec
           "http://127.0.0.1:1",
           versions = PolicyVersions.zero,
           readOnlyCatalogs = ReadOnlyCatalogs.none
-        )
+        ), searchSystem = None
       )
       val began  = System.nanoTime()
       val answer = adapter

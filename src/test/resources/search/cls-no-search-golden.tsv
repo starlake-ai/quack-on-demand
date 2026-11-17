@@ -1,0 +1,18 @@
+Select	SELECT * FROM lake.main.pages	Rewritten(SELECT pages.id, pages.title, '***' AS body, pages.lang, pages.cat FROM lake.main.pages)
+Select	SELECT title FROM pages WHERE lang = 'fr'	Passthrough
+Select	SELECT p.title FROM pages p JOIN lake.main.other o ON o.id = p.id	Passthrough
+Select	SELECT title FROM main.pages AS x WHERE x.cat IN (SELECT cat FROM pages)	Passthrough
+Select	SELECT count(*) FROM (SELECT * FROM pages) t	Rewritten(SELECT count(*) FROM (SELECT pages.id, pages.title, '***' AS body, pages.lang, pages.cat FROM pages) t)
+Select	WITH c AS (SELECT * FROM pages) SELECT * FROM c	Rewritten(WITH c AS (SELECT pages.id, pages.title, '***' AS body, pages.lang, pages.cat FROM pages) SELECT c.id, c.title, c.body, c.lang, c.cat FROM c)
+Select	SELECT * FROM pages UNION ALL SELECT * FROM lake.main.pages	Denied(a star expansion (COLUMNS(..), * LIKE / ILIKE / GLOB / SIMILAR TO, *COLUMNS(..), a star inside an expression) over a table with column policies cannot be masked; name the columns instead)
+Select	SELECT (SELECT max(id) FROM pages) AS m	Passthrough
+Select	SELECT * FROM "pages"	Rewritten(SELECT pages.id, pages.title, '***' AS body, pages.lang, pages.cat FROM "pages")
+Select	SELECT * FROM lake.main.pages WHERE EXISTS (SELECT 1 FROM pages q WHERE q.id = pages.id)	Rewritten(SELECT pages.id, pages.title, '***' AS body, pages.lang, pages.cat FROM lake.main.pages WHERE EXISTS (SELECT 1 FROM pages q WHERE q.id = pages.id))
+Select	SELECT qod_searcher(1) FROM pages	Passthrough
+Select	SELECT * FROM range(3) r JOIN pages p ON p.id = r.range	PassthroughParseFailed
+Select	SELECT body FROM pages	Rewritten(SELECT '***' AS body FROM pages)
+Select	SELECT * FROM rpages	Rewritten(SELECT rpages.id, '***' AS rowid, rpages.secret FROM rpages)
+Select	SELECT rowid, secret FROM rpages	Rewritten(SELECT '***' AS rowid, secret FROM rpages)
+Select	SELECT qod_snippet(body, 'x') FROM pages	Rewritten(SELECT qod_snippet('***', 'x') FROM pages)
+Select	SELECT 'qod_search' AS x, body FROM pages	Rewritten(SELECT 'qod_search' AS x, '***' AS body FROM pages)
+Dml	INSERT INTO other SELECT id, body FROM pages	Passthrough

@@ -175,6 +175,18 @@ verify_qod_node_binaries() {
   expected="protocol=$(qod_node_pin_protocol);duckdb=$(qod_node_pin_duckdb);duckdb_source=${ids[0]}"
   [[ "$(cat "$root/VERSION" 2>/dev/null || true)" == "$expected" ]] \
     || { echo "$root/VERSION does not read $expected. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+  # A binary that links qod_search_core ships with its third-party notices (search spec 13): the jar, the node
+  # image and the wheel take them from beside the binaries.
+  local search_on=()
+  for plat in "${QOD_NODE_UNIX_PLATFORMS[@]}"; do
+    if [[ "$(qod_node_search_flag "$root/$plat/qod-node")" == on ]]; then
+      search_on+=("$plat")
+    fi
+  done
+  if [[ ${#search_on[@]} -gt 0 ]]; then
+    cmp -s "$root/$QOD_SEARCH_NOTICES_NAME" "$QOD_SEARCH_NOTICES" \
+      || { echo "the vendored qod-node binaries of ${search_on[*]} link qod_search_core, and $root/$QOD_SEARCH_NOTICES_NAME is missing or differs from $QOD_SEARCH_NOTICES. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+  fi
   echo "phase 1 OK: vendored qod-node binaries match $expected"
 }
 

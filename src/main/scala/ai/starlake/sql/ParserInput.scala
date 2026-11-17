@@ -97,6 +97,25 @@ private[starlake] object ParserInput:
             i += 1
       out.toString
 
+  /** The text of every DuckLake time-travel clause [[stripTimeTravel]] removes from `sql`, in
+    * order, each from its `at` to its balancing `)` (as DuckDB's tokenizer reads the input).
+    */
+  def timeTravelClauses(sql: String): List[String] =
+    if sql == null then Nil
+    else
+      val view = SqlLexer.engineView(sql)
+      val toks = SqlLexer.tokens(sql)
+      val out  = List.newBuilder[String]
+      var i    = 0
+      while i < toks.length do
+        timeTravelEnd(view, toks, i) match
+          case Some(next) =>
+            val end = if next > i && next <= toks.length then toks(next - 1).end else sql.length
+            out += view.substring(toks(i).start, end)
+            i = next
+          case None => i += 1
+      out.result()
+
   /** When token `i` opens a time-travel clause, the index of the first token after it. */
   private def timeTravelEnd(view: String, toks: Vector[Token], i: Int): Option[Int] =
     def slice(k: Int): String = view.substring(toks(k).start, toks(k).end)

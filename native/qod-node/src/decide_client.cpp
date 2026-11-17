@@ -92,6 +92,15 @@ AuthzLimits AuthzLimitsFromEnv() {
 	return ParseAuthzLimits(EnvValue);
 }
 
+HttpReply SignedPost(const HttpUrl &url, const std::string &path, const std::string &node_id,
+                     const std::string &node_key, const std::string &body, int64_t timeout_ms) {
+	return HttpPost(url, path,
+	                {{"Content-Type", "application/json"},
+	                 {"X-QoD-Node", node_id},
+	                 {"X-QoD-Signature", Hex(HmacSha256(node_key, body))}},
+	                body, timeout_ms);
+}
+
 DecideClient::DecideClient(std::string node_id, std::string node_key, AuthzLimits limits,
                            std::function<int64_t()> clock, AuthzStats &stats)
     : node_id_(std::move(node_id)), node_key_(std::move(node_key)), limits_(limits), clock_(std::move(clock)),
@@ -134,11 +143,7 @@ DecideResult DecideClient::Ask(const DecideCall &call, const std::string &finger
 	                                      {"kind", JsonString(call.kind)}}));
 	HttpReply reply;
 	try {
-		reply = HttpPost(url, url.path + kDecidePath,
-		                 {{"Content-Type", "application/json"},
-		                  {"X-QoD-Node", node_id_},
-		                  {"X-QoD-Signature", Hex(HmacSha256(node_key_, body))}},
-		                 body, limits_.decide_timeout_ms);
+		reply = SignedPost(url, url.path + kDecidePath, node_id_, node_key_, body, limits_.decide_timeout_ms);
 	} catch (std::exception &error) {
 		std::cerr << "[qod-node] decide call to " << url.authority << " failed: " << error.what() << std::endl;
 		return Unavailable("authorization unavailable");

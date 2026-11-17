@@ -35,6 +35,8 @@ struct MintSpec {
 	std::string path;
 	//! The pool's read-only catalogs (decision 24), sorted as the manager writes them; empty: none.
 	std::vector<std::string> read_only;
+	//! The handle's pool, tenant/tenantDb/pool.
+	std::string pool = "acme/acme_db/bi";
 };
 
 //! `aliases` as a handle's readOnly array (the tests' aliases need no escaping).
@@ -56,7 +58,7 @@ inline std::string MintWith(const MintSpec &spec) {
 	               "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
 	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +
 	               ",\"system\":" + (spec.system ? "true" : "false") + "}," +
-	               "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
+	               "\"pool\":\"" + spec.pool + "\",\"policyVersion\":" + std::to_string(spec.policy_version) +
 	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
 	               "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) + ",\"nonce\":\"" + nonce +
 	               "\",\"exp\":" + std::to_string(spec.exp) + "}";

@@ -61,6 +61,17 @@ final case class DroppedTableEntry(
     tableId: Long = 0L
 )
 
+/** A live table as QoD Search reads it (`DuckLakeCatalogReader.liveTableColumns`): its DuckLake
+  * table id, its schema and name as the catalog spells them, and `(name, field id, type)` of each
+  * live top-level column in column order.
+  */
+final case class LiveTable(
+    tableId: Long,
+    schema: String,
+    table: String,
+    columns: List[(String, Long, String)]
+)
+
 /** One `ducklake_table` row: a table version under a stable `tableId`, live from `begin`
   * (inclusive) until `end` (exclusive; None = still live). A rename inserts a new version under the
   * same id.
@@ -739,6 +750,53 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       schema,
       table
     )(_.getLong("table_id")).headOption
+
+  /** QoD Search's read of a live table (spec 6.1): the table id of `(schema, table)` at the current
+    * snapshot, its schema and name as the catalog spells them, then `(name, field id, type)` of its
+    * live top-level columns in column order, the field id being `ducklake_column.column_id`. None
+    * when no live table has that name. A name matches as DuckDB resolves one, ignoring case, the
+    * exact spelling winning when several match; two that differ only in case and neither exact
+    * match nothing.
+    */
+  def liveTableColumns(schema: String, table: String): Option[LiveTable] =
+    val candidates = query(
+      """SELECT t.table_id, s.schema_name, t.table_name
+        |  FROM ducklake_schema s
+        |  JOIN ducklake_table t ON t.schema_id = s.schema_id
+        | WHERE lower(s.schema_name) = lower(?) AND lower(t.table_name) = lower(?)
+        |   AND s.end_snapshot IS NULL AND t.end_snapshot IS NULL""".stripMargin,
+      schema,
+      table
+    )(rs => (rs.getLong("table_id"), rs.getString("schema_name"), rs.getString("table_name")))
+    val chosen = candidates.find((_, s, t) => s == schema && t == table) match
+      case Some(exact) => Some(exact)
+      case None        => Option.when(candidates.size == 1)(candidates.head)
+    chosen.map { (tableId, liveSchema, liveTable) =>
+      LiveTable(
+        tableId,
+        liveSchema,
+        liveTable,
+        query(
+          """SELECT column_id, column_name, column_type
+          |  FROM ducklake_column
+          | WHERE table_id = ? AND end_snapshot IS NULL AND parent_column IS NULL
+          | ORDER BY column_order""".stripMargin,
+          tableId
+        )(rs => (rs.getString("column_name"), rs.getLong("column_id"), rs.getString("column_type")))
+      )
+    }
+
+  /** The current `(schema, table)` names of a live table id, None when that table id is no longer
+    * live (dropped, or replaced by `CREATE OR REPLACE`, which takes a new id).
+    */
+  def liveTableName(tableId: Long): Option[(String, String)] =
+    query(
+      """SELECT s.schema_name, t.table_name
+        |  FROM ducklake_table t
+        |  JOIN ducklake_schema s ON s.schema_id = t.schema_id
+        | WHERE t.table_id = ? AND t.end_snapshot IS NULL AND s.end_snapshot IS NULL""".stripMargin,
+      tableId
+    )(rs => (rs.getString("schema_name"), rs.getString("table_name"))).headOption
 
   /** `(table_id, begin_snapshot)` of the CURRENT `ducklake_table` row for `(schema, table)`, or
     * None when the table is not live. `begin_snapshot` is the snapshot that created this table

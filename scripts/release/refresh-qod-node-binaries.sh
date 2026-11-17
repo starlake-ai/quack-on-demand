@@ -19,6 +19,12 @@
 # companions and the VERSION stamp, and STOPS. Nothing under native/qod-node/binaries/ changes
 # unless every binary passes. Review the diff and commit like any other change.
 #
+# Search (QOD_NODE_SEARCH): every binary vendored here is built with it OFF (OWNER RULING 2026-11-16, D2:
+# nothing shipped links qod_search_core while search Phase 1 is unmerged), and a CI artifact built otherwise
+# is refused. A set that links it would get its third-party notices vendored beside it
+# (THIRD-PARTY-NOTICES-qod-search.txt, from native/qod-search; the jar, the node image and the wheel ship
+# them from there), and a set without it has none.
+#
 # The CI run defaults to the latest successful qod-node.yml run whose head commit is HEAD (push it
 # and let the workflow run first, or start it with workflow_dispatch); QOD_NODE_CI_RUN=<run id>
 # picks another run.
@@ -34,6 +40,8 @@ source "$REPO_DIR/scripts/release/glibc-floor.sh"
 
 FETCH_CI="${FETCH_CI:-1}"
 VENDORED=native/qod-node/binaries
+# The search setting of the configure below, as qod_node_search_flag reads a binary.
+SEARCH=off
 
 protocol="$(qod_node_pin_protocol)"
 [[ -n "$protocol" ]] || { echo "cannot read QOD_NODE_PROTOCOL from native/qod-node/CMakeLists.txt" >&2; exit 1; }
@@ -75,8 +83,10 @@ if [[ "$build_host" == "1" ]]; then
     || { echo "pinned libduckdb cache missing at $duckdb_home (need lib/ and include/ with the internal header tree). Run 'QOD_VERSION=BUILD ./scripts/run-jar.sh' once to populate it, then re-run." >&2; exit 1; }
   echo "cmake build [$host_platform] (DUCKDB_HOME=$duckdb_home)..."
   rm -rf native/qod-node/build-release
+  # The lowest macOS the binary starts on, written as CI's build-release writes it (OWNER RULING 2026-11-17); without
+  # it the host SDK's version. CMake ignores it on Linux.
   cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
-    -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$duckdb_home"
+    -DQOD_NODE_RELATIVE_RPATH=ON -DQOD_NODE_SEARCH=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DDUCKDB_HOME="$duckdb_home"
   cmake --build native/qod-node/build-release --config Release --target qod-node
   host_built=native/qod-node/build-release/qod-node
   source_id="$(qod_node_check_marker "$host_built")" \
@@ -84,6 +94,8 @@ if [[ "$build_host" == "1" ]]; then
   if [[ "$host_os" == linux ]]; then
     glibc_floor_check "$host_built" || { echo "nothing was changed." >&2; exit 1; }
   fi
+  [[ "$(qod_node_search_flag "$host_built")" == "$SEARCH" ]] \
+    || { echo "the host build's search setting is not $SEARCH; nothing was changed." >&2; exit 1; }
   staged=("$host_platform:$host_built")
 fi
 
@@ -115,8 +127,16 @@ if [[ "$FETCH_CI" == "1" ]]; then
     if [[ "$plat" == linux-* ]]; then
       glibc_floor_check "$f" || { echo "CI run $ci_run_id: nothing was changed." >&2; exit 1; }
     fi
+    [[ "$(qod_node_search_flag "$f")" == "$SEARCH" ]] \
+      || { echo "CI run $ci_run_id: the $plat artifact is not built with search $SEARCH; nothing was changed." >&2; exit 1; }
     staged+=("$plat:$f")
   done
+fi
+
+# A set linking qod_search_core needs its notices current with Cargo.lock before anything changes.
+if [[ "$SEARCH" == on ]]; then
+  python3 -I scripts/release/search-third-party-notices.py --check \
+    || { echo "nothing was changed." >&2; exit 1; }
 fi
 
 # --- vendor ---
@@ -138,5 +158,12 @@ for entry in "${staged[@]}"; do
   chmod 755 "$CLI_COPY/$plat/qod-node"
 done
 cp "$VENDORED/VERSION" "$CLI_COPY/VERSION"
+for dir in "$VENDORED" "$CLI_COPY"; do
+  if [[ "$SEARCH" == on ]]; then
+    cp "$QOD_SEARCH_NOTICES" "$dir/$QOD_SEARCH_NOTICES_NAME"
+  else
+    rm -f "$dir/$QOD_SEARCH_NOTICES_NAME"
+  fi
+done
 echo "vendored: ${staged[*]%%:*}"
 echo "refreshed. Review with 'git status $VENDORED $CLI_COPY' and commit (git update-index --chmod=+x on a new binary: core.fileMode may be off)."

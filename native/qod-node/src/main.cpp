@@ -21,6 +21,9 @@
 #include "node_config.hpp"
 #include "node_hooks.hpp"
 #include "options.hpp"
+#ifdef QOD_NODE_SEARCH
+#include "search_functions.hpp"
+#endif
 #include "secrets.hpp"
 #include "settings_list.hpp"
 #include "spill_dir.hpp"
@@ -80,6 +83,10 @@ int ListFunctionsMode(const NodeOptions &options) {
 	// qod_session and qod_screen are functions every node has. The id and key are never used: no
 	// handle is verified in this mode.
 	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>("qod-node-list", std::string(32, '\0')));
+#ifdef QOD_NODE_SEARCH
+	// The search functions too, so the classification lists them.
+	RegisterSearchFunctions(*db.instance);
+#endif
 	duckdb::Connection con(db);
 	RunInitFiles(con, options);
 	ListFunctions(con, std::cout);
@@ -128,6 +135,13 @@ int Serve(const NodeOptions &options) {
 	// connection quack opens from here on.
 	RegisterNodeAuthz(*db.instance,
 	                  std::make_shared<NodeAuthz>(options.node_id, secrets.node_key, SystemNowMs, limits));
+#ifdef QOD_NODE_SEARCH
+	// The search table functions, after the identity checks and before any SQL, with the signed per-node
+	// index record fetch (POST /api/internal/search/records on the handle's replica) as their record source.
+	auto records =
+	    std::make_shared<search::RecordClient>(options.node_id, secrets.node_key, limits.decide_timeout_ms, SystemNowMs);
+	RegisterSearchFunctions(*db.instance, std::move(records));
+#endif
 	duckdb::Connection con(db);
 
 	// Before any CREATE SECRET or ATTACH: once duckdb_secrets() has put the secret manager in use,
@@ -241,7 +255,13 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	if (options.mode == NodeOptions::Mode::BUILD_INFO) {
-		std::cout << BuildInfo() << std::endl;
+		// The marker stays byte for byte as every reader matches it (QodNodeBinary, the qod CLI, the node
+		// image, the release scripts); whether the search functions are built follows it (search review M17).
+#ifdef QOD_NODE_SEARCH
+		std::cout << BuildInfo() << " search=on" << std::endl;
+#else
+		std::cout << BuildInfo() << " search=off" << std::endl;
+#endif
 #ifndef QOD_NODE_DUCKDB_STATIC
 		// Also the libduckdb this process loaded: the manager runs --build-info at boot to learn the
 		// binary starts here, against the release it was built for.

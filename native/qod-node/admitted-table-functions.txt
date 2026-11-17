@@ -26,6 +26,8 @@ pragma_collations
 pragma_platform
 pragma_user_agent
 pragma_version
+qod_search
+qod_search_matches
 qod_session
 query
 query_table

@@ -46,7 +46,9 @@ final class FleetHandlers(
     // the manager was told.
     nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // Required (Main passes the manager's): a default would silently run qod-node's own limits.
-    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig,
+    // Required (Main passes the manager's), for the same reason: the search knobs (QoD Search).
+    searchNode: ai.starlake.quack.SearchNodeConfig
 ) extends LazyLogging:
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -185,7 +187,8 @@ final class FleetHandlers(
                           nodeKeys.keyHex(a.nodeId),
                           nodeExtensions,
                           nodeFiles,
-                          nodeAuthzLimits
+                          nodeAuthzLimits,
+                          searchNode
                         )
                     ),
                   approval
@@ -344,14 +347,16 @@ object FleetHandlers:
     case ServerLiveness.Dead           => "dead"
 
   /** The heartbeat's assignment, with the node key derived for its node id, the manager's extension
-    * policy, whether its nodes may open local files and its decide limits (none stored).
+    * policy, whether its nodes may open local files, its decide limits and its search knobs (none
+    * stored).
     */
   def toDto(
       a: FleetAssignment,
       authzKey: String,
       extensions: ai.starlake.quack.NodeExtensionsConfig,
       files: ai.starlake.quack.NodeFilesConfig,
-      limits: ai.starlake.quack.NodeAuthzLimitsConfig
+      limits: ai.starlake.quack.NodeAuthzLimitsConfig,
+      search: ai.starlake.quack.SearchNodeConfig
   ): FleetAssignmentDto =
     FleetAssignmentDto(
       a.epoch,
@@ -372,6 +377,17 @@ object FleetHandlers:
       ),
       FleetNodeFilesDto(files.allowLocal),
       FleetNodeAuthzLimitsDto(limits.decideTimeoutMs, limits.cacheEntries),
+      FleetNodeSearchLimitsDto(
+        search.maxUnindexedRows,
+        search.maxUnindexedSources,
+        search.queryMemoryBytes,
+        search.maxK,
+        search.livenessCacheEntries,
+        search.livenessCacheBytes,
+        search.segmentCacheBytes,
+        search.missTtlSec,
+        search.maxBundleBytes
+      ),
       a.tenantDbInitSql,
       a.tenantDbInitTrusted,
       a.tenantPoolInitSql,

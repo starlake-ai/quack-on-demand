@@ -118,7 +118,9 @@ object LiveQodNode:
       port: Int = freePort(),
       token: String = "tok-live-qod-node",
       home: Option[Path] = None,
-      bin: Option[Path] = None
+      bin: Option[Path] = None,
+      /** Extra variables for the node's environment (never a secret: secrets go as files). */
+      env: Map[String, String] = Map.empty
   ): LiveQodNode =
     val exe = bin
       .orElse(QodNodeTestBinary.path)
@@ -165,6 +167,7 @@ object LiveQodNode:
       .redirectErrorStream(true)
       .redirectOutput(logFile.toFile)
     home.foreach(h => builder.environment().put("HOME", h.toString))
+    env.foreach((k, v) => builder.environment().put(k, v))
     val p    = launch(builder)
     val live = new LiveQodNode(new At(nodeId, port, token, keys), p, logFile)
     // The init SQL goes down the node's stdin and the pipe is closed, as the spawn scripts do (init

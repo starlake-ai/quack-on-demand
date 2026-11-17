@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Quack on Demand REST API
-  version: 0.9.10-SNAPSHOT
+  version: 0.13.2-SNAPSHOT
 paths:
   /api/scim/v2/{tenant}/Groups/{id}:
     get:
@@ -7090,6 +7090,184 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/search/index/build:
+    post:
+      description: 'Interim operator tool until the indexer: flushes the table''s
+        inlined rows and builds the bundle of each live data file for its search index,
+        on the named pool, as the system principal. Superuser only (403 superuser_required).
+        409 search_build_deleted_rows for a file holding deleted rows.'
+      operationId: postApiSearchIndexBuild
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchIndexBuildRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchBuildResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/search/index/create:
+    post:
+      description: 'Create a full-text search index on a DuckLake table''s VARCHAR
+        columns (1 to 32). The index is keyed by the table''s DuckLake id, so a rename
+        keeps it. k1 and b are fixed at 1.2 and 0.75: a body naming options, k1 or
+        b is 400 invalid_search_options. Refusals: 404 not_found, 400 search_branch_unsupported,
+        400 search_ducklake_only, 400 search_encrypted_unsupported, 400 invalid_name,
+        400 invalid_search_columns, 503 catalog_unavailable, 404 table_not_found,
+        400 search_column_not_found, 400 search_column_type, 409 search_index_exists.'
+      operationId: postApiSearchIndexCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchIndexCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchIndexResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/search/index/delete:
+    post:
+      description: Drop a search index, named by its table's current name (an index
+        whose table is gone, by its name at create) or by its indexId, exactly one
+        of them (400 invalid_search_target). Its bundles stay until they are collected.
+        404 not_found; 403 token_scope for a database the token does not allow.
+      operationId: postApiSearchIndexDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchIndexDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchIndexDeleteResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/search/index/list:
+    post:
+      description: List a tenant's search indexes, of one database or all. An index
+        whose table was dropped reads disabled; a renamed table shows its current
+        name.
+      operationId: postApiSearchIndexList
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchIndexListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchIndexListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/statement/kill:
     post:
       operationId: postApiStatementKill
@@ -8952,6 +9130,7 @@ components:
       - nodeExtensions
       - nodeFiles
       - authzLimits
+      - searchLimits
       - tenantDbInitSql
       - tenantDbInitTrusted
       - tenantPoolInitSql
@@ -8987,6 +9166,8 @@ components:
           $ref: '#/components/schemas/FleetNodeFilesDto'
         authzLimits:
           $ref: '#/components/schemas/FleetNodeAuthzLimitsDto'
+        searchLimits:
+          $ref: '#/components/schemas/FleetNodeSearchLimitsDto'
         tenantDbInitSql:
           type: string
         tenantDbInitTrusted:
@@ -9097,6 +9278,47 @@ components:
           type: string
         action:
           type: string
+    FleetNodeSearchLimitsDto:
+      title: FleetNodeSearchLimitsDto
+      type: object
+      required:
+      - maxUnindexedRows
+      - maxUnindexedSources
+      - queryMemoryBytes
+      - maxK
+      - livenessCacheEntries
+      - livenessCacheBytes
+      - segmentCacheBytes
+      - missTtlSec
+      - maxBundleBytes
+      properties:
+        maxUnindexedRows:
+          type: integer
+          format: int64
+        maxUnindexedSources:
+          type: integer
+          format: int64
+        queryMemoryBytes:
+          type: integer
+          format: int64
+        maxK:
+          type: integer
+          format: int32
+        livenessCacheEntries:
+          type: integer
+          format: int32
+        livenessCacheBytes:
+          type: integer
+          format: int64
+        segmentCacheBytes:
+          type: integer
+          format: int64
+        missTtlSec:
+          type: integer
+          format: int32
+        maxBundleBytes:
+          type: integer
+          format: int64
     FleetPoolKeyDto:
       title: FleetPoolKeyDto
       type: object
@@ -10861,6 +11083,180 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SchemaDiffNullability'
+    SearchBuildResponse:
+      title: SearchBuildResponse
+      type: object
+      required:
+      - flushed
+      properties:
+        flushed:
+          type: boolean
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchBuiltFile'
+        skipped:
+          type: array
+          items:
+            type: string
+    SearchBuiltFile:
+      title: SearchBuiltFile
+      type: object
+      required:
+      - path
+      - bundle
+      - docs
+      - bytes
+      - ms
+      properties:
+        path:
+          type: string
+        bundle:
+          type: string
+        docs:
+          type: integer
+          format: int64
+        bytes:
+          type: integer
+          format: int64
+        ms:
+          type: integer
+          format: int64
+    SearchIndexBuildRequest:
+      title: SearchIndexBuildRequest
+      type: object
+      required:
+      - tenant
+      - database
+      - table
+      - pool
+      properties:
+        tenant:
+          type: string
+        database:
+          type: string
+        table:
+          type: string
+        pool:
+          type: string
+    SearchIndexCreateRequest:
+      title: SearchIndexCreateRequest
+      type: object
+      required:
+      - tenant
+      - database
+      - table
+      properties:
+        tenant:
+          type: string
+        database:
+          type: string
+        table:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
+    SearchIndexDeleteRequest:
+      title: SearchIndexDeleteRequest
+      type: object
+      required:
+      - tenant
+      - database
+      properties:
+        tenant:
+          type: string
+        database:
+          type: string
+        table:
+          type: string
+        indexId:
+          type: string
+    SearchIndexDeleteResponse:
+      title: SearchIndexDeleteResponse
+      type: object
+      required:
+      - deleted
+      properties:
+        deleted:
+          type: boolean
+    SearchIndexFieldDto:
+      title: SearchIndexFieldDto
+      type: object
+      required:
+      - column
+      - fieldId
+      properties:
+        column:
+          type: string
+        fieldId:
+          type: integer
+          format: int64
+    SearchIndexListRequest:
+      title: SearchIndexListRequest
+      type: object
+      required:
+      - tenant
+      properties:
+        tenant:
+          type: string
+        database:
+          type: string
+    SearchIndexListResponse:
+      title: SearchIndexListResponse
+      type: object
+      properties:
+        indexes:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchIndexResponse'
+    SearchIndexResponse:
+      title: SearchIndexResponse
+      type: object
+      required:
+      - indexId
+      - tenant
+      - database
+      - schema
+      - table
+      - tableId
+      - state
+      - segmentsVersion
+      - createdBy
+      - createdAt
+      properties:
+        indexId:
+          type: string
+        tenant:
+          type: string
+        database:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        tableId:
+          type: integer
+          format: int64
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchIndexFieldDto'
+        bundleRoot:
+          type: string
+        state:
+          type: string
+        segmentsVersion:
+          type: integer
+          format: int64
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+        currentSchema:
+          type: string
+        currentTable:
+          type: string
     SetMaxConcurrentRequest:
       title: SetMaxConcurrentRequest
       type: object

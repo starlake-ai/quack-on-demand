@@ -208,7 +208,7 @@ class BranchWiringMergeExecutorSpec extends AnyFlatSpec with Matchers:
     BranchWiring.mergeExecutor(
       cfg,
       backend,
-      new QuackHttpAdapter(client, new NodeLoadTracker, NodeKeys.ephemeral())
+      new QuackHttpAdapter(client, new NodeLoadTracker, NodeKeys.ephemeral(), searchSystem = None)
     )
 
   /** A port with a listener on it, which is all the readiness wait asks of a node. */

@@ -10,6 +10,9 @@ import ai.starlake.quack.model.{
   ReapedRun,
   RunCounters,
   RunningNode,
+  SearchIndex,
+  SearchIndexTombstone,
+  SearchSegment,
   SnapshotTag,
   Tenant,
   TenantAcl,
@@ -173,6 +176,46 @@ trait ControlPlaneStore:
 
   /** Every tenant's locations, by tenant then location. */
   def listAllTenantLocations(): List[TenantLocation]
+
+  // ---------------- QoD Search index registry (Liquibase 0059) ----------------
+  // Not on the policy-version trigger: an index changes no principal's permissions (spec 6.1).
+
+  /** Insert `ix`. False, with nothing written, when its table or its id already has an index. */
+  def insertSearchIndex(ix: SearchIndex): Boolean
+
+  /** Write `ix` as given, by its index id (a manifest import): see [[PostgresSearchIndexRows]]. */
+  def upsertSearchIndex(ix: SearchIndex): Unit
+
+  /** The indexes of these tenant-dbs. */
+  def listSearchIndexes(tenantDbIds: Set[String]): List[SearchIndex]
+
+  /** Every index of every tenant-db. */
+  def listAllSearchIndexes(): List[SearchIndex]
+
+  /** The index of a tenant-db's table, by DuckLake table id. */
+  def findSearchIndex(tenantDbId: String, tableId: Long): Option[SearchIndex]
+
+  def findSearchIndexById(indexId: java.util.UUID): Option[SearchIndex]
+
+  /** Remove the index and its segment rows and write its tombstone, in one transaction. False when
+    * there is no such index.
+    */
+  def deleteSearchIndex(indexId: java.util.UUID): Boolean
+
+  def setSearchIndexState(indexId: java.util.UUID, state: String): Unit
+
+  /** Upsert one segment row and move the index's `segments_version` up by one, in one transaction.
+    */
+  def recordSearchSegment(s: SearchSegment): Unit
+
+  def listSearchSegments(indexId: java.util.UUID): List[SearchSegment]
+
+  /** Tombstone and remove every index of a tenant-db, in one transaction; the count removed. Called
+    * before the tenant-db row goes, whose key `qodstate_search_index` does not cascade.
+    */
+  def deleteSearchIndexesForTenantDb(tenantDbId: String): Int
+
+  def listSearchIndexTombstones(): List[SearchIndexTombstone]
 
   // ---------------- Users' own S3 credentials (Liquibase 0052) ----------------
 

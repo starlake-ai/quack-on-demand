@@ -96,6 +96,7 @@ class PreviewEndToEndSpec
       max = 24999,
       nodeKeys = keys,
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val sup      = new PoolSupervisor(backend, tracker, store)
@@ -161,7 +162,7 @@ class PreviewEndToEndSpec
               s"quack node at ${node.host}:${node.port} never came up (last poll error: $lastError)"
             )
           val client   = new QuackHttpClient(allocator)
-          val adapter  = new QuackHttpAdapter(client, tracker, keys)
+          val adapter  = new QuackHttpAdapter(client, tracker, keys, searchSystem = None)
           val sessions = new ai.starlake.quack.edge.SessionRegistry
           val router   = new FlightSqlRouter(
             sup,

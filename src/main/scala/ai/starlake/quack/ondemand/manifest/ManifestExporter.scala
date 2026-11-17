@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{FederatedSecret, TenantDb}
+import ai.starlake.quack.model.{FederatedSecret, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
   ControlPlaneSnapshot,
@@ -95,6 +95,8 @@ object ManifestExporter extends LazyLogging:
     val dbsByTenant = snap.tenantDbs.groupBy(_.tenantId)
     // Authorized locations are not part of the snapshot.
     val locationsByTenant = store.listAllTenantLocations().groupBy(_.tenantId)
+    // Nor are search indexes.
+    val searchIndexesByDb = store.listAllSearchIndexes().groupBy(_.tenantDbId)
     val poolsByDb         = snap.pools.groupBy(_.tenantDbId)
     // Global pool -> (owning tenant addressing-name, pool name) index, used to
     // resolve pool grants regardless of which tenant loop iteration is
@@ -204,7 +206,27 @@ object ManifestExporter extends LazyLogging:
                 pid
               }
             )
-          }
+          },
+          // The registry rows as stored: no k1 or b (D10), no segment row, no key. A database
+          // that can hold indexes exports its list even when empty, so a restore drops an index
+          // created after the backup (review M4); any other exports none.
+          searchIndexes = Option
+            .when(d.kind == TenantDbKind.DuckLake && d.branchOf.isEmpty)(
+              searchIndexesByDb.getOrElse(d.id, Nil)
+            )
+            .map {
+              _.map { ix =>
+                ManifestSearchIndex(
+                  indexId = ix.indexId.toString,
+                  schema = ix.schemaName,
+                  table = ix.tableName,
+                  tableId = ix.tableId,
+                  fields = ix.fields.map(f => ManifestSearchIndexField(f.column, f.fieldId)),
+                  bundleRoot = ix.bundleRoot,
+                  state = ix.state
+                )
+              }
+            }
         )
       }
 

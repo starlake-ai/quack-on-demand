@@ -1,0 +1,6 @@
+# The Rust release qod_search_core is built with (search spec change 11, owner ruling 2026-11-14).
+# Corrosion does not read this file: native/qod-node/CMakeLists.txt reads `channel` into Rust_TOOLCHAIN,
+# and the qod-node workflow installs the same release from it. Bump it here only.
+[toolchain]
+channel = "1.96.1"
+profile = "minimal"

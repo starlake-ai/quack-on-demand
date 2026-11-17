@@ -95,7 +95,12 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       ) =
         IO.pure(stub())
     val adapter =
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      new QuackHttpAdapter(
+        client,
+        tracker,
+        ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        searchSystem = None
+      )
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -205,6 +210,34 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     e.detail("reason") should include("QoD: user:alice lacks grants on cat.sch.tbl:insert")
   }
 
+  it should "emit no data-denial for the node's search_index_behind (search spec 9, ruling 7)" in {
+    // Raised by the node as a Permission Error, as a refusal is, but a backlog, never a denial.
+    val behind = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: search_index_behind: acme_lake.main.pages has 250000 " +
+            "unindexed live rows (cap 200000); retry once the indexer catches up"
+        ),
+        1L
+      )
+    val (router, journal, store) = setupWithJournal(stub = behind)
+    router
+      .execute("aud-sib", "alice", poolKey, "SELECT 1", patId = Some("pat-9"))
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.Unavailable]
+    journal.drainNow()
+    store.events.filter(_.family == "data-denial") shouldBe empty
+    // The same shape with any other reason is a denial, and journals one.
+    val refusal = () =>
+      QuackResponse.Failed(QuackError.Permanent("Permission Error: QoD: user:alice lacks"), 1L)
+    val (denied, deniedJournal, deniedStore) = setupWithJournal(stub = refusal)
+    denied.execute("aud-sib-2", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    deniedJournal.drainNow()
+    deniedStore.events.map(_.family) shouldBe List("data-denial")
+  }
+
   it should "not throw and not record when using the default noop journal (EventJournal.noop)" in {
     val sup     = buildSupervisor()
     val tracker = new NodeLoadTracker
@@ -218,7 +251,12 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       ) =
         IO.pure(defaultStub())
     val adapter =
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      new QuackHttpAdapter(
+        client,
+        tracker,
+        ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        searchSystem = None
+      )
     val sessions = new SessionRegistry
     // No journal param -> defaults to EventJournal.noop
     val router = new FlightSqlRouter(

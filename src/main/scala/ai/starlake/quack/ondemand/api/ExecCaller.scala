@@ -41,6 +41,11 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * restore's commit fence matches it; a restore's and an undrop's lost answer is settled by it).
   * The stamp is then required: it is sent whatever `QOD_STAMP_WRITES` says, and a write whose stamp
   * fails is not sent. No credential sets it, and it never travels in client SQL.
+  *
+  * `searchRecords` marks a system caller whose statements ask for search index records (the interim
+  * bundle build, [[ExecCaller.systemSearch]]): the routed executor passes it on, and the adapter
+  * records that call's system handles for the record route. It grants nothing (the record route
+  * serves records, not rights) and counts only with `system`; no credential sets it.
   */
 final case class ExecCaller(
     connectionId: String,
@@ -49,7 +54,8 @@ final case class ExecCaller(
     superuserAdmissible: Boolean,
     patId: Option[String] = None,
     system: Boolean = false,
-    commitMessage: Option[String] = None
+    commitMessage: Option[String] = None,
+    searchRecords: Boolean = false
 ):
   /** The row cap actually applied: the server cap, the token's cap and the request's, smallest
     * wins. A token can lower the cap and can never raise it.
@@ -98,6 +104,12 @@ object ExecCaller:
       superuserAdmissible = true,
       system = true
     )
+
+  /** [[system]] for a call site whose statements ask for search index records (the interim bundle
+    * build): its system handles are recorded for the record route (`searchRecords`).
+    */
+  def systemSearch(connectionId: String, identity: String): ExecCaller =
+    system(connectionId, identity).copy(searchRecords = true)
 
   /** A caller with no token restriction: a login session. `superuserAdmissible` is the session's
     * own `SessionScope.superuser`.

@@ -204,7 +204,7 @@ class QodNodeReadOnlySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
   }
 
   "the health probe" should "pass an enforcing node with keys that carry a read-only catalog" in {
-    new QuackHttpAdapter(client, new NodeLoadTracker, readOnly)
+    new QuackHttpAdapter(client, new NodeLoadTracker, readOnly, searchSystem = None)
       .probe(node.node)
       .unsafeRunSync() shouldBe ProbeVerdict.Ok
   }

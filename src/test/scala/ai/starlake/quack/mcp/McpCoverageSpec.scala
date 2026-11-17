@@ -105,6 +105,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/role/row-policy/create"    -> "create_row_policy",
     "POST /api/role/row-policy/delete"    -> "delete_row_policy",
     "POST /api/role/row-policy/update"    -> "update_row_policy",
+    "POST /api/search/index/create"       -> "create_search_index",
+    "POST /api/search/index/delete"       -> "drop_search_index",
+    "POST /api/search/index/list"         -> "list_search_indexes",
     "POST /api/statement/kill"            -> "kill_statement",
     "POST /api/tenant/create"             -> "create_tenant",
     "POST /api/tenant/delete"             -> "delete_tenant",
@@ -145,7 +148,10 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/internal/",      // node-to-manager calls (CredentialsRoute, DecideRoute), never REST
     "POST /api/profile/s3/add", // a secret must not pass through an agent (decision 23)
     "POST /api/user/s3/",       // an admin's view of a user's S3 credentials: REST, CLI and UI
-    "POST /api/scim/",          // IdP wire protocol
+    // QoD Search's interim bundle build (D7): a superuser operator tool, interim until Phase 2's
+    // indexer.
+    "POST /api/search/index/build",
+    "POST /api/scim/", // IdP wire protocol
     "PUT /api/scim/",
     "PATCH /api/scim/",
     "DELETE /api/scim/"
@@ -401,9 +407,10 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
       // enumerate the registered names.
       val branchTools             = new McpBranchTools(null, superuserScope)
       val profileTools            = new McpProfileTools(null)
+      val searchTools             = new McpSearchTools(null, superuserScope)
       val registered: Set[String] =
         (identityTools.tools ++ accessTools.tools ++ adminTools.tools ++ platformTools.tools ++
-          branchTools.tools ++ profileTools.tools)
+          branchTools.tools ++ profileTools.tools ++ searchTools.tools)
           .map(_.name)
           .toSet
       val referenced = covered.map(_._2).toSet

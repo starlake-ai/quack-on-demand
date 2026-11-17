@@ -12,6 +12,7 @@ import ai.starlake.quack.edge.opa.{
   OpaTarget,
   OpaUser
 }
+import ai.starlake.quack.edge.policy.PolicyCoverage
 import ai.starlake.quack.edge.sql.GrantMatch
 import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.auth.TokenRestriction
@@ -115,6 +116,120 @@ final class AuthzDecider(
         _ <- objects(ctx, narrowed(ctx), d, rules, dryRun)
       yield ()
     }
+
+  /** The statistics population of each search call of `d` (search spec 4.2 rules 5 and 8, 7.5), for
+    * a plan [[decidePlan]] allowed, on `pool`, the handle's pool. `Right(Nil)` for a plan holding
+    * no search call. The population only: the index record is not the verdict's (spec ruling 18),
+    * and every principal takes it from its own route.
+    *
+    * A superuser or the system principal is judged nothing and gets the table population (rule 8);
+    * [[DecideRoute]] never asks for them, as the node never asks it for their plans. Any other
+    * principal: each search column must be an object read of `d` the plan rules judged (a direct
+    * read of that table, not through a secure view, so judged with the principal's own rights), and
+    * rule 5 refuses a search column a column policy (mask or deny) covers for them; then the
+    * population is `allowed` when a row policy of theirs may cover the table (its table part is `*`
+    * or the table's name, whatever its catalog and schema), OPA tenants included (the gateway
+    * applies QoD row policies whatever the tenant's mode), else `table`. Never a caller's choice,
+    * and never absent for a call: a `Left` is a refusal or an unavailable decision.
+    */
+  def searchPopulations(
+      p: DecidePrincipal,
+      d: Description,
+      pool: PoolKey
+  ): Either[Decision, List[SearchPopulation]] =
+    val calls = d.searches.map(_.call)
+    if d.searches.isEmpty then Right(Nil)
+    else if calls.sorted != calls.indices.toList then
+      malformed("search calls are not numbered 0 to n-1")
+    else
+      val privileged = p.principal.superuser || p.principal.system
+      val judge: Either[Decision, Option[EffectiveSet]] =
+        if privileged then Right(None)
+        else
+          p.context match
+            case None                             => Left(Decision.Unavailable(ContextExpired))
+            case Some(ctx) if ctx.poolKey != pool =>
+              Left(Decision.Refuse("the handle's pool is not its context's"))
+            case Some(ctx) => Right(Some(narrowed(ctx)))
+      judge.flatMap { eff =>
+        d.searches.sortBy(_.call).foldLeft[Either[Decision, List[SearchPopulation]]](Right(Nil)) {
+          (acc, s) => acc.flatMap(done => searchPopulation(eff, d, s).map(done :+ _))
+        }
+      }
+
+  private def searchPopulation(
+      eff: Option[EffectiveSet],
+      d: Description,
+      s: DescribedSearch
+  ): Either[Decision, SearchPopulation] =
+    def refused(reason: String) = Left(Decision.Refuse(reason))
+    // -1: Java's split drops trailing empty parts, so "t." would read as "t" (review m1).
+    s.table.split("\\.", -1) match
+      case Array(cat, sch, tab) if cat.nonEmpty && sch.nonEmpty && tab.nonEmpty =>
+        if s.columns.isEmpty || s.columns.exists(_.isEmpty) then
+          malformed(s"a search call on ${s.table} names no column")
+        else
+          eff match
+            // A superuser or the system principal: nothing judged (rule 8).
+            case None    => Right(SearchPopulation(s.call, SearchPopulation.Table))
+            case Some(e) =>
+              // Each search column is an object read the plan rules judged as the principal's:
+              // the node describes every search column so (rule 5); a description that does not
+              // is refused, never taken on the call's word.
+              def judgedRead(column: String) = d.objects.exists(o =>
+                o.kind == "table" && o.access == "read" && o.via.isEmpty && !o.dropped &&
+                  o.catalog.equalsIgnoreCase(cat) && o.schema.equalsIgnoreCase(sch) &&
+                  o.name.equalsIgnoreCase(tab) && o.columns.exists(_.equalsIgnoreCase(column))
+              )
+              // Rule 5 fails closed on the table part alone, whatever the policy's catalog and
+              // schema, like the population's match below (review m2): a column policy that may
+              // cover the table refuses its column as a search column.
+              def masked(column: String) = e.columnPolicies.exists(cp =>
+                rowPolicyMayCover(cp.tableName, tab) &&
+                  (cp.columnName == "*" || cp.columnName.equalsIgnoreCase(column))
+              )
+              // On the table part alone, whatever the policy's catalog and schema (spec 7.5,
+              // P9): `allowed` over an unfiltered input discloses nothing, so the over-match (a
+              // same-named table of another schema or catalog) costs only the statistics' scope.
+              val rowPolicy = e.rowPolicies.exists(rp => rowPolicyMayCover(rp.tableName, tab))
+              s.columns.find(c => !judgedRead(c)) match
+                case Some(column) =>
+                  malformed(
+                    s"search column $column of ${s.table} is not an object read of the plan"
+                  )
+                case None =>
+                  s.columns.find(masked) match
+                    case Some(column) =>
+                      refused(s"search column $column carries a column policy")
+                    case None =>
+                      Right(
+                        SearchPopulation(
+                          s.call,
+                          if rowPolicy then SearchPopulation.Allowed else SearchPopulation.Table
+                        )
+                      )
+      case _ =>
+        malformed(s"search table '${s.table}' is not catalog.schema.table")
+
+  /** A search description the decider cannot read (Task 5 review M3, Task 10), worded apart from
+    * the route's own "malformed description" (a description that does not decode, a refusal), so
+    * each text keeps one class: qod-node writes every search call numbered 0 to n-1, on a
+    * catalog.schema.table, with its columns as direct object reads of the plan, so another one
+    * points to a node bug, never to the principal's denial. It takes the answer of a decision that
+    * cannot be made, [[Decision.Unavailable]] (the node's "authorization unavailable, retry",
+    * Flight UNAVAILABLE), never a refusal, which the router would book as a denial (UNAUTHORIZED, a
+    * data-denial audit event). The statement is refused either way: nothing runs.
+    */
+  private def malformed(why: String): Left[Decision, Nothing] =
+    Left(Decision.Unavailable(s"unreadable search description: $why"))
+
+  /** Whether a policy whose table part is `policyTable` may cover a table named `table`, for the
+    * statistics population and rule 5's column-policy refusal: the table part as
+    * [[PolicyCoverage.covers]] reads it (`*`, or the same name ignoring case), the catalog and
+    * schema ignored, so it over-includes and both uses fail closed.
+    */
+  private def rowPolicyMayCover(policyTable: String, table: String): Boolean =
+    PolicyCoverage.covers(RowPolicyAny, RowPolicyAny, policyTable, "", "", table)
 
   def decideScreen(p: DecidePrincipal, d: ScreenDescription): Decision =
     judged(p) { ctx =>
@@ -495,6 +610,9 @@ object AuthzDecider:
 
   /** What a dry run's plan is answered when the rules allow it: refused, so it never runs. */
   val DryRunReason: String = "dry run"
+
+  /** Any catalog or schema, for [[rowPolicyMayCover]]. */
+  private val RowPolicyAny: String = "*"
 
   /** The location rules threw while being read (a store failure): the decision is unavailable. */
   val RulesUnavailable: String = "the location rules could not be read; retry"

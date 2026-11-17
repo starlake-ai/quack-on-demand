@@ -256,14 +256,14 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     )
 
   "the health probe" should "pass an enforcing node, as the system principal" in {
-    new QuackHttpAdapter(client, new NodeLoadTracker, node.keys)
+    new QuackHttpAdapter(client, new NodeLoadTracker, node.keys, searchSystem = None)
       .probe(node.node)
       .unsafeRunSync() shouldBe ProbeVerdict.Ok
   }
 
   it should "carry the node's refusal when the manager's keys are not the node's" in {
     // A manager whose node-key secret is not the one this node's key derives from.
-    new QuackHttpAdapter(client, new NodeLoadTracker, NodeKeys.ephemeral())
+    new QuackHttpAdapter(client, new NodeLoadTracker, NodeKeys.ephemeral(), searchSystem = None)
       .probe(node.node)
       .unsafeRunSync() match
       case refused @ ProbeVerdict.HandleRefused(answer) =>

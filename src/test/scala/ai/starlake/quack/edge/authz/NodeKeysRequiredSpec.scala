@@ -27,6 +27,7 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
   private val fleetCfg: ai.starlake.quack.FleetConfig                       = null
   private val limits: ai.starlake.quack.NodeAuthzLimitsConfig               = null
   private val files: ai.starlake.quack.NodeFilesConfig                      = null
+  private val search: ai.starlake.quack.SearchNodeConfig                    = null
 
   // The snippets below are type-checked when this spec compiles, and a string records no
   // dependency: these compiled constructions (never run) make an incremental build recompile the
@@ -38,13 +39,14 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
       versions = PolicyVersions.zero,
       readOnlyCatalogs = ReadOnlyCatalogs.none
     )
-    new ai.starlake.quack.edge.adapter.QuackHttpAdapter(client, tracker, keys)
+    new ai.starlake.quack.edge.adapter.QuackHttpAdapter(client, tracker, keys, searchSystem = None)
     new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(
       23000,
       23001,
       nodeKeys = keys,
       nodeFiles = files,
-      nodeAuthzLimits = limits
+      nodeAuthzLimits = limits,
+      searchNode = search
     )
     new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(
       k8s,
@@ -55,14 +57,16 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
       5,
       nodeKeys = keys,
       nodeFiles = files,
-      nodeAuthzLimits = limits
+      nodeAuthzLimits = limits,
+      searchNode = search
     )
     new ai.starlake.quack.ondemand.api.FleetHandlers(
       fleetStore,
       fleetCfg,
       nodeKeys = keys,
       nodeFiles = files,
-      nodeAuthzLimits = limits
+      nodeAuthzLimits = limits,
+      searchNode = search
     )
     new ai.starlake.quack.ondemand.runtime.FleetQuackBackend(
       fleetStore,
@@ -84,41 +88,57 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
 
   "the adapter that mints session handles" should "need the manager's keys" in {
     """new ai.starlake.quack.edge.adapter.QuackHttpAdapter(client, tracker)""" shouldNot typeCheck
-    """new ai.starlake.quack.edge.adapter.QuackHttpAdapter(client, tracker, NodeKeys.ephemeral())""" should
+    // The record registry is required too: a construction that forgot it would silently stop the
+    // bundle build and system searches (Task 7 review, minor 5).
+    """new ai.starlake.quack.edge.adapter.QuackHttpAdapter(client, tracker, NodeKeys.ephemeral())""" shouldNot
+      typeCheck
+    """new ai.starlake.quack.edge.adapter.QuackHttpAdapter(client, tracker, NodeKeys.ephemeral(), None)""" should
       compile
   }
 
   "the backends that hand nodes their keys" should "need the manager's keys" in {
-    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeFiles = files, nodeAuthzLimits = limits, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" should
+    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits, searchNode = search)""" should
       compile
-    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeFiles = files, nodeAuthzLimits = limits, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" should
+    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits, searchNode = search)""" should
       compile
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeFiles = files, nodeAuthzLimits = limits, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" should
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits, searchNode = search)""" should
       compile
   }
 
   "the runtimes that hand nodes their decide limits" should "need the manager's limits" in {
-    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files)""" shouldNot
+    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files)""" shouldNot
+    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files)""" shouldNot
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, searchNode = search)""" shouldNot
       typeCheck
     // The same constructions given the limits compile: the "need the manager's keys" case above.
   }
 
+  // QoD Search, Task 16: a site that dropped the search knobs would run qod-node's own, silently
+  // ignoring the operator's, as for the decide limits.
+  "the runtimes that hand nodes their search knobs" should "need the manager's knobs" in {
+    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+      typeCheck
+    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+      typeCheck
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+      typeCheck
+    // The same constructions given the knobs compile: the "need the manager's keys" case above.
+  }
+
   "every runtime" should "need whether its nodes may open local files" in {
-    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.runtime.LocalQuackBackend(23000, 23001, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits, searchNode = search)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits, searchNode = search)""" shouldNot
       typeCheck
     """new ai.starlake.quack.ondemand.runtime.FleetQuackBackend(fleetStore, fleetCfg)""" shouldNot
       typeCheck

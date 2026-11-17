@@ -98,7 +98,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
         IO.pure(stub())
     }
     val adapter =
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -174,7 +174,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
         IO.pure(defaultStub())
     }
     val adapter =
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     // No journal param -> defaults to EventJournal.noop backed by NoopTelemetryStore
     val router = new FlightSqlRouter(

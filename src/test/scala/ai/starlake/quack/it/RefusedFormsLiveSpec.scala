@@ -238,7 +238,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         sup,
         new SessionRegistry,
         tracker,
-        new QuackHttpAdapter(client, tracker, keys),
+        new QuackHttpAdapter(client, tracker, keys, searchSystem = None),
         metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter),
         protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )

@@ -221,7 +221,97 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   def deleteTenantDb(id: String): Unit =
     if pools.values.exists(_.tenantDbId == id) then
       throw new java.sql.SQLException(s"tenant-db $id has pool children")
+    // qodstate_search_index's key on the tenant-db does not cascade (Liquibase 0059).
+    if searchIndexes.values.exists(_.tenantDbId == id) then
+      throw new java.sql.SQLException(s"tenant-db $id has search index children")
     tenantDbs.remove(id)
+
+  // ---- QoD Search index registry (Liquibase 0059) ----
+
+  private val searchIndexes =
+    TrieMap.empty[java.util.UUID, ai.starlake.quack.model.SearchIndex]
+  private val searchSegments =
+    TrieMap.empty[(java.util.UUID, String), ai.starlake.quack.model.SearchSegment]
+  private val searchTombstones =
+    TrieMap.empty[java.util.UUID, ai.starlake.quack.model.SearchIndexTombstone]
+
+  def insertSearchIndex(ix: ai.starlake.quack.model.SearchIndex): Boolean = synchronized {
+    if searchIndexes.contains(ix.indexId) ||
+      searchIndexes.values.exists(x => x.tenantDbId == ix.tenantDbId && x.tableId == ix.tableId)
+    then false
+    else
+      searchIndexes.put(ix.indexId, ix)
+      searchTombstones.remove(ix.indexId)
+      true
+  }
+
+  def upsertSearchIndex(ix: ai.starlake.quack.model.SearchIndex): Unit = synchronized {
+    searchIndexes.get(ix.indexId) match
+      case None =>
+        if !insertSearchIndex(ix) then
+          throw new java.sql.SQLException(s"search index ${ix.indexId} not written")
+      case Some(stored) =>
+        if !SearchIndexStore.sameIdentity(stored, ix) then
+          throw new java.sql.SQLException(s"search index ${ix.indexId} would change its identity")
+        searchIndexes.put(
+          ix.indexId,
+          stored.copy(schemaName = ix.schemaName, tableName = ix.tableName, state = ix.state)
+        ): Unit
+  }
+
+  private def searchOrder(xs: Iterable[ai.starlake.quack.model.SearchIndex]) =
+    xs.toList.sortBy(x => (x.tenantDbId, x.schemaName, x.tableName, x.indexId.toString))
+
+  def listSearchIndexes(tenantDbIds: Set[String]): List[ai.starlake.quack.model.SearchIndex] =
+    searchOrder(searchIndexes.values.filter(x => tenantDbIds.contains(x.tenantDbId)))
+
+  def listAllSearchIndexes(): List[ai.starlake.quack.model.SearchIndex] =
+    searchOrder(searchIndexes.values)
+
+  def findSearchIndex(
+      tenantDbId: String,
+      tableId: Long
+  ): Option[ai.starlake.quack.model.SearchIndex] =
+    searchIndexes.values.find(x => x.tenantDbId == tenantDbId && x.tableId == tableId)
+
+  def findSearchIndexById(indexId: java.util.UUID): Option[ai.starlake.quack.model.SearchIndex] =
+    searchIndexes.get(indexId)
+
+  def deleteSearchIndex(indexId: java.util.UUID): Boolean = synchronized {
+    searchIndexes.remove(indexId) match
+      case None     => false
+      case Some(ix) =>
+        searchSegments.keys.filter(_._1 == indexId).foreach(searchSegments.remove)
+        searchTombstones.put(
+          indexId,
+          ai.starlake.quack.model.SearchIndexTombstone(indexId, ix.bundleRoot, Instant.now())
+        )
+        true
+  }
+
+  def setSearchIndexState(indexId: java.util.UUID, state: String): Unit = synchronized {
+    searchIndexes.get(indexId).foreach(ix => searchIndexes.put(indexId, ix.copy(state = state)))
+  }
+
+  def recordSearchSegment(seg: ai.starlake.quack.model.SearchSegment): Unit = synchronized {
+    searchIndexes.get(seg.indexId) match
+      case None     => throw new java.sql.SQLException(s"no search index ${seg.indexId}")
+      case Some(ix) =>
+        searchSegments.put((seg.indexId, seg.pathKey), seg)
+        searchIndexes.put(seg.indexId, ix.copy(segmentsVersion = ix.segmentsVersion + 1)): Unit
+  }
+
+  def listSearchSegments(indexId: java.util.UUID): List[ai.starlake.quack.model.SearchSegment] =
+    searchSegments.values.filter(_.indexId == indexId).toList.sortBy(_.pathKey)
+
+  def deleteSearchIndexesForTenantDb(tenantDbId: String): Int = synchronized {
+    val ids = searchIndexes.values.filter(_.tenantDbId == tenantDbId).map(_.indexId).toList
+    ids.foreach(deleteSearchIndex)
+    ids.size
+  }
+
+  def listSearchIndexTombstones(): List[ai.starlake.quack.model.SearchIndexTombstone] =
+    searchTombstones.values.toList.sortBy(_.indexId.toString)
 
   def upsertPool(p: Pool): Unit                 = pools.put(p.id, p)
   def listPools(tenantDbId: String): List[Pool] =

@@ -1,0 +1,46 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0059-search-index
+      author: qod
+      changes:
+        # QoD Search (spec 6.1, 6.2). Not attached to the policy-version trigger: an index changes no
+        # principal's permissions (spec 6.1); what a principal may read stays the verdict's.
+        - createTable:
+            tableName: qodstate_search_index
+            columns:
+              - column: { name: index_id,         type: UUID,        constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_db_id,     type: TEXT,        constraints: { nullable: false, foreignKeyName: fk_qodstate_search_index_tenant_db, references: 'qodstate_tenant_db(id)', deleteCascade: false } }
+              # The names at create, for display; the table id is the key (a rename keeps the index).
+              - column: { name: schema_name,      type: TEXT,        constraints: { nullable: false } }
+              - column: { name: table_name,       type: TEXT,        constraints: { nullable: false } }
+              - column: { name: table_id,         type: BIGINT,      constraints: { nullable: false } }
+              - column: { name: fields,           type: JSONB,       constraints: { nullable: false } }
+              - column: { name: options,          type: JSONB,       defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
+              - column: { name: bundle_root,      type: TEXT,        constraints: { nullable: false } }
+              - column: { name: state,            type: TEXT,        defaultValue: ready, constraints: { nullable: false } }
+              - column: { name: segments_version, type: BIGINT,      defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: created_by,       type: TEXT,        constraints: { nullable: false } }
+              - column: { name: created_at,       type: TIMESTAMPTZ, defaultValueComputed: now(), constraints: { nullable: false } }
+        - sql:
+            sql: >
+              ALTER TABLE qodstate_search_index ADD CONSTRAINT ck_qodstate_search_index_state CHECK (state IN ('ready', 'disabled'));
+              CREATE UNIQUE INDEX ux_qodstate_search_index_table ON qodstate_search_index (tenant_db_id, table_id);
+        - createTable:
+            tableName: qodstate_search_segment
+            columns:
+              - column: { name: index_id,       type: UUID,        constraints: { nullable: false, foreignKeyName: fk_qodstate_search_segment_index, references: 'qodstate_search_index(index_id)', deleteCascade: true } }
+              - column: { name: path_key,       type: TEXT,        constraints: { nullable: false } }
+              - column: { name: path,           type: TEXT,        constraints: { nullable: false } }
+              - column: { name: bytes,          type: BIGINT,      constraints: { nullable: false } }
+              - column: { name: docs,           type: BIGINT,      constraints: { nullable: false } }
+              - column: { name: built_at,       type: TIMESTAMPTZ, defaultValueComputed: now(), constraints: { nullable: false } }
+              - column: { name: build_ms,       type: BIGINT,      constraints: { nullable: false } }
+              - column: { name: format_version, type: INT,         constraints: { nullable: false } }
+        - addPrimaryKey: { tableName: qodstate_search_segment, columnNames: 'index_id, path_key', constraintName: pk_qodstate_search_segment }
+        # A dropped index's bundles stay under bundle_root until Phase 2's GC reads this row (spec 6.1).
+        - createTable:
+            tableName: qodstate_search_index_tombstone
+            columns:
+              - column: { name: index_id,    type: UUID,        constraints: { primaryKey: true, nullable: false } }
+              - column: { name: bundle_root, type: TEXT,        constraints: { nullable: false } }
+              - column: { name: dropped_at,  type: TIMESTAMPTZ, defaultValueComputed: now(), constraints: { nullable: false } }

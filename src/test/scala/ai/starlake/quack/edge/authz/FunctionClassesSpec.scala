@@ -120,6 +120,10 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     "pragma_platform",
     "pragma_user_agent",
     "pragma_version",
+    // QoD Search (spec 4.1), in a QOD_NODE_SEARCH build's classification: the describer reports the
+    // table and columns each searches as a read of them, judged on their grants.
+    "qod_search",
+    "qod_search_matches",
     "qod_session",
     "query",
     "query_table",

@@ -247,6 +247,55 @@ object ManifestImporter extends LazyLogging:
       }
     }
 
+    // Search indexes (spec 6.1): written as given, so only what the rows cannot hold is refused:
+    // an id that is not a canonical UUID, an id twice, a table indexed twice in one database, a
+    // state the registry does not know, an entry naming k1, b or options (fixed through Phase 1,
+    // OWNER RULING 2026-11-16, D10), and an id the store holds as another index: under another
+    // database (a tenant cloned by renaming it in the YAML), or with another table id, fields or
+    // bundle root (an index's identity never changes in place; spec 6.2: a field change is a new
+    // index id). A dropped index's id is not stored, so a restore after a drop brings it back.
+    val searchIndexes = m.tenants.flatMap(t =>
+      t.tenantDbs.flatMap(d => d.searchIndexes.toList.flatten.map(ix => (t, d, ix)))
+    )
+    searchIndexes.foreach { (t, d, ix) =>
+      val where = s"tenant '${t.name}' tenant-db '${d.name}' search index '${ix.indexId}'"
+      if canonicalUuid(ix.indexId).isEmpty then
+        errs += s"$where: indexId is not a canonical lowercase UUID"
+      if !ai.starlake.quack.model.SearchIndex.States.contains(ix.state) then
+        errs += s"$where: state must be ready or disabled"
+      if ix.refusedKeys.nonEmpty then
+        errs += s"$where: ${ix.refusedKeys.mkString(", ")} cannot be set: k1 and b are fixed at " +
+          "1.2 and 0.75 in this release"
+      canonicalUuid(ix.indexId).flatMap(store.findSearchIndexById).foreach { stored =>
+        val targetDbId = storedTenants
+          .find(x => x.id == t.name || x.displayName == t.name)
+          .flatMap(st => store.listTenantDbs(st.id).find(_.name == d.name))
+          .map(_.id)
+        if !targetDbId.contains(stored.tenantDbId) then
+          errs += s"$where: the index id is stored for another database; an index keeps its " +
+            "database: give this entry a new indexId"
+        else if !ai.starlake.quack.ondemand.state.SearchIndexStore.sameIdentity(
+            stored,
+            stored.copy(
+              tableId = ix.tableId,
+              fields =
+                ix.fields.map(f => ai.starlake.quack.model.SearchIndexField(f.column, f.fieldId)),
+              bundleRoot = ix.bundleRoot
+            )
+          )
+        then
+          errs += s"$where: the stored index has another table id, fields or bundle root; an " +
+            "index's identity never changes in place: give this entry a new indexId"
+      }
+    }
+    dup(searchIndexes.map(_._3), _.indexId, "search index id")
+    searchIndexes
+      .groupBy((t, d, ix) => (t.name, d.name, ix.tableId))
+      .collect {
+        case ((t, d, tableId), xs) if xs.size > 1 =>
+          errs += s"tenant '$t' tenant-db '$d': table id $tableId has more than one search index"
+      }
+
     // Account kinds, stored in their one spelling: an unknown or padded one (" admin ") would be
     // no recognized kind once stored.
     m.users.foreach { u =>
@@ -685,6 +734,8 @@ object ManifestImporter extends LazyLogging:
                 store.deleteNodesForPool(p.id)
                 store.deletePool(p.id)
               })
+            // Its search indexes first, tombstoned (their key on the row does not cascade).
+            store.deleteSearchIndexesForTenantDb(d.id)
             store.deleteTenantDb(d.id)
             localDbs.remove(d.name)
             poolsByDb.remove(d.id)
@@ -805,6 +856,7 @@ object ManifestImporter extends LazyLogging:
                     errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
                   case None =>
                     store.upsertTenantDb(upserted)
+                    dropIndexesItCannotHold(store, upserted)
                     localDbs.put(mtd.name, upserted)
                     applyFederatedSources(
                       federatedStore,
@@ -813,6 +865,7 @@ object ManifestImporter extends LazyLogging:
                       TenantDb.catalogAlias(upserted.metastore, upserted.name),
                       errs
                     )
+                    mtd.searchIndexes.foreach(applySearchIndexes(store, mt.name, upserted, _))
         }
 
         // ---- Pools: delete-then-upsert, keyed by (tenant, pool name).
@@ -1105,6 +1158,67 @@ object ManifestImporter extends LazyLogging:
 
       if errs.isEmpty then Right(()) else Left(errs.toList)
     }
+
+  /** `s` when it is a canonical lowercase UUID. */
+  private def canonicalUuid(s: String): Option[java.util.UUID] =
+    scala.util.Try(java.util.UUID.fromString(s)).toOption.filter(_.toString == s)
+
+  /** A DuckLake database that is not a branch: the only kind an index lives on. */
+  private def canHoldIndexes(td: TenantDb): Boolean =
+    td.kind == TenantDbKind.DuckLake && td.branchOf.isEmpty
+
+  /** A database the import leaves unable to hold an index (its kind left DuckLake, or it became a
+    * branch) loses its indexes, each with its tombstone (review M7).
+    */
+  private def dropIndexesItCannotHold(store: ControlPlaneStore, td: TenantDb): Unit =
+    if !canHoldIndexes(td) then store.deleteSearchIndexesForTenantDb(td.id): Unit
+
+  /** Makes `td`'s search indexes exactly `incoming` (validated by validate()): a stored index the
+    * manifest leaves out is dropped with its tombstone, every incoming one written as given by its
+    * id. A database that cannot hold an index (not DuckLake, or a branch) writes none, with one
+    * ERROR line per index, so the backup still restores (its stored indexes went when its row was
+    * written, [[dropIndexesItCannotHold]]).
+    */
+  private def applySearchIndexes(
+      store: ControlPlaneStore,
+      tenant: String,
+      td: TenantDb,
+      incoming: List[ManifestSearchIndex]
+  ): Unit =
+    if !canHoldIndexes(td) then
+      incoming.foreach { ix =>
+        logger.error(
+          s"manifest import: search index ${ix.indexId} of tenant '$tenant' database " +
+            s"'${td.name}' not imported: the manifest holds no DuckLake database '${td.name}' " +
+            "that is not a branch to index"
+        )
+      }
+    else
+      val keep = incoming.flatMap(ix => canonicalUuid(ix.indexId)).toSet
+      store
+        .listSearchIndexes(Set(td.id))
+        .filterNot(ix => keep.contains(ix.indexId))
+        .foreach(ix => store.deleteSearchIndex(ix.indexId))
+      incoming.foreach { ix =>
+        canonicalUuid(ix.indexId).foreach { id =>
+          store.upsertSearchIndex(
+            ai.starlake.quack.model.SearchIndex(
+              indexId = id,
+              tenantDbId = td.id,
+              schemaName = ix.schema,
+              tableName = ix.table,
+              tableId = ix.tableId,
+              fields =
+                ix.fields.map(f => ai.starlake.quack.model.SearchIndexField(f.column, f.fieldId)),
+              bundleRoot = ix.bundleRoot,
+              state = ix.state,
+              segmentsVersion = 0L,
+              createdBy = "manifest",
+              createdAt = java.time.Instant.now()
+            )
+          )
+        }
+      }
 
   /** Resolve a tenant identifier from its YAML-facing name. Matches on `displayName` first (the
     * user-facing label persisted on `qodstate_tenant.display_name`), then falls back to

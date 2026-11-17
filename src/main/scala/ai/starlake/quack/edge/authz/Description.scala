@@ -52,13 +52,23 @@ final case class DescribedSetting(name: String, scope: String, value: Option[Str
 /** One control step (`control[]`): ATTACH, COPY TO, a transaction verb, an extension operator. */
 final case class DescribedControl(op: String, target: Option[String], tpe: Option[String])
 
-/** What qod-node resolved for one bound plan (description v1, `kind = plan`). */
+/** One search call of a bound plan (`searches[]`, search spec 4.2 rule 5): its position in the
+  * node's walk of the plan (`call`, from 0), the table its `table` argument resolved to
+  * (`catalog.schema.table`, lowercase) and the columns it searches, as the table names them. Each
+  * column is also an object read of that table in `objects`, judged like any read.
+  */
+final case class DescribedSearch(call: Int, table: String, columns: List[String])
+
+/** What qod-node resolved for one bound plan (description v1, `kind = plan`). `searches`: absent on
+  * the wire for a plan holding no search call (a node built without search never writes it).
+  */
 final case class Description(
     statement: String,
     objects: List[DescribedObject],
     functions: List[DescribedFunction],
     settings: List[DescribedSetting],
-    control: List[DescribedControl]
+    control: List[DescribedControl],
+    searches: List[DescribedSearch] = Nil
 )
 
 /** One location a statement names before it binds (`kind = screen`). `written` is the wire's
@@ -126,6 +136,14 @@ object Description:
     yield DescribedControl(op, target, tpe)
   }
 
+  given Decoder[DescribedSearch] = Decoder.instance { c =>
+    for
+      call    <- c.get[Int]("call")
+      table   <- c.get[String]("table")
+      columns <- c.get[List[String]]("columns")
+    yield DescribedSearch(call, table, columns)
+  }
+
   given Decoder[Description] = Decoder.instance { c =>
     for
       statement <- c.get[String]("statement")
@@ -133,7 +151,8 @@ object Description:
       functions <- c.get[List[DescribedFunction]]("functions")
       settings  <- c.get[List[DescribedSetting]]("settings")
       control   <- c.get[List[DescribedControl]]("control")
-    yield Description(statement, objects, functions, settings, control)
+      searches  <- c.getOrElse[List[DescribedSearch]]("searches")(Nil)
+    yield Description(statement, objects, functions, settings, control, searches)
   }
 
   /** The node's canonical description bytes as a description v1; Left names what is malformed. */

@@ -68,7 +68,8 @@ object BootFactories extends LazyLogging:
           nodeKeys = nodeKeys,
           nodeExtensions = mgrCfg.nodeExtensions,
           nodeFiles = mgrCfg.nodeFiles,
-          nodeAuthzLimits = mgrCfg.nodeAuthzLimits
+          nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
+          searchNode = mgrCfg.search
         )
       case rt if RuntimeType.isKubernetes(rt) =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
@@ -87,7 +88,8 @@ object BootFactories extends LazyLogging:
           nodeKeys = nodeKeys,
           nodeExtensions = mgrCfg.nodeExtensions,
           nodeFiles = mgrCfg.nodeFiles,
-          nodeAuthzLimits = mgrCfg.nodeAuthzLimits
+          nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
+          searchNode = mgrCfg.search
         )
       case rt if RuntimeType.isFleet(rt) =>
         val proxies =
@@ -137,7 +139,8 @@ object BootFactories extends LazyLogging:
         nodeKeys = nodeKeys,
         nodeExtensions = mgrCfg.nodeExtensions,
         nodeFiles = mgrCfg.nodeFiles,
-        nodeAuthzLimits = mgrCfg.nodeAuthzLimits
+        nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
+        searchNode = mgrCfg.search
       )
     else main
 

@@ -24,6 +24,20 @@ if [[ ! -x "$node" ]]; then
   echo "ERROR: no qod-node at $node (build native/qod-node first, or set QOD_NODE_BIN)" >&2
   exit 1
 fi
+# A build without the search functions would drop their names from the classification (search review M8 of
+# part 2): only a build configured with QOD_NODE_SEARCH=ON lists them.
+if ! build_info="$("$node" --build-info 2>&1)"; then
+  echo "ERROR: $node --build-info failed: $build_info" >&2
+  exit 1
+fi
+if [[ "$build_info" == *" search=off" ]]; then
+  echo "ERROR: $node is built without search (--build-info ends with search=off): configure it with -DQOD_NODE_SEARCH=ON, or the classification drops the search functions" >&2
+  exit 1
+fi
+if [[ "$build_info" != *" search=on" ]]; then
+  echo "ERROR: $node --build-info names no search flag; build qod-node from this checkout with -DQOD_NODE_SEARCH=ON" >&2
+  exit 1
+fi
 
 # Every extension a node may INSTALL: the spawn scripts (httpfs, avro, azure, ducklake, postgres), the
 # object-store and federation setup SQL (httpfs, azure, iceberg, aws, postgres) and qod-node's strict
@@ -63,7 +77,8 @@ if [[ -z "$cli" || ! -x "$cli" ]]; then
   echo "ERROR: set DUCKDB_CLI to the release duckdb CLI of the node's DuckDB" >&2
   exit 1
 fi
-node_duckdb="$("$node" --build-info | sed -n 's/.*;duckdb=\([^;]*\);duckdb_source=\([^;]*\).*/\1 \2/p')"
+# The source id only: --build-info prints " search=on" or " search=off" after the marker.
+node_duckdb="$("$node" --build-info | sed -n 's/.*;duckdb=\([^;]*\);duckdb_source=\([0-9a-f]*\).*/\1 \2/p')"
 cli_duckdb="$("$cli" -no-agent -version | awk '{print $1, $NF}')"
 if [[ -z "$node_duckdb" || "$node_duckdb" != "$cli_duckdb" ]]; then
   echo "ERROR: DUCKDB_CLI is DuckDB '$cli_duckdb', qod-node runs '$node_duckdb'" >&2

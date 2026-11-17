@@ -27,6 +27,10 @@ ARG DUCKDB_VERSION=2.0.0
 # QodNodeBinarySpec pins): a vendored qod-node of another protocol fails the build. Pods never pass
 # through the manager's QodNodeBinary check, so this is theirs.
 ARG QOD_NODE_PROTOCOL=6
+# Whether the vendored qod-node links qod_search_core (QOD_NODE_SEARCH in native/qod-node/CMakeLists.txt): OFF
+# while search Phase 1 stays unmerged (OWNER RULING 2026-11-16, D2). A binary of the other setting fails the
+# build, and one that links it ships its third-party notices as /opt/qod-node/THIRD-PARTY-NOTICES-qod-search.txt.
+ARG QOD_NODE_SEARCH=OFF
 
 RUN <<EOF
 set -eu
@@ -60,6 +64,18 @@ install -m 0755 "/tmp/qod-node-binaries/$PLATFORM/qod-node" /opt/qod-node/bin/qo
 /opt/qod-node/bin/qod-node --build-info
 /opt/qod-node/bin/qod-node --build-info | grep -q "qod-node-build-info:protocol=${QOD_NODE_PROTOCOL};duckdb=v${DUCKDB_VERSION};" \
   || { echo "the vendored qod-node is not node protocol ${QOD_NODE_PROTOCOL}: run scripts/release/refresh-qod-node-binaries.sh" >&2; exit 1; }
+# A binary from before the search flag prints none, and links no search library.
+case "$(/opt/qod-node/bin/qod-node --build-info | head -n1)" in
+  *" search=on") SEARCH=ON ;;
+  *) SEARCH=OFF ;;
+esac
+[ "$SEARCH" = "${QOD_NODE_SEARCH}" ] \
+  || { echo "the vendored qod-node is built with QOD_NODE_SEARCH=$SEARCH; this image takes ${QOD_NODE_SEARCH}" >&2; exit 1; }
+if [ "$SEARCH" = ON ]; then
+  test -f /tmp/qod-node-binaries/THIRD-PARTY-NOTICES-qod-search.txt \
+    || { echo "the vendored qod-node links qod_search_core and its notices are not beside it: run scripts/release/refresh-qod-node-binaries.sh" >&2; exit 1; }
+  install -m 0644 /tmp/qod-node-binaries/THIRD-PARTY-NOTICES-qod-search.txt /opt/qod-node/THIRD-PARTY-NOTICES-qod-search.txt
+fi
 # Pre-install the runtime extensions so the pod needs no outbound internet on first ATTACH.
 mkdir -p /opt/duckdb-extensions
 HOME=/opt/duckdb-extensions duckdb -c "INSTALL ducklake; INSTALL postgres; INSTALL quack; INSTALL httpfs; INSTALL aws;"

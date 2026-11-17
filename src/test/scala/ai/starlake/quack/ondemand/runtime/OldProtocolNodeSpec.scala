@@ -72,7 +72,7 @@ class OldProtocolNodeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
     live
 
   "a node of an earlier protocol" should "fail the health probe on this manager's handle" in {
-    new QuackHttpAdapter(client, new NodeLoadTracker, node.keys)
+    new QuackHttpAdapter(client, new NodeLoadTracker, node.keys, searchSystem = None)
       .probe(node.node)
       .unsafeRunSync() match
       case ProbeVerdict.HandleRefused(answer) => answer should include("unsupported handle version")

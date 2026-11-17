@@ -30,6 +30,9 @@ import scala.jdk.CollectionConverters.*
   *   default would leave a node's local files on whatever the manager was told
   * @param nodeAuthzLimits
   *   the decide limits every spawn hands qod-node; Main passes the manager's
+  * @param searchNode
+  *   the search knobs every spawn hands qod-node (QoD Search); Main passes the manager's. Required:
+  *   a default would silently run qod-node's own
   */
 final class LocalQuackBackend(
     min: Int,
@@ -42,7 +45,8 @@ final class LocalQuackBackend(
       ai.starlake.quack.NodeExtensionsConfig(),
     nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // Required (Main passes the manager's): a default would silently run qod-node's own limits.
-    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig,
+    searchNode: ai.starlake.quack.SearchNodeConfig
 ) extends QuackBackend
     with LazyLogging:
 
@@ -133,6 +137,9 @@ final class LocalQuackBackend(
     nodeFiles.env.foreach { case (k, v) => env.put(k, v) }
     // The decide limits, both, always, after the metastore overlay, for the same reason.
     nodeAuthzLimits.env.foreach { case (k, v) => env.put(k, v) }
+    // The search knobs: every QOD_SEARCH_ variable this process inherited dropped (the manager's
+    // own config variables, or one no node reads yet), then all nine, after the metastore overlay.
+    ai.starlake.quack.SearchNodeConfig.overlay(env, searchNode)
     val secretsDir =
       try NodeSecretFiles.writePrivateDir(secrets)
       catch

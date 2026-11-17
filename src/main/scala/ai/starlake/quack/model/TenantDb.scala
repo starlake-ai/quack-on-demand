@@ -100,7 +100,8 @@ object TenantDb {
     * `NodeSecretFilesSpec`). Any other name would become an environment variable of a bash script
     * and of qod-node: `BASH_ENV` (bash expands it before running the script), `PATH`, `LD_PRELOAD`,
     * `QOD_NODE_BIN`, or a variable the manager sets itself (`kind`, `QOD_NODE_ID`, the decide
-    * limits `QOD_AUTHZ_DECIDE_TIMEOUT_MS` / `QOD_AUTHZ_CACHE_ENTRIES`). The metastore's secrets
+    * limits `QOD_AUTHZ_DECIDE_TIMEOUT_MS` / `QOD_AUTHZ_CACHE_ENTRIES`, the search knobs
+    * `QOD_SEARCH_*` of [[ai.starlake.quack.SearchNodeConfig]]). The metastore's secrets
     * ([[NodeSecretEnvKeys]]) reach the launcher as files, never env. A key the scripts start
     * reading from the metastore must be added here, or every launcher drops it.
     */

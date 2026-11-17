@@ -262,7 +262,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     as(AllTables, MemoryPool, "SELECT v FROM t") shouldBe Right(List("1"))
     // As Main's health loop: the probe (statement, then canary), then on a healthy verdict the
     // counters' read, then the export on scrape.
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, keys)
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, keys, searchSystem = None)
     adapter.probe(node.node).unsafeRunSync() shouldBe ProbeVerdict.Ok
     val reading = adapter.authzStats(node.node).unsafeRunSync()
     reading.map(_.planCacheHits).getOrElse(0L) should be > 0L

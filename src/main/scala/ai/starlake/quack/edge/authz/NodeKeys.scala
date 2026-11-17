@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.authz
 
 import ai.starlake.quack.model.{PoolKey, RunningNode}
 
+import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.util.Base64
 
@@ -44,6 +45,22 @@ final class NodeKeys(
     */
   def key(nodeId: String): Array[Byte] = NodeHandles.nodeKey(secret, nodeId)
 
+  /** The bundle MAC key of search index `indexId` (search spec 13, "Bundle authenticity"):
+    * HMAC-SHA256(node-key secret, "qod-search-bundle-mac/v1|" + indexId), 32 bytes. Per index, not
+    * per node, since every node of the pool reads the same bundles; derived from the secret, so
+    * rotating it makes every bundle read as missing (its MAC no longer verifies) until rebuilt,
+    * never wrong. `indexId` is the canonical UUID text (lowercase, hyphenated, 36 characters),
+    * anything else an IllegalArgumentException that names no value. The key is never logged and
+    * leaves the manager only in the signed index record a node fetches; each call returns a fresh
+    * array.
+    */
+  def searchBundleMacKey(indexId: String): Array[Byte] =
+    NodeKeys.requireCanonicalIndexId(indexId)
+    NodeHandles.hmac(
+      secret.getBytes(StandardCharsets.UTF_8),
+      s"${NodeKeys.SearchBundleMacLabel}$indexId".getBytes(StandardCharsets.UTF_8)
+    )
+
   /** A fresh handle for one statement of `principal` on `node`: the node's tenant's current policy
     * version, the digest of the principal's session context and of its S3 credentials, and the
     * pool's read-only catalogs (none for the system principal: the manager's own statements).
@@ -69,7 +86,10 @@ final class NodeKeys(
       nowMs = clock()
     )
     // The credentials endpoint serves a principal's keys only for a handle this replica minted.
-    if !principal.system then issued.foreach(_.put(m.nonce, node.nodeId, principal.id, m.expiresAt))
+    if !principal.system then
+      issued.foreach(
+        _.put(m.nonce, node.nodeId, principal.id, NodeHandles.pool(node.poolKey), m.expiresAt)
+      )
     // The decision endpoint judges this handle's statements with this context (MintedHandles),
     // checked against the digest computed here. A superuser's statements need no context.
     if !principal.superuser then
@@ -84,6 +104,20 @@ final class NodeKeys(
     NodeHandles.prelude(handle(node, principal))
 
 object NodeKeys:
+
+  /** The derivation label of a search index's bundle MAC key, versioned: a change of the derivation
+    * moves to v2 together with the bundle format readers check.
+    */
+  private val SearchBundleMacLabel = "qod-search-bundle-mac/v1|"
+
+  /** A canonical UUID as the segment path and the bundle label write it (search spec 6.2). */
+  private val CanonicalUuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}".r
+
+  private def requireCanonicalIndexId(indexId: String): Unit =
+    if indexId == null || !CanonicalUuid.matches(indexId) then
+      throw new IllegalArgumentException(
+        "the index id is not a canonical lowercase hyphenated UUID"
+      )
 
   /** 32 random bytes, base64url: a node-key secret. */
   def randomSecret(): String =

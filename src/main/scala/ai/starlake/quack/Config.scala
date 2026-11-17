@@ -694,6 +694,7 @@ final case class ManagerConfig(
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
     nodeFiles: NodeFilesConfig = NodeFilesConfig(),
     nodeAuthzLimits: NodeAuthzLimitsConfig = NodeAuthzLimitsConfig(),
+    search: SearchNodeConfig = SearchNodeConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
       description =
@@ -1062,6 +1063,198 @@ object NodeAuthzLimitsConfig:
   val DecideTimeoutEnv: String = "QOD_AUTHZ_DECIDE_TIMEOUT_MS"
   val CacheEntriesEnv: String  = "QOD_AUTHZ_CACHE_ENTRIES"
   val EnvNames: Set[String]    = Set(DecideTimeoutEnv, CacheEntriesEnv)
+
+/** QoD Search's node knobs (`quack-on-demand.search`): what every node's search functions read from
+  * the environment once, at registration (the node's start). Every runtime hands all nine to every
+  * node it starts ([[SearchNodeConfig.nodeEnv]]: the local spawn env, the Kubernetes pod env, the
+  * fleet assignment's `searchLimits` and `qod fleet join`'s overlay), and no node inherits one from
+  * anywhere else; a change applies at each node's next start. The defaults and ranges are
+  * qod-node's own (`native/qod-node/src/search_knobs.hpp`, pinned equal by SearchNodeConfigSpec),
+  * so a node never runs on a value the manager refused, and a value outside a range refuses the
+  * manager's boot at config load ([[SearchNodeConfig.refusal]]).
+  *
+  * Which bound fires first: the per-query budget (`queryMemoryBytes`) is charged before each
+  * allocation a search makes in proportion to its data, so a search whose needs pass it fails
+  * `search_memory_exceeded` before DuckDB's own `memory_limit` refuses a buffer-managed block; the
+  * default (a quarter of `memory_limit`, read per query) keeps one search from taking the whole
+  * node, and the library's heap, which DuckDB does not see, is bounded by this budget alone. A
+  * fixed value above a node's `memory_limit` leaves DuckDB's limit to fire first, with DuckDB's
+  * out-of-memory error; nothing is checked against `memory_limit` here, as the manager does not
+  * know each node's.
+  */
+final case class SearchNodeConfig(
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_MAX_UNINDEXED_ROWS",
+      description =
+        "QoD Search: the most live rows of a table a search indexes for itself, in memory, when " +
+          "the index lags (data files with no bundle, inlined rows), 0 to 100000000. Past it the " +
+          "search fails search_index_behind (retryable). 0 refuses any lag. Applies at each " +
+          "node's next start."
+    )
+    maxUnindexedRows: Long = 200000,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_MAX_UNINDEXED_SOURCES",
+      description =
+        "QoD Search: the most unindexed sources (data files with no bundle, plus the inlined " +
+          "rows) a search indexes for itself, 1 to 4096; past it the search fails " +
+          "search_index_behind. Applies at each node's next start."
+    )
+    maxUnindexedSources: Long = 64,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_QUERY_MEMORY",
+      description = "QoD Search: one search's memory budget in bytes, 0 or 67108864 (64 MiB) to " +
+        "1099511627776 (1 TiB). 0 is a quarter of the node's memory_limit, read per query. " +
+        "Charged before each allocation in proportion to the data, so a search past it fails " +
+        "search_memory_exceeded before DuckDB's memory_limit refuses a block; a search that " +
+        "indexes unindexed rows for itself needs at least about 16 MiB. A fixed value above a " +
+        "node's memory_limit leaves DuckDB's limit to fire first. At 0, a bundle larger than a " +
+        "quarter of the node's memory_limit fails its search (search_memory_exceeded, naming " +
+        "this variable): set a fixed value above the largest bundle on such nodes. Applies at " +
+        "each node's next start."
+    )
+    queryMemoryBytes: Long = 0,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_MAX_K",
+      description =
+        "QoD Search: the largest k qod_search accepts, 1 to 10000 (the library's own maximum); " +
+          "a larger k is refused. A call that names no k takes min(10, this). Applies at each " +
+          "node's next start."
+    )
+    maxK: Int = 10000,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_LIVENESS_CACHE_ENTRIES",
+      description =
+        "QoD Search: how many tables' liveness at a snapshot a node keeps between searches, 0 to " +
+          "100000 (0 keeps none). Applies at each node's next start."
+    )
+    livenessCacheEntries: Int = 64,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_LIVENESS_CACHE_BYTES",
+      description =
+        "QoD Search: the liveness cache's own byte bound, 0 to 1099511627776 (1 TiB; 0 keeps " +
+          "none). Within the joint bound QOD_SEARCH_SEGMENT_CACHE_BYTES sets, it keeps a slice " +
+          "of min(this, the joint bound / 8) the open segments never take. Applies at each " +
+          "node's next start."
+    )
+    livenessCacheBytes: Long = 256L << 20,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_SEGMENT_CACHE_BYTES",
+      description =
+        "QoD Search: what a node's two search caches (open segments and liveness) hold together, " +
+          "0 to 1099511627776 (1 TiB), and at most a quarter of the node's memory_limit. 0 turns " +
+          "both caches off. Applies at each node's next start."
+    )
+    segmentCacheBytes: Long = 4L << 30,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_MISS_TTL_SEC",
+      description =
+        "QoD Search: how long a node remembers a missing or refused bundle before it looks " +
+          "again, in seconds, 0 to 60 (0: never remembered). A new version of the index's " +
+          "segments ends it sooner. Applies at each node's next start."
+    )
+    missTtlSec: Int = 60,
+    @field @ConfigField(
+      envVar = "QOD_SEARCH_MAX_BUNDLE_BYTES",
+      description =
+        "QoD Search: the largest index bundle a node reads, in bytes, 1048576 (1 MiB) to " +
+          "68719476736 (64 GiB). A larger bundle is never read: its data file is searched as " +
+          "unindexed. A bundle is read whole into one block of DuckDB's buffer manager, so one " +
+          "above the node's memory_limit fails the search instead, and so, under the default " +
+          "QOD_SEARCH_QUERY_MEMORY, does one above a quarter of it. Applies at each node's next " +
+          "start."
+    )
+    maxBundleBytes: Long = 1L << 30
+)
+
+object SearchNodeConfig:
+  /** Every variable qod-node's search functions read starts with this; a launcher drops any it
+    * inherited.
+    */
+  val EnvPrefix: String = "QOD_SEARCH_"
+
+  /** One knob: its key under `quack-on-demand.search`, its variable, its range (and whether 0 is
+    * allowed below it), and its value in a config.
+    */
+  final case class Knob(
+      key: String,
+      env: String,
+      least: Long,
+      greatest: Long,
+      orZero: Boolean,
+      value: SearchNodeConfig => Long
+  ):
+    def path: String                                 = s"quack-on-demand.search.$key"
+    def refusal(c: SearchNodeConfig): Option[String] =
+      val v = value(c)
+      Option.when(!((v >= least && v <= greatest) || (orZero && v == 0))) {
+        val range = if orZero then s"0 or $least to $greatest" else s"$least to $greatest"
+        s"$path ($env) must be $range, got $v"
+      }
+
+  private val MiB = 1L << 20
+  private val GiB = 1L << 30
+  private val TiB = 1L << 40
+
+  val Knobs: List[Knob] = List(
+    Knob(
+      "maxUnindexedRows",
+      "QOD_SEARCH_MAX_UNINDEXED_ROWS",
+      0,
+      100000000,
+      false,
+      _.maxUnindexedRows
+    ),
+    Knob(
+      "maxUnindexedSources",
+      "QOD_SEARCH_MAX_UNINDEXED_SOURCES",
+      1,
+      4096,
+      false,
+      _.maxUnindexedSources
+    ),
+    Knob("queryMemoryBytes", "QOD_SEARCH_QUERY_MEMORY", 64 * MiB, TiB, true, _.queryMemoryBytes),
+    Knob("maxK", "QOD_SEARCH_MAX_K", 1, 10000, false, _.maxK.toLong),
+    Knob(
+      "livenessCacheEntries",
+      "QOD_SEARCH_LIVENESS_CACHE_ENTRIES",
+      0,
+      100000,
+      false,
+      _.livenessCacheEntries.toLong
+    ),
+    Knob(
+      "livenessCacheBytes",
+      "QOD_SEARCH_LIVENESS_CACHE_BYTES",
+      0,
+      TiB,
+      false,
+      _.livenessCacheBytes
+    ),
+    Knob("segmentCacheBytes", "QOD_SEARCH_SEGMENT_CACHE_BYTES", 0, TiB, false, _.segmentCacheBytes),
+    Knob("missTtlSec", "QOD_SEARCH_MISS_TTL_SEC", 0, 60, false, _.missTtlSec.toLong),
+    Knob("maxBundleBytes", "QOD_SEARCH_MAX_BUNDLE_BYTES", MiB, 64 * GiB, false, _.maxBundleBytes)
+  )
+
+  val EnvNames: Set[String] = Knobs.map(_.env).toSet
+
+  /** The env the node reads, by variable, for every launcher: all nine, always, as decimal text. */
+  def nodeEnv(c: SearchNodeConfig): Map[String, String] =
+    Knobs.map(k => k.env -> k.value(c).toString).toMap
+
+  /** Every knob outside its range, named by its key and its variable; None when all are in range.
+    * The config reader refuses the manager's boot on it.
+    */
+  def refusal(c: SearchNodeConfig): Option[String] =
+    val refused = Knobs.flatMap(_.refusal(c))
+    Option.when(refused.nonEmpty)(refused.mkString("; "))
+
+  /** Lays the knobs over a spawn environment that started as this process's own: drops every
+    * `QOD_SEARCH_` variable it holds (a knob the manager was given, or one no node reads yet), then
+    * sets all nine from `c`, so a node never inherits one.
+    */
+  def overlay(env: java.util.Map[String, String], c: SearchNodeConfig): Unit =
+    env.keySet().removeIf(_.startsWith(EnvPrefix))
+    nodeEnv(c).foreach { case (k, v) => env.put(k, v) }
 
 final case class RoutingConfig(
     @field @ConfigField(

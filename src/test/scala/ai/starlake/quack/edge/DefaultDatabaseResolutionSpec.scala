@@ -123,7 +123,8 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
             s"SELECT count(*) FROM $table",
             StatementKind.Select,
             withRows(List(rowPolicyOn(policyCatalog))),
-            ctx
+            ctx,
+            searchStatement = false
           )
           out match
             case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(sql) =>
@@ -233,7 +234,7 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
         captured = sql
         IO.pure(TestArrow.okResponse())
     val adapter =
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
@@ -310,5 +311,23 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
           send(router, s"SELECT f FROM $table", withMasks(List(maskOn(policyCatalog))))
           UseTarget.findFirstMatchIn(sent()).map(_.group(1)) shouldBe Some(s"$Alias.main")
           masked(sent()) shouldBe expected
+        }
+    }
+
+    // Search spec 4.2 rule 3 on the one session path: the search statement's wrap (which keeps
+    // `rowid`) applies the row policy exactly where the node resolves the name, whatever the
+    // stored defaultDatabase says.
+    it should s"wrap a search statement's input as the node resolves, case $name, over $path" in {
+      val (router, sent) = routerWith(dd)
+      for (table, form) <- forms do
+        withClue(s"$form name $table: ") {
+          send(
+            router,
+            s"SELECT h.rowid FROM qod_search((SELECT rowid FROM $table), '$table', ['f'], 'x') h",
+            withRows(List(rowPolicyOn(policyCatalog)))
+          )
+          UseTarget.findFirstMatchIn(sent()).map(_.group(1)) shouldBe Some(s"$Alias.main")
+          filtered(sent()) shouldBe expected
+          sent().contains(s"(SELECT *, rowid FROM $table WHERE") shouldBe expected
         }
     }

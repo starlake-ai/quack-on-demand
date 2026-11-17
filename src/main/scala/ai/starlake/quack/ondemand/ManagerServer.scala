@@ -113,7 +113,10 @@ final class ManagerServer(
     tenantLocations: Option[TenantLocationHandlers] = None,
     // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
     // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
-    s3Credentials: Option[UserS3CredentialHandlers] = None
+    s3Credentials: Option[UserS3CredentialHandlers] = None,
+    // QoD Search index registry (search/index/*; TenantScopeCheck inside the handler, build
+    // superuser only). None leaves the routes unmounted; Main always wires it.
+    search: Option[SearchHandlers] = None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -740,6 +743,24 @@ final class ManagerServer(
       )
     }
 
+    // QoD Search index registry: gated per request inside the handler.
+    val searchEndpoints: List[ServerEndpoint[Any, IO]] = search.toList.flatMap { h =>
+      List(
+        SearchEndpoints.createIndex.serverLogic { case (req, token) =>
+          h.create(req, token)(scopeOfToken)
+        },
+        SearchEndpoints.listIndexes.serverLogic { case (req, token) =>
+          h.list(req, token)(scopeOfToken)
+        },
+        SearchEndpoints.deleteIndex.serverLogic { case (req, token) =>
+          h.delete(req, token)(scopeOfToken)
+        },
+        SearchEndpoints.buildIndex.serverLogic { case (req, token) =>
+          h.build(req, token)(scopeOfToken)
+        }
+      )
+    }
+
     // Restore (Spec 04). Session-gated per request via TenantScopeCheck inside the handler.
     val restoreEndpoints: List[ServerEndpoint[Any, IO]] = restore.toList.map { h =>
       RestoreEndpoints.restoreEndpoint.serverLogic { case (req, token) =>
@@ -1291,7 +1312,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ tenantLocationEndpoints ++ s3CredentialEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ searchEndpoints ++ branchEndpoints ++ fleetEndpoints ++ tenantLocationEndpoints ++ s3CredentialEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

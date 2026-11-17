@@ -6,13 +6,24 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace qod {
+
+//! One search call's entry in a plan verdict (search spec 4.2 rule 8, 7.5): the call's position in the
+//! plan's search calls (the description's `searches[].call`) and its statistics population, exactly
+//! "table" or "allowed". The index record is not the verdict's (ruling 18): the node takes it from the
+//! record source (search_records.hpp).
+struct SearchEntry {
+	uint64_t call = 0;
+	std::string population;
+};
 
 //! A verified verdict: the manager's decision on one description, sent like a handle (decision 14) as
 //! `<base64url(verdict JSON)>.<lowercase hex HMAC-SHA256(node key, verdict bytes)>`, the JSON
 //! {"v":1,"kind","decision","reason","retryable","principal","policyVersion","ctx","fingerprint",
-//!  "expiresAt","rowFilters":[],"masks":[]}. Other keys are ignored.
+//!  "expiresAt","rowFilters":[],"masks":[]}, and for a plan holding search calls the optional
+//! "search":[{"call","population"}]. Other keys are ignored.
 struct Verdict {
 	//! "plan" or "screen".
 	std::string kind;
@@ -29,6 +40,8 @@ struct Verdict {
 	std::string fingerprint;
 	//! Epoch milliseconds.
 	int64_t expires_at = 0;
+	//! The search calls' populations and index records, by call; empty when the verdict has no "search".
+	std::vector<SearchEntry> search;
 };
 
 //! What a verdict must answer: the request's kind and fingerprint, and the connection's installed
@@ -50,7 +63,9 @@ constexpr int64_t kMaxScreenVerdictAgeMs = 60 * 1000;
 //! shape, the version, kind, fingerprint, principal, policy version, ctx, expiry (a plan verdict while
 //! expiresAt > now; a screen verdict, which carries expiresAt = now and is used once, at once, while
 //! expiresAt >= now - kMaxScreenVerdictAgeMs), or a non-empty rowFilters or masks (reserved for part 2:
-//! refused until a node enforces them).
+//! refused until a node enforces them). A "search" key, when present, is an array of entries each with an
+//! integer `call` >= 0 (no two alike) and a `population` of exactly "table" or "allowed" (an entry's other
+//! keys are ignored), on a plan verdict only; anything else is a malformed verdict.
 Verdict VerifyVerdict(const std::string &text, const std::string &node_key, const VerdictExpectation &expected,
                       int64_t now_ms);
 

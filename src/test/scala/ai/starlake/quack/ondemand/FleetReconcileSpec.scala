@@ -394,6 +394,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend = Some(fx.backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
@@ -417,6 +418,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend = Some(fx.backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
@@ -640,6 +642,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend = Some(fx.backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
       h.remove(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)

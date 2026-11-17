@@ -34,6 +34,7 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => true,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(
@@ -62,6 +63,7 @@ class KubernetesQuackBackendSpec
       stopTimeoutSec = 2,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key = PoolKey("acme", "acme_default", "sales")
@@ -89,6 +91,7 @@ class KubernetesQuackBackendSpec
       readEnv = name => fakeEnv.get(name),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val node = backend
@@ -140,6 +143,7 @@ class KubernetesQuackBackendSpec
       readEnv = name => fakeEnv.get(name),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val (node, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
@@ -211,6 +215,7 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => true,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val nodes = backend.discoverExisting().unsafeRunSync()
@@ -229,6 +234,7 @@ class KubernetesQuackBackendSpec
     readPodReady = _ => true,
     nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
     nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+    searchNode = ai.starlake.quack.SearchNodeConfig(),
     nodeFiles = ai.starlake.quack.NodeFilesConfig()
   )
 
@@ -612,6 +618,7 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => false,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(FedKey, "quack-fail-1", Role.Dual, metastore = Map.empty, s3 = Map.empty)
@@ -655,6 +662,7 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => false,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     an[Exception] should be thrownBy failing
@@ -693,6 +701,7 @@ class KubernetesQuackBackendSpec
       stopTimeoutSec = 5,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key  = PoolKey("acme", "acme_default", "sales")
@@ -722,6 +731,7 @@ class KubernetesQuackBackendSpec
       stopTimeoutSec = 1,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key  = PoolKey("acme", "acme_default", "sales")
@@ -745,6 +755,7 @@ class KubernetesQuackBackendSpec
       stopTimeoutSec = 1,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key  = PoolKey("acme", "acme_default", "sales")
@@ -803,6 +814,7 @@ class KubernetesQuackBackendSpec
       podTemplateEnabled = podTemplateEnabled,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
 
@@ -932,6 +944,7 @@ class KubernetesQuackBackendSpec
       serviceType = "NodePort",
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(
@@ -960,6 +973,7 @@ class KubernetesQuackBackendSpec
       serviceAccount = Some("quack-nodes"),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key      = PoolKey("acme", "acme_default", "sales")
@@ -981,6 +995,7 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => true,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val keyA = PoolKey("acme", "acme_default", "sales")
@@ -1004,6 +1019,7 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => true,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(

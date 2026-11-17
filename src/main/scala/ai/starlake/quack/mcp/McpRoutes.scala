@@ -227,6 +227,8 @@ object McpRoutes:
     "my_usage",
     "list_recoverable",
     "list_my_s3_credentials",
+    // Search
+    "list_search_indexes",
     // Branches
     "list_branches",
     "branch_changes",

@@ -381,7 +381,12 @@ object ManagerServerHarness:
       // GET /metrics. The default mounts nothing (no Prometheus child, as with the sink off); a spec
       // that drives the route through the real server passes an endpoint over its own registry.
       metricsEndpoint: MetricsEndpoint =
-        new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
+        new MetricsEndpoint(prometheus = None, beforeScrape = () => ()),
+      // Builds the QoD Search index registry's handlers from this harness's own supervisor, the
+      // way Main does. None leaves the search/index routes unmounted.
+      searchOf: Option[
+        (PoolSupervisor, RestCaller) => ai.starlake.quack.ondemand.api.SearchHandlers
+      ] = None
   ): Harness =
     val mgrCfg  = minimalManagerConfig(port = 0).copy(restLimits = restLimits)
     val edgeCfg = minimalFlightConfig
@@ -789,6 +794,7 @@ object ManagerServerHarness:
           backend = None,
           nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
           nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
+          searchNode = mgrCfg.search,
           nodeFiles = ai.starlake.quack.NodeFilesConfig()
         )
       ),
@@ -796,6 +802,7 @@ object ManagerServerHarness:
       mcpRoutes = mcpRoutes,
       tenantLocations = Some(tenantLocationHandlers),
       s3Credentials = Some(s3CredentialHandlers),
+      search = searchOf.map(build => build(sup, restCaller)),
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>
         new IcebergCatalogHandlers(
           sup,

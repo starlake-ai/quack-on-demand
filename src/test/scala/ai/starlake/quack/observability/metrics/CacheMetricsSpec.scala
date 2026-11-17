@@ -7,7 +7,8 @@ import ai.starlake.quack.edge.authz.{
   DryRunOutcome,
   DryRunResults,
   IssuedHandles,
-  MintedHandles
+  MintedHandles,
+  SearchSystemHandles
 }
 import ai.starlake.quack.edge.opa.{Decision, OpaCacheKey, OpaDecisionCache}
 import ai.starlake.quack.model.{PoolKey, Tenant}
@@ -65,13 +66,27 @@ class CacheMetricsSpec extends AnyFlatSpec with Matchers:
     val r   = new IssuedHandles(maxEntries = 2)
     r.bindMetrics(reg)
     capacity(reg, "qod_issued_handles") shouldBe 2.0
-    r.put("n-0", "node-1", "u-1", Long.MaxValue / 2)
+    r.put("n-0", "node-1", "u-1", "acme/lake/bi", Long.MaxValue / 2)
     r.get("n-0").isDefined shouldBe true
     gets(reg, "qod_issued_handles", "hit") shouldBe 1.0
-    (1 to 10).foreach(i => r.put(s"n-$i", "node-1", "u-1", Long.MaxValue / 2))
+    (1 to 10).foreach(i => r.put(s"n-$i", "node-1", "u-1", "acme/lake/bi", Long.MaxValue / 2))
     r.size should be <= 2L
     size(reg, "qod_issued_handles") should be <= 2.0
     evictions(reg, "qod_issued_handles") should be >= 9.0
+  }
+
+  "SearchSystemHandles" should "report its size, hits, evictions and capacity" in {
+    val reg = new SimpleMeterRegistry
+    val r   = new SearchSystemHandles(maxEntries = 2)
+    r.bindMetrics(reg)
+    capacity(reg, "qod_search_system_handles") shouldBe 2.0
+    r.put("n-0", "node-1", "acme/lake/bi", Long.MaxValue / 2)
+    r.get("n-0").isDefined shouldBe true
+    gets(reg, "qod_search_system_handles", "hit") shouldBe 1.0
+    (1 to 10).foreach(i => r.put(s"n-$i", "node-1", "acme/lake/bi", Long.MaxValue / 2))
+    r.size should be <= 2L
+    size(reg, "qod_search_system_handles") should be <= 2.0
+    evictions(reg, "qod_search_system_handles") should be >= 9.0
   }
 
   "DryRunResults" should "report its size, evictions and capacity" in {

@@ -210,6 +210,14 @@ final class ProtectedWriteGuard(
       deny: String => String
   ): GuardOutcome =
     innerSelect(ast) match
+      // Search Phase 1, change 9: the oracle separates a search call and can answer Passthrough
+      // for a read side holding one; a column-policy holder's write over a search call stays
+      // denied here, as before the separation (spec 4.3), never left to a later layer alone.
+      case Some(sel)
+          if ai.starlake.sql.TooDeep.orElse(true)(
+            ai.starlake.quack.edge.search.SearchFunctions.callsSearch(sel.toString)
+          ) =>
+        GuardOutcome.Deny(deny(protectedName))
       case Some(sel) =>
         oracle.rewrite(sel.toString, StatementKind.Select, eff, ctx).unsafeRunSync() match
           case ColumnPolicyRewriter.Passthrough => GuardOutcome.Allow

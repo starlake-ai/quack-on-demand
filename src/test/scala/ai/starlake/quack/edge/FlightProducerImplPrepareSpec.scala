@@ -72,7 +72,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
         sent += (endpoint -> sql)
         IO.pure(TestArrow.okResponse())
 
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     val router =
       if wireAdmin then

@@ -5,7 +5,8 @@
 # pgHost, pgPort, pgUser, dbName, catalogAlias, schemaName, dataPath, encrypted, createDatabase; no other
 # metastore key reaches a pod) and what the manager sets itself (kind,
 # the three QOD_NODE_*_EXTENSIONS policy variables, QOD_NODE_ALLOW_LOCAL_FILES, QOD_AUTHZ_DECIDE_TIMEOUT_MS and
-# QOD_AUTHZ_CACHE_ENTRIES, the optional non-secret QOD_S3_* knobs). The sensitive values (token, node
+# QOD_AUTHZ_CACHE_ENTRIES, the nine QOD_SEARCH_* search knobs qod-node reads at start, the optional
+# non-secret QOD_S3_* knobs). The sensitive values (token, node
 # key, pgPassword, encryptionKey, federation and object-store SQL, the tenant-db's and the
 # pool's initSql, whose file name says whether it runs as written, object-store credentials) are NOT
 # env vars: they are files of the read-only Secret volume named

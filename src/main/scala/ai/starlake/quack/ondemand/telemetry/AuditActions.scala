@@ -41,6 +41,10 @@ object AuditActions:
   val DatabaseCreate       = "database.create"
   val DatabaseDelete       = "database.delete"
   val DatabaseUpdate       = "database.update"
+  // QoD Search index registry (spec 6.1); the build is the interim superuser tool (D7).
+  val SearchIndexCreate = "search.index.create"
+  val SearchIndexDelete = "search.index.delete"
+  val SearchIndexBuild  = "search.index.build"
   // pool
   val PoolCreate           = "pool.create"
   val PoolScale            = "pool.scale"
@@ -242,7 +246,10 @@ object AuditActions:
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,
     MaintenanceRunManual,
-    ModuleSql
+    ModuleSql,
+    SearchIndexCreate,
+    SearchIndexDelete,
+    SearchIndexBuild
   ).sorted
 
   require(all.distinct.size == all.size, "duplicate audit action in AuditActions.all")

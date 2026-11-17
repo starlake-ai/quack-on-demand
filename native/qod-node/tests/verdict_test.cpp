@@ -123,6 +123,100 @@ void VerifyGolden(const std::string &path) {
 	}
 }
 
+// The golden search verdict AuthzDeciderSearchSpec (Scala) signs (tests/golden/verdict-v1-search.txt): both
+// sides agree on the optional "search" key byte for byte.
+void VerifySearchGolden(const std::string &path) {
+	std::ifstream in(path);
+	if (!in) {
+		std::cerr << "FAIL: cannot read " << path << std::endl;
+		failures++;
+		return;
+	}
+	std::string line, key_hex, description, fingerprint, ctx, json, allow;
+	while (std::getline(in, line)) {
+		if (line.rfind("key=", 0) == 0) {
+			key_hex = line.substr(4);
+		} else if (line.rfind("description=", 0) == 0) {
+			description = line.substr(12);
+		} else if (line.rfind("fingerprint=", 0) == 0) {
+			fingerprint = line.substr(12);
+		} else if (line.rfind("ctx=", 0) == 0) {
+			ctx = line.substr(4);
+		} else if (line.rfind("json=", 0) == 0) {
+			json = line.substr(5);
+		} else if (line.rfind("allow=", 0) == 0) {
+			allow = line.substr(6);
+		}
+	}
+	Expect(qod::Hex(qod::Sha256(description)) == fingerprint, "the search golden's fingerprint");
+	Expect(qod::ToBase64Url(json) == allow.substr(0, allow.find('.')), "the search golden's payload is its json");
+	auto key = qod::FromHex(key_hex);
+	qod::VerdictExpectation expected {"plan", fingerprint, "u-1", 42, ctx};
+	try {
+		auto verdict = qod::VerifyVerdict(allow, key, expected, 1761200000000);
+		// The golden's entries carry call and population only (ruling 18); SearchEntries pins that an
+		// entry's other keys are ignored.
+		Expect(verdict.allow && verdict.search.size() == 1 && verdict.search[0].call == 0 &&
+		           verdict.search[0].population == "allowed",
+		       "the golden search verdict's entry");
+	} catch (std::invalid_argument &error) {
+		std::cerr << "FAIL: the golden search verdict does not verify: " << error.what() << std::endl;
+		failures++;
+	}
+}
+
+std::string Entry(const std::string &call, const std::string &population) {
+	return "{\"call\":" + call + ",\"population\":" + population + "}";
+}
+
+void SearchEntries() {
+	// No "search": no entries (verdict-v1.txt's shape).
+	auto plain = qod::VerifyVerdict(SignVerdict(VerdictJson(Good())), kKey, Expected(), kNow);
+	Expect(plain.search.empty(), "a verdict with no search key has no entries");
+	auto two = Good();
+	two.search = "[" + Entry("1", "\"table\"") + "," + Entry("0", "\"allowed\"") + "]";
+	auto verdict = qod::VerifyVerdict(SignVerdict(VerdictJson(two)), kKey, Expected(), kNow);
+	Expect(verdict.search.size() == 2 && verdict.search[0].call == 1 && verdict.search[0].population == "table" &&
+	           verdict.search[1].call == 0 && verdict.search[1].population == "allowed",
+	       "a verdict's search entries, as sent");
+	// The record is not the verdict's (ruling 18): an entry's other keys, a record's among them, are ignored.
+	auto extra = Good();
+	extra.search = "[{\"bundleRoot\":\"/elsewhere/\",\"call\":0,\"indexId\":\"i-9\",\"population\":\"table\"}]";
+	auto ignored = qod::VerifyVerdict(SignVerdict(VerdictJson(extra)), kKey, Expected(), kNow);
+	Expect(ignored.search.size() == 1 && ignored.search[0].call == 0 && ignored.search[0].population == "table",
+	       "an entry's other keys are ignored");
+	auto empty = Good();
+	empty.search = "[]";
+	Expect(qod::VerifyVerdict(SignVerdict(VerdictJson(empty)), kKey, Expected(), kNow).search.empty(),
+	       "an empty search array");
+	struct Bad {
+		std::string search, needle, what;
+	};
+	std::vector<Bad> bad = {
+	    {"{}", "\"search\" is not", "search not an array"},
+	    {"[" + Entry("0", "\"everything\"") + "]", "unknown search population", "an unknown population"},
+	    {"[" + Entry("0", "\"Table\"") + "]", "unknown search population", "a population in another case"},
+	    {"[" + Entry("-1", "\"table\"") + "]", "below 0", "a negative call"},
+	    {"[" + Entry("0", "\"table\"") + "," + Entry("0", "\"allowed\"") + "]", "two search entries",
+	     "two entries for one call"},
+	    {"[{\"call\":0}]", "population", "an entry with no population"},
+	    {"[{\"population\":\"table\"}]", "call", "an entry with no call"},
+	    {"[" + Entry("\"0\"", "\"table\"") + "]", "\"call\" is not", "a call that is a string"},
+	    {"[1]", "not an object", "an entry that is not an object"},
+	};
+	for (auto &b : bad) {
+		auto fields = Good();
+		fields.search = b.search;
+		ExpectRefused(SignVerdict(VerdictJson(fields)), Expected(), b.needle, "search: " + b.what);
+	}
+	auto screen = Good();
+	screen.kind = "screen";
+	screen.expires_at = kNow;
+	screen.search = "[" + Entry("0", "\"table\"") + "]";
+	ExpectRefused(SignVerdict(VerdictJson(screen)), Expected("screen"), "not a plan",
+	              "search: a search entry on a screen verdict");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -132,6 +226,13 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	VerifyGolden(argv[1]);
+	if (argc < 3) {
+		std::cerr << "FAIL: no search golden file: run verdict_test with tests/golden/verdict-v1-search.txt second"
+		          << std::endl;
+		return 1;
+	}
+	VerifySearchGolden(argv[2]);
+	SearchEntries();
 
 	// ---- a verdict that answers the request
 	auto allowed = qod::VerifyVerdict(SignVerdict(VerdictJson(Good())), kKey, Expected(), kNow);

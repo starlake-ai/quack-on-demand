@@ -190,21 +190,22 @@ jobs:
           pattern: qod-node-windows-*
           path: qod-node
 
+      # QOD_NODE_SEARCH: what this release ships (OFF while search Phase 1 is unmerged: OWNER RULING
+      # 2026-11-16, D2; scripts/release/check-release-pins.sh). A Windows exe built otherwise is refused; one
+      # linking qod_search_core ships its third-party notices beside it.
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QOD_NODE_SEARCH: 'OFF'
         run: |
           set -euo pipefail
           tag="${{ needs.prepare.outputs.tag }}"
           version="${{ needs.prepare.outputs.version }}"
           jar="distrib/quack-on-demand-assembly-${version}.jar"
           assets=("$jar" "$jar.sha256")
-          for arch in x86_64 aarch64; do
-            exe="qod-node-windows-$arch.exe"
-            cp "qod-node/qod-node-windows-$arch/qod-node.exe" "$exe"
-            shasum -a 256 "$exe" > "$exe.sha256"
-            assets+=("$exe" "$exe.sha256")
-          done
+          mapfile -t windows < <(scripts/release/qod-node-windows-assets.sh qod-node "$QOD_NODE_SEARCH" release-assets)
+          [[ ${#windows[@]} -gt 0 ]] || { echo "::error::no Windows qod-node assets"; exit 1; }
+          assets+=("${windows[@]}")
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag exists; (re)uploading assets."
             gh release upload "$tag" "${assets[@]}" --clobber

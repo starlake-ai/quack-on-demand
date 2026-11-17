@@ -84,6 +84,10 @@ ALLOWED_TABLE = {
     # judged on its grant like any read of it. The parse screen admits them only with the catalog,
     # schema and table as literals (screen_rules.cpp, ChangeFeed).
     "ducklake_table_deletions", "ducklake_table_insertions",
+    # QoD Search (spec 4.1) of a QOD_NODE_SEARCH build: their TABLE input is judged like any read; the
+    # table and columns they search are described as a read of those columns (spec 4.2 rule 5), judged
+    # on their grants; the node's post_bind hook judges the input's lineage and the index record.
+    "qod_search", "qod_search_matches",
 }
 
 # Superusers only. Listed for review; any table function no set names is superuser anyway.
@@ -113,6 +117,10 @@ SUPERUSER_TABLE = {
     # qod-node's authorization counters: the manager's health probe reads them as the system principal
     # (the node refuses every other principal, superusers too)
     "qod_authz_stats",
+    # QoD Search (6.2): builds and publishes one data file's bundle under the table's index record. The
+    # system principal only (spec 13): like qod_authz_stats, the node refuses every other principal at
+    # bind, superusers too.
+    "qod_search_build_segment",
 }
 
 # Whole families, superuser: DuckLake and Iceberg catalog functions (maintenance, raw catalog rows,

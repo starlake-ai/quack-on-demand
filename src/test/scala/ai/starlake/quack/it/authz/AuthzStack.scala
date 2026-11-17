@@ -74,7 +74,12 @@ final class AuthzStack(
       */
     allowLocalFiles: Boolean = true,
     /** The spawn script, for a spec that wraps the real one. */
-    spawnScript: Option[Path] = None
+    spawnScript: Option[Path] = None,
+    /** TLS on the FlightSQL edge, its certificate and key generated in this folder at boot. The
+      * plain gRPC helpers below ([[flight]], [[heldFlight]], ...) then do not connect: a spec that
+      * sets it talks to the edge with a TLS client of its own (the Flight SQL JDBC driver).
+      */
+    flightTls: Option[Path] = None
 ):
   import Main.given
 
@@ -100,6 +105,10 @@ final class AuthzStack(
     val filesConfig =
       if allowLocalFiles then s"""tenantFiles.root = "$filesRoot""""
       else "nodeFiles.allowLocal = false"
+    val flightTlsConfig = flightTls.fold("tlsEnabled = false") { dir =>
+      s"""tlsEnabled = true, tlsCertChain = "$dir/server-cert.pem", """ +
+        s"""tlsPrivateKey = "$dir/server-key.pem""""
+    }
     val overlay = ConfigSource.string(
       s"""
          |quack-on-demand {
@@ -133,7 +142,7 @@ final class AuthzStack(
          |quack-flightsql {
          |  host = "127.0.0.1"
          |  port = $flightPort
-         |  tlsEnabled = false
+         |  $flightTlsConfig
          |}
          |quack-native { enabled = true, host = "127.0.0.1", port = $quackPort }
          |""".stripMargin

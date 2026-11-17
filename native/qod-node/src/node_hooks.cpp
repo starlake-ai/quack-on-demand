@@ -97,7 +97,8 @@ public:
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx,
-		                      text,             handle.replica,        handle.path, handle.read_only};
+		                      text,             handle.replica,        handle.path, handle.read_only,
+		                      handle.pool};
 		installed_ = true;
 		authz_ = &authz;
 	}
@@ -229,6 +230,17 @@ public:
 		std::lock_guard<std::mutex> guard(lock_);
 		pending_ = Admitted {"",           current_.principal.id, current_.policy_version,
 		                     current_.ctx, kNeverExpires,         current_.read_only};
+	}
+
+	//! The search entries of the verdict the current statement runs under (search spec 4.2 rule 8), into
+	//! `out`; false when it runs under none.
+	bool PendingSearch(std::vector<SearchEntry> &out) {
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!pending_) {
+			return false;
+		}
+		out = pending_->search;
+		return true;
 	}
 
 	//! True when the current statement already runs under a verdict for the plan `fingerprint`
@@ -692,7 +704,10 @@ std::string RefusalMessage(const DecideResult &decided) {
 }
 
 //! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
-//! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
+//! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal. A superuser's or
+//! the system principal's plan holding search calls takes the local allow too: they search the table
+//! population, and the index records come from the record source, not a verdict (search spec 4.2 rule 8,
+//! ruling 18).
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
 	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version,
 	                   installed.ctx,         kNeverExpires,          installed.read_only};
@@ -715,6 +730,9 @@ Admitted Decide(Gate &gate, const Installed &installed, const Described &describ
 	// decision cache TTL) must not pin a prepared statement's verdict either.
 	auto now = gate.authz->Now();
 	admitted.expires_at = result.has_verdict ? std::min(result.verdict.expires_at, now + kMaxCachedVerdictMs) : now;
+	if (result.has_verdict) {
+		admitted.search = result.verdict.search;
+	}
 	return admitted;
 }
 
@@ -760,9 +778,16 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 	session->Admit(Decide(gate, installed, described), plan);
 }
 
+#ifdef QOD_NODE_TEST_HOOKS
+std::atomic<uint64_t> g_internal_passes {0};
+#endif
+
 void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 	auto &context = input.context;
 	if (!IsQuackSession(context)) {
+#ifdef QOD_NODE_TEST_HOOKS
+		g_internal_passes++;
+#endif
 		return;
 	}
 	auto &gate = *static_cast<GatePlannerInfo &>(*input.info).gate;
@@ -787,6 +812,17 @@ void PreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &pl
 }
 
 } // namespace
+
+#ifdef QOD_NODE_TEST_HOOKS
+uint64_t NodeInternalPassesForTest() {
+	return g_internal_passes.load();
+}
+#endif
+
+bool StatementSearchEntries(ClientContext &context, std::vector<SearchEntry> &out) {
+	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
+	return session && session->PendingSearch(out);
+}
 
 bool SessionSnapshot(ClientContext &context, int64_t now_ms, Installed &out) {
 	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);

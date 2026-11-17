@@ -13,6 +13,10 @@ name: qod-node
 #     internal C++ symbols the planner hooks use), runs ctest, then a smoke of qod-node.exe through
 #     the real spawn-quack-node.ps1 (tests/windows_spawn_smoke.ps1). Its artifact is the release
 #     asset the launchers download: too large to bundle in the jar.
+#   - Every build above names QOD_NODE_SEARCH=OFF: nothing shipped links the search library while
+#     search Phase 1 is unmerged (OWNER RULING 2026-11-16, D2; scripts/release/check-release-pins.sh).
+#     The search jobs (search/ branches and workflow_dispatch only) build and test with it ON on the
+#     six platforms, and `search notices` checks native/qod-search/THIRD-PARTY-NOTICES.txt.
 #
 # The DuckDB version is read from project/Versions.scala, like the quackwire workflow. release.yml
 # and snapshot.yml call this workflow (workflow_call) for the Windows assets they publish.
@@ -20,6 +24,7 @@ name: qod-node
 on:
   push:
     paths:
+      - 'native/qod-search/**'
       - 'native/qod-node/**'
       - 'scripts/spawn-quack-node.ps1'
       - 'scripts/release/glibc-floor.sh'
@@ -27,6 +32,7 @@ on:
       - '.github/workflows/qod-node.yml'
   pull_request:
     paths:
+      - 'native/qod-search/**'
       - 'native/qod-node/**'
       - 'scripts/spawn-quack-node.ps1'
       - 'scripts/release/glibc-floor.sh'
@@ -65,6 +71,41 @@ jobs:
           [[ -n "$duckdb" ]] || { echo "::error::cannot read val duckdb from project/Versions.scala"; exit 1; }
           echo "DuckDB pin: v$duckdb"
           echo "duckdb=$duckdb" >> "$GITHUB_OUTPUT"
+      # The release pins, the search ones included (every shipped configure names QOD_NODE_SEARCH=OFF): on a
+      # search/ branch nothing else runs them (release-pins.yml is main and pull requests to main only).
+      - name: Release pins
+        run: scripts/release/check-release-pins.sh
+
+  # The third-party notices every binary linking qod_search_core ships with (search spec 13): the committed
+  # native/qod-search/THIRD-PARTY-NOTICES.txt must be what Cargo.lock and the pinned Rust toolchain (its standard
+  # library, read from rust-src) give, and every crate's license must be in native/qod-search/allowed-licenses.txt.
+  # On every run of this workflow but a call (release.yml and
+  # snapshot.yml build what ships, which links no search library while search Phase 1 is unmerged).
+  search-notices:
+    name: search notices
+    if: github.workflow == 'qod-node'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Rust release from native/qod-search/rust-toolchain.toml
+        id: rust
+        run: echo "toolchain=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' native/qod-search/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      # rust-src: the standard library's workspace and license files, part 2 of the notices.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          components: rust-src
+
+      - name: Check the notices against Cargo.lock, the toolchain and the allowed licenses
+        run: |
+          set -euo pipefail
+          (cd native/qod-search && cargo "+${{ steps.rust.outputs.toolchain }}" fetch --locked)
+          python3 -I scripts/release/search-third-party-notices.py --check
 
   unix:
     name: ${{ matrix.platform }}
@@ -123,14 +164,17 @@ jobs:
           echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
           ls -l "$home/lib" "$home/bin"
 
+      # QOD_NODE_SEARCH is named on every configure of this job and the Windows one, as they build what ships
+      # (OFF while search Phase 1 is unmerged: OWNER RULING 2026-11-16, D2; scripts/release/check-release-pins.sh).
       - name: Build and test (development build)
         run: |
           set -euo pipefail
           export DUCKDB_CLI="$DUCKDB_HOME/bin/duckdb"
           cmake -S native/qod-node -B native/qod-node/build -DCMAKE_BUILD_TYPE=Release \
-            -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+            -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=OFF -DDUCKDB_HOME="$DUCKDB_HOME"
           cmake --build native/qod-node/build --config Release
-          ctest --test-dir native/qod-node/build --output-on-failure --timeout 300
+          ctest --test-dir native/qod-node/build --output-on-failure --timeout 300 2>&1 | tee "$RUNNER_TEMP/ctest.log"
+          bash native/qod-node/tests/ctest_gate.sh "$RUNNER_TEMP/ctest.log" '.*' no_test_hooks_in_node build_info_search
 
       # The spill folder's foreign-owner cases chown to another user, so they need root: the run above
       # skips them. One Linux job runs that test again as root.
@@ -148,8 +192,9 @@ jobs:
           MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
         run: |
           set -euo pipefail
+          # The macOS floor is written, not left to the runner's SDK (OWNER RULING 2026-11-17); CMake ignores it on Linux.
           build='cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
-            -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+            -DQOD_NODE_RELATIVE_RPATH=ON -DQOD_NODE_SEARCH=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DDUCKDB_HOME="$DUCKDB_HOME"
           cmake --build native/qod-node/build-release --config Release --target qod-node'
           if [[ "$RUNNER_OS" == Linux ]]; then
             docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DUCKDB_HOME \
@@ -162,6 +207,8 @@ jobs:
           fi
           source scripts/release/qod-node-build-info.sh
           qod_node_check_marker native/qod-node/build-release/qod-node
+          [[ "$(qod_node_search_flag native/qod-node/build-release/qod-node)" == off ]] \
+            || { echo "::error::the vendored binary links qod_search_core"; exit 1; }
 
       - name: Test the vendored binary from a {bin,lib} layout
         run: |
@@ -175,7 +222,10 @@ jobs:
             echo "::error::the vendored binary started with no lib/ next to it"; exit 1
           fi
           ln -s "$DUCKDB_HOME/lib" "$layout/lib"
-          "$layout/bin/qod-node" --build-info
+          info="$("$layout/bin/qod-node" --build-info)"
+          echo "$info"
+          [[ "${info%%$'\n'*}" == *" search=off" ]] \
+            || { echo "::error::the vendored binary's --build-info does not end with search=off"; exit 1; }
           bash native/qod-node/tests/process_test.sh "$layout/bin/qod-node" native/qod-node/build/handle_tool
 
       - uses: actions/upload-artifact@v7
@@ -239,12 +289,22 @@ jobs:
           read -r version source_id < <("$cli" -noheader -list -c "SELECT library_version, source_id FROM pragma_version()" | tr '|' ' ')
           echo "DuckDB $version ($source_id)"
           cmake -S native/qod-node -B native/qod-node/build -A ${{ matrix.cmake_arch }} \
-            -DQOD_NODE_DUCKDB_STATIC=ON -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME" \
+            -DQOD_NODE_DUCKDB_STATIC=ON -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=OFF -DDUCKDB_HOME="$DUCKDB_HOME" \
             -DQOD_NODE_DUCKDB_VERSION="$version" -DQOD_NODE_DUCKDB_SOURCE_ID="$source_id"
           cmake --build native/qod-node/build --config Release
-          ctest --test-dir native/qod-node/build -C Release --output-on-failure --timeout 300
+          ctest --test-dir native/qod-node/build -C Release --output-on-failure --timeout 300 2>&1 | tee "$RUNNER_TEMP/ctest.log"
+          # This exe ships, built with QOD_NODE_TESTS=ON: the test-hook symbol gate must have run.
+          bash native/qod-node/tests/ctest_gate.sh "$RUNNER_TEMP/ctest.log" '.*' no_test_hooks_in_node
           source scripts/release/qod-node-build-info.sh
           qod_node_check_marker native/qod-node/build/Release/qod-node.exe
+          # The artifact carries the exe's --build-info (the publishing jobs read its search setting through
+          # scripts/release/qod-node-windows-assets.sh) and, for a search build, the notices it ships with.
+          out=native/qod-node/build/Release
+          "$out/qod-node.exe" --build-info | tr -d '\r' > "$out/build-info.txt"
+          cat "$out/build-info.txt"
+          if [[ "$(qod_node_search_flag "$out/qod-node.exe")" == on ]]; then
+            cp "$QOD_SEARCH_NOTICES" "$out/$QOD_SEARCH_NOTICES_NAME"
+          fi
 
       - name: Smoke through spawn-quack-node.ps1
         shell: pwsh
@@ -258,8 +318,250 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: qod-node-${{ matrix.platform }}
-          path: native/qod-node/build/Release/qod-node.exe
+          path: |
+            native/qod-node/build/Release/qod-node.exe
+            native/qod-node/build/Release/build-info.txt
+            native/qod-node/build/Release/THIRD-PARTY-NOTICES-qod-search.txt
           if-no-files-found: error
+
+  # QoD Search (spec 5.1): the development builds, qod-node with the Rust qod_search_core (native/qod-search)
+  # linked through Corrosion (-DQOD_NODE_SEARCH=ON) and its search functions, on the six platforms (OWNER
+  # RULING 2026-11-16, D2): each builds, links, stays under the glibc floor (Linux) and on the 15.0 deployment
+  # target (macOS), and passes the whole node suite (ctest -LE probe), the symbol gates included. Two jobs also
+  # build the test programs against the library's test-hooks build (QOD_SEARCH_TEST_HOOKS) and run the property
+  # suite. A gate on its branch; nothing here is uploaded, as every shipped build names QOD_NODE_SEARCH=OFF
+  # (the jobs above, scripts/release/check-release-pins.sh). Every ON configure writes a build-search* tree.
+  search-link-unix:
+    name: search build ${{ matrix.platform }}
+    # Not inside release.yml / snapshot.yml: in a called workflow github.workflow is the caller's name.
+    # Only by hand or on a search/ branch, so a merge to main does not run it on every push.
+    if: github.workflow == 'qod-node' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/search/'))
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            duckdb_platform: linux-amd64
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64:2026.11.07-1
+            hooks: true
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+            duckdb_platform: linux-arm64
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64:2026.11.07-1
+          - runner: macos-15-intel
+            platform: osx-x86_64
+            duckdb_platform: osx-universal
+          - runner: macos-15
+            platform: osx-aarch64
+            duckdb_platform: osx-universal
+            hooks: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release library, full headers, CLI)
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/libs" "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/libs.tar.gz" "$base/duckdb-shared-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/libs.tar.gz" -C "$tmp/libs"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp"/libs/libduckdb.* "$home/lib/"
+          cp "$tmp/cli/duckdb" "$home/bin/duckdb"
+          # The archives carry only the C headers; the hooks need the internal ones of the same tag.
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      - name: Rust release from native/qod-search/rust-toolchain.toml
+        id: rust
+        shell: bash
+        run: echo "toolchain=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' native/qod-search/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      # llvm-tools: the llvm-nm the library's symbol gate reads rustc's objects with (search_library_symbols).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          components: llvm-tools
+
+      # The whole suite, and the gates that must have run in it: the symbol gates (added only where their tool
+      # is found) and every search suite but the Postgres one (no Postgres here) and the property one (it needs
+      # the test-hooks build, next step) passing rather than skipping. On macOS the binaries record the 15.0
+      # deployment target the CMakeLists sets, and no object of the library was built for a newer macOS.
+      - name: Build and test with QOD_NODE_SEARCH=ON (development build)
+        run: |
+          set -euo pipefail
+          rustc --version
+          export DUCKDB_CLI="$DUCKDB_HOME/bin/duckdb"
+          cmake -S native/qod-node -B native/qod-node/build-search -DCMAKE_BUILD_TYPE=Release \
+            -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+          cmake --build native/qod-node/build-search --config Release 2>&1 | tee "$RUNNER_TEMP/build-search.log"
+          ctest --test-dir native/qod-node/build-search -C Release -LE probe --output-on-failure --timeout 600 \
+            2>&1 | tee "$RUNNER_TEMP/ctest-search.log"
+          bash native/qod-node/tests/ctest_gate.sh "$RUNNER_TEMP/ctest-search.log" \
+            '[a-z_]*_postgres|search_property|describer_extensions|enforcement_extensions|s3_env' \
+            no_test_hooks_in_node search_library_symbols build_info_search search_link search_engine \
+            search_adversarial search_removal search_limits search_snapshot search_records search_sink search_rowmap
+          native/qod-node/build-search/qod-node --build-info
+          ls -l native/qod-node/build-search/qod-node native/qod-node/build-search/search_link_test
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for bin in qod-node search_link_test; do
+              otool -l "native/qod-node/build-search/$bin" | grep -E 'minos|sdk'
+              otool -l "native/qod-node/build-search/$bin" | grep -Eq 'minos 15\.0$' \
+                || { echo "::error::$bin does not record the 15.0 deployment target"; exit 1; }
+            done
+            if grep -q 'built for newer' "$RUNNER_TEMP/build-search.log"; then
+              echo "::error::objects built for a newer macOS than the deployment target"; exit 1
+            fi
+          fi
+
+      # The test programs against the library's test-hooks build (qs_test_*, which qod-node never links): the
+      # property suite runs, at its default 200 cases, only there. Two platforms; the library's symbol gate
+      # checks here that the hooks build has them and the plain build qod-node links does not.
+      - name: Build and test with the library's test hooks (QOD_SEARCH_TEST_HOOKS, development build)
+        if: matrix.hooks
+        run: |
+          set -euo pipefail
+          export DUCKDB_CLI="$DUCKDB_HOME/bin/duckdb"
+          cmake -S native/qod-node -B native/qod-node/build-search-hooks -DCMAKE_BUILD_TYPE=Release \
+            -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DQOD_SEARCH_TEST_HOOKS=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+          cmake --build native/qod-node/build-search-hooks --config Release 2>&1 | tee "$RUNNER_TEMP/build-hooks.log"
+          ctest --test-dir native/qod-node/build-search-hooks -C Release -LE probe --output-on-failure --timeout 600 \
+            2>&1 | tee "$RUNNER_TEMP/ctest-hooks.log"
+          bash native/qod-node/tests/ctest_gate.sh "$RUNNER_TEMP/ctest-hooks.log" \
+            '[a-z_]*_postgres|describer_extensions|enforcement_extensions|s3_env' \
+            no_test_hooks_in_node search_library_symbols search_property search_engine search_adversarial \
+            search_removal search_limits
+          if [[ "$RUNNER_OS" == macOS ]] && grep -q 'built for newer' "$RUNNER_TEMP/build-hooks.log"; then
+            echo "::error::objects built for a newer macOS than the deployment target"; exit 1
+          fi
+
+      # The shipped Linux binaries are built in manylinux_2_28 (scripts/release/glibc-floor.sh). The test
+      # program is built there too, as it is the binary that holds Tantivy's code.
+      - name: manylinux_2_28 build with Rust (glibc floor)
+        if: runner.os == 'Linux'
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+          RUST_TOOLCHAIN: ${{ steps.rust.outputs.toolchain }}
+        run: |
+          set -euo pipefail
+          build='curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" && . "$HOME/.cargo/env" && \
+            rustc --version && \
+            cmake -S native/qod-node -B native/qod-node/build-search-release -DCMAKE_BUILD_TYPE=Release \
+              -DQOD_NODE_RELATIVE_RPATH=ON -DQOD_NODE_SEARCH=ON -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME" && \
+            cmake --build native/qod-node/build-search-release --config Release --target qod-node search_link_test'
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DUCKDB_HOME -e RUST_TOOLCHAIN \
+            -v "$PWD:$PWD" -v "$DUCKDB_HOME:$DUCKDB_HOME:ro" -w "$PWD" "$MANYLINUX_IMAGE" bash -euc "$build"
+          source scripts/release/glibc-floor.sh
+          glibc_floor_check native/qod-node/build-search-release/qod-node
+          glibc_floor_check native/qod-node/build-search-release/search_link_test
+          native/qod-node/build-search-release/search_link_test
+          ls -l native/qod-node/build-search-release/qod-node native/qod-node/build-search-release/search_link_test
+
+  search-link-windows:
+    name: search build ${{ matrix.platform }}
+    # Not inside release.yml / snapshot.yml: in a called workflow github.workflow is the caller's name.
+    # Only by hand or on a search/ branch, so a merge to main does not run it on every push.
+    if: github.workflow == 'qod-node' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/search/'))
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows-x86_64
+            duckdb_platform: windows-amd64
+            cmake_arch: x64
+          - runner: windows-11-arm
+            platform: windows-aarch64
+            duckdb_platform: windows-arm64
+            cmake_arch: ARM64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release static libraries, full headers, CLI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # POSIX path for bash and tar (GNU tar reads the "D:" of a Windows path as a remote host).
+          home="$(cygpath -u "$RUNNER_TEMP")/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/static.tar.gz" "$base/duckdb-static-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/static.tar.gz" -C "$home/lib"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp/cli/duckdb.exe" "$home/bin/duckdb.exe"
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          # Mixed form (D:/a/...) for CMake and later steps.
+          echo "DUCKDB_HOME=$(cygpath -m "$home")" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      - name: Rust release from native/qod-search/rust-toolchain.toml
+        id: rust
+        shell: bash
+        run: echo "toolchain=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' native/qod-search/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      # llvm-tools: the llvm-nm the library's symbol gate reads rustc's objects with (search_library_symbols).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          components: llvm-tools
+
+      # The static build needs its DuckDB version and source id given: no libduckdb to probe. The
+      # CMakeLists builds the crate with +crt-static here, to match the static CRT of the DuckDB libraries.
+      # The whole suite; the gates that must pass are those that need no DuckLake (the suites that load the
+      # ducklake extension skip themselves when it cannot load, and the log lists them).
+      - name: Build and test with QOD_NODE_SEARCH=ON (Visual Studio 2022, static DuckDB)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cli="$(cygpath -u "$DUCKDB_HOME")/bin/duckdb.exe"
+          read -r version source_id < <("$cli" -noheader -list -c "SELECT library_version, source_id FROM pragma_version()" | tr '|' ' ')
+          echo "DuckDB $version ($source_id)"
+          cmake -S native/qod-node -B native/qod-node/build-search -A ${{ matrix.cmake_arch }} \
+            -DQOD_NODE_DUCKDB_STATIC=ON -DQOD_NODE_TESTS=ON -DQOD_NODE_SEARCH=ON -DDUCKDB_HOME="$DUCKDB_HOME" \
+            -DQOD_NODE_DUCKDB_VERSION="$version" -DQOD_NODE_DUCKDB_SOURCE_ID="$source_id"
+          cmake --build native/qod-node/build-search --config Release
+          ctest --test-dir native/qod-node/build-search -C Release -LE probe --output-on-failure --timeout 600 \
+            2>&1 | tee "$RUNNER_TEMP/ctest-search.log"
+          bash native/qod-node/tests/ctest_gate.sh "$RUNNER_TEMP/ctest-search.log" '.*' \
+            no_test_hooks_in_node search_library_symbols search_link search_sink search_rowmap search_records
+          info="$(native/qod-node/build-search/Release/qod-node.exe --build-info | tr -d '\r')"
+          echo "$info"
+          [[ "${info%%$'\n'*}" == *" search=on" ]] || { echo "::error::--build-info does not end with search=on"; exit 1; }
+          ls -l native/qod-node/build-search/Release/qod-node.exe native/qod-node/build-search/Release/search_link_test.exe
 
   # The rolling `snapshot` pre-release (QOD_VERSION=latest-snapshot) carries the Windows qod-node.exe
   # of main, under the release asset names. Only for a push to main: a release takes its own from
@@ -272,23 +574,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: qod-node-windows-*
           path: qod-node
+      # QOD_NODE_SEARCH: what the snapshot ships (OFF while search Phase 1 is unmerged: OWNER RULING
+      # 2026-11-16, D2). An exe built otherwise is refused; one linking qod_search_core ships its notices.
       - name: Upload to the snapshot pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          QOD_NODE_SEARCH: 'OFF'
         run: |
           set -euo pipefail
-          assets=()
-          for arch in x86_64 aarch64; do
-            exe="qod-node-windows-$arch.exe"
-            cp "qod-node/qod-node-windows-$arch/qod-node.exe" "$exe"
-            shasum -a 256 "$exe" > "$exe.sha256"
-            assets+=("$exe" "$exe.sha256")
-          done
+          mapfile -t assets < <(scripts/release/qod-node-windows-assets.sh qod-node "$QOD_NODE_SEARCH" snapshot-assets)
+          [[ ${#assets[@]} -gt 0 ]] || { echo "::error::no Windows qod-node assets"; exit 1; }
           if ! gh release view snapshot >/dev/null 2>&1; then
             gh release create snapshot --prerelease --title "snapshot" \
               --notes "Rolling snapshot of main. Assets are overwritten on every push to main; see the VERSION asset for the exact version, commit, and build time. Consumed by QOD_VERSION=latest-snapshot."

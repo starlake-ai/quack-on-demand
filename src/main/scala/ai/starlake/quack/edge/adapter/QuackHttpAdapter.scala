@@ -1,18 +1,28 @@
 package ai.starlake.quack.edge.adapter
 
-import ai.starlake.quack.edge.authz.{MintedHandle, NodeHandles, NodeKeys, NodePrincipal}
+import ai.starlake.quack.edge.authz.{
+  MintedHandle,
+  NodeHandles,
+  NodeKeys,
+  NodePrincipal,
+  SearchSystemHandles
+}
 import ai.starlake.quack.model.RunningNode
 import ai.starlake.quack.route.NodeUnhealthy
 import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 
 /** `keys` mints every session handle: the manager's (Main), required, since keys of another secret
-  * would have every node refuse every handle (Phase B T6-M6).
+  * would have every node refuse every handle (Phase B T6-M6). `searchSystem`, required (Main's
+  * registry; tests that never ask for records pass None), is told the system handles of a call made
+  * with `searchSystemCall` ([[QuackHttpAdapter.recordSearchSystem]]), so the record route can serve
+  * them; None records nothing, so every system fetch of an index record is refused.
   */
 final class QuackHttpAdapter(
     client: QuackHttpClient,
     tracker: NodeLoadTracker,
-    keys: NodeKeys
+    keys: NodeKeys,
+    searchSystem: Option[SearchSystemHandles]
 ) extends LazyLogging:
 
   /** Send `sql` to `node` for `principal`: every PREPARE of the call follows a fresh session handle
@@ -38,9 +48,16 @@ final class QuackHttpAdapter(
       recordLoad: Boolean = true,
       stampPrelude: Option[String] = None,
       /** Told every handle minted for the call: the OPA dry run collects their nonces. */
-      onMint: MintedHandle => Unit = _ => ()
+      onMint: MintedHandle => Unit = _ => (),
+      /** The call asks for index records as the system principal (the interim bundle build, a
+        * system search): its system handles are recorded for the record route. Set by that call
+        * site only, never read from the statement's text (security review M3).
+        */
+      searchSystemCall: Boolean = false
   ): IO[QuackResponse] =
-    call(node, principal, recordLoad, onMint) { (endpoint, authorize) =>
+    val recorded =
+      QuackHttpAdapter.recordSearchSystem(searchSystem, node, principal, searchSystemCall)
+    call(node, principal, recordLoad, m => { recorded(m); onMint(m) }) { (endpoint, authorize) =>
       stampPrelude match
         case Some(p) => client.queryStamped(endpoint, node.token, authorize, p, sql)
         case None    => client.query(endpoint, node.token, sql, session, authorize)
@@ -57,13 +74,17 @@ final class QuackHttpAdapter(
       sql: String,
       principal: NodePrincipal,
       prelude: Option[String],
-      recordLoad: Boolean
+      recordLoad: Boolean,
+      /** As for [[send]]. */
+      searchSystemCall: Boolean = false
   ): IO[QuackResponse] =
     prelude match
       // Refused before the node is touched: nothing is booked against it.
       case None    => IO.pure(QuackResponse.Failed(QuackError.Permanent(QuackHttpAdapter.NoStamp)))
       case Some(p) =>
-        call(node, principal, recordLoad, _ => ()) { (endpoint, authorize) =>
+        val recorded =
+          QuackHttpAdapter.recordSearchSystem(searchSystem, node, principal, searchSystemCall)
+        call(node, principal, recordLoad, recorded) { (endpoint, authorize) =>
           client.queryStampedRequired(endpoint, node.token, authorize, p, sql)
         }
 
@@ -336,6 +357,25 @@ final class QuackHttpAdapter(
       }
 
 object QuackHttpAdapter:
+
+  /** What the minting site tells `searchSystem` of each handle minted for a call on `node`: a
+    * system-principal handle of a call its call site flagged (`searchSystemCall`) is recorded with
+    * the node, the pool and the expiry, every other handle is not. The statement's text decides
+    * nothing, so no other system statement can fill the registry (security review M3); the probes'
+    * handles (minted through [[authorizer]] directly) and every user's never reach it. Every handle
+    * of a flagged call is recorded, a stamp prelude's and a COMMIT's included: all precede
+    * statements of that one call.
+    */
+  def recordSearchSystem(
+      searchSystem: Option[SearchSystemHandles],
+      node: RunningNode,
+      principal: NodePrincipal,
+      searchSystemCall: Boolean
+  ): MintedHandle => Unit =
+    searchSystem match
+      case Some(registry) if principal.system && searchSystemCall =>
+        m => registry.put(m.nonce, node.nodeId, NodeHandles.pool(node.poolKey), m.expiresAt)
+      case _ => _ => ()
 
   /** The health probe's read of what `QOD_NODE_ALLOW_LOCAL_FILES=false` sets on a node. */
   val ExternalAccessSql: String = "SELECT current_setting('enable_external_access')::VARCHAR"

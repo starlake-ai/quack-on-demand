@@ -81,7 +81,10 @@ final class KubernetesQuackBackend(
     nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // The decide limits every pod's qod-node reads at start. Required (Main passes the manager's): a
     // default would silently run qod-node's own limits.
-    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig,
+    // The search knobs every pod's qod-node reads at start (QoD Search). Required, for the same
+    // reason: a default would silently run qod-node's own.
+    searchNode: ai.starlake.quack.SearchNodeConfig
 ) extends QuackBackend,
       LazyLogging:
 
@@ -182,13 +185,14 @@ final class KubernetesQuackBackend(
     nodeIdEnv.setName(NodeSecretFiles.NodeIdEnv)
     nodeIdEnv.setValue(spec.nodeId)
     envs.add(nodeIdEnv)
-    // Plain env like the node id: the policy and the limits are the manager's, not secrets.
-    (nodeExtensions.env ++ nodeFiles.env ++ nodeAuthzLimits.env).toList.sorted.foreach {
-      case (k, v) =>
-        val e = new EnvVar()
-        e.setName(k)
-        e.setValue(v)
-        envs.add(e)
+    // Plain env like the node id: the policy, the limits and the search knobs are the manager's,
+    // not secrets. The pod's env is built here from nothing, so no other QOD_SEARCH_ reaches it.
+    (nodeExtensions.env ++ nodeFiles.env ++ nodeAuthzLimits.env ++
+      ai.starlake.quack.SearchNodeConfig.nodeEnv(searchNode)).toList.sorted.foreach { case (k, v) =>
+      val e = new EnvVar()
+      e.setName(k)
+      e.setValue(v)
+      envs.add(e)
     }
 
     val containerPort = new ContainerPort()

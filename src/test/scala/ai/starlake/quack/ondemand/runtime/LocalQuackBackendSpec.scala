@@ -17,6 +17,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-1", Role.Dual, Map.empty, Map.empty)
@@ -35,6 +36,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
@@ -53,6 +55,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key   = PoolKey("t", "t_default", "p")
@@ -80,6 +83,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key = PoolKey("t", "t_default", "p")
@@ -114,6 +118,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(
@@ -137,6 +142,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec = NodeSpec(
@@ -171,6 +177,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     // Mirrors what effectiveMetastoreFor produces for a pathless duckdb-file
@@ -203,6 +210,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       ,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val storeSql = "CREATE OR REPLACE SECRET qod_db_store (TYPE s3, SECRET 'store-secret');"
@@ -276,6 +284,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       max = 23093,
       nodeKeys = keys,
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       commandFor = (spec, port, token) =>
         argv.set(production(spec, port, token))
         envDumpCmd(capture.getAbsolutePath, 5)
@@ -348,6 +357,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val key  = PoolKey("t", "t_default", "p")
@@ -385,7 +395,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
         commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal),
-        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig()
       )
       backend.allowsLocalFiles shouldBe allowLocal
       val key  = PoolKey("t", "t_default", "p")
@@ -422,6 +433,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       max = 23095,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
@@ -446,6 +458,45 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       )
     finally backend.stop(key, "node-limits").unsafeRunSync()
 
+  // The search knobs (QoD Search, Task 16) reach the spawn script as nine plain variables, always,
+  // with the backend's config values: a metastore entry spelled like one is dropped, and what the
+  // manager's own environment holds never reaches a node (SearchNodeConfig.overlay, whose drop of an
+  // inherited value SearchNodeConfigSpec pins on a map, since a test cannot set this JVM's env).
+  // The checks print only these variables, never the dump.
+  it should "hand the node the manager's search knobs, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-search-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23094,
+      max = 23095,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(maxUnindexedRows = 1234),
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    val key  = PoolKey("t", "t_default", "p")
+    val spec = NodeSpec(
+      key,
+      "node-search",
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "QOD_SEARCH_MAX_UNINDEXED_ROWS" -> "1"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out      = java.nio.file.Files.readString(capture.toPath)
+      val expected = ai.starlake.quack.SearchNodeConfig
+        .nodeEnv(ai.starlake.quack.SearchNodeConfig(maxUnindexedRows = 1234))
+      out.linesIterator
+        .filter(_.startsWith(ai.starlake.quack.SearchNodeConfig.EnvPrefix))
+        .toList
+        .sorted shouldBe expected.toList.sorted.map((k, v) => s"$k=$v")
+      expected("QOD_SEARCH_MAX_UNINDEXED_ROWS") shouldBe "1234"
+    finally backend.stop(key, "node-search").unsafeRunSync()
+
   // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
   // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
   // QOD_NODE_BIN would run commands as the manager's user, and a stale lockdownSql
@@ -469,6 +520,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (spec, _, _) => envDumpCmd(capture(spec.nodeId).getAbsolutePath, 5),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val allowed = Map(
@@ -581,6 +633,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val a = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-a", Role.Dual, Map.empty, Map.empty)
@@ -618,6 +671,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => List("bash", "-c", "trap '' TERM; sleep 30 & wait"),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val spec =
@@ -653,6 +707,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (_, _, _) => sleepCmd(30),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     backend

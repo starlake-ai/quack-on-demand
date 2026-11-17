@@ -162,7 +162,7 @@ class CatalogRestoreLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker, keys),
+      new QuackHttpAdapter(client, tracker, keys, searchSystem = None),
       stampWrites = stampWrites,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
       protectedWriteGuard = ProtectedWriteGuard.disabled

@@ -122,7 +122,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(stub())
-    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
 
     val sessions = new SessionRegistry
     val router   =
@@ -692,6 +692,150 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       s"Permission Error: ${FlightSqlRouter.NodeAuthzUnavailable}: timed out"
     ) shouldBe false
 
+  // ---- search spec 9, ruling 7 (Task 10): search_index_behind is a retryable UNAVAILABLE ----
+
+  private val indexBehind =
+    "Permission Error: QoD: search_index_behind: acme_lake.main.pages has 250000 unindexed live " +
+      "rows (cap 200000); retry once the indexer catches up"
+
+  /** A router over two readers whose node answers every send with `message`, and its send count. */
+  private def behindRouter(message: String) =
+    val sends               = new java.util.concurrent.atomic.AtomicInteger(0)
+    val (router, _, _) = setupWithRewriter(
+      readers = 2,
+      stub = () =>
+        sends.incrementAndGet()
+        QuackResponse.Failed(QuackError.Permanent(message), 1L)
+    )
+    (router, sends)
+
+  "the node's search_index_behind" should
+    "answer a lone read UNAVAILABLE with its text, sent to no other node, booked permanent" in:
+      FlightSqlRouter.isSearchIndexBehind(indexBehind) shouldBe true
+      val (router, sends) = behindRouter(indexBehind)
+      router.execute("sib-1", "alice", poolKey, "SELECT 1").unsafeRunSync() match
+        case Left(RouterFailure.Unavailable(reason)) =>
+          reason shouldBe s"permanent failure: $indexBehind"
+        case other => fail(s"expected Unavailable, got $other")
+      // Ruling 7 as the brief settles it: no retry on another node (every node of the pool reads the
+      // same catalog, so it would meet the same backlog).
+      sends.get() shouldBe 1
+      router.history.snapshot(1).head.status shouldBe "permanent"
+      // The allowed population's text, which names no count, is the same code.
+      FlightSqlRouter.isSearchIndexBehind(
+        "Permission Error: QoD: search_index_behind: acme_lake.main.pages has more unindexed rows " +
+          "than the search reads (cap 200000); retry once the indexer catches up"
+      ) shouldBe true
+
+  it should "answer a two-statement submission INVALID_ARGUMENT, not retryable as a whole" in:
+    val (router, sends) = behindRouter(indexBehind)
+    router.execute("sib-2", "alice", poolKey, "SELECT 1; SELECT 2").unsafeRunSync() match
+      case Left(RouterFailure.BadRequest(reason)) =>
+        reason should startWith(s"permanent failure: $indexBehind")
+        reason should endWith(s"(${FlightSqlRouter.BatchNotRetried})")
+      case other => fail(s"expected BadRequest, got $other")
+    sends.get() shouldBe 1
+    router.history.snapshot(1).head.status shouldBe "permanent"
+
+  it should "not be forged by a user's error() nor by a catalog error echoing its marker" in:
+    // What `SELECT error('QoD: search_index_behind: x')` gives, and the marker inside other errors.
+    List(
+      "Invalid Input Error: QoD: search_index_behind: x",
+      "Binder Error: Permission Error: QoD: search_index_behind: x"
+    ).foreach { m =>
+      withClue(m) {
+        FlightSqlRouter.isSearchIndexBehind(m) shouldBe false
+        val (router, _) = behindRouter(m)
+        router
+          .execute("sib-forged", "alice", poolKey, "SELECT error('QoD: search_index_behind: x')")
+          .unsafeRunSync()
+          .swap
+          .toOption
+          .get shouldBe a[RouterFailure.BadRequest]
+        router.history.snapshot(1).head.status shouldBe "permanent"
+      }
+    }
+    // The parse screen never raises it (the node raises it while the search runs), so its wrapped
+    // shape is not the code: it stays the denial every other wrapped node refusal is.
+    FlightSqlRouter.isSearchIndexBehind(
+      "Invalid Input Error: Authorization callback failed: Permission Error: QoD: " +
+        "search_index_behind: x"
+    ) shouldBe false
+    // A catalog error quoting the marker is a permanent NOT_FOUND, never UNAVAILABLE.
+    val catalog = "Catalog Error: Table with name QoD: search_index_behind: x does not exist!"
+    FlightSqlRouter.isSearchIndexBehind(catalog) shouldBe false
+    val (router, _) = behindRouter(catalog)
+    router
+      .execute("sib-catalog", "alice", poolKey, "SELECT 1")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.NotFound]
+    router.history.snapshot(1).head.status shouldBe "permanent"
+
+  it should "match only the node's own text, its fixed ending included" in:
+    // A stored view or macro body reading read_csv('search_index_behind: x') makes the node's
+    // post_bind location refusal open with the marker: it must stay a denial (security review m2).
+    val location =
+      "Permission Error: QoD: search_index_behind: x is outside the tenant's authorized locations"
+    FlightSqlRouter.isSearchIndexBehind(location) shouldBe false
+    FlightSqlRouter.isNodeRefusal(location) shouldBe true
+    val (router, _) = behindRouter(location)
+    router.execute("sib-loc", "alice", poolKey, "SELECT * FROM v").unsafeRunSync() match
+      case Left(RouterFailure.AccessDenied(reason)) => reason shouldBe s"access denied: $location"
+      case other => fail(s"expected AccessDenied, got $other")
+    router.history.snapshot(1).head.status shouldBe "denied"
+    // The node's texts, both caps in both populations, still map to UNAVAILABLE; one with anything
+    // after the ending (or a truncated ending) does not.
+    val ending = "; retry once the indexer catches up"
+    val real   = List(
+      "acme_lake.main.pages has 250000 unindexed live rows (cap 200000)",
+      "acme_lake.main.pages has more unindexed rows than the search reads (cap 200000)",
+      "acme_lake.main.pages has 70 unindexed sources (cap 64)",
+      "acme_lake.main.pages has more unindexed sources than the search reads (cap 64)"
+    ).map(t => s"Permission Error: QoD: search_index_behind: $t$ending")
+    real.foreach { m =>
+      withClue(m) {
+        FlightSqlRouter.isSearchIndexBehind(m) shouldBe true
+        val (r, _) = behindRouter(m)
+        r.execute("sib-real", "alice", poolKey, "SELECT 1")
+          .unsafeRunSync()
+          .swap
+          .toOption
+          .get shouldBe a[RouterFailure.Unavailable]
+      }
+    }
+    FlightSqlRouter.isSearchIndexBehind(real.head + " x") shouldBe false
+    FlightSqlRouter.isSearchIndexBehind(real.head.dropRight(1)) shouldBe false
+
+  it should "not be booked as a denial" in:
+    FlightSqlRouter.isNodeRefusal(indexBehind) shouldBe false
+    // And the other search codes keep their classes: the node's InvalidInput ones a BadRequest.
+    val memory =
+      "Invalid Input Error: QoD: search_memory_exceeded: the search needs more memory than its budget"
+    FlightSqlRouter.isSearchIndexBehind(memory) shouldBe false
+    val (router, _) = behindRouter(memory)
+    router
+      .execute("sib-mem", "alice", poolKey, "SELECT 1")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.BadRequest]
+    router.history.snapshot(1).head.status shouldBe "permanent"
+    // search_star_unsupported is the gateway's refusal (pinned for every principal by "a search
+    // statement with a star projection" below): access denied, here too.
+    FlightSqlRouter.isSearchIndexBehind(
+      s"Permission Error: ${ai.starlake.quack.edge.search.SearchStarScreen.Message}"
+    ) shouldBe false
+    val (starRouter, starSent, _) = setupWithRewriter()
+    starRouter
+      .execute("sib-star", "alice", poolKey, searchStarSql, Some(superuserSet))
+      .unsafeRunSync() match
+      case Left(RouterFailure.AccessDenied(reason)) =>
+        reason should include("search_star_unsupported")
+      case other => fail(s"expected AccessDenied, got $other")
+    starSent() shouldBe ""
+
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
     viaLink(router, "c-4", poolKey, "BEGIN")
@@ -759,7 +903,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None),
       metadataFilterRewriter = mountedFilter,
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
@@ -876,7 +1020,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -1085,7 +1229,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       ) =
         capturedSql = sql
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val router  = new FlightSqlRouter(
       sup2,
       new SessionRegistry,
@@ -1164,7 +1308,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       stub: () => QuackResponse = defaultStub,
       protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
         ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
-      attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty
+      attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty,
+      rowPolicyRewriter: ai.starlake.quack.edge.rls.RowPolicyRewriter =
+        new ai.starlake.quack.edge.rls.RowPolicyRewriter()
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
       def allowsLocalFiles = true
@@ -1216,7 +1362,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         capturedSql = sql
         IO.pure(stub())
 
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -1224,6 +1370,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       columnPolicyRewriter = rewriter,
+      rowPolicyRewriter = rowPolicyRewriter,
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard = protectedWriteGuard,
       attachedCatalogsOf = attachedCatalogsOf
@@ -1987,7 +2134,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             authorize: () => String
         ) =
           IO.pure(stub())
-    val adapter2  = new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter2  = new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions2 = new SessionRegistry
     val registry2 = new ActiveStatementRegistry()
     val router2   = new FlightSqlRouter(
@@ -2070,7 +2217,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         sup2,
         new SessionRegistry,
         tkr,
-        new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+        new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None),
         metadataFilterRewriter = mountedFilter,
         protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
@@ -2195,7 +2342,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             required += ((prelude, sql))
             requiredAnswer(math.min(required.size - 1, requiredAnswer.size - 1))()
           }
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2532,7 +2679,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             else TestArrow.okResponse()
           }
 
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2722,7 +2869,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             QuackResponse.Failed(QuackError.Transient("connect refused (test)"))
           else TestArrow.okResponse()
         }
-    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val router  = new FlightSqlRouter(
       sup,
       new SessionRegistry,
@@ -2906,7 +3053,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None)
     val reg     = new SimpleMeterRegistry
     val ri      = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
     val dir     = new ai.starlake.quack.route.PlacementDirectory()
@@ -3635,7 +3782,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral(), searchSystem = None),
       stmtInstruments = si,
       metadataFilterRewriter = mountedFilter,
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
@@ -3656,3 +3803,288 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     tracker.snapshot(first.nodeId).copy(draining = false) shouldBe
       ai.starlake.quack.route.NodeLoad.empty
 
+  // ---- search spec 4.2, the star rule (owner ruling 2026-11-14) ----
+
+  private val searchStarSql =
+    "SELECT p.* FROM qod_search((SELECT rowid FROM main.customer), 'main.customer', ['c_email'], " +
+      "'x') h JOIN main.customer p ON p.rowid = h.rowid"
+
+  "a search statement with a star projection" should
+    "be refused before the policy steps, for every principal, with its code" in:
+      val principals = List(
+        "superuser"         -> Some(superuserSet),
+        "unbound"           -> None,
+        "plain tenant user" -> Some(wildcardAllSet),
+        "column policy"     -> Some(effWithPolicies(List(maskCustomerEmail))),
+        "row policy"        -> Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      for (label, eff) <- principals do
+        val (router, capturedSql, _) =
+          setupWithRewriter(
+            rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+              new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+                Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+              ),
+              enabled = true
+            ),
+            protectedWriteGuard = guardKnowingCustomer
+          )
+        val out = router.execute("star-1", "alice", poolKey, searchStarSql, eff).unsafeRunSync()
+        withClue(label) {
+          val failure = out.left.toOption.get
+          failure shouldBe a[RouterFailure.AccessDenied]
+          // The star screen's text, not the column-policy step's parse_failed nor a guard's.
+          failure.reason shouldBe
+            s"access denied: ${ai.starlake.quack.edge.search.SearchStarScreen.Message}"
+          failure.reason should include("search_star_unsupported")
+          capturedSql() shouldBe ""
+        }
+
+  it should "let the same statement with listed columns reach the next steps" in:
+    val listed   = searchStarSql.replace("SELECT p.*", "SELECT p.c_id, h.score")
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+      ),
+      enabled = true
+    )
+    // A superuser: no policy step applies, the statement is sent.
+    val (router, capturedSql, _) = setupWithRewriter(rewriter = rewriter)
+    router
+      .execute("star-2", "alice", poolKey, listed, Some(superuserSet))
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql() should include("qod_search(")
+    // A column-policy holder: past the star screen, the column-policy step separates the search
+    // call (Phase 1, change 9): the statement reads no masked column and is sent as written.
+    val (router2, capturedSql2, _) = setupWithRewriter(rewriter = rewriter)
+    router2
+      .execute("star-3", "alice", poolKey, listed, Some(effWithPolicies(List(maskCustomerEmail))))
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql2() should include(
+      "qod_search((SELECT rowid FROM main.customer), 'main.customer', ['c_email'], 'x') h"
+    )
+    // Reading the masked column through the join-back: masked, the call put back as written.
+    val (router3, capturedSql3, _) = setupWithRewriter(rewriter = rewriter)
+    val masked                     = listed.replace("SELECT p.c_id, h.score", "SELECT p.c_email")
+    router3
+      .execute("star-5", "alice", poolKey, masked, Some(effWithPolicies(List(maskCustomerEmail))))
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql3() should not include "p.c_email"
+    capturedSql3() should include(
+      "qod_search((SELECT rowid FROM main.customer), 'main.customer', ['c_email'], 'x') h"
+    )
+
+  // Task 9 review m4: the oracle of the protected-write guard separates a search read side, so the
+  // guard denies a column-policy holder's write over a search call itself; with the guard off, the
+  // column-policy step still denies a flagged statement of another kind. Either way, never sent.
+  it should "deny a column-policy holder's write whose read side calls a search function" in:
+    val catalog = new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+      Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+    )
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(catalog, enabled = true)
+    val guard    = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
+      catalog,
+      clsEnabled = true,
+      rlsEnabled = true
+    )
+    val write =
+      "INSERT INTO main.customer SELECT p.c_id, p.c_region, p.c_region FROM qod_search((SELECT " +
+        "rowid FROM main.customer), 'main.customer', ['c_region'], 'x') h JOIN main.customer p ON " +
+        "p.rowid = h.rowid"
+    for g <- List(guard, ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled) do
+      val (router, capturedSql, _) = setupWithRewriter(rewriter = rewriter, protectedWriteGuard = g)
+      val out                      = router
+        .execute("star-6", "alice", poolKey, write, Some(effWithPolicies(List(maskCustomerEmail))))
+        .unsafeRunSync()
+      out.left.toOption.map(_.getClass) shouldBe Some(classOf[RouterFailure.AccessDenied])
+      capturedSql() shouldBe ""
+
+  it should "journal one denied history row and one failed StatementExecuted" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    router
+      .execute("star-4", "alice", poolKey, searchStarSql, Some(superuserSet))
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = router.history.snapshot(1).head
+    latest.status shouldBe "denied"
+    latest.error shouldBe Some(ai.starlake.quack.edge.search.SearchStarScreen.Message)
+    val executed = received.toArray.toList.collect { case e: ManagerEvent.StatementExecuted => e }
+    executed.map(_.ok) shouldBe List(false)
+
+  // Review C1: a mask expression holding a search name lands in the column-policy rewriter's
+  // output; the row-policy wrap's search flag is read from the client's own text, so it never
+  // keeps rowid (no `rowid_1` repeat of the real rowid column) for a statement the client wrote
+  // with no search name.
+  "a search name in a mask expression" should "never switch the wrap to keep rowid" in:
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "rpages") -> List("id", "rowid", "secret"))
+      ),
+      enabled = true
+    )
+    val eff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      tenantUser,
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      List(
+        ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+          "cp-r1",
+          "r-1",
+          "*",
+          "main",
+          "rpages",
+          "rowid",
+          "deny",
+          None
+        ),
+        ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+          "cp-r2",
+          "r-1",
+          "*",
+          "main",
+          "rpages",
+          "secret",
+          "mask",
+          Some("'hidden (see qod_search(x))'")
+        )
+      ),
+      List(
+        ai.starlake.quack.ondemand.state
+          .RoleRowPolicy("rp-r", "r-1", "*", "main", "rpages", "id = 3")
+      )
+    )
+    val (router, capturedSql, _) = setupWithRewriter(rewriter = rewriter)
+    router
+      .execute("c1-1", "alice", poolKey, "SELECT secret, rowid_1 FROM main.rpages", Some(eff))
+      .unsafeRunSync() match
+      case Right(qr) => qr.close()
+      case Left(_)   => ()
+    val sent = capturedSql()
+    info(s"sent: $sent")
+    sent should include("(SELECT * FROM main.rpages WHERE (id = 3))")
+    sent should not include "*, rowid"
+
+  // Search spec ruling 3 (Phase 1 Task 8): the router asks RewriteScope about the rewrite of a
+  // row-policy holder's search statement, and the scope reads the call's table argument, so the
+  // rewrite is judged: the real wrap is admitted, a rewrite naming another table is refused.
+  private val rlsSearchSql =
+    "SELECT h.rowid, h.score FROM qod_search((SELECT rowid FROM main.customer), 'main.customer', " +
+      "['c_email'], 'x') h"
+
+  "a row-policy holder's search statement" should "pass the rewrite scope check, judged" in:
+    val (router, capturedSql, _) = setupWithRewriter()
+    router
+      .execute("s1-1", "alice", poolKey, rlsSearchSql, Some(effWithRowPolicies(List(rowPolicyCustomer))))
+      .unsafeRunSync() match
+      case Right(qr) => qr.close()
+      case Left(f)   => fail(s"expected the statement to be sent, got $f")
+    // The adapter sends the session path's USE prelude ahead of the statement the router judged.
+    val prelude = "USE memory.main; "
+    capturedSql() should startWith(prelude)
+    val sent = capturedSql().stripPrefix(prelude)
+    sent should include("(SELECT *, rowid FROM main.customer WHERE (c_region = 'X'))")
+    // What the router asked: the original's scope is a reach holding the target, and the rewrite
+    // it sent reaches nothing beyond it. That the router itself asks is shown by the next case,
+    // whose retargeting spy rewrite is refused by the router's own rewrite scope check.
+    val cfg = ai.starlake.acl.model.Config.forDuckDB(Some("memory"), Some("main"), Set.empty)
+    ai.starlake.quack.edge.policy.RewriteScope.scopeOf(
+      rlsSearchSql,
+      cfg,
+      "memory",
+      clientDataScans = false
+    ) match
+      case ai.starlake.quack.edge.policy.RewriteScope.Scope.Reaches(g, _) =>
+        g.map(_.table.canonical) shouldBe Set("memory.main.customer")
+      case other => fail(s"expected a reach, got $other")
+    ai.starlake.quack.edge.policy.RewriteScope
+      .reachesBeyond(rlsSearchSql, sent, cfg, "memory", clientDataScans = false) shouldBe None
+
+  it should "be refused when the rewrite names another table in the call" in:
+    // A row-policy rewriter that wraps as usual, then points the call at another table: the router's
+    // rewrite scope check must catch it (before Task 8 the scope was refused and nothing compared).
+    val retargeting = new ai.starlake.quack.edge.rls.RowPolicyRewriter():
+      override def rewrite(
+          sql: String,
+          kind: ai.starlake.quack.model.StatementKind,
+          eff: ai.starlake.quack.ondemand.rbac.EffectiveSet,
+          ctx: ai.starlake.quack.edge.rls.SchemaContext,
+          searchStatement: Boolean,
+          realRowidTables: ai.starlake.quack.edge.rls.RealRowidTables
+      ) = super.rewrite(sql, kind, eff, ctx, searchStatement, realRowidTables) match
+        case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(s) =>
+          ai.starlake.quack.edge.rls.RowPolicyRewriter
+            .Rewritten(s.replace("'main.customer'", "'main.secret'"))
+        case other => other
+    val (router, capturedSql, _) = setupWithRewriter(rowPolicyRewriter = retargeting)
+    val out                      = router
+      .execute("s1-2", "alice", poolKey, rlsSearchSql, Some(effWithRowPolicies(List(rowPolicyCustomer))))
+      .unsafeRunSync()
+    val failure = out.left.toOption.getOrElse(fail(s"expected a denial, got $out"))
+    failure shouldBe a[RouterFailure.AccessDenied]
+    failure.reason should include("policy rewrite: the rewritten statement reaches what the")
+    failure.reason should include("memory.main.secret (Read)")
+    capturedSql() shouldBe ""
+
+  // Review M4: EXPLAIN ANALYZE classifies as the Select it runs, so the protected-write guard lets it
+  // through; the rewriters refuse it end to end for every policy holder (the row-policy rewriter's
+  // EXPLAIN refusal, the column-policy step's denial of a statement holding a search name).
+  "EXPLAIN ANALYZE of a search statement" should "be denied to every policy holder" in:
+    val explain = "EXPLAIN ANALYZE " + rlsSearchSql
+    val both    = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      tenantUser,
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      List(maskCustomerEmail),
+      List(rowPolicyCustomer)
+    )
+    val principals = List(
+      ("rls10 (row policy)", effWithRowPolicies(List(rowPolicyCustomer)), "EXPLAIN of a statement"),
+      ("clsmask (column policy)", effWithPolicies(List(maskCustomerEmail)), "column policy rewrite"),
+      // The column-policy step runs first.
+      ("both", both, "column policy rewrite")
+    )
+    for (label, eff, reason) <- principals do
+      val (router, capturedSql, _) = setupWithRewriter(
+        rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+          new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+            Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+          ),
+          enabled = true
+        ),
+        protectedWriteGuard = guardKnowingCustomer
+      )
+      val out = router.execute("s1-x", "alice", poolKey, explain, Some(eff)).unsafeRunSync()
+      withClue(label) {
+        val failure = out.left.toOption.getOrElse(fail(s"expected a denial, got $out"))
+        failure shouldBe a[RouterFailure.AccessDenied]
+        failure.reason should include(reason)
+        capturedSql() shouldBe ""
+      }
+
+  // Task 5 security review m3: the flag is read from the router's input as well as from screenSql,
+  // so a caller passing a screenSql with no search call never lowers it.
+  "the search flag" should "stay up when a mismatched screenSql holds no search call" in:
+    val (router, capturedSql, _) = setupWithRewriter()
+    val searchSql                =
+      "SELECT h.rowid FROM qod_search((SELECT rowid FROM main.customer), 'main.customer', " +
+        "['c_email'], 'x') h"
+    router
+      .execute(
+        "m3-1",
+        "alice",
+        poolKey,
+        searchSql,
+        Some(effWithRowPolicies(List(rowPolicyCustomer))),
+        screenSql = Some("SELECT 1")
+      )
+      .unsafeRunSync() match
+      case Right(qr) => qr.close()
+      case Left(f)   => fail(s"expected the statement to be sent, got $f")
+    val sent = capturedSql()
+    info(s"sent: $sent")
+    sent should include("(SELECT *, rowid FROM main.customer WHERE (c_region = 'X'))")

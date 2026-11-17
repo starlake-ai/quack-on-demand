@@ -2437,7 +2437,7 @@ final class PoolSupervisor(
             )
           else
             tdbs.foreach { td =>
-              store.deleteTenantDb(td.id)
+              deleteTenantDbRow(td.id)
               // Same tombstone stamp as deleteTenantDb: a cascaded delete must not strand a
               // managed prefix un-eligible, or its objects would be billed forever.
               stampManagedPrefixDeleted(td.id, td.name, purgeManagedData = false)
@@ -2459,6 +2459,16 @@ final class PoolSupervisor(
   }
 
   // ---------- TenantDb API ----------
+
+  /** Removes a tenant-db row with its QoD Search indexes, in one transaction: each index leaves a
+    * tombstone for Phase 2's bundle GC (OWNER RULING 2026-11-16, D3), and `qodstate_search_index`'s
+    * key on the row does not cascade, so the indexes go first.
+    */
+  private def deleteTenantDbRow(tenantDbId: String): Unit =
+    store.atomically {
+      store.deleteSearchIndexesForTenantDb(tenantDbId)
+      store.deleteTenantDb(tenantDbId)
+    }
 
   /** The Postgres database of a deleted row, on QoD's own server. Only a DuckLake row of that
     * server has one there: a create makes none for any other kind, and a catalog on another server
@@ -2894,7 +2904,7 @@ final class PoolSupervisor(
                     )
                   )
                 else
-                  store.deleteTenantDb(td.id)
+                  deleteTenantDbRow(td.id)
                   stampManagedPrefixDeleted(td.id, tenantDbName, purgeManagedData)
                   removeTenantDbRow(td.id)
                   dataFoldersChanged()

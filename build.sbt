@@ -171,11 +171,12 @@ lazy val root = (project in file("."))
         IO.copyFile(srcRoot / p / "qod-node", out)
         out
       }
-      val stamp = srcRoot / "VERSION"
-      if (stamp.exists) {
-        IO.copyFile(stamp, outRoot / "VERSION")
-        binaries :+ (outRoot / "VERSION")
-      } else binaries
+      // The third-party notices of qod_search_core, vendored beside binaries that link it (search spec 13).
+      val extras = Seq("VERSION", "THIRD-PARTY-NOTICES-qod-search.txt").filter(n => (srcRoot / n).exists)
+      binaries ++ extras.map { n =>
+        IO.copyFile(srcRoot / n, outRoot / n)
+        outRoot / n
+      }
     }.taskValue,
     // The pinned DuckDB release at runtime, from project/Versions.scala: QodNodeBinary checks the
     // node's engine against it, so a pin bump needs no source edit.

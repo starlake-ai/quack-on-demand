@@ -4,7 +4,8 @@ import ai.starlake.acl.parser.{AstChildren, TableExtractor}
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
-import ai.starlake.sql.ParserInput
+import ai.starlake.quack.edge.search.SearchFunctions
+import ai.starlake.sql.{ParserInput, TooDeep}
 import com.typesafe.scalalogging.LazyLogging
 import net.sf.jsqlparser.expression.{Alias, Expression}
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
@@ -39,7 +40,10 @@ final case class SchemaContext(
   * the table is replaced by an inline filtered view
   * `(SELECT * FROM <table> WHERE <predicate>) <alias>`, so the node only ever sees the rows the
   * predicate admits. Predicates from multiple policies on the same table are combined with **OR**
-  * (permissive union - a row is visible if ANY of the principal's roles allow it).
+  * (permissive union - a row is visible if ANY of the principal's roles allow it). In a statement
+  * calling a search function ([[ai.starlake.quack.edge.search.SearchFunctions.callsSearch]]) the
+  * view is `(SELECT *, rowid FROM <table> WHERE <predicate>)`, so the search input and its
+  * join-back can still read DuckDB's virtual `rowid` (search spec 4.2 rule 3).
   *
   * Wrapping the BASE table (rather than appending a top-level WHERE) keeps the filter correct under
   * joins, set operations, CTEs and subqueries, and - when stacked under the column-level rewriter -
@@ -102,6 +106,31 @@ object RowPolicyRewriter:
     "EXPLAIN of a statement reading a row-policy table is refused (EXPLAIN ANALYZE runs it " +
       "unfiltered, and a plan reports row counts); run the statement itself"
 
+  /** Search spec 4.3 (owner ruling 2026-11-14) and Phase 1 change 9: the wrap of rule 3 repeats a
+    * real `rowid` column under a name no column policy covers (`rowid_1`), and a wrapped relation
+    * with no `rowid` of its own (a view) binds the wrap's `rowid` to an earlier FROM item's, a real
+    * column included. So for a principal holding any column policy the wrap keeps `rowid` only when
+    * every table of the statement is known, from the column-policy step ([[RealRowidTables]]), to
+    * hold no real `rowid` column; otherwise the statement is refused.
+    */
+  private[rls] val ColumnPolicySearchRefusal =
+    "a search statement cannot keep rowid for a table holding a real rowid column"
+
+  /** Search spec 4.2 rule 3 (Task 5 security review m4): the wrap rebuilds a policy table from its
+    * name, which would drop a sample clause on it for the row-policy holder alone; in a search
+    * statement such a reference is refused, never sent unsampled.
+    */
+  private[rls] val SampledSearchRefusal =
+    "a statement calling a search function cannot sample a row-policy table (TABLESAMPLE, " +
+      "USING SAMPLE); sample a subquery instead"
+
+  /** Task 18 fix round 1 (lead ruling B): the wrap rebuilds a policy table from its name, which
+    * would drop a time-travel clause on it, reading the current snapshot; in a search statement
+    * such a reference is refused, never read at another snapshot than the one named.
+    */
+  private[rls] val TimeTravelSearchRefusal =
+    "a statement calling a search function cannot time travel on a row-policy table (AT (...))"
+
   private val TableStatementRefusal =
     "a TABLE statement in expression position (ARRAY(TABLE t), ANY (TABLE t)) reads a " +
       "row-policy table; use a subquery selecting from it instead"
@@ -147,11 +176,46 @@ object RowPolicyRewriter:
 class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
   import RowPolicyRewriter._
 
-  def rewrite(
+  /** [[rewrite]] with the search flag read from `sql` itself, for the rls package's specs, whose
+    * `sql` is the client's own text. Private to the package (review M2): the router passes the flag
+    * it read from the client's text, since `sql` is there the column-policy rewriter's output,
+    * which a mask expression can change, and no other caller may read it from there.
+    */
+  private[rls] def rewrite(
       sql: String,
       kind: StatementKind,
       eff: EffectiveSet,
       ctx: SchemaContext
+  ): Outcome =
+    rewrite(sql, kind, eff, ctx, TooDeep.orElse(true)(SearchFunctions.callsSearch(sql)))
+
+  /** [[rewrite]] knowing nothing of the statement's tables ([[RealRowidTables.Unknown]]): a wrap
+    * that keeps `rowid` for a principal holding any column policy is then refused.
+    */
+  def rewrite(
+      sql: String,
+      kind: StatementKind,
+      eff: EffectiveSet,
+      ctx: SchemaContext,
+      searchStatement: Boolean
+  ): Outcome =
+    rewrite(sql, kind, eff, ctx, searchStatement, RealRowidTables.Unknown)
+
+  /** `searchStatement`: the client's statement calls a search function
+    * ([[SearchFunctions.callsSearch]] of the client's own text, never of a rewriter's output or a
+    * gateway-built wrapper), which makes every policy table's wrap keep `rowid` (search spec 4.2
+    * rule 3). For a principal holding any column policy, such a wrap is refused
+    * ([[ColumnPolicySearchRefusal]]) unless every table of the statement is in
+    * `realRowidTables.resolved` and none in its `real` (the column-policy step's answer, review
+    * I6).
+    */
+  def rewrite(
+      sql: String,
+      kind: StatementKind,
+      eff: EffectiveSet,
+      ctx: SchemaContext,
+      searchStatement: Boolean,
+      realRowidTables: RealRowidTables
   ): Outcome =
     if !enabled then Passthrough
     else if eff.user.tenant.isEmpty then Passthrough // superuser: no row filtering
@@ -172,18 +236,28 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
         case Some((stmt: Select, exact)) =>
           val values  = tokenValues(eff)
           val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
+          // Spec 4.2 rule 3 (search, option A): in a statement calling a search function, and only
+          // there, every policy table's wrap keeps DuckDB's virtual rowid, which SELECT * drops.
+          val keepRowid = searchStatement
           try
             // Taken before the walk replaces them: every policy table the ACL parser's
             // depth-complete walk sees, as the very AST nodes the rewrite walk wraps.
-            val policyReads = TableExtractor.extract(stmt).tables.filter { t =>
-              matchingPolicies(t, eff, ctx).nonEmpty
-            }
-            val walker = new DeepWalker(eff, ctx, values, changed)
+            val reads       = TableExtractor.extract(stmt).tables
+            val policyReads = reads.filter(t => matchingPolicies(t, eff, ctx).nonEmpty)
+            val walker      = new DeepWalker(eff, ctx, values, changed, keepRowid)
             walker.walk(stmt)
             // Completeness (audit F21): a policy table in a position the walk holds no slot for
             // (a PIVOT / UNPIVOT source) would reach the node unfiltered. Refused, never passed.
             if policyReads.exists(t => !walker.wrappedTables.contains(t)) then
               Refused(UnfilteredRefusal)
+            // Spec 4.3, change 9: a wrap kept `rowid` for a column-policy holder; every table the
+            // statement reads must hold no real `rowid` column (the `rowid_1` repeat, and a view's
+            // wrap binding an earlier item's `rowid`), as the column-policy step resolved them.
+            else if keepRowid && changed.get() && eff.columnPolicies.nonEmpty &&
+              (reads ++ walker.slotTables.asScala).exists(t =>
+                realRowidTables.holdsRealRowid(canonical(t, ctx))
+              )
+            then Refused(ColumnPolicySearchRefusal)
             // The rewrite is printed from the parser input; when that is not the caller's
             // statement (ParserInput.Rendered.exact) shipping it would run a different one.
             else if !changed.get() then Passthrough
@@ -241,7 +315,8 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       eff: EffectiveSet,
       ctx: SchemaContext,
       values: Map[String, String],
-      changed: java.util.concurrent.atomic.AtomicBoolean
+      changed: java.util.concurrent.atomic.AtomicBoolean,
+      keepRowid: => Boolean
   ):
     private val visited: java.util.Set[AnyRef] =
       java.util.Collections.newSetFromMap(
@@ -250,6 +325,12 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
 
     /** The base tables this walk wrapped, by identity: the completeness check's other side. */
     val wrappedTables: java.util.Set[Table] =
+      java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
+
+    /** Every base table this walk met in a FROM slot, wrapped or not, at any depth (a search call's
+      * input included): the tables a column-policy holder's `rowid` wrap is judged against.
+      */
+    val slotTables: java.util.Set[Table] =
       java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
 
     def walk(node: AnyRef): Unit =
@@ -291,7 +372,8 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
     private def wrapped(item: FromItem): Option[FromItem] =
       item match
         case t: Table =>
-          val w = maybeWrap(t, eff, ctx, values, changed)
+          slotTables.add(t): Unit
+          val w = maybeWrap(t, eff, ctx, values, changed, keepRowid)
           if w eq t then None
           else
             visited.add(w): Unit
@@ -314,6 +396,16 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
         case leaf if AstChildren.isLeaf(leaf)      => ()
         case _                                     => throw new Refusal(UnwalkedRefusal)
 
+  /** `t` as [[RealRowidTables]] names it: unquoted, qualified by the session defaults. */
+  private def canonical(t: Table, ctx: SchemaContext): String =
+    val name    = unquote(t.getName)
+    val schema  = Option(t.getSchemaName).map(unquote).getOrElse(ctx.defaultSchema.getOrElse(""))
+    val catalog = Option(t.getDatabase)
+      .flatMap(d => Option(d.getDatabaseName))
+      .map(unquote)
+      .getOrElse(ctx.defaultDatabase.getOrElse(""))
+    RealRowidTables.canonical(catalog, schema, name)
+
   /** The principal's row policies covering `t`, its bare parts qualified by the session defaults. A
     * two-part name is read schema-first; one headed by an attached catalog, which DuckDB binds
     * catalog-first, never reaches here for a policy holder: the protected-write guard refuses it on
@@ -333,15 +425,16 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
     eff.rowPolicies.filter(p => policyMatches(p, catalog, schema, name))
 
   /** If `t` matches one or more of the principal's row policies, return a parenthesed
-    * `(SELECT * FROM t WHERE <ORed predicate>)` carrying t's original alias; else return `t`
-    * unchanged.
+    * `(SELECT * FROM t WHERE <ORed predicate>)`, or `(SELECT *, rowid FROM t WHERE ...)` when
+    * `keepRowid` (spec 4.2 rule 3), carrying t's original alias; else return `t` unchanged.
     */
   private def maybeWrap(
       t: Table,
       eff: EffectiveSet,
       ctx: SchemaContext,
       values: Map[String, String],
-      changed: java.util.concurrent.atomic.AtomicBoolean
+      changed: java.util.concurrent.atomic.AtomicBoolean,
+      keepRowid: => Boolean
   ): net.sf.jsqlparser.statement.select.FromItem =
     val matched = matchingPolicies(t, eff, ctx)
     if matched.isEmpty then t
@@ -358,6 +451,14 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
 
       val inner = new PlainSelect()
       inner.addSelectItem(new AllColumns())
+      if keepRowid then
+        // Spec 4.3: for a column-policy holder, checked on the whole statement once the walk ends.
+        // Review m4: the rebuilt table carries no sample clause; refuse rather than drop it.
+        if t.getSampleClause != null then throw new Refusal(SampledSearchRefusal)
+        // Task 18 fix round 1 (lead ruling B): nor a time-travel clause.
+        if t.getTimeTravel != null || t.getTimeTravelStrAfterAlias != null then
+          throw new Refusal(TimeTravelSearchRefusal)
+        inner.addSelectItem(new net.sf.jsqlparser.schema.Column("rowid"))
       inner.setFromItem(baseTable)
       inner.setWhere(expr)
 

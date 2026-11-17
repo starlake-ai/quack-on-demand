@@ -371,6 +371,22 @@ final case class FleetNodeFilesDto(allowLocal: Boolean)
   * per heartbeat from `quack-on-demand.nodeAuthzLimits`, never stored.
   */
 final case class FleetNodeAuthzLimitsDto(decideTimeoutMs: Int, cacheEntries: Int)
+
+/** The manager's search knobs for the node (QoD Search), as the join process hands them to
+  * qod-node, each under its `quack-on-demand.search` key. Derived per heartbeat from that block,
+  * never stored.
+  */
+final case class FleetNodeSearchLimitsDto(
+    maxUnindexedRows: Long,
+    maxUnindexedSources: Long,
+    queryMemoryBytes: Long,
+    maxK: Int,
+    livenessCacheEntries: Int,
+    livenessCacheBytes: Long,
+    segmentCacheBytes: Long,
+    missTtlSec: Int,
+    maxBundleBytes: Long
+)
 final case class FleetAssignmentDto(
     epoch: Long,
     nodeId: String,
@@ -386,6 +402,7 @@ final case class FleetAssignmentDto(
     nodeExtensions: FleetNodeExtensionsDto,
     nodeFiles: FleetNodeFilesDto,
     authzLimits: FleetNodeAuthzLimitsDto,
+    searchLimits: FleetNodeSearchLimitsDto,
     tenantDbInitSql: String,
     tenantDbInitTrusted: Boolean,
     tenantPoolInitSql: String,
@@ -1894,6 +1911,7 @@ object Dtos:
   given Codec[FleetNodeExtensionsDto]       = deriveCodec
   given Codec[FleetNodeFilesDto]            = deriveCodec
   given Codec[FleetNodeAuthzLimitsDto]      = deriveCodec
+  given Codec[FleetNodeSearchLimitsDto]     = deriveCodec
   given Codec[FleetAssignmentDto]           = deriveCodec
   given Codec[FleetHeartbeatResponse]       = deriveCodec
   given Codec[FleetServerDto]               = deriveCodec

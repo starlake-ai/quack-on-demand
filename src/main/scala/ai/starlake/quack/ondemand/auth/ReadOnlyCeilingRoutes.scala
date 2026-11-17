@@ -11,6 +11,7 @@ object ReadOnlyCeilingRoutes:
   private val ReadsByPost: Set[List[String]] = Set(
     List("api", "auth", "pat", "list"),
     List("api", "profile", "s3", "list"),
+    List("api", "search", "index", "list"),
     List("api", "tenant", "location", "list"),
     List("api", "user", "s3", "list")
   )

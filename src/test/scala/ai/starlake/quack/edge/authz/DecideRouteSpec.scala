@@ -664,3 +664,110 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       withClue("a secret value reached the log")(text.contains(sv) shouldBe false)
     )
   }
+
+  // ---- search spec 4.2 rule 8: populations in the verdict ----
+
+  /** A plan holding `calls` search calls on acme_lake.main.`table`, reading its column `id`. */
+  private def searchPlan(table: String, calls: Int = 1): Array[Byte] =
+    CanonicalJson
+      .render(
+        Json.obj(
+          "control"   -> Json.arr(),
+          "functions" -> Json.arr(),
+          "objects"   -> Json.arr(read(table)),
+          "searches"  -> Json.arr((0 until calls).map { i =>
+            Json.obj(
+              "call"    -> Json.fromInt(i),
+              "columns" -> Json.arr(s("id")),
+              "table"   -> s(s"acme_lake.main.$table")
+            )
+          }*),
+          "settings"  -> Json.arr(),
+          "statement" -> s("PROJECTION"),
+          "v"         -> Json.fromInt(1)
+        )
+      )
+      .getBytes(UTF_8)
+
+  /** Each search entry's keys and its (call, population). */
+  private def searchEntries(v: HCursor): List[(Set[String], (Int, String))] =
+    v.downField("search")
+      .values
+      .getOrElse(fail("the verdict carries no search"))
+      .toList
+      .map { e =>
+        val c = e.hcursor
+        (
+          e.asObject.map(_.keys.toSet).getOrElse(Set.empty),
+          (c.get[Int]("call").toOption.get, c.get[String]("population").toOption.get)
+        )
+      }
+
+  "a search plan's verdict" should "carry each call's population, and nothing of an index record" in {
+    val f             = new Fixture()
+    val (st, body, _) = f.call(request(f.handle(), "plan", searchPlan("orders", calls = 2)))
+    st shouldBe Status.Ok
+    val v = verdict(body)
+    v.get[String]("decision") shouldBe Right("allow")
+    searchEntries(v) shouldBe List(
+      (Set("call", "population"), (0, "table")),
+      (Set("call", "population"), (1, "table"))
+    )
+  }
+
+  it should "answer a superuser's and the system principal's search plan as before search" in {
+    // The node never asks for them (spec ruling 18): if it does, the route attaches nothing and
+    // fetches no record.
+    val f = new Fixture()
+    for p <- List(Root, NodePrincipal.System) do
+      withClue(p.name) {
+        val (st, body, _) = f.call(request(f.handle(p), "plan", searchPlan("customers")))
+        st shouldBe Status.Ok
+        val v = verdict(body)
+        v.get[String]("decision") shouldBe Right("allow")
+        v.downField("search").succeeded shouldBe false
+      }
+  }
+
+  it should "carry no search key on a refusal, nor on a plan holding no search call" in {
+    val f         = new Fixture()
+    val (_, b, _) = f.call(request(f.handle(), "plan", searchPlan("customers")))
+    val refused   = verdict(b)
+    refused.get[String]("decision") shouldBe Right("refuse")
+    refused.downField("search").succeeded shouldBe false
+    val (_, b2, _) = f.call(request(f.handle(), "plan", plan(List(read("orders")))))
+    verdict(b2).downField("search").succeeded shouldBe false
+  }
+
+  // Task 5 review M3, settled in Task 10: a search description the decider cannot read, and a
+  // handle naming no pool, point to a node or manager bug, never to a principal's denial. They take
+  // the route's one answer for a decision it cannot make, 503 (the node's "authorization
+  // unavailable, retry", Flight UNAVAILABLE): never a signed refusal, which the router would book
+  // as a denial (UNAUTHORIZED, a data-denial audit event).
+  it should "answer a plan whose search calls are not numbered 0 to n-1 unavailable, never a refusal" in {
+    val f          = new Fixture()
+    val bytes      = new String(searchPlan("orders"), UTF_8).replace("\"call\":0", "\"call\":3")
+    val (st, b, _) = f.call(request(f.handle(), "plan", bytes.getBytes(UTF_8)))
+    st shouldBe Status.ServiceUnavailable
+    b shouldBe "unreadable search description: search calls are not numbered 0 to n-1"
+    decisions(f, "plan", "unavailable") shouldBe 1.0
+    decisions(f, "plan", "refuse") shouldBe 0.0
+  }
+
+  it should "answer a handle naming no pool a search can run on unavailable, never a refusal" in {
+    // A pool string PoolKey.parse refuses (an empty pool name), minted with a context naming it,
+    // so the handle is consistent with its context and the plan rules allow the read.
+    val noPool = PoolKey("acme", "acme_lake", "")
+    val f      = new Fixture()
+    val handle = f.keys.handle(
+      Node.copy(poolKey = noPool),
+      NodePrincipal.of(Some(Alice), noPool, DecidePurpose.Live)
+    )
+    val (st, b, _) = f.call(request(handle, "plan", searchPlan("orders")))
+    st shouldBe Status.ServiceUnavailable
+    b shouldBe "the handle names no pool a search can run on"
+    // The same plan through a handle of the pool is allowed: only the pool made the difference.
+    val (ok, body, _) = f.call(request(f.handle(), "plan", searchPlan("orders")))
+    ok shouldBe Status.Ok
+    verdict(body).get[String]("decision") shouldBe Right("allow")
+  }

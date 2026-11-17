@@ -22,6 +22,7 @@
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/enums/trigger_type.hpp"
 #include "duckdb/common/enums/view_security_type.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
@@ -60,6 +61,9 @@
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/prepare_statement.hpp"
 #include "duckdb/parser/statement/update_statement.hpp"
+#ifdef QOD_NODE_SEARCH
+#include "search_lineage.hpp"
+#endif
 #include "duckdb/parser/expression/list.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/query_node/list.hpp"
@@ -74,6 +78,10 @@
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <map>
 #include <set>
 #include <utility>
@@ -708,9 +716,21 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 //! The statement's own names come from the parse screen's walk (ReachedNames); a body's from the
 //! definition walk below, which follows the shapes a view's query takes (a SELECT, a set operation,
 //! CTEs) and a trigger action's (an INSERT, UPDATE or DELETE).
+//! The search functions (spec 4.1): their arguments are judged on the statement's own text (Task 8).
+bool IsSearchName(const std::string &lower) {
+	return lower == "qod_search" || lower == "qod_search_matches" || lower == "qod_search_build_segment" ||
+	       lower == "qod_knn" || lower == "qod_hybrid";
+}
+
+constexpr const char *kSearchInBody =
+    "QoD: search_input_not_governed: a search function called inside a view, macro or query() body";
+
 class CallNames {
 public:
-	explicit CallNames(ClientContext &context) : context_(context) {
+	//! `search_only` (Task 8, any principal's statement holding a search call): judge nothing but the
+	//! search names reached through view, macro, table macro and query() bodies, walking superusers'
+	//! macros too.
+	explicit CallNames(ClientContext &context, bool search_only = false) : context_(context), search_only_(search_only) {
 	}
 
 	//! Every statement of `sql`.
@@ -825,6 +845,14 @@ private:
 	//! (a macro shadowing a built-in) is refused.
 	void Resolution(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever) {
 		auto lower = StringUtil::Lower(Text(name.Name()));
+		if (search_only_) {
+			auto entry = Resolved(name, type, retriever);
+			if (entry && !BuiltIn(*entry) &&
+			    (entry->type == CatalogType::MACRO_ENTRY || entry->type == CatalogType::TABLE_MACRO_ENTRY)) {
+				Macro(*entry, retriever, Rules {});
+			}
+			return;
+		}
 		if (!IsClassifiedFunction(lower)) {
 			return;
 		}
@@ -850,7 +878,19 @@ private:
 	//! classification, and outside a secure view's boundary its class.
 	void Call(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever, Rules rules) {
 		auto lower = StringUtil::Lower(Text(name.Name()));
+		if (IsSearchName(lower)) {
+			// Search rule 1 and rule 7 judge a call on the statement's own text, which a body hides (and
+			// the row-policy wrap of rule 3 never reaches a body): Task 8, review I2.
+			throw InvalidInputException(kSearchInBody);
+		}
 		auto entry = Resolved(name, type, retriever);
+		if (search_only_) {
+			if (entry && !BuiltIn(*entry) &&
+			    (entry->type == CatalogType::MACRO_ENTRY || entry->type == CatalogType::TABLE_MACRO_ENTRY)) {
+				Macro(*entry, retriever, Rules {rules.secure, false});
+			}
+			return;
+		}
 		if (rules.secure && lower == "current_setting") {
 			// The plan rule (Walker::AddFunction), for a call DuckDB folded away (reviews m-R7, m-R9).
 			Unsupported(lower + "() inside a secure view");
@@ -928,7 +968,7 @@ private:
 			return;
 		}
 		if (BuiltIn(*entry)) {
-			if (!rules.secure) {
+			if (!rules.secure && !search_only_) {
 				BuiltInView(*entry, name, own);
 			}
 			return;
@@ -1338,6 +1378,7 @@ private:
 	}
 
 	ClientContext &context_;
+	bool search_only_ = false;
 	//! The views and macros on the walk's current path, for cycles.
 	std::set<const CatalogEntry *> path_;
 	//! How deep query() literals nest on the current path.
@@ -1356,6 +1397,24 @@ void JudgeCallNames(ClientContext &context, LogicalOperator &plan, const std::st
 				Unsupported("an EXECUTE whose prepared statement cannot be read");
 			}
 			names.Statement(*prepared->unbound_statement);
+		}
+		for (auto &child : op.children) {
+			executes(*child);
+		}
+	};
+	executes(plan);
+}
+
+//! JudgeSearchBodies: the same statements as JudgeCallNames, walked for search names only.
+void SearchBodies(ClientContext &context, LogicalOperator &plan, const std::string &statement_text) {
+	CallNames names(context, true);
+	names.Sql(statement_text);
+	std::function<void(LogicalOperator &)> executes = [&](LogicalOperator &op) {
+		if (op.type == LogicalOperatorType::LOGICAL_EXECUTE) {
+			auto &prepared = op.Cast<LogicalExecute>().prepared;
+			if (prepared && prepared->unbound_statement) {
+				names.Statement(*prepared->unbound_statement);
+			}
 		}
 		for (auto &child : op.children) {
 			executes(*child);
@@ -1385,12 +1444,22 @@ public:
 	void CheckSession();
 
 	std::string Canonical(const std::string &statement) const {
-		return CanonicalJson(JsonObject({{"control", ToArray(control_)},
-		                                 {"functions", ToArray(functions_)},
-		                                 {"objects", ToArray(objects_)},
-		                                 {"settings", ToArray(settings_)},
-		                                 {"statement", JsonString(statement)},
-		                                 {"v", JsonInt(1)}}));
+		std::map<std::string, JsonValue> members {{"control", ToArray(control_)},
+		                                          {"functions", ToArray(functions_)},
+		                                          {"objects", ToArray(objects_)},
+		                                          {"settings", ToArray(settings_)},
+		                                          {"statement", JsonString(statement)},
+		                                          {"v", JsonInt(1)}};
+		if (!searches_.empty()) {
+			// Present only for a plan holding a search call, so every other description is unchanged.
+			members.emplace("searches", ToArray(searches_));
+		}
+		return CanonicalJson(JsonObject(std::move(members)));
+	}
+
+	//! How many search calls the walk described (Described::search_calls).
+	size_t SearchCalls() const {
+		return search_calls_;
 	}
 
 	//! The catalogs the walk found written or targeted (Described::written_catalogs).
@@ -1471,6 +1540,9 @@ private:
 	Elements functions_;
 	Elements settings_;
 	Elements control_;
+	//! Search calls (Task 8): each call's table and columns, by its pre-order position.
+	Elements searches_;
+	idx_t search_calls_ = 0;
 	std::set<std::string> written_;
 };
 
@@ -1658,6 +1730,33 @@ void Walker::Get(LogicalGet &get, const std::string &via) {
 		Unsupported("qod_session outside the prelude");
 	}
 	AddFunction("table", qualified, TableArgs(get, name, via), via);
+#ifdef QOD_NODE_SEARCH
+	// A search call reads its `table`'s `columns` (spec 4.2 rule 5): an object read like any scan's, and
+	// a `searches` entry, so two calls differing only in them never share a verdict.
+	if (auto data = search::SearchCallData(get)) {
+		auto table = search::ResolveSearchTable(context_, data->table);
+		if (!table) {
+			throw InvalidInputException("QoD: search_input_wrong_table: " + data->table + " does not name a table");
+		}
+		std::set<std::string> read;
+		std::vector<std::string> columns;
+		for (auto &given : data->columns) {
+			auto column = search::TableColumnName(*table, given);
+			if (column.empty()) {
+				// A refusal of the statement's shape, not of the principal: InvalidInput, as at every other site of
+				// search_columns_unsupported (Describe lets the `QoD: search_` shape refusals through as they are).
+				throw InvalidInputException("QoD: search_columns_unsupported: " + given + " is not a column of " +
+				                            search::CanonicalTableName(*table));
+			}
+			read.insert(column);
+			columns.push_back(column);
+		}
+		AddEntry("table", "read", *table, read, via);
+		Add(searches_, JsonObject({{"call", JsonInt(static_cast<int64_t>(search_calls_++))},
+		                           {"columns", Strings(columns)},
+		                           {"table", JsonString(search::CanonicalTableName(*table))}}));
+	}
+#endif
 }
 
 //! Names as DuckDB resolves identifiers: without case.
@@ -3169,6 +3268,7 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
                    const std::string *statement_text) {
 	std::string canonical;
 	std::set<std::string> written;
+	size_t search_calls = 0;
 	try {
 		Walker walker(context, principal, statement_text, plan);
 		walker.Operator(plan, "");
@@ -3181,8 +3281,16 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 		}
 		canonical = walker.Canonical(duckdb::LogicalOperatorToString(plan.type));
 		written = walker.Written();
+		search_calls = walker.SearchCalls();
 	} catch (duckdb::PermissionException &) {
 		throw;
+	} catch (duckdb::InvalidInputException &e) {
+		// A search call's shape refusal (`QoD: search_...`, an ordinary error that leaves the transaction usable)
+		// stands as it is; any other invalid input is the plain refusal below.
+		if (duckdb::ErrorData(e).RawMessage().rfind("QoD: search_", 0) == 0) {
+			throw;
+		}
+		throw duckdb::PermissionException("QoD: statement could not be described");
 	} catch (std::invalid_argument &) {
 		// CanonicalJson refuses a string that is not UTF-8 (Task 1). DuckDB validates query text and
 		// identifiers, so only a value read from elsewhere could carry one.
@@ -3194,7 +3302,191 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 		// parser, permission... error does): a refusal, plain.
 		throw duckdb::PermissionException("QoD: statement could not be described");
 	}
-	return Described {canonical, Hex(Sha256(canonical)), std::move(written)};
+	return Described {canonical, Hex(Sha256(canonical)), std::move(written), search_calls};
+}
+
+namespace {
+
+std::atomic<bool> g_fail_table_id_reads {false};
+std::atomic<bool> g_fail_encryption_reads {false};
+std::mutex g_metadata_lock;
+std::function<void(const std::string &)> g_metadata_observer;
+
+//! One of the search's fixed metadata reads, on a connection of the node's: its rows, or null when it failed
+//! (or a test made it fail). The observer sees the text first.
+std::optional<std::vector<std::vector<duckdb::Value>>> SearchMetadataRead(duckdb::ClientContext &context,
+                                                                           const std::string &sql,
+                                                                           const std::atomic<bool> &fail) {
+	std::function<void(const std::string &)> observer;
+	{
+		std::lock_guard<std::mutex> guard(g_metadata_lock);
+		observer = g_metadata_observer;
+	}
+	if (observer) {
+		observer(sql);
+	}
+	if (fail.load()) {
+		return std::nullopt;
+	}
+	duckdb::Connection internal(*context.db);
+	auto result = internal.Query(sql);
+	if (result->HasError()) {
+		return std::nullopt;
+	}
+	std::vector<std::vector<duckdb::Value>> rows;
+	while (auto chunk = result->Fetch()) {
+		for (duckdb::idx_t r = 0; r < chunk->size(); r++) {
+			std::vector<duckdb::Value> row;
+			for (duckdb::idx_t c = 0; c < chunk->ColumnCount(); c++) {
+				row.push_back(chunk->GetValue(c, r));
+			}
+			rows.push_back(std::move(row));
+		}
+	}
+	if (result->HasError()) {
+		return std::nullopt;
+	}
+	return rows;
+}
+
+} // namespace
+
+DuckLakeIdRead DuckLakeTableIdAt(duckdb::ClientContext &context, duckdb::TableCatalogEntry &entry, int64_t at,
+                                 int64_t &table_id) {
+	table_id = -1;
+	auto &catalog = entry.ParentCatalog();
+	if (catalog.GetCatalogType() != "ducklake") {
+		return DuckLakeIdRead::None;
+	}
+	auto name = Text(entry.name);
+	auto schema = Text(entry.ParentSchema().name);
+	auto prefix = DuckLakeMetadataPrefix(context, Text(catalog.GetName()));
+	if (prefix.empty()) {
+		return DuckLakeIdRead::Unreadable;
+	}
+	// The versions of the target alone: its schema and its name, folded as DuckDB folds identifiers.
+	auto result = SearchMetadataRead(
+	    context, "SELECT t.table_id, t.begin_snapshot, coalesce(t.end_snapshot, -1) FROM " + prefix +
+	                 ".ducklake_table t WHERE t.schema_id IN (SELECT schema_id FROM " + prefix +
+	                 ".ducklake_schema WHERE " + AsciiFolded("schema_name") + " = " +
+	                 KeywordHelper::WriteQuoted(StringUtil::Lower(schema), '\'') + ") AND " +
+	                 AsciiFolded("t.table_name") + " = " + KeywordHelper::WriteQuoted(StringUtil::Lower(name), '\'') +
+	                 " ORDER BY t.table_id, t.begin_snapshot LIMIT " + std::to_string(kMaxDuckLakeHistory + 1),
+	    g_fail_table_id_reads);
+	if (!result) {
+		return DuckLakeIdRead::Unreadable;
+	}
+	if (result->size() > kMaxDuckLakeHistory) {
+		return DuckLakeIdRead::Unreadable;
+	}
+	int64_t found = -1;
+	for (auto &row : *result) {
+		auto id = row[0].GetValue<int64_t>();
+		auto begin = row[1].GetValue<int64_t>();
+		auto end = row[2].GetValue<int64_t>();
+		auto live = at < 0 ? end < 0 : begin <= at && (end < 0 || end > at);
+		if (live) {
+			if (found >= 0 && found != id) {
+				// Two tables under one name at one snapshot: none is told apart (fail closed).
+				return DuckLakeIdRead::None;
+			}
+			found = id;
+		}
+	}
+	if (found < 0) {
+		return DuckLakeIdRead::None;
+	}
+	if (at >= 0) {
+		// The entry holding the name at `at` must be the target's own (DuckLake keeps one oid per table id), as
+		// DroppedDuckLakeRead checks a direct pick: the metadata read is another transaction's, the target scan
+		// the client's (security review m1).
+		bool holds = false;
+		TablesAt(context, catalog, {schema}, at, [&](TableCatalogEntry &candidate) {
+			holds = holds || (candidate.oid == entry.oid && SameName(Text(candidate.name), name));
+		});
+		if (!holds) {
+			return DuckLakeIdRead::None;
+		}
+	}
+	table_id = found;
+	return DuckLakeIdRead::Found;
+}
+
+int DuckLakeEncrypted(duckdb::ClientContext &context, duckdb::Catalog &catalog) {
+	if (catalog.GetCatalogType() != "ducklake") {
+		return -1;
+	}
+	auto prefix = DuckLakeMetadataPrefix(context, Text(catalog.GetName()));
+	if (prefix.empty()) {
+		return -1;
+	}
+	auto result = SearchMetadataRead(context, "SELECT value FROM " + prefix + ".ducklake_metadata WHERE key = 'encrypted'",
+	                                 g_fail_encryption_reads);
+	if (!result) {
+		return -1;
+	}
+	int answer = 0;
+	for (auto &row : *result) {
+		auto &value = row[0];
+		// Any `encrypted` entry, at any scope, other than exactly 'false' counts (fail closed).
+		if (value.IsNull() || value.ToString() != "false") {
+			answer = 1;
+		}
+	}
+	return answer;
+}
+
+DuckLakeIdRead DuckLakeDataPath(duckdb::ClientContext &context, const std::string &catalog, std::string &data_path) {
+	data_path.clear();
+	auto entry = Catalog::GetCatalogEntry(context, Identifier(catalog));
+	if (!entry || entry->GetCatalogType() != "ducklake") {
+		return DuckLakeIdRead::None;
+	}
+	auto prefix = DuckLakeMetadataPrefix(context, catalog);
+	if (prefix.empty()) {
+		return DuckLakeIdRead::Unreadable;
+	}
+	auto result = SearchMetadataRead(
+	    context, "SELECT value FROM " + prefix + ".ducklake_metadata WHERE key = 'data_path' AND scope IS NULL",
+	    g_fail_table_id_reads);
+	if (!result) {
+		return DuckLakeIdRead::Unreadable;
+	}
+	if (result->size() != 1 || (*result)[0][0].IsNull()) {
+		return DuckLakeIdRead::None;
+	}
+	data_path = (*result)[0][0].ToString();
+	return DuckLakeIdRead::Found;
+}
+
+#ifdef QOD_NODE_TEST_HOOKS
+void FailSearchMetadataReadsForTest(bool table_ids, bool encryption) {
+	g_fail_table_id_reads = table_ids;
+	g_fail_encryption_reads = encryption;
+}
+
+void SearchMetadataReadObserverForTest(std::function<void(const std::string &)> observer) {
+	std::lock_guard<std::mutex> guard(g_metadata_lock);
+	g_metadata_observer = std::move(observer);
+}
+#endif // QOD_NODE_TEST_HOOKS
+
+void JudgeSearchBodies(duckdb::ClientContext &context, duckdb::LogicalOperator &plan,
+                       const std::string &statement_text) {
+	try {
+		SearchBodies(context, plan, statement_text);
+	} catch (duckdb::PermissionException &) {
+		throw;
+	} catch (duckdb::InvalidInputException &e) {
+		if (duckdb::ErrorData(e).RawMessage().rfind("QoD: search_", 0) == 0) {
+			throw;
+		}
+		throw duckdb::InvalidInputException(
+		    "QoD: search_input_not_governed: the views and macros the statement reaches could not be walked");
+	} catch (std::exception &) {
+		throw duckdb::InvalidInputException(
+		    "QoD: search_input_not_governed: the views and macros the statement reaches could not be walked");
+	}
 }
 
 void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement) {

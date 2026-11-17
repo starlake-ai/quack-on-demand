@@ -392,7 +392,20 @@ final class FlightSqlRouter(
         * ([[QuackHttpAdapter.sendStampRequired]]). A statement that is not a write leaves it
         * unused.
         */
-      commitMessage: Option[String] = None
+      commitMessage: Option[String] = None,
+      /** The client's own statement when `sql` is a wrapper the gateway built around it (the Flight
+        * SQL schema probe `SELECT * FROM (<sql>) AS _qod_probe LIMIT 0`): the search star screen
+        * and the search flag of the policy rewriters read it, never the wrapper (search spec 4.2
+        * rules 3 and 10). None: `sql` is the client's statement.
+        */
+      screenSql: Option[String] = None,
+      /** The statement asks for index records as the system principal (the interim bundle build, a
+        * system search): its system handles are recorded for the record route
+        * (`QuackHttpAdapter.send(searchSystemCall)`). Set only by the manager's own call site
+        * (`ExecCaller.searchRecords`), never derived from the text (security review M3); for any
+        * other principal it records nothing.
+        */
+      searchSystemCall: Boolean = false
   ): IO[Either[RouterFailure, QueryResult]] =
     adminExecutor match
       case Some(exec) if adminDispatch && ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
@@ -433,7 +446,7 @@ final class FlightSqlRouter(
               poolKey,
               sql,
               effectiveSet,
-              arrowSendFor(sql, commitMessage),
+              arrowSendFor(sql, commitMessage, searchSystemCall),
               source = source,
               edge = edge,
               preferredNode = preferredNode,
@@ -442,7 +455,8 @@ final class FlightSqlRouter(
               patId = patId,
               evaluate = Some(adapterEvaluate),
               purpose = DecidePurpose.Live,
-              commitMessage = commitMessage
+              commitMessage = commitMessage,
+              screenSql = screenSql
             ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
             // The session state follows the request's first statement: `BEGIN; ...; COMMIT`
             // would leave it "in a transaction" (pinned, writes unstamped) though the request
@@ -486,7 +500,9 @@ final class FlightSqlRouter(
   /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
     * around. `session` is always None on the outbound wire.
     */
-  private val adapterSend: FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+  private def adapterSend(
+      searchSystemCall: Boolean
+  ): FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
     (node, wrappedSql, prelude, recordLoad, principal) =>
       adapter
         .send(
@@ -495,7 +511,8 @@ final class FlightSqlRouter(
           principal,
           session = None,
           recordLoad = recordLoad,
-          stampPrelude = prelude
+          stampPrelude = prelude,
+          searchSystemCall = searchSystemCall
         )
         .map(NodeOutcome.fromQuackResponse)
 
@@ -503,11 +520,12 @@ final class FlightSqlRouter(
     * ([[QuackHttpAdapter.sendStampRequired]]). A stamp that fails is `notSent`, so the retry on
     * another node is as safe as for any statement that never left.
     */
-  private val adapterSendStampRequired
-      : FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+  private def adapterSendStampRequired(
+      searchSystemCall: Boolean
+  ): FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
     (node, wrappedSql, prelude, recordLoad, principal) =>
       adapter
-        .sendStampRequired(node, wrappedSql, principal, prelude, recordLoad)
+        .sendStampRequired(node, wrappedSql, principal, prelude, recordLoad, searchSystemCall)
         .map(NodeOutcome.fromQuackResponse)
 
   /** The Arrow transport for `sql`: [[adapterSendStampRequired]] for a write that names its commit
@@ -515,7 +533,8 @@ final class FlightSqlRouter(
     */
   private def arrowSendFor(
       sql: String,
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      searchSystemCall: Boolean
   ): FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
     // Classified only for a statement that names a message (the statement is classified again
     // where it is stamped, by the same classifier on the same text).
@@ -523,7 +542,8 @@ final class FlightSqlRouter(
       val kind = classifier.classify(sql)
       kind == StatementKind.Dml || kind == StatementKind.Ddl
     }
-    if namesWrite then adapterSendStampRequired else adapterSend
+    if namesWrite then adapterSendStampRequired(searchSystemCall)
+    else adapterSend(searchSystemCall)
 
   /** The Arrow transport reading a small result back for the manager ([[NodeRows]]): the statement
     * runs as [[adapterSend]] runs it, its rows are read and its reader closed inside the call.
@@ -679,7 +699,9 @@ final class FlightSqlRouter(
       purpose: DecidePurpose,
       /** [[execute]]'s `commitMessage`: the message a stamped write carries in place of the verb's.
         */
-      commitMessage: Option[String] = None
+      commitMessage: Option[String] = None,
+      /** [[execute]]'s `screenSql`: the client's own statement when `sql` is a gateway wrapper. */
+      screenSql: Option[String] = None
   ): IO[Either[RouterFailure, Routed[A]]] =
     if purpose == DecidePurpose.DryRun && !FlightSqlRouter.dryRunnable(effectiveSet) then
       IO.pure(Left(FlightSqlRouter.dryRunRefused))
@@ -702,7 +724,8 @@ final class FlightSqlRouter(
         evaluate,
         failInTransaction,
         purpose,
-        commitMessage
+        commitMessage,
+        screenSql
       )
 
   /** [[executeWith]] past its dry-run principal check. */
@@ -724,8 +747,12 @@ final class FlightSqlRouter(
       evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]],
       failInTransaction: Option[FlightSqlRouter.TransactionFence],
       purpose: DecidePurpose,
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      screenSql: Option[String]
   ): IO[Either[RouterFailure, Routed[A]]] =
+    // The client's own statement: what every step that reads the search flag or screens stars
+    // judges, whichever rewrite of it runs (search spec 4.2 rules 3 and 10).
+    val clientStatement = screenSql.getOrElse(sql)
     def run(
         statement: String,
         pin: Option[String],
@@ -750,7 +777,8 @@ final class FlightSqlRouter(
         purpose,
         detail = detail,
         pinLost = failInTransaction,
-        commitMessage = commitMessage
+        commitMessage = commitMessage,
+        screenSql = clientStatement
       )
     // The client's statement answered with `failure` before anything ran it: its history row.
     def refused(failure: RouterFailure): IO[Either[RouterFailure, Routed[A]]] =
@@ -947,7 +975,9 @@ final class FlightSqlRouter(
       internal = true,
       pinLost = pinLost,
       // An internal read-back is never stamped.
-      commitMessage = None
+      commitMessage = None,
+      // The gateway's own statement, judged as written.
+      screenSql = statement
     ).flatMap {
       case Left(failure) => IO.pure(Left(failure))
       case Right(routed) => IO(routed.close()).as(Right((routed.value, routed.nodeId)))
@@ -973,7 +1003,8 @@ final class FlightSqlRouter(
       internal: Boolean = false,
       detail: Map[String, String] = Map.empty,
       pinLost: Option[FlightSqlRouter.TransactionFence],
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      screenSql: String
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Backstop behind the analysis steps' own TooDeep guards: the screens, gates and rewriters run
     // synchronously here, before any IO, so a walk none of them guards that overflows is denied
@@ -1001,7 +1032,8 @@ final class FlightSqlRouter(
         internal,
         detail,
         pinLost,
-        commitMessage
+        commitMessage,
+        screenSql
       )
     )
 
@@ -1081,7 +1113,8 @@ final class FlightSqlRouter(
       internal: Boolean,
       detail: Map[String, String],
       pinLost: Option[FlightSqlRouter.TransactionFence],
-      commitMessage: Option[String]
+      commitMessage: Option[String],
+      screenSql: String
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
     val s    = openSession(connectionId, user, poolKey, recordExecution, source)
@@ -1140,6 +1173,27 @@ final class FlightSqlRouter(
           maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
           Left(RouterFailure.AccessDenied(s"access denied: $reason"))
 
+    // Whether the client's own statement calls a search function (search spec 4.2 rule 3), read
+    // once, never from a rewriter's output (a mask expression can carry a search name), for the
+    // star screen and both policy rewriters. Read from `screenSql` and also from `clientSql`, the
+    // router's input before any rewrite (the probe's wrap holds the client's text whole), so a
+    // caller's screenSql can never lower it (review m3). An overflowing scan counts as a call.
+    val searchStatement =
+      TooDeep.orElse(true)(
+        ai.starlake.quack.edge.search.SearchFunctions.callsSearch(screenSql) ||
+          ai.starlake.quack.edge.search.SearchFunctions.callsSearch(clientSql)
+      )
+
+    // Search spec 4.2, the star rule (owner ruling 2026-11-14): a statement calling a search
+    // function holds no star projection, for every principal, superusers included, refused before
+    // the protected-write guard and the rewriters, like their own refusals (AccessDenied).
+    def searchStar(): Either[RouterFailure, Unit] =
+      ai.starlake.quack.edge.search.SearchStarScreen.refusal(screenSql, searchStatement) match
+        case None         => Right(())
+        case Some(reason) =>
+          maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+          Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = defaultDb,
@@ -1176,37 +1230,49 @@ final class FlightSqlRouter(
       maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
       Left(RouterFailure.AccessDenied(s"access denied: $reason"))
 
-    def clsRewritten(): Either[RouterFailure, String] = effectiveSet match
-      case None =>
-        Right(sql) // no RBAC principal bound: no policy applies
-      case Some(eff) =>
-        val t0        = System.nanoTime()
-        val outcome   = columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync()
-        val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
-        stmtInstruments.recordColumnPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
-        outcome match
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
-            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
-            Right(sql)
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
-            // Fail closed: the principal has column policies and we cannot prove the masked
-            // columns are absent; forwarding the original SQL would leak them.
-            clsDenied(
-              "parse_failed",
-              "column policy rewrite could not parse statement; denied (fail-closed)"
-            )
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
-            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
-            Right(s)
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
-            clsDenied("denied", reason)
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
-            // Unresolved coordinate, not a policy match; same wire error, separate tag.
-            clsDenied("unresolved_deny", "unresolved table")
+    // Beside the statement, what the column-policy step learned of its tables, for the row-policy
+    // wrap of a search statement (search spec 4.3, change 9); Unknown when the step did not run,
+    // which refuses a wrap keeping rowid for a column-policy holder.
+    def clsRewritten()
+        : Either[RouterFailure, (String, ai.starlake.quack.edge.rls.RealRowidTables)] =
+      effectiveSet match
+        case None =>
+          // no RBAC principal bound: no policy applies
+          Right((sql, ai.starlake.quack.edge.rls.RealRowidTables.Unknown))
+        case Some(eff) =>
+          val t0     = System.nanoTime()
+          val result = columnPolicyRewriter
+            .rewriteWithTables(sql, kind, eff, schemaCtx, searchStatement)
+            .unsafeRunSync()
+          val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
+          stmtInstruments.recordColumnPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
+          val rewritten = result.outcome match
+            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
+              stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
+              Right(sql)
+            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
+              // Fail closed: the principal has column policies and we cannot prove the masked
+              // columns are absent; forwarding the original SQL would leak them.
+              clsDenied(
+                "parse_failed",
+                "column policy rewrite could not parse statement; denied (fail-closed)"
+              )
+            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
+              stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
+              Right(s)
+            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
+              clsDenied("denied", reason)
+            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
+              // Unresolved coordinate, not a policy match; same wire error, separate tag.
+              clsDenied("unresolved_deny", "unresolved table")
+          rewritten.map(_ -> result.realRowidTables)
 
     // RLS operates on the CLS output but injects at the BASE table, so the predicate
     // runs on true (unmasked) values: RLS innermost, CLS outermost.
-    def rlsRewritten(rewrittenSql: String): Either[RouterFailure, String] = effectiveSet match
+    def rlsRewritten(
+        rewrittenSql: String,
+        realRowidTables: ai.starlake.quack.edge.rls.RealRowidTables
+    ): Either[RouterFailure, String] = effectiveSet match
       case None      => Right(rewrittenSql)
       case Some(eff) =>
         val r0         = System.nanoTime()
@@ -1214,7 +1280,15 @@ final class FlightSqlRouter(
           defaultDatabase = defaultDb,
           defaultSchema = defaultSchm
         )
-        val outcome   = rowPolicyRewriter.rewrite(rewrittenSql, kind, eff, schemaCtxR)
+        val outcome =
+          rowPolicyRewriter.rewrite(
+            rewrittenSql,
+            kind,
+            eff,
+            schemaCtxR,
+            searchStatement,
+            realRowidTables
+          )
         val elapsedMs = (System.nanoTime() - r0) / 1_000_000L
         stmtInstruments.recordRowPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
@@ -1316,14 +1390,15 @@ final class FlightSqlRouter(
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(denial))
             Left(RouterFailure.AccessDenied(s"access denied: $denial"))
 
-    // client scan -> protected write -> CLS -> RLS -> metadata filter -> rewrite scope; every
-    // denial arm has already journaled itself. Bound to resultIO so one flatTap below emits
-    // exactly one StatementExecuted event on every exit path, including the denial arms.
+    // client scan -> search star -> protected write -> CLS -> RLS -> metadata filter -> rewrite
+    // scope; every denial arm has already journaled itself. Bound to resultIO so one flatTap below
+    // emits exactly one StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
       clientScan()
+        .flatMap(_ => searchStar())
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
-        .flatMap(rlsRewritten)
+        .flatMap((s, tables) => rlsRewritten(s, tables))
         .flatMap(metadataFiltered)
         .flatMap(rewriteRevalidated) match
         case Left(f)         => IO.pure(Left(f))
@@ -1782,8 +1857,9 @@ final class FlightSqlRouter(
     s"no fallback node available after a transient failure: $cause"
 
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
-    * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes
-    * Unavailable, which the client may retry, for a single-statement submission only: in a batch
+    * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow), and its search
+    * index backlog ([[FlightSqlRouter.isSearchIndexBehind]], search ruling 7), become Unavailable,
+    * which the client may retry, for a single-statement submission only: in a batch
     * (`multiStatement`) the statements before the refused one may have run, each autocommitting,
     * and a retry would run them twice (Phase C review D-m5), so the batch gets a BadRequest saying
     * so ([[FlightSqlRouter.BatchNotRetried]]); any other refusal of the node's
@@ -1801,7 +1877,7 @@ final class FlightSqlRouter(
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $context$message"
-    if FlightSqlRouter.isNodeAuthzUnavailable(message) then
+    if FlightSqlRouter.isNodeUnavailable(message) then
       if multiStatement then RouterFailure.BadRequest(s"$full (${FlightSqlRouter.BatchNotRetried})")
       else RouterFailure.Unavailable(full)
     else if FlightSqlRouter.isNodeRefusal(message) then
@@ -1870,6 +1946,32 @@ object FlightSqlRouter:
     s"Invalid Input Error: Authorization callback failed: Permission Error: $NodeAuthzUnavailable"
   )
 
+  /** Search spec 9, ruling 7: the node's `search_index_behind` (an unindexed backlog past the
+    * fallback's caps) is answered as [[NodeAuthzUnavailable]] is, in the one shape the node raises
+    * it, its prefix and its fixed ending both: a PermissionException while the search runs, so a
+    * user's `error('QoD: search_index_behind: ...')` (an Invalid Input Error) or an identifier
+    * echoed in a catalog error stays a permanent failure. No retry on another node: every node of a
+    * pool reads the same catalog, so it would meet the same backlog.
+    */
+  def isSearchIndexBehind(message: String): Boolean =
+    message.startsWith(SearchIndexBehindPrefix) && message.endsWith(SearchIndexBehindEnding)
+
+  private val SearchIndexBehindPrefix = "Permission Error: QoD: search_index_behind: "
+
+  /** The fixed ending of the node's text (search_fallback.cpp, `IndexBehind`): a node refusal that
+    * quotes a user's text right after `QoD: ` (a stored view body's location,
+    * `QoD: <location> is outside the tenant's authorized locations`) can open with the marker, but
+    * never ends so, and stays a denial (security review m2).
+    */
+  private val SearchIndexBehindEnding = "; retry once the indexer catches up"
+
+  /** The node's refusals answered as a retryable UNAVAILABLE for a single statement: no verdict
+    * could be had ([[isNodeAuthzUnavailable]]), or the search index is behind
+    * ([[isSearchIndexBehind]]).
+    */
+  def isNodeUnavailable(message: String): Boolean =
+    isNodeAuthzUnavailable(message) || isSearchIndexBehind(message)
+
   /** Why a batch's "authorization unavailable" refusal is not marked retryable. */
   val BatchNotRetried: String =
     "not retryable as a whole: the statements before the refused one may have run"
@@ -1899,13 +2001,15 @@ object FlightSqlRouter:
     )
 
   /** Whether a node's error `message` is its authorization refusal, other than
-    * [[NodeAuthzUnavailable]]: `QoD: ` right after DuckDB's Permission Error, in a statement's or
-    * the parse screen's shape. The node decided the principal may not run the statement, so the
-    * router books it as a denial, like the gateway's own refusals. A user's text quoting the marker
-    * (error('QoD: ...'), an identifier echoed in a catalog error) stays a permanent failure.
+    * [[NodeAuthzUnavailable]] and the search backlog ([[isSearchIndexBehind]]): `QoD: ` right after
+    * DuckDB's Permission Error, in a statement's or the parse screen's shape. The node decided the
+    * principal may not run the statement, so the router books it as a denial, like the gateway's
+    * own refusals. A user's text quoting the marker (error('QoD: ...'), an identifier echoed in a
+    * catalog error) stays a permanent failure.
     */
   def isNodeRefusal(message: String): Boolean =
-    !isNodeAuthzUnavailable(message) && NodeRefusalPrefixes.exists(message.startsWith)
+    !isNodeAuthzUnavailable(message) && !isSearchIndexBehind(message) &&
+      NodeRefusalPrefixes.exists(message.startsWith)
 
   private val NodeRefusalPrefixes: List[String] = List(
     "Permission Error: QoD: ",

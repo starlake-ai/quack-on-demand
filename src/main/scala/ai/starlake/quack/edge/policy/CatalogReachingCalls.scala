@@ -20,6 +20,12 @@ import ai.starlake.quack.edge.sql.{FunctionCalls, StatementHead}
   *     equivalents, the `*_external_resource` invokers and `getenv`. The SQL or target is a string
   *     the rewriters never parse.
   *
+  * A third family joined with search (search spec 4.3, decision S1): the calls that name a table by
+  * a string, the four search functions ([[SearchTableNaming]]). They are in the family, so every
+  * reader of it sees them, and S1 excepts them for principals holding column or row policies
+  * ([[S1Exception]]); [[find]] never returns them, and every other call of the family stays refused
+  * beside them.
+  *
   * Every other principal is judged by the node alone: its describer reads what these calls resolve
   * to, and a superuser keeps the raw passthrough (owner ruling 2026-10-11). That includes
   * DuckLake's change feed (`ducklake_table_changes` / `_insertions` / `_deletions` with the table
@@ -140,6 +146,36 @@ object CatalogReachingCalls:
     "quack_authorization_function"
   )
 
+  /** Calls that name a table by a string (search spec 4.3): the four search functions. They join
+    * the family so that every reader of it sees them, and S1 excepts them for principals holding
+    * column or row policies, on the four grounds of spec 4.3. The exception lives here and nowhere
+    * else (invariant 1).
+    */
+  val SearchTableNaming: Set[String] = ai.starlake.quack.edge.search.SearchFunctions.Names
+
+  /** Decision S1 (accepted 2026-11-13): the calls of the family admitted to policy holders.
+    *
+    * Ground 1 ("rows enter only through the governed input, which the rewriters do rewrite") holds
+    * for reads only: the row-policy rewriter rewrites a `Select` alone, so in a write or a batch
+    * the governed input would reach the node unfiltered. Those stay closed by the protected-write
+    * guard's own analysis, which denies a policy holder's write or batch that reads a row-policy
+    * table, or whose table extraction is incomplete (a search call is a `gatedUnsupported` table
+    * function for `TableExtractor`), whatever this exception admits.
+    */
+  val S1Exception: Set[String] = SearchTableNaming
+
+  /** True for a call that names its table by a string ([[SearchTableNaming]]); `name` is unquoted
+    * and lowercased, as [[FunctionCalls]] and [[RewriteScope.callName]] give it.
+    */
+  def namesTableByString(name: String): Boolean = SearchTableNaming.contains(name)
+
+  /** The private sets, for the specs that check the exception reaches nothing else. */
+  private[policy] object ForTests:
+    val fixed: Set[String]              = Fixed
+    val nodeEscaping: Set[String]       = NodeEscaping
+    def inFamily(name: String): Boolean =
+      isReaching(FunctionCalls.Call(name, s"$name(", name.length + 1))
+
   /** The first SQL-valued setting a statement of `sql` sets, resets or pragmas, or None. */
   def sqlValuedSetting(sql: String): Option[String] =
     StatementHead
@@ -196,21 +232,23 @@ object CatalogReachingCalls:
     */
   private val NestingTooDeep = "\u0000nesting-too-deep"
 
-  /** The first catalog-reaching or node-escaping function called by `sql`, lowercased, or the
-    * nesting sentinel when a literal nested past
+  /** The first catalog-reaching or node-escaping function called by `sql` that [[S1Exception]] does
+    * not admit, lowercased, or the nesting sentinel when a literal nested past
     * [[ai.starlake.quack.edge.sql.FunctionCalls.MaxDepth]] left part of the statement unscanned
-    * (fail closed), or None.
+    * (fail closed), or None. A search call never answers, and never hides another call: a search
+    * statement that also calls `query_table` is refused naming `query_table`.
     */
   def find(sql: String): Option[String] =
     val scan = FunctionCalls.scan(sql)
     scan.calls.iterator
-      .find(isReaching)
+      .find(c => isReaching(c) && !S1Exception.contains(c.name))
       .map(_.name)
       .orElse(if scan.truncated then Some(NestingTooDeep) else None)
 
   private def isReaching(call: FunctionCalls.Call): Boolean =
     val name = call.name
     Fixed.contains(name) || NodeEscaping.contains(name) || name.startsWith("ducklake_") ||
+    namesTableByString(name) ||
     (DuckLakeSchemaMacros.contains(name) && !(name == "table_info" && afterPragma(call)))
 
   /** True when the significant token before `call`'s name is the word PRAGMA. */

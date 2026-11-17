@@ -49,6 +49,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         backend = Some(backend),
         nodeKeys = nodeKeys,
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
     )
@@ -165,6 +166,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
@@ -186,7 +188,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         ),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal),
-        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig()
       )
       h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
       store.claim(
@@ -253,9 +256,76 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       nodeKeys = NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     limits(set, setStore) shouldBe Some(FleetNodeAuthzLimitsDto(750, 0))
+  }
+
+  it should "carry the manager's search knobs in the assignment, as JSON numbers" in {
+    import Dtos.given
+    def assigned(h: FleetHandlers, store: FleetServerStore): Option[io.circe.Json] =
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+      store.claim(
+        FleetAssignment(
+          epoch = 0,
+          nodeId = "n1",
+          poolKey = PoolKey("acme", "db", "bi"),
+          port = 21900,
+          token = "tok",
+          kind = "memory",
+          env = Map("pgHost" -> "h"),
+          objectStoreSql = "",
+          extraSetupSql = ""
+        ),
+        30,
+        None
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None)
+        .unsafeRunSync()
+        .toOption
+        .flatMap(_.assignment)
+        .map(a => io.circe.Encoder[FleetAssignmentDto].apply(a))
+    val set      = ai.starlake.quack.SearchNodeConfig(maxUnindexedRows = 1234, maxK = 50)
+    val setStore = new InMemoryFleetServerStore(clock = () => t0)
+    val h        = new FleetHandlers(
+      setStore,
+      hbCfg,
+      backend = Some(
+        new FleetQuackBackend(
+          setStore,
+          hbCfg,
+          clock = () => t0,
+          nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        )
+      ),
+      nodeKeys = NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = set,
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    val json   = assigned(h, setStore)
+    val limits = json.flatMap(_.hcursor.downField("searchLimits").focus)
+    // Each knob under its config key, as the number the node reads.
+    limits.map(_.asObject.map(_.keys.toSet)) shouldBe Some(
+      Some(
+        Set(
+          "maxUnindexedRows",
+          "maxUnindexedSources",
+          "queryMemoryBytes",
+          "maxK",
+          "livenessCacheEntries",
+          "livenessCacheBytes",
+          "segmentCacheBytes",
+          "missTtlSec",
+          "maxBundleBytes"
+        )
+      )
+    )
+    limits.flatMap(_.hcursor.downField("maxUnindexedRows").as[Long].toOption) shouldBe Some(1234L)
+    limits.flatMap(_.hcursor.downField("maxK").as[Long].toOption) shouldBe Some(50L)
+    limits.flatMap(_.hcursor.downField("segmentCacheBytes").as[Long].toOption) shouldBe
+      Some(4L << 30)
   }
 
   it should "409 an address change on a known name even when idle (no takeover)" in {
@@ -338,6 +408,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     val e = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().left.toOption.get
@@ -356,6 +427,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       backend = None,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     h.heartbeat(req(), Some("secret"), loopback, None)
@@ -392,6 +464,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         backend = Some(backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        searchNode = ai.starlake.quack.SearchNodeConfig(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig()
       )
     )
@@ -459,6 +532,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     widened
@@ -608,6 +682,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       audit = rootAudit,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     (store, h)
@@ -771,6 +846,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       publish = StateChangePublisher.noop,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
@@ -934,6 +1010,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       publish = pub,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      searchNode = ai.starlake.quack.SearchNodeConfig(),
       nodeFiles = ai.starlake.quack.NodeFilesConfig()
     )
     (inner, probe, pub, h)
@@ -1044,7 +1121,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       "ab" * 32,
       ai.starlake.quack.NodeExtensionsConfig(),
       ai.starlake.quack.NodeFilesConfig(),
-      ai.starlake.quack.NodeAuthzLimitsConfig()
+      ai.starlake.quack.NodeAuthzLimitsConfig(),
+      ai.starlake.quack.SearchNodeConfig()
     )
     io.circe
       .Encoder[FleetAssignmentDto]

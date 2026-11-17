@@ -76,6 +76,9 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "qodstate_role_permission",
           "qodstate_role_row_policy",
           "qodstate_rollup_watermark",
+          "qodstate_search_index",
+          "qodstate_search_index_tombstone",
+          "qodstate_search_segment",
           "qodstate_snapshot_tag",
           "qodstate_stmt_history",
           "qodstate_stmt_rollup",
@@ -124,8 +127,9 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
       // 1 node-key secret table (node_authz, Liquibase 0047) +
       // 1 boot-secret table (boot_secret, Liquibase 0049) +
       // 1 tenant-location table (tenant_location, Liquibase 0051) +
-      // 1 user S3 credential table (user_s3_credential, Liquibase 0052).
+      // 1 user S3 credential table (user_s3_credential, Liquibase 0052) +
+      // 3 search tables (search_index, search_segment, search_index_tombstone, Liquibase 0059).
       // qodstate_tenant_identity is gone -- auth provider is a tenant attribute now.
-      rs.getInt(1) shouldBe 36
+      rs.getInt(1) shouldBe 39
     finally c.close()
   }

@@ -54,6 +54,23 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
       reader.getTable(schema = "tpch1", table = "does_not_exist") shouldBe None
     }
 
+  "liveTableColumns" should "give the live table's id and its columns' field ids and types" in
+    withCatalog("tpch", "ALTER TABLE lake.tpch1.region RENAME TO zone;") { (reader, _) =>
+      val live       = reader.liveTableColumns("tpch1", "zone").value
+      val (id, cols) = (live.tableId, live.columns)
+      (live.schema, live.table) shouldBe ("tpch1", "zone")
+      cols.map(_._1) shouldBe List("r_regionkey", "r_name", "r_comment")
+      cols.find(_._1 == "r_name").value._3.toLowerCase shouldBe "varchar"
+      cols.map(_._2).distinct should have size 3
+      // Matched as DuckDB resolves a name, ignoring case; the old name is no live table.
+      // The catalog's spelling comes back, whatever the request's.
+      reader.liveTableColumns("TPCH1", "Zone").map(l => (l.tableId, l.schema, l.table)) shouldBe
+        Some((id, "tpch1", "zone"))
+      reader.liveTableColumns("tpch1", "region") shouldBe None
+      reader.liveTableName(id) shouldBe Some(("tpch1", "zone"))
+      reader.liveTableName(id + 1000) shouldBe None
+    }
+
   "listSnapshots" should "list snapshots newest-first with change summaries and counts" in
     withCatalog("tpch") { (reader, _) =>
       val snaps = reader.listSnapshots()

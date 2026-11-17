@@ -2,6 +2,7 @@
 
 #include "authz_stats.hpp"
 #include "handle.hpp"
+#include "http_post.hpp"
 #include "verdict.hpp"
 
 #include <cstddef>
@@ -63,6 +64,12 @@ struct DecideResult {
 
 //! The path every replica serves decisions on.
 constexpr const char *kDecidePath = "/api/internal/authz/decide";
+
+//! One signed node-to-replica call (decide, search records): POSTs the JSON `body` to `path` on `url`'s
+//! host with `X-QoD-Node: node_id` and `X-QoD-Signature`, the lowercase hex HMAC-SHA256 of the body under
+//! `node_key`, within `timeout_ms` (HttpPost). Throws what HttpPost throws.
+HttpReply SignedPost(const HttpUrl &url, const std::string &path, const std::string &node_id,
+                     const std::string &node_key, const std::string &body, int64_t timeout_ms);
 
 //! Asks the issuing replica for verdicts (Section 5) and verifies them. Thread safe.
 class DecideClient {

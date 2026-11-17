@@ -443,7 +443,14 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     val p = HandleInspector.payload(keys.handle(Node2, Alice))
     p.hcursor.get[String]("creds") shouldBe Right("d" * 64)
     val nonce = p.hcursor.get[String]("nonce").toOption.get
-    issued.get(nonce) shouldBe Some(IssuedHandles.Issued(Node2.nodeId, "u-1"))
+    issued.get(nonce) shouldBe Some(
+      IssuedHandles.Issued(
+        Node2.nodeId,
+        "u-1",
+        NodeHandles.pool(Node2.poolKey),
+        p.hcursor.get[Long]("exp").toOption.get
+      )
+    )
     val s = HandleInspector.payload(keys.handle(Node2, NodePrincipal.System))
     s.hcursor.get[String]("creds") shouldBe Right("")
     issued.get(s.hcursor.get[String]("nonce").toOption.get) shouldBe None

@@ -3282,6 +3282,56 @@ final class PostgresControlPlaneStore(
     "SELECT id, tenant_id, kind, location, created_at, created_by " +
       "FROM qodstate_tenant_location"
 
+  // ---- QoD Search index registry (Liquibase 0059), statements in PostgresSearchIndexRows ----
+
+  def insertSearchIndex(ix: ai.starlake.quack.model.SearchIndex): Boolean =
+    atomically(withConn(PostgresSearchIndexRows.insert(_, ix)))
+
+  def upsertSearchIndex(ix: ai.starlake.quack.model.SearchIndex): Unit =
+    atomically(withConn(PostgresSearchIndexRows.upsert(_, ix)))
+
+  def listSearchIndexes(tenantDbIds: Set[String]): List[ai.starlake.quack.model.SearchIndex] =
+    withConn(PostgresSearchIndexRows.list(_, tenantDbIds))
+
+  def listAllSearchIndexes(): List[ai.starlake.quack.model.SearchIndex] =
+    withConn(PostgresSearchIndexRows.listAll)
+
+  def findSearchIndex(
+      tenantDbId: String,
+      tableId: Long
+  ): Option[ai.starlake.quack.model.SearchIndex] =
+    withConn(PostgresSearchIndexRows.byTable(_, tenantDbId, tableId))
+
+  def findSearchIndexById(indexId: java.util.UUID): Option[ai.starlake.quack.model.SearchIndex] =
+    withConn(PostgresSearchIndexRows.byId(_, indexId))
+
+  def deleteSearchIndex(indexId: java.util.UUID): Boolean =
+    deleteSearchIndexWith(indexId, () => ())
+
+  /** [[deleteSearchIndex]] with a seam between the tombstone and the row's delete, for the spec
+    * that pins the two in one transaction.
+    */
+  private[ondemand] def deleteSearchIndexWith(
+      indexId: java.util.UUID,
+      afterTombstone: () => Unit
+  ): Boolean =
+    atomically(withConn(PostgresSearchIndexRows.delete(_, indexId, afterTombstone)))
+
+  def setSearchIndexState(indexId: java.util.UUID, state: String): Unit =
+    withConn(PostgresSearchIndexRows.setState(_, indexId, state))
+
+  def recordSearchSegment(s: ai.starlake.quack.model.SearchSegment): Unit =
+    atomically(withConn(PostgresSearchIndexRows.recordSegment(_, s)))
+
+  def listSearchSegments(indexId: java.util.UUID): List[ai.starlake.quack.model.SearchSegment] =
+    withConn(PostgresSearchIndexRows.segments(_, indexId))
+
+  def deleteSearchIndexesForTenantDb(tenantDbId: String): Int =
+    atomically(withConn(PostgresSearchIndexRows.deleteForTenantDb(_, tenantDbId)))
+
+  def listSearchIndexTombstones(): List[ai.starlake.quack.model.SearchIndexTombstone] =
+    withConn(PostgresSearchIndexRows.tombstones)
+
   def insertTenantLocation(l: TenantLocation): Boolean = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_location

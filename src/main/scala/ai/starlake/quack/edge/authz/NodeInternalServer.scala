@@ -10,15 +10,16 @@ import org.http4s.server.Server
 
 import scala.concurrent.duration.*
 
-/** The listener nodes call for verdicts and users' credentials: the routes [[DecideRoute]] and
-  * [[CredentialsRoute]], in plain HTTP since qod-node speaks nothing else. It stands apart from the
-  * REST port so that clients filling that port's connection slots cannot stop authorization for
-  * every tenant. Every route authenticates each call with the node's key, but only after reading
-  * its body, which the signature covers, so a client that reaches this port can hold
-  * `maxConnections` slots and about 1.4 MiB of heap in each (the 1 MiB body, and the parsed header
-  * block, read buffer and state Ember holds for the request: `ConnectionBudget.heldBytes`), and the
-  * listener takes no more connections than a fifth of the heap holds. A node opens one connection
-  * per call, sends its body at once and leaves, so the idle timeout is short.
+/** The listener nodes call for verdicts, users' credentials and search index records: the routes
+  * [[DecideRoute]], [[CredentialsRoute]] and [[SearchRecordRoute]], in plain HTTP since qod-node
+  * speaks nothing else. It stands apart from the REST port so that clients filling that port's
+  * connection slots cannot stop authorization for every tenant. Every route authenticates each call
+  * with the node's key, but only after reading its body, which the signature covers, so a client
+  * that reaches this port can hold `maxConnections` slots and about 1.4 MiB of heap in each (the 1
+  * MiB body, and the parsed header block, read buffer and state Ember holds for the request:
+  * `ConnectionBudget.heldBytes`), and the listener takes no more connections than a fifth of the
+  * heap holds. A node opens one connection per call, sends its body at once and leaves, so the idle
+  * timeout is short.
   */
 final class NodeInternalServer(
     host: String,

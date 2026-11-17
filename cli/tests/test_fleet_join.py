@@ -480,6 +480,51 @@ def test_a_decide_limit_is_set_only_for_a_json_integer(tmp_path):
     assert _limit_env(tmp_path / "list", dict(assignment(1), authzLimits=[750, 0])) == [None, None]
 
 
+SEARCH_ENV = {
+    "maxUnindexedRows": "QOD_SEARCH_MAX_UNINDEXED_ROWS",
+    "maxUnindexedSources": "QOD_SEARCH_MAX_UNINDEXED_SOURCES",
+    "queryMemoryBytes": "QOD_SEARCH_QUERY_MEMORY",
+    "maxK": "QOD_SEARCH_MAX_K",
+    "livenessCacheEntries": "QOD_SEARCH_LIVENESS_CACHE_ENTRIES",
+    "livenessCacheBytes": "QOD_SEARCH_LIVENESS_CACHE_BYTES",
+    "segmentCacheBytes": "QOD_SEARCH_SEGMENT_CACHE_BYTES",
+    "missTtlSec": "QOD_SEARCH_MISS_TTL_SEC",
+    "maxBundleBytes": "QOD_SEARCH_MAX_BUNDLE_BYTES",
+}
+SEARCH_SENT = {"maxUnindexedRows": 1234, "maxUnindexedSources": 7, "queryMemoryBytes": 0, "maxK": 50,
+               "livenessCacheEntries": 3, "livenessCacheBytes": 5242880, "segmentCacheBytes": 6442450944,
+               "missTtlSec": 30, "maxBundleBytes": 2097152}
+
+
+def _search_env(tmp_path, a):
+    """Every QOD_SEARCH_ variable the node of assignment `a` is started with."""
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return {k: v for k, v in seen[0].items() if k.startswith("QOD_SEARCH_")}
+
+
+def test_the_search_knobs_come_from_the_assignment_only(tmp_path, monkeypatch):
+    # Neither this process's own environment (a knob of its own, or one the node does not read yet)
+    # nor the metastore decides them; an older manager sends none, which leaves qod-node's defaults.
+    for name in SEARCH_ENV.values():
+        monkeypatch.setenv(name, "9")
+    monkeypatch.setenv("QOD_SEARCH_SOME_LATER_KNOB", "9")
+    spoofed = dict(assignment(1), env={"pgHost": "h", "QOD_SEARCH_MAX_K": "1"})
+    assert _search_env(tmp_path / "none", spoofed) == {}
+    sent = dict(assignment(1), searchLimits=SEARCH_SENT)
+    assert _search_env(tmp_path / "sent", sent) == {SEARCH_ENV[k]: str(v) for k, v in SEARCH_SENT.items()}
+
+
+def test_a_search_knob_is_set_only_for_a_json_integer(tmp_path):
+    odd = dict(assignment(1), searchLimits={"maxK": "50", "missTtlSec": True, "maxUnindexedRows": 1.5,
+                                            "maxUnindexedSources": 7})
+    assert _search_env(tmp_path, odd) == {"QOD_SEARCH_MAX_UNINDEXED_SOURCES": "7"}
+    assert _search_env(tmp_path / "list", dict(assignment(1), searchLimits=[1, 2])) == {}
+
+
 def test_a_dropped_assignment_key_is_named_once_per_pool(tmp_path, capsys):
     member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
     a = dict(assignment(1), env={**SEC1_ALLOWED, "PATH": "/nonexistent/sec1-marker-path"})

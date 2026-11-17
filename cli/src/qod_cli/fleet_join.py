@@ -105,6 +105,20 @@ _NODE_FILES_ENV = "QOD_NODE_ALLOW_LOCAL_FILES"
 # JSON integer is dropped, both leaving qod-node's defaults (it refuses to start on a malformed one).
 _NODE_AUTHZ_LIMIT_ENV = (("decideTimeoutMs", "QOD_AUTHZ_DECIDE_TIMEOUT_MS"),
                          ("cacheEntries", "QOD_AUTHZ_CACHE_ENTRIES"))
+# The manager's search knobs (quack-on-demand.search, QoD Search), assignment key -> the variable
+# qod-node reads once at start. From the assignment only: this process's own QOD_SEARCH_* never reach
+# a node (the environment starts from _ENV_PASSTHROUGH). An older manager sends none, and a value
+# that is not a JSON integer is dropped, both leaving qod-node's defaults; qod-node applies its own
+# ranges too (a value outside one keeps its default, with one stderr line).
+_NODE_SEARCH_ENV = (("maxUnindexedRows", "QOD_SEARCH_MAX_UNINDEXED_ROWS"),
+                    ("maxUnindexedSources", "QOD_SEARCH_MAX_UNINDEXED_SOURCES"),
+                    ("queryMemoryBytes", "QOD_SEARCH_QUERY_MEMORY"),
+                    ("maxK", "QOD_SEARCH_MAX_K"),
+                    ("livenessCacheEntries", "QOD_SEARCH_LIVENESS_CACHE_ENTRIES"),
+                    ("livenessCacheBytes", "QOD_SEARCH_LIVENESS_CACHE_BYTES"),
+                    ("segmentCacheBytes", "QOD_SEARCH_SEGMENT_CACHE_BYTES"),
+                    ("missTtlSec", "QOD_SEARCH_MISS_TTL_SEC"),
+                    ("maxBundleBytes", "QOD_SEARCH_MAX_BUNDLE_BYTES"))
 # Sensitive values never sit in the node's environment or command line (a node user with SQL reads
 # both back through getenv() or /proc/<pid>/environ|cmdline): they go to a private directory, one
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
@@ -575,6 +589,11 @@ class FleetMember:
         limits = assignment.get("authzLimits")
         for key, name in _NODE_AUTHZ_LIMIT_ENV:
             value = limits.get(key) if isinstance(limits, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool):
+                env[name] = str(value)
+        search = assignment.get("searchLimits")
+        for key, name in _NODE_SEARCH_ENV:
+            value = search.get(key) if isinstance(search, dict) else None
             if isinstance(value, int) and not isinstance(value, bool):
                 env[name] = str(value)
         if self.node_bin is not None:

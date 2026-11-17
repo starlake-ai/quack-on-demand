@@ -239,7 +239,22 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     out should include("vendored qod-node binaries match protocol=1;duckdb=v2.0.0")
   }
 
-  it should "refuse a missing platform" in {
+  "qod_node_check_marker (refresh-qod-node-binaries.sh's parse)" should
+    "read a --build-info line ending with search=on or search=off (search review M17)" in {
+      val root = nodeTree()
+      Seq(" search=on", " search=off").foreach { suffix =>
+        val line = root.resolve("build-info" + suffix.trim + ".txt")
+        Files.writeString(line, nodeMarker() + suffix + "\n")
+        val (code, out) = bash(
+          root,
+          s"""source scripts/release/qod-node-build-info.sh && qod_node_check_marker "$line""""
+        )
+        withClue(out)(code shouldBe 0)
+        out.trim shouldBe "d54cbbe3df"
+      }
+    }
+
+  "verify_qod_node_binaries" should "refuse a missing platform" in {
     val (code, out) = verifyNodes(nodeTree(markers = Map("osx-x86_64" -> None)))
     code shouldBe 1
     out should include("missing vendored qod-node binaries: osx-x86_64")
@@ -279,6 +294,46 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     out should include("VERSION does not read")
   }
 
+  // Search spec 13: a binary linking qod_search_core ships its third-party notices. A search build holds the
+  // literal " search=on" its --build-info prints; the stand-in carries it after the marker.
+  private val searchOn = Map("osx-aarch64" -> Some(nodeMarker() + " search=on"))
+
+  it should "refuse a search build vendored without its third-party notices" in {
+    val (code, out) = verifyNodes(nodeTree(markers = searchOn))
+    code shouldBe 1
+    out should include("osx-aarch64 link qod_search_core")
+    out should include("THIRD-PARTY-NOTICES-qod-search.txt is missing or differs")
+  }
+
+  it should "pass a search build vendored beside the notices native/qod-search holds, and no stale copy" in {
+    val root    = nodeTree(markers = searchOn)
+    val beside  = root.resolve("native/qod-node/binaries/THIRD-PARTY-NOTICES-qod-search.txt")
+    val current = root.resolve("native/qod-search/THIRD-PARTY-NOTICES.txt")
+    Files.createDirectories(current.getParent)
+    Files.writeString(current, "Package: tantivy 0.27.0\n")
+    Files.writeString(beside, "Package: tantivy 0.27.0\n")
+    val (code, out) = verifyNodes(root)
+    withClue(out)(code shouldBe 0)
+    Files.writeString(beside, "Package: tantivy 0.26.0\n")
+    verifyNodes(root)._1 shouldBe 1
+  }
+
+  "qod_node_search_flag" should "read on for a search build and off for any other, without running it" in {
+    val root                       = nodeTree(markers = searchOn)
+    def flag(plat: String): String =
+      bash(
+        root,
+        s"""source scripts/release/qod-node-build-info.sh && qod_node_search_flag native/qod-node/binaries/$plat/qod-node"""
+      )._2.trim
+    flag("osx-aarch64") shouldBe "on"
+    flag("linux-x86_64") shouldBe "off"
+    val off = fakeBinary(root.resolve("off/qod-node"), Some(nodeMarker() + " search=off"))
+    bash(
+      root,
+      s"""source scripts/release/qod-node-build-info.sh && qod_node_search_flag "$off""""
+    )._2.trim shouldBe "off"
+  }
+
   private val pinsScript = Paths.get("scripts/release/check-release-pins.sh").toAbsolutePath
 
   private def pinsTree(jdbc: String, buildSbt: String): Path =
@@ -309,6 +364,135 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val (code, out) = checkPins(pinsTree("duckdb", "    resolvers += Resolver.mavenLocal,\n"))
     code shouldBe 1
     out should include("build.sbt:1 resolves from ~/.m2")
+  }
+
+  // QoD Search, OWNER RULING 2026-11-16 (D2): every configure of a shipped qod-node names QOD_NODE_SEARCH=OFF,
+  // ON goes only into build-search* development trees, and each publishing step names the setting it ships.
+  private def searchTree(files: (String, String)*): Path =
+    val root = pinsTree("duckdb", "")
+    files.foreach { (rel, text) =>
+      Files.createDirectories(root.resolve(rel).getParent)
+      Files.writeString(root.resolve(rel), text)
+    }
+    root
+
+  private def workflow(steps: String*): String =
+    ("jobs:\n  unix:\n    steps:\n" +: steps.map(s => s"      - run: |\n$s")).mkString
+
+  private val shippedOff =
+    "          cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \\\n" +
+      "            -DQOD_NODE_SEARCH=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DDUCKDB_HOME=\"$DUCKDB_HOME\"\n"
+  private val snapshotEnv = "      - env:\n          QOD_NODE_SEARCH: 'OFF'\n"
+  private val searchOnDev =
+    "          cmake -S native/qod-node -B native/qod-node/build-search \\\n" +
+      "            -DQOD_NODE_SEARCH=ON -DQOD_NODE_TESTS=ON\n"
+
+  "check-release-pins.sh" should "pass shipped qod-node configures naming OFF, with ON only in build-search trees" in {
+    val root = searchTree(
+      ".github/workflows/qod-node.yml" -> (workflow(shippedOff, searchOnDev) + snapshotEnv),
+      ".github/workflows/release.yml"  -> "        env:\n          QOD_NODE_SEARCH: 'OFF'\n",
+      "docker/quack-node/Dockerfile"   -> "ARG QOD_NODE_SEARCH=OFF\n"
+    )
+    val (code, out) = checkPins(root)
+    withClue(out)(code shouldBe 0)
+    out should include("every shipped qod-node configure names QOD_NODE_SEARCH=OFF")
+  }
+
+  it should "refuse a qod-node configure that does not name QOD_NODE_SEARCH, naming the file and line" in {
+    val unnamed =
+      "          cmake -S native/qod-node -B native/qod-node/build -DQOD_NODE_TESTS=ON \\\n" +
+        "            -DDUCKDB_HOME=\"$DUCKDB_HOME\"\n"
+    val (code, out) =
+      checkPins(searchTree(".github/workflows/qod-node.yml" -> workflow(shippedOff, unnamed)))
+    code shouldBe 1
+    out should include(
+      ".github/workflows/qod-node.yml:8 configures qod-node without naming QOD_NODE_SEARCH"
+    )
+  }
+
+  // OWNER RULING 2026-11-17: the shipped build-release tree, macOS binaries included, writes the 15.0 floor.
+  it should "refuse a build-release configure that does not write the macOS floor 15.0" in {
+    val noFloor     = shippedOff.replace(" -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0", "")
+    val other       = shippedOff.replace("TARGET=15.0", "TARGET=26.0")
+    val (code, out) =
+      checkPins(searchTree(".github/workflows/qod-node.yml" -> workflow(noFloor, other)))
+    code shouldBe 1
+    out should include(
+      ".github/workflows/qod-node.yml:5 configures the shipped build-release tree without -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0"
+    )
+    out should include(".github/workflows/qod-node.yml:8 configures the shipped build-release tree")
+  }
+
+  it should "refuse QOD_NODE_SEARCH=ON into a shipped tree, and anywhere in the refresh script" in {
+    val onShipped = shippedOff.replace("SEARCH=OFF", "SEARCH=ON")
+    val refresh   =
+      "#!/usr/bin/env bash\n  cmake -S native/qod-node -B native/qod-node/build-search \\\n" +
+        "    -DQOD_NODE_RELATIVE_RPATH=ON -DQOD_NODE_SEARCH=ON\n"
+    val (code, out) = checkPins(
+      searchTree(
+        ".github/workflows/qod-node.yml"               -> workflow(onShipped),
+        "scripts/release/refresh-qod-node-binaries.sh" -> refresh
+      )
+    )
+    code shouldBe 1
+    out should include(
+      ".github/workflows/qod-node.yml:5 configures qod-node with QOD_NODE_SEARCH=ON into 'build-release'"
+    )
+    out should include(
+      "scripts/release/refresh-qod-node-binaries.sh:2 configures qod-node with QOD_NODE_SEARCH=ON"
+    )
+  }
+
+  it should "read every workflow and script, with -S anywhere on the command, and refuse the option named twice" in {
+    val twice =
+      "          cmake -B native/qod-node/build-release -S native/qod-node \\\n" +
+        "            -DQOD_NODE_SEARCH=OFF -DQOD_NODE_SEARCH=ON\n"
+    val (code, out) = checkPins(
+      searchTree(
+        ".github/workflows/other.yml" -> workflow(twice),
+        "scripts/dev/rebuild.sh"      ->
+          "#!/usr/bin/env bash\ncd native/qod-node && cmake -B build-release -DCMAKE_BUILD_TYPE=Release\n",
+        "scripts/dev/rebuild.ps1" ->
+          "# cmake -S native/qod-node -B ignored\ncmake -B \"native/qod-node/build\" -S\"native/qod-node\" -DQOD_NODE_SEARCH=ON\n",
+        "scripts/dev/other.sh" -> "cd native/quackwire && cmake -B build -DCMAKE_BUILD_TYPE=Release\n"
+      )
+    )
+    code shouldBe 1
+    out should include(
+      ".github/workflows/other.yml:5 configures qod-node naming QOD_NODE_SEARCH 2 times"
+    )
+    out should include(
+      "scripts/dev/rebuild.sh:2 configures qod-node without naming QOD_NODE_SEARCH"
+    )
+    out should include(
+      "scripts/dev/rebuild.ps1:2 configures qod-node with QOD_NODE_SEARCH=ON into 'build'"
+    )
+    out should not include "scripts/dev/other.sh"
+    out should not include "rebuild.ps1:1"
+  }
+
+  it should "refuse an artifact uploaded from a build-search tree" in {
+    val upload =
+      "      - uses: actions/upload-artifact@v7\n        with:\n          path: |\n" +
+        "            native/qod-node/build-search/qod-node\n"
+    val (code, out) =
+      checkPins(searchTree(".github/workflows/qod-node.yml" -> (workflow(shippedOff) + upload)))
+    code shouldBe 1
+    out should include(
+      "uploads native/qod-node/build-search/qod-node from a build-search* development tree"
+    )
+  }
+
+  it should "refuse a publishing step that ships search ON or names no setting" in {
+    val (code, out) = checkPins(
+      searchTree(
+        ".github/workflows/release.yml" -> "        env:\n          QOD_NODE_SEARCH: 'ON'\n",
+        "docker/quack-node/Dockerfile"  -> "ARG QOD_NODE_PROTOCOL=6\n"
+      )
+    )
+    code shouldBe 1
+    out should include(".github/workflows/release.yml:2 ships QOD_NODE_SEARCH=ON")
+    out should include("docker/quack-node/Dockerfile names no ARG QOD_NODE_SEARCH")
   }
 
   // Audit F26: the release-day list lived only in gitignored files; the red check now names the

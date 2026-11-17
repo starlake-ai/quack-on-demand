@@ -136,6 +136,10 @@ from .commands import branch  # noqa: E402
 
 app.add_typer(branch.app, name="branch")
 
+from .commands import search  # noqa: E402
+
+app.add_typer(search.app, name="search")
+
 from .commands import federation, maintenance, manifest  # noqa: E402
 
 app.add_typer(maintenance.app, name="maintenance")
