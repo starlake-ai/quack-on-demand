@@ -122,7 +122,8 @@ final class FlightSqlRouter(
       */
     val nodeAnswers: Option[ai.starlake.quack.model.RunningNode => IO[Boolean]] = None,
     /** How long the wake hold waits for one node's readiness check in one poll round (never past
-      * the hold itself); a node that has not answered by then counts as not ready this round.
+      * the hold itself); a node that has not answered by then counts as not ready this round. It
+      * also bounds each request the check sends, so a check the round stopped waiting for ends.
       */
     val readinessTimeout: FiniteDuration = 5.seconds
 ):
@@ -1687,13 +1688,16 @@ final class FlightSqlRouter(
     * suspended pool is answered [[FlightSqlRouter.PoolNotWoken]] instead.
     */
   private def answers(n: ai.starlake.quack.model.RunningNode): IO[Boolean] =
-    nodeAnswers.fold(adapter.answers(n))(_(n))
+    nodeAnswers.fold(adapter.answers(n, readinessTimeout))(_(n))
 
   /** Every node's readiness check at once, each waited for at most [[readinessTimeout]] and never
     * past `deadline`. The check is a blocking node call that cancellation cannot interrupt, so it
     * runs on a fiber of its own and the round stops waiting for it rather than cancelling it: one
     * hung node then costs a round its bound, not the whole hold. A late answer is dropped, which
-    * holds nothing ([[QuackHttpAdapter.answers]] closes its own result).
+    * holds nothing ([[QuackHttpAdapter.answers]] closes its own result). A check left behind ends
+    * by itself: each request it sends is bounded by [[readinessTimeout]] too, so on a node that
+    * never answers it closes what it opened rather than keep a thread and a node connection for as
+    * long as the node hangs.
     */
   private def answering(
       nodes: List[ai.starlake.quack.model.RunningNode],

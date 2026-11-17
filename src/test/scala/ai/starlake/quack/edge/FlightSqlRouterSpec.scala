@@ -2676,6 +2676,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       /** The readiness check in place of the adapter's (None: the adapter's, through `client`). */
       nodeAnswers: Option[RunningNode => IO[Boolean]] = None,
       readinessTimeout: FiniteDuration = 5.seconds,
+      /** The port of every node, whose readiness checks then go over the real wire client (None:
+        * ports from 28000 up, checks answered by the stub).
+        */
+      nodePort: Option[Int] = None,
       /** The endpoints the statements were sent to. */
       sent: scala.collection.mutable.ListBuffer[String] = scala.collection.mutable.ListBuffer.empty
   ) =
@@ -2699,7 +2703,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
               s.poolKey,
               s.role,
               "127.0.0.1",
-              28000 + n.size,
+              nodePort.getOrElse(28000 + n.size),
               "tok",
               Some(1L),
               None,
@@ -2724,13 +2728,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     if localFilesOff then filesOff.set(true)
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(
-          endpoint: String,
-          token: String,
-          sql: String,
-          session: Option[String],
-          authorize: () => String
-      ) =
+      private def answer(endpoint: String) =
         IO {
           sent.synchronized(sent += endpoint)
           queries.incrementAndGet()
@@ -2738,6 +2736,23 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             QuackResponse.Failed(QuackError.Transient("connect refused (test)"))
           else TestArrow.okResponse()
         }
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) = answer(endpoint)
+      // The readiness check's own call ([[QuackHttpAdapter.answers]]), answered the same way.
+      override def queryWithin(
+          endpoint: String,
+          token: String,
+          sql: String,
+          authorize: () => String,
+          within: FiniteDuration
+      ) =
+        if nodePort.isDefined then super.queryWithin(endpoint, token, sql, authorize, within)
+        else answer(endpoint)
     val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup,
@@ -2886,6 +2901,29 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .isRight shouldBe true
     (System.nanoTime() - start).nanos should be < 5.seconds
     sent.toList.map(_.contains(":28001")) shouldBe List(true)
+
+  it should "bound each readiness check by its round's, so one left on a hung node ends by itself" in:
+    // A real node socket that accepts and never answers: the round stops waiting for each check,
+    // and each check must then end on its own, closing its connection, rather than hold a thread
+    // and the connection for as long as the node hangs.
+    val silent = ai.starlake.quack.edge.adapter.SilentNode()
+    try
+      val (router, sup, _) = setupWithSupervisor(
+        resumeHoldTimeout = 1.second,
+        resumePollInterval = 20.millis,
+        readinessTimeout = 300.millis,
+        nodePort = Some(silent.port)
+      )
+      sup.suspendPool(poolKey, "rest").unsafeRunSync()
+      router
+        .execute("wake-11", "alice", poolKey, "SELECT 1", recordExecution = true)
+        .unsafeRunSync() should matchPattern { case Left(RouterFailure.Unavailable(_)) => }
+      // One check per round, a round about every 300 ms of the one-second hold.
+      silent.accepted.get() should be >= 2
+      val deadline = System.nanoTime() + 2.seconds.toNanos
+      while silent.open > 0 && System.nanoTime() < deadline do Thread.sleep(25)
+      silent.open shouldBe 0
+    finally silent.close()
 
   it should "not wake a disabled pool" in:
     val (router, sup, _) = setupWithSupervisor()

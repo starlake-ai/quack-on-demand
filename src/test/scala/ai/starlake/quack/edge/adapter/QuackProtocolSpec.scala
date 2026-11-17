@@ -470,3 +470,24 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
       err.msg should not include "127.0.0.1"
       err.msg should not include closed.toString
     }
+
+    it("reports a bounded request the node never answers as Transient, naming no address") {
+      // A node that accepts and never answers: the bound, not the node, ends the request.
+      val silent = SilentNode()
+      try
+        val transport = new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient())
+          .bounded(300.millis)
+        val start = System.nanoTime()
+        val err   = intercept[QuackWireError.Transient] {
+          scala.concurrent.Await.result(
+            transport
+              .post(URI.create(s"http://127.0.0.1:${silent.port}/quack"), Array.emptyByteArray)
+              .unsafeToFuture(),
+            5.seconds
+          )
+        }
+        (System.nanoTime() - start).nanos should be < 3.seconds
+        err.msg shouldBe QuackProtocol.NoAnswer
+        err.msg should not include silent.port.toString
+      finally silent.close()
+    }

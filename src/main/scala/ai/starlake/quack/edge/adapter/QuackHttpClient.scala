@@ -55,13 +55,30 @@ open class QuackHttpClient(
       session: Option[String],
       authorize: () => String
   ): IO[QuackResponse] =
-    queryNative(endpoint, token, sql, Some(authorize))
+    queryNative(endpoint, token, sql, Some(authorize), within = None)
+
+  /** [[query]] with every request it sends the node bounded by `within`
+    * ([[QuackTransport.bounded]]): one the node has not begun to answer by then fails Transient
+    * (`notSent` unless `sql` had gone out), and the connection it opened is closed, its heartbeat
+    * stopped and its DISCONNECT bounded too. So the call ends by itself, holding nothing, on a node
+    * that accepts and never answers. For the wake's readiness check alone
+    * ([[QuackHttpAdapter.answers]]), whose caller may stop waiting for it: a statement's requests
+    * are never bounded, as [[query]]'s are not.
+    */
+  def queryWithin(
+      endpoint: String,
+      token: String,
+      sql: String,
+      authorize: () => String,
+      within: FiniteDuration
+  ): IO[QuackResponse] =
+    queryNative(endpoint, token, sql, Some(authorize), Some(within))
 
   /** `sql` with no session handle at all: the health probe's canary, which a node that enforces its
     * checks refuses. Never used for a statement anyone asked for.
     */
   def queryWithoutHandle(endpoint: String, token: String, sql: String): IO[QuackResponse] =
-    queryNative(endpoint, token, sql, None)
+    queryNative(endpoint, token, sql, None, within = None)
 
   /** The JNI-backed native path. Opens a fresh [[QuackProtocol]] [[Connection]], runs `sql`, and
     * returns a [[QuackResponse.Ok]] whose `close` callback closes the chained Arrow reader.
@@ -77,12 +94,15 @@ open class QuackHttpClient(
     * observed at [[checkpoint]] / [[handOver]], where whatever is held gets closed. Callers wrap
     * this in `.timeout`, and the JDK send is uninterruptible, so a cancel typically lands right
     * after PREPARE returns: the reader built from that response is closed, not dropped.
+    *
+    * `within` bounds every request of the connection ([[queryWithin]]); None bounds none.
     */
   private def queryNative(
       endpoint: String,
       token: String,
       sql: String,
-      authorize: Option[() => String]
+      authorize: Option[() => String],
+      within: Option[FiniteDuration]
   ): IO[QuackResponse] =
     IO.uncancelable { poll =>
       IO.monotonic.flatMap { startNanos =>
@@ -95,7 +115,7 @@ open class QuackHttpClient(
         // is `notSent`, one after it may come once `sql` ran.
         val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
         nativeProtocol
-          .open(endpoint, token)
+          .open(endpoint, token, within)
           .flatMap { conn =>
             (checkpoint(poll, conn.close()) *> install(poll, conn, authorize) *>
               IO(sent.set(true)) *> conn.execute(sql))
@@ -311,7 +331,8 @@ open class QuackHttpClient(
                         s"stamping prelude failed on $endpoint; write proceeds unstamped: ${t.getMessage}"
                       )
                       // Nothing is held once conn is closed, so the fallback may be cancelled whole.
-                      conn.close() *> poll(queryNative(endpoint, token, sql, Some(authorize)))
+                      conn.close() *>
+                        poll(queryNative(endpoint, token, sql, Some(authorize), within = None))
                     case Left(t) =>
                       logger.warn(
                         s"stamping prelude failed on $endpoint; the write is not sent: ${t.getMessage}"

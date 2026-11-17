@@ -6,6 +6,8 @@ import ai.starlake.quack.route.NodeUnhealthy
 import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 
+import scala.concurrent.duration.FiniteDuration
+
 /** `keys` mints every session handle: the manager's (Main), required, since keys of another secret
   * would have every node refuse every handle (Phase B T6-M6).
   */
@@ -248,15 +250,20 @@ final class QuackHttpAdapter(
     * by default ([[ai.starlake.quack.route.NodeLoad]] starts healthy) before its process listens,
     * so the hold asks the node itself. Same bookkeeping-free path as [[probe]], without the canary:
     * the periodic probe still judges enforcement. Never fails: any error is "not yet".
+    *
+    * Each request the check sends is bounded by `within` ([[QuackHttpClient.queryWithin]]), so a
+    * check its caller stopped waiting for ends by itself on a node that never answers, closing the
+    * connection it opened. That timeout is "not yet" like any other error, and, the path keeping no
+    * books, never marks the node the way a statement lost on it does.
     */
-  def answers(node: RunningNode): IO[Boolean] =
+  def answers(node: RunningNode, within: FiniteDuration): IO[Boolean] =
     client
-      .query(
+      .queryWithin(
         s"quack:${node.host}:${node.port}",
         node.token,
         "SELECT 1",
-        None,
-        authorizer(node, NodePrincipal.System)
+        authorizer(node, NodePrincipal.System),
+        within
       )
       .flatMap {
         case QuackResponse.Ok(_, _, close) => IO(close()).as(true)

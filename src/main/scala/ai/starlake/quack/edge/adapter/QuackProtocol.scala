@@ -47,6 +47,15 @@ trait QuackTransport:
     */
   def post(uri: URI, body: Array[Byte]): IO[Array[Byte]]
 
+  /** This transport with each request bounded by `within`: one the node has not begun to answer by
+    * then fails [[QuackWireError.Transient]], whatever the node did with it. Only the wake's
+    * readiness check asks for it ([[QuackProtocol.open]]'s `within`), so that a check nobody waits
+    * for any more ends by itself on a node that never answers; a statement's own requests are never
+    * bounded, as it runs for as long as it takes. A transport with no clock of its own (a spec's
+    * stub) returns itself, unbounded.
+    */
+  def bounded(within: FiniteDuration): QuackTransport = this
+
 /** Owns Quack connection lifecycle over an injectable [[QuackTransport]] and produces a lazy
   * chained `ArrowReader` for callers.
   *
@@ -96,14 +105,31 @@ final class QuackProtocol(
     * `endpoint` is the upstream Quack endpoint string in the `quack:host:port` form that
     * `ai.starlake.quack.ondemand.runtime.LocalQuackBackend` produces. Translated to
     * `http://host:port/quack` for the actual HTTP POST.
+    *
+    * `within`, when set, bounds every request of the connection ([[QuackTransport.bounded]]): the
+    * CONNECTION_REQUEST, each PREPARE and FETCH, each heartbeat and the DISCONNECT, so closing it
+    * ends too on a node that never answers. None, every statement's, bounds nothing.
     */
-  def open(endpoint: String, token: String): IO[Connection] =
-    open(endpoint, token, () => QuackNativeSupport.requireLoaded())
+  def open(
+      endpoint: String,
+      token: String,
+      within: Option[FiniteDuration] = None
+  ): IO[Connection] =
+    connect(endpoint, token, within, () => QuackNativeSupport.requireLoaded())
 
   /** [[open]] with the native-load guard injectable, so a test can fail it without breaking the
     * real native.
     */
   private[adapter] def open(endpoint: String, token: String, guard: () => Unit): IO[Connection] =
+    connect(endpoint, token, None, guard)
+
+  private def connect(
+      endpoint: String,
+      token: String,
+      within: Option[FiniteDuration],
+      guard: () => Unit
+  ): IO[Connection] =
+    val wire = within.fold(transport)(transport.bounded)
     IO.defer {
       // Fail this IO, not the runtime: a broken native would otherwise surface as a fatal
       // LinkageError at the first bridge call below (see QuackNativeSupport.probe).
@@ -116,14 +142,14 @@ final class QuackProtocol(
       // JDK transport's send is IO.blocking (uninterruptible) anyway, so this masks nothing a
       // cancel could have cut short.
       IO.uncancelable { _ =>
-        transport
+        wire
           .post(url, reqBody)
           .map { respBytes =>
             val wireOrdinal = QuackNativeBridge.parseMessageType(respBytes)
             MessageType.fromWireOrdinal(wireOrdinal) match
               case Some(MessageType.ConnectionResponse) =>
                 val connId = QuackNativeBridge.extractConnectionId(respBytes)
-                new Connection(transport, url, connId, allocator)
+                new Connection(wire, url, connId, allocator)
               case Some(MessageType.ErrorResponse) =>
                 val msg = QuackNativeBridge.extractErrorMessage(respBytes)
                 throw QuackWireError.Permanent(msg)
@@ -156,6 +182,9 @@ object QuackProtocol:
   /** A refused or timed-out connect, as clients read it: no address, which only the log carries. */
   val CannotConnect = "cannot connect to the Quack node"
 
+  /** A bounded request ([[QuackTransport.bounded]]) the node did not begin to answer in time. */
+  val NoAnswer = "the Quack node did not answer in time"
+
   def heartbeatEvery(leaseSec: Int): FiniteDuration = math.max(1, leaseSec / 3).seconds
 
   /** "quack:host:port" -> "http://host:port/quack". The leading `quack:` scheme is what
@@ -174,23 +203,40 @@ object QuackProtocol:
     * `IO.blocking` wraps the synchronous send because the JDK HttpClient's `send` blocks the
     * calling thread until the full response body is received. cats-effect routes blocking calls to
     * a dedicated thread pool so they do not starve compute fibers.
+    *
+    * `within` (set by [[bounded]] alone) is each request's JDK timeout: past it the send throws and
+    * the JDK closes the request's connection. It covers the wait for the answer to begin, not the
+    * reading of its body, which is enough for a node that never answers.
     */
-  final class JdkHttpTransport(http: HttpClient) extends QuackTransport with LazyLogging:
+  final class JdkHttpTransport(http: HttpClient, within: Option[FiniteDuration] = None)
+      extends QuackTransport
+      with LazyLogging:
+
+    /** The same client, so its connection pool and selector are shared. */
+    override def bounded(within: FiniteDuration): QuackTransport =
+      new JdkHttpTransport(http, Some(within))
+
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO.blocking {
-      val req = HttpRequest
+      val builder = HttpRequest
         .newBuilder(uri)
         .header("Content-Type", "application/vnd.duckdb")
         .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-        .build()
+      within.foreach(w => builder.timeout(java.time.Duration.ofNanos(w.toNanos)))
+      val req = builder.build()
       // Refused or timed out while connecting: nothing reached the node, so the call is safe to
       // retry, as the Transient contract above says (a node still starting, or one that died).
-      // The message reaches clients, so it names no node address: that goes to the log.
+      // The message reaches clients, so it names no node address: that goes to the log. A bounded
+      // request with no answer in time is Transient too: the node may serve later, and nothing
+      // says it refused.
       val resp =
         try http.send(req, HttpResponse.BodyHandlers.ofByteArray())
         catch
           case e @ (_: java.net.ConnectException | _: java.net.http.HttpConnectTimeoutException) =>
             logger.warn(s"cannot connect to Quack node at $uri: $e")
             throw QuackWireError.Transient(QuackProtocol.CannotConnect)
+          case e: java.net.http.HttpTimeoutException =>
+            logger.warn(s"Quack node at $uri did not answer in time: $e")
+            throw QuackWireError.Transient(QuackProtocol.NoAnswer)
       resp.statusCode() match
         case 200                         => resp.body()
         case sc if sc >= 500 && sc < 600 =>
@@ -243,12 +289,13 @@ final class Connection private[adapter] (
     )
 
   /** Stops the heartbeats without waiting for them. `fiber.cancel` would wait for an in-flight
-    * beat, whose JDK send is uninterruptible and has no timeout, so a hung node would hang close()
-    * and the DISCONNECT behind it. Instead the cancel runs on its own fiber and the `closing` flag
-    * keeps any beat from starting from here on. A beat already in flight may still reach the node
-    * after the DISCONNECT; the node then finds no such connection and answers "Invalid connection
-    * id" before touching any lease (quack_server.cpp DispatchMessage), so it neither renews nor
-    * resurrects the session, and the error is swallowed by the beat's own handler.
+    * beat, whose JDK send is uninterruptible and has no timeout (unless the connection is bounded,
+    * [[QuackTransport.bounded]]), so a hung node would hang close() and the DISCONNECT behind it.
+    * Instead the cancel runs on its own fiber and the `closing` flag keeps any beat from starting
+    * from here on. A beat already in flight may still reach the node after the DISCONNECT; the node
+    * then finds no such connection and answers "Invalid connection id" before touching any lease
+    * (quack_server.cpp DispatchMessage), so it neither renews nor resurrects the session, and the
+    * error is swallowed by the beat's own handler.
     */
   private def stopHeartbeats: IO[Unit] = IO.defer {
     closing.set(true)

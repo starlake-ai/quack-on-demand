@@ -87,7 +87,8 @@
   be admitted under the old names; it is now kept only until the next commit, and the check's
   metadata reads give up after 3 s and refuse the read rather than hold the statement.
 - **One hung node no longer holds a statement that wakes its pool.** Each node's readiness check
-  is waited for at most 5 s per poll round, so the statement goes to a node that answered.
+  is waited for at most 5 s per poll round, so the statement goes to a node that answered. A
+  check on a node that never answers then ends by itself after 5 s, closing its node connection.
 - **A refused connect to a node names no node address to clients** (the manager log has it), and
   marks the node `unreachable`, not `statement_failed`, since nothing was sent; a refused session
   handle on a statement is reported as the probe reports it.

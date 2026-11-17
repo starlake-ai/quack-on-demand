@@ -7,6 +7,8 @@ import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import java.time.Instant
+import scala.concurrent.Await
+import scala.concurrent.duration.*
 
 class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
@@ -782,6 +784,74 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync() should matchPattern { case ProbeVerdict.Failed(_) => }
     calls.get() shouldBe 1
     tracker.snapshot("n").localFilesNotOff shouldBe Some("held")
+
+  /** The real client, wire and JDK transport, to a node on `silent`'s port. */
+  private def wired(
+      tracker: NodeLoadTracker,
+      nodeLeaseSec: Int = QuackProtocol.DefaultNodeLeaseSec
+  ) =
+    new QuackHttpAdapter(
+      new QuackHttpClient(TestArrow.sharedAllocator, nodeLeaseSec),
+      tracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+  private def at(silent: SilentNode): RunningNode = node("hung").copy(port = silent.port)
+
+  /** Polls `cond` until it holds or `within` elapses; true iff it held. */
+  private def eventually(within: FiniteDuration)(cond: => Boolean): Boolean =
+    val deadline = System.nanoTime() + within.toNanos
+    while !cond && System.nanoTime() < deadline do Thread.sleep(25)
+    cond
+
+  // A check is a JDK send, which a cancel cannot interrupt: each spec waits for it with
+  // `Await.result`, and a check its bound does not reach is ended by closing the node.
+
+  "answers" should "end on a node that never answers within about its bound, closing what it opened" in:
+    val silent = SilentNode()
+    try
+      val tracker = new NodeLoadTracker
+      val before  = tracker.snapshot("hung")
+      val start   = System.nanoTime()
+      val check   = wired(tracker).answers(at(silent), 300.millis)
+      Await.result(check.unsafeToFuture(), 5.seconds) shouldBe false
+      (System.nanoTime() - start).nanos should be < 3.seconds
+      silent.accepted.get() shouldBe 1
+      eventually(2.seconds)(silent.open == 0) shouldBe true
+      // "Not yet", never a failure booked against the node as a statement's would be.
+      tracker.snapshot("hung") shouldBe before
+    finally silent.close()
+
+  it should "close the connection and stop the heartbeat of a node that granted it, then hung" in:
+    val silent = SilentNode(grantConnection = true)
+    try
+      // A three-second lease beats every second: one goes out while the check waits on the node.
+      val adapter = wired(new NodeLoadTracker, nodeLeaseSec = 3)
+      val check   = adapter.answers(at(silent), 1500.millis)
+      Await.result(check.unsafeToFuture(), 8.seconds) shouldBe false
+      eventually(3.seconds)(silent.open == 0) shouldBe true
+      silent.types should contain(MessageType.HeartbeatRequest.wireOrdinal)
+      silent.types should contain(MessageType.DisconnectMessage.wireOrdinal)
+      // No beat once closed: nothing more reaches the node over two beat periods.
+      val reached = silent.accepted.get()
+      Thread.sleep(2500)
+      silent.accepted.get() shouldBe reached
+    finally silent.close()
+
+  it should "leave a statement's own requests unbounded: only the check's are" in:
+    val silent    = SilentNode()
+    val adapter   = wired(new NodeLoadTracker)
+    val statement = adapter
+      .send(at(silent), "SELECT 1", NodePrincipal.System, None, recordLoad = false)
+      .unsafeToFuture()
+    try
+      val check = adapter.answers(at(silent), 300.millis)
+      Await.result(check.unsafeToFuture(), 5.seconds) shouldBe false
+      Thread.sleep(700)
+      // A second in, three times the check's bound, the statement still waits on the node.
+      statement.isCompleted shouldBe false
+      silent.open shouldBe 1
+    finally silent.close()
+    Await.ready(statement, 5.seconds)
 
   "HandleRefusalWarnings" should "name another node-key secret once, until the node passes again" in:
     val warnings = new HandleRefusalWarnings
