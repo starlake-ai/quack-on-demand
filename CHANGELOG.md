@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A user with a row policy on a table is now refused when they read that table with a
+  time-travel clause (`SELECT * FROM customer AT (TIMESTAMP => '...')`). Until now the statement
+  ran against the current snapshot, filtered, and answered with no error. Time travel on a table
+  under a row policy is not supported.
+- The same user is also refused when they read that table with `TABLESAMPLE` or `USING SAMPLE`,
+  or with a `PIVOT` or `UNPIVOT` written after it (`FROM customer PIVOT (...)`). Until now the
+  sample or the pivot was dropped and every filtered row came back. To sample or pivot, wrap the
+  table in a subquery: `FROM (SELECT * FROM customer) USING SAMPLE 10%`,
+  `PIVOT (SELECT * FROM customer) ON ...`.
+- A user whose system-catalog reads are filtered is refused the same way for a sample, a `PIVOT`
+  or `UNPIVOT`, or `WITH ORDINALITY` on `information_schema.tables` (and its other filtered
+  views) or a `duckdb_*()` catalog function. A subquery works around the sample and the pivot:
+  `FROM (SELECT * FROM information_schema.tables) USING SAMPLE 10%`.
+- Tables without a row policy for the user, and users without row policies, are not affected.
+
 ## 0.13.1
 
 ### Upgrading
