@@ -78,11 +78,10 @@ Every release is published to GHCR as `oci://ghcr.io/starlake-ai/charts/quack-on
 | Object | Purpose |
 |---|---|
 | `Deployment` | The manager pod. Default `replicas: 1` (see the Resilience guide at https://starlake-ai.github.io/quack-on-demand/operating/resilience and #11). |
-| `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`. |
+| `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`, and `/data/v1` (the read-only REST data edge) when `dataEdge.enabled`. |
 | Container port `internal` | `:20901`, no Service: node pods call the manager pod directly for verdicts. Any pod that reaches it can hold its connection slots, which stops authorization for every tenant, so set `networkPolicy.enabled=true` (off by default), or in a NetworkPolicy of your own open the port to node pods alone. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `Service` (Quack) | ClusterIP on `:9494` for the native Quack protocol front door, which a DuckDB client `ATTACH`es to (when `quack.enabled`, the default). |
-| `Service` (REST data) | `<release>-rest`, ClusterIP on `:31339` for the read-only REST data edge (`GET /api/v1/...`, PAT bearer). Only when `rest.enabled`. |
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
 | `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |
@@ -107,10 +106,8 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
-| `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PATs only. Internet exposure requires a reverse proxy or WAF that rate-limits per client and per `Authorization` value. |
-| `rest.tls.enabled` | `true` | `QOD_REST_TLS_ENABLED`; reuses the Flight edge's PEM pair from `flightsql.tls.existingSecret` (`QOD_REST_TLS_CERT_CHAIN` / `QOD_REST_TLS_PRIVATE_KEY`, which `env` may then not set). Without that Secret each replica signs a certificate of its own, so clients see a different one per pod. |
-| `service.restData.type` | `ClusterIP` | The REST data edge Service (`service.rest` is the admin REST/UI one). |
-| `ingress.enabled` | `false` | REST/UI only. |
+| `dataEdge.enabled` | `false` | Read-only REST data edge under `/data/v1` on the manager port (`QOD_DATA_EDGE_ENABLED`), plain HTTP like the rest of that port. PATs only. Expose it by routing only the `/data/` prefix (a reverse proxy, or `ingress` paths `/data/` with `pathType: Prefix`), never the whole port; the proxy must rate-limit per client and per `Authorization` value. A NetworkPolicy cannot tell `/data/` from the admin API on the same port, so in-cluster callers reach both. |
+| `ingress.enabled` | `false` | REST/UI only. The default path `/` exposes the whole manager port (admin API, console, `/mcp`, `/metrics`); for the data edge alone use path `/data/`, `pathType: Prefix`. |
 | `serviceMonitor.enabled` | `false` | Set true when you run Prometheus Operator. |
 | `metrics.sink` | `prometheus` | One of `prometheus` \| `aws` \| `azure` \| `gcp` \| `none`. |
 | `loadTpc.enabled` | `false` | Inject `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` to seed the bundled acme + globex demo manifest on boot. |

@@ -6,9 +6,9 @@
 
 - **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
   (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
-  `QOD_REST_ENABLED=true` opens a listener of its own on `:31339` (`QOD_REST_PORT`, TLS on by default
-  and reusing the FlightSQL edge's PEM pair, `QOD_REST_TLS_ENABLED`) with four `GET` endpoints under
-  `/api/v1/tenant/{tenant}/database/{db}`: `/schemas`, `/schemas/{s}/tables`,
+  `QOD_DATA_EDGE_ENABLED=true` (config block `quack-data-edge`) serves four `GET` endpoints on the
+  manager port (`:20900`, plain HTTP like the rest of the manager; TLS is the reverse proxy's) under
+  `/data/v1/tenant/{tenant}/database/{db}`: `/schemas`, `/schemas/{s}/tables`,
   `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, answering JSON (an array of
   objects, exact decimals) or CSV (RFC 4180) by `format=` or `Accept`. `/rows` takes `select`,
   column filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, each
@@ -29,17 +29,19 @@
   policy, which the probe cannot read (the table listing still names it). A reserved parameter
   name in any case with a filter-shaped value (`limit=eq.5`, `Format=not.eq.x`) answers
   `400 reserved_column`. Credentials are personal access tokens only (never the static API
-  key, a cookie or a password; a superuser token is refused): a token with no `tools` restriction
+  key, the session cookie, Basic or a password, only `Authorization: Bearer`; a superuser token is
+  refused): a token with no `tools` restriction
   may use the edge, and one restricted with `qod auth pat create --tool ...` must list the reserved
-  name `rest`. Rows are capped by `min(limit or QOD_REST_DEFAULT_LIMIT, QOD_REST_MAX_ROWS, the
-  token's maxRows)` and bodies by `QOD_REST_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB, cut at a
+  name `rest`. Rows are capped by `min(limit or QOD_DATA_EDGE_DEFAULT_LIMIT (1000),
+  QOD_DATA_EDGE_MAX_ROWS (100000), the token's maxRows)` and bodies by
+  `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB, cut at a
   row boundary), and the pages in flight share a fifth of the heap (past it a request waits up to
   its statement bound, then answers `503 edge_busy`),
   with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
-  `min(QOD_REST_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
+  `min(QOD_DATA_EDGE_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
   that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
   a request to a cold pool that the edge's own wait cuts short. Boot refuses a
-  `QOD_REST_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
+  `QOD_DATA_EDGE_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
   `Retry-After`. CSV values are written as stored, with no spreadsheet formula escaping, and
   `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to.
   Schema and table segments take any name DuckDB can hold (`order-items`, `2024_sales`), so every
@@ -54,16 +56,21 @@
   every door: the column rewriter cannot expand a star over that name.
   Responses are `Cache-Control: private` with `Vary:
   Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
-  endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a
-  `<release>-rest` Service (`service.restData`) and its NetworkPolicy port; the image exposes
-  `31339`. There is no per-client rate limit, authentication throttle or per-user concurrency cap
-  yet: an internet-facing edge must sit behind a reverse proxy or WAF that rate-limits per client
-  and per `Authorization` value.
-  The edge keeps at most `QOD_REST_DATA_MAX_CONNECTIONS` (512) connections open, and no more than
-  fit a tenth of the heap at `QOD_REST_DATA_MAX_HEADER_BYTES` (16 KiB per request line and per
-  header block), as boot says when that is fewer; `QOD_REST_MAX_CONNECTIONS` and
-  `QOD_REST_MAX_HEADER_BYTES` stay the manager REST port's. Boot refuses a `QOD_REST_PORT` in the
-  node port range. With no `pool` named, a request goes to a pool the caller may use: among the
+  endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains
+  `dataEdge.enabled` (off by default, `QOD_DATA_EDGE_ENABLED`); the edge needs no Service, port or
+  NetworkPolicy rule of its own. Every request under `/data/` is answered by the edge, a 404
+  included, so `/data/../api/...` never reaches a manager route; requests elsewhere go to the
+  manager as before. At most `QOD_DATA_EDGE_MAX_CONCURRENT_REQUESTS` (256) edge requests are
+  answered at once (past it `503 edge_busy`), so data traffic cannot take all of the manager
+  listener's work; its connections count against the manager port's `QOD_REST_MAX_CONNECTIONS`.
+  To publish the edge, put a reverse proxy in front of the manager port that exposes only the
+  `/data/` prefix and keeps the admin API, the console, `/mcp`, `/health`, `/ready` and `/metrics`
+  internal; the README's "Exposing the data edge" gives an nginx configuration (data routes only,
+  `GET` only, no `Cookie`, dot segments and encoded slashes refused) and the matching rule for
+  AWS ALB, GCP, Azure and a Kubernetes Ingress. Callers inside the network bypass the proxy, and a
+  NetworkPolicy cannot tell `/data/` from the admin API on the same port. There is no per-client
+  rate limit, authentication throttle or per-user concurrency cap yet: the proxy must rate-limit
+  per client and per `Authorization` value. With no `pool` named, a request goes to a pool the caller may use: among the
   database's pools, those the token's `pools` axis allows and, when several are left, the first the
   FlightSQL handshake admits the caller to. A UUID, JSON or ENUM column is pattern-matched, range-filtered
   and ordered as the text it is shown as (`like` and range filters work on a UUID, an ENUM sorts

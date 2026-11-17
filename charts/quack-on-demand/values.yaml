@@ -105,17 +105,21 @@ service:
     port: 9494
     nodePort: ""
     annotations: {}
-  # Read-only REST data edge (`GET /api/v1/...`, PAT bearer), created only when
-  # rest.enabled. Not `service.rest`: that key is the admin REST/UI listener
-  # above. Internet exposure requires a reverse proxy or WAF in front of it
-  # that rate-limits per client and per Authorization value.
-  restData:
-    type: ClusterIP
-    port: 31339
-    nodePort: ""
-    annotations: {}
 
 # --- Ingress (REST/UI only - FlightSQL is gRPC and not handled here) --------
+# Routes to the manager port (service.rest). The default `path: /` exposes the
+# whole port: the admin API (/api), the console (/ui), /mcp, /health, /ready
+# and /metrics. To expose only the read-only REST data edge (dataEdge.enabled),
+# route the `/data/` prefix alone:
+#   hosts:
+#     - host: data.example.com
+#       paths:
+#         - path: /data/
+#           pathType: Prefix
+# Ingress controllers do not reliably refuse dot segments or encoded slashes;
+# the edge answers every request under /data/ itself (a 404 included), so none
+# of those reaches a manager route. Rate-limit per client and per Authorization value at the Ingress
+# controller: the edge has no throttle of its own.
 ingress:
   enabled: false
   className: ""
@@ -315,14 +319,13 @@ quack:
     enabled: false
 
 # Read-only REST data edge (tables and views as GET resources, JSON or CSV,
-# personal access tokens only). Off by default. TLS on by default, reusing the
-# Flight edge's PEM pair (flightsql.tls.existingSecret) like the Quack door;
-# without one each replica signs a certificate of its own. A PAT may use it
-# unless its `tools` axis is set without `rest`.
-rest:
+# personal access tokens only), served under /data/v1 on the manager port
+# (service.rest, plain HTTP like the rest of the manager). Off by default
+# (QOD_DATA_EDGE_ENABLED). A PAT may use it unless its `tools` axis is set
+# without `rest`. Expose it through a reverse proxy or the ingress above
+# routing only `/data/`; in-cluster callers reach the whole manager port.
+dataEdge:
   enabled: false
-  tls:
-    enabled: true
 
 flightsql:
   tls:
@@ -333,9 +336,8 @@ flightsql:
     # chain under certKey and the PEM key under keyKey: the chart mounts it
     # read-only at /etc/qod/flight-tls and points PROXY_TLS_CERT_CHAIN /
     # PROXY_TLS_PRIVATE_KEY (and the native front door's
-    # QOD_QUACK_TLS_CERT_CHAIN / QOD_QUACK_TLS_PRIVATE_KEY, and the REST data
-    # edge's QOD_REST_TLS_CERT_CHAIN / QOD_REST_TLS_PRIVATE_KEY) at it. Rule:
-    # with existingSecret set the chart owns those six variables and
+    # QOD_QUACK_TLS_CERT_CHAIN / QOD_QUACK_TLS_PRIVATE_KEY) at it. Rule: with
+    # existingSecret set the chart owns those four variables and
     # PROXY_TLS_ENABLED, so setting any of them under `env`, or
     # flightsql.tls.enabled false, fails the render. With existingSecret empty
     # they stay free for a mount of your own (extraVolumes). The manager reads

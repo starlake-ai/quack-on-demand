@@ -2559,12 +2559,13 @@ library):
 
 ## Reading over HTTP (REST data edge)
 
-A read-only HTTP listener for tools that speak nothing else (n8n, Zapier, a spreadsheet
-import, a cache): tables and views as `GET` resources, JSON or CSV. Off by default; turn
-it on with `QOD_REST_ENABLED=true` in the manager's environment (Helm: `rest.enabled=true`,
-which also creates the `<release>-rest` Service). Port `31339` (`QOD_REST_PORT`), TLS on by
-default with the FlightSQL edge's certificate (`QOD_REST_TLS_ENABLED=false` for plain HTTP
-on a trusted network only). The boot banner prints a `REST (data)` line when it is up.
+Read-only HTTP for tools that speak nothing else (n8n, Zapier, a spreadsheet import, a
+cache): tables and views as `GET` resources, JSON or CSV, under `/data/v1` on the manager
+port (`:20900`, plain HTTP like the rest of the manager; TLS is the reverse proxy's). Off by
+default; turn it on with `QOD_DATA_EDGE_ENABLED=true` in the manager's environment (Helm:
+`dataEdge.enabled=true`). The boot banner prints a `REST (data)` line when it is on. Every
+request under `/data/` is answered by the edge (a 404 included), so `/data/../api/...` never
+reaches a manager route; anything else falls through to the manager.
 
 **Credentials: personal access tokens only.** Never the static `X-API-Key`, a session
 cookie, HTTP Basic or `?access_token=`. A superuser's token is refused (401): mint it from a
@@ -2577,23 +2578,23 @@ and `maxRows` / `stmtTimeoutMs` axes apply as everywhere else.
 qod auth pat create --name n8n-orders --tool rest --database acme_tpch --max-rows 5000
 # {"id":"pat-...","token":"qod_pat_..."}   <- printed once
 TOKEN=qod_pat_...
-BASE=https://localhost:31339/api/v1/tenant/acme/database/acme_tpch
+BASE=http://localhost:20900/data/v1/tenant/acme/database/acme_tpch
 
-# 2. The four endpoints (-k: the default certificate is self-signed)
-curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas"
-curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables"
-curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders"
-curl -k -H "Authorization: Bearer $TOKEN" \
+# 2. The four endpoints
+curl -H "Authorization: Bearer $TOKEN" "$BASE/schemas"
+curl -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables"
+curl -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders"
+curl -H "Authorization: Bearer $TOKEN" \
   "$BASE/schemas/tpch1/tables/orders/rows?select=o_orderkey,o_totalprice&o_orderstatus=eq.F&order=o_orderkey&limit=100"
 
 # CSV instead of JSON
-curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders/rows?limit=10&format=csv"
+curl -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders/rows?limit=10&format=csv"
 ```
 
 `/rows` parameters:
 
 - `select=a,b` (default: every column the caller may see), `order=a.desc.nullslast,b`,
-  `limit` (default `QOD_REST_DEFAULT_LIMIT`, 1000), `offset` (needs `order`), `pool=<name>`,
+  `limit` (default `QOD_DATA_EDGE_DEFAULT_LIMIT`, 1000), `offset` (needs `order`), `pool=<name>`,
   `format=json|csv` (or the `Accept` header).
 - Filters: `<column>=<op>.<value>` with `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`,
   `ilike` (`*` is the wildcard, at most 4), `in.(a,b,"c,d")`, `is.null|true|false`, each
@@ -2614,10 +2615,12 @@ curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders/row
   policy: read the whole row instead.
 - Headers: `Content-Range: <first>-<last>/*`, and `X-QoD-Truncated: true` when a server or
   token cap (not your own `limit`) cut the page. Rows are capped at
-  `min(limit, QOD_REST_MAX_ROWS, the token's maxRows)`, and a page is cut at a row
-  boundary once its body would pass `QOD_REST_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB),
-  also flagged `X-QoD-Truncated`. Pages in flight share a fifth of the manager's heap: past
-  it a request waits up to its statement bound, then answers 503 `edge_busy`.
+  `min(limit, QOD_DATA_EDGE_MAX_ROWS, the token's maxRows)`, and a page is cut at a row
+  boundary once its body would pass `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` (16 MiB, at most
+  64 MiB), also flagged `X-QoD-Truncated`. Pages in flight share a fifth of the manager's
+  heap: past it a request waits up to its statement bound, then answers 503 `edge_busy`.
+  At most `QOD_DATA_EDGE_MAX_CONCURRENT_REQUESTS` (256) edge requests are answered at once;
+  past it a request answers 503 `edge_busy` at once.
 
 Things to know:
 
@@ -2656,15 +2659,21 @@ Things to know:
   it cannot read included.
 - **Cold pools.** A hibernated pool wakes on the first request; if it is not ready within
   the resume hold (`PROXY_RESUME_HOLD_TIMEOUT_SEC`, 60 s) the answer is 503
-  `pool_resuming` with `Retry-After: 5`. `QOD_REST_STMT_TIMEOUT_SEC` (90 s) must be larger
+  `pool_resuming` with `Retry-After: 5`. `QOD_DATA_EDGE_STMT_TIMEOUT_SEC` (90 s) must be larger
   than the hold, or the manager refuses to boot; a request to a cold pool that the edge's
   own wait cuts short still answers 503 `pool_resuming`. On a warm pool a statement past
   that wait answers 504. Every 503 carries `Retry-After`.
-- **Internet exposure requires a reverse proxy or WAF in front of the port that
-  rate-limits per client and per `Authorization` value.** The edge has no per-client
-  throttle or per-user concurrency cap of its own yet (they come in a later change): every
-  bad token costs a control-plane lookup, and a valid token can run heavy reads
-  concurrently, bounded only by the row, byte and time caps.
+- **Expose only `/data/`, through a reverse proxy that rate-limits per client and per
+  `Authorization` value.** The edge shares the manager port with the admin API (`/api`),
+  the console (`/ui`), `/mcp`, `/health`, `/ready` and `/metrics`, which stay internal: the
+  proxy routes the `/data/` prefix alone (nginx, ALB `path-pattern /data/*`, GCP URL map
+  prefix `/data/`, Azure path rule `/data/*` or Gateway API `PathPrefix: /data/`, Ingress
+  `path: /data/` with `pathType: Prefix`; the README's "Exposing the data edge" has an
+  nginx example). Callers inside the network bypass the proxy, and a NetworkPolicy cannot
+  tell `/data/` from the admin API on the same port. The edge has no per-client throttle or
+  per-user concurrency cap of its own yet: every bad token costs a control-plane lookup,
+  and a valid token can run heavy reads concurrently, bounded only by the row, byte, time
+  and concurrent-request caps.
 - Errors are `{"error": "<code>", "message": "..."}`: 401 `unauthorized` (one body for every
   credential failure), 403 `forbidden` / `acl_denied`, 404 `not_found`, 400
   `invalid_filter` / `unknown_column` / `order_required` / `invalid_parameter`, 406
@@ -2900,7 +2909,7 @@ The audit reads the answering replica's configuration and the shared control pla
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/api/*` returns 401 (the CLI adds "run qod login, or set QOD_TOKEN to a personal access token") | No valid credential on the call: none sent, an expired or revoked session or PAT, or a former static API key | `qod login`, or set `QOD_TOKEN` to a personal access token (`X-API-Key: <token>` on raw REST calls) |
-| REST data edge (`:31339`) returns 401 on every call | Not a live PAT of a tenant user: static key, session, superuser-owned or revoked token | Mint a PAT as the tenant user (`qod auth pat create --tool rest ...`) and send `Authorization: Bearer qod_pat_...` |
+| REST data edge (`/data/v1`) returns 401 on every call | Not a live PAT of a tenant user: static key, session, superuser-owned or revoked token | Mint a PAT as the tenant user (`qod auth pat create --tool rest ...`) and send `Authorization: Bearer qod_pat_...` |
 | REST data edge returns 403 `forbidden` | Path tenant is not the token's tenant, or the token's `tools` axis lacks `rest` | Fix the URL's tenant, or mint a token with `--tool rest` (or no `--tool` at all) |
 | Manager boots with `WARNING: QOD_API_KEY (quack-on-demand.apiKey) was removed and is ignored`, and clients sending the key get 401 | `QOD_API_KEY` is set to a non-empty value (shell, container env, chart `env`, or `quack-on-demand.apiKey` in an operator config file); the manager no longer accepts a static API key | Unset it everywhere it is set. Mint a personal access token for automation (`qod login`, then `qod auth pat create`) and point scripts (`QOD_TOKEN`), MCP clients and SCIM connectors at it |
 | `qod start` / `qod serve` (with or without `--demo`) print `warning: QOD_API_KEY is set` | The key is in your shell, or an earlier `qod setup` stored it in the `[start]` table of the CLI profile file; it is ignored and never passed to the manager | `unset QOD_API_KEY`, or `qod setup --unset QOD_API_KEY --non-interactive` (or delete the line from the `[start]` table of the file the message names) |
