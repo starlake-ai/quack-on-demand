@@ -236,6 +236,22 @@ int main() {
 	Expect(!qod::search::SameDataPath("s3://lake/acme_lake/", "s3://lake/globex_lake/"), "another folder");
 	Expect(!qod::search::SameDataPath("s3://lake/acme_lake/", "s3://lake/acme_lake/sub/"), "a subfolder");
 	Expect(!qod::search::SameDataPath("/", "/"), "an empty path names nothing");
+	// Windows: DuckLake stores data_path with '/' (StorePath) while a configured dataPath may hold '\\'.
+	Expect(qod::search::SameDataPathAs("C:\\qod\\data", "C:/qod/data/", true), "Windows: '\\' and '/' name one local folder");
+	Expect(qod::search::SameDataPathAs("C:\\qod\\data\\", "C:/qod/data/", true), "Windows: a trailing '\\' is dropped too");
+	Expect(!qod::search::SameDataPathAs("C:\\qod\\data", "C:/qod/other/", true), "Windows: another folder");
+	Expect(!qod::search::SameDataPathAs("s3://lake/a\\b/", "s3://lake/a/b/", true), "Windows: a remote path keeps its '\\'");
+	Expect(!qod::search::SameDataPathAs("/data/a\\b/", "/data/a/b/", false), "POSIX: '\\' is a name's character");
+	// Fail closed (CI round 2 re-review): a case that differs, a UNC or device path, a drive's root, a bare scheme.
+	Expect(!qod::search::SameDataPathAs("C:\\QOD\\Data", "C:/qod/data/", true), "Windows: a path differing in case is refused");
+	Expect(!qod::search::SameDataPathAs("\\\\server\\share\\data", "//server/share/data/", true),
+	       "Windows: a UNC path is refused");
+	Expect(!qod::search::SameDataPathAs("\\\\server\\share\\data", "\\\\server\\share\\data", true),
+	       "Windows: a UNC path is refused even against itself");
+	Expect(!qod::search::SameDataPathAs("\\\\?\\C:\\qod\\data", "C:/qod/data/", true), "Windows: a device path is refused");
+	Expect(!qod::search::SameDataPathAs("C:\\", "C:/", true), "Windows: a drive's root is refused");
+	Expect(!qod::search::SameDataPathAs("C:", "C:", true), "Windows: a bare drive is refused");
+	Expect(!qod::search::SameDataPath("s3://", "s3://"), "a scheme with no folder is refused");
 
 	// Every bad answer: the retryable text, nothing cached.
 	{

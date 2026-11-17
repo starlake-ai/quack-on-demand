@@ -111,8 +111,19 @@ std::string FirstLine(const std::string &text) {
 	return Redact(line.size() > 300 ? line.substr(0, 300) + "..." : line);
 }
 
+//! A file's name: after its last separator. DuckLake loads a local path with the platform's separator, so on
+//! Windows a view's paths hold '\\' where the catalog stores '/' (StorePath, LoadPath); the tests' paths hold
+//! no backslash in a name.
 std::string Base(const std::string &path) {
-	return path.substr(path.find_last_of('/') + 1);
+	return path.substr(path.find_last_of("/\\") + 1);
+}
+
+//! A stored local path (the catalog's '/' form) as DuckLake loads it on this platform: '\\' on Windows.
+std::string Loaded(std::string path) {
+#ifdef _WIN32
+	std::replace(path.begin(), path.end(), '/', '\\');
+#endif
+	return path;
 }
 
 std::string Quote(const std::string &text) {
@@ -458,7 +469,7 @@ Truth ReadTruth(Connection &ref, int64_t s, const std::string &table = "pages") 
 		t.delete_files.insert(data_base + "|" + Base(path) + "|" + dels->GetValue(2, r).ToString() + "|" + footer);
 		// The delete file's positions and snapshot column, as the file holds them.
 		auto full = path;
-		if (!full.empty() && full[0] != '/') {
+		if (!full.empty() && !std::filesystem::path(full).is_absolute()) {
 			// a relative path: look the full one up beside the data file (same directory)
 			for (auto &entry : std::filesystem::recursive_directory_iterator(t.data_path)) {
 				if (entry.path().filename().string() == Base(path)) {
@@ -652,7 +663,8 @@ void CompareView(const std::string &label, const Truth &truth, const std::string
 	for (auto &f : v.files) {
 		ids_unknown = ids_unknown && f.data_file_id == -1 && !f.flags_known && f.record_count == -1 &&
 		              f.bundle_key == qod::Hex(qod::Sha256(f.path)) && f.bundle_key.size() == 64;
-		Check(f.path.rfind(truth.data_path, 0) == 0, label + ": data file path is absolute under data_path", Base(f.path));
+		Check(f.path.rfind(Loaded(truth.data_path), 0) == 0, label + ": data file path is absolute under data_path",
+		      Base(f.path));
 	}
 	Check(ids_unknown, label + ": every file: data_file_id and record_count -1, flags_known false, bundle_key = "
 	                           "hex SHA-256 of its path");
@@ -955,6 +967,58 @@ void RunScenario(const std::string &kind, const std::filesystem::path &dir, cons
 		Check(!beyond.empty() && t_small.inlined_deletes.empty(),
 		      "9b hidden positions beyond the delete files are not the catalog's inlined deletes (rows stamped after S)",
 		      Join(beyond));
+	}
+
+	// ---- 10. a data file outside data_path: DuckLake stores its path absolute (path_is_relative false) ----
+	// Windows stores every path in '/' form and loads it with its own separator (DuckLake's StorePath and LoadPath),
+	// and its scans name files by the loaded path; a file added from outside data_path is the absolute stored form
+	// every platform can make. The view keys files, their delete files and the scan's rows by the path DuckLake
+	// loads, so an absolute path must serve as a relative one does: liveness, the delete file, the inlined delete.
+	{
+		auto outside = dir / "outside";
+		std::filesystem::create_directories(outside);
+		auto ext_file = (outside / "ext.parquet").string();
+		bool made = Exec(setup, "CREATE TABLE lake.main.ext (id BIGINT, v VARCHAR)", "create ext") &&
+		            Exec(setup, "COPY (SELECT i::BIGINT AS id, 'v' || i AS v FROM range(0, 3000) r(i)) TO " +
+		                            Quote(ext_file),
+		                 "write the outside file") &&
+		            Exec(setup, "CALL ducklake_add_data_files('lake', 'ext', " + Quote(ext_file) + ")", "add it") &&
+		            Exec(setup, "DELETE FROM lake.main.ext WHERE id BETWEEN 100 AND 1099", "a delete file") &&
+		            Exec(setup, "DELETE FROM lake.main.ext WHERE id = 7", "an inlined delete");
+		if (made) {
+			auto stored = Must(ref, "SELECT path, path_is_relative FROM " + g_meta + ".ducklake_data_file WHERE table_id = " +
+			                            std::to_string(TableId(ref, "ext")) + " AND end_snapshot IS NULL");
+			Check(stored->RowCount() == 1 && !stored->GetValue(1, 0).GetValue<bool>(),
+			      "10 the outside file's path is stored absolute (path_is_relative false)",
+			      stored->RowCount() ? stored->GetValue(0, 0).ToString() : "no row");
+			auto ext_truth = TruthAt(ref, Head(ref), false, "ext");
+			RunHooked(client, "SELECT rowid FROM lake.main.ext", err, HookMode::Resolve, "ext");
+			if (g_hook.view) {
+				auto &v = *g_hook.view;
+				auto g = Summarize(v);
+				Check(v.files.size() == 1 && Base(v.files[0].path) == "ext.parquet" &&
+				          v.files[0].bundle_key == qod::Hex(qod::Sha256(v.files[0].path)),
+				      "10 the view names the outside file by the absolute path DuckLake loads",
+				      v.files.empty() ? "no file" : v.files[0].path);
+				Check(g.files == ext_truth.files, "10 data files (path, row_id_start, begin, size, footer)",
+				      Join(g.files) + " vs " + Join(ext_truth.files));
+				Check(g.live == ext_truth.live && !g.live.empty() && g.live.begin()->second.size() == 1999,
+				      "10 liveness equals the positions the table's own read returns (1,999 of 3,000 live)",
+				      std::to_string(g.live.empty() ? 0 : g.live.begin()->second.size()) + " live");
+				Check(g.delete_files == ext_truth.delete_files && !g.delete_files.empty(),
+				      "10 the delete file (data file, path, size, footer)",
+				      Join(g.delete_files) + " vs " + Join(ext_truth.delete_files));
+				Check(g.positions == ext_truth.positions, "10 ReadDeletePositions equals read_parquet(pos, snapshot column)");
+				auto beyond = HiddenBeyondDeleteFiles(v, ext_truth);
+				Check(beyond == ext_truth.inlined_deletes && ext_truth.inlined_deletes.size() == 1,
+				      "10 hidden positions beyond the delete file equal the catalog's inlined delete",
+				      Join(beyond) + " vs " + Join(ext_truth.inlined_deletes));
+			} else {
+				Check(false, "10 the outside file's view resolves", FirstLine(g_hook.error + err));
+			}
+		} else {
+			Check(false, "10 the outside file's setup");
+		}
 	}
 
 	// ---- the exception's conditions (spec 13) ----

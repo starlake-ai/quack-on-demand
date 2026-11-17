@@ -9,6 +9,7 @@
 #include "wire_text.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/object_cache.hpp"
@@ -275,15 +276,37 @@ RecordAnswer VerifyIndexRecords(const std::string &text, const std::string &node
 	return answer;
 }
 
-bool SameDataPath(const std::string &a, const std::string &b) {
-	auto trimmed = [](std::string path) {
+bool SameDataPathAs(const std::string &a, const std::string &b, bool backslash_separator) {
+	// The empty string when `path` names no folder this check accepts (fail closed).
+	auto stored = [backslash_separator](std::string path) -> std::string {
+		// DuckLake's StorePath: the catalog keeps data_path (and every path) with '/', and a local path's own
+		// separator ('\\' on Windows; a remote path's is always '/') becomes '/'.
+		if (backslash_separator && !duckdb::FileSystem::IsRemoteFile(path)) {
+			std::replace(path.begin(), path.end(), '\\', '/');
+			// A UNC or device path (\\server\share, \\?\C:\...) has other spellings of one folder: refused.
+			if (path.rfind("//", 0) == 0) {
+				return "";
+			}
+		}
 		while (!path.empty() && path.back() == '/') {
 			path.pop_back();
 		}
+		// A drive's root (C:\ read as C:) or a scheme with no folder (s3://) names no data path: refused.
+		if (!path.empty() && path.back() == ':') {
+			return "";
+		}
 		return path;
 	};
-	auto left = trimmed(a);
-	return !left.empty() && left == trimmed(b);
+	auto left = stored(a);
+	return !left.empty() && left == stored(b);
+}
+
+bool SameDataPath(const std::string &a, const std::string &b) {
+#ifdef _WIN32
+	return SameDataPathAs(a, b, true);
+#else
+	return SameDataPathAs(a, b, false);
+#endif
 }
 
 RecordClient::RecordClient(std::string node_id, std::string node_key, int64_t timeout_ms,

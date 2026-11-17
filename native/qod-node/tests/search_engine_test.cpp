@@ -4702,6 +4702,35 @@ void RunCaches(DuckDB &db, Connection &setup, Connection &sysc, Connection &clie
 		      "C4 a refused bundle is cached like a miss: read once, then no FileSystem call (another object's size "
 		      "included) until the record's version moves; the fallback answers every search",
 		      shown);
+#ifndef _WIN32
+		// Only a real not-found is a miss: an index folder the node may not enter (EACCES, not ENOENT) is a read
+		// failure, counted refused and never cached, so each search tries the bundle again.
+		if (::geteuid() == 0) {
+			Say("note C4 an index folder the node may not enter: not checked as root (root enters any folder)");
+		} else {
+			g_indexes.Change("lake", "c4r", [](qod::search::IndexRecord &r) { r.segments_version++; });
+			auto folder = fs::path(path).parent_path();
+			auto before = qod::search::SegmentCacheCountersForTest();
+			fs::permissions(folder, fs::perms::none, ec);
+			std::vector<idx_t> denied_opens;
+			bool denied_same = true;
+			for (int i = 0; i < 2; i++) {
+				CRun run;
+				denied_opens.push_back(OpensOf(path, [&] { run = CSearch(setup, counted, "c4r"); }));
+				denied_same = denied_same && run.same && run.record.fallback_docs == 5000;
+			}
+			fs::permissions(folder, fs::perms::owner_all, ec);
+			auto after = qod::search::SegmentCacheCountersForTest();
+			Check(denied_same && after.refused == before.refused + 2 && after.missing == before.missing &&
+			          after.reads == before.reads + 2 && after.missing_hits == before.missing_hits,
+			      "C4 an index folder the node may not enter (mode 000): refused each time, never cached as missing; the "
+			      "fallback answers",
+			      "refused +" + std::to_string(after.refused - before.refused) + ", missing +" +
+			          std::to_string(after.missing - before.missing) + ", reads +" +
+			          std::to_string(after.reads - before.reads) + ", opens " + std::to_string(denied_opens[0]) + " " +
+			          std::to_string(denied_opens[1]));
+		}
+#endif
 	}
 	{
 		// Review M4: a build on this node that forgets a key while a search's probe of it is under way: the probe
@@ -5823,25 +5852,61 @@ int Run(const fs::path &goldens) {
 		      "E4b 200,000 input rows on one local state: interrupt checks ran, at most 65,536 rows between them",
 		      (ran ? "" : FirstLine(error) + "; ") + std::to_string(c.interrupt_checks) + " checks, max " +
 		          std::to_string(c.max_rows_between_checks) + ", " + std::to_string(int(ms)) + " ms");
-		// The client interrupts 5 ms into qs_search; the watcher copies it into the cancel flag.
+		// The client interrupts the statement while qs_search runs; the watcher copies it into the cancel flag.
+		const std::string e0 = "E0 an interrupt while qs_search runs: the watcher sets the flag, qs_search answers "
+		                       "search_cancelled, no row";
 		std::thread interrupter;
+		qod::ResetLastSearchCallForTest();
+#ifdef QOD_SEARCH_TEST_HOOKS
+		// Deterministic (the library's test-hooks hold): qs_search waits past its statistics, before it scores, for its
+		// cancel flag, and the client interrupts only once the call is held, so the interrupt lands inside qs_search
+		// on any host, however fast.
+		auto holds = qs_test_search_holds();
+		qs_test_hold_next_search();
+		qod::SearchCallObserverForTest([&](ClientContext &context) {
+			interrupter = std::thread([&context, holds] {
+				auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				while (qs_test_search_holds() == holds && std::chrono::steady_clock::now() < until) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				context.Interrupt();
+			});
+		});
+#else
+		// Timed (no hold in a build without the test hooks): 5 ms in. It counts only when the library itself answered
+		// search_cancelled; an interrupt that landed outside qs_search (a fast host) is noted, never passed.
 		qod::SearchCallObserverForTest([&](ClientContext &context) {
 			interrupter = std::thread([&context] {
 				std::this_thread::sleep_for(std::chrono::milliseconds(5));
 				context.Interrupt();
 			});
 		});
-		qod::ResetLastSearchCallForTest();
+#endif
 		ran = Try(setup, Search(big, query, "'lake.main.big'"), rows, error);
 		qod::SearchCallObserverForTest(nullptr);
 		if (interrupter.joinable()) {
 			interrupter.join();
 		}
 		auto record = qod::LastSearchCallForTest();
+#ifdef QOD_SEARCH_TEST_HOOKS
+		Check(qs_test_search_holds() == holds + 1, "E0 qs_search reached the hold",
+		      std::to_string(qs_test_search_holds() - holds) + " holds");
 		Check(!ran && rows.empty() && error.find("Interrupt") != std::string::npos && record.library_cancelled,
-		      "E0 an interrupt while qs_search runs: the watcher sets the flag, qs_search answers search_cancelled, "
-		      "no row",
+		      e0 + " (held in qs_search)",
 		      FirstLine(error) + (record.library_cancelled ? "" : " (qs_search did not report search_cancelled)"));
+#else
+		if (record.library_cancelled) {
+			Check(!ran && rows.empty() && error.find("Interrupt") != std::string::npos, e0, FirstLine(error));
+		} else {
+			Say("note " + e0 + ": not reached on this host (the interrupt landed outside qs_search: " +
+			    (ran ? std::to_string(rows.size()) + " rows answered" : FirstLine(error)) +
+			    "); no cancel inside the library to check");
+			if (!ran) {
+				Check(rows.empty() && error.find("Interrupt") != std::string::npos,
+				      "E0 the interrupt outside qs_search: Interrupted, no row", FirstLine(error));
+			}
+		}
+#endif
 		Exec(setup, "SELECT 1", "the connection after the interrupt");
 		Exec(setup, "SET threads = 16", "threads 16");
 	}

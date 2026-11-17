@@ -1,5 +1,7 @@
 #include "search_segments.hpp"
 
+#include "search_path_probe.hpp"
+
 #include "search_visibility.hpp"
 
 #include "crypto.hpp"
@@ -412,7 +414,24 @@ std::shared_ptr<const OpenSegment> LoadSegment(ClientContext &context, const std
 	uint64_t object_size = 0;
 	try {
 		settings.reads++;
-		auto handle = fs.OpenFile(bundle_path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+		unique_ptr<FileHandle> handle;
+#ifdef _WIN32
+		try {
+			handle = fs.OpenFile(bundle_path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+		} catch (IOException &) {
+			// On Windows DuckDB's local file system returns no handle only for ERROR_FILE_NOT_FOUND: a bundle whose
+			// index folder (.qod_search/<index id>/) does not exist yet fails with ERROR_PATH_NOT_FOUND, an IO error.
+			// Only a real not-found of a local path is missing (D8 caches it), as POSIX's ENOENT is; any other failure
+			// (access denied, an invalid name, every remote one) stays a read failure below.
+			if (FileSystem::IsRemoteFile(bundle_path) || !LocalPathNotFound(bundle_path)) {
+				throw;
+			}
+		}
+#else
+		// POSIX: ENOENT, a missing file or folder, is the null handle; anything else (EACCES on a folder of the path,
+		// ...) throws and is a read failure below, never cached as missing.
+		handle = fs.OpenFile(bundle_path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+#endif
 		if (!handle) {
 			settings.missing++;
 			RememberMiss(cache, miss_key, record.segments_version, -1, probe);

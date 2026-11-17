@@ -254,7 +254,8 @@ if(QOD_NODE_SEARCH)
   # index records (6.1).
   target_sources(qod_node_core PRIVATE src/search_functions.cpp src/search_sink.cpp src/search_snapshot.cpp
                  src/search_lineage.cpp src/search_segments.cpp src/search_visibility.cpp
-                 src/search_fallback.cpp src/search_records.cpp src/search_memory.cpp src/search_rowmap.cpp)
+                 src/search_fallback.cpp src/search_records.cpp src/search_memory.cpp src/search_rowmap.cpp
+                 src/search_path_probe.cpp)
   target_compile_definitions(qod_node_core PUBLIC QOD_NODE_SEARCH=1)
   set(QOD_SEARCH_LIB qod_search_core)
   if(QOD_SEARCH_TEST_HOOKS AND QOD_NODE_TESTS)

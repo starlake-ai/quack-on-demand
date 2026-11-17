@@ -110,8 +110,14 @@ struct RecordAnswer {
 RecordAnswer VerifyIndexRecords(const std::string &text, const std::string &node_key, const std::string &node_id,
                                 const std::string &nonce, const std::vector<RecordTable> &tables);
 
-//! True when two data paths name the same folder: equal once trailing '/' are dropped from both.
+//! True when two data paths name the same folder: equal in DuckLake's stored form (StorePath: on Windows a local
+//! path's '\\' read as '/', as the catalog's ducklake_metadata keeps data_path) once trailing '/' are dropped from both.
+//! The manager's bundleRoot is the database's dataPath as configured, which may spell a Windows path either way.
+//! Fails closed: a path that ends in ':' once trimmed (a drive's root, a scheme with no folder), and on Windows a UNC or
+//! device path (it starts with two separators), match nothing; letters compare exactly (no case folding).
 bool SameDataPath(const std::string &a, const std::string &b);
+//! SameDataPath with the platform's rule given: `backslash_separator` is true on Windows (the tests drive both).
+bool SameDataPathAs(const std::string &a, const std::string &b, bool backslash_separator);
 
 //! DuckLakeDataPath of `catalog` for the record check of FetchIndexRecords (Task 12, carried from Task 7), kept on
 //! the database instance (its ObjectCache) by (catalog folded to lowercase, the attached catalog's oid) for
