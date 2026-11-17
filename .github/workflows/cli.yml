@@ -3,9 +3,9 @@ name: cli
 on:
   push:
     branches: [main]
-    paths: ["cli/**", ".github/workflows/cli.yml"]
+    paths: ["cli/**", "scripts/release/release_manifest.py", "project/Versions.scala", "native/qod-node/CMakeLists.txt", ".github/workflows/cli.yml"]
   pull_request:
-    paths: ["cli/**", ".github/workflows/cli.yml"]
+    paths: ["cli/**", "scripts/release/release_manifest.py", "project/Versions.scala", "native/qod-node/CMakeLists.txt", ".github/workflows/cli.yml"]
 
 jobs:
   test:

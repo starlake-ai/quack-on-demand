@@ -23,6 +23,14 @@
   `qod database update --default-database ''`. A `memory` database that pointed `defaultDatabase`
   at a federated alias names that catalog's tables by their alias (`fedpg.public.orders`).
 
+### Added
+
+- Each release publishes `release.json` beside its jar (#223): the jar, the `qod` files on PyPI
+  and the Windows `qod-node` with their sha256, the Java major the manager needs, the DuckDB
+  release and the sha256 of each DuckDB asset the CLI downloads, and the qod-node protocol. The
+  jar, `qod-node-windows-*.exe`, the `qod` wheel and sdist and `release.json` carry a Sigstore
+  build provenance attestation: `gh attestation verify <file> --repo starlake-ai/qod`.
+
 ### Changed
 
 - A column mask or deny applies only to the table its catalog, schema and table name cover, as row
@@ -30,6 +38,11 @@
   `client_b.claims.claim.member_no`, which it matched by table name alone (#201). A policy whose
   catalog or schema is `*` still covers every table of that name. When the table walk meets a
   construct it does not read, the rewriter keeps matching by table name for that statement.
+- `qod start`, `qod serve` and `qod fleet join` check the DuckDB CLI and libduckdb they download
+  against a sha256 the wheel pins per asset, before unpacking them, as they already did for the
+  jar, the JRE and SeaweedFS (#223). A `DUCKDB_VERSION` naming a release the wheel pins nothing
+  for is refused before any download: unset it, or unpack that release into the cache folder the
+  error names.
 - Under HA, DuckLake maintenance runs on follower replicas (#210). The leader still decides when a
   run is due, and takes a queued run only once it has waited `QOD_MAINT_LEADER_GRACE_SEC` (0, the
   default, means three `QOD_MAINT_TICK_SEC` ticks), so it runs maintenance only when no follower
