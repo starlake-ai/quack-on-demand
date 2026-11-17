@@ -26,3 +26,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Guard - release-grade DuckDB pins
         run: scripts/release/check-release-pins.sh
+      # The DuckDB release the qod CLI provisions (with a sha256 for each asset it downloads)
+      # against Versions.duckdb, and the CLI's node protocol against qod-node's. release.json is
+      # written from these pins only after every channel published, too late to catch a mismatch.
+      - name: Guard - the pins release.json states agree
+        run: python3 scripts/release/release_manifest.py --check-pins

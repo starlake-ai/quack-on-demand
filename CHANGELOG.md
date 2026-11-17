@@ -87,6 +87,21 @@
 - **A refused connect to a node names no node address to clients** (the manager log has it), and
   marks the node `unreachable`, not `statement_failed`, since nothing was sent; a refused session
   handle on a statement is reported as the probe reports it.
+- A user with a row policy on a table now reads it at the snapshot its time-travel clause names
+  (`SELECT * FROM customer AT (TIMESTAMP => '...')`, `AT (VERSION => n)`), filtered, under the
+  name-history rule of the data edge entry above. Until now the row filter dropped the clause, so
+  the statement ran against the current snapshot and answered with no error. A time-travel
+  spelling DuckDB does not take (`FOR TIMESTAMP AS OF`, `FOR SYSTEM_TIME AS OF`) is refused.
+- The same user is refused when they read that table with `TABLESAMPLE` or `USING SAMPLE`,
+  or with a `PIVOT` or `UNPIVOT` written after it (`FROM customer PIVOT (...)`). Until now the
+  sample or the pivot was dropped and every filtered row came back. To sample or pivot, wrap the
+  table in a subquery: `FROM (SELECT * FROM customer) USING SAMPLE 10%`,
+  `PIVOT (SELECT * FROM customer) ON ...`.
+- A user whose system-catalog reads are filtered is refused the same way for a sample, a `PIVOT`
+  or `UNPIVOT`, or `WITH ORDINALITY` on `information_schema.tables` (and its other filtered
+  views) or a `duckdb_*()` catalog function. A subquery works around the sample and the pivot:
+  `FROM (SELECT * FROM information_schema.tables) USING SAMPLE 10%`.
+- Tables without a row policy for the user, and users without row policies, are not affected.
 
 ## 0.13.1
 
@@ -111,6 +126,14 @@
   `qod database update --default-database ''`. A `memory` database that pointed `defaultDatabase`
   at a federated alias names that catalog's tables by their alias (`fedpg.public.orders`).
 
+### Added
+
+- Each release publishes `release.json` beside its jar (#223): the jar, the `qod` files on PyPI
+  and the Windows `qod-node` with their sha256, the Java major the manager needs, the DuckDB
+  release and the sha256 of each DuckDB asset the CLI downloads, and the qod-node protocol. The
+  jar, `qod-node-windows-*.exe`, the `qod` wheel and sdist and `release.json` carry a Sigstore
+  build provenance attestation: `gh attestation verify <file> --repo starlake-ai/qod`.
+
 ### Changed
 
 - A column mask or deny applies only to the table its catalog, schema and table name cover, as row
@@ -118,6 +141,11 @@
   `client_b.claims.claim.member_no`, which it matched by table name alone (#201). A policy whose
   catalog or schema is `*` still covers every table of that name. When the table walk meets a
   construct it does not read, the rewriter keeps matching by table name for that statement.
+- `qod start`, `qod serve` and `qod fleet join` check the DuckDB CLI and libduckdb they download
+  against a sha256 the wheel pins per asset, before unpacking them, as they already did for the
+  jar, the JRE and SeaweedFS (#223). A `DUCKDB_VERSION` naming a release the wheel pins nothing
+  for is refused before any download: unset it, or unpack that release into the cache folder the
+  error names.
 - Under HA, DuckLake maintenance runs on follower replicas (#210). The leader still decides when a
   run is due, and takes a queued run only once it has waited `QOD_MAINT_LEADER_GRACE_SEC` (0, the
   default, means three `QOD_MAINT_TICK_SEC` ticks), so it runs maintenance only when no follower

@@ -503,10 +503,46 @@ _DUCKDB_PLAT = {
 }
 
 
+# The sha256 of every DuckDB release asset _DUCKDB_PLAT names, per release: a download is checked
+# against it before it is unpacked. Bumping DUCKDB_CLI_VERSION means adding the new release's
+# digests here (`gh api repos/duckdb/duckdb/releases/tags/v<version>` lists each asset's `digest`);
+# test_duckdb_assets_are_pinned_for_every_platform fails until they are.
+_DUCKDB_SHA256 = {
+    "2.0.0": {
+        "duckdb-cli-linux-amd64.tar.gz": "c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc",
+        "duckdb-cli-linux-arm64.tar.gz": "859e1875d2a9515fbb4bf8871061437a14af82320da68c753f094c4b776348fe",
+        "duckdb-cli-osx-universal.tar.gz": "8a8f67e7c7f7d1392fa63ba3971948391392fe2a25fca63e7008e33c50beb4c2",
+        "duckdb-cli-windows-amd64.tar.gz": "91663c2f36c2a334b0e5e639006d8c29c29e013af0c477d80bb931df68870312",
+        "duckdb-cli-windows-arm64.tar.gz": "4b5d1e4611debf676a693a8a6896dc29b352a9c3b11b706e7421d1d6082e05fd",
+        "duckdb-shared-libs-linux-amd64.tar.gz": "993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1",
+        "duckdb-shared-libs-linux-arm64.tar.gz": "c60eecf91143ca6bbac55c4f4d40dc22520488b0ac257c86e0fe9a2b451cf2b7",
+        "duckdb-shared-libs-osx-universal.tar.gz": "14cd63180614cfd961f7959146ecd9087527ff20b67311efdc3fa1c29c18204d",
+        "duckdb-shared-libs-windows-amd64.tar.gz": "2b83169128239de5f45fe21de80f99bf436e53aa4bb24020dd951a1ba8d4b95f",
+        "duckdb-shared-libs-windows-arm64.tar.gz": "159ce60eb587112b8c5f290b8beea56af5f13be4d13679de127ad9bfaafb7447",
+    },
+}
+
+
 def duckdb_version() -> str:
     """The duckdb release to provision: `DUCKDB_VERSION` (run-jar.sh
     convention) or the pinned default."""
     return os.environ.get("DUCKDB_VERSION") or DUCKDB_CLI_VERSION
+
+
+def duckdb_asset_sha256(asset: str, home: Path | None = None) -> str:
+    """The pinned sha256 of `asset` in the DuckDB release being provisioned. A release this qod
+    pins nothing for (a DUCKDB_VERSION override) is refused before anything is downloaded; the
+    refusal names `home`, the <root>/<version> folder to unpack that release into by hand."""
+    version = duckdb_version()
+    digest = _DUCKDB_SHA256.get(version, {}).get(asset)
+    if digest is None:
+        home = home or duckdb_cache_root() / version
+        raise RuntimeError(
+            f"this qod pins no sha256 for {asset} of DuckDB {version} (it pins DuckDB "
+            f"{', '.join(sorted(_DUCKDB_SHA256))}); unset DUCKDB_VERSION, or unpack that release "
+            f"into {home / 'bin'} and {home / 'lib'} yourself"
+        )
+    return digest
 
 
 def duckdb_cache_root(cache_dir: Path | None = None) -> Path:
@@ -545,6 +581,21 @@ def _extract_tar_gz(archive: Path, dest: Path) -> None:
             t.extractall(dest)
 
 
+def _fetch_duckdb_archive(url: str, dest: Path, archive_name: str, label: str) -> None:
+    """Download a DuckDB release asset, check it against its pinned sha256 and unpack it into
+    `dest`; a download that does not match is deleted, never unpacked."""
+    expected = duckdb_asset_sha256(url.rsplit("/", 1)[1], dest.parent)
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = dest / archive_name
+    try:
+        actual = _download(url, archive, label)
+        if actual != expected:
+            raise IntegrityError(f"{url}: sha256 {actual} is not the pinned {expected}")
+        _extract_tar_gz(archive, dest)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
 def duckdb_cli_url(os_name: str, arch: str) -> str:
     plat = _DUCKDB_PLAT[(os_name, arch.lower())]
     return (
@@ -559,7 +610,7 @@ def ensure_duckdb_cli(
     arch: str | None = None,
 ) -> Path:
     """bin dir holding the pinned `duckdb` CLI under `cache_dir`, downloading
-    it from the DuckDB GitHub release on first use."""
+    it from the DuckDB GitHub release on first use (sha256-checked before it is unpacked)."""
     import platform
 
     bin_dir = _duckdb_dir("bin", cache_dir)
@@ -568,13 +619,9 @@ def ensure_duckdb_cli(
         return bin_dir
 
     arch = arch if arch is not None else platform.machine()
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    archive = bin_dir / "duckdb-cli.tar.gz"
-    try:
-        _download(duckdb_cli_url(os_name, arch), archive, f"duckdb {duckdb_version()} CLI")
-        _extract_tar_gz(archive, bin_dir)
-    finally:
-        archive.unlink(missing_ok=True)
+    _fetch_duckdb_archive(
+        duckdb_cli_url(os_name, arch), bin_dir, "duckdb-cli.tar.gz", f"duckdb {duckdb_version()} CLI"
+    )
     if not duckdb.is_file():
         raise RuntimeError(f"no duckdb binary found after extracting the CLI archive in {bin_dir}")
     duckdb.chmod(0o755)
@@ -636,13 +683,9 @@ def ensure_libduckdb(
             return lib_dir
         lib.unlink()
 
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    archive = lib_dir / "duckdb-shared-libs.tar.gz"
-    try:
-        _download(libduckdb_url(os_name, arch), archive, f"libduckdb {duckdb_version()}")
-        _extract_tar_gz(archive, lib_dir)
-    finally:
-        archive.unlink(missing_ok=True)
+    _fetch_duckdb_archive(
+        libduckdb_url(os_name, arch), lib_dir, "duckdb-shared-libs.tar.gz", f"libduckdb {duckdb_version()}"
+    )
     if not lib.is_file():
         raise RuntimeError(f"no {lib.name} found after extracting the libduckdb archive in {lib_dir}")
     return lib_dir

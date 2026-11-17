@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.policy.TimeTravelCarrier
 import ai.starlake.quack.edge.policy.TimeTravelCarrier.Carry
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.edge.policy.TableClauses
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
 import ai.starlake.sql.ParserInput
 import com.typesafe.scalalogging.LazyLogging
@@ -64,8 +65,9 @@ object RowPolicyRewriter:
 
   /** The statement parses but holds a shape the rewrite cannot filter or cannot ship (a
     * parenthesized statement reading a policy table, a syntax node the walk cannot follow, DuckDB's
-    * `//` integer division). Denied by the router with `reason`, a fixed string that never carries
-    * the SQL, so the caller learns what to change.
+    * `//` integer division, a policy table carrying a clause the wrap would drop such as a
+    * `TABLESAMPLE`; a time-travel clause TimeTravelCarrier placed is kept). Denied by the router
+    * with `reason`, a fixed string that never carries the SQL, so the caller learns what to change.
     */
   final case class Refused(reason: String) extends Outcome
 
@@ -107,6 +109,13 @@ object RowPolicyRewriter:
   private val TableStatementRefusal =
     "a TABLE statement in expression position (ARRAY(TABLE t), ANY (TABLE t)) reads a " +
       "row-policy table; use a subquery selecting from it instead"
+
+  /** A row-policy table read with a clause the wrap cannot keep ([[TableClauses]]): `clause` is a
+    * fixed phrase, never SQL.
+    */
+  private def unkeptClauseRefusal(clause: String): String =
+    s"a row-policy table is read with $clause, which the row filter cannot keep; " +
+      "read the table without it"
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
@@ -360,19 +369,27 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
     val matched = matchingPolicies(t, eff, ctx)
     if matched.isEmpty then t
     else
-      val predicate =
-        matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
-      val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
-
       val alias: Alias = t.getAlias
       // Rebuild from the RAW parts: a quoted identifier stays quoted in the output.
       val baseTable = new Table(t.getName)
       Option(t.getSchemaName).foreach(_ => baseTable.setSchemaName(t.getSchemaName))
       Option(t.getDatabase).foreach(baseTable.setDatabase)
-      // A time-travel clause pins the BASE table: on the wrapper it would be invalid SQL, and
-      // dropping it would filter the current data instead of the snapshot.
-      baseTable.setTimeTravel(t.getTimeTravel): Unit
-      baseTable.setTimeTravelStrAfterAlias(t.getTimeTravelStrAfterAlias): Unit
+      // A time-travel clause TimeTravelCarrier placed pins the BASE table: on the wrapper it would
+      // be invalid SQL, and dropping it would filter the current data instead of the snapshot.
+      // Anything else on t (another time-travel spelling, a sample, a PIVOT after the table) would
+      // vanish with the rebuild and the filtered read would answer as another statement, so it is
+      // refused, naming the clause, never a value.
+      val carried =
+        TimeTravelCarrier.isPlaceholder(t.getTimeTravel) && t.getTimeTravelStrAfterAlias == null
+      val unkept =
+        if carried then TableClauses.unkeptBesidesTimeTravel(t, baseTable.getFullyQualifiedName)
+        else TableClauses.unkept(t, baseTable.getFullyQualifiedName)
+      unkept.foreach(clause => throw new Refusal(unkeptClauseRefusal(clause)))
+      if carried then baseTable.setTimeTravel(t.getTimeTravel): Unit
+
+      val predicate =
+        matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
+      val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
 
       val inner = new PlainSelect()
       inner.addSelectItem(new AllColumns())

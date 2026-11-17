@@ -580,3 +580,143 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, List(regionEu))
     ) shouldBe PassthroughParseFailed
   }
+
+  // ---- clauses on a policy table the wrap cannot keep: refused, never dropped --------------
+
+  /** The wrap rebuilt a policy table from its name and alias only, so anything else written on it
+    * (a sample, a PIVOT after the table) vanished and the filtered read answered as another
+    * statement. Each reason is pinned whole: it names the clause, never the table nor a value from
+    * the statement. A DuckDB `AT (...)` clause is the exception: TimeTravelCarrier carries it onto
+    * the base table (above); only the time-travel spellings it does not carry are refused.
+    */
+  private val TimeTravelReason =
+    "a row-policy table is read with a time-travel clause (AT ...), which the row filter cannot " +
+      "keep; read the table without it"
+  private val SampleReason =
+    "a row-policy table is read with a sample clause (TABLESAMPLE, USING SAMPLE), which the row " +
+      "filter cannot keep; read the table without it"
+  private val PivotReason =
+    "a row-policy table is read with a PIVOT or UNPIVOT clause written after the table, which " +
+      "the row filter cannot keep; read the table without it"
+  private val HintReason =
+    "a row-policy table is read with a table hint (USE INDEX, WITH (...)), which the row filter " +
+      "cannot keep; read the table without it"
+  private val NameReason =
+    "a row-policy table is read with a name the rewrite cannot print back as written (a " +
+      "database link, more than three parts), which the row filter cannot keep; read the table " +
+      "without it"
+
+  /** (statement, the exact reason, values of the statement the reason must not carry). One test per
+    * row, so a red run shows every row that was rewritten.
+    */
+  private val unkeptCases: List[(String, String, List[String])] = List(
+    // JSqlParser's other time-travel spellings (DuckDB refuses them; the wrap made them run).
+    ("SELECT * FROM customer FOR TIMESTAMP AS OF '2026-01-01'", TimeTravelReason, Nil),
+    ("SELECT * FROM customer FOR SYSTEM_TIME AS OF '2026-01-01'", TimeTravelReason, Nil),
+    ("SELECT * FROM customer TABLESAMPLE 10%", SampleReason, List("10")),
+    (
+      "SELECT * FROM customer TABLESAMPLE reservoir(10 ROWS)",
+      SampleReason,
+      List("10", "reservoir")
+    ),
+    ("SELECT * FROM customer USING SAMPLE 10%", SampleReason, List("10")),
+    (
+      "SELECT * FROM customer PIVOT (count(*) FOR c_nation IN ('FR'))",
+      PivotReason,
+      List("FR", "c_nation", "count")
+    ),
+    (
+      "SELECT * FROM customer UNPIVOT (v FOR k IN (c_email, c_phone))",
+      PivotReason,
+      List("c_email", "c_phone")
+    ),
+    ("SELECT * FROM customer USE INDEX (i_cust)", HintReason, List("i_cust")),
+    ("SELECT * FROM customer WITH (NOLOCK)", HintReason, List("NOLOCK")),
+    ("SELECT * FROM customer@remote", NameReason, List("remote")),
+    ("SELECT * FROM srv.acme_tpch.tpch1.customer", NameReason, List("srv", "acme_tpch", "tpch1"))
+  )
+
+  unkeptCases.foreach { (sql, reason, values) =>
+    s"a row-policy table read as `$sql`" should "be refused with the clause's reason" in {
+      val got = go(sql, frOnly) match
+        case Refused(r) => r
+        case other      => fail(s"expected Refused, got $other")
+      got shouldBe reason
+      (List("2026", "customer") ++ values).foreach(v => got should not include v)
+    }
+  }
+
+  "a time-travel read" should "pass untouched when the table carries no policy" in {
+    go("SELECT * FROM orders AT (TIMESTAMP => '2026-01-01')", frOnly) shouldBe Passthrough
+    go("SELECT * FROM customer AT (TIMESTAMP => '2026-01-01')", eff(tenantUser, Nil)) shouldBe
+      Passthrough
+    go(
+      "SELECT * FROM customer AT (TIMESTAMP => '2026-01-01')",
+      eff(superuser, List(policy("c_nation = 'FR'")))
+    ) shouldBe Passthrough
+  }
+
+  it should "keep the clause on a table without a policy beside a filtered one" in {
+    raw(
+      go(
+        "SELECT * FROM customer c JOIN orders o AT (TIMESTAMP => '2026-01-01') ON true",
+        frOnly
+      )
+    ) should (include("FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) c") and
+      include("orders o AT (TIMESTAMP => '2026-01-01')"))
+  }
+
+  // Main refused these (the wrap dropped the clause); the carrier now keeps each on the base table.
+  it should "keep AT (TIMESTAMP => ...) on a policy table in every position the carrier reaches" in
+    List(
+      "SELECT * FROM customer AT (TIMESTAMP => '2026-01-01 00:00:00')",
+      "SELECT * FROM customer AT(TIMESTAMP => '2026-01-01 00:00:00')",
+      "SELECT * FROM acme_tpch.tpch1.customer AT (TIMESTAMP => '2026-01-01')",
+      "SELECT * FROM orders o JOIN customer c AT (TIMESTAMP => '2026-01-01') ON true",
+      "SELECT 1 WHERE EXISTS (SELECT 1 FROM customer AT (TIMESTAMP => '2026-01-01'))",
+      "WITH x AS (SELECT * FROM customer AT (TIMESTAMP => '2026-01-01')) SELECT * FROM x"
+    ).foreach { sql =>
+      withClue(sql) {
+        val out = raw(go(sql, frOnly))
+        out should include("TIMESTAMP => '2026-01-01")
+        out should include("WHERE (c_nation = 'FR')")
+        out should not include "__qod_time_travel_"
+      }
+    }
+
+  it should "fail closed on AT written before the alias, which DuckDB does not accept" in {
+    go("SELECT c.c_id FROM customer AT (TIMESTAMP => TIMESTAMP '2026-01-01') c", frOnly) shouldBe
+      PassthroughParseFailed
+  }
+
+  "a sample or a PIVOT on a table without a policy" should "pass untouched" in
+    List(
+      "SELECT * FROM orders TABLESAMPLE 10%",
+      "SELECT * FROM orders USING SAMPLE 10%",
+      "SELECT * FROM orders PIVOT (count(*) FOR o_status IN ('F'))"
+    ).foreach { sql =>
+      withClue(sql)(go(sql, frOnly) shouldBe Passthrough)
+    }
+
+  "a sample of a filtered subquery" should "be rewritten (the way out for a sample or a pivot)" in {
+    go("SELECT * FROM (SELECT * FROM customer) USING SAMPLE 10%", frOnly) shouldBe Rewritten(
+      "SELECT * FROM (SELECT * FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) AS customer) " +
+        "USING SAMPLE 10%"
+    )
+  }
+
+  "a row-policy table read with no clause" should "be wrapped exactly as before" in {
+    go("SELECT * FROM customer", frOnly) shouldBe
+      Rewritten("SELECT * FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) AS customer")
+    go("SELECT c.c_id FROM customer c", frOnly) shouldBe
+      Rewritten("SELECT c.c_id FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) c")
+    go("SELECT * FROM acme_tpch.tpch1.customer AS c", frOnly) shouldBe
+      Rewritten(
+        "SELECT * FROM (SELECT * FROM acme_tpch.tpch1.customer WHERE (c_nation = 'FR')) AS c"
+      )
+    go("SELECT * FROM \"tpch1\".\"customer\"", frOnly) shouldBe
+      Rewritten(
+        "SELECT * FROM (SELECT * FROM \"tpch1\".\"customer\" WHERE (c_nation = 'FR')) " +
+          "AS \"customer\""
+      )
+  }
