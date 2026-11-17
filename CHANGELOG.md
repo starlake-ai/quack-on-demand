@@ -91,7 +91,8 @@
   (`SELECT * FROM customer AT (TIMESTAMP => '...')`, `AT (VERSION => n)`), filtered, under the
   name-history rule of the data edge entry above. Until now the row filter dropped the clause, so
   the statement ran against the current snapshot and answered with no error. A time-travel
-  spelling DuckDB does not take (`FOR TIMESTAMP AS OF`, `FOR SYSTEM_TIME AS OF`) is refused.
+  spelling DuckDB does not take (`FOR TIMESTAMP AS OF`, `FOR SYSTEM_TIME AS OF`) is refused, and
+  the refusal names that spelling rather than `AT (...)`.
 - The same user is refused when they read that table with `TABLESAMPLE` or `USING SAMPLE`,
   or with a `PIVOT` or `UNPIVOT` written after it (`FROM customer PIVOT (...)`). Until now the
   sample or the pivot was dropped and every filtered row came back. To sample or pivot, wrap the
