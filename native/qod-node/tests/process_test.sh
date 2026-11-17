@@ -73,8 +73,30 @@ nonce_line() {
   printf -- '-- qod:init-nonce %s\n' "${1-$init_nonce}"
 }
 
+# A port for a node to listen on. Below the system's ephemeral range: outgoing connections, their TIME_WAIT
+# leftovers and the test servers bound to port 0 (the C++ suites run before this one) all draw local ports from
+# it, and the bind of a port one of them holds fails ("address in use"; CI run 44136435141 drew 39262, inside
+# Linux's 32768 to 60999). Consecutive from a random start (a counter file, as $(port) runs in a subshell), so no
+# two nodes of a run share one.
+ephemeral_low() {
+  local low=""
+  if [[ -r /proc/sys/net/ipv4/ip_local_port_range ]]; then
+    read -r low _ < /proc/sys/net/ipv4/ip_local_port_range
+  else
+    low="$(sysctl -n net.inet.ip.portrange.first 2>/dev/null || true)"
+  fi
+  [[ "$low" =~ ^[0-9]+$ ]] || low=32768
+  echo "$low"
+}
+port_floor=10000
+port_ceiling=$(( $(ephemeral_low) - 1 ))
+(( port_ceiling > port_floor + 2000 )) || { echo "FAIL: the ephemeral port range starts at $((port_ceiling + 1)), leaving no ports below it" >&2; exit 1; }
+echo $(( port_floor + RANDOM % (port_ceiling - port_floor - 1000) )) > "$work/next-port"
 port() {
-  echo $((30000 + RANDOM % 20000))
+  local p
+  p="$(cat "$work/next-port")"
+  echo $((p + 1)) > "$work/next-port"
+  echo "$p"
 }
 
 # A blank and non-ASCII letters in the name: the path reaches qod-node as an argument.

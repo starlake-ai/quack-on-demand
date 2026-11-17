@@ -270,6 +270,12 @@ uint64_t qs_test_footer_reads(void);
 // TEST ONLY: the bytes the library's Rust code holds on the heap now, every thread's (the feature
 // installs a counting global allocator), so a test can measure what a segment adds beyond its bundle.
 uint64_t qs_test_allocated_bytes(void);
+// TEST ONLY: arms a one-shot hold of the next qs_search: once its statistics are computed and before it
+// scores its first segment, it waits for its cancel byte (at most 10 s), so a cancel set meanwhile lands
+// inside the call, which answers search_cancelled. qs_test_search_holds counts the holds reached, every
+// thread's, so a test can wait until the call is held before it cancels.
+void qs_test_hold_next_search(void);
+uint64_t qs_test_search_holds(void);
 // TEST ONLY: the tokens the TEXT fields' analyzer (the builder's and the query parser's) makes of the
 // len UTF-8 bytes at text, in order, each followed by a line feed (no token holds one); free with
 // qs_string_free. NULL with *err set on failure. A test reference tokenizes with it and scores alone.

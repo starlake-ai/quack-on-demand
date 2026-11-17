@@ -4042,6 +4042,9 @@ uint64_t ResidentBytes() {
 		return 0;
 	}
 	return info.resident_size;
+#elif defined(_WIN32)
+	// No /proc and no sysconf: not measured on Windows. The figure is only reported (C0's line), never checked.
+	return 0;
 #else
 	std::ifstream statm("/proc/self/statm");
 	uint64_t size = 0, resident = 0;

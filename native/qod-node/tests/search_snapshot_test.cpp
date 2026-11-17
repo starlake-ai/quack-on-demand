@@ -48,8 +48,9 @@
 #include "duckdb/planner/planner_extension.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -60,8 +61,15 @@
 #include <set>
 #include <sstream>
 #include <string>
-#include <unistd.h>
+#include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 
 using namespace duckdb;
 using View = qod::search::SnapshotView;
@@ -1888,11 +1896,20 @@ void RunBench(const std::filesystem::path &dir, int64_t rows) {
 	}
 }
 
-void OnAlarm(int) {
-	const char msg[] = "FAIL search_snapshot_test: no answer within 600 s\n";
-	ssize_t ignored = ::write(1, msg, sizeof(msg) - 1);
-	(void)ignored;
-	_exit(1);
+//! The run's watchdog, on every platform (it was alarm(2) and SIGALRM, which MSVC lacks): a detached thread that
+//! ends the process after `seconds` unless a later call replaced it.
+std::atomic<int> g_watchdog {0};
+
+void Watchdog(int seconds) {
+	auto generation = ++g_watchdog;
+	std::thread([generation, seconds] {
+		std::this_thread::sleep_for(std::chrono::seconds(seconds));
+		if (g_watchdog.load() == generation) {
+			std::fprintf(stdout, "FAIL search_snapshot_test: no answer within %d s\n", seconds);
+			std::fflush(stdout);
+			std::_Exit(1);
+		}
+	}).detach();
 }
 
 } // namespace
@@ -1966,7 +1983,6 @@ void RunBitsetUnits() {
 }
 
 int main(int argc, char **argv) {
-	std::signal(SIGALRM, OnAlarm);
 	auto base = std::filesystem::temp_directory_path() / ("qod-search-snapshot-" + std::to_string(::getpid()));
 	if (argc > 1 && std::string(argv[1]) == "--bench") {
 		// Task 10's liveness cost only (CTest search_snapshot_bench, label probe): skipped without a size.
@@ -1975,14 +1991,14 @@ int main(int argc, char **argv) {
 			Say("search_snapshot_test --bench: QOD_P2_T6_BENCH_ROWS is not set, skipped");
 			return 77;
 		}
-		alarm(3500);
+		Watchdog(3500);
 		RunBench(base / "bench", std::stoll(rows));
 		std::error_code ignored;
 		std::filesystem::remove_all(base, ignored);
 		Say("checks: " + std::to_string(g_checks) + ", failed: " + std::to_string(g_failures));
 		return g_failures == 0 ? 0 : 1;
 	}
-	alarm(600);
+	Watchdog(600);
 	RunBitsetUnits();
 	auto dsn_env = std::getenv("QOD_P2_PG_DSN_FILE");
 	std::string dsn_file = dsn_env ? dsn_env : "";

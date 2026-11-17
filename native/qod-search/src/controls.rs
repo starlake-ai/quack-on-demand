@@ -80,3 +80,30 @@ impl<'a> Controls<'a> {
         self.used.load(Ordering::Relaxed)
     }
 }
+
+/// TEST ONLY (feature `test-hooks`): a one-shot hold inside `qs_search`, so a test lands a cancel there
+/// deterministically. Armed by `qs_test_hold_next_search`; the next exact search, once its query is compiled and
+/// its statistics are computed and before it scores its first segment, counts itself in `REACHED`, then waits
+/// for its cancel flag (at most `LIMIT`, so a test that never cancels fails rather than hangs) and goes on, its
+/// next cancel check answering `search_cancelled`. Process-wide: a test arms it around one call.
+#[cfg(feature = "test-hooks")]
+pub mod test_hold {
+    use super::Controls;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    pub static ARMED: AtomicBool = AtomicBool::new(false);
+    pub static REACHED: AtomicU64 = AtomicU64::new(0);
+    pub const LIMIT: Duration = Duration::from_secs(10);
+
+    pub fn hold_for_cancel(controls: &Controls) {
+        if !ARMED.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        REACHED.fetch_add(1, Ordering::SeqCst);
+        let until = Instant::now() + LIMIT;
+        while !controls.is_cancelled() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}

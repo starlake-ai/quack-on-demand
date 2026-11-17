@@ -473,6 +473,36 @@ fn search_cancelled_while_it_runs() {
     assert_eq!(r.unwrap_err().code(), "search_cancelled");
 }
 
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_cancel_lands_inside_a_held_search() {
+    // Deterministic (the test-hooks hold): the call waits, past its statistics and before it scores, until the flag
+    // is set; the flag is set only once the call is held, so the cancel lands inside it, whatever the host's speed.
+    use qod_search_core::{qs_test_hold_next_search, qs_test_search_holds};
+    use std::sync::atomic::Ordering;
+    let docs: Vec<TDoc> = (0..20_000).map(|i| TDoc { rowid: i, text: format!("w{} w{}", i % 7, i % 13) }).collect();
+    let s = build("/lake/c/held.parquet", &docs);
+    let live = bitset(docs.len(), |_| true);
+    let flag = AtomicU8::new(0);
+    let before = qs_test_search_holds();
+    qs_test_hold_next_search();
+    let r = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while qs_test_search_holds() == before {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            flag.store(1, Ordering::Relaxed);
+        });
+        search::top_k_with(&[&s], &[&live], &[], Population::Table, "w1 w2", BODY, 1.2, 0.75, 10, &Controls::new(Some(&flag), u64::MAX))
+    });
+    assert_eq!(qs_test_search_holds(), before + 1, "the search was not held");
+    assert_eq!(r.unwrap_err().code(), "search_cancelled");
+    // Disarmed after one call: the next search runs to its end.
+    let next = search::top_k_with(&[&s], &[&live], &[], Population::Table, "w1 w2", BODY, 1.2, 0.75, 10, &Controls::unlimited());
+    assert_eq!(next.unwrap().len(), 10);
+    assert_eq!(qs_test_search_holds(), before + 1);
+}
+
 #[test]
 fn one_call_stops_mid_scan_when_cancelled() {
     // One segment of 1,000,000 docs: a flag set by another thread during a single call ends that

@@ -952,6 +952,27 @@ pub extern "C" fn qs_test_allocated_bytes() -> u64 {
     ffi(std::ptr::null_mut(), "search_internal", 0, test_alloc::total)
 }
 
+/// TEST ONLY (feature `test-hooks`): arms a one-shot hold of the next `qs_search` (`controls::test_hold`): once
+/// its statistics are computed and before it scores its first segment, it waits for its cancel flag (at most
+/// 10 s), so a cancel set meanwhile lands inside the call and it answers `search_cancelled`.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub extern "C" fn qs_test_hold_next_search() {
+    ffi(std::ptr::null_mut(), "search_internal", (), || {
+        controls::test_hold::ARMED.store(true, std::sync::atomic::Ordering::SeqCst)
+    })
+}
+
+/// TEST ONLY (feature `test-hooks`): the holds `qs_test_hold_next_search` armed that a search has reached, every
+/// thread's.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub extern "C" fn qs_test_search_holds() -> u64 {
+    ffi(std::ptr::null_mut(), "search_internal", 0, || {
+        controls::test_hold::REACHED.load(std::sync::atomic::Ordering::SeqCst)
+    })
+}
+
 /// TEST ONLY (feature `test-hooks`): the per-call segment unions this thread has built.
 #[cfg(feature = "test-hooks")]
 #[no_mangle]

@@ -929,6 +929,8 @@ pub fn top_k_with(
     };
     controls.charge((k as u64 + 1) * std::mem::size_of::<Candidate>() as u64)?;
     let mut heap: BinaryHeap<Candidate> = BinaryHeap::with_capacity(k + 1);
+    #[cfg(feature = "test-hooks")]
+    crate::controls::test_hold::hold_for_cancel(controls);
     for (ord, reader) in c.searcher.segment_readers().iter().enumerate() {
         controls.check()?;
         let input = c.order[ord];

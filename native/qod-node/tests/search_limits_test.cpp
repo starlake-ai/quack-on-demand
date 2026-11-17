@@ -5,7 +5,9 @@
 // a group the collector cannot score in clause order, the unindexed rows cap, the unindexed sources cap (refused
 // before any scan: the fallback's text scan counter does not move), search_memory_exceeded, and a cancel in the
 // drain, in the statistics (the cancel flag set before the library's first pass), in the fallback's indexing, while
-// the library searches (an interrupt 5 ms into qs_search) and in the matches iterator. Each asserts the exact error
+// the library searches (with the test hooks, qs_search held until its cancel flag is set and the interrupt sent once
+// it is held; without them, or for qod_search_matches, an interrupt 5 ms in that counts only when the library itself
+// answered search_cancelled) and in the matches iterator. Each asserts the exact error
 // and that the client received no row: the statement read as a stream, the rows that reached the client before its
 // error counted, 0. Beside each limit, its bound itself is admitted (k 1 and the knob's bound, 4,096 bytes, 32 deep,
 // 64 terms, the cap at the backlog). Then the k default (Task 16, carried from its review): with QOD_SEARCH_MAX_K=5,
@@ -192,25 +194,74 @@ int Run() {
 		      "Interrupted");
 		qod::search::InterruptFallbackAfterRowsForTest(0);
 
-		// While the library searches: the client interrupts 5 ms into qs_search, the watcher copies it into the flag.
+		// While the library searches: the client interrupts the statement, the node's watcher copies the interrupt into
+		// the call's cancel flag, and the library answers search_cancelled.
 		Exec(client, "SET threads = 1", "threads 1");
+		const std::string searches = fn + " a cancel while the library searches (40 terms over 200,000 docs)";
 		std::thread interrupter;
+		qod::ResetLastSearchCallForTest();
+#ifdef QOD_SEARCH_TEST_HOOKS
+		if (fn == "qod_search") {
+			// Deterministic (the library's test-hooks hold): qs_search stops past its statistics and before it scores
+			// until its cancel flag is set, and the client interrupts only once the call is held, so the interrupt
+			// lands inside qs_search on any host, however fast.
+			auto holds = qs_test_search_holds();
+			qs_test_hold_next_search();
+			qod::SearchCallObserverForTest([&](ClientContext &context) {
+				interrupter = std::thread([&context, holds] {
+					auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+					while (qs_test_search_holds() == holds && std::chrono::steady_clock::now() < until) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+					context.Interrupt();
+				});
+			});
+			Fails(client, searches + ", held in qs_search", Call(fn, lt, Quote(Terms(40)), ltt), "Interrupted");
+			qod::SearchCallObserverForTest(nullptr);
+			if (interrupter.joinable()) {
+				interrupter.join();
+			}
+			Check(qs_test_search_holds() == holds + 1, fn + " the held search: qs_search reached the hold",
+			      std::to_string(qs_test_search_holds() - holds) + " holds");
+			Check(qod::LastSearchCallForTest().library_cancelled,
+			      fn + " the search's cancel: the library itself answered search_cancelled");
+			Exec(client, "SET threads = 16", "threads 16");
+			continue;
+		}
+#endif
+		// Timed (no hold: a build without the test hooks, and qod_search_matches, whose iterator cancel has its own
+		// deterministic case below): the client interrupts 5 ms into the call. The interrupt can land before the library
+		// runs (in the drain) or after it (a fast host); such a run tells nothing of a cancel inside the library, so it
+		// counts only when the library itself answered search_cancelled, and never as a pass of a cancel that did not
+		// happen.
 		qod::SearchCallObserverForTest([&](ClientContext &context) {
 			interrupter = std::thread([&context] {
 				std::this_thread::sleep_for(std::chrono::milliseconds(5));
 				context.Interrupt();
 			});
 		});
-		qod::ResetLastSearchCallForTest();
-		Fails(client, fn + " a cancel while the library searches (40 terms over 200,000 docs)",
-		      Call(fn, lt, Quote(Terms(40)), ltt), "Interrupted");
+		auto got = Stream(client, Call(fn, lt, Quote(Terms(40)), ltt));
 		qod::SearchCallObserverForTest(nullptr);
 		if (interrupter.joinable()) {
 			interrupter.join();
 		}
-		if (fn == "qod_search") {
-			Check(qod::LastSearchCallForTest().library_cancelled,
-			      fn + " the search's cancel: the library itself answered search_cancelled");
+		if (qod::LastSearchCallForTest().library_cancelled) {
+			Check(got.failed && got.rows == 0 && got.error.find("Interrupted") != std::string::npos,
+			      searches + ": Interrupted, no row reached the client (the library itself answered search_cancelled)",
+			      got.failed ? std::to_string(got.rows) + " rows before: " + FirstLine(got.error)
+			                 : "it ended as a success with " + std::to_string(got.rows) + " rows");
+		} else {
+			Say("note " + searches + ": not reached on this host (the interrupt landed outside the library, " +
+			    (got.failed ? "the statement failed: " + FirstLine(got.error) : "the statement answered " +
+			                                                                    std::to_string(got.rows) + " rows") +
+			    "); no cancel inside the library to check");
+			// An interrupt that landed outside the library (in the drain before it, or after it) still never delivers
+			// part of an answer.
+			if (got.failed) {
+				Check(got.rows == 0 && got.error.find("Interrupted") != std::string::npos,
+				      searches + ", the interrupt outside the library: Interrupted, no row reached the client",
+				      std::to_string(got.rows) + " rows before: " + FirstLine(got.error));
+			}
 		}
 		Exec(client, "SET threads = 16", "threads 16");
 	}
