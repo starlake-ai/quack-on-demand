@@ -46,7 +46,7 @@ object ConfigRegistry:
     "quack-flightsql.validation" -> validationCls,
     "quack-flightsql.opa"        -> opaCls,
     "quack-native"               -> quackCls,
-    "quack-rest"                 -> restCls
+    "quack-data-edge"            -> restCls
   )
 
   /** Build the full registry by reflecting through `roots`. */

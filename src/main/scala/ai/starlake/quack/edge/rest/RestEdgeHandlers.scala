@@ -42,22 +42,22 @@ object RestEdgeHandlers:
   enum Route(val template: String, val params: Option[Set[String]]):
     case Schemas
         extends Route(
-          "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas",
+          "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas",
           Some(Set("pool", "format"))
         )
     case Tables
         extends Route(
-          "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables",
+          "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables",
           Some(Set("pool", "format"))
         )
     case Table
         extends Route(
-          "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}",
+          "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}",
           Some(Set("pool", "format", "asOf", "asOfTag", "asOfTs"))
         )
     case Rows
         extends Route(
-          "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows",
+          "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows",
           None
         )
 
@@ -111,7 +111,7 @@ final class RestEdgeHandlers(
       * the unrecording executor, so nothing else would.
       */
     recordRefusedProbe: (ExecCaller, PoolKey, String, RouterFailure) => Unit = (_, _, _, _) => (),
-    /** The heap `/rows` pages may hold at once; [[RestEdgeServer]] gives a page's share back once
+    /** The heap `/rows` pages may hold at once; [[RestEdgeRoutes]] gives a page's share back once
       * its response is written.
       */
     pageBudget: RestPageBudget = RestPageBudget.Unbounded

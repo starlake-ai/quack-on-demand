@@ -11,8 +11,9 @@ import sttp.tapir.model.ServerRequest
 /** The REST data edge's four `GET` routes as Tapir values.
   *
   * Registered in `EndpointModules.all` so `GenOpenApi` documents them, and served ONLY by
-  * [[RestEdgeServer]] on its own port: `ManagerServer` must never mount them, since the manager's
-  * `apiKeyGuard` (static key, session cookie) is exactly the credential set this edge refuses.
+  * [[RestEdgeRoutes]] under `/data/`, ahead of the manager's own routes: `ManagerServer` must never
+  * mount them among its API routes, since the manager's `apiKeyGuard` (static key, session cookie)
+  * is exactly the credential set this edge refuses.
   *
   * The query string and the headers are read RAW through one `extractFromRequest` input rather than
   * as typed `query`/`header` inputs: the form decoding behind those turns `+` into a space and
@@ -35,8 +36,9 @@ object RestEdgeEndpoints:
   val SecuritySchemeName = "restEdgePat"
 
   private val PortNote =
-    "Served by the REST data edge on its own port (quack-rest, default 31339), never on the " +
-      "manager port. Auth: `Authorization: Bearer <PAT>` only; the token's tools axis must allow " +
+    "Served by the REST data edge under /data/v1 on the manager port when quack-data-edge is " +
+      "enabled (QOD_DATA_EDGE_ENABLED); expose it through a reverse proxy with one `/data/` " +
+      "prefix rule. Auth: `Authorization: Bearer <PAT>` only; the token's tools axis must allow " +
       "`rest`. Parameters: `pool` (default: a read-capable pool of the database), `format` " +
       "(`json` or `csv`; else `Accept`, else JSON)."
 
@@ -58,7 +60,7 @@ object RestEdgeEndpoints:
   private def values(req: ServerRequest, name: String): List[String] =
     req.headers.filter(_.is(name)).map(_.value).toList
 
-  /** Where [[RestEdgeServer]] parks the client's `Accept` before Tapir sees the request. Tapir's
+  /** Where [[RestEdgeRoutes]] parks the client's `Accept` before Tapir sees the request. Tapir's
     * own content negotiation would answer `Accept: text/csv` with a 406 of its own, since the
     * endpoints' body is declared as a plain string; negotiation is the handlers' job.
     */
@@ -82,7 +84,7 @@ object RestEdgeEndpoints:
   }
 
   private val base = endpoint.get
-    .in("api" / "v1" / "tenant" / path[String]("tenant") / "database" / path[String]("tenantDb"))
+    .in("data" / "v1" / "tenant" / path[String]("tenant") / "database" / path[String]("tenantDb"))
     .errorOut(statusCode.and(headers).and(jsonBody[ErrorResponse]))
     .out(headers)
     .out(

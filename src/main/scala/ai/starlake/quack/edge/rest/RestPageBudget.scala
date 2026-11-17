@@ -9,14 +9,14 @@ import scala.concurrent.duration.FiniteDuration
 
 /** The heap the REST data edge's `/rows` pages may hold at once. A page is encoded into one buffer
   * that lives until the response is written ([[RestResultEncoder]]), up to twice
-  * `QOD_REST_MAX_RESPONSE_BYTES` while the buffer doubles, and an out-of-memory error is fatal to
-  * the manager, for every tenant. So one PAT with a valid token could otherwise take the heap with
-  * concurrent large pages, bounded only by the connection count.
+  * `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` while the buffer doubles, and an out-of-memory error is fatal
+  * to the manager, for every tenant. So one PAT with a valid token could otherwise take the heap
+  * with concurrent large pages, bounded only by the connection count.
   *
   * A data statement first reserves a page's worst case ([[reserve]], waiting at most the request's
   * own statement bound, else `503 edge_busy`), keeps only what its body holds once it is encoded
   * ([[settle]]), and gives that back when the response has been written or has failed ([[release]],
-  * from [[RestEdgeServer]]). A reservation whose release never comes (a connection that broke
+  * from [[RestEdgeRoutes]]). A reservation whose release never comes (a connection that broke
   * before its body was pulled) is given back after `holdAtMost`. Counted in KiB.
   */
 final class RestPageBudget private (

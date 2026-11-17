@@ -38,7 +38,7 @@ final case class TokenRestriction(
 object TokenRestriction:
 
   /** The REST data edge's entry on the `tools` axis: a PAT whose `tools` list omits it cannot read
-    * through `/api/v1`, and a PAT with no `tools` restriction is admitted. It is not an MCP tool,
+    * through `/data/v1`, and a PAT with no `tools` restriction is admitted. It is not an MCP tool,
     * so the MCP registry must never register a tool of that name, or one allowlist entry would
     * admit two surfaces.
     */

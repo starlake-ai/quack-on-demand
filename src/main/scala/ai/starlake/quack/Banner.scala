@@ -53,9 +53,8 @@ object Banner:
   /** The REST data edge's banner line, without the banner's indent. Every statement it sends is
     * judged by the node like any other door's, so the line only says how a client authenticates.
     */
-  def restLine(host: String, port: Int, tls: Boolean): String =
-    val url = s"${if tls then "https" else "http"}://${display(host)}:$port/api/v1"
-    s"REST (data)   : $url  (PAT bearer, read-only)"
+  def restLine(host: String, port: Int): String =
+    s"REST (data)   : http://${display(host)}:$port/data/v1  (PAT bearer, read-only)"
 
   /** The post-startup banner: printed once REST and FlightSQL are both listening. `restHost` /
     * `flightHost` of 0.0.0.0 render as localhost so the endpoints are copy-pasteable. Client
@@ -70,8 +69,8 @@ object Banner:
       tlsEnabled: Boolean,
       /** The native Quack front door `(host, port, tls)` when it is enabled. */
       quack: Option[(String, Int, Boolean)] = None,
-      /** The REST data edge `(host, port, tls)` when it is enabled. */
-      rest: Option[(String, Int, Boolean)] = None,
+      /** Whether the REST data edge is served, under `/data/v1` on the manager port. */
+      dataEdge: Boolean = false,
       /** Authorization engine of a tenant that sets none (`quack-flightsql.opa.defaultMode`, env
         * `QOD_ACL_MODE`): `qod` or `opa`.
         */
@@ -94,10 +93,8 @@ object Banner:
       s"   ACL MODE      : $aclMode (default for tenants that set none; $opaTenants tenant(s) in opa mode)"
     val rh             = display(restHost)
     val fh             = display(flightHost)
-    val restBannerLine = rest.fold("") { case (h, p, tls) =>
-      s"\n   ${restLine(h, p, tls)}"
-    }
-    val quackLine = quack.fold("") { case (h, p, tls) =>
+    val restBannerLine = if dataEdge then s"\n   ${restLine(restHost, restPort)}" else ""
+    val quackLine      = quack.fold("") { case (h, p, tls) =>
       s"\n   Quack (DuckDB): quack:${display(h)}:$p  (${if tls then "TLS" else "plain HTTP"})"
     }
     val scheme     = if tlsEnabled then "grpc+tls" else "grpc"

@@ -18,10 +18,11 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 /** End-to-end spec of the REST data edge: real HTTP against the edge of a real manager booted
-  * in-process ([[AuthzStack]], `quack-rest` turned on), whose nodes are qod-node processes deciding
-  * every statement of a tenant user through the manager's decision endpoint. Nothing on the request
-  * path is a test double: the PATs are minted and revoked through the `/api/auth/pat` routes, and
-  * the data is written by the seeded superuser through the FlightSQL edge.
+  * in-process ([[AuthzStack]], `quack-data-edge` turned on, served under `/data/v1` on the manager
+  * port), whose nodes are qod-node processes deciding every statement of a tenant user through the
+  * manager's decision endpoint. Nothing on the request path is a test double: the PATs are minted
+  * and revoked through the `/api/auth/pat` routes, and the data is written by the seeded superuser
+  * through the FlightSQL edge.
   *
   * Environment gate: every test CANCELS (never fails, never aborts the suite) on Windows (the stack
   * spawns nodes through the bash script and reaps them with kill-quack-nodes.sh), without the test
@@ -32,7 +33,7 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   import RestEdgeEndToEndSpec.*
 
-  private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
+  private val run = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
   // Tenant ids are letters and digits only.
   private val Acme   = s"acmerestx$run"
   private val Globex = s"globexrestx$run"
@@ -64,7 +65,7 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       try
         stack = new AuthzStack(
           "rest_e2e",
-          restPort = 20991,
+          restPort = ManagerPort,
           flightPort = 31391,
           quackPort = 29491,
           relayPort = 20992,
@@ -73,11 +74,8 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
           filesRoot = work,
           relayed = false,
           stackPrefixes = List("acmerestx", "globexrestx"),
-          extraConfig = s"""quack-rest {
+          extraConfig = s"""quack-data-edge {
                            |  enabled = true
-                           |  host = "127.0.0.1"
-                           |  port = $RestDataPort
-                           |  tlsEnabled = false
                            |  defaultLimit = $DefaultLimit
                            |  maxRows = $MaxRows
                            |  stmtTimeoutSec = 120
@@ -264,7 +262,7 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   private val http = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build()
 
-  private val base = s"http://127.0.0.1:$RestDataPort"
+  private val base = s"http://127.0.0.1:$ManagerPort"
 
   private final case class Resp(status: Int, headers: Map[String, String], body: String):
     def header(name: String): Option[String] = headers.get(name.toLowerCase)
@@ -276,7 +274,7 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def get(path: String, token: Option[Pat], query: String = ""): Resp =
     val q = if query.isEmpty then "" else s"?$query"
     val b = HttpRequest
-      .newBuilder(URI.create(s"$base/api/v1/tenant/$path$q"))
+      .newBuilder(URI.create(s"$base/data/v1/tenant/$path$q"))
       .timeout(java.time.Duration.ofSeconds(180))
       .GET()
     token.foreach(t => b.header("Authorization", s"Bearer ${t.raw}"))
@@ -622,8 +620,8 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
 object RestEdgeEndToEndSpec:
 
-  /** The REST data edge's port, beside the stack's manager, FlightSQL and Quack listeners. */
-  val RestDataPort = 31392
+  /** The stack's manager port, which also serves the REST data edge under `/data/v1`. */
+  val ManagerPort = 20991
 
   val LakeSchema = "tpch1"
   val FileSchema = "app"

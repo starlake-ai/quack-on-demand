@@ -29,7 +29,6 @@ final class ShutdownCoordinator(
     edge: FlightEdgeServer,
     backend: QuackBackend,
     quackFrontDoor: Option[ai.starlake.quack.edge.quack.QuackFrontDoorServer] = None,
-    restEdge: Option[ai.starlake.quack.edge.rest.RestEdgeServer] = None,
     coordinator: Option[HaCoordinator],
     eventJournal: EventJournal,
     telemetryStore: TelemetryStore,
@@ -62,8 +61,6 @@ final class ShutdownCoordinator(
         try edge.stop()
         catch case _: Throwable => ()
         try quackFrontDoor.foreach(_.stop())
-        catch case _: Throwable => ()
-        try restEdge.foreach(_.stop())
         catch case _: Throwable => ()
         try backend.cleanup().unsafeRunSync()
         catch case _: Throwable => ()
@@ -125,7 +122,6 @@ final class ShutdownCoordinator(
     (IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
       IO.delay(edge.stop()) *>
       IO.delay(quackFrontDoor.foreach(_.stop())) *>
-      IO.delay(restEdge.foreach(_.stop())) *>
       IO.delay(
         logger.info(
           s"graceful shutdown: awaiting in-flight statements (up to ${drainTimeoutSec}s)"

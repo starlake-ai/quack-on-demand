@@ -49,19 +49,11 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
 
   private val cfg = RestEdgeConfig(
     enabled = true,
-    host = "127.0.0.1",
-    port = 0,
-    tlsEnabled = false,
-    tlsCertChain = "",
-    tlsPrivateKey = "",
     defaultLimit = 100,
     maxRows = 1000,
     maxResponseBytes = 1L << 20,
     stmtTimeoutSec = 30,
-    maxConnections = 4,
-    maxHeaderBytes = 16384,
-    headerReceiveTimeoutSec = 10,
-    idleTimeoutSec = 60
+    maxConcurrentRequests = 4
   )
 
   private val reader: DuckLakeCatalogReader = new DuckLakeCatalogReader(null):

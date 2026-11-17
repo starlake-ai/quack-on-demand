@@ -244,19 +244,11 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
 
   private val baseCfg = RestEdgeConfig(
     enabled = true,
-    host = "127.0.0.1",
-    port = 0,
-    tlsEnabled = false,
-    tlsCertChain = "",
-    tlsPrivateKey = "",
     defaultLimit = 1000,
     maxRows = 100000,
     maxResponseBytes = 64L * 1024 * 1024,
     stmtTimeoutSec = 60,
-    maxConnections = 16,
-    maxHeaderBytes = 16384,
-    headerReceiveTimeoutSec = 10,
-    idleTimeoutSec = 60
+    maxConcurrentRequests = 16
   )
 
   private def fixture(
@@ -813,8 +805,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
   // ---- timeouts and resuming pools --------------------------------------------------------------
 
   "a statement past the timeout" should "get 504 and have its late result closed exactly once" in {
-    val release                          = new CountDownLatch(1)
-    val closes                           = new AtomicInteger()
+    val release = new CountDownLatch(1)
+    val closes  = new AtomicInteger()
     // Shaped like the node call (QuackHttpClient): an uninterruptible wait for the node, then the
     // result handed over at a cancellation point. The edge never cancels it: the late result is
     // delivered after the wait gave up, and closed once.
@@ -913,11 +905,11 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     IORuntime.builder().setScheduler(scheduler, () => clock.shutdown()).build()
 
   "the shipped defaults" should "let a cold pool's resume end inside the edge's wait" in {
-    val restDefaults = ConfigSource.default.at("quack-rest").loadOrThrow[RestEdgeConfig]
+    val restDefaults = ConfigSource.default.at("quack-data-edge").loadOrThrow[RestEdgeConfig]
     val hold         =
       ConfigSource.default.at("quack-flightsql").loadOrThrow[FlightConfig].resumeHoldTimeoutSec
-    RestEdgeConfig.validate(restDefaults.copy(enabled = true), Nil, hold, (21900, 22500)) shouldBe Right(())
-    val cfg     = restDefaults.copy(enabled = true, host = "127.0.0.1", port = 0)
+    RestEdgeConfig.validate(restDefaults.copy(enabled = true), hold) shouldBe Right(())
+    val cfg     = restDefaults.copy(enabled = true)
     val runtime = compressedRuntime(100)
     try
       // The router's hold expires on a pool that never wakes: its retryable 503 must reach the

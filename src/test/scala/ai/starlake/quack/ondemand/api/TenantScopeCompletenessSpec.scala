@@ -30,10 +30,11 @@ class TenantScopeCompletenessSpec extends AnyFlatSpec with Matchers:
   /** Modules whose `{tenant}` routes are NOT behind `apiKeyGuard`, excluded on purpose: this spec
     * must not claim a guard applies where it does not.
     *
-    *   - `RestEdgeEndpoints`: served only by the REST data edge's own listener, never by
-    *     ManagerServer. Its tenant binding is the PAT's: `RestAuth.admit` refuses a path tenant
-    *     other than the token owner's with 403 (pinned by RestAuthSpec and RestEdgeHandlersSpec),
-    *     so `extractTenant` has nothing to guard there.
+    *   - `RestEdgeEndpoints`: served only by `RestEdgeRoutes` under `/data/`, which ManagerServer
+    *     mounts before the guard and which claims every `/data/` request, so none of them ever
+    *     reaches `apiKeyGuard` or the `/api` routes. Its tenant binding is the PAT's:
+    *     `RestAuth.admit` refuses a path tenant other than the token owner's with 403 (pinned by
+    *     RestAuthSpec and RestEdgeHandlersSpec), so `extractTenant` has nothing to guard there.
     */
   private val notBehindApiKeyGuard: List[AnyRef] =
     List(ai.starlake.quack.edge.rest.RestEdgeEndpoints)
@@ -48,7 +49,7 @@ class TenantScopeCompletenessSpec extends AnyFlatSpec with Matchers:
     excluded should not be empty
     excluded.foreach { case (name, ep) =>
       withClue(name)(ep.info.tags shouldBe Vector("rest-edge"))
-      ep.showPathTemplate() should startWith("/api/v1/tenant/{tenant}/")
+      ep.showPathTemplate() should startWith("/data/v1/tenant/{tenant}/")
     }
   }
 

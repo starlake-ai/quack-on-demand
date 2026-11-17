@@ -29,7 +29,7 @@ object EndpointModules:
     RestoreEndpoints,
     BranchEndpoints,
     FleetEndpoints,
-    // Served by the REST data edge's own listener (RestEdgeServer), never mounted by
-    // ManagerServer: registered here for the OpenAPI document only.
+    // Served under /data/v1 by RestEdgeRoutes, mounted ahead of ManagerServer's own routes and
+    // never among its API routes: registered here for the OpenAPI document only.
     ai.starlake.quack.edge.rest.RestEdgeEndpoints
   )

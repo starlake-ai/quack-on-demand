@@ -381,7 +381,10 @@ object ManagerServerHarness:
       // GET /metrics. The default mounts nothing (no Prometheus child, as with the sink off); a spec
       // that drives the route through the real server passes an endpoint over its own registry.
       metricsEndpoint: MetricsEndpoint =
-        new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
+        new MetricsEndpoint(prometheus = None, beforeScrape = () => ()),
+      // The REST data edge's routes (`RestEdgeRoutes.routes`), mounted as Main mounts them. None,
+      // the default, leaves `/data/` to the manager's own routes, like a boot with the edge off.
+      dataEdgeRoutes: Option[org.http4s.HttpRoutes[IO]] = None
   ): Harness =
     val mgrCfg  = minimalManagerConfig(port = 0).copy(restLimits = restLimits)
     val edgeCfg = minimalFlightConfig
@@ -794,6 +797,7 @@ object ManagerServerHarness:
       ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
       mcpRoutes = mcpRoutes,
+      dataEdgeRoutes = dataEdgeRoutes,
       tenantLocations = Some(tenantLocationHandlers),
       s3Credentials = Some(s3CredentialHandlers),
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>

@@ -20,10 +20,10 @@ class GenOpenApiSpec extends AnyFlatSpec with Matchers:
   "the REST data edge operations" should "require the PAT bearer scheme" in {
     val rest = operations.filter(_._2.tags.contains(RestEdgeEndpoints.Tag))
     rest.map(_._1).sorted shouldBe List(
-      "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas",
-      "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables",
-      "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}",
-      "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows"
+      "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas",
+      "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables",
+      "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}",
+      "/data/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows"
     )
     rest.foreach { case (_, op) =>
       op.security shouldBe List(ListMap(RestEdgeEndpoints.SecuritySchemeName -> Vector.empty))
