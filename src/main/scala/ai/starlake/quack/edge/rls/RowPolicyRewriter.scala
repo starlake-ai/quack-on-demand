@@ -3,6 +3,7 @@ package ai.starlake.quack.edge.rls
 import ai.starlake.acl.parser.{AstChildren, TableExtractor}
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.edge.policy.TableClauses
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
 import ai.starlake.quack.edge.search.SearchFunctions
 import ai.starlake.sql.{ParserInput, TooDeep}
@@ -66,7 +67,8 @@ object RowPolicyRewriter:
 
   /** The statement parses but holds a shape the rewrite cannot filter or cannot ship (a
     * parenthesized statement reading a policy table, a syntax node the walk cannot follow, DuckDB's
-    * `//` integer division). Denied by the router with `reason`, a fixed string that never carries
+    * `//` integer division, a policy table carrying a clause the wrap would drop such as `AT
+    * (TIMESTAMP => ...)`). Denied by the router with `reason`, a fixed string that never carries
     * the SQL, so the caller learns what to change.
     */
   final case class Refused(reason: String) extends Outcome
@@ -120,20 +122,16 @@ object RowPolicyRewriter:
     * name, which would drop a sample clause on it for the row-policy holder alone; in a search
     * statement such a reference is refused, never sent unsampled.
     */
-  private[rls] val SampledSearchRefusal =
-    "a statement calling a search function cannot sample a row-policy table (TABLESAMPLE, " +
-      "USING SAMPLE); sample a subquery instead"
-
-  /** Task 18 fix round 1 (lead ruling B): the wrap rebuilds a policy table from its name, which
-    * would drop a time-travel clause on it, reading the current snapshot; in a search statement
-    * such a reference is refused, never read at another snapshot than the one named.
-    */
-  private[rls] val TimeTravelSearchRefusal =
-    "a statement calling a search function cannot time travel on a row-policy table (AT (...))"
-
   private val TableStatementRefusal =
     "a TABLE statement in expression position (ARRAY(TABLE t), ANY (TABLE t)) reads a " +
       "row-policy table; use a subquery selecting from it instead"
+
+  /** A row-policy table read with a clause the wrap cannot keep ([[TableClauses]]): `clause` is a
+    * fixed phrase, never SQL.
+    */
+  private[rls] def unkeptClauseRefusal(clause: String): String =
+    s"a row-policy table is read with $clause, which the row filter cannot keep; " +
+      "read the table without it"
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
@@ -439,25 +437,27 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
     val matched = matchingPolicies(t, eff, ctx)
     if matched.isEmpty then t
     else
-      val predicate =
-        matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
-      val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
-
       val alias: Alias = t.getAlias
       // Rebuild from the RAW parts: a quoted identifier stays quoted in the output.
       val baseTable = new Table(t.getName)
       Option(t.getSchemaName).foreach(_ => baseTable.setSchemaName(t.getSchemaName))
       Option(t.getDatabase).foreach(baseTable.setDatabase)
+      // The rebuild keeps the name and the alias only. Anything else on t (a time-travel AT
+      // clause, a sample, a PIVOT after the table) would vanish and the filtered read would
+      // answer as another statement, so it is refused, naming the clause, never a value.
+      TableClauses
+        .unkept(t, baseTable.getFullyQualifiedName)
+        .foreach(clause => throw new Refusal(unkeptClauseRefusal(clause)))
+
+      val predicate =
+        matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
+      val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
 
       val inner = new PlainSelect()
       inner.addSelectItem(new AllColumns())
       if keepRowid then
         // Spec 4.3: for a column-policy holder, checked on the whole statement once the walk ends.
-        // Review m4: the rebuilt table carries no sample clause; refuse rather than drop it.
-        if t.getSampleClause != null then throw new Refusal(SampledSearchRefusal)
-        // Task 18 fix round 1 (lead ruling B): nor a time-travel clause.
-        if t.getTimeTravel != null || t.getTimeTravelStrAfterAlias != null then
-          throw new Refusal(TimeTravelSearchRefusal)
+        // A sample or a time-travel clause on t was refused above (TableClauses).
         inner.addSelectItem(new net.sf.jsqlparser.schema.Column("rowid"))
       inner.setFromItem(baseTable)
       inner.setWhere(expr)

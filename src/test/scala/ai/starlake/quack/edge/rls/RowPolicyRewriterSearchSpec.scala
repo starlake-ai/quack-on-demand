@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.rls
 
+import ai.starlake.quack.edge.policy.TableClauses
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, StatementKind}
 import ai.starlake.quack.ondemand.PoolState
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -823,7 +824,10 @@ class RowPolicyRewriterSearchSpec extends AnyFlatSpec with Matchers:
         rls.rewrite(q, StatementKind.Select, withRows, rlsCtx, searchStatement = true) match
           case RowPolicyRewriter.Rewritten(out) => fail(s"expected a refusal, got the rewrite $out")
           case RowPolicyRewriter.Passthrough    => fail("expected a refusal, got Passthrough")
-          case other                            => info(s"refused: $other")
+          case other                            =>
+            other shouldBe RowPolicyRewriter.Refused(
+              RowPolicyRewriter.unkeptClauseRefusal(TableClauses.Sample)
+            )
       }
   }
 
@@ -845,24 +849,28 @@ class RowPolicyRewriterSearchSpec extends AnyFlatSpec with Matchers:
     do
       withClue(q) {
         val out = rls.rewrite(q, StatementKind.Select, withRows, rlsCtx, searchStatement = true)
-        // Review M1: the timestamp clause parses, so ruling B's own refusal is due; JSqlParser
-        // cannot parse the version clause, which is refused as unparseable.
+        // The timestamp clause parses, so the wrap's refusal of a clause it cannot keep is due
+        // (TableClauses, from main's fix); JSqlParser cannot parse the version clause, which is
+        // refused as unparseable.
         if clause.contains("TIMESTAMP") then
-          out shouldBe RowPolicyRewriter.Refused(RowPolicyRewriter.TimeTravelSearchRefusal)
+          out shouldBe RowPolicyRewriter.Refused(
+            RowPolicyRewriter.unkeptClauseRefusal(TableClauses.TimeTravel)
+          )
         else out shouldBe RowPolicyRewriter.PassthroughParseFailed
       }
   }
 
-  it should "leave a statement with no search call rewritten as before" in {
-    // Unchanged on this branch (the owner's fix on main covers every statement): the wrap still
-    // drops a timestamp clause outside a search statement.
+  it should "be refused the same way in a statement with no search call" in {
+    // Main's fix (TableClauses) covers every statement, not only search ones.
     rls.rewrite(
       "SELECT id FROM pages AT (TIMESTAMP => TIMESTAMPTZ '2026-11-17 10:00:00+00')",
       StatementKind.Select,
       withRows,
       rlsCtx,
       searchStatement = false
-    ) shouldBe a[RowPolicyRewriter.Rewritten]
+    ) shouldBe RowPolicyRewriter.Refused(
+      RowPolicyRewriter.unkeptClauseRefusal(TableClauses.TimeTravel)
+    )
   }
 
   // Task 5 review M2: the overload reading the flag from its own text is the rls package's only,

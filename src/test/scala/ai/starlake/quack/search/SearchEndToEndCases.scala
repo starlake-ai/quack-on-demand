@@ -247,7 +247,7 @@ object SearchEndToEndCases:
   /** The policy rewriters' texts for a statement they cannot parse, and ruling B's refusal. */
   val ColumnPolicyUnparsed = "column policy rewrite could not parse statement"
   val RowPolicyUnparsed    = "row policy rewrite could not parse statement"
-  val RowPolicyTimeTravel  = "cannot time travel on a row-policy table"
+  val RowPolicyTimeTravel  = "a time-travel clause (AT ...), which the row filter cannot keep"
 
   private val AtTimestamp =
     Expect.Refused("INVALID_ARGUMENT", List("search_at_timestamp_unsupported"))

@@ -35,7 +35,11 @@ def join(
         raise typer.Exit(2)
     cache = launcher.default_cache_dir()
     spawn_sh, _ = launcher.materialize_spawn_scripts(cache / "scripts")
-    exe = qod_node_bin or qod_node.install(cache, launcher.ensure_libduckdb(cache))
+    try:
+        exe = qod_node_bin or qod_node.install(cache, launcher.ensure_libduckdb(cache))
+    except Exception as e:
+        typer.echo(f"could not provision the node runtime: {e}", err=True)
+        raise typer.Exit(1) from e
     # Report what the binary that runs the node says, bundled or caller-supplied, not the pin: the
     # fleet listing is how an operator spots a stale engine. None when it cannot start here.
     try:

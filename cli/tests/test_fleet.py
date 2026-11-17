@@ -140,6 +140,36 @@ def test_fleet_join_refuses_a_qod_node_of_another_protocol(monkeypatch, tmp_path
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="qod fleet join is POSIX-only")
+def test_fleet_join_says_why_it_cannot_provision_libduckdb(monkeypatch, tmp_path):
+    # A libduckdb download that fails its pinned sha256 is a one-line refusal, not a traceback.
+    import qod_cli.commands.fleet as fleet_cmd
+    started = []
+
+    class FakeMember:
+        def __init__(self, manager, token, **kw):
+            started.append(kw)
+        def run_forever(self):
+            pass
+
+    def mismatch(cache):
+        raise fleet_cmd.launcher.IntegrityError("duckdb-shared-libs-linux-amd64.tar.gz: sha256 a is not the pinned b")
+
+    monkeypatch.setattr(fleet_cmd, "FleetMember", FakeMember)
+    monkeypatch.setattr(fleet_cmd.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(fleet_cmd.launcher, "default_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(fleet_cmd.launcher, "materialize_spawn_scripts",
+                        lambda d: (tmp_path / "spawn.sh", tmp_path / "spawn.ps1"))
+    monkeypatch.setattr(fleet_cmd.launcher, "ensure_libduckdb", mismatch)
+    env = {"QOD_MANAGER_URL": "http://mgr:20900", "QOD_FLEET_JOIN_TOKEN": "tok",
+           "QOD_FLEET_ADVERTISE_HOST": "10.0.0.5"}
+    out = runner.invoke(app, ["fleet", "join", "--insecure"], env=env)
+    assert out.exit_code == 1, out.output
+    assert "could not provision the node runtime: duckdb-shared-libs-linux-amd64.tar.gz" in out.output
+    assert out.exception is None or isinstance(out.exception, SystemExit)
+    assert started == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="qod fleet join is POSIX-only")
 def test_fleet_join_runs_the_bundled_qod_node_and_reports_its_probed_version(monkeypatch, tmp_path):
     # The bundled qod-node is installed beside the pinned libduckdb; the fleet listing shows what
     # that binary says, not the pin, so a stale engine shows up as such.
