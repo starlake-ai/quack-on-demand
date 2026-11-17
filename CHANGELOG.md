@@ -49,7 +49,9 @@
   has always been the same table with the same column names, and never a view's: those policies
   match today's names, so a table or column renamed, dropped or recreated since is refused, in
   every statement kind and on every door. A `/rows` request with no `select` reads `*`, so a
-  column whose name holds a dot or a quote no longer refuses its table to such a principal.
+  column whose name holds a dot or a quote no longer refuses its table to a principal whose
+  policies are on other tables. A column policy on such a table itself still hides it (404), on
+  every door: the column rewriter cannot expand a star over that name.
   Responses are `Cache-Control: private` with `Vary:
   Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
   endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a

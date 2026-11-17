@@ -376,7 +376,9 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
           ids("c_email=eq.a@x.io&order=c_id") shouldBe Right(Json.arr())
           ids("c_email=like.a*&order=c_id") shouldBe Right(Json.arr())
           ids("c_email=eq.***&order=c_email,c_id.desc") shouldBe
-            Right(Json.arr(Json.obj("c_id" -> Json.fromInt(2)), Json.obj("c_id" -> Json.fromInt(1))))
+            Right(
+              Json.arr(Json.obj("c_id" -> Json.fromInt(2)), Json.obj("c_id" -> Json.fromInt(1)))
+            )
         }
       }
   }
@@ -397,10 +399,9 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
-  // DuckDB reads `"a.b"` as one name and the policy rewriters' parser as two, so a policy holder's
-  // statement that writes it is refused (DottedIdentifierScreen), whichever table the policy is on.
-  // With no `select` the edge reads the whole row as `*`, as its probe does, and writes no such
-  // name.
+  // DuckDB reads `"a.b"` as one name and the policy rewriters' parser as two, so a policy rewrite
+  // that writes it is refused (DottedIdentifierScreen). With no `select` the edge reads the whole
+  // row as `*`, as its probe does, and writes no such name.
   "a column whose name holds a dot" should "be served to a policy holder reading the whole row" in {
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {
@@ -415,6 +416,46 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
             Right(
               Json.arr(Json.obj("a.b" -> Json.fromInt(1), "c_email" -> Json.fromString("a@x.io")))
             )
+        }
+      }
+  }
+
+  // Policies are scoped per table: with none on `dotted`, its statement is not a policy rewrite,
+  // so the caller may name the column in `select` and in a filter.
+  it should "be served when named, to a holder whose policies are on other tables" in {
+    for kc <- AllKinds do
+      withClue(s"${kc.kind}: ") {
+        withHandlers(
+          kc,
+          permissions = grant(kc.catalog, "main", "dotted") :: grants(kc),
+          columnPolicies = List(maskEmail)
+        ) { h =>
+          h.rows("acme", db(kc), "main", "dotted", req("select=a.b&a.b=eq.1"))
+            .unsafeRunSync()
+            .map(ok => parse(ok.body).toOption.get) shouldBe
+            Right(Json.arr(Json.obj("a.b" -> Json.fromInt(1))))
+        }
+      }
+  }
+
+  // A column policy on the table itself makes the column rewriter expand the probe's `*`, and it
+  // cannot print such a name (JSqlParser splits "a.b" when the expansion is parsed again; see
+  // StarExpansion). The probe is refused, fail-closed, and the table answers the one 404 of a
+  // missing object, as on every door. Pinned so lifting that limit in the rewriter shows up here.
+  it should "hide its table from a holder of a column policy on that table" in {
+    val maskDotted =
+      RoleColumnPolicy("cp-mask-d", "r-1", "*", "main", "dotted", "c_email", "mask", Some("'***'"))
+    for kc <- AllKinds do
+      withClue(s"${kc.kind}: ") {
+        withHandlers(
+          kc,
+          permissions = grant(kc.catalog, "main", "dotted") :: grants(kc),
+          columnPolicies = List(maskDotted)
+        ) { h =>
+          val missing = h.table("acme", db(kc), "main", "no_such_table", req()).unsafeRunSync()
+          h.table("acme", db(kc), "main", "dotted", req()).unsafeRunSync() shouldBe missing
+          h.rows("acme", db(kc), "main", "dotted", req()).unsafeRunSync().left.map(_._1) shouldBe
+            Left(StatusCode.NotFound)
         }
       }
   }
