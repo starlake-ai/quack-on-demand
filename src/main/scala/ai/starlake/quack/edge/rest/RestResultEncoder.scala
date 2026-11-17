@@ -131,16 +131,21 @@ object RestResultEncoder:
     var cut  = false
     var done = false
     while !done && reader.loadNextBatch() do
-      val cols  = root.getFieldVectors.asScala.toVector.map(v => encoderFor(v, reader))
-      val count = root.getRowCount
-      var i     = 0
+      val vectors = root.getFieldVectors.asScala.toVector
+      val cols    = vectors.map(v => encoderFor(v, reader))
+      val floors  = vectors.map(floorOf)
+      val count   = root.getRowCount
+      var i       = 0
       while !cut && i < count && n < maxRows do
-        val bytes = render(cols.map(_(i)), n).getBytes(UTF_8)
-        if used + bytes.length > budget then cut = true
+        // A row whose floor alone passes the budget is cut before any of its cells is decoded.
+        if used + floors.foldLeft(0L)((acc, f) => acc + f(i)) > budget then cut = true
         else
-          used += out.append(bytes)
-          n += 1
-          i += 1
+          val bytes = render(cols.map(_(i)), n).getBytes(UTF_8)
+          if used + bytes.length > budget then cut = true
+          else
+            used += out.append(bytes)
+            n += 1
+            i += 1
       if cut then
         more = true
         done = true
@@ -219,6 +224,55 @@ object RestResultEncoder:
 
   private def base64(bytes: Array[Byte]): Json =
     Json.fromString(Base64.getEncoder.encodeToString(bytes))
+
+  /** A floor on the UTF-8 bytes row `i` of `v` renders to, in either format, read from the vector's
+    * value lengths without decoding a value: text counts its bytes (JSON escaping and CSV quoting
+    * only add to them), binary its base64 length, a nested value the sum of its members, and
+    * anything else (fixed width, dictionary indices, NULL) nothing. The page loop cuts on it before
+    * rendering a row, so a cell far past the cap is never decoded, held as a `String` and encoded
+    * again.
+    */
+  private[rest] def floorOf(v: ValueVector): Int => Long =
+    val f: Int => Long =
+      if v.getField.getDictionary != null then _ => 0L
+      else
+        v match
+          case x: VarCharVector         => i => x.getValueLength(i).toLong
+          case x: LargeVarCharVector    => i => x.getValueLength(i).toLong
+          case x: ViewVarCharVector     => i => x.getValueLength(i).toLong
+          case x: VarBinaryVector       => i => base64Length(x.getValueLength(i).toLong)
+          case x: LargeVarBinaryVector  => i => base64Length(x.getValueLength(i).toLong)
+          case x: ViewVarBinaryVector   => i => base64Length(x.getValueLength(i).toLong)
+          case x: FixedSizeBinaryVector => _ => base64Length(x.getByteWidth.toLong)
+          // MapVector is a ListVector of key/value structs: the same sum.
+          case x: ListVector =>
+            val child = floorOf(x.getDataVector)
+            i => sumOver(x.getElementStartIndex(i).toLong, x.getElementEndIndex(i).toLong, child)
+          case x: LargeListVector =>
+            val child = floorOf(x.getDataVector)
+            i => sumOver(x.getElementStartIndex(i), x.getElementEndIndex(i), child)
+          case x: FixedSizeListVector =>
+            val child = floorOf(x.getDataVector)
+            val size  = x.getListSize.toLong
+            i => sumOver(i * size, (i + 1) * size, child)
+          case x: StructVector =>
+            val children = x.getChildrenFromFields.asScala.toVector.map(floorOf)
+            i => children.foldLeft(0L)((acc, c) => acc + c(i))
+          case x: UnionVector      => i => floorOf(x.getVector(i))(i)
+          case x: DenseUnionVector =>
+            i => floorOf(x.getVectorByType(x.getTypeId(i)))(x.getOffset(i))
+          case _ => _ => 0L
+    i => if v.isNull(i) then 0L else f(i)
+
+  private def base64Length(bytes: Long): Long = 4L * ((bytes + 2L) / 3L)
+
+  private def sumOver(from: Long, until: Long, cell: Int => Long): Long =
+    var acc = 0L
+    var j   = from
+    while j < until do
+      acc += cell(j.toInt)
+      j += 1
+    acc
 
   /** Per-batch compiled cell reader for one vector; NULL is checked before any typed access. */
   private def encoderFor(v: ValueVector, dicts: DictionaryProvider): Int => Json =

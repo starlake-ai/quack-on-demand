@@ -7,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.nio.charset.StandardCharsets.UTF_8
+import scala.jdk.CollectionConverters.*
 import scala.util.{Random, Using}
 
 /** JSON and CSV for each type family, exactly as DuckDB exports them, plus the row cap. Inputs come
@@ -165,6 +166,35 @@ class RestResultEncoderSpec extends AnyFlatSpec with Matchers:
 
   it should "keep a value that looks like a spreadsheet formula exactly as stored" in {
     csv("SELECT '=1+1' AS a, '-2' AS b, '@x' AS c").body shouldBe "a,b,c\r\n=1+1,-2,@x\r\n"
+  }
+
+  /** The floor of each row of `sql`'s first batch, as the page loop computes it. */
+  private def floors(sql: String): Vector[Long] =
+    Using.resource(TestArrow.readerFor(sql)) { r =>
+      r.loadNextBatch() shouldBe true
+      val root  = r.getVectorSchemaRoot
+      val cells = root.getFieldVectors.asScala.toVector.map(RestResultEncoder.floorOf)
+      (0 until root.getRowCount).toVector.map(i => cells.map(_(i)).sum)
+    }
+
+  "a row's floor" should "count the bytes its cells render to at least, nested ones included" in {
+    // 'é' x10 is 20 bytes; a 2-byte BLOB is 4 base64 chars; the list's string 5 and the struct's
+    // 3; NULL and fixed-width cells count nothing.
+    floors(
+      "SELECT repeat('é', 10) AS s, '\\x00\\x01'::BLOB AS b, [repeat('a', 5), NULL] AS l, " +
+        "{'x': 'abc'} AS st, NULL::VARCHAR AS n, 42 AS i, MAP {'k': 'vv'} AS m"
+    ) shouldBe Vector(20L + 4 + 5 + 3 + 3)
+  }
+
+  it should "never exceed what the row renders to, in either format" in {
+    val sql =
+      "SELECT range::INTEGER AS i, repeat('é漢😀\"', (range % 7)::INTEGER) AS s, " +
+        "[repeat('x', range::INTEGER)] AS l, ('\\x01'::BLOB) AS b FROM range(20)"
+    val fl = floors(sql)
+    val js = parseJson(json(sql).body).toOption.flatMap(_.asArray).get
+    fl.zip(js).foreach((f, row) => f should be <= row.noSpaces.getBytes(UTF_8).length.toLong)
+    val lines = csv(sql).body.split("\r\n").toVector.drop(1)
+    fl.zip(lines).foreach((f, line) => f should be <= line.getBytes(UTF_8).length.toLong)
   }
 
   "the byte cap" should "cut a JSON page at a row boundary, never past the cap" in {
