@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 export interface MultiSelectOption {
   value: string;
   label: string;
+  /** Hover text for the option, when its label alone does not say enough. */
+  title?: string;
 }
 
 // Form dropdown holding a checkbox list: looks like a closed <select>, opens a
@@ -110,6 +112,7 @@ export default function MultiSelectDropdown({
           {options.map(o => (
             <label
               key={o.value}
+              title={o.title}
               className="checkbox-label"
               style={{ margin: 0, padding: '.35rem .75rem', cursor: 'pointer', color: 'var(--text)' }}
             >

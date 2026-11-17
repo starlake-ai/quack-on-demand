@@ -673,6 +673,23 @@ export interface PatEntry {
 
 export interface PatListResponse { tokens: PatEntry[]; }
 
+// One name valid on a token's `tools` axis (GET /api/auth/pat/tools). `data`: an MCP tool any
+// token may be offered; `admin`: an MCP tool offered only to an admin-owned token; `surface`: a
+// reserved name of another surface, such as `rest` for the REST data edge. `label` is the name
+// itself for an MCP tool. `readOnly`: a token with a ceiling of RO keeps it. Creating a token
+// with a name outside this list answers 400 unknown_tool.
+export type PatToolGroup = 'data' | 'admin' | 'surface';
+
+export interface PatToolEntry {
+  name: string;
+  label: string;
+  group: PatToolGroup;
+  readOnly: boolean;
+  description: string;
+}
+
+export interface PatToolsResponse { tools: PatToolEntry[]; }
+
 export interface PatRevokeRequest { id: string; }
 
 // ----- RBAC: roles -----
