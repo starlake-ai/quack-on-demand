@@ -121,3 +121,5 @@ databaseChangeLog:
       file: db/changelog/0057-own-keys-policy-version.yaml
   - include:
       file: db/changelog/0058-maintenance-node-stop.yaml
+  - include:
+      file: db/changelog/0059-release-gate.yaml
