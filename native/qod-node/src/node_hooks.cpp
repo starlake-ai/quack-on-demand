@@ -531,7 +531,7 @@ std::vector<NodeSecretScope> NodeS3SecretScopes(ClientContext &context) {
 	return scopes;
 }
 
-std::string RefusalMessage(const DecideResult &decided);
+std::string RefusalMessage(const DecideResult &decided, const NodeAuthz &authz, const std::string &nonce);
 
 //! `refusal`, counted as one the node made alone (decision 26: AuthzStats::local_refusals).
 std::string LocalRefusal(NodeAuthz &authz, std::string refusal) {
@@ -584,7 +584,7 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 	if (decided.status == DecideResult::Status::Allow) {
 		return "";
 	}
-	return RefusalMessage(decided);
+	return RefusalMessage(decided, authz, recorded.nonce);
 }
 
 // ---- qod_screen ----------------------------------------------------------------------------------
@@ -680,15 +680,17 @@ void RefuseForeignCopyFunction(ClientContext &context, LogicalOperator &op) {
 
 //! A refused decision as the client reads it. Every unavailable one is retryable (a 503, a timeout, a
 //! transport failure): it says so, like the credential fetch does, in the words the manager maps to a
-//! retryable failure (FlightSqlRouter.NodeAuthzUnavailable).
-std::string RefusalMessage(const DecideResult &decided) {
+//! retryable failure (FlightSqlRouter.NodeAuthzUnavailable), and ends with the marker of `nonce`, the
+//! handle the statement runs under (UnavailableMarker): without it the manager books the words as a
+//! denial, since a refusal that echoes a user's text could otherwise spell them.
+std::string RefusalMessage(const DecideResult &decided, const NodeAuthz &authz, const std::string &nonce) {
 	if (decided.status != DecideResult::Status::Unavailable) {
 		return decided.Message();
 	}
 	std::string unavailable = "authorization unavailable";
 	auto rest = decided.reason.compare(0, unavailable.size(), unavailable) == 0 ? decided.reason.substr(unavailable.size())
 	                                                                             : ": " + decided.reason;
-	return "QoD: " + unavailable + ", retry" + rest;
+	return "QoD: " + unavailable + ", retry" + rest + UnavailableMarker(authz.NodeKey(), nonce);
 }
 
 //! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
@@ -709,7 +711,7 @@ Admitted Decide(Gate &gate, const Installed &installed, const Described &describ
 	call.ctx = installed.ctx;
 	auto result = gate.decider(call);
 	if (result.status != DecideResult::Status::Allow) {
-		throw PermissionException(RefusalMessage(result));
+		throw PermissionException(RefusalMessage(result, *gate.authz, installed.nonce));
 	}
 	// Capped as the verdict cache caps it (VerdictCache::Put): a far-future expiry (an OPA tenant's
 	// decision cache TTL) must not pin a prepared statement's verdict either.

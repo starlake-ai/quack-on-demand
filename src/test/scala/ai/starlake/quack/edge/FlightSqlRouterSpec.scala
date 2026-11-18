@@ -71,10 +71,60 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     */
   private def defaultStub: () => QuackResponse = () => TestArrow.okResponse()
 
+  /** Node keys that register the context of every handle they mint, as `Main` wires them
+    * (`MintedHandles`): only with them can a node's "authorization unavailable" marker verify.
+    */
+  private def markingKeys(): ai.starlake.quack.edge.authz.NodeKeys =
+    new ai.starlake.quack.edge.authz.NodeKeys(
+      ai.starlake.quack.edge.authz.NodeKeys.randomSecret(),
+      "http://127.0.0.1:0",
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
+      minted = Some(new ai.starlake.quack.edge.authz.MintedHandles(10000)),
+      readOnlyCatalogs = ai.starlake.quack.edge.authz.ReadOnlyCatalogs.none
+    )
+
+  /** The nonce of the handle `authorize` mints for `nodeId` under `keys`, as qod-node reads it. */
+  private def mintedNonce(
+      keys: ai.starlake.quack.edge.authz.NodeKeys,
+      nodeId: String,
+      authorize: () => String
+  ): String =
+    val handle = authorize().stripPrefix("CALL system.main.qod_session('").stripSuffix("')")
+    ai.starlake.quack.edge.authz.NodeHandles
+      .verify(handle, keys.key(nodeId), nodeId, System.currentTimeMillis())
+      .fold(why => fail(s"the minted handle does not verify: $why"), _.nonce)
+
+  /** qod-node's "authorization unavailable" refusal (`text`), ending with the marker of `nonce`
+    * under `nodeId`'s key, as the node raises it for the statement that handle was minted for.
+    */
+  private def markedUnavailable(
+      keys: ai.starlake.quack.edge.authz.NodeKeys,
+      nodeId: String,
+      nonce: String,
+      text: String = "Permission Error: QoD: authorization unavailable, retry"
+  ): QuackResponse =
+    QuackResponse.Failed(
+      QuackError.Permanent(
+        text + ai.starlake.quack.edge.authz.NodeHandles.unavailableMarker(keys.key(nodeId), nonce)
+      ),
+      1L
+    )
+
+  /** A tenant user of acme with no grant: a principal with a session context, which the handles
+    * of its statements are minted with.
+    */
+  private def tenantEff: ai.starlake.quack.ondemand.rbac.EffectiveSet =
+    ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil)
+
+  /** `answer`, when given, replaces `stub`: it is handed the pool's node id and the nonce of the
+    * handle the call minted for it (under `keys`), as the node is.
+    */
   private def setup(
       stub: () => QuackResponse = defaultStub,
       events: ManagerEventSink = ManagerEventSink.noop,
-      adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
+      adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None,
+      keys: ai.starlake.quack.edge.authz.NodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      answer: Option[(String, String) => QuackResponse] = None
   ) =
     val backend = new QuackBackend:
       def allowsLocalFiles = true
@@ -121,8 +171,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           session: Option[String],
           authorize: () => String
       ) =
-        IO.pure(stub())
-    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+        IO(answer.fold(stub())(_(node.nodeId, mintedNonce(keys, node.nodeId, authorize))))
+    val adapter = new QuackHttpAdapter(client, tracker, keys)
 
     val sessions = new SessionRegistry
     val router   =
@@ -587,16 +637,33 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get shouldBe a[RouterFailure.BadRequest]
 
   it should "tag the node's refusal for an unavailable decision as RouterFailure.Unavailable" in:
-    val perm = () =>
-      QuackResponse.Failed(
-        QuackError.Permanent(
-          "Permission Error: QoD: authorization unavailable, retry: cannot connect to 127.0.0.1:1"
-        ),
-        1L
-      )
-    val (router, _, _) = setup(stub = perm)
-    val out            = router.execute("c-unavail", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
+    val keys = markingKeys()
+    val text = "Permission Error: QoD: authorization unavailable, retry: cannot connect to 127.0.0.1:1"
+    val (router, _, node) =
+      setup(keys = keys, answer = Some((id, n) => markedUnavailable(keys, id, n, text)))
+    router
+      .execute("c-unavail", "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync() match
+      case Left(RouterFailure.Unavailable(reason)) =>
+        // The marker is the node's word to the router: neither the client nor the history reads it.
+        reason shouldBe s"permanent failure: $text"
+        reason should not include "(qod-retry"
+      case other => fail(s"expected Unavailable, got $other")
+    val latest = router.history.snapshot(1).head
+    latest.status shouldBe "permanent"
+    latest.nodeId shouldBe node.nodeId
+    latest.error shouldBe Some(text)
+    // The parse screen's form of the same refusal is retryable too.
+    val wrapped = "Invalid Input Error: Authorization callback failed: Permission Error: " +
+      "QoD: authorization unavailable, retry: timed out"
+    val (screen, _, _) =
+      setup(keys = keys, answer = Some((id, n) => markedUnavailable(keys, id, n, wrapped)))
+    screen
+      .execute("c-unavail-screen", "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe RouterFailure.Unavailable(s"permanent failure: $wrapped")
     // Any other node refusal is a denial (the next case).
     val refusal        = QuackError.Permanent("Permission Error: QoD: user:alice lacks")
     val (denied, _, _) = setup(stub = () => QuackResponse.Failed(refusal, 1L))
@@ -606,17 +673,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .swap
       .toOption
       .get shouldBe a[RouterFailure.AccessDenied]
-    // The parse screen's form of the same refusal is retryable too; a user's own text quoting the
-    // marker is not.
-    FlightSqlRouter.isNodeAuthzUnavailable(
-      "Invalid Input Error: Authorization callback failed: Permission Error: " +
-        "QoD: authorization unavailable, retry: timed out"
-    ) shouldBe true
+    // Only the words the node raises start the claim; a user's own text quoting them does not.
+    FlightSqlRouter.claimsNodeAuthzUnavailable(wrapped) shouldBe true
     List(
       "Invalid Input Error: QoD: authorization unavailable, retry",
       "Catalog Error: Table with name QoD: authorization unavailable, retry does not exist!",
       "Binder Error: Permission Error: QoD: authorization unavailable, retry"
-    ).foreach(m => FlightSqlRouter.isNodeAuthzUnavailable(m) shouldBe false)
+    ).foreach(m => FlightSqlRouter.claimsNodeAuthzUnavailable(m) shouldBe false)
     val user =
       QuackError.Permanent("Invalid Input Error: QoD: authorization unavailable, retry")
     val (mine, _, _) = setup(stub = () => QuackResponse.Failed(user, 1L))
@@ -627,23 +690,136 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .toOption
       .get shouldBe a[RouterFailure.BadRequest]
 
+  it should "book the unavailable words without the statement's own marker as a denial" in:
+    // A file location refusal echoes the location as typed right after `QoD: `, so a tenant user's
+    // read_csv('authorization unavailable, retry/x') reads like the unavailable refusal: unmarked, it
+    // is a denial, booked as one (history `denied`, a data-denial event), never a retryable outage.
+    val forged =
+      "Permission Error: QoD: authorization unavailable, retry/x is outside the tenant's authorized " +
+        "locations"
+    val keys = markingKeys()
+    def expectDenied(router: FlightSqlRouter, id: String, what: String): Unit =
+      withClue(what) {
+        router
+          .execute(id, "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
+          .unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(reason)) => reason should startWith("access denied: ")
+          case other                                    => fail(s"expected AccessDenied, got $other")
+        router.history.snapshot(1).head.status shouldBe "denied"
+      }
+    // 1. The exploit: the words, unmarked.
+    val (plain, _, _) = setup(
+      keys = keys,
+      answer = Some((_, _) => QuackResponse.Failed(QuackError.Permanent(forged), 1L))
+    )
+    expectDenied(plain, "c-forged", "an unmarked forgery")
+    // 2. A real marker of an earlier statement's handle, replayed in a later statement's message.
+    val nonces = new java.util.concurrent.ConcurrentLinkedQueue[String]
+    val (replay, _, _) = setup(
+      keys = keys,
+      answer = Some { (id, n) =>
+        nonces.add(n)
+        if nonces.size == 1 then markedUnavailable(keys, id, n)
+        else markedUnavailable(keys, id, nonces.peek(), forged)
+      }
+    )
+    replay
+      .execute("c-first", "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.Unavailable]
+    expectDenied(replay, "c-replayed", "a marker of an earlier statement")
+    // 3. This statement's nonce, under another node's key.
+    val (otherKey, _, _) = setup(
+      keys = keys,
+      answer = Some((_, n) => markedUnavailable(keys, "quack--acme--other--sales--0", n, forged))
+    )
+    expectDenied(otherKey, "c-other-key", "a marker computed under another node's key")
+    // 4. This statement's nonce, with a wrong MAC.
+    val (wrongMac, _, _) = setup(
+      keys = keys,
+      answer = Some { (id, n) =>
+        val good = ai.starlake.quack.edge.authz.NodeHandles.unavailableMarker(keys.key(id), n)
+        val bad = good.dropRight(2) + (if good.charAt(good.length - 2) == '0' then "1)" else "0)")
+        QuackResponse.Failed(QuackError.Permanent(forged + bad), 1L)
+      }
+    )
+    expectDenied(wrongMac, "c-wrong-mac", "a marker with a wrong MAC")
+    // Fake markers in a user's text do not help, however many: only one the node computed verifies.
+    val (many, _, _) = setup(
+      keys = keys,
+      answer = Some { (_, n) =>
+        val fake = s" (qod-retry $n.${"0" * 64})"
+        QuackResponse.Failed(QuackError.Permanent(forged + fake * 3), 1L)
+      }
+    )
+    expectDenied(many, "c-many", "several fake markers")
+
+  it should "keep the context-expired refusal retryable, with MintedHandles or without it" in:
+    // The node answers "authorization context expired; retry" when the replica no longer holds the
+    // handle's context (MintedHandles evicted it, or its grace ran out): the statement's own record
+    // of its nonces still binds the marker to it, so it stays a retryable outage, never a denial.
+    val now    = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+    val minted = new ai.starlake.quack.edge.authz.MintedHandles(1000L, clock = () => now.get())
+    val keys   = new ai.starlake.quack.edge.authz.NodeKeys(
+      ai.starlake.quack.edge.authz.NodeKeys.randomSecret(),
+      "http://127.0.0.1:0",
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
+      minted = Some(minted),
+      readOnlyCatalogs = ai.starlake.quack.edge.authz.ReadOnlyCatalogs.none
+    )
+    val text =
+      "Permission Error: QoD: authorization unavailable, retry: authorization context expired; retry"
+    val (router, _, _) = setup(
+      keys = keys,
+      answer = Some { (id, n) =>
+        now.addAndGet(
+          ai.starlake.quack.edge.authz.NodeHandles.LifetimeMs +
+            ai.starlake.quack.edge.authz.NodeHandles.DecideGraceMs + 60_000L
+        )
+        minted.get(n) shouldBe None
+        markedUnavailable(keys, id, n, text)
+      }
+    )
+    router
+      .execute("c-expired", "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe RouterFailure.Unavailable(s"permanent failure: $text")
+    router.history.snapshot(1).head.status shouldBe "permanent"
+    // Keys wired with no registry at all recognize their own statement's marker too.
+    val bareKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val (bare, _, _) = setup(
+      keys = bareKeys,
+      answer = Some((id, n) => markedUnavailable(bareKeys, id, n, text))
+    )
+    bare
+      .execute("c-no-registry", "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.Unavailable]
+
   it should "not mark that refusal retryable for a multi-statement submission" in:
     // In `SELECT 1; SELECT 2` the first statement may have run (each autocommits) before the node
     // refused the second for want of a verdict: a client retry would run it twice (D-m5).
-    val perm = () =>
-      QuackResponse.Failed(
-        QuackError.Permanent("Permission Error: QoD: authorization unavailable, retry: timed out"),
-        1L
-      )
-    val (router, _, _) = setup(stub = perm)
-    router.execute("c-batch", "alice", poolKey, "SELECT 1; SELECT 2").unsafeRunSync() match
+    val keys = markingKeys()
+    val text = "Permission Error: QoD: authorization unavailable, retry: timed out"
+    val (router, _, _) =
+      setup(keys = keys, answer = Some((id, n) => markedUnavailable(keys, id, n, text)))
+    router
+      .execute("c-batch", "alice", poolKey, "SELECT 1; SELECT 2", effectiveSet = Some(tenantEff))
+      .unsafeRunSync() match
       case Left(RouterFailure.BadRequest(reason)) =>
         reason should startWith("permanent failure: Permission Error: QoD: authorization")
         reason should endWith(s"(${FlightSqlRouter.BatchNotRetried})")
+        reason should not include "(qod-retry"
       case other => fail(s"expected BadRequest, got $other")
     // The nearest admitted case: one statement, a trailing separator and a comment included.
     router
-      .execute("c-one", "alice", poolKey, "SELECT 1; -- done")
+      .execute("c-one", "alice", poolKey, "SELECT 1; -- done", effectiveSet = Some(tenantEff))
       .unsafeRunSync()
       .swap
       .toOption
@@ -676,7 +852,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "Parser Error: syntax error at or near \"QoD\""
     ).foreach { m =>
       withClue(m) {
-        FlightSqlRouter.isNodeRefusal(m) shouldBe false
+        FlightSqlRouter.isNodeRefusal(m, verifiedUnavailable = false) shouldBe false
         val (router, _, _) =
           setup(stub = () => QuackResponse.Failed(QuackError.Permanent(m), 1L))
         router
@@ -688,9 +864,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         router.history.snapshot(1).head.status shouldBe "permanent"
       }
     }
-    FlightSqlRouter.isNodeRefusal(
-      s"Permission Error: ${FlightSqlRouter.NodeAuthzUnavailable}: timed out"
-    ) shouldBe false
+    // The unavailable words are a refusal unless the router verified the statement's marker.
+    val unavailable = s"Permission Error: ${FlightSqlRouter.NodeAuthzUnavailable}: timed out"
+    FlightSqlRouter.isNodeRefusal(unavailable, verifiedUnavailable = true) shouldBe false
+    FlightSqlRouter.isNodeRefusal(unavailable, verifiedUnavailable = false) shouldBe true
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
@@ -2014,16 +2191,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "keep the retry node's authorization-unavailable answer retryable" in:
     // The first node fails transiently; the fallback answers that it could get no verdict, which
-    // a client may retry: the "retry failed" context must not make it a bad request.
-    val callCount                 = new java.util.concurrent.atomic.AtomicInteger(0)
-    val stub: () => QuackResponse = () =>
-      if callCount.getAndIncrement() == 0 then
-        QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
-      else
-        QuackResponse.Failed(
-          QuackError.Permanent("Permission Error: QoD: authorization unavailable, retry"),
-          1L
-        )
+    // a client may retry: the "retry failed" context must not make it a bad request. The marker is
+    // the fallback node's own (its key, this statement's nonce); one under the first node's key is
+    // a denial, booked against the node that answered.
+    val callCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    val keys      = markingKeys()
+    val firstNode = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val markWith  = new java.util.concurrent.atomic.AtomicReference[String => String](identity)
     val bknd = new QuackBackend:
       def allowsLocalFiles = true
 
@@ -2055,6 +2229,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
       .unsafeRunSync()
     sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val nodes2  = sup2.get(pk2).get.nodes
     val client2 =
       new QuackHttpClient(TestArrow.sharedAllocator):
         override def query(
@@ -2064,20 +2239,50 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             session: Option[String],
             authorize: () => String
         ) =
-          IO.pure(stub())
+          IO {
+            val node  = nodes2.find(n => endpoint.endsWith(s":${n.port}")).get
+            val nonce = mintedNonce(keys, node.nodeId, authorize)
+            if callCount.getAndIncrement() % 2 == 0 then
+              firstNode.set(node.nodeId)
+              QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
+            else
+              markedUnavailable(keys, markWith.get()(node.nodeId), nonce)
+          }
     val router2 =
       new FlightSqlRouter(
         sup2,
         new SessionRegistry,
         tkr,
-        new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+        new QuackHttpAdapter(client2, tkr, keys),
         metadataFilterRewriter = mountedFilter,
         protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
       )
-    router2.execute("retry-authz", "alice", pk2, "SELECT 1").unsafeRunSync() match
-      case Left(f: RouterFailure.Unavailable) => f.reason should include("retry failed")
-      case other                              => fail(s"expected Unavailable, got $other")
+    router2
+      .execute("retry-authz", "alice", pk2, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync() match
+      case Left(f: RouterFailure.Unavailable) =>
+        f.reason should include("retry failed")
+        f.reason should not include "(qod-retry"
+      case other => fail(s"expected Unavailable, got $other")
     callCount.get() shouldBe 2
+    // The same, with the marker under the key of the node that failed first: a denial.
+    markWith.set(_ => firstNode.get())
+    nodes2.foreach(n => tkr.setHealthy(n.nodeId, true))
+    router2
+      .execute("retry-authz-2", "alice", pk2, "SELECT 1", effectiveSet = Some(tenantEff))
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.AccessDenied]
+    callCount.get() shouldBe 4
+    // Booked against the node that answered: the first node's transient row, then the retry
+    // node's denial (a data-denial event).
+    val rows = router2.history.snapshot(2)
+    rows.map(_.status) should contain theSameElementsAs List("transient", "denied")
+    val denial = rows.find(_.status == "denied").get
+    denial.nodeId should not be firstNode.get()
+    nodes2.map(_.nodeId) should contain(denial.nodeId)
+    denial.error.get should include("authorization unavailable, retry")
 
   // ---------- EPIC P1: author stamping ----------
 

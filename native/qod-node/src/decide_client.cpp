@@ -27,6 +27,11 @@ long long LimitValue(const char *name, const std::string &text, long long min, l
 	return value;
 }
 
+//! Why a decide request too large for the verdict listener is refused (a 413, or refused before the call).
+const std::string kTooLargeReason = "authorization refused: the statement's authorization request is larger than "
+                                    "the verdict listener takes (" +
+                                    std::to_string(kMaxDecideBodyBytes) + " bytes)";
+
 DecideResult Refused(std::string reason) {
 	DecideResult result;
 	result.status = DecideResult::Status::Refuse;
@@ -108,8 +113,15 @@ DecideResult DecideClient::Decide(const DecideCall &call) {
 		}
 		stats_.plan_cache_misses++;
 	}
+	auto body = RequestBody(call);
+	// The statement chooses the description's size: one past the listener's limit is its refusal,
+	// made here before any call (a local refusal, never an outage).
+	if (body.size() > kMaxDecideBodyBytes) {
+		stats_.local_refusals++;
+		return Refused(kTooLargeReason);
+	}
 	stats_.decide_calls++;
-	auto result = Ask(call, fingerprint);
+	auto result = Ask(call, fingerprint, body);
 	if (result.status == DecideResult::Status::Unavailable) {
 		stats_.decide_unavailable++;
 	} else if (result.status == DecideResult::Status::Refuse) {
@@ -121,7 +133,13 @@ DecideResult DecideClient::Decide(const DecideCall &call) {
 	return result;
 }
 
-DecideResult DecideClient::Ask(const DecideCall &call, const std::string &fingerprint) {
+std::string DecideClient::RequestBody(const DecideCall &call) {
+	return CanonicalJson(JsonObject({{"description", JsonString(ToBase64Url(call.description))},
+	                                 {"handle", JsonString(call.handle)},
+	                                 {"kind", JsonString(call.kind)}}));
+}
+
+DecideResult DecideClient::Ask(const DecideCall &call, const std::string &fingerprint, const std::string &body) {
 	HttpUrl url;
 	try {
 		url = ParseHttpUrl(call.replica);
@@ -129,9 +147,6 @@ DecideResult DecideClient::Ask(const DecideCall &call, const std::string &finger
 		return Refused(std::string("authorization refused: the handle's replica cannot be called (") + error.what() +
 		               ")");
 	}
-	auto body = CanonicalJson(JsonObject({{"description", JsonString(ToBase64Url(call.description))},
-	                                      {"handle", JsonString(call.handle)},
-	                                      {"kind", JsonString(call.kind)}}));
 	HttpReply reply;
 	try {
 		reply = HttpPost(url, url.path + kDecidePath,
@@ -145,6 +160,12 @@ DecideResult DecideClient::Ask(const DecideCall &call, const std::string &finger
 	}
 	if (reply.status == 401) {
 		return Refused("authorization refused: " + QuotedBody(reply.body));
+	}
+	if (reply.status == 413) {
+		return Refused(kTooLargeReason);
+	}
+	if (reply.status == 400) {
+		return Refused("authorization refused: the verdict listener refused the request as malformed");
 	}
 	if (reply.status == 503) {
 		auto said = QuotedBody(reply.body);

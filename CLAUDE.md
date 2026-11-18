@@ -281,9 +281,15 @@ one); screen verdicts are never cached. Decide timeout `QOD_AUTHZ_DECIDE_TIMEOUT
 ranges, 1 to 60000 ms and 0 to 10000000 entries) and forwards them to every node on every runtime:
 the local spawn env, the Kubernetes pod env and the fleet assignment's `authzLimits`
 (`NodeAuthzLimitsConfig`); a node never inherits them from elsewhere. A timeout, an unreachable
-replica or a 503 is `QoD: authorization unavailable, retry`, which the gateway answers as Flight
-`UNAVAILABLE` (`FlightSqlRouter.isNodeAuthzUnavailable`) for a single statement and the native front
-door relays; a multi-statement submission so refused is answered `INVALID_ARGUMENT` "not retryable
+replica or a 503 is `QoD: authorization unavailable, retry`, ended with a marker ` (qod-retry
+<nonce>.<mac>)` bound to the statement's handle nonce and the node key; a request too large for the
+verdict listener (past 1 MiB, `kMaxDecideBodyBytes` = `DecideRoute.MaxBodyBytes`, refused on the node
+before any call) or one it refuses as malformed is a refusal, not an outage. The gateway treats
+`authorization unavailable, retry` as a retryable outage only when the marker is one it minted for that very statement on that node
+(`NodeKeys.marksUnavailable`, from the statement's own record, never `MintedHandles`, so a
+context-expired 503 stays retryable), and strips it; anything else that reads so is a denial. A
+verified one is Flight `UNAVAILABLE` for a single statement, and the native front door answers with
+the same text; a multi-statement submission so refused is answered `INVALID_ARGUMENT` "not retryable
 as a whole: the statements before the refused one may have run" (`FlightSqlRouter.BatchNotRetried`).
 Every other node refusal reads `QoD: <reason>`, is permanent and is booked as a denial
 (`FlightSqlRouter.isNodeRefusal`: Flight `UNAUTHORIZED`, `access denied: Permission Error: QoD:
@@ -635,7 +641,13 @@ restore's latency lands on the next request thread. A multi-statement submission
 as it reaches it, under the one handle sent before its PREPARE, so a statement that binds more than
 60 s after the send is refused `qod-node: this connection has no verified principal`, COMMIT included,
 for superusers too (a single statement may run longer). The merge is not affected: it sends one PREPARE
-per statement.
+per statement. A statement a tenant user writes can still be answered as a retryable outage, and so stay out of
+the denial audit, in four ways: a decision slower than `QOD_AUTHZ_DECIDE_TIMEOUT_MS` (no node can tell
+it from a slow replica); an OPA tenant's OPA failing or timing out on a large or slow input the
+statement makes (`OpaAuthorizer.UnavailableMessage`); more tenant statements per second than
+`QOD_AUTHZ_HANDLE_CONTEXTS_MAX / 360`, which evicts handle contexts so refusals read `authorization
+context expired; retry` (`cache_evictions_total{cache="qod_minted_handles"}` shows it); and an
+unexpected exception in the decider, which `DecideRoute` answers 503.
 
 Which binary: `QodNodeBinary` (`ondemand/runtime/`) resolves it once at boot for every manager that
 starts nodes on its host (runtime local, or fleet with `QOD_FLEET_EPHEMERAL=local`) and refuses to

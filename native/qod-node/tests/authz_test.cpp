@@ -1,9 +1,13 @@
-// Unit tests for authz: the prelude's exact form, the refresh rules and the parse screen's
-// per-connection book, without DuckDB. Built with -DQOD_NODE_TESTS=ON and run by CTest.
+// Unit tests for authz: the prelude's exact form, the refresh rules, the parse screen's
+// per-connection book and the "authorization unavailable" marker (against the golden marker
+// UnavailableMarkerSpec (Scala) pins too, tests/golden/unavailable-marker-v1.txt, the one argument),
+// without DuckDB. Built with -DQOD_NODE_TESTS=ON and run by CTest.
 
 #include "authz.hpp"
+#include "crypto.hpp"
 #include "test_handles.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -33,9 +37,48 @@ void ExpectMentions(const std::string &text, const std::string &needle, const st
 
 int64_t now_ms = 1761200000000;
 
+//! The golden marker: both sides compute it from the same key and nonce, byte for byte.
+void VerifyGoldenMarker(const std::string &path) {
+	std::ifstream in(path);
+	if (!in) {
+		std::cerr << "FAIL: cannot read " << path << std::endl;
+		failures++;
+		return;
+	}
+	std::string line, key_hex, nonce, marker;
+	while (std::getline(in, line)) {
+		if (line.rfind("key=", 0) == 0) {
+			key_hex = line.substr(4);
+		} else if (line.rfind("nonce=", 0) == 0) {
+			nonce = line.substr(6);
+		} else if (line.rfind("marker=", 0) == 0) {
+			marker = line.substr(7);
+		}
+	}
+	Expect(!key_hex.empty() && nonce.size() == 32 && !marker.empty(), "the golden file holds a key, a nonce, a marker");
+	auto key = qod::FromHex(key_hex);
+	Expect(qod::UnavailableMarker(key, nonce) == marker, "the golden marker");
+	Expect(qod::UnavailableMarker(std::string(32, '\x42'), nonce) != marker, "another key, another marker");
+	Expect(qod::UnavailableMarker(key, std::string(32, '0')) != marker, "another nonce, another marker");
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+	// Run without the golden file, the cross-language check would be skipped and the run still pass.
+	if (argc < 2) {
+		std::cerr << "FAIL: no golden file: run authz_test with the path of tests/golden/unavailable-marker-v1.txt"
+		          << std::endl;
+		return 1;
+	}
+	VerifyGoldenMarker(argv[1]);
+	// ---- the marker's shape: one space, (qod-retry <nonce>.<64 hex>)
+	auto shaped = qod::UnavailableMarker(kKey, "0123456789abcdef0123456789abcdef");
+	Expect(shaped.rfind(" (qod-retry 0123456789abcdef0123456789abcdef.", 0) == 0 &&
+	           shaped.size() == 1 + 11 + 32 + 1 + 64 + 1 && shaped.back() == ')',
+	       "the marker's shape");
+	Expect(qod::NodeAuthz(kNode, kKey).NodeKey() == kKey, "the node key the markers are MACed with");
+
 	// ---- the prelude: exactly the manager's spelling
 	Expect(qod::PreludeHandle("CALL system.main.qod_session('abc.0f')") == "abc.0f", "the prelude");
 	Expect(qod::PreludeHandle("CALL qod_session('abc.0f')").empty(), "unqualified, a macro could shadow it");

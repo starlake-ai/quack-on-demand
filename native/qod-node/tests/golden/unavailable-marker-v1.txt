@@ -1,0 +1,10 @@
+# The marker qod-node appends to an "authorization unavailable" refusal (qod::UnavailableMarker) and
+# the manager verifies (NodeHandles.unavailableMarker, NodeKeys.marksUnavailable), from fixed inputs:
+# UnavailableMarkerSpec (Scala) and authz_test.cpp both compute it and compare it with `marker`, so the
+# two sides agree byte for byte. The marker is ` (qod-retry <nonce>.<mac>)`, mac the lowercase hex
+# HMAC-SHA256 under the node key of "qod-authz-unavailable/v1|" followed by the nonce; `marker` starts
+# with that one space, right after the `=`. Regenerate both sides together if it changes.
+# key: NodeHandles.nodeKeyHex("qod-golden-node-key-secret-0123456789", "quack-acme-db-bi-1") (handle-v4.txt's).
+key=bafdaeb38095c6be835ce8d4b771938bc7fe634c2f4a6e5ca0ea80a617340c70
+nonce=0123456789abcdef0123456789abcdef
+marker= (qod-retry 0123456789abcdef0123456789abcdef.849f0884cde034695bd01996fd357294c90ba4b8b86fb41ccc4fe69ed486627f)

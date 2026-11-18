@@ -161,19 +161,24 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   it should "be refused, retryably, while the endpoint is unavailable" in {
     decide.status = 503
+    // The handle the statement runs under: its refusal ends with that handle's marker under this
+    // node's key, which only qod-node and the minting replica can compute (UnavailableMarkerSpec).
+    val nonce     = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val authorize = () =>
+      val minted = keys.mint(node.node, Alice)
+      nonce.set(minted.nonce)
+      ai.starlake.quack.edge.authz.NodeHandles.prelude(minted.text)
     try
-      refused(
-        client
-          .query(
-            node.endpoint,
-            node.token,
-            "SELECT v * 2 FROM answers",
-            None,
-            node.authorize(Alice)
-          )
-          .unsafeRunSync(),
-        "QoD: authorization unavailable"
-      )
+      val resp = client
+        .query(node.endpoint, node.token, "SELECT v * 2 FROM answers", None, authorize)
+        .unsafeRunSync()
+      refused(resp, "QoD: authorization unavailable")
+      val marker =
+        ai.starlake.quack.edge.authz.NodeHandles
+          .unavailableMarker(keys.key(node.nodeId), nonce.get())
+      LiveQodNode.lines(resp) match
+        case Left(m) => m should endWith(marker)
+        case other   => fail(s"expected a refusal, got $other")
     finally decide.status = 200
   }
 
