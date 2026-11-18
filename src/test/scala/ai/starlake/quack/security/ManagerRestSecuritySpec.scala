@@ -214,6 +214,56 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "route no path holding a dot segment, however the request target spells it (#239)" in {
+    import sttp.tapir.*
+    // A module route that takes any path outside /api: whatever reaches it says so. It stands for a
+    // route that would read a dot segment the way the guard did not.
+    val catchAll = endpoint.get
+      .in(paths)
+      .out(stringBody)
+      .serverLogicSuccess[IO](ps => IO.pure("reached:" + ps.mkString("/")))
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, moduleEndpoints = List(catchAll))
+    def send(target: String, key: Option[String]): (Int, String) =
+      val uri  = java.net.URI.create(h.baseUrl)
+      val sock = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        sock.setSoTimeout(15000)
+        val auth = key.fold("")(k => s"X-API-Key: $k\r\n")
+        sock.getOutputStream.write(
+          s"GET $target HTTP/1.1\r\nHost: x\r\nConnection: close\r\n$auth\r\n".getBytes(UTF_8)
+        )
+        sock.getOutputStream.flush()
+        val (status, _, body) = rawResponse(sock.getInputStream)
+        (status, new String(body, UTF_8))
+      finally sock.close()
+    try
+      val root = h.superuserSession()
+      // The catch-all answers an ordinary path, and the guard still answers /api.
+      send("/plain/path", None) shouldBe (200, "reached:plain/path")
+      send("//data/api/tenant/list", None)._1 shouldBe 401
+      for
+        target <- List(
+          // Ember reads `//data` as an authority: the path is `/../api/tenant/list`.
+          "//data/../api/tenant/list",
+          "//data/./api/tenant/list",
+          "/x/../api/tenant/list",
+          "/x/%2e%2e/api/tenant/list",
+          "/x/%2E/api/tenant/list",
+          "/api/../api/tenant/list",
+          "/api/tenant/./list"
+        )
+        key <- List(None, Some(root))
+      do
+        val (status, body) = send(target, key)
+        withClue(s"GET $target with ${key.fold("no key")(_ => "a session")}: $status $body") {
+          status shouldBe 404
+          body should not include "reached"
+          body should not include SecurityFixtures.TenantId
+        }
+    finally h.shutdown()
+  }
+
   it should "demote a non-admin session to the profile allowlist" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)

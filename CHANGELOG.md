@@ -94,6 +94,12 @@
 
 ### Fixed
 
+- **No REST route sees a path holding a `.` or `..` segment.** A request target such as
+  `//data/../api/tenant/list` is read as the host `data` and the path `/../api/tenant/list`, which
+  the API guard took as outside `/api` and handed to the routes with no credential. No route
+  resolved dot segments, so nothing leaked, but the guard and the routes could read one path
+  differently. Such a path now skips the API routes, with or without a credential, and answers
+  404 (a module's static mount answers with its own 404 page, as before) (#239).
 - **A time-travel read under a column or row policy is checked against the catalog's latest
   commit.** The name-history answer was kept for 5 s, so a read right after a column rename could
   be admitted under the old names; it is now kept only until the next commit, and the check's

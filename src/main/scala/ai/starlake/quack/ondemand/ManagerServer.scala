@@ -363,6 +363,13 @@ final class ManagerServer(
     * `/api/config/client`, `/health`, `/ready`, and everything outside `/api/...` (incl.
     * `/ui/...`).
     *
+    * A path holding a `.` or `..` segment, decoded, never reaches these routes, with or without a
+    * credential: it falls through to the routes after them (`/mcp`, the UI, module mounts, each
+    * with its own dot-segment handling) and else answers 404. Ember reads a target such as
+    * `//data/../api/tenant/list` as the authority `data` and the path `/../api/tenant/list`, which
+    * is outside `/api` here; no route resolves dot segments today, and this keeps the guard's
+    * reading of a path and the routes' from ever differing on one (#239).
+    *
     * Request bodies are read here, whole, before a route sees one ([[withBoundedBody]]), within
     * `restLimits.bodyTimeoutSec`. A public route takes no chunked framing, as no credential has
     * been checked: a core one reads at most `restLimits.maxPublicBodyBytes`, a module's at most
@@ -389,7 +396,8 @@ final class ManagerServer(
         if req.uri.path.endsWithSlash then raw + "/" else raw
       }
       val branchApi = isBranchApi(req.method, segments, req.uri.path.endsWithSlash)
-      if !path.startsWith("/api/") && path != "/api" then routes(req)
+      if ManagerServer.holdsDotSegment(segments) then OptionT.none[IO, Response[IO]]
+      else if !path.startsWith("/api/") && path != "/api" then routes(req)
       else if isPublicApi(path) then
         // No credential has been checked: see BoundedBody.asksChunked.
         if BoundedBody.asksChunked(req) then
@@ -1464,6 +1472,10 @@ final class ManagerServer(
       .build
 
 object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
+
+  /** Whether a path's decoded segments hold `.` or `..`, which no API route takes (#239). */
+  private[ondemand] def holdsDotSegment(segments: Vector[String]): Boolean =
+    segments.exists(s => s == "." || s == "..")
 
   /** `resp` as a caller who is not a superuser reads it. A server failure or a conflict can carry a
     * client library's text on QoD's Postgres server, and `shown` keeps what it does not name. Only
