@@ -242,18 +242,25 @@ final class RestEdgeHandlers(
         // Same node as the probe: a soft pin, a vanished node falls back as usual.
         pinnedCaller = t.caller.copy(preferredNode = Some(loc.node))
         sql          = RestSql.render(loc.at, rq, limit)
-        room   <- io(pageBudget.reserve(req.requestId, timeoutFor(t.caller)))
-        _      <- if room then lift(Right(())) else fail(RestError.Busy)
-        before <- io(latestSnapshot(tenant, t.td, req.requestId))
-        enc    <- execute(
-          t.copy(caller = pinnedCaller),
-          sql,
-          dataFailure(req.requestId, filtered = rq.filters.nonEmpty),
-          req
-        )(reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes)))
-        _     <- io(pageBudget.settle(req.requestId, enc.bytes.capacity.toLong))
-        after <- io(latestSnapshot(tenant, t.td, req.requestId))
-        sn = shownSnapshot(loc, before, after)
+        room <- io(pageBudget.reserve(req.requestId, timeoutFor(t.caller)))
+        _    <- if room then lift(Right(())) else fail(RestError.Busy)
+        page <- holdingPage(req.requestId) {
+          for
+            before <- io(latestSnapshot(tenant, t.td, req.requestId))
+            // One bound for the statement, its rows' delivery included: the wait for the result
+            // and the encoding of the page share it.
+            deadline <- io(IO(Deadline.now + timeoutFor(t.caller)))
+            enc      <- execute(
+              t.copy(caller = pinnedCaller),
+              sql,
+              dataFailure(req.requestId, filtered = rq.filters.nonEmpty),
+              req
+            )(encoding(req.requestId, f, limit, deadline))
+            _     <- io(pageBudget.settle(req.requestId, enc.bytes.capacity.toLong))
+            after <- io(latestSnapshot(tenant, t.td, req.requestId))
+          yield (enc, shownSnapshot(loc, before, after))
+        }
+        (enc, sn) = page
       yield
         val range =
           if enc.rows == 0 then "*/*" else s"${q.offset}-${q.offset.toLong + enc.rows - 1}/*"
@@ -593,6 +600,37 @@ final class RestEdgeHandlers(
   /** A `use` for [[execute]] that reads the result with `f` and closes it ([[consume]]). */
   private def reading[A](f: QueryResult => A): QueryResult => IO[Either[RestError, A]] =
     qr => consume(qr)(f).map(Right(_))
+
+  /** The data statement's `use`: encodes the page by `deadline`, the statement's own bound. A page
+    * the deadline stopped is a 504 like a statement that answered late, and is never served.
+    */
+  private def encoding(
+      rid: String,
+      f: RestFormat,
+      limit: Int,
+      deadline: Deadline
+  ): QueryResult => IO[Either[RestError, RestResultEncoder.Encoded]] =
+    qr =>
+      consume(qr)(r =>
+        RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes, Some(deadline))
+      ).map { enc =>
+        if enc.overdue then
+          logger.info(s"rest [$rid] page not encoded within the statement bound")
+          Left(RestError.StatementTimeout)
+        else Right(enc)
+      }
+
+  /** Runs `step` while request `rid` holds its page reservation: any outcome but a page (an error
+    * answer, a raised error, a cancel) gives it back at once. Only a page's body outlives the
+    * handler holding its share, under [[RestPageBudget.settle]]'s backstop; an error body the
+    * server never pulled would otherwise hold a page's worst case with nothing to give it back.
+    */
+  private def holdingPage[A](rid: String)(step: Step[A]): Step[A] =
+    EitherT(step.value.guaranteeCase {
+      case Outcome.Succeeded(out) =>
+        out.flatMap(o => if o.isRight then IO.unit else pageBudget.release(rid))
+      case _ => pageBudget.release(rid)
+    })
 
   /** `qr`, whose close runs at most once. */
   private def closingOnce(qr: QueryResult): QueryResult =

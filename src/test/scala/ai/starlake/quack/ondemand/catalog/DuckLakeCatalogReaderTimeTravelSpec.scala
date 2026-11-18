@@ -1,10 +1,20 @@
 package ai.starlake.quack.ondemand.catalog
 
-import ai.starlake.quack.ondemand.state.testkit.PostgresFixture
+import ai.starlake.quack.ondemand.state.testkit.{PostgresFixture, TestPostgres}
+import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-class DuckLakeCatalogReaderTimeTravelSpec extends AnyFlatSpec with Matchers with PostgresFixture:
+import java.sql.{DriverManager, SQLException}
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.util.Try
+
+class DuckLakeCatalogReaderTimeTravelSpec
+    extends AnyFlatSpec
+    with Matchers
+    with OptionValues
+    with PostgresFixture:
 
   // Two tables so the per-table filter has something to exclude; the second
   // insert into `nation` is stamped with the P1 author prelude.
@@ -155,4 +165,49 @@ class DuckLakeCatalogReaderTimeTravelSpec extends AnyFlatSpec with Matchers with
       reader.viewEverNamed("tpch1", "myview") shouldBe true
       reader.viewEverNamed("TPCH1", "MyView") shouldBe true
       reader.viewEverNamed("tpch1", "nation") shouldBe false
+    }
+
+  // The name-history reads run on the statement path of every time-travel read under a policy, so
+  // a metadata Postgres that does not answer must cost a bounded wait, never a hung statement. A
+  // session holding a metadata table locked stands for it: the read waits on the lock until its
+  // timeout cancels it. `Bound` is the timeout and a margin, past which the read counts as hung.
+  private val Bound = (DuckLakeCatalogReader.HistoryQueryTimeoutSec + 5).seconds
+
+  private def whileLocked[A](table: String)(read: => A): Try[A] =
+    val db   = currentDbName.getOrElse(fail("whileLocked outside withCatalog"))
+    val lock = DriverManager.getConnection(
+      TestPostgres.dbUrl(db),
+      TestPostgres.pgUser,
+      TestPostgres.pgPass
+    )
+    try
+      lock.setAutoCommit(false)
+      lock.createStatement().execute(s"LOCK TABLE $table IN ACCESS EXCLUSIVE MODE")
+      Await.result(Future(Try(read))(ExecutionContext.global), Bound)
+    finally
+      lock.rollback()
+      lock.close()
+
+  "nameHistoryStable" should "give up past its timeout, never answering, when the metadata does not answer" in
+    withCatalog("tt", extraSql = extra) { (reader, _) =>
+      whileLocked("ducklake_table")(reader.nameHistoryStable("tpch1", "nation")).failed.get shouldBe
+        a[SQLException]
+      reader.nameHistoryStable("tpch1", "nation") shouldBe true
+    }
+
+  "maxSnapshotIdBounded" should "match maxSnapshotId, and move on a column rename" in
+    withCatalog("tt", extraSql = extra) { (reader, _) =>
+      val before = reader.maxSnapshotIdBounded()
+      before shouldBe reader.maxSnapshotId()
+      reader.nameHistoryStable("tpch1", "nation") shouldBe true
+      // What the history cache rests on: a rename is a commit, so the newest snapshot moves.
+      runSqlOnCatalog("ALTER TABLE lake.tpch1.nation RENAME COLUMN n_name TO n_label;")
+      reader.maxSnapshotIdBounded().value should be > before.value
+      reader.nameHistoryStable("tpch1", "nation") shouldBe false
+    }
+
+  it should "give up past its timeout when the metadata does not answer" in
+    withCatalog("tt", extraSql = extra) { (reader, _) =>
+      whileLocked("ducklake_snapshot")(reader.maxSnapshotIdBounded()).failed.get shouldBe
+        a[SQLException]
     }

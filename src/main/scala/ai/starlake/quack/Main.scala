@@ -1327,7 +1327,7 @@ object Main extends IOApp with LazyLogging:
       // is not doubled on cold misses.
       val columnCatalog = EdgeRewriters.columnCatalog(
         sup,
-        catalogReaders,
+        catalogReaders.get,
         stmtInstruments,
         // A table only the pool's nodes hold is described there through the same routed system
         // caller as the node-held catalog browser (set once the router exists; "manager starting"
@@ -1897,13 +1897,16 @@ object Main extends IOApp with LazyLogging:
       // under /data/ on the manager's own listener, mounted ahead of the manager's routes.
       val restEdge: Option[ai.starlake.quack.edge.rest.RestEdgeRoutes] =
         Option.when(restCfgResolved.enabled) {
-          // What /rows pages may hold of the heap at once; a reservation the routes never give
-          // back (a connection broken before its body was pulled) returns after this long.
+          // What /rows pages may hold of the heap at once. A body the server never pulls (a
+          // connection broken before its response was written) gives its share back 120 s after
+          // it was encoded: Ember starts writing a response as soon as it has it, and the
+          // backstop stops once the writing begins, so the hold only has to outlast that gap,
+          // with ample room for a manager under load.
           val pageBudget = ai.starlake.quack.edge.rest.RestPageBudget.forHeap(
             restCfgResolved.maxResponseBytes,
             Runtime.getRuntime.maxMemory,
-            holdAtMost = scala.concurrent.duration.FiniteDuration(
-              restCfgResolved.stmtTimeoutSec.toLong + 120L,
+            unpulledHold = scala.concurrent.duration.FiniteDuration(
+              120L,
               java.util.concurrent.TimeUnit.SECONDS
             )
           )

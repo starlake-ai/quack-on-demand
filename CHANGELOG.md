@@ -37,7 +37,8 @@
   `QOD_DATA_EDGE_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB, cut at a
   row boundary), and the pages in flight share a fifth of the heap (past it a request waits up to
   its statement bound, then answers `503 edge_busy`),
-  with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
+  with `X-QoD-Truncated` when a server or token cap cut the page; each statement, the reading of
+  its `/rows` page from the node included, is bounded by
   `min(QOD_DATA_EDGE_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
   that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
   a request to a cold pool that the edge's own wait cuts short. Boot refuses a
@@ -93,8 +94,13 @@
 
 ### Fixed
 
+- **A time-travel read under a column or row policy is checked against the catalog's latest
+  commit.** The name-history answer was kept for 5 s, so a read right after a column rename could
+  be admitted under the old names; it is now kept only until the next commit, and the check's
+  metadata reads give up after 3 s and refuse the read rather than hold the statement.
 - **One hung node no longer holds a statement that wakes its pool.** Each node's readiness check
-  is waited for at most 5 s per poll round, so the statement goes to a node that answered.
+  is waited for at most 5 s per poll round, so the statement goes to a node that answered. A
+  check on a node that never answers then ends by itself after 5 s, closing its node connection.
 - **A refused connect to a node names no node address to clients** (the manager log has it), and
   marks the node `unreachable`, not `statement_failed`, since nothing was sent; a refused session
   handle on a statement is reported as the probe reports it.

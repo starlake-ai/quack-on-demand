@@ -143,8 +143,10 @@ final class RestEdgeRoutes(
       .map { resp =>
         // At most one TLS record per chunk (slices of the body, no copy): see WriteChunkBytes. A
         // page's share of the budget is given back once its body has been written, or its write
-        // failed; one never pulled is given back by the budget's own deadline.
-        val body = resp.body.chunkLimit(WriteChunkBytes).unchunks
+        // failed. Once the writing begins the finalizer is registered, so the budget's backstop
+        // for a body never pulled is stopped: a slow client keeps its page counted to the end.
+        val body = fs2.Stream.exec(pageBudget.pulled(rid)) ++
+          resp.body.chunkLimit(WriteChunkBytes).unchunks
         decorate(resp, rid).withBodyStream(body.onFinalize(pageBudget.release(rid)))
       }
       .guaranteeCase {

@@ -2573,12 +2573,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "give two concurrent calls on one connection a session each (review 5 R4)" in:
     // Without a per-call nonce both register `<id>`: the first one's close drops the second's.
     @volatile var routerRef: FlightSqlRouter = null
-    val inSend                               = new java.util.concurrent.CountDownLatch(2)
-    val seen = new java.util.concurrent.CopyOnWriteArrayList[Integer]()
+    // Both calls are in their send when each counts the sessions, and neither returns (closing its
+    // own) before the other has counted.
+    val bothIn = new java.util.concurrent.CyclicBarrier(2)
+    val seen   = new java.util.concurrent.CopyOnWriteArrayList[Integer]()
     val stub: () => QuackResponse = () =>
-      inSend.countDown()
-      inSend.await(5, java.util.concurrent.TimeUnit.SECONDS)
+      bothIn.await(5, java.util.concurrent.TimeUnit.SECONDS)
       seen.add(routerRef.sessions.size)
+      bothIn.await(5, java.util.concurrent.TimeUnit.SECONDS)
       defaultStub()
     val (router, _, _) = setup(stub = stub)
     routerRef = router
@@ -2676,6 +2678,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       /** The readiness check in place of the adapter's (None: the adapter's, through `client`). */
       nodeAnswers: Option[RunningNode => IO[Boolean]] = None,
       readinessTimeout: FiniteDuration = 5.seconds,
+      /** The bound each readiness check sent through `client` was handed, in the order sent. */
+      checkBounds: scala.collection.mutable.ListBuffer[FiniteDuration] =
+        scala.collection.mutable.ListBuffer.empty,
       /** The endpoints the statements were sent to. */
       sent: scala.collection.mutable.ListBuffer[String] = scala.collection.mutable.ListBuffer.empty
   ) =
@@ -2724,13 +2729,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     if localFilesOff then filesOff.set(true)
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(
-          endpoint: String,
-          token: String,
-          sql: String,
-          session: Option[String],
-          authorize: () => String
-      ) =
+      private def answer(endpoint: String) =
         IO {
           sent.synchronized(sent += endpoint)
           queries.incrementAndGet()
@@ -2738,6 +2737,24 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             QuackResponse.Failed(QuackError.Transient("connect refused (test)"))
           else TestArrow.okResponse()
         }
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) = answer(endpoint)
+      // The readiness check's own call ([[QuackHttpAdapter.answers]]): its bound is recorded, and
+      // it is answered the same way.
+      override def queryWithin(
+          endpoint: String,
+          token: String,
+          sql: String,
+          authorize: () => String,
+          within: FiniteDuration
+      ) =
+        checkBounds.synchronized(checkBounds += within)
+        answer(endpoint)
     val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup,
@@ -2886,6 +2903,26 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .isRight shouldBe true
     (System.nanoTime() - start).nanos should be < 5.seconds
     sent.toList.map(_.contains(":28001")) shouldBe List(true)
+
+  it should "hand each readiness check its round's bound, so one left on a hung node ends by itself" in:
+    // The round stops waiting for a check after readinessTimeout; the check itself ends on a node
+    // that never answers only when every request it sends is bounded too. The router hands the
+    // check that bound; QuackHttpAdapterSpec shows a check so bounded ending on a silent node and
+    // closing what it opened. Kept off the wire here: this spec runs where no native library is.
+    val checkBounds      = scala.collection.mutable.ListBuffer.empty[FiniteDuration]
+    val (router, sup, _) = setupWithSupervisor(
+      resumePollInterval = 20.millis,
+      refusedQueries = 2,
+      readinessTimeout = 300.millis,
+      checkBounds = checkBounds
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    router
+      .execute("wake-11", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    // Two refused checks, then the one that answers: each handed the round's bound.
+    checkBounds.synchronized(checkBounds.toList) shouldBe List.fill(3)(300.millis)
 
   it should "not wake a disabled pool" in:
     val (router, sup, _) = setupWithSupervisor()

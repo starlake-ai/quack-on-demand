@@ -7,6 +7,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.nio.charset.StandardCharsets.UTF_8
+import java.util.concurrent.atomic.AtomicInteger
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.{Random, Using}
 
@@ -263,4 +265,35 @@ class RestResultEncoderSpec extends AnyFlatSpec with Matchers:
       RestResultEncoder.json(_, 2, 1000L)
     )
     (b.rows, b.more, b.cut) shouldBe (2, true, false)
+  }
+
+  "the statement's deadline" should "stop a page it has passed before the next row, as overdue" in {
+    val sql = "SELECT range::INTEGER AS i FROM range(5)"
+    List(RestFormat.Json, RestFormat.Csv).foreach { fmt =>
+      val b = Using.resource(TestArrow.readerFor(sql))(
+        RestResultEncoder.encode(fmt, _, 100, deadline = Some(Deadline.now - 1.second))
+      )
+      (b.rows, b.overdue) shouldBe (0, true)
+    }
+  }
+
+  it should "stop pulling a stream whose batches arrive past it" in {
+    // Three batches, each 300 ms behind: the deadline passes before the second has arrived, and
+    // the third is never asked for.
+    val loads = new AtomicInteger()
+    val sql   = "SELECT range::INTEGER AS i FROM range(3000)"
+    val b     = Using.resource(TestArrow.slowReader(sql, 300L, loads))(
+      RestResultEncoder.json(_, 10000, deadline = Some(Deadline.now + 450.millis))
+    )
+    b.overdue shouldBe true
+    loads.get should be <= 2
+  }
+
+  it should "leave a page finished in time as it was" in {
+    val sql = "SELECT range::INTEGER AS i FROM range(3000)"
+    val b   = Using.resource(TestArrow.readerFor(sql))(
+      RestResultEncoder.json(_, 10000, deadline = Some(Deadline.now + 1.hour))
+    )
+    (b.rows, b.more, b.cut, b.overdue) shouldBe (3000, false, false, false)
+    b.body shouldBe json(sql, 10000).body
   }

@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.rest
 
-import cats.effect.IO
+import cats.effect.{FiberIO, IO}
 import cats.effect.std.Semaphore
 import cats.effect.unsafe.implicits.global
 
@@ -16,57 +16,109 @@ import scala.concurrent.duration.FiniteDuration
   * A data statement first reserves a page's worst case ([[reserve]], waiting at most the request's
   * own statement bound, else `503 edge_busy`), keeps only what its body holds once it is encoded
   * ([[settle]]), and gives that back when the response has been written or has failed ([[release]],
-  * from [[RestEdgeRoutes]]). A reservation whose release never comes (a connection that broke
-  * before its body was pulled) is given back after `holdAtMost`. Counted in KiB.
+  * from [[RestEdgeRoutes]]). Counted in KiB.
+  *
+  * Nothing gives a reservation back on a clock while its page is being encoded: the buffer is still
+  * growing, and the encoding is bounded by the statement's own deadline instead. Once the body
+  * exists, a backstop gives back what the request still holds after `unpulledHold`, for a body the
+  * server never pulls (a connection that broke before its response was written), whose finalizer
+  * then never runs. It is stopped by the normal release, and as soon as the body's writing begins
+  * ([[pulled]]): from then on the body's own finalizer gives the page back, however slowly the
+  * client reads it.
   */
 final class RestPageBudget private (
     val totalKiB: Long,
     val reserveKiB: Long,
-    holdAtMost: FiniteDuration,
+    unpulledHold: FiniteDuration,
     permits: Option[Semaphore[IO]]
 ):
 
-  private val held = mutable.HashMap.empty[String, Long]
+  /** What one request holds, and the backstop armed once its body exists. */
+  private final case class Held(kiB: Long, backstop: Option[FiberIO[Unit]])
+
+  private val held = mutable.HashMap.empty[String, Held]
 
   /** Whether request `rid` holds part of the budget. */
   def holds(rid: String): Boolean = held.synchronized(held.contains(rid))
 
   /** Reserves a page's worst case for request `rid`, waiting at most `wait`; false when none came
     * free in time.
+    *
+    * The permits are taken and recorded in one uncancelable step, the wait alone cancelable: a
+    * cancel lands either before they were taken (the semaphore then takes nothing) or after they
+    * were recorded, where [[release]] finds them. A wait that gives up as the permits arrive (the
+    * timeout's race) has them recorded too, and gives them back here.
     */
   def reserve(rid: String, wait: FiniteDuration): IO[Boolean] = permits match
     case None    => IO.pure(true)
     case Some(s) =>
-      s.acquireN(reserveKiB).timeout(wait).attempt.flatMap {
-        case Left(_)   => IO.pure(false)
-        case Right(()) =>
-          IO(held.synchronized(held.update(rid, reserveKiB))) *>
-            (IO.sleep(holdAtMost) *> release(rid)).start.as(true)
+      val take = IO.uncancelable { poll =>
+        poll(s.acquireN(reserveKiB)) *>
+          IO(held.synchronized(held.update(rid, Held(reserveKiB, None))))
+      }
+      IO.uncancelable { poll =>
+        poll(take.timeout(wait)).attempt.flatMap {
+          case Right(()) => IO.pure(true)
+          case Left(_)   => release(rid).as(false)
+        }
       }
 
-  /** Keeps what a body of `bytes` bytes holds of request `rid`'s reservation, and gives the rest
-    * back.
+  /** Keeps what a body of `bytes` bytes holds of request `rid`'s reservation, gives the rest back,
+    * and arms the backstop for a body that is never pulled. After [[release]], a no-op.
     */
-  def settle(rid: String, bytes: Long): IO[Unit] =
-    val keep = math.max(1L, (bytes + 1023L) / 1024L)
-    giveBack(rid, held => math.min(held, keep))
-
-  /** Gives back all request `rid` holds. Idempotent. */
-  def release(rid: String): IO[Unit] = giveBack(rid, _ => 0L)
-
-  private def giveBack(rid: String, keep: Long => Long): IO[Unit] = permits match
+  def settle(rid: String, bytes: Long): IO[Unit] = permits match
     case None    => IO.unit
     case Some(s) =>
+      val keep = math.max(1L, (bytes + 1023L) / 1024L)
+      IO.uncancelable { _ =>
+        (IO.sleep(unpulledHold) *> giveBack(rid)).void.start.flatMap { backstop =>
+          IO {
+            held.synchronized {
+              held.get(rid) match
+                // Released already: nothing to keep, and no backstop to arm.
+                case None    => (0L, Some(backstop))
+                case Some(h) =>
+                  val now = math.min(h.kiB, keep)
+                  held.update(rid, Held(now, Some(backstop)))
+                  (h.kiB - now, h.backstop)
+            }
+          }.flatMap { (freed, stale) =>
+            (if freed > 0L then s.releaseN(freed) else IO.unit) *> stale.fold(IO.unit)(_.cancel)
+          }
+        }
+      }
+
+  /** Request `rid`'s body has begun to be written, under a finalizer that releases it: the backstop
+    * is no longer needed and is stopped.
+    */
+  def pulled(rid: String): IO[Unit] =
+    IO.uncancelable { _ =>
       IO {
         held.synchronized {
           held.get(rid) match
-            case None    => 0L
+            case None    => None
             case Some(h) =>
-              val now = keep(h)
-              if now <= 0L then held.remove(rid) else held.update(rid, now)
-              h - math.max(now, 0L)
+              held.update(rid, h.copy(backstop = None))
+              h.backstop
         }
-      }.flatMap(n => if n > 0L then s.releaseN(n) else IO.unit)
+      }.flatMap(_.fold(IO.unit)(_.cancel))
+    }
+
+  /** Gives back all request `rid` holds, and stops its backstop. Idempotent. */
+  def release(rid: String): IO[Unit] = giveBack(rid).flatMap(_.fold(IO.unit)(_.cancel))
+
+  /** Gives back all request `rid` holds and returns its backstop, without stopping it: the
+    * backstop's own release must not cancel itself.
+    */
+  private def giveBack(rid: String): IO[Option[FiberIO[Unit]]] = permits match
+    case None    => IO.pure(None)
+    case Some(s) =>
+      IO.uncancelable { _ =>
+        IO(held.synchronized(held.remove(rid))).flatMap {
+          case None    => IO.pure(None)
+          case Some(h) => s.releaseN(h.kiB).as(h.backstop)
+        }
+      }
 
 object RestPageBudget:
 
@@ -78,13 +130,14 @@ object RestPageBudget:
     new RestPageBudget(Long.MaxValue, 0L, FiniteDuration(0, "s"), None)
 
   /** One part in [[HeapParts]] of `maxHeapBytes`, each page reserving twice `maxResponseBytes` (a
-    * budget smaller than that still serves one page at a time).
+    * budget smaller than that still serves one page at a time). A body never pulled gives its share
+    * back `unpulledHold` after it was settled.
     */
   def forHeap(
       maxResponseBytes: Long,
       maxHeapBytes: Long,
-      holdAtMost: FiniteDuration
+      unpulledHold: FiniteDuration
   ): RestPageBudget =
     val total   = math.max(1L, maxHeapBytes / HeapParts / 1024L)
     val reserve = math.min(total, math.max(1L, (2L * maxResponseBytes + 1023L) / 1024L))
-    new RestPageBudget(total, reserve, holdAtMost, Some(Semaphore[IO](total).unsafeRunSync()))
+    new RestPageBudget(total, reserve, unpulledHold, Some(Semaphore[IO](total).unsafeRunSync()))
