@@ -15,10 +15,6 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
 
   private final case class DenyException(reason: String) extends RuntimeException(reason)
 
-  private val DottedColumnRefusal =
-    "a star over this FROM clause cannot be expanded under column policies: a column whose name " +
-      "holds a dot could be read as another table's column; alias the tables or name the columns"
-
   def rewrite(
       sql: String,
       schema: Map[String, List[String]],
@@ -115,7 +111,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     // `JSQLDataException` umbrella; it raises one of the table/column/schema/catalog-not-
     // found exceptions under `ai.starlake.transpiler.*`.
     val resolveAttempt: Either[RewriteOutcome, String] =
-      try Right(resolvedText(resolver, metaData, sql, schema))
+      try Right(resolvedText(resolver, metaData, sql))
       catch
         case e: ai.starlake.transpiler.TableNotFoundException    => Left(Denied(e.getMessage))
         case e: ai.starlake.transpiler.TableNotDeclaredException => Left(Denied(e.getMessage))
@@ -123,7 +119,6 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         case e: ai.starlake.transpiler.SchemaNotFoundException   => Left(Denied(e.getMessage))
         case e: ai.starlake.transpiler.CatalogNotFoundException  => Left(Denied(e.getMessage))
         case _: net.sf.jsqlparser.JSQLParserException            => Left(ParseFailed)
-        case e: DenyException                                    => Left(Denied(e.reason))
         case _: Throwable                                        => Left(ParseFailed)
 
     resolveAttempt match
@@ -195,8 +190,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
   private def resolvedText(
       resolver: JSQLColumResolver,
       metaData: JdbcMetaData,
-      sql: String,
-      schema: Map[String, List[String]]
+      sql: String
   ): String =
     val statement = ai.starlake.sql.JSqlStatements.parseFirst(sql)
     statement match
@@ -205,13 +199,6 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           ResidualColumns.tablesOf(select).map(t => t -> new java.util.ArrayList(t.getNameParts))
         val stars =
           derivedStarSelects(select).map(ps => ps -> new java.util.ArrayList(ps.getSelectItems))
-        // The items the caller wrote, by identity: what the resolver adds is its star expansion.
-        val writtenItems = java.util.Collections.newSetFromMap(
-          new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
-        )
-        StarExpansion
-          .plainSelects(select)
-          .foreach(ps => Option(ps.getSelectItems).foreach(_.forEach(i => writtenItems.add(i))))
         select.accept(
           resolver: net.sf.jsqlparser.statement.select.SelectVisitor[
             ai.starlake.transpiler.schema.JdbcResultSetMetaData
@@ -220,79 +207,10 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         )
         written.foreach((t, parts) => t.setNameParts(parts))
         stars.foreach((ps, items) => ps.setSelectItems(items))
-        StarExpansion
-          .plainSelects(select)
-          .foreach(ps => requalifyDottedColumns(ps, writtenItems.contains, schema))
       case _ => ()
     val builder = new java.lang.StringBuilder()
     statement.accept(new net.sf.jsqlparser.util.deparser.StatementDeParser(builder))
     builder.toString
-
-  /** Issue #238. A catalog column whose name holds a dot (`"a.b"`) comes out of the resolver's star
-    * expansion split, as column `b` of a table `a` (it builds the column from the bare name), and
-    * prints `a.b`, which DuckDB reads the same way: the statement failed to bind, or read another
-    * column if a table `a` was in scope. Quoted alone (`"a.b"`), JSqlParser still splits it when
-    * the rewrite is parsed again; quoted and qualified by its table (`dotted."a.b"`) it parses back
-    * as that one column, which is what DuckDB reads.
-    *
-    * Only items the resolver added are touched (`written` holds the caller's own). When its "table"
-    * is no binding of the select's FROM clause and the joined name is a catalog column of exactly
-    * one of its base tables, that table's binding (alias, else its name as written) qualifies it.
-    * When the joined name is a catalog column but either reading is possible (a binding `a` is in
-    * scope, or several tables have the column), the statement is refused: printed as it is, it
-    * would read another column. An item whose joined name is no catalog column is a real reference
-    * and is left as it is.
-    */
-  private def requalifyDottedColumns(
-      ps: PlainSelect,
-      written: AnyRef => Boolean,
-      schema: Map[String, List[String]]
-  ): Unit =
-    import net.sf.jsqlparser.schema.{Column, Table}
-    def unquote(s: String) = ai.starlake.sql.QuotedIdentifier.unquote(s)
-    def lower(s: String)   = s.toLowerCase(java.util.Locale.ROOT)
-    val from               = Option(ps.getFromItem).toList ++
-      Option(ps.getJoins).toList.flatMap(_.asScala).map(_.getFromItem)
-    def binding(fi: net.sf.jsqlparser.statement.select.FromItem): Option[String] =
-      Option(fi.getAlias)
-        .map(_.getName)
-        .orElse(fi match
-          case t: Table => Option(t.getFullyQualifiedName)
-          case _        => None)
-    // The names a column qualifier can bind to here: each alias, else each table's last name part.
-    val bindings = from.flatMap { fi =>
-      Option(fi.getAlias)
-        .map(_.getName)
-        .orElse(fi match
-          case t: Table => Option(t.getName)
-          case _        => None)
-        .map(b => lower(unquote(b)))
-    }.toSet
-    // Each base table of the FROM clause with its catalog columns, lowercased.
-    val tables = from.collect { case t: Table =>
-      val name = unquote(Option(t.getName).getOrElse(""))
-      t -> schema.find(_._1.equalsIgnoreCase(name)).map(_._2.map(lower).toSet).getOrElse(Set.empty)
-    }
-    Option(ps.getSelectItems).toList.flatMap(_.asScala).filterNot(i => written(i)).foreach { si =>
-      si.getExpression match
-        case c: Column if c.getTable != null && c.getTable.getName != null =>
-          val parts  = c.getTable.getNameParts.asScala.toList.filter(_ != null).map(unquote).reverse
-          val joined = (parts :+ unquote(c.getColumnName)).mkString(".")
-          val head   = lower(unquote(c.getTable.getName))
-          val owners = tables.filter((_, cols) => cols.contains(lower(joined)))
-          (owners, bindings.contains(head)) match
-            case (Nil, _)              => ()
-            case (List((t, _)), false) =>
-              val col = binding(t).map { q =>
-                val quoted = "\"" + joined.replace("\"", "\"\"") + "\""
-                CCJSqlParserUtil.parseExpression(s"$q.$quoted")
-              }
-              col match
-                case Some(c: Column) => si.asInstanceOf[SelectItem[Expression]].setExpression(c)
-                case _               => throw DenyException(DottedColumnRefusal)
-            case _ => throw DenyException(DottedColumnRefusal)
-        case _ => ()
-    }
 
   /** The selects, at any depth, whose items are all plain stars (`*`, `t.*`: no EXCLUDE, REPLACE or
     * alias) and whose FROM items are all derived tables. The resolver expands such a star to the

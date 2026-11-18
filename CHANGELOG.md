@@ -133,10 +133,10 @@
   which DuckDB reads as column `b` of a table `a`: the statement failed to bind (on the REST data
   edge the table answered the `404` of a missing object), and over a join with a table named `a`
   it could read that table's `b`. The expansion now prints it qualified by its table
-  (`dotted."a.b"`), which parses back as that one column, on every door; a policy on the dotted
-  column itself masks it. A star over a join where the name could still read another table's
-  column (an unaliased table named like the part before the dot) is refused instead, with a
-  message saying to alias the tables or name the columns (#238).
+  (`dotted."a.b"`), which parses back as that one column, on every door, over a join too; a policy
+  on the dotted column itself masks it. The fix is jsqltranspiler 1.17 (starlake-ai/jsqltranspiler#156),
+  with JSqlParser 5.4.272, the version it pins, for the plain star, and the same qualified form in
+  qod's own expansion of an aliased table's star, `EXCLUDE` and `REPLACE` (#238).
 - **No REST route sees a path holding a `.` or `..` segment.** A request target such as
   `//data/../api/tenant/list` is read as the host `data` and the path `/../api/tenant/list`, which
   the API guard took as outside `/api` and handed to the routes with no credential. No route

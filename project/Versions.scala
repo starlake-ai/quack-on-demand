@@ -13,8 +13,8 @@ object Versions {
   val nimbusJoseJwt  = "9.47"
   val scalaTest      = "3.2.17"
   // jsqlParser must match the version jsqltranspiler's pom pins (its manticore line)
-  val jsqlParser     = "5.4.162"
-  val jsqltranspiler = "1.16"
+  val jsqlParser     = "5.4.272"
+  val jsqltranspiler = "1.17"
   val circeYaml      = "0.16.1"
   val cats           = "2.13.0"
   val netty          = "4.1.118.Final"

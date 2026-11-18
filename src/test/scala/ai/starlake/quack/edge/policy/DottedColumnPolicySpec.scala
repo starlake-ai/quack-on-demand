@@ -1,6 +1,5 @@
 package ai.starlake.quack.edge.policy
 
-import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.edge.cls.ColumnCatalog
 import ai.starlake.quack.ondemand.state.RoleColumnPolicy
 import org.scalatest.flatspec.AnyFlatSpec
@@ -8,10 +7,12 @@ import org.scalatest.matchers.should.Matchers
 
 /** Issue #238: a column policy on a table that has a column whose name holds a dot (`"a.b"`).
   *
-  * The column rewriter expands `*` to apply the mask. The expansion printed such a column `a.b`,
-  * which DuckDB reads as column `b` of a table `a`, and JSqlParser splits even `"a.b"` into two
-  * parts when the rewrite is parsed again. It is now printed qualified (`dotted."a.b"`), which
-  * parses back as that one column, through the real policy pipeline and in-process DuckDB.
+  * The column rewriter expands `*` to apply the mask. jsqltranspiler before 1.17 expanded such a
+  * column as column `b` of a table `a` and printed `a.b`, which DuckDB reads the same way (the
+  * statement failed to bind, or read another table's `b`); JSqlParser also splits a lone `"a.b"`
+  * when the rewrite is parsed again. The expansion must print it qualified (`dotted."a.b"`), which
+  * parses back as that one column. Run through the real policy pipeline and in-process DuckDB, so a
+  * regression in either library shows here as the wrong rows.
   */
 class DottedColumnPolicySpec extends AnyFlatSpec with Matchers:
 
@@ -50,8 +51,9 @@ class DottedColumnPolicySpec extends AnyFlatSpec with Matchers:
       // The edge's probe and its data statement.
       sent(h, s"SELECT * FROM $Ref LIMIT 0")
       val text = sent(h, s"SELECT * FROM $Ref")
-      text should include(s"""$Ref."a.b"""")
-      text should include(s"""$Ref."x.y.z"""")
+      // Qualified by the table, in whichever form: `dotted."a.b"` or the name as written.
+      text should include regex """dotted"?\."a\.b"""".r
+      text should include regex """dotted"?\."x\.y\.z"""".r
       text should not include "\"a\".\"b\""
       rowsOf(conn, text) shouldBe List(List("1", "2", "***"))
     }
@@ -81,11 +83,10 @@ class DottedColumnPolicySpec extends AnyFlatSpec with Matchers:
       rowsOf(conn, text) shouldBe List(List("1", "2", "***", "99"))
     }
 
-  // Unaliased, `a.b` could be the dotted column or table `a`'s `b`: refused, never guessed.
-  it should "refuse a star over a join where the dotted name could read another table's column" in
-    withTables { (_, h) =>
-      h.run(s"SELECT * FROM $Ref, $Other", effWith(columnPolicies = List(mask("c_email")))) match
-        case Left(RouterFailure.AccessDenied(reason)) =>
-          reason should include("could be read as another table's column")
-        case other => fail(s"expected a refusal, got $other")
+  // Unaliased, with a table named `a` beside it: the expansion names the dotted column's own table,
+  // so `a.b` never reads table `a`'s `b` in its place.
+  it should "read each table's own columns over a join with a table named like the dot's head" in
+    withTables { (conn, h) =>
+      rowsOf(conn, sent(h, s"SELECT * FROM $Ref, $Other")) shouldBe
+        List(List("1", "2", "***", "99"))
     }
