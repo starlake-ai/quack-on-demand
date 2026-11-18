@@ -105,6 +105,20 @@
   re-checked. On the profile page the free-text Tools field becomes three dropdowns (Data tools,
   Admin tools, Other surfaces), each with Select all and Clear; nothing ticked still leaves the axis unrestricted, and a token
   narrowed to MCP tools without `rest` is flagged as one that will not reach the REST data edge.
+- **A single Linux host can keep several releases installed and switch between them offline
+  (#220).** `qod start --version X --download-only` downloads and checks everything a start of X
+  needs into the user's cache (the jar and its sha256, a Java runtime when none is installed,
+  DuckDB with its pinned sha256, the DuckDB extensions nodes install, and qod-node.exe on
+  Windows), prints where, and starts nothing. A later `qod start --version X` with all of that
+  cached makes no network request: a pinned start no longer asks PyPI whether a newer qod exists
+  (its advice to upgrade the CLI alone would part the CLI from the jar it runs). The new
+  `deploy/host/` holds `install.sh VERSION` (the qod CLI of that release in its own virtualenv
+  under `/opt/qod/versions/`, then the download-only run as the `qod` user), `switch.sh VERSION`
+  (refuses a version not installed, writes the pin `/etc/qod/version.env`, restarts) and
+  `qod-manager.service`, which runs the pinned version's CLI with the pinned jar, so the two
+  always move together. Switching, and switching back, is then "write the pin, restart", with no
+  unit edit and no network; only the install needs the network. `deploy/host/README.md`
+  describes the layout.
 - **The Docker images check every DuckDB archive they download before unpacking it (#230).** The
   manager, node and fleet worker images unpack the DuckDB CLI and libduckdb only when
   `sha256sum -c` matches the digest the Dockerfile pins for that release and architecture, the

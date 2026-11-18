@@ -1,0 +1,41 @@
+# quack-on-demand manager, the release /etc/qod/version.env pins (see deploy/host/README.md).
+# Install once: install -m 0644 qod-manager.service /etc/systemd/system/
+#               systemctl daemon-reload && systemctl enable qod-manager
+# Switching versions never edits this file: switch.sh VERSION writes the pin and restarts.
+
+[Unit]
+Description=quack-on-demand manager
+Documentation=https://github.com/starlake-ai/qod/tree/main/deploy/host
+# The manager needs its Postgres and its listeners, not the internet: every release it runs was
+# cached by install.sh.
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=qod
+Group=qod
+# The pin: QOD_VERSION=<version>, written by install.sh (first install) and switch.sh.
+EnvironmentFile=/etc/qod/version.env
+# The manager's own settings (QOD_PG_*, QOD_ADMIN_PASSWORD for the first boot, ...). Optional.
+EnvironmentFile=-/etc/qod/manager.env
+# The pin chooses both the CLI install and the jar, so the two always move together. The shell
+# runs only to put the version into the executable's path (systemd expands variables in the
+# arguments of ExecStart, not in the program it runs); exec makes qod the main process.
+# $$ is systemd's escape for a literal $.
+ExecStart=/bin/sh -c 'case "$$QOD_VERSION" in ""|*[!0-9.]*) echo "qod-manager: QOD_VERSION in /etc/qod/version.env is not a release version" >&2; exit 1;; esac; exec /opt/qod/versions/"$$QOD_VERSION"/bin/qod start --version "$$QOD_VERSION"'
+# SIGTERM goes to qod alone, which stops the manager and then its nodes (as qod stop does);
+# systemd kills what is left in the group only after qod has exited.
+KillMode=mixed
+# Longer than that stop, at worst about 102 s with the defaults: the manager's drain and exit
+# (QOD_DRAIN_TIMEOUT_SEC, 60 s, plus 20 s), the nodes' stop (FORCE_AFTER, 10 s, plus 2 s) and the
+# CLI's wait for the JVM to exit (FORCE_AFTER again). Raise it with QOD_DRAIN_TIMEOUT_SEC or
+# FORCE_AFTER.
+TimeoutStopSec=150
+# qod exits 130 after a stop it was asked for: a clean stop, not a failure.
+SuccessExitStatus=130
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

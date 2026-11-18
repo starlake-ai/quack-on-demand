@@ -116,6 +116,11 @@ qod start
 qod start --version 0.8.3
 qod start --jar /path/to/quack-on-demand-assembly.jar
 
+# Fetch and check everything a release's start needs (jar, Java when none is
+# installed, DuckDB and its node extensions) without starting anything; a
+# later `qod start --version 0.13.1` then needs no network
+qod start --version 0.13.1 --download-only
+
 # QOD_AUTH_DB_ENABLED=false (no password login) boots only with another
 # FlightSQL authenticator: a Keycloak or Azure password backend
 # (QOD_AUTH_KEYCLOAK_ENABLED / QOD_AUTH_AZURE_ENABLED) or a bearer provider

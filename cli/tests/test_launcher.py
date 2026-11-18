@@ -100,3 +100,75 @@ def test_cached_release_hint_survives_a_corrupt_or_unwritable_cache(respx_mock, 
     blocker = tmp_path / "file"
     blocker.write_text("")
     assert "0.9.5" in cached_release_hint("0.9.3", cache_file=blocker / "sub" / "c.json")
+
+
+# ---- what qod start --download-only adds (#220) ------------------------
+
+
+class _FakeDuckdb:
+    """A stand-in for subprocess.run over the duckdb CLI: records each statement, answers the
+    install_path query, fails the statements named in `failing`."""
+
+    def __init__(self, failing=()):
+        self.argvs = []
+        self.agent_mode_off = []
+        self.failing = set(failing)
+
+    def __call__(self, argv, **kwargs):
+        import subprocess
+
+        self.argvs.append(argv)
+        self.agent_mode_off.append(kwargs["env"].get("DUCKDB_AGENT_MODE") == "0")
+        statement = argv[-1]
+        if statement in self.failing:
+            return subprocess.CompletedProcess(argv, 1, "", "HTTP Error: Failed to download\nmore")
+        out = "/home/qod/.duckdb/extensions/v2.0.0/linux_amd64/quack.duckdb_extension\n"
+        return subprocess.CompletedProcess(argv, 0, out if statement.startswith("SELECT") else "", "")
+
+
+def test_ensure_node_extensions_installs_each_one_with_the_provisioned_cli(tmp_path):
+    from qod_cli import launcher
+
+    fake = _FakeDuckdb()
+    got = launcher.ensure_node_extensions(tmp_path / "bin", os_name="linux", run=fake, environ={})
+    statements = [argv[-1] for argv in fake.argvs]
+    assert statements[:-1] == [f"INSTALL {name}" for name in launcher.NODE_EXTENSIONS]
+    assert {"quack", "httpfs", "avro", "ducklake", "postgres"} <= set(launcher.NODE_EXTENSIONS)
+    assert all(argv[0] == str(tmp_path / "bin" / "duckdb") for argv in fake.argvs)
+    assert all(fake.agent_mode_off)
+    assert all("-cmd" not in argv for argv in fake.argvs)
+    assert got.as_posix() == "/home/qod/.duckdb/extensions/v2.0.0/linux_amd64"
+
+
+def test_ensure_node_extensions_sets_the_proxy_duckdb_reads(tmp_path):
+    from qod_cli import launcher
+
+    fake = _FakeDuckdb()
+    environ = {"HTTPS_PROXY": "http://proxy.internal:3128/"}
+    launcher.ensure_node_extensions(tmp_path, os_name="linux", run=fake, environ=environ)
+    assert all(
+        argv[argv.index("-cmd") + 1] == "SET http_proxy = 'proxy.internal:3128'" for argv in fake.argvs
+    )
+
+
+def test_ensure_node_extensions_names_the_one_that_failed(tmp_path):
+    from qod_cli import launcher
+
+    fake = _FakeDuckdb(failing={"INSTALL ducklake"})
+    with pytest.raises(RuntimeError, match=r"^INSTALL ducklake failed: HTTP Error: Failed to download$"):
+        launcher.ensure_node_extensions(tmp_path, os_name="linux", run=fake, environ={})
+
+
+def test_cached_jre_reads_the_cache_only(tmp_path, monkeypatch):
+    from qod_cli import launcher
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("cached_jre must not ask Adoptium")
+
+    monkeypatch.setattr(httpx, "get", no_network)
+    assert launcher.cached_jre(tmp_path / "jre") is None
+    java = tmp_path / "jre" / "jdk-25" / "bin" / "java"
+    java.parent.mkdir(parents=True)
+    java.write_text("")
+    assert launcher.cached_jre(tmp_path / "jre") == str(java)
+    assert launcher.ensure_jre(tmp_path / "jre", os_name="linux", arch="x86_64") == str(java)
