@@ -18,7 +18,14 @@ import org.scalatest.matchers.should.Matchers
   * to cats-effect: under `IOApp` one statement halted the whole manager.
   *
   * Each step runs on a thread with a 1 MiB stack, the JVM default of a production worker thread, so
-  * the depth that overflows does not depend on the test runner's own thread.
+  * the depth that overflows does not depend on the test runner's own thread. JSqlParser parses on
+  * a thread of its own (`CCJSqlParserUtil.parseStatements` submits to an executor), with the JVM's
+  * default stack, and only the walks over the result run on that 1 MiB stack.
+  *
+  * Every shape is nested far past what either stack holds, whatever the JIT has compiled: compiled
+  * parser frames are smaller, so a depth that overflows in a cold JVM can parse in one warmed by a
+  * long run (#242). After a warm-up, 1000 nested subqueries parsed and analysed on these stacks,
+  * 2000 did not; the specs use 20000, like the operator chain.
   */
 class DeepNestingSpec extends AnyFunSuite with Matchers:
 
@@ -43,7 +50,7 @@ class DeepNestingSpec extends AnyFunSuite with Matchers:
 
   // A left-deep operator chain, nested scalar subqueries, and the chain behind PREPARE ... AS.
   private val chain       = "SELECT " + List.fill(20000)("1").mkString("+")
-  private val subqueries  = "SELECT " + "(SELECT " * 500 + "1" + ")" * 500
+  private val subqueries  = "SELECT " + "(SELECT " * 20000 + "1" + ")" * 20000
   private val prepared    = "PREPARE p AS " + chain
   private val insertChain = "INSERT INTO tpch1.t SELECT " + List.fill(20000)("c").mkString("+") +
     " FROM tpch1.customer"
