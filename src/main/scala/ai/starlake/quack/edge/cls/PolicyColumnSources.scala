@@ -8,19 +8,20 @@ import io.circe.Json
 import scala.concurrent.duration.FiniteDuration
 
 /** Where the column policy rewriter gets a table's columns from. A DuckLake catalog of the tenant
-  * is read from its Postgres metadata (`duckLake`); anything else a statement names (a federated
-  * source, a `duckdb-file` or `memory` database, a DuckLake view) lives only on the nodes, so it is
-  * asked of a node of the pool the statement runs on, with `DESCRIBE` as the system principal
-  * (`node`), which binds the name exactly as the statement's own binding will. With no pool, or a
-  * pool of another tenant, a table no DuckLake catalog lists has no columns, as before, and the
-  * rewriter refuses what it cannot mask.
+  * is read from its Postgres metadata (`duckLake`, given the statement's pool, since a branch pool
+  * attaches its own catalog under its parent's alias and its columns are its own); anything else a
+  * statement names (a federated source, a `duckdb-file` or `memory` database, a DuckLake view)
+  * lives only on the nodes, so it is asked of a node of the pool the statement runs on, with
+  * `DESCRIBE` as the system principal (`node`), which binds the name exactly as the statement's own
+  * binding will. With no pool, or a pool of another tenant, a table no DuckLake catalog lists has
+  * no columns, as before, and the rewriter refuses what it cannot mask.
   *
   * `duckLake` and `node` are injected so the order and its fail-closed ends are testable without a
   * supervisor or a node. A DuckLake read that fails falls through to the node; a node failure or
   * timeout is `Nil` (the caller caches it for a tick).
   */
 final class PolicyColumnSources(
-    duckLake: (String, String, String, String) => IO[List[String]],
+    duckLake: (String, Option[PoolKey], String, String, String) => IO[List[String]],
     node: (PoolKey, String) => IO[Either[RouterFailure, List[List[Json]]]],
     nodeTimeout: FiniteDuration
 ):
@@ -31,7 +32,7 @@ final class PolicyColumnSources(
       schemaName: String,
       tableName: String
   ): IO[List[String]] =
-    duckLake(tenant, catalog, schemaName, tableName).handleError(_ => Nil).flatMap {
+    duckLake(tenant, pool, catalog, schemaName, tableName).handleError(_ => Nil).flatMap {
       case cols if cols.nonEmpty => IO.pure(cols)
       case _                     =>
         val sql = PolicyColumnSources.describeSql(catalog, schemaName, tableName)

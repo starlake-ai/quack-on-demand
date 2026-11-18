@@ -1794,13 +1794,82 @@ abstract class AuthzEndToEndCases(
         case Left(e) =>
           e.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.UNAVAILABLE
           e.getMessage should include("QoD: authorization unavailable, retry")
+          // The node's marker for the statement is the router's to check, not the client's to read.
+          e.getMessage should not include "(qod-retry"
         case Right(r) => fail(s"expected a refusal while the replica is down, got $r")
       if AuthzStack.cliPresent then
         stack.door(sql, "alice", AlicePw, Acme, "lake") match
-          case Left(err) => err should include("QoD: authorization unavailable, retry")
-          case Right(r)  => fail(s"expected a refusal while the replica is down, got $r")
+          case Left(err) =>
+            err should include("QoD: authorization unavailable, retry")
+            err should not include "(qod-retry"
+          case Right(r) => fail(s"expected a refusal while the replica is down, got $r")
     finally stack.relay.start()
     allowed("alice", "lake", sql)
+  }
+
+  /** The `denied` rows of the statement history (`GET /api/history/statements`) whose text holds
+    * `fragment`, polled while the journal flushes (every 500 ms).
+    */
+  private def deniedInHistory(fragment: String): List[Json] =
+    val q        = java.net.URLEncoder.encode(fragment, java.nio.charset.StandardCharsets.UTF_8)
+    val deadline = System.nanoTime() + 15.seconds.toNanos
+    def rows(): List[Json] =
+      stack
+        .get(s"/api/history/statements?status=denied&q=$q&limit=50")
+        .hcursor
+        .downField("statements")
+        .as[List[Json]]
+        .getOrElse(Nil)
+    var found = rows()
+    while found.isEmpty && System.nanoTime() < deadline do
+      Thread.sleep(250)
+      found = rows()
+    found
+
+  "a refusal that reads like an unavailable decision" should "be a denial, not a retryable outage" in {
+    ready()
+    // A file location refusal echoes the location as typed right after `QoD: ` (here the parse
+    // screen's "<location> is a relative path"), so this one starts as the node's "authorization
+    // unavailable" refusal. Without the marker qod-node computes for the
+    // statement's own handle it is a denial: Flight UNAUTHORIZED, booked as denied, never UNAVAILABLE.
+    val sql = "SELECT * FROM read_csv('authorization unavailable, retry/forged-x')"
+    stack.flightCall(sql, "alice", AlicePw, Acme, "lake") match
+      case Left(e) =>
+        e.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.UNAUTHORIZED
+        e.getMessage should include(
+          "QoD: authorization unavailable, retry/forged-x is a relative path"
+        )
+        e.getMessage should not include "(qod-retry"
+      case Right(r) => fail(s"expected a refusal, got $r")
+    // Booked as a denial: a `denied` history row (the data-denial audit event goes with it).
+    val booked = deniedInHistory("retry/forged-x")
+    booked should not be empty
+    booked.head.hcursor.get[String]("username") shouldBe Right("alice")
+    if AuthzStack.cliPresent then
+      stack.door(sql, "alice", AlicePw, Acme, "lake") match
+        case Left(err) =>
+          err should include("access denied")
+          err should include("QoD: authorization unavailable, retry/forged-x is a relative path")
+        case Right(r) => fail(s"expected a refusal, got $r")
+  }
+
+  "a statement too large for the verdict listener" should "be a denial, not a retryable outage" in {
+    ready()
+    // The description's size is the statement's to choose: one location long enough that the decide
+    // request passes the listener's 1 MiB is refused by the node before any call, as a refusal, so
+    // the user cannot turn a refused file access into an outage (review I1).
+    val segment = "a" * 200
+    val path    = "/qod-too-large" + ("/" + segment) * 4000
+    val sql     = s"SELECT * FROM read_csv('$path')"
+    stack.flightCall(sql, "alice", AlicePw, Acme, "lake") match
+      case Left(e) =>
+        e.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.UNAUTHORIZED
+        e.getMessage should include(
+          "QoD: authorization refused: the statement's authorization request is larger than the " +
+            "verdict listener takes (1048576 bytes)"
+        )
+      case Right(r) => fail(s"expected a refusal, got $r")
+    deniedInHistory("/qod-too-large/") should not be empty
   }
 
   "a restricted token" should "not reuse a full session's cached verdict" in {

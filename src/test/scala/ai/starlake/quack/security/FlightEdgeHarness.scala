@@ -61,17 +61,6 @@ object FlightEdgeHarness:
     new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
   // ------------------------------------------------------------------
-  // Find a free port on loopback by briefly binding a ServerSocket to
-  // port 0, recording the OS-assigned port, then releasing it.
-  // FlightServer doesn't expose port-0 binding natively, so this
-  // find-then-bind dance is the standard approach for test code.
-  // ------------------------------------------------------------------
-  private def ephemeralPort(): Int =
-    val ss = new java.net.ServerSocket(0)
-    try ss.getLocalPort
-    finally ss.close()
-
-  // ------------------------------------------------------------------
   // Public API
   // ------------------------------------------------------------------
 
@@ -131,7 +120,9 @@ object FlightEdgeHarness:
       protectedWriteGuard: ProtectedWriteGuard
   )
 
-  /** Boot a [[FlightEdgeServer]] on an ephemeral loopback port.
+  /** Boot a [[FlightEdgeServer]] on an ephemeral loopback port: the edge binds port 0 and the
+    * harness reads back the port the OS assigned ([[FlightEdgeServer.boundPort]]). Picking a free
+    * port first and binding it later lost it to any process that took it in between (#242).
     *
     * @param store
     *   Seeded in-memory control plane store (use [[SecurityFixtures.freshStore]]).
@@ -159,11 +150,11 @@ object FlightEdgeHarness:
       wiring: RouterWiring,
       authService: Option[AuthenticationService] = None,
       edgeConfig: EdgeConfig => EdgeConfig = identity,
-      /** Where the edge records a refused handshake; a spec that reads those rows passes its own. */
+      /** Where the edge records a refused handshake; a spec that reads those rows passes its own.
+        */
       audit: ai.starlake.quack.ondemand.telemetry.HandshakeAudit =
         ai.starlake.quack.ondemand.telemetry.HandshakeAudit.noop
   ): Harness =
-    val port = ephemeralPort()
     val host = "127.0.0.1"
 
     // TLS cert paths: unique tempdir per call so concurrent harnesses
@@ -175,7 +166,7 @@ object FlightEdgeHarness:
     val cfg = edgeConfig(
       EdgeConfig(
         host = host,
-        port = port,
+        port = 0,
         tlsEnabled = tls,
         tlsCertChain = certPath,
         tlsPrivateKey = keyPath,
@@ -249,7 +240,7 @@ object FlightEdgeHarness:
 
     Harness(
       host = host,
-      port = port,
+      port = srv.boundPort,
       allocator = allocator,
       shutdown = () => {
         srv.stop()

@@ -172,6 +172,17 @@ object QuackProtocol:
   /** Default node lease (Quack v3 `heartbeat_timeout_seconds`), config `nodeLeaseSec`. */
   val DefaultNodeLeaseSec: Int = 30
 
+  /** A refused or timed-out connect, as clients read it: no address, which only the log carries. */
+  val CannotConnect = "cannot connect to the Quack node"
+
+  /** A bounded request ([[QuackTransport.bounded]]) the node did not begin to answer in time. */
+  val NoAnswer = "the Quack node did not answer in time"
+
+  /** A node's answer other than 200, as clients read it: the status and no address, which only the
+    * log carries (#240).
+    */
+  def nodeAnswered(status: Int): String = s"HTTP $status from Quack node"
+
   /** A third of the lease, at least one second. The node checks the lease when a message arrives
     * and counts whole elapsed seconds, so a beat renews in time while the gap since the previous
     * message stays under the lease: from 3 s up, one lost beat is tolerated (two periods stay under
@@ -179,12 +190,6 @@ object QuackProtocol:
     * at 1 s the period equals the lease, so a gap of one period already lapses it unless other
     * traffic renews it first.
     */
-  /** A refused or timed-out connect, as clients read it: no address, which only the log carries. */
-  val CannotConnect = "cannot connect to the Quack node"
-
-  /** A bounded request ([[QuackTransport.bounded]]) the node did not begin to answer in time. */
-  val NoAnswer = "the Quack node did not answer in time"
-
   def heartbeatEvery(leaseSec: Int): FiniteDuration = math.max(1, leaseSec / 3).seconds
 
   /** "quack:host:port" -> "http://host:port/quack". The leading `quack:` scheme is what
@@ -237,12 +242,15 @@ object QuackProtocol:
           case e: java.net.http.HttpTimeoutException =>
             logger.warn(s"Quack node at $uri did not answer in time: $e")
             throw QuackWireError.Transient(QuackProtocol.NoAnswer)
+      // Any other status reaches clients too: the text names the status, the log the address.
       resp.statusCode() match
         case 200                         => resp.body()
         case sc if sc >= 500 && sc < 600 =>
-          throw QuackWireError.Transient(s"HTTP $sc from Quack node at $uri")
+          logger.warn(s"Quack node at $uri answered HTTP $sc")
+          throw QuackWireError.Transient(QuackProtocol.nodeAnswered(sc))
         case sc =>
-          throw QuackWireError.Permanent(s"HTTP $sc from Quack node at $uri")
+          logger.warn(s"Quack node at $uri answered HTTP $sc")
+          throw QuackWireError.Permanent(QuackProtocol.nodeAnswered(sc))
     }
 
 /** Per logical query handle. Construction by [[QuackProtocol.open]] captures the server-assigned

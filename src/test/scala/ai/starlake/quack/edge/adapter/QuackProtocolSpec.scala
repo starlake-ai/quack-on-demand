@@ -491,3 +491,43 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
         err.msg should not include silent.port.toString
       finally silent.close()
     }
+
+    /** `body` against a local server that answers every request with `status`. */
+    def answering[A](status: Int)(body: Int => A): A =
+      val server = com.sun.net.httpserver.HttpServer
+        .create(new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress, 0), 0)
+      server.createContext(
+        "/",
+        exchange =>
+          exchange.getRequestBody.readAllBytes(): Unit
+          exchange.sendResponseHeaders(status, -1)
+          exchange.close()
+      )
+      server.start()
+      try body(server.getAddress.getPort)
+      finally server.stop(0)
+
+    def post(port: Int): Unit =
+      new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient())
+        .post(URI.create(s"http://127.0.0.1:$port/quack"), Array.emptyByteArray)
+        .unsafeRunSync(): Unit
+
+    it("reports a node's 5xx as Transient with its status, naming no address (#240)") {
+      answering(503) { port =>
+        val err = intercept[QuackWireError.Transient](post(port))
+        err.msg shouldBe QuackProtocol.nodeAnswered(503)
+        err.msg should include("503")
+        // The message reaches clients: it names neither the node's address nor its port.
+        err.msg should not include "127.0.0.1"
+        err.msg should not include port.toString
+      }
+    }
+
+    it("reports any other status as Permanent with its status, naming no address (#240)") {
+      answering(401) { port =>
+        val err = intercept[QuackWireError.Permanent](post(port))
+        err.msg shouldBe QuackProtocol.nodeAnswered(401)
+        err.msg should not include "127.0.0.1"
+        err.msg should not include port.toString
+      }
+    }

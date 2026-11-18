@@ -120,6 +120,13 @@ final class QuackHttpAdapter(
       onMint(minted)
       NodeHandles.prelude(minted.text)
 
+  /** Whether `message`, node `nodeId`'s error for a statement of `principal`, carries the
+    * "authorization unavailable" marker qod-node computed for that statement
+    * ([[NodeKeys.marksUnavailable]]): the router honors the refusal as retryable only then.
+    */
+  def marksUnavailable(nodeId: String, principal: NodePrincipal, message: String): Boolean =
+    keys.marksUnavailable(nodeId, principal, message)
+
   /** Run any node call with the same load, latency and health bookkeeping as [[send]]. This is what
     * the native Quack relay wraps its per-statement node connection in, so both transports feed the
     * per-node dashboard stats identically. `recordLoad=false` skips every side effect, as for

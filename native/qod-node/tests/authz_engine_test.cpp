@@ -68,6 +68,12 @@ void ExpectQuery(duckdb::Connection &con, const std::string &sql, const std::str
 	Check(result->HasError() ? result->GetError() : "", result->HasError(), needle, what);
 }
 
+//! The error `sql` raises on `con`, empty when it succeeds.
+std::string ErrorOf(duckdb::Connection &con, const std::string &sql) {
+	auto result = con.Query(sql);
+	return result->HasError() ? result->GetError() : "";
+}
+
 //! The first value `sql` answers on `con` as DuckDB renders it, or its error.
 std::string FirstValue(duckdb::Connection &con, const std::string &sql) {
 	auto result = con.Query(sql);
@@ -85,6 +91,18 @@ void TagAsQuackSession(duckdb::Connection &con) {
 }
 
 int64_t now_ms = 1761200000000;
+
+//! Records a failure unless `error` ends with the "authorization unavailable" marker of `handle`'s nonce
+//! under the tests' node key (qod::UnavailableMarker): the manager honors the refusal only with it.
+void ExpectMarkedFor(const std::string &error, const std::string &handle, const std::string &what) {
+	auto nonce = qod::VerifyHandle(handle, kKey, kNode, now_ms).nonce;
+	auto marker = qod::UnavailableMarker(kKey, nonce);
+	if (error.size() < marker.size() || error.compare(error.size() - marker.size(), marker.size(), marker) != 0) {
+		std::cerr << "FAIL: " << what << ": \"" << error << "\" does not end with the marker of its handle"
+		          << std::endl;
+		failures++;
+	}
+}
 
 //! What the stand-in decision endpoint was asked: (principal id, policy version, description), oldest
 //! first.
@@ -449,10 +467,12 @@ int main() {
 	MintSpec kim = judy;
 	kim.principal_id = "u-kim";
 	kim.replica = "http://127.0.0.1:" + std::to_string(qod_test::UnusedPort());
-	ExpectQuery(internal, ScreenCall("c-kim", Prelude(MintWith(kim))), "",
-	            "kim's prelude names a replica that is down");
-	ExpectQuery(internal, ScreenCall("c-kim", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"),
-	            "QoD: authorization unavailable, retry", "no verdict, no statement, and the client may retry");
+	auto kim_handle = MintWith(kim);
+	ExpectQuery(internal, ScreenCall("c-kim", Prelude(kim_handle)), "", "kim's prelude names a replica that is down");
+	auto kim_error = ErrorOf(internal, ScreenCall("c-kim", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"));
+	Check(kim_error, !kim_error.empty(), "QoD: authorization unavailable, retry",
+	      "no verdict, no statement, and the client may retry");
+	ExpectMarkedFor(kim_error, kim_handle, "the screen's unavailable refusal carries kim's handle's marker");
 	{
 		// A replica that answers 503: retryable too, with what it said.
 		qod_test::TestHttpServer busy([](const qod_test::HttpRequest &) {
@@ -464,9 +484,13 @@ int main() {
 		MintSpec lou = judy;
 		lou.principal_id = "u-lou";
 		lou.replica = busy.Url();
-		ExpectQuery(internal, ScreenCall("c-lou", Prelude(MintWith(lou))), "", "lou's prelude");
-		ExpectQuery(internal, ScreenCall("c-lou", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"),
-		            "QoD: authorization unavailable, retry: ", "a 503 is retryable");
+		auto lou_handle = MintWith(lou);
+		ExpectQuery(internal, ScreenCall("c-lou", Prelude(lou_handle)), "", "lou's prelude");
+		auto lou_error = ErrorOf(internal, ScreenCall("c-lou", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"));
+		Check(lou_error, !lou_error.empty(),
+		      "QoD: authorization unavailable, retry: authorization context expired; retry (qod-retry ",
+		      "a 503 is retryable, with what the replica said before the marker");
+		ExpectMarkedFor(lou_error, lou_handle, "and the marker is lou's handle's");
 	}
 	MintSpec root_screen = superuser;
 	root_screen.replica = replica.Url();
@@ -541,15 +565,21 @@ int main() {
 	// ---- verdicts: an ordinary principal's plans run only under the endpoint's allow
 	duckdb::Connection frank(db);
 	TagAsQuackSession(frank);
-	ExpectQuery(frank, Prelude(Fresh("u-frank")), "", "frank installs");
+	auto frank_handle = Fresh("u-frank");
+	ExpectQuery(frank, Prelude(frank_handle), "", "frank installs");
 	// Created on an internal connection: the stand-in refuses every plan that names it.
 	ExpectQuery(internal, "CREATE TABLE forbidden AS SELECT 1 AS x", "", "a table the stand-in refuses");
 	auto before = decide_calls.size();
 	ExpectQuery(frank, "SELECT 7", "", "frank's statement runs under an allow");
 	ExpectAsked(before, true, "frank's statement");
 	ExpectQuery(frank, "SELECT * FROM forbidden", "QoD: denied by test", "a refused verdict");
-	ExpectQuery(frank, "CREATE TABLE unavailable AS SELECT 1 AS x", "QoD: authorization unavailable, retry",
-	            "an unavailable decision refuses");
+	auto frank_error = ErrorOf(frank, "CREATE TABLE unavailable AS SELECT 1 AS x");
+	Check(frank_error, !frank_error.empty(), "QoD: authorization unavailable, retry (qod-retry ",
+	      "an unavailable decision refuses");
+	ExpectMarkedFor(frank_error, frank_handle, "the plan's unavailable refusal carries frank's handle's marker");
+	auto forbidden_error = ErrorOf(frank, "SELECT * FROM forbidden");
+	Check(forbidden_error, !forbidden_error.empty(), "QoD: denied by test", "a refused verdict");
+	Check("", forbidden_error.find("qod-retry") != std::string::npos, "", "carries no marker");
 	ExpectQuery(internal, "SELECT count(*) FROM unavailable", "does not exist", "and nothing ran");
 	// Transaction control is decided like any statement, and runs under its allow.
 	ExpectQuery(frank, "BEGIN", "", "frank opens a transaction");

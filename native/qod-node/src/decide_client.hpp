@@ -64,6 +64,12 @@ struct DecideResult {
 //! The path every replica serves decisions on.
 constexpr const char *kDecidePath = "/api/internal/authz/decide";
 
+//! The largest decide request body a replica's verdict listener takes; it answers 413 past it. Must
+//! equal DecideRoute.MaxBodyBytes (pinned by DecideBodyLimitSpec). A larger request is refused here,
+//! before any call: its size is the statement's to choose, so it must read as a refusal, never as an
+//! outage.
+constexpr size_t kMaxDecideBodyBytes = 1048576;
+
 //! Asks the issuing replica for verdicts (Section 5) and verifies them. Thread safe.
 class DecideClient {
 public:
@@ -74,9 +80,11 @@ public:
 	//! The verdict on `call`. A plan: from the cache when it holds one for the principal id, policy
 	//! version, ctx and fingerprint, else from the replica, then cached (an allow, or a refusal that is
 	//! not retryable). A screen: from the replica every time, never cached. Never throws: a transport
-	//! failure, a timeout or an unexpected status is Unavailable (retryable); a 401, a replica URL that
-	//! is not plain http, or a verdict that does not verify is a Refuse. Counts a plan's cache hit or
-	//! miss, then each call and how it was answered.
+	//! failure, a timeout or an unexpected status is Unavailable (retryable); a 401, a 400 (a request the
+	//! listener refused as malformed), a 413 or a request body past kMaxDecideBodyBytes (no call made), a
+	//! replica URL that is not plain http, or a verdict that does not verify is a Refuse: the statement
+	//! can force those, so none may read as an outage. Counts a plan's cache hit or
+	//! miss, then each call and how it was answered; a body past the limit counts as a local refusal.
 	DecideResult Decide(const DecideCall &call);
 
 	VerdictCache &Cache() {
@@ -84,7 +92,8 @@ public:
 	}
 
 private:
-	DecideResult Ask(const DecideCall &call, const std::string &fingerprint);
+	static std::string RequestBody(const DecideCall &call);
+	DecideResult Ask(const DecideCall &call, const std::string &fingerprint, const std::string &body);
 
 	std::string node_id_;
 	std::string node_key_;

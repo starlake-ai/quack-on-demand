@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.RestEdgeConfig
 import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
+import ai.starlake.quack.edge.policy.ProtectedWriteGuard
 import ai.starlake.quack.model.{Names, PoolKey, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
@@ -34,6 +35,11 @@ object RestEdgeHandlers:
 
   /** The longest schema or object name a path segment may carry. */
   private val MaxObjectName = 1024
+
+  /** A policy holder's `asOf*` read of a table whose name history is not stable (#236). */
+  val UnstableHistoryMessage: String =
+    "this table was renamed, recreated or lost a column in its history, and your column or row " +
+      "policies do not allow reading it with time travel; read it without asOf, asOfTag or asOfTs"
 
   /** The four routes: their template (for access logs, never the concrete path) and the parameters
     * each admits. `None` admits the whole `/rows` vocabulary; the listings and the detail refuse
@@ -88,7 +94,10 @@ object RestEdgeHandlers:
   * the current state carries no `AT` clause, so the time-travel guard of a policy holder never
   * judges it. Its `X-QoD-Snapshot` is the catalog's latest snapshot when that did not move while
   * the statement ran (read before and after), so it names the state the page was read at; under
-  * concurrent writes it is left out.
+  * concurrent writes it is left out. A principal holding a column or row policy cannot read at a
+  * snapshot a table whose name history is not stable (the router's time-travel guard): sending the
+  * header back as `asOf` then answers 400 `invalid_selector` (the caller has just read the table,
+  * so this tells it nothing new), never the 404 of an object it cannot see.
   *
   * Views: DuckLake's behaviour on `AT (VERSION => n)` over a view is not established, so a name
   * that is or was a view carries no `X-QoD-Snapshot` and no caching, and `asOf*` on it is a 400
@@ -418,8 +427,20 @@ final class RestEdgeHandlers(
       _    <- refuseViewTimeTravel(view, q)
       snap <- if q.timeTravel then snapshotOf(tenant, t.td, q, req.requestId) else lift(Right(None))
       at = current.copy(snapshot = snap)
-      seen <- if snap.isEmpty then lift(Right(now)) else probe(t, at, req)
+      seen <- if snap.isEmpty then lift(Right(now)) else probe(t, at, req, pinnedRefusal)
     yield Located(at, seen._1, seen._2, view)
+
+  /** The second probe's refusal, at a snapshot `asOf*` names, of an object the first probe has just
+    * shown the caller: a policy holder's time-travel read of a table whose name history is not
+    * stable is a 400, so that a client sending `X-QoD-Snapshot` back as `asOf` reads why its next
+    * page failed (#236); any other refusal stays the 404, as the object may not exist there.
+    */
+  private def pinnedRefusal(rid: String)(f: RouterFailure): RestError = f match
+    case RouterFailure.AccessDenied(reason)
+        if ProtectedWriteGuard.isUnstableHistoryRefusal(reason) =>
+      logger.info(s"rest [$rid] time-travel read refused: the table's name history is not stable")
+      RestError.InvalidSelector(UnstableHistoryMessage)
+    case other => hiddenFailure(rid)(other)
 
   /** The snapshot a client's `asOf*` names, by the preview endpoint's rules
     * (`SnapshotSelector.resolve`), on DuckLake only (the caller checked the kind).
@@ -519,7 +540,8 @@ final class RestEdgeHandlers(
   private def probe(
       t: Target,
       at: RestSql.Target,
-      req: RestRequest
+      req: RestRequest,
+      answer: String => RouterFailure => RestError = hiddenFailure
   ): Step[(Vector[ProbedColumn], String)] =
     val sql                                  = RestSql.probe(at)
     def refused(f: RouterFailure): RestError =
@@ -527,7 +549,7 @@ final class RestEdgeHandlers(
       catch
         case e: Exception =>
           logger.warn(s"rest [${req.requestId}] recording a refused probe failed: ${e.getClass}")
-      hiddenFailure(req.requestId)(f)
+      answer(req.requestId)(f)
     execute(t, sql, refused, req, probeExecutor)(
       reading(r => (ProbedColumn.fromArrow(r.rows.getVectorSchemaRoot.getSchema), r.nodeId))
     )
