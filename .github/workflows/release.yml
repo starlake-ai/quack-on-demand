@@ -867,3 +867,5 @@ jobs:
             Post-release housekeeping after v${{ needs.prepare.outputs.version }}.
             Bumps version.sbt and the qod CLI versions to the next dev snapshot.
             libquackwire is intentionally left pinned.
+
+            - [x] I license this contribution under the Apache License 2.0, the same license as the project.

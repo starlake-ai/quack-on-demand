@@ -136,6 +136,21 @@ final class ManagerServer(
   private val sessionOfToken: String => Option[SessionTokenStore.Session] =
     t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
 
+  extension [I, E, O](e: sttp.tapir.PublicEndpoint[I, E, O, Any])
+    /** Binds `e` to a handler of the common shape `handler(inputs...)(scopeOf)`: the endpoint's
+      * inputs in order, then the scope resolver every handler gate receives, `scopeOfToken`.
+      */
+    private def scoped(
+        handler: I => ai.starlake.quack.ondemand.auth.SessionScope.Resolver => IO[Either[E, O]]
+    ): ServerEndpoint[Any, IO] =
+      e.serverLogic(i => handler(i)(scopeOfToken))
+
+    /** [[scoped]] for a synchronous handler (JDBC under Hikari): runs it on `IO.blocking`. */
+    private def scopedBlocking(
+        handler: I => ai.starlake.quack.ondemand.auth.SessionScope.Resolver => Either[E, O]
+    ): ServerEndpoint[Any, IO] =
+      e.serverLogic(i => IO.blocking(handler(i)(scopeOfToken)))
+
   /** Best-effort host of an OIDC issuer URL, for a cosmetic provider label in the client config. */
   private def issuerHost(issuerUrl: String): String =
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
@@ -527,12 +542,8 @@ final class ManagerServer(
       // asOf / asOfTag resolution also lives in the handler, behind the gate.
       // JDBC calls go on `IO.blocking` since Hikari semantics are synchronous.
       List[ServerEndpoint[Any, IO]](
-        CatalogEndpoints.listSchemasEndpoint.serverLogic { case (tenant, tenantDb, token) =>
-          IO.blocking(h.listSchemas(tenant, tenantDb, token)(scopeOfToken))
-        },
-        CatalogEndpoints.listTablesEndpoint.serverLogic { case (tenant, tenantDb, schema, token) =>
-          IO.blocking(h.listTables(tenant, tenantDb, schema, token)(scopeOfToken))
-        },
+        CatalogEndpoints.listSchemasEndpoint.scopedBlocking(h.listSchemas(_, _, _)),
+        CatalogEndpoints.listTablesEndpoint.scopedBlocking(h.listTables(_, _, _, _)),
         CatalogEndpoints.getTableEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, asOf, asOfTag, asOfTsRaw, token) =>
             QueryParams.instantAs(asOfTsRaw, "asOfTs", "invalid_selector") match
@@ -544,12 +555,7 @@ final class ManagerServer(
                   )
                 )
         },
-        CatalogEndpoints.listSnapshotsEndpoint.serverLogic {
-          case (tenant, tenantDb, limit, before, table, token) =>
-            IO.blocking(
-              h.listSnapshots(tenant, tenantDb, limit, before, table, token)(scopeOfToken)
-            )
-        }
+        CatalogEndpoints.listSnapshotsEndpoint.scopedBlocking(h.listSnapshots(_, _, _, _, _, _))
       )
     }
 
@@ -558,18 +564,10 @@ final class ManagerServer(
     // above (both surfaces have been gated since Spec 00).
     val tagEndpoints: List[ServerEndpoint[Any, IO]] = tags.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        TagEndpoints.listTagsEndpoint.serverLogic { case (tenant, tenantDb, token) =>
-          h.list(tenant, tenantDb, token)(scopeOfToken)
-        },
-        TagEndpoints.createTagEndpoint.serverLogic { case (req, token) =>
-          h.create(req, token)(scopeOfToken)
-        },
-        TagEndpoints.deleteTagEndpoint.serverLogic { case (req, token) =>
-          h.delete(req, token)(scopeOfToken)
-        },
-        TagEndpoints.protectTagEndpoint.serverLogic { case (req, token) =>
-          h.protect(req, token)(scopeOfToken)
-        }
+        TagEndpoints.listTagsEndpoint.scoped(h.list(_, _, _)),
+        TagEndpoints.createTagEndpoint.scoped(h.create(_, _)),
+        TagEndpoints.deleteTagEndpoint.scoped(h.delete(_, _)),
+        TagEndpoints.protectTagEndpoint.scoped(h.protect(_, _))
       )
     }
 
@@ -577,22 +575,11 @@ final class ManagerServer(
     // TenantScopeCheck inside the handlers, same shape as tagEndpoints.
     val maintenanceEndpoints: List[ServerEndpoint[Any, IO]] = maintenance.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        MaintenanceEndpoints.upsertPolicyEndpoint.serverLogic { case (req, token) =>
-          h.upsertPolicy(req, token)(scopeOfToken)
-        },
-        MaintenanceEndpoints.deletePolicyEndpoint.serverLogic { case (req, token) =>
-          h.deletePolicy(req, token)(scopeOfToken)
-        },
-        MaintenanceEndpoints.listPoliciesEndpoint.serverLogic { case (tenant, tenantDb, token) =>
-          h.listPolicies(tenant, tenantDb, token)(scopeOfToken)
-        },
-        MaintenanceEndpoints.listRunsEndpoint.serverLogic {
-          case (tenant, tenantDb, limit, before, token) =>
-            h.listRuns(tenant, tenantDb, limit, before, token)(scopeOfToken)
-        },
-        MaintenanceEndpoints.triggerRunEndpoint.serverLogic { case (req, token) =>
-          h.triggerRun(req, token)(scopeOfToken)
-        }
+        MaintenanceEndpoints.upsertPolicyEndpoint.scoped(h.upsertPolicy(_, _)),
+        MaintenanceEndpoints.deletePolicyEndpoint.scoped(h.deletePolicy(_, _)),
+        MaintenanceEndpoints.listPoliciesEndpoint.scoped(h.listPolicies(_, _, _)),
+        MaintenanceEndpoints.listRunsEndpoint.scoped(h.listRuns(_, _, _, _, _)),
+        MaintenanceEndpoints.triggerRunEndpoint.scoped(h.triggerRun(_, _))
       )
     }
 
@@ -646,24 +633,10 @@ final class ManagerServer(
     // the handler; asOfTs is parsed here, like the DuckLake preview above.
     val icebergCatalogEndpoints: List[ServerEndpoint[Any, IO]] = icebergCatalog.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        IcebergCatalogEndpoints.schemasEndpoint.serverLogic {
-          case (tenant, tenantDb, alias, token) =>
-            h.schemas(tenant, tenantDb, alias, token)(scopeOfToken)
-        },
-        IcebergCatalogEndpoints.tablesEndpoint.serverLogic {
-          case (tenant, tenantDb, alias, schema, token) =>
-            h.tables(tenant, tenantDb, alias, schema, token)(scopeOfToken)
-        },
-        IcebergCatalogEndpoints.detailEndpoint.serverLogic {
-          case (tenant, tenantDb, alias, schema, table, token) =>
-            h.detail(tenant, tenantDb, alias, schema, table, token)(scopeOfToken)
-        },
-        IcebergCatalogEndpoints.historyEndpoint.serverLogic {
-          case (tenant, tenantDb, alias, schema, table, limit, before, operation, token) =>
-            h.history(tenant, tenantDb, alias, schema, table, limit, before, operation, token)(
-              scopeOfToken
-            )
-        },
+        IcebergCatalogEndpoints.schemasEndpoint.scoped(h.schemas(_, _, _, _)),
+        IcebergCatalogEndpoints.tablesEndpoint.scoped(h.tables(_, _, _, _, _)),
+        IcebergCatalogEndpoints.detailEndpoint.scoped(h.detail(_, _, _, _, _, _)),
+        IcebergCatalogEndpoints.historyEndpoint.scoped(h.history(_, _, _, _, _, _, _, _, _)),
         IcebergCatalogEndpoints.previewEndpoint.serverLogic {
           case (tenant, tenantDb, alias, schema, table, asOf, asOfTag, asOfTsRaw, limit, token) =>
             QueryParams.instantAs(asOfTsRaw, "asOfTs", "invalid_selector") match
@@ -682,36 +655,23 @@ final class ManagerServer(
                   token
                 )(scopeOfToken)
         },
-        IcebergCatalogEndpoints.dataDiffEndpoint.serverLogic {
-          case (tenant, tenantDb, alias, schema, table, from, to, limit, changeType, token) =>
-            h.dataDiff(tenant, tenantDb, alias, schema, table, from, to, limit, changeType, token)(
-              scopeOfToken
-            )
-        }
+        IcebergCatalogEndpoints.dataDiffEndpoint.scoped(h.dataDiff(_, _, _, _, _, _, _, _, _, _))
       )
     }
 
     // Undrop (Spec 03). Session-gated per request via TenantScopeCheck inside the handler.
     val undropEndpoints: List[ServerEndpoint[Any, IO]] = undrop.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        UndropEndpoints.recoverableEndpoint.serverLogic { case (tenant, tenantDb, limit, token) =>
-          h.recoverable(tenant, tenantDb, limit, token)(scopeOfToken)
-        },
-        UndropEndpoints.undropEndpoint.serverLogic { case (req, token) =>
-          h.undrop(req, token)(scopeOfToken)
-        },
-        ProfileEndpoints.recoverable.serverLogic { case (tenantDb, limit, token) =>
-          h.recoverableMine(tenantDb, limit, token)
-        },
-        ProfileEndpoints.undrop.serverLogic { case (req, token) => h.undropMine(req, token) }
+        UndropEndpoints.recoverableEndpoint.scoped(h.recoverable(_, _, _, _)),
+        UndropEndpoints.undropEndpoint.scoped(h.undrop(_, _)),
+        ProfileEndpoints.recoverable.serverLogic(h.recoverableMine(_, _, _)),
+        ProfileEndpoints.undrop.serverLogic(h.undropMine(_, _))
       )
     }
 
     // Restore (Spec 04). Session-gated per request via TenantScopeCheck inside the handler.
     val restoreEndpoints: List[ServerEndpoint[Any, IO]] = restore.toList.map { h =>
-      RestoreEndpoints.restoreEndpoint.serverLogic { case (req, token) =>
-        h.restore(req, token)(scopeOfToken)
-      }
+      RestoreEndpoints.restoreEndpoint.scoped(h.restore(_, _))
     }
 
     // Fleet heartbeat (qod fleet join): public at the guard (fleet runtime only), X-Fleet-Token checked
@@ -722,34 +682,20 @@ final class ManagerServer(
         FleetEndpoints.heartbeat.serverLogic { case (req, token, forwardedFor, remote) =>
           h.heartbeat(req, token, remote.map(_.getAddress), forwardedFor)
         },
-        FleetEndpoints.listServers.serverLogic(token => h.listServers(token)(scopeOfToken)),
-        FleetEndpoints.drainServer.serverLogic { case (req, token) =>
-          h.drain(req, token)(scopeOfToken)
-        },
-        FleetEndpoints.undrainServer.serverLogic { case (req, token) =>
-          h.undrain(req, token)(scopeOfToken)
-        },
-        FleetEndpoints.removeServer.serverLogic { case (req, token) =>
-          h.remove(req, token)(scopeOfToken)
-        },
-        FleetEndpoints.approveServer.serverLogic { case (req, token) =>
-          h.approve(req, token)(scopeOfToken)
-        }
+        FleetEndpoints.listServers.scoped(h.listServers(_)),
+        FleetEndpoints.drainServer.scoped(h.drain(_, _)),
+        FleetEndpoints.undrainServer.scoped(h.undrain(_, _)),
+        FleetEndpoints.removeServer.scoped(h.remove(_, _)),
+        FleetEndpoints.approveServer.scoped(h.approve(_, _))
       )
     }
 
     val tenantLocationEndpoints: List[ServerEndpoint[Any, IO]] =
       tenantLocations.toList.flatMap { h =>
         List[ServerEndpoint[Any, IO]](
-          TenantEndpoints.listTenantLocations.serverLogic { case (req, token) =>
-            h.list(req, token)(scopeOfToken)
-          },
-          TenantEndpoints.addTenantLocation.serverLogic { case (req, token) =>
-            h.add(req, token)(scopeOfToken)
-          },
-          TenantEndpoints.removeTenantLocation.serverLogic { case (req, token) =>
-            h.remove(req, token)(scopeOfToken)
-          }
+          TenantEndpoints.listTenantLocations.scoped(h.list(_, _)),
+          TenantEndpoints.addTenantLocation.scoped(h.add(_, _)),
+          TenantEndpoints.removeTenantLocation.scoped(h.remove(_, _))
         )
       }
 
@@ -757,55 +703,25 @@ final class ManagerServer(
       s3Credentials.toList.flatMap { h =>
         List[ServerEndpoint[Any, IO]](
           S3CredentialEndpoints.listMine.serverLogic { case (_, token) => h.listMine(token) },
-          S3CredentialEndpoints.addMine.serverLogic { case (req, token) => h.addMine(req, token) },
-          S3CredentialEndpoints.removeMine.serverLogic { case (req, token) =>
-            h.removeMine(req, token)
-          },
-          S3CredentialEndpoints.listForUser.serverLogic { case (req, token) =>
-            h.listForUser(req, token)(scopeOfToken)
-          },
-          S3CredentialEndpoints.removeForUser.serverLogic { case (req, token) =>
-            h.removeForUser(req, token)(scopeOfToken)
-          }
+          S3CredentialEndpoints.addMine.serverLogic(h.addMine(_, _)),
+          S3CredentialEndpoints.removeMine.serverLogic(h.removeMine(_, _)),
+          S3CredentialEndpoints.listForUser.scoped(h.listForUser(_, _)),
+          S3CredentialEndpoints.removeForUser.scoped(h.removeForUser(_, _))
         )
       }
 
     // Branches (Epic 1). Session-gated per request via TenantScopeCheck inside the handler.
     val branchEndpoints: List[ServerEndpoint[Any, IO]] = branches.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        BranchEndpoints.createEndpoint.serverLogic { case (req, token) =>
-          h.create(req, token)(scopeOfToken)
-        },
-        BranchEndpoints.listEndpoint.serverLogic {
-          case (tenant, tenantDb, includeTerminal, token) =>
-            h.list(tenant, tenantDb, includeTerminal, token)(scopeOfToken)
-        },
-        BranchEndpoints.getEndpoint.serverLogic { case (tenant, tenantDb, branch, token) =>
-          h.get(tenant, tenantDb, branch, token)(scopeOfToken)
-        },
-        BranchEndpoints.changesEndpoint.serverLogic {
-          case (tenant, tenantDb, branch, counts, token) =>
-            h.changes(tenant, tenantDb, branch, counts, token)(scopeOfToken)
-        },
-        BranchEndpoints.diffEndpoint.serverLogic {
-          case (tenant, tenantDb, branch, schema, table, limit, cursor, changeType, token) =>
-            h.diff(tenant, tenantDb, branch, schema, table, limit, cursor, changeType, token)(
-              scopeOfToken
-            )
-        },
-        BranchEndpoints.schemaDiffEndpoint.serverLogic {
-          case (tenant, tenantDb, branch, schema, table, token) =>
-            h.schemaDiff(tenant, tenantDb, branch, schema, table, token)(scopeOfToken)
-        },
-        BranchEndpoints.proposeEndpoint.serverLogic { case (req, token) =>
-          h.propose(req, token)(scopeOfToken)
-        },
-        BranchEndpoints.mergeEndpoint.serverLogic { case (req, token) =>
-          h.merge(req, token)(scopeOfToken)
-        },
-        BranchEndpoints.discardEndpoint.serverLogic { case (req, token) =>
-          h.discard(req, token)(scopeOfToken)
-        }
+        BranchEndpoints.createEndpoint.scoped(h.create(_, _)),
+        BranchEndpoints.listEndpoint.scoped(h.list(_, _, _, _)),
+        BranchEndpoints.getEndpoint.scoped(h.get(_, _, _, _)),
+        BranchEndpoints.changesEndpoint.scoped(h.changes(_, _, _, _, _)),
+        BranchEndpoints.diffEndpoint.scoped(h.diff(_, _, _, _, _, _, _, _, _)),
+        BranchEndpoints.schemaDiffEndpoint.scoped(h.schemaDiff(_, _, _, _, _, _)),
+        BranchEndpoints.proposeEndpoint.scoped(h.propose(_, _)),
+        BranchEndpoints.mergeEndpoint.scoped(h.merge(_, _)),
+        BranchEndpoints.discardEndpoint.scoped(h.discard(_, _))
       )
     }
 
@@ -853,22 +769,16 @@ final class ManagerServer(
     }
 
     val authEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      AuthEndpoints.login.serverLogic { case (req, proto) => auth.login(req, proto) },
-      AuthEndpoints.changePassword.serverLogic(req => auth.changePassword(req)),
-      AuthEndpoints.logout.serverLogic { case (apiKey, cookie, proto) =>
-        auth.logout(apiKey, cookie, proto)
-      },
+      AuthEndpoints.login.serverLogic(auth.login(_, _)),
+      AuthEndpoints.changePassword.serverLogic(auth.changePassword),
+      AuthEndpoints.logout.serverLogic(auth.logout(_, _, _)),
       AuthEndpoints.whoami.serverLogic(token => auth.whoami(token, None)),
-      AuthEndpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
+      AuthEndpoints.authMode.serverLogic(auth.authMode),
       // Self-scoped: identity comes from the token, never from a request param.
-      ProfileEndpoints.usage.serverLogic { case (days, token) => profile.usage(days, token) },
-      ProfileEndpoints.statements.serverLogic { case (limit, token) =>
-        profile.statements(limit, token)
-      },
-      ProfileEndpoints.pools.serverLogic(token => profile.pools(token)),
-      NodeEndpoints.statementHistory.serverLogic { case (limit, token) =>
-        statementHistory.recent(limit, token)(scopeOfToken)
-      },
+      ProfileEndpoints.usage.serverLogic(profile.usage(_, _)),
+      ProfileEndpoints.statements.serverLogic(profile.statements(_, _)),
+      ProfileEndpoints.pools.serverLogic(profile.pools),
+      NodeEndpoints.statementHistory.scoped(statementHistory.recent(_, _)),
       TelemetryEndpoints.auditList.serverLogic {
         case (family, tenant, actor, action, q, from, to, limit, before, noTenant, after, token) =>
           auditHandlers.list(
@@ -886,23 +796,16 @@ final class ManagerServer(
             after
           )(scopeOfToken)
       },
-      TelemetryEndpoints.auditActions.serverLogic(token => auditHandlers.actions(token)),
-      TelemetryEndpoints.historyTrends.serverLogic {
-        case (granularity, from, to, tenant, pool, token) =>
-          history.trends(granularity, from, to, tenant, pool, token)(scopeOfToken)
-      },
+      TelemetryEndpoints.auditActions.serverLogic(auditHandlers.actions),
+      TelemetryEndpoints.historyTrends.scoped(history.trends(_, _, _, _, _, _)),
       TelemetryEndpoints.historyStatements.serverLogic {
         case (from, to, tenant, pool, user, status, q, limit, before, after, token) =>
           history.statements(from, to, tenant, pool, user, status, q, limit, before, token, after)(
             scopeOfToken
           )
       },
-      TelemetryEndpoints.usage.serverLogic { case (from, to, groupBy, tenant, pool, token) =>
-        usage.usage(from, to, groupBy, tenant, pool, token)(scopeOfToken)
-      },
-      AuthEndpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
-        auth.oidcStart(tenant, returnTo, proto)
-      },
+      TelemetryEndpoints.usage.scoped(usage.usage(_, _, _, _, _, _)),
+      AuthEndpoints.oidcStart.serverLogic(auth.oidcStart(_, _, _)),
       AuthEndpoints.oidcCallback.serverLogicSuccess { case (code, state, stateCookie, proto) =>
         auth.oidcCallback(code, state, stateCookie, proto)
       },
@@ -914,9 +817,7 @@ final class ManagerServer(
         case (code, state, error, cookie, proto) =>
           auth.sqlTokenCallback(code, state, error, cookie, proto)
       },
-      AuthEndpoints.driverStart.serverLogic { case (tenant, port, key, state, proto) =>
-        auth.driverStart(tenant, port, key, state, proto)
-      }
+      AuthEndpoints.driverStart.serverLogic(auth.driverStart(_, _, _, _, _))
     )
 
     // Starlake SSO handoff. Mounted only when the integration is effectively on (SL_ENABLED=true
@@ -925,8 +826,8 @@ final class ManagerServer(
     val ssoEndpoints: List[ServerEndpoint[Any, IO]] =
       if cfg.auth.management.slIntegrationOn then
         List[ServerEndpoint[Any, IO]](
-          AuthEndpoints.ssoTicket.serverLogic(token => auth.ssoTicket(token)),
-          AuthEndpoints.ssoRedeem.serverLogic(req => auth.ssoRedeem(req))
+          AuthEndpoints.ssoTicket.serverLogic(auth.ssoTicket),
+          AuthEndpoints.ssoRedeem.serverLogic(auth.ssoRedeem)
         )
       else Nil
 
@@ -935,11 +836,11 @@ final class ManagerServer(
     // itself, never touch a sibling, its parent or itself): see PatHandlers.
     val patEndpoints: List[ServerEndpoint[Any, IO]] = pat.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        PatEndpoints.create.serverLogic { case (token, req) => h.create(token, req) },
-        PatEndpoints.list.serverLogic(token => h.list(token)),
-        PatEndpoints.revoke.serverLogic { case (token, req) => h.revoke(token, req) },
-        PatEndpoints.delete.serverLogic { case (token, req) => h.delete(token, req) },
-        PatEndpoints.tools.serverLogic(token => h.tools(token))
+        PatEndpoints.create.serverLogic(h.create(_, _)),
+        PatEndpoints.list.serverLogic(h.list),
+        PatEndpoints.revoke.serverLogic(h.revoke(_, _)),
+        PatEndpoints.delete.serverLogic(h.delete(_, _)),
+        PatEndpoints.tools.serverLogic(h.tools)
       )
     }
 
@@ -947,158 +848,64 @@ final class ManagerServer(
     // (see isPublicApi), so a wired handler is reachable pre-session.
     val passwordResetEndpoints: List[ServerEndpoint[Any, IO]] = passwordReset.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        AuthEndpoints.forgotPassword.serverLogic(req => h.forgotPassword(req)),
-        AuthEndpoints.resetPassword.serverLogic(req => h.resetPassword(req))
+        AuthEndpoints.forgotPassword.serverLogic(h.forgotPassword),
+        AuthEndpoints.resetPassword.serverLogic(h.resetPassword)
       )
     }
 
     val scimEndpoints: List[ServerEndpoint[Any, IO]] = scim.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
-        ScimEndpoints.listUsers.serverLogic { case (tenant, filter, start, count, token) =>
-          h.listUsers(tenant, filter, start, count, token)(scopeOfToken)
-        },
-        ScimEndpoints.getUser.serverLogic { case (tenant, id, token) =>
-          h.getUser(tenant, id, token)(scopeOfToken)
-        },
-        ScimEndpoints.createUser.serverLogic { case (tenant, body, token) =>
-          h.createUser(tenant, body, token)(scopeOfToken)
-        },
-        ScimEndpoints.replaceUser.serverLogic { case (tenant, id, body, token) =>
-          h.replaceUser(tenant, id, body, token)(scopeOfToken)
-        },
-        ScimEndpoints.patchUser.serverLogic { case (tenant, id, body, token) =>
-          h.patchUser(tenant, id, body, token)(scopeOfToken)
-        },
-        ScimEndpoints.deleteUser.serverLogic { case (tenant, id, token) =>
-          h.deleteUser(tenant, id, token)(scopeOfToken)
-        },
-        ScimEndpoints.listGroups.serverLogic { case (tenant, filter, start, count, token) =>
-          h.listGroups(tenant, filter, start, count, token)(scopeOfToken)
-        },
-        ScimEndpoints.getGroup.serverLogic { case (tenant, id, token) =>
-          h.getGroup(tenant, id, token)(scopeOfToken)
-        },
-        ScimEndpoints.createGroup.serverLogic { case (tenant, body, token) =>
-          h.createGroup(tenant, body, token)(scopeOfToken)
-        },
-        ScimEndpoints.replaceGroup.serverLogic { case (tenant, id, body, token) =>
-          h.replaceGroup(tenant, id, body, token)(scopeOfToken)
-        },
-        ScimEndpoints.patchGroup.serverLogic { case (tenant, id, body, token) =>
-          h.patchGroup(tenant, id, body, token)(scopeOfToken)
-        },
-        ScimEndpoints.deleteGroup.serverLogic { case (tenant, id, token) =>
-          h.deleteGroup(tenant, id, token)(scopeOfToken)
-        },
-        ScimEndpoints.serviceProviderConfig.serverLogic { case (tenant, token) =>
-          h.serviceProviderConfig(tenant, token)(scopeOfToken)
-        },
-        ScimEndpoints.resourceTypes.serverLogic { case (tenant, token) =>
-          h.resourceTypes(tenant, token)(scopeOfToken)
-        },
-        ScimEndpoints.schemas.serverLogic { case (tenant, token) =>
-          h.schemas(tenant, token)(scopeOfToken)
-        }
+        ScimEndpoints.listUsers.scoped(h.listUsers(_, _, _, _, _)),
+        ScimEndpoints.getUser.scoped(h.getUser(_, _, _)),
+        ScimEndpoints.createUser.scoped(h.createUser(_, _, _)),
+        ScimEndpoints.replaceUser.scoped(h.replaceUser(_, _, _, _)),
+        ScimEndpoints.patchUser.scoped(h.patchUser(_, _, _, _)),
+        ScimEndpoints.deleteUser.scoped(h.deleteUser(_, _, _)),
+        ScimEndpoints.listGroups.scoped(h.listGroups(_, _, _, _, _)),
+        ScimEndpoints.getGroup.scoped(h.getGroup(_, _, _)),
+        ScimEndpoints.createGroup.scoped(h.createGroup(_, _, _)),
+        ScimEndpoints.replaceGroup.scoped(h.replaceGroup(_, _, _, _)),
+        ScimEndpoints.patchGroup.scoped(h.patchGroup(_, _, _, _)),
+        ScimEndpoints.deleteGroup.scoped(h.deleteGroup(_, _, _)),
+        ScimEndpoints.serviceProviderConfig.scoped(h.serviceProviderConfig(_, _)),
+        ScimEndpoints.resourceTypes.scoped(h.resourceTypes(_, _)),
+        ScimEndpoints.schemas.scoped(h.schemas(_, _))
       )
     }
 
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      RbacEndpoints.createUser.serverLogic { case (req, token) =>
-        users.createUser(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.updateUser.serverLogic { case (req, token) =>
-        users.updateUser(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.deleteUser.serverLogic { case (req, token) =>
-        users.deleteUser(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listUsers.serverLogic { case (t, key) =>
-        users.listUsers(t, key)(scopeOfToken)
-      },
-      RbacEndpoints.effectivePermissions.serverLogic { case (id, key) =>
-        users.effective(id, key)(scopeOfToken)
-      },
-      RbacEndpoints.createRole.serverLogic { case (req, token) =>
-        roles.createRole(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.deleteRole.serverLogic { case (req, token) =>
-        roles.deleteRole(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listRoles.serverLogic { case (t, key) =>
-        roles.listRoles(t, key)(scopeOfToken)
-      },
-      RbacEndpoints.grantRolePermission.serverLogic { case (req, token) =>
-        roles.grantPermission(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.revokeRolePermission.serverLogic { case (req, token) =>
-        roles.revokePermission(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listRolePermissions.serverLogic { case (roleId, key) =>
-        roles.listPermissions(roleId, key)(scopeOfToken)
-      },
-      RbacEndpoints.createGroup.serverLogic { case (req, token) =>
-        groups.createGroup(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.deleteGroup.serverLogic { case (req, token) =>
-        groups.deleteGroup(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listGroups.serverLogic { case (t, key) =>
-        groups.listGroups(t, key)(scopeOfToken)
-      },
-      RbacEndpoints.addUserRoleMembership.serverLogic { case (req, token) =>
-        memberships.addUserRole(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, token) =>
-        memberships.removeUserRole(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.addUserGroupMembership.serverLogic { case (req, token) =>
-        memberships.addUserGroup(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, token) =>
-        memberships.removeUserGroup(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, token) =>
-        memberships.addGroupRole(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, token) =>
-        memberships.removeGroupRole(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listGroupRoleMembership.serverLogic { case (groupId, key) =>
-        memberships.listGroupRoles(groupId, key)(scopeOfToken)
-      },
-      RbacEndpoints.grantPoolPermission.serverLogic { case (req, token) =>
-        poolPermissions.grant(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.revokePoolPermission.serverLogic { case (req, token) =>
-        poolPermissions.revoke(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g, key) =>
-        poolPermissions.list(t, u, g, key)(scopeOfToken)
-      },
-      RbacEndpoints.createColumnPolicy.serverLogic { case (req, token) =>
-        columnPolicies.create(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.updateColumnPolicy.serverLogic { case (req, token) =>
-        columnPolicies.update(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.deleteColumnPolicy.serverLogic { case (req, token) =>
-        columnPolicies.delete(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listColumnPolicies.serverLogic { case (roleId, key) =>
-        columnPolicies.list(roleId, key)(scopeOfToken)
-      },
-      RbacEndpoints.createRowPolicy.serverLogic { case (req, token) =>
-        rowPolicies.create(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.updateRowPolicy.serverLogic { case (req, token) =>
-        rowPolicies.update(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.deleteRowPolicy.serverLogic { case (req, token) =>
-        rowPolicies.delete(req, token)(scopeOfToken)
-      },
-      RbacEndpoints.listRowPolicies.serverLogic { case (roleId, key) =>
-        rowPolicies.list(roleId, key)(scopeOfToken)
-      }
+      RbacEndpoints.createUser.scoped(users.createUser(_, _)),
+      RbacEndpoints.updateUser.scoped(users.updateUser(_, _)),
+      RbacEndpoints.deleteUser.scoped(users.deleteUser(_, _)),
+      RbacEndpoints.listUsers.scoped(users.listUsers(_, _)),
+      RbacEndpoints.effectivePermissions.scoped(users.effective(_, _)),
+      RbacEndpoints.createRole.scoped(roles.createRole(_, _)),
+      RbacEndpoints.deleteRole.scoped(roles.deleteRole(_, _)),
+      RbacEndpoints.listRoles.scoped(roles.listRoles(_, _)),
+      RbacEndpoints.grantRolePermission.scoped(roles.grantPermission(_, _)),
+      RbacEndpoints.revokeRolePermission.scoped(roles.revokePermission(_, _)),
+      RbacEndpoints.listRolePermissions.scoped(roles.listPermissions(_, _)),
+      RbacEndpoints.createGroup.scoped(groups.createGroup(_, _)),
+      RbacEndpoints.deleteGroup.scoped(groups.deleteGroup(_, _)),
+      RbacEndpoints.listGroups.scoped(groups.listGroups(_, _)),
+      RbacEndpoints.addUserRoleMembership.scoped(memberships.addUserRole(_, _)),
+      RbacEndpoints.removeUserRoleMembership.scoped(memberships.removeUserRole(_, _)),
+      RbacEndpoints.addUserGroupMembership.scoped(memberships.addUserGroup(_, _)),
+      RbacEndpoints.removeUserGroupMembership.scoped(memberships.removeUserGroup(_, _)),
+      RbacEndpoints.addGroupRoleMembership.scoped(memberships.addGroupRole(_, _)),
+      RbacEndpoints.removeGroupRoleMembership.scoped(memberships.removeGroupRole(_, _)),
+      RbacEndpoints.listGroupRoleMembership.scoped(memberships.listGroupRoles(_, _)),
+      RbacEndpoints.grantPoolPermission.scoped(poolPermissions.grant(_, _)),
+      RbacEndpoints.revokePoolPermission.scoped(poolPermissions.revoke(_, _)),
+      RbacEndpoints.listPoolPermissions.scoped(poolPermissions.list(_, _, _, _)),
+      RbacEndpoints.createColumnPolicy.scoped(columnPolicies.create(_, _)),
+      RbacEndpoints.updateColumnPolicy.scoped(columnPolicies.update(_, _)),
+      RbacEndpoints.deleteColumnPolicy.scoped(columnPolicies.delete(_, _)),
+      RbacEndpoints.listColumnPolicies.scoped(columnPolicies.list(_, _)),
+      RbacEndpoints.createRowPolicy.scoped(rowPolicies.create(_, _)),
+      RbacEndpoints.updateRowPolicy.scoped(rowPolicies.update(_, _)),
+      RbacEndpoints.deleteRowPolicy.scoped(rowPolicies.delete(_, _)),
+      RbacEndpoints.listRowPolicies.scoped(rowPolicies.list(_, _))
     )
 
     val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
@@ -1106,116 +913,46 @@ final class ManagerServer(
     val federatedSourceEndpoints: List[ServerEndpoint[Any, IO]] =
       federatedSources.toList.flatMap { h =>
         List[ServerEndpoint[Any, IO]](
-          FederatedSourceEndpoints.createFederatedSource.serverLogic { case (t, td, req, token) =>
-            h.createSource(t, td, req, token)
-          },
-          FederatedSourceEndpoints.listFederatedSources.serverLogic { case (t, td) =>
-            h.listSources(t, td)
-          },
-          FederatedSourceEndpoints.getFederatedSource.serverLogic { case (t, td, alias) =>
-            h.getSource(t, td, alias)
-          },
-          FederatedSourceEndpoints.deleteFederatedSource.serverLogic { case (t, td, alias, token) =>
-            h.deleteSource(t, td, alias, token)
-          },
-          FederatedSourceEndpoints.listFederatedSecrets.serverLogic { case (t, td, alias) =>
-            h.listSecrets(t, td, alias)
-          },
-          FederatedSourceEndpoints.upsertFederatedSecret.serverLogic {
-            case (t, td, alias, req, token) =>
-              h.upsertSecret(t, td, alias, req, token)
-          },
-          FederatedSourceEndpoints.deleteFederatedSecret.serverLogic {
-            case (t, td, alias, name, token) =>
-              h.deleteSecret(t, td, alias, name, token)
-          }
+          FederatedSourceEndpoints.createFederatedSource.serverLogic(h.createSource(_, _, _, _)),
+          FederatedSourceEndpoints.listFederatedSources.serverLogic(h.listSources(_, _)),
+          FederatedSourceEndpoints.getFederatedSource.serverLogic(h.getSource(_, _, _)),
+          FederatedSourceEndpoints.deleteFederatedSource.serverLogic(h.deleteSource(_, _, _, _)),
+          FederatedSourceEndpoints.listFederatedSecrets.serverLogic(h.listSecrets(_, _, _)),
+          FederatedSourceEndpoints.upsertFederatedSecret.serverLogic(h.upsertSecret(_, _, _, _, _)),
+          FederatedSourceEndpoints.deleteFederatedSecret.serverLogic(h.deleteSecret(_, _, _, _, _))
         )
       }
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      PoolEndpoints.createPool.serverLogic { case (req, token) =>
-        pools.createPool(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.scalePool.serverLogic { case (req, token) =>
-        pools.scalePool(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.stopPool.serverLogic { case (req, token) =>
-        pools.stopPool(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.deletePool.serverLogic { case (req, token) =>
-        pools.deletePool(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.suspendPool.serverLogic { case (req, token) =>
-        pools.suspendPool(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.resumePool.serverLogic { case (req, token) =>
-        pools.resumePool(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.listPools.serverLogic(token => pools.listPools(token)(scopeOfToken)),
-      PoolEndpoints.poolStatus.serverLogic((t, td, p, k) =>
-        pools.poolStatus(t, td, p, k)(scopeOfToken)
-      ),
-      PoolEndpoints.setPoolDisabled.serverLogic { case (req, token) =>
-        pools.setPoolDisabled(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.setPoolInitSql.serverLogic { case (req, token) =>
-        pools.setInitSql(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.setPoolResources.serverLogic { case (req, token) =>
-        pools.setResources(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.setPoolTemplate.serverLogic { case (req, token) =>
-        pools.setPodTemplate(req, token)(scopeOfToken)
-      },
-      PoolEndpoints.setPoolAutoscale.serverLogic { case (req, token) =>
-        pools.setPoolAutoscale(req, token)(scopeOfToken)
-      },
-      NodeEndpoints.setMaxConcurrent.serverLogic { case (req, token) =>
-        nodes.setMaxConcurrent(req, token)(scopeOfToken)
-      },
-      NodeEndpoints.quarantineNode.serverLogic { case (req, token) =>
-        nodes.quarantineNode(req, token)(scopeOfToken)
-      },
-      NodeEndpoints.unquarantineNode.serverLogic { case (req, token) =>
-        nodes.unquarantineNode(req, token)(scopeOfToken)
-      },
-      NodeEndpoints.restartNode.serverLogic { case (req, token) =>
-        nodes.restartNode(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.createTenant.serverLogic { case (req, token) =>
-        tenants.createTenant(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.listTenants.serverLogic(token => tenants.listTenants(token)(scopeOfToken)),
-      TenantEndpoints.deleteTenant.serverLogic { case (req, token) =>
-        tenants.deleteTenant(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.setTenantDisabled.serverLogic { case (req, token) =>
-        tenants.setTenantDisabled(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.setTenantAuth.serverLogic { case (req, token) =>
-        tenants.setTenantAuth(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.setTenantAcl.serverLogic { case (req, token) =>
-        tenants.setTenantAcl(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.opaTest.serverLogic { case (req, token) =>
-        tenants.opaTest(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.createTenantDb.serverLogic { case (req, token) =>
-        tenantDbs.createTenantDb(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.listTenantDbs.serverLogic { case (tenant, token) =>
-        tenantDbs.listTenantDbs(tenant, token)(scopeOfToken)
-      },
-      TenantEndpoints.deleteTenantDb.serverLogic { case (req, token) =>
-        tenantDbs.deleteTenantDb(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.updateTenantDb.serverLogic { case (req, token) =>
-        tenantDbs.update(req, token)(scopeOfToken)
-      },
-      TenantEndpoints.metastoreDefaults.serverLogic { token =>
-        tenantDbs.metastoreDefaults(token)(scopeOfToken)
-      },
+      PoolEndpoints.createPool.scoped(pools.createPool(_, _)),
+      PoolEndpoints.scalePool.scoped(pools.scalePool(_, _)),
+      PoolEndpoints.stopPool.scoped(pools.stopPool(_, _)),
+      PoolEndpoints.deletePool.scoped(pools.deletePool(_, _)),
+      PoolEndpoints.suspendPool.scoped(pools.suspendPool(_, _)),
+      PoolEndpoints.resumePool.scoped(pools.resumePool(_, _)),
+      PoolEndpoints.listPools.scoped(pools.listPools(_)),
+      PoolEndpoints.poolStatus.scoped(pools.poolStatus(_, _, _, _)),
+      PoolEndpoints.setPoolDisabled.scoped(pools.setPoolDisabled(_, _)),
+      PoolEndpoints.setPoolInitSql.scoped(pools.setInitSql(_, _)),
+      PoolEndpoints.setPoolResources.scoped(pools.setResources(_, _)),
+      PoolEndpoints.setPoolTemplate.scoped(pools.setPodTemplate(_, _)),
+      PoolEndpoints.setPoolAutoscale.scoped(pools.setPoolAutoscale(_, _)),
+      NodeEndpoints.setMaxConcurrent.scoped(nodes.setMaxConcurrent(_, _)),
+      NodeEndpoints.quarantineNode.scoped(nodes.quarantineNode(_, _)),
+      NodeEndpoints.unquarantineNode.scoped(nodes.unquarantineNode(_, _)),
+      NodeEndpoints.restartNode.scoped(nodes.restartNode(_, _)),
+      TenantEndpoints.createTenant.scoped(tenants.createTenant(_, _)),
+      TenantEndpoints.listTenants.scoped(tenants.listTenants(_)),
+      TenantEndpoints.deleteTenant.scoped(tenants.deleteTenant(_, _)),
+      TenantEndpoints.setTenantDisabled.scoped(tenants.setTenantDisabled(_, _)),
+      TenantEndpoints.setTenantAuth.scoped(tenants.setTenantAuth(_, _)),
+      TenantEndpoints.setTenantAcl.scoped(tenants.setTenantAcl(_, _)),
+      TenantEndpoints.opaTest.scoped(tenants.opaTest(_, _)),
+      TenantEndpoints.createTenantDb.scoped(tenantDbs.createTenantDb(_, _)),
+      TenantEndpoints.listTenantDbs.scoped(tenantDbs.listTenantDbs(_, _)),
+      TenantEndpoints.deleteTenantDb.scoped(tenantDbs.deleteTenantDb(_, _)),
+      TenantEndpoints.updateTenantDb.scoped(tenantDbs.update(_, _)),
+      TenantEndpoints.metastoreDefaults.scoped(tenantDbs.metastoreDefaults(_)),
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.ready.serverLogic(_ => health.ready),
       Endpoints.clientConfig.serverLogic(_ =>
@@ -1247,18 +984,16 @@ final class ManagerServer(
           )
         )
       ),
-      Endpoints.serverConfig.serverLogic(token => serverConfig.list(token)(scopeOfToken)),
-      SecurityAuditEndpoints.audit.serverLogic(token => securityAudit.run(token)(scopeOfToken)),
+      Endpoints.serverConfig.scoped(serverConfig.list(_)),
+      SecurityAuditEndpoints.audit.scoped(securityAudit.run(_)),
       Endpoints.manifestExport.serverLogic { case (mode, tenant, token) =>
         manifest.exportYaml(token, mode, tenant)(scopeOfToken)
       },
       Endpoints.manifestImport.serverLogic { case (body, mode, tenant, token) =>
         manifest.importYaml(body, token, mode, tenant)(scopeOfToken)
       },
-      NodeEndpoints.activeStatements.serverLogic(token => activeStmts.list(token)(scopeOfToken)),
-      NodeEndpoints.killStatement.serverLogic { case (req, token) =>
-        activeStmts.kill(req, token)(scopeOfToken)
-      }
+      NodeEndpoints.activeStatements.scoped(activeStmts.list(_)),
+      NodeEndpoints.killStatement.scoped(activeStmts.kill(_, _))
     ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ tenantLocationEndpoints ++ s3CredentialEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
