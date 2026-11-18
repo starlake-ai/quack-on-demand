@@ -121,6 +121,20 @@
   resolved dot segments, so nothing leaked, but the guard and the routes could read one path
   differently. Such a path now skips the API routes, with or without a credential, and answers
   404 (a module's static mount answers with its own 404 page, as before) (#239).
+- **Stopping the manager lets its running statements finish.** `qod stop`, Ctrl-C or SIGTERM on a
+  foreground `qod start` or `qod serve`, and `scripts/stop-jar.sh` signalled the manager and its
+  nodes at the same moment, so the nodes died under the statements the manager's drain was waiting
+  for (a FlightSQL client read `HTTP/1.1 header parser received no bytes`). The FlightSQL edge also
+  cancelled every call still running 3 s into the shutdown, before the drain began. Now the manager
+  gets SIGTERM first, alone: its FlightSQL edge refuses new calls while running ones finish and
+  stream their results, for up to `QOD_DRAIN_TIMEOUT_SEC` (60 s), and the manager then stops its
+  nodes itself. The stop prints that the manager is draining, waits for it to exit (the drain plus
+  20 s), signals only the nodes still left, and kills after `FORCE_AFTER` as before. With nothing
+  running the manager still exits within seconds; a long statement can make a stop take up to the
+  drain plus 20 s, and a lower `QOD_DRAIN_TIMEOUT_SEC` shortens that. A second Ctrl-C on
+  `qod start` still stops everything at once. Not covered yet: the native Quack front door (`:9494`) still closes its sessions when the
+  drain starts, and Ctrl-C on a foreground `scripts/run-jar.sh` still reaches the nodes together
+  with the manager (#221).
 - **A column policy on a branch pool reads the branch's own columns.** It read the parent's, so
   for a user under a column policy a `SELECT *` on the branch left out a column added on the
   branch, and failed on a column renamed there.

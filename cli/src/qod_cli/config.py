@@ -190,6 +190,20 @@ def force_after_seconds() -> int:
         return 10
 
 
+def drain_timeout_seconds() -> int:
+    """How long the manager lets running statements finish as it stops: `QOD_DRAIN_TIMEOUT_SEC`
+    (the manager's own setting, `quack-on-demand.drainTimeoutSec`), a real env var over a value
+    `qod setup` persisted, else the manager's default of 60. A stop gives the manager this long,
+    plus a margin, to exit before it stops the nodes itself.
+
+    Never raises, like `force_after_seconds`: a value that is no integer, or a profile that cannot
+    be read or parsed, gives 60; a negative value gives 0."""
+    try:
+        return max(0, int({**load_start_env(), **os.environ}.get("QOD_DRAIN_TIMEOUT_SEC") or "60"))
+    except (ValueError, OSError):
+        return 60
+
+
 def save_start_env(values: dict[str, str], remove: list[str] | None = None) -> None:
     data = _read_file()
     start = data.setdefault("start", {})

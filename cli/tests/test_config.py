@@ -228,3 +228,30 @@ def test_force_after_seconds_falls_back_to_10_on_a_profile_that_is_no_toml(monke
     monkeypatch.delenv("FORCE_AFTER", raising=False)
     config_path().write_text("[start\nFORCE_AFTER = ")
     assert config.force_after_seconds() == 10
+
+
+def test_drain_timeout_seconds_defaults_to_the_managers_60():
+    from qod_cli import config
+
+    assert config.drain_timeout_seconds() == 60
+
+
+def test_drain_timeout_seconds_prefers_the_environment_over_the_saved_value(monkeypatch):
+    from qod_cli import config
+
+    config.save_start_env({"QOD_DRAIN_TIMEOUT_SEC": "30"})
+    assert config.drain_timeout_seconds() == 30
+    monkeypatch.setenv("QOD_DRAIN_TIMEOUT_SEC", "5")
+    assert config.drain_timeout_seconds() == 5
+
+
+def test_drain_timeout_seconds_never_raises_and_never_goes_negative(monkeypatch):
+    from qod_cli import config
+
+    monkeypatch.setenv("QOD_DRAIN_TIMEOUT_SEC", "abc")
+    assert config.drain_timeout_seconds() == 60
+    monkeypatch.setenv("QOD_DRAIN_TIMEOUT_SEC", "-3")
+    assert config.drain_timeout_seconds() == 0
+    monkeypatch.delenv("QOD_DRAIN_TIMEOUT_SEC")
+    config_path().write_text("[start\nQOD_DRAIN_TIMEOUT_SEC = ")
+    assert config.drain_timeout_seconds() == 60
