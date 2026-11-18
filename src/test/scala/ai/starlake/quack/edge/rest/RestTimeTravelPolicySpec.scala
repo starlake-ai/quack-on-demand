@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.edge.cls.ColumnCatalog
+import ai.starlake.quack.edge.policy.ProtectedWriteGuard
 import ai.starlake.quack.ondemand.state.{RoleColumnPolicy, RoleRowPolicy}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -157,6 +158,19 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       renamed.run(st(WithAt), effWith(columnPolicies = List(maskEmail))) match
         case Left(RouterFailure.AccessDenied(reason)) =>
           reason should include("cannot be read with time travel")
+          // What the edge answers as 400 invalid_selector, not its 404 (#236).
+          ProtectedWriteGuard.isUnstableHistoryRefusal(reason) shouldBe true
         case other => fail(s"expected a refusal, got $other")
     }
+  }
+
+  it should "be the only refusal the edge reads as an unstable history" in {
+    // A statement the guard refuses for another reason (a clause it cannot tie to a table).
+    val unplaced = s"SELECT * FROM (SELECT * FROM $Ref) $At LIMIT 0"
+    pipeline.run(unplaced, effWith(columnPolicies = List(maskEmail))) match
+      case Left(RouterFailure.AccessDenied(reason)) =>
+        ProtectedWriteGuard.isUnstableHistoryRefusal(reason) shouldBe false
+      case other => fail(s"expected a refusal, got $other")
+    ProtectedWriteGuard.isUnstableHistoryRefusal("access denied: acme_lake.main.hidden") shouldBe
+      false
   }

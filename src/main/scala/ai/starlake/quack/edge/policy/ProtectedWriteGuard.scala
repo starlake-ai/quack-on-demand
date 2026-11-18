@@ -305,7 +305,7 @@ final class ProtectedWriteGuard(
 
   private def timeTravelDeny(table: String): String =
     s"$table, or one of its columns, was renamed, dropped or recreated in the history the " +
-      "catalog holds; under a column or row policy it cannot be read with time travel"
+      ProtectedWriteGuard.UnstableHistoryTail
 
   private val TimeTravelUnplaceable =
     "a time-travel clause could not be tied to its table, and column/row policies apply; " +
@@ -315,6 +315,16 @@ final class ProtectedWriteGuard(
     "access denied: statement could not be fully analysed and reads a protected schema; query the table directly instead"
 
 object ProtectedWriteGuard:
+
+  /** The end of the refusal of a time-travel read whose name history is not stable. */
+  private val UnstableHistoryTail =
+    "catalog holds; under a column or row policy it cannot be read with time travel"
+
+  /** Whether `reason` is this guard's refusal of a time-travel read of a table whose name history
+    * is not stable: the REST data edge answers it as a 400 rather than its uniform 404, since the
+    * caller has just read the table at the current state (#236).
+    */
+  def isUnstableHistoryRefusal(reason: String): Boolean = reason.endsWith(UnstableHistoryTail)
 
   /** A guard that admits everything: for specs isolating something else, never for production. */
   val disabled: ProtectedWriteGuard =

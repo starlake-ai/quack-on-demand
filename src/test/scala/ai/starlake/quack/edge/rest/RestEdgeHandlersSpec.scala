@@ -4,6 +4,8 @@ import ai.starlake.quack.{FlightConfig, RestEdgeConfig}
 import ai.starlake.quack.Main.given
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.{NodeLoadTracker, TestArrow}
+import ai.starlake.quack.edge.policy.ProtectedWriteGuard
+import ai.starlake.quack.edge.rest.RestEdgeHandlers.Route
 import ai.starlake.quack.model.{
   PoolKey,
   RoleDistribution,
@@ -355,6 +357,46 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val tagged = fixture()
     header(okOf(rows(tagged, "customer", "asOfTag=v1")).headers, "X-QoD-Snapshot") shouldBe
       Some("4")
+  }
+
+  it should "answer the guard's unstable-history refusal of a pinned read as invalid_selector (#236)" in {
+    // The router's time-travel guard refuses a policy holder's read at a snapshot of a table
+    // renamed or recreated since; the probe at the current state succeeded.
+    val reason =
+      "access denied: customer, or one of its columns, was renamed, dropped or recreated in the " +
+        "history the catalog holds; under a column or row policy it cannot be read with time travel"
+    ProtectedWriteGuard.isUnstableHistoryRefusal(reason) shouldBe true
+    val refusing: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.contains("AT (VERSION") then IO.pure(Left(RouterFailure.AccessDenied(reason)))
+        else defaultResponder(closes, 3)(sql)
+    // Page 1 shows the snapshot; page 2 sends it back.
+    val first = okOf(rows(fixture(respond = Some(refusing)), "customer"))
+    val snap  = header(first.headers, "X-QoD-Snapshot")
+    snap shouldBe Some("7")
+    List(Route.Rows, Route.Table).foreach { route =>
+      val fx = fixture(respond = Some(refusing))
+      val e  =
+        if route == Route.Rows then errOf(rows(fx, "customer", s"asOf=${snap.get}"))
+        else
+          errOf(
+            fx.handlers
+              .table("acme", "acme_lake", "main", "customer", req(s"asOf=${snap.get}"))
+              .unsafeRunSync()
+          )
+      (e._1, e._3.error) shouldBe (StatusCode.BadRequest, "invalid_selector")
+      e._3.message shouldBe RestEdgeHandlers.UnstableHistoryMessage
+      // No data statement after the refused probe.
+      fx.calls.map(_.sql.endsWith("LIMIT 0")) shouldBe List(true, true)
+    }
+    // Any other refusal of the pinned probe stays the 404: the object may not exist there.
+    val gone: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.contains("AT (VERSION") then
+          IO.pure(Left(RouterFailure.AccessDenied("access denied: acme_lake.main.customer")))
+        else defaultResponder(closes, 3)(sql)
+    errOf(rows(fixture(respond = Some(gone)), "customer", "asOf=3"))._1 shouldBe
+      StatusCode.NotFound
   }
 
   it should "leave X-QoD-Snapshot out when a commit landed while the page was read" in {
