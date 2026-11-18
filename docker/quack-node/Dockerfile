@@ -48,8 +48,29 @@ case "${TARGETARCH:-$(dpkg --print-architecture)}" in
 esac
 base="https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}"
 mkdir -p /opt/qod-node/bin /opt/qod-node/lib /tmp/libs
-curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$base/duckdb-cli-${ARCH}.tar.gz" -o /tmp/cli.tar.gz
-curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$base/duckdb-shared-libs-${ARCH}.tar.gz" -o /tmp/libs.tar.gz
+# The sha256 of each DuckDB release asset this image downloads, one line per <version>/<asset>.
+# They must equal _DUCKDB_SHA256 in cli/src/qod_cli/launcher.py (scripts/release/release_manifest.py
+# --check-pins refuses a difference), and a DUCKDB_VERSION with no line here fails the build.
+duckdb_sha256() {
+  case "$1" in
+    2.0.0/duckdb-cli-linux-amd64.tar.gz) echo c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc ;;
+    2.0.0/duckdb-cli-linux-arm64.tar.gz) echo 859e1875d2a9515fbb4bf8871061437a14af82320da68c753f094c4b776348fe ;;
+    2.0.0/duckdb-shared-libs-linux-amd64.tar.gz) echo 993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1 ;;
+    2.0.0/duckdb-shared-libs-linux-arm64.tar.gz) echo c60eecf91143ca6bbac55c4f4d40dc22520488b0ac257c86e0fe9a2b451cf2b7 ;;
+  esac
+}
+# Downloads one release asset to a file and checks its sha256 before anything unpacks it.
+fetch_duckdb() {
+  digest="$(duckdb_sha256 "${DUCKDB_VERSION}/$1")"
+  if [ -z "$digest" ]; then
+    echo "no pinned sha256 for $1 of DuckDB ${DUCKDB_VERSION}: add it to duckdb_sha256 in this Dockerfile and to _DUCKDB_SHA256 in cli/src/qod_cli/launcher.py" >&2
+    exit 1
+  fi
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$base/$1" -o "$2"
+  echo "$digest  $2" | sha256sum -c -
+}
+fetch_duckdb "duckdb-cli-${ARCH}.tar.gz" /tmp/cli.tar.gz
+fetch_duckdb "duckdb-shared-libs-${ARCH}.tar.gz" /tmp/libs.tar.gz
 tar -xzf /tmp/cli.tar.gz -C /usr/local/bin duckdb
 tar -xzf /tmp/libs.tar.gz -C /tmp/libs
 cp /tmp/libs/libduckdb.so /opt/qod-node/lib/

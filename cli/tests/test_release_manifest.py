@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import shutil
 import sys
 
@@ -21,6 +22,7 @@ PIN_FILES = (
     "cli/src/qod_cli/qod_node.py",
     "native/qod-node/CMakeLists.txt",
     "project/Versions.scala",
+    *release_manifest.DOCKERFILES,
     "version.sbt",
     "src/main/resources/release/upgrades.json",
 )
@@ -170,6 +172,98 @@ def test_read_pins_refuses_a_duckdb_release_with_no_asset_sha256(tmp_path):
         release_manifest.read_pins(repo)
 
 
+DOCKER_PIN = "2.0.0/duckdb-cli-linux-amd64.tar.gz) echo "
+
+
+def _edit(repo: pathlib.Path, rel: str, old: str, new: str) -> None:
+    text = (repo / rel).read_text(encoding="utf-8")
+    assert old in text, f"{rel} holds no {old!r}"
+    (repo / rel).write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_every_dockerfile_pins_the_clis_sha256_for_each_asset_it_downloads(rel):
+    version, pins = release_manifest.dockerfile_duckdb_pins(REPO / rel, rel)
+    assert version == launcher.DUCKDB_CLI_VERSION
+    cli = launcher._DUCKDB_SHA256[version]
+    assert pins == {(version, asset): cli[asset] for asset in release_manifest.DOCKER_DUCKDB_ASSETS}
+    text = (REPO / rel).read_text(encoding="utf-8")
+    # Each asset is fetched through the function that checks it, and nothing else downloads one.
+    assert text.count('fetch_duckdb "duckdb-cli-') == 1
+    assert text.count('fetch_duckdb "duckdb-shared-libs-') == 1
+    assert "sha256sum -c -" in text
+    assert text.count("duckdb/duckdb/releases/download") == 1
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_read_pins_refuses_a_dockerfile_sha256_the_cli_does_not_pin(tmp_path, rel):
+    repo = _fake_repo(tmp_path)
+    pinned = launcher._DUCKDB_SHA256[launcher.DUCKDB_CLI_VERSION]["duckdb-cli-linux-amd64.tar.gz"]
+    _edit(repo, rel, DOCKER_PIN + pinned, DOCKER_PIN + "0" * 64)
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins sha256 0{{64}} for duckdb-cli-linux-amd64.tar.gz of DuckDB 2.0.0, "
+        f"launcher.py pins {pinned}$",
+    ):
+        release_manifest.read_pins(repo)
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_read_pins_refuses_a_dockerfile_missing_an_asset_sha256(tmp_path, rel):
+    repo = _fake_repo(tmp_path)
+    text = (repo / rel).read_text(encoding="utf-8")
+    pin = "2.0.0/duckdb-shared-libs-linux-arm64.tar.gz)"
+    line = next(li for li in text.splitlines(keepends=True) if pin in li)
+    _edit(repo, rel, line, "")
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins no sha256 for duckdb-shared-libs-linux-arm64.tar.gz of DuckDB 2.0.0",
+    ):
+        release_manifest.read_pins(repo)
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_read_pins_refuses_a_dockerfile_duckdb_version_with_no_sha256(tmp_path, rel):
+    repo = _fake_repo(tmp_path)
+    _edit(repo, rel, f"ARG DUCKDB_VERSION={launcher.DUCKDB_CLI_VERSION}\n", "ARG DUCKDB_VERSION=9.9.9\n")
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins no sha256 for duckdb-cli-linux-amd64.tar.gz of DuckDB 9.9.9",
+    ):
+        release_manifest.read_pins(repo)
+
+
+def test_read_pins_refuses_a_dockerfile_release_the_cli_pins_nothing_for(tmp_path):
+    repo = _fake_repo(tmp_path)
+    rel = "docker/quack-node/Dockerfile"
+    _edit(repo, rel, "ARG DUCKDB_VERSION=2.0.0\n", "ARG DUCKDB_VERSION=9.9.9\n")
+    text = (repo / rel).read_text(encoding="utf-8")
+    (repo / rel).write_text(text.replace("    2.0.0/duckdb-", "    9.9.9/duckdb-"), encoding="utf-8")
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins a sha256 for duckdb-cli-linux-amd64.tar.gz of DuckDB 9.9.9, "
+        "launcher.py pins none",
+    ):
+        release_manifest.read_pins(repo)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        # A pin written another way is refused, not skipped.
+        (DOCKER_PIN, "2.0.0/duckdb-cli-linux-amd64.tar.gz)\n    echo ", "unreadable duckdb_sha256 line"),
+        ("duckdb_sha256() {", "duckdb_sha256_off() {", "expected one duckdb_sha256"),
+        ("ARG DUCKDB_VERSION=", "ARG DUCKDB_RELEASE=", "expected one ARG DUCKDB_VERSION"),
+    ],
+)
+def test_read_pins_refuses_a_dockerfile_it_cannot_read_as_the_clis_pins(tmp_path, old, new, message):
+    repo = _fake_repo(tmp_path)
+    rel = "docker/quack-node/Dockerfile"
+    _edit(repo, rel, old, new)
+    with pytest.raises(release_manifest.ManifestError, match=f"^{re.escape(rel)}.*{message}"):
+        release_manifest.read_pins(repo)
+
+
 def test_main_writes_release_json(tmp_path, released, capsys):
     jar, exes = released
     pypi = tmp_path / "pypi.json"
@@ -204,6 +298,14 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
     cmake.write_text(cmake.read_text(encoding="utf-8").replace("set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 9", 1))
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     assert "node protocol" in capsys.readouterr().err
+
+    _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
+    libs = "2.0.0/duckdb-shared-libs-linux-amd64.tar.gz) echo "
+    _edit(repo, "docker/fleet-worker/Dockerfile", libs + "9", libs + "8")
+    assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("release_manifest: docker/fleet-worker/Dockerfile pins sha256 8")
+    assert "for duckdb-shared-libs-linux-amd64.tar.gz of DuckDB 2.0.0" in err
 
 
 def test_main_refuses_a_manifest_without_its_release_files(capsys):

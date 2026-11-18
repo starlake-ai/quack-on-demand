@@ -105,6 +105,13 @@
   re-checked. On the profile page the free-text Tools field becomes three dropdowns (Data tools,
   Admin tools, Other surfaces), each with Select all and Clear; nothing ticked still leaves the axis unrestricted, and a token
   narrowed to MCP tools without `rest` is flagged as one that will not reach the REST data edge.
+- **The Docker images check every DuckDB archive they download before unpacking it (#230).** The
+  manager, node and fleet worker images unpack the DuckDB CLI and libduckdb only when
+  `sha256sum -c` matches the digest the Dockerfile pins for that release and architecture, the
+  same digests the qod CLI checks, and a `DUCKDB_VERSION` build arg with no pinned digest fails
+  the build. `release_manifest.py --check-pins` refuses a Dockerfile digest or `DUCKDB_VERSION`
+  default that disagrees with the qod CLI's, so a DuckDB bump updates the digests in
+  `launcher._DUCKDB_SHA256` and in the three Dockerfiles together.
 
 ### Fixed
 
