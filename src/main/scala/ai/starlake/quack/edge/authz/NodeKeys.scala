@@ -1,9 +1,12 @@
 package ai.starlake.quack.edge.authz
 
 import ai.starlake.quack.model.{PoolKey, RunningNode}
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
 
-import java.security.SecureRandom
+import java.nio.charset.StandardCharsets
+import java.security.{MessageDigest, SecureRandom}
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 
 /** The manager's node-key secret and what derives from it: every node's key, delivered to the node
   * as its `QOD_NODE_AUTHZ_KEY` file, and the session handles the manager mints for statements on
@@ -35,6 +38,19 @@ final class NodeKeys(
     readOnlyCatalogs: ReadOnlyCatalogs
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
+
+  /** The nonces of every handle minted for a statement, by the statement's [[DecideContext]]
+    * object: the router builds one per statement and mints every handle of it with that object, so
+    * the context's identity names the statement. Weak keys, which Caffeine compares by identity
+    * (`eq`) and drops once the context is unreachable, so the record has no size bound of its own:
+    * it is bounded in practice by [[MintedHandles]]' retention of the contexts (it holds each one
+    * strongly for 360 s, up to `QOD_AUTHZ_HANDLE_CONTEXTS_MAX`) plus the statements running now.
+    * Unlike [[MintedHandles]] it never drops a running statement's entry, so a decide call refused
+    * because the replica no longer holds the handle's context (`authorization context expired;
+    * retry`) is still recognized as this statement's ([[marksUnavailable]]).
+    */
+  private val statementNonces: Cache[DecideContext, java.util.Set[String]] =
+    Caffeine.newBuilder().weakKeys().executor(_.run()).build[DecideContext, java.util.Set[String]]()
 
   /** The key of node `nodeId`, as its secret file holds it. */
   def keyHex(nodeId: String): String = NodeHandles.nodeKeyHex(secret, nodeId)
@@ -68,6 +84,11 @@ final class NodeKeys(
       readOnly = if principal.system then Set.empty else readOnlyCatalogs.of(node.poolKey),
       nowMs = clock()
     )
+    // The statement's own record of its nonces: what its "authorization unavailable" marker is
+    // checked against, whatever the bounded registries below still hold.
+    principal.context.foreach { c =>
+      statementNonces.get(c, _ => ConcurrentHashMap.newKeySet[String]()).add(m.nonce)
+    }
     // The credentials endpoint serves a principal's keys only for a handle this replica minted.
     if !principal.system then issued.foreach(_.put(m.nonce, node.nodeId, principal.id, m.expiresAt))
     // The decision endpoint judges this handle's statements with this context (MintedHandles),
@@ -78,6 +99,29 @@ final class NodeKeys(
         registry <- minted
       do registry.put(m.nonce, context, ctx, m.expiresAt)
     m
+
+  /** Whether `message`, node `nodeId`'s error for a statement of `principal`, carries an
+    * "authorization unavailable" marker qod-node computed for that very statement
+    * ([[NodeHandles.unavailableMarker]]): a marker whose nonce this replica minted with
+    * `principal`'s own context object (reference identity, `statementNonces`: the router builds one
+    * [[DecideContext]] per statement and every handle of the statement is minted with it), and
+    * whose MAC verifies under `nodeId`'s key, compared in constant time. It reads no bounded
+    * registry, so it holds when [[MintedHandles]] has evicted the handle's context. False for the
+    * system principal (no context), and for a marker of another statement, another node's key or a
+    * wrong MAC.
+    */
+  def marksUnavailable(nodeId: String, principal: NodePrincipal, message: String): Boolean =
+    principal.context.flatMap(c => Option(statementNonces.getIfPresent(c))) match
+      case Some(nonces) =>
+        lazy val nodeKey = key(nodeId)
+        NodeHandles.unavailableMarkers(message).exists { (nonce, mac) =>
+          nonces.contains(nonce) &&
+          MessageDigest.isEqual(
+            NodeHandles.unavailableMac(nodeKey, nonce).getBytes(StandardCharsets.US_ASCII),
+            mac.getBytes(StandardCharsets.US_ASCII)
+          )
+        }
+      case None => false
 
   /** [[handle]] as the prelude statement the node runs before the statement itself. */
   def prelude(node: RunningNode, principal: NodePrincipal): String =

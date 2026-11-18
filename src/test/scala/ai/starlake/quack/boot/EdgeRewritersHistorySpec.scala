@@ -14,17 +14,21 @@ import org.scalatest.matchers.should.Matchers
 
 import scala.concurrent.duration.DurationInt
 
-/** The name-history reads [[EdgeRewriters.columnCatalog]] wires: a branch pool attaches its own
-  * catalog under its parent's alias, so both its newest snapshot and its history are its own. No
-  * Postgres: the readers are stubs.
+/** The DuckLake reads [[EdgeRewriters.columnCatalog]] wires: a branch pool attaches its own catalog
+  * under its parent's alias, so its columns, its newest snapshot and its history are all its own.
+  * No Postgres: the readers are stubs.
   */
 class EdgeRewritersHistorySpec extends AnyFlatSpec with Matchers:
 
-  /** A reader whose newest snapshot and history answer the test sets. */
-  private final class StubReader(var snapshot: Long, var stable: Boolean)
-      extends DuckLakeCatalogReader(null):
+  /** A reader whose columns, newest snapshot and history answer the test sets. */
+  private final class StubReader(
+      var snapshot: Long,
+      var stable: Boolean,
+      var columns: List[String] = List("id", "name")
+  ) extends DuckLakeCatalogReader(null):
     override def maxSnapshotIdBounded(): Option[Long]                     = Some(snapshot)
     override def nameHistoryStable(schema: String, name: String): Boolean = stable
+    override def columnNames(schema: String, table: String): List[String] = columns
 
   private val parentRow = TenantDb(
     id = "td-lake",
@@ -66,6 +70,8 @@ class EdgeRewritersHistorySpec extends AnyFlatSpec with Matchers:
     )
     def stable(pool: Option[PoolKey], cat: String = "sales"): Boolean =
       catalog.historyStable("acme", pool, cat, "tpch1", "customer").unsafeRunSync()
+    def columns(pool: Option[PoolKey], cat: String = "sales"): List[String] =
+      catalog.columnsOf("acme", pool, cat, "tpch1", "customer").unsafeRunSync()
 
   "The name-history check" should "read a branch pool's snapshot and history from the branch" in {
     val f = new Fixture
@@ -93,4 +99,25 @@ class EdgeRewritersHistorySpec extends AnyFlatSpec with Matchers:
   it should "answer false for a catalog that is no DuckLake database of the tenant" in {
     val f = new Fixture
     f.stable(ParentPool, cat = "pg_federated") shouldBe false
+  }
+
+  "The column lookup" should "read a branch pool's columns from the branch (#241)" in {
+    val f = new Fixture
+    // A column added on the branch only.
+    f.branch.columns = List("id", "name", "ssn")
+    f.columns(BranchPool) shouldBe List("id", "name", "ssn")
+    f.columns(ParentPool) shouldBe List("id", "name")
+  }
+
+  it should "read a statement with no pool, or another tenant's pool, from the alias's database" in {
+    val f = new Fixture
+    f.branch.columns = List("id", "name", "ssn")
+    f.columns(None) shouldBe List("id", "name")
+    f.columns(Some(PoolKey("globex", branchRow.name, "p"))) shouldBe List("id", "name")
+  }
+
+  it should "list nothing from DuckLake for a catalog that is no DuckLake database of the tenant" in {
+    val f = new Fixture
+    // The fixture's node answers no rows, so nothing lists the table.
+    f.columns(ParentPool, cat = "pg_federated") shouldBe Nil
   }

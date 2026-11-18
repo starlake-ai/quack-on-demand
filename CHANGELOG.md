@@ -51,7 +51,9 @@
   under a column or row policy reads a table at a snapshot only when the table, under that name,
   has always been the same table with the same column names, and never a view's: those policies
   match today's names, so a table or column renamed, dropped or recreated since is refused, in
-  every statement kind and on every door. A `/rows` request with no `select` reads `*`, so a
+  every statement kind and on every door; on the data edge such an `asOf*` read, sending
+  `X-QoD-Snapshot` back included, answers `400 invalid_selector` saying to read without `asOf*`,
+  not the `404` of an object the caller cannot see. A `/rows` request with no `select` reads `*`, so a
   column whose name holds a dot or a quote no longer refuses its table to a principal whose
   policies are on other tables. A column policy on such a table itself still hides it (404), on
   every door: the column rewriter cannot expand a star over that name.
@@ -100,6 +102,9 @@
   resolved dot segments, so nothing leaked, but the guard and the routes could read one path
   differently. Such a path now skips the API routes, with or without a credential, and answers
   404 (a module's static mount answers with its own 404 page, as before) (#239).
+- **A column policy on a branch pool reads the branch's own columns.** It read the parent's, so
+  for a user under a column policy a `SELECT *` on the branch left out a column added on the
+  branch, and failed on a column renamed there.
 - **A time-travel read under a column or row policy is checked against the catalog's latest
   commit.** The name-history answer was kept for 5 s, so a read right after a column rename could
   be admitted under the old names; it is now kept only until the next commit, and the check's

@@ -69,6 +69,16 @@ qod_test::HttpAnswer Answer(const qod_test::HttpRequest &request) {
 		answer.body = "authorization context expired; retry";
 		return answer;
 	}
+	if (mode == "413") {
+		answer.status = 413;
+		answer.body = "request body too large";
+		return answer;
+	}
+	if (mode == "400") {
+		answer.status = 400;
+		answer.body = "malformed request";
+		return answer;
+	}
 	if (mode == "500") {
 		answer.status = 500;
 		answer.body = "boom";
@@ -268,6 +278,45 @@ int main() {
 	// Two 401s and the https replica refused, the 503, the 500, the dropped connection and the
 	// unreachable replica unavailable: every one a miss and a call.
 	ExpectMoved(stats, counted, Counts {0, 7, 7, 4, 3}, "each answer counts as its outcome");
+
+	// ---- I1: answers the statement can force are refusals, never outages. The description's size is
+	// the statement's to choose, and a refused request must not keep a denial out of the audit.
+	counted = Read(stats);
+	Mode("413");
+	auto too_large = client.Decide(Call(server.Url(), "screen"));
+	ExpectRefusal(too_large, DecideResult::Status::Refuse, false,
+	              "authorization refused: the statement's authorization request is larger than the verdict "
+	              "listener takes (1048576 bytes)",
+	              "a 413 is a refusal");
+	Expect(too_large.Message().find("too large") == std::string::npos, "and quotes nothing of the answer's body");
+	Mode("400");
+	ExpectRefusal(client.Decide(Call(server.Url(), "screen")), DecideResult::Status::Refuse, false,
+	              "authorization refused: the verdict listener refused the request as malformed",
+	              "a 400 is a refusal");
+	Mode("500");
+	ExpectRefusal(client.Decide(Call(server.Url(), "screen")), DecideResult::Status::Unavailable, true,
+	              "authorization unavailable", "a 500 stays unavailable");
+	ExpectMoved(stats, counted, Counts {0, 0, 3, 1, 2}, "the 413 and the 400 count as refusals");
+	// A request body past the listener's limit is refused before any call. Base64 adds a third, so a
+	// description of three quarters of the limit already passes it.
+	auto oversized = Call(server.Url(), "screen");
+	oversized.description = std::string(qod::kMaxDecideBodyBytes * 3 / 4 + 16, 'x');
+	requests = server.Requests();
+	counted = Read(stats);
+	auto local_before = stats.local_refusals.load();
+	ExpectRefusal(client.Decide(oversized), DecideResult::Status::Refuse, false,
+	              "authorization refused: the statement's authorization request is larger than the verdict "
+	              "listener takes (1048576 bytes)",
+	              "an oversized request is refused");
+	Expect(server.Requests() == requests, "and no call reaches the replica");
+	ExpectMoved(stats, counted, Counts {}, "an oversized request counts as no decide call");
+	Expect(stats.local_refusals.load() == local_before + 1, "and as one local refusal");
+	auto fits = Call(server.Url(), "screen");
+	fits.description = std::string(1000, 'x');
+	Mode("500");
+	requests = server.Requests();
+	client.Decide(fits);
+	Expect(server.Requests() == requests + 1, "a request within the limit is sent");
 
 	// ---- verdicts that do not verify
 	struct Bad {
