@@ -11,7 +11,7 @@ the pin, restart": no unit edit, no `daemon-reload`, and no network at restart.
 | `/opt/qod/versions/<version>/` | root | the qod CLI of that release, in its own virtualenv |
 | `/opt/qod/deploy/` | root | `install.sh`, `switch.sh` (this folder) |
 | `/etc/qod/version.env` | root, 0644 | the pin: `QOD_VERSION=<version>` |
-| `/etc/qod/manager.env` | root, 0600 | the manager's settings (`QOD_PG_*`, ...), optional |
+| `/etc/qod/qod.env` | root, 0600 | the manager's settings (`QOD_PG_*`, ...), required |
 | `/etc/systemd/system/qod-manager.service` | root | the unit, never edited after install |
 | `~qod/.cache/qod/` | qod | jars (`jars/quack-on-demand-assembly-<version>.jar`), a Java runtime when the host has none (`jre-25/`), DuckDB (`duckdb/<release>/`) |
 | `~qod/.duckdb/extensions/` | qod | the DuckDB extensions nodes install |
@@ -37,7 +37,7 @@ install -d -m 0755 /opt/qod/deploy
 install -m 0755 deploy/host/install.sh deploy/host/switch.sh /opt/qod/deploy/
 install -m 0644 deploy/host/qod-manager.service /etc/systemd/system/
 install -d -m 0755 /etc/qod
-install -m 0600 deploy/host/manager.env.example /etc/qod/manager.env   # then edit it
+install -m 0600 deploy/host/qod.env.example /etc/qod/qod.env   # then edit it
 systemctl daemon-reload
 systemctl enable qod-manager
 ```
@@ -57,10 +57,16 @@ install, into `qod`'s cache. The first install also writes the pin. Running it a
 installed version only checks the cache. A version that PyPI or the GitHub release does not have
 is refused, and nothing of it is kept. Other versions are never touched.
 
-The first boot needs `QOD_ADMIN_PASSWORD` in `/etc/qod/manager.env` (a service has no terminal to
+The unit carries the settings of the published single-server guide's unit (`Restart=always`,
+`OOMPolicy=continue`, `NoNewPrivileges=true`, `KillMode=mixed`, `SuccessExitStatus=130`; its
+section 0.3 says why), with a longer `TimeoutStopSec` for the drain and the pin in place of
+`--version`. Coming from that unit, keep your `/etc/qod/qod.env` as it is: this one reads the
+same file. Use `systemctl stop`, not `qod stop`, which `Restart=always` undoes 5 seconds later.
+
+The first boot needs `QOD_ADMIN_PASSWORD` in `/etc/qod/qod.env` (a service has no terminal to
 ask on); remove it afterwards. `qod setup`, run as `qod`
 (`runuser -u qod -- /opt/qod/versions/VERSION/bin/qod setup`), is the other place settings can
-live; a value in `manager.env` wins over it.
+live; a value in `qod.env` wins over it.
 
 ## Switch, and roll back
 
@@ -105,9 +111,9 @@ qod-upgrade ALL=(root) NOPASSWD: /opt/qod/deploy/install.sh, /opt/qod/deploy/swi
 Only `install.sh`: PyPI for the CLI, GitHub for the jar, Adoptium for a Java runtime when the
 host has none, GitHub for DuckDB, the DuckDB extension repository for the extensions. `switch.sh`
 and every start of an installed version use the cache. Behind a proxy, set `HTTPS_PROXY` in
-`/etc/qod/manager.env` (install.sh hands it to the download run) and in root's environment for
+`/etc/qod/qod.env` (install.sh hands it to the download run) and in root's environment for
 pip.
 
 Not covered by the cache: an extension that a database's or a pool's initSql installs (it is
 downloaded when a node first starts), and a different `DUCKDB_VERSION` or Java set in
-`manager.env` after the install (run `install.sh VERSION` again).
+`qod.env` after the install (run `install.sh VERSION` again).

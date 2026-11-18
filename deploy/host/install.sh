@@ -28,7 +28,7 @@ SERVICE_USER="${QOD_HOST_USER:-qod}"
 PYTHON="${PYTHON:-python3}"
 # What a systemd service gets as PATH, so the download-only run sees the Java the unit will see.
 SERVICE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# The variables of manager.env that change what a start downloads, or where it looks for it.
+# The variables of qod.env that change what a start downloads, or where it looks for it.
 FETCH_KEYS="JAVA_BIN JAVA_HOME JAR_CACHE_DIR DUCKDB_VERSION DUCKDB_CACHE_DIR XDG_CACHE_HOME
 HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy"
 
@@ -48,11 +48,11 @@ case "$VERSION" in
   "" | *[!0-9.]* | .* | *. | *..*) usage ;;
 esac
 
-# The value of KEY in manager.env (systemd EnvironmentFile syntax: KEY=value, optionally quoted),
+# The value of KEY in qod.env (systemd EnvironmentFile syntax: KEY=value, optionally quoted),
 # the last one when repeated; nothing when absent.
-manager_env_value() {
-  [ -r "$ETC/manager.env" ] || return 0
-  sed -n "s/^[[:space:]]*$1=//p" "$ETC/manager.env" | tail -n 1 |
+qod_env_value() {
+  [ -r "$ETC/qod.env" ] || return 0
+  sed -n "s/^[[:space:]]*$1=//p" "$ETC/qod.env" | tail -n 1 |
     sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
 }
 
@@ -67,12 +67,12 @@ user_home() {
 }
 
 # Run "$@" as the service user in the environment its unit gives it: HOME, the service PATH and
-# the download-relevant keys of manager.env, nothing else of this shell.
+# the download-relevant keys of qod.env, nothing else of this shell.
 as_service_user() {
   local key value
   local cmd=(env -i "HOME=$(user_home)" "PATH=$SERVICE_PATH")
   for key in $FETCH_KEYS; do
-    value="$(manager_env_value "$key")"
+    value="$(qod_env_value "$key")"
     if [ -n "$value" ]; then
       cmd+=("$key=$value")
     fi
