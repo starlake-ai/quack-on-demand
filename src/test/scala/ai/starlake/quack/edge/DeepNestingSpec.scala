@@ -42,8 +42,11 @@ class DeepNestingSpec extends AnyFunSuite with Matchers:
     case Left(e)  => fail(s"escaped ${e.getClass.getName}", e)
 
   // A left-deep operator chain, nested scalar subqueries, and the chain behind PREPARE ... AS.
+  // Deep enough to overflow a JIT-compiled parser too: compiled frames are smaller than
+  // interpreted ones, and once earlier specs have warmed the parser up, 1 MiB holds about 1,300
+  // nested subqueries (500 overflowed only a cold parser, so the spec failed in a full run).
   private val chain       = "SELECT " + List.fill(20000)("1").mkString("+")
-  private val subqueries  = "SELECT " + "(SELECT " * 500 + "1" + ")" * 500
+  private val subqueries  = "SELECT " + "(SELECT " * 10000 + "1" + ")" * 10000
   private val prepared    = "PREPARE p AS " + chain
   private val insertChain = "INSERT INTO tpch1.t SELECT " + List.fill(20000)("c").mkString("+") +
     " FROM tpch1.customer"
