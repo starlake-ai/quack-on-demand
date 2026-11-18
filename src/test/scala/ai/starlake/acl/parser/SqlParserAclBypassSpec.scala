@@ -370,13 +370,17 @@ class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
     )
   }
 
-  test("qualified SHOW COLUMNS FROM and SHOW ALL TABLES stay denied fail-closed") {
-    // Neither form is in the grammar of the pinned parser, so both land on the
-    // ParseError arm: no change here, just pinning that they are not admitted.
-    SqlParser
-      .extract("SHOW COLUMNS FROM tpch1.customer", config)
-      .statements
-      .head shouldBe a[StatementResult.ParseError]
+  test("qualified SHOW COLUMNS FROM is treated like DESCRIBE, as the unqualified form") {
+    // JSqlParser 5.4.272 parses the qualified form (5.4.162 did not, and it took the ParseError
+    // arm). DuckDB 2.0 has no SHOW COLUMNS syntax at all, so the node refuses either form at
+    // parse time; here it is a read of its table, as the unqualified form already was.
+    extracted("SHOW COLUMNS FROM tpch1.customer").accesses shouldBe Set(
+      TableAccess(TableRef("db", "tpch1", "customer"), Verb.Read)
+    )
+  }
+
+  test("SHOW ALL TABLES stays denied fail-closed") {
+    // Not in the grammar of the pinned parser: it lands on the ParseError arm.
     SqlParser
       .extract("SHOW ALL TABLES", config)
       .statements

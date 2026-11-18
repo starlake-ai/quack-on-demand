@@ -448,8 +448,8 @@ object SqlParser:
           case Some(select) => asOuter(processStatement(select, index, config), index, snippet)
           case None         => namedTableRead(d.getTable, index, snippet, config)
       case sc: ShowColumnsStatement =>
-        // Only the unqualified form reaches here; `SHOW COLUMNS FROM x.y` is not in
-        // the grammar and already fails closed on the parse-error arm.
+        // Unqualified and, since JSqlParser 5.4.272, qualified (`SHOW COLUMNS FROM x.y`) alike.
+        // DuckDB 2.0 has no SHOW COLUMNS syntax, so the node refuses it at parse time anyway.
         val (qTgt, errs) = TableQualifier.qualify(List(new Table(sc.getTableName)), config)
         StatementResult
           .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
