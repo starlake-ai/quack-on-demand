@@ -30,5 +30,8 @@ jobs:
       # against Versions.duckdb and the three Dockerfiles (their release and asset sha256), and the
       # CLI's node protocol against qod-node's. release.json is written from these pins only after
       # every channel published, too late to catch a mismatch.
+      # It also checks src/main/resources/release/upgrades.json (#221, #222): an entry for the
+      # release version.sbt builds, every changelog file listed, no one-way change in a release
+      # that says it rolls back.
       - name: Guard - the pins release.json states agree
         run: python3 scripts/release/release_manifest.py --check-pins

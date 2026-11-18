@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Each release states its upgrade path and whether it rolls back without a restore, and the
+  manager enforces both at boot.** `release.json` and the release notes now carry
+  `min_from_version` (the oldest release that upgrades directly to it), the manual steps of every
+  release after it, `rollback_without_restore`, and what makes a rollback one way, from
+  `src/main/resources/release/upgrades.json`. A manager refuses to start when the control plane was
+  last run by a release older than its `min_from_version`, naming the release to go through, and
+  when a newer release changed the schema one way, naming the changesets it does not know and the
+  restore to run, instead of failing later on a missing column. Liquibase `0059` adds the
+  `qodstate_release` table these checks read. Only releases from this one on check: an earlier
+  one booted on a newer schema still fails as before. `release_manifest.py --check-pins` refuses a
+  changelog file no release lists, and a drop, rename or type change in a release that says it
+  rolls back (#221, #222, #223).
 - **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
   (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
   `QOD_DATA_EDGE_ENABLED=true` (config block `quack-data-edge`) serves four `GET` endpoints on the

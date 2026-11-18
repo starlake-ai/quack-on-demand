@@ -238,8 +238,11 @@ jobs:
             gh release delete-asset "$tag" release.json --yes 2>/dev/null || true
             gh release upload "$tag" "${assets[@]}" --clobber
           else
+            # The upgrade path and rollback rule (#221, #222) go ahead of the generated notes.
+            python3 scripts/release/release_manifest.py --upgrade-notes "${tag#v}" > upgrade-notes.md
             gh release create "$tag" \
               --title "$tag" \
+              --notes-file upgrade-notes.md \
               --generate-notes \
               "${assets[@]}"
           fi
@@ -856,6 +859,9 @@ jobs:
           set_cli_version "$cli_next"
           set_cli_manager_version "$cli_next"
           set_cli_shim_version "$cli_next"
+          # The next release's entry in upgrades.json (#221, #222): --check-pins refuses a tree
+          # whose release has none, so every pull request after this one fills it in.
+          python3 scripts/release/release_manifest.py --add-release "${next%-SNAPSHOT}"
 
       - name: Open bump PR
         uses: peter-evans/create-pull-request@v8
@@ -865,7 +871,8 @@ jobs:
           commit-message: "Setting version to ${{ steps.bump.outputs.next }}"
           body: |
             Post-release housekeeping after v${{ needs.prepare.outputs.version }}.
-            Bumps version.sbt and the qod CLI versions to the next dev snapshot.
+            Bumps version.sbt and the qod CLI versions to the next dev snapshot, and adds the next
+            release's entry to src/main/resources/release/upgrades.json.
             libquackwire is intentionally left pinned.
 
             - [x] I license this contribution under the Apache License 2.0, the same license as the project.
