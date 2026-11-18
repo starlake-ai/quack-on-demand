@@ -102,6 +102,18 @@ final class FlightEdgeServer(
     */
   private[quack] def queuedTasks: Int = executor.getQueue.size
 
+  /** The port the edge listens on once started: the configured one, or for port 0 the one the OS
+    * assigned at bind time.
+    */
+  def boundPort: Int =
+    require(server != null, "the FlightSQL edge is not started")
+    server.getPort
+
+  /** The port the edge's threads are named after: the configured one until the server has bound,
+    * then the one it listens on (the OS's choice for port 0).
+    */
+  @volatile private var namingPort: Int = cfg.port
+
   def start(): Unit =
     val producer = new FlightProducerImpl(
       router,
@@ -128,7 +140,8 @@ final class FlightEdgeServer(
     // and only binds this address.
     val location = Location.forGrpcInsecure(cfg.host, cfg.port)
 
-    val pool = FlightEdgeServer.boundedExecutor(cfg.flightThreads, s"flight-edge-${cfg.port}")
+    val pool =
+      FlightEdgeServer.boundedExecutor(cfg.flightThreads, () => s"flight-edge-$namingPort")
     executor = pool
     val probation = new ConnectionProbation(
       if cfg.tlsEnabled then
@@ -180,13 +193,15 @@ final class FlightEdgeServer(
 
     server = builder.build()
     server.start()
+    val port = server.getPort
+    namingPort = port
     // A booted manager always has a provider (BootPreflight.checkEdgeAuthAvailable); with none the
     // handshake refuses every client.
     val authMode =
       if authService.hasProviders then "providers configured"
       else "none configured, every connection refused"
     logger.info(
-      s"FlightSQL edge listening on ${cfg.host}:${cfg.port} (TLS=${cfg.tlsEnabled}, auth: $authMode)"
+      s"FlightSQL edge listening on ${cfg.host}:$port (TLS=${cfg.tlsEnabled}, auth: $authMode)"
     )
 
   /** Resolve credentials to a peerIdentity and bind the pool context.
@@ -448,16 +463,17 @@ object FlightEdgeServer:
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
 
-  /** A pool of at most `threads` daemon threads, named `<name>-<n>`. A saturated pool makes calls
-    * wait and never fails them, and waiting costs heap: a waiting call keeps its headers, whatever
-    * became of its client. [[ConnectionProbation.maxBacklog]] bounds what connections with no
-    * credential can leave waiting. Connections that have shown one have no such bound. Idle threads
-    * leave after a minute.
+  /** A pool of at most `threads` daemon threads, named `<name>-<n>`, `name` read as each thread
+    * starts. A saturated pool makes calls wait and never fails them, and waiting costs heap: a
+    * waiting call keeps its headers, whatever became of its client.
+    * [[ConnectionProbation.maxBacklog]] bounds what connections with no credential can leave
+    * waiting. Connections that have shown one have no such bound. Idle threads leave after a
+    * minute.
     */
-  def boundedExecutor(threads: Int, name: String): ThreadPoolExecutor =
+  def boundedExecutor(threads: Int, name: () => String): ThreadPoolExecutor =
     val counter                = new AtomicInteger(0)
     val factory: ThreadFactory = r =>
-      val t = new Thread(r, s"$name-${counter.incrementAndGet()}")
+      val t = new Thread(r, s"${name()}-${counter.incrementAndGet()}")
       t.setDaemon(true)
       t
     val pool = new ThreadPoolExecutor(
