@@ -200,6 +200,42 @@ object NodeHandles:
 
   private val MacText = "[0-9a-f]{64}".r
 
+  /** What the MAC of an "authorization unavailable" marker covers before the handle's nonce
+    * (qod-node's kUnavailableMarkerLabel).
+    */
+  val UnavailableMarkerLabel: String = "qod-authz-unavailable/v1|"
+
+  /** The marker qod-node appends to its "authorization unavailable" refusal of a statement that ran
+    * under the handle `nonce` names (native/qod-node/src/authz.cpp, UnavailableMarker): one space,
+    * then `(qod-retry <nonce>.<mac>)`, `mac` the lowercase hex HMAC-SHA256 under `nodeKey` of
+    * [[UnavailableMarkerLabel]] followed by `nonce`. Only that node and the replica that minted the
+    * handle can compute it, so the router honors the refusal only with it
+    * ([[NodeKeys.marksUnavailable]]): a refusal that echoes a user's text (a file location) could
+    * otherwise spell the words and keep a denial out of the audit.
+    */
+  def unavailableMarker(nodeKey: Array[Byte], nonce: String): String =
+    s" (qod-retry $nonce.${unavailableMac(nodeKey, nonce)})"
+
+  /** The MAC of [[unavailableMarker]]: 64 lowercase hex digits. */
+  def unavailableMac(nodeKey: Array[Byte], nonce: String): String =
+    hex(hmac(nodeKey, (UnavailableMarkerLabel + nonce).getBytes(StandardCharsets.UTF_8)))
+
+  private val UnavailableMarkerPattern = """\(qod-retry ([0-9a-f]{32})\.([0-9a-f]{64})\)""".r
+
+  /** Every `(qod-retry <nonce>.<mac>)` in `message`, as (nonce, mac), in order. A user's text can
+    * hold any number of them; only one qod-node computed can verify.
+    */
+  def unavailableMarkers(message: String): List[(String, String)] =
+    UnavailableMarkerPattern.findAllMatchIn(message).map(m => (m.group(1), m.group(2))).toList
+
+  /** `message` without its [[unavailableMarker]]s (each with the space before it): what a client
+    * and the history read of a refusal the router honored as "authorization unavailable".
+    */
+  def withoutUnavailableMarkers(message: String): String =
+    UnavailableMarkerWithSpace.replaceAllIn(message, "")
+
+  private val UnavailableMarkerWithSpace = (" ?" + UnavailableMarkerPattern.regex).r
+
   /** `text`, a handle a node presents to this replica, read back: the MAC under `nodeKey`
     * (constant-time, over the payload bytes as sent), then `v`, the node, `exp` (with
     * [[DecideGraceMs]] of grace) and the payload's shape (`ctx` 64 hex digits, `creds` empty or 64,

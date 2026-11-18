@@ -2,7 +2,7 @@ package ai.starlake.quack.edge
 
 import java.util.Locale
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.authz.DecidePurpose
+import ai.starlake.quack.edge.authz.{DecidePurpose, NodeHandles, NodePrincipal}
 import ai.starlake.quack.edge.sql.{ComputedLocations, RefusedForms}
 import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind, TenantDb}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
@@ -1121,7 +1121,7 @@ final class FlightSqlRouter(
     val kind = classifier.classify(sql)
     // With the session's authorization context: the handle digests it and the decision endpoint
     // judges the statement's plan with it (MintedHandles).
-    val principal = ai.starlake.quack.edge.authz.NodePrincipal.of(effectiveSet, poolKey, purpose)
+    val principal = NodePrincipal.of(effectiveSet, poolKey, purpose)
     // The text the active-statement registry shows (ActiveStatementHandlers.list, to the tenant's
     // admins): a system statement's values masked, as history and audit mask them (review M1).
     val activeSql =
@@ -1579,17 +1579,23 @@ final class FlightSqlRouter(
                                 recordLoad = recordExecution,
                                 internal = internal,
                                 prelude = prelude,
-                                patId = patId
+                                patId = patId,
+                                recordOutcome = maybeRecord(_, _, _, _)
                               )
 
-                          case NodeOutcome.Permanent(m, latency) =>
+                          case NodeOutcome.Permanent(raw, latency) =>
                             stmtId.foreach(registry.deregister)
+                            val (unavailable, m) = readNodeError(nodeId, principal, raw)
                             // The node's own refusal is a denial, journaled like the gateway's.
-                            val status =
-                              if FlightSqlRouter.isNodeRefusal(m) then "denied" else "permanent"
-                            maybeRecord(nodeId, latency, status, Some(m))
+                            maybeRecord(nodeId, latency, nodeErrorStatus(m, unavailable), Some(m))
                             IO.pure(
-                              Left(classifyPermanent(m, FlightSqlRouter.isMultiStatement(finalSql)))
+                              Left(
+                                classifyPermanent(
+                                  m,
+                                  FlightSqlRouter.isMultiStatement(finalSql),
+                                  unavailable
+                                )
+                              )
                             )
                         }
           }
@@ -1773,11 +1779,12 @@ final class FlightSqlRouter(
       exclude: String,
       cause: String,
       send: FlightSqlRouter.NodeSend[A],
-      principal: ai.starlake.quack.edge.authz.NodePrincipal,
+      principal: NodePrincipal,
       recordLoad: Boolean,
       internal: Boolean,
       prelude: Option[String],
-      patId: Option[String]
+      patId: Option[String],
+      recordOutcome: (String, Long, String, Option[String]) => Unit
   ): IO[Either[RouterFailure, Routed[A]]] =
     supervisor.snapshot(poolKey) match
       case None          => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
@@ -1820,12 +1827,17 @@ final class FlightSqlRouter(
                       if notSent || FlightSqlRouter.repeatable(kind, sql) then
                         Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
                       else Left(FlightSqlRouter.outcomeUnknown(s"retry failed (transient): $m"))
-                    case NodeOutcome.Permanent(m, _) =>
+                    case NodeOutcome.Permanent(raw, latency) =>
                       stmtId.foreach(registry.deregister)
+                      val (unavailable, m) = readNodeError(nodeId, principal, raw)
+                      // Booked against the node that answered, as on the first try: a refusal on
+                      // the retry node is a denial too.
+                      recordOutcome(nodeId, latency, nodeErrorStatus(m, unavailable), Some(m))
                       Left(
                         classifyPermanent(
                           m,
                           FlightSqlRouter.isMultiStatement(sql),
+                          unavailable,
                           context = "retry failed: "
                         )
                       )
@@ -1839,8 +1851,40 @@ final class FlightSqlRouter(
   private def noFallback(cause: String): String =
     s"no fallback node available after a transient failure: $cause"
 
+  /** Whether `message`, node `nodeId`'s error for a statement of `principal`, is its refusal for a
+    * decision it could not get: [[FlightSqlRouter.NodeAuthzUnavailable]] in a shape the node raises
+    * it ([[FlightSqlRouter.claimsNodeAuthzUnavailable]]) AND the marker qod-node computed for this
+    * statement's handle under this node's key ([[QuackHttpAdapter.marksUnavailable]]). The words
+    * alone are not enough: a refusal that echoes a user's text (a file location) can spell them,
+    * and would keep a denial out of the audit.
+    */
+  private def nodeAuthzUnavailable(
+      nodeId: String,
+      principal: NodePrincipal,
+      message: String
+  ): Boolean =
+    FlightSqlRouter.claimsNodeAuthzUnavailable(message) &&
+      adapter.marksUnavailable(nodeId, principal, message)
+
+  /** Node `nodeId`'s permanent error `raw` for a statement of `principal`, read once for both the
+    * first try and the retry: whether it is a verified "authorization unavailable"
+    * ([[nodeAuthzUnavailable]]), and the text the history records and the client reads (without its
+    * markers when it is; untouched otherwise).
+    */
+  private def readNodeError(
+      nodeId: String,
+      principal: NodePrincipal,
+      raw: String
+  ): (Boolean, String) =
+    val unavailable = nodeAuthzUnavailable(nodeId, principal, raw)
+    (unavailable, if unavailable then NodeHandles.withoutUnavailableMarkers(raw) else raw)
+
+  /** The history status of a node's permanent error: `denied` for its refusal, `permanent` else. */
+  private def nodeErrorStatus(message: String, unavailable: Boolean): String =
+    if FlightSqlRouter.isNodeRefusal(message, unavailable) then "denied" else "permanent"
+
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
-    * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes
+    * not get (`unavailable`, [[nodeAuthzUnavailable]]: the replica is down or slow) becomes
     * Unavailable, which the client may retry, for a single-statement submission only: in a batch
     * (`multiStatement`) the statements before the refused one may have run, each autocommitting,
     * and a retry would run them twice (Phase C review D-m5), so the batch gets a BadRequest saying
@@ -1853,16 +1897,17 @@ final class FlightSqlRouter(
   private def classifyPermanent(
       message: String,
       multiStatement: Boolean,
+      unavailable: Boolean,
       context: String = ""
   ): RouterFailure =
     val lower    = message.toLowerCase(Locale.ROOT)
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $context$message"
-    if FlightSqlRouter.isNodeAuthzUnavailable(message) then
+    if unavailable then
       if multiStatement then RouterFailure.BadRequest(s"$full (${FlightSqlRouter.BatchNotRetried})")
       else RouterFailure.Unavailable(full)
-    else if FlightSqlRouter.isNodeRefusal(message) then
+    else if FlightSqlRouter.isNodeRefusal(message, unavailable) then
       RouterFailure.AccessDenied(s"access denied: $context$message")
     else if notFound then RouterFailure.NotFound(full)
     else RouterFailure.BadRequest(full)
@@ -1911,16 +1956,21 @@ object FlightSqlRouter:
   )
 
   /** How qod-node words a statement it refused because no verdict could be had (the decision
-    * replica unreachable, slow or answering 503): retryable, unlike every other node refusal.
+    * replica unreachable, slow or answering 503): retryable, unlike every other node refusal. The
+    * node ends that refusal with a marker bound to the statement's handle nonce and the node's key
+    * (`NodeHandles.unavailableMarker`), and the router honors the words only with a marker minted
+    * for that statement (`NodeKeys.marksUnavailable`); anything else that reads so is a denial.
     */
   val NodeAuthzUnavailable: String = "QoD: authorization unavailable, retry"
 
-  /** Whether a node's error `message` is that refusal, in the exact shapes the node raises it: a
-    * statement's (DuckDB's PermissionException) or the parse screen's (quack's authorization
-    * callback wrapping it). A user's own text that quotes the marker (error('...'), an identifier
-    * echoed in a catalog error) stays a permanent failure.
+  /** Whether a node's error `message` starts as that refusal, in the exact shapes the node raises
+    * it: a statement's (DuckDB's PermissionException) or the parse screen's (quack's authorization
+    * callback wrapping it). Never enough alone: a node refusal that echoes a user's text right
+    * after `QoD: ` (a file location) starts the same way, so the router also requires the
+    * statement's marker (the router's `nodeAuthzUnavailable`). A user's own text that quotes the
+    * words elsewhere (error('...'), an identifier echoed in a catalog error) does not start so.
     */
-  def isNodeAuthzUnavailable(message: String): Boolean =
+  def claimsNodeAuthzUnavailable(message: String): Boolean =
     NodeAuthzUnavailablePrefixes.exists(message.startsWith)
 
   private val NodeAuthzUnavailablePrefixes: List[String] = List(
@@ -1956,14 +2006,16 @@ object FlightSqlRouter:
         s"($cause); it may have run, check the data before retrying"
     )
 
-  /** Whether a node's error `message` is its authorization refusal, other than
-    * [[NodeAuthzUnavailable]]: `QoD: ` right after DuckDB's Permission Error, in a statement's or
-    * the parse screen's shape. The node decided the principal may not run the statement, so the
-    * router books it as a denial, like the gateway's own refusals. A user's text quoting the marker
-    * (error('QoD: ...'), an identifier echoed in a catalog error) stays a permanent failure.
+  /** Whether a node's error `message` is its authorization refusal: `QoD: ` right after DuckDB's
+    * Permission Error, in a statement's or the parse screen's shape, unless the router verified it
+    * as [[NodeAuthzUnavailable]] for this statement (`verifiedUnavailable`: its words and the
+    * statement's marker). The node decided the principal may not run the statement, so the router
+    * books it as a denial, like the gateway's own refusals; so is the unavailable form without a
+    * verified marker (a forged one, a replayed one, an older node's). A user's text quoting the
+    * words (error('QoD: ...'), an identifier echoed in a catalog error) stays a permanent failure.
     */
-  def isNodeRefusal(message: String): Boolean =
-    !isNodeAuthzUnavailable(message) && NodeRefusalPrefixes.exists(message.startsWith)
+  def isNodeRefusal(message: String, verifiedUnavailable: Boolean): Boolean =
+    !verifiedUnavailable && NodeRefusalPrefixes.exists(message.startsWith)
 
   private val NodeRefusalPrefixes: List[String] = List(
     "Permission Error: QoD: ",

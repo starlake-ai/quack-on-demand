@@ -1,5 +1,7 @@
 #include "authz.hpp"
 
+#include "crypto.hpp"
+
 #include <chrono>
 #include <cstring>
 #include <iterator>
@@ -20,6 +22,10 @@ const std::string kRefused = kHandleRefused;
 int64_t SystemNowMs() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
 	    .count();
+}
+
+std::string UnavailableMarker(const std::string &key, const std::string &nonce) {
+	return " (qod-retry " + nonce + "." + Hex(HmacSha256(key, std::string(kUnavailableMarkerLabel) + nonce)) + ")";
 }
 
 std::string PreludeHandle(const std::string &sql) {

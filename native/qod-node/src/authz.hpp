@@ -28,6 +28,18 @@ constexpr const char *kPreludeSuffix = "')";
 //! How every refusal of a session handle starts, from the parse screen and from qod_session.
 constexpr const char *kHandleRefused = "qod-node: session handle refused: ";
 
+//! What the MAC of an "authorization unavailable" marker covers before the handle's nonce; the manager
+//! computes the same (NodeHandles.UnavailableMarkerLabel).
+constexpr const char *kUnavailableMarkerLabel = "qod-authz-unavailable/v1|";
+
+//! The marker appended to every "authorization unavailable" refusal: ` (qod-retry <nonce>.<mac>)`, `mac`
+//! the lowercase hex HMAC-SHA256 under `key` (the node key's bytes) of kUnavailableMarkerLabel followed
+//! by `nonce`, the statement's handle nonce. Only this node and the replica that minted that handle can
+//! compute it, so the manager honors the refusal as retryable only when it carries the marker of a
+//! handle minted for that statement (NodeKeys.marksUnavailable): any other text that reads like it, a
+//! file location a user typed included, is a denial.
+std::string UnavailableMarker(const std::string &key, const std::string &nonce);
+
 //! Milliseconds since the epoch.
 using Clock = std::function<int64_t()>;
 int64_t SystemNowMs();
@@ -113,6 +125,10 @@ public:
 	}
 	int64_t Now() const {
 		return clock_();
+	}
+	//! This node's key (raw bytes): what its handles, decide calls and unavailable markers are MACed with.
+	const std::string &NodeKey() const {
+		return node_key_;
 	}
 
 	//! VerifyHandle for this node, now.
