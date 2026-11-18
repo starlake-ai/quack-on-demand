@@ -17,6 +17,7 @@ import net.sf.jsqlparser.statement.select.TableFunction
 object TableClauses:
 
   val TimeTravel    = "a time-travel clause (AT ...)"
+  val ForAsOf       = "a time-travel clause DuckDB does not take (FOR ... AS OF)"
   val Sample        = "a sample clause (TABLESAMPLE, USING SAMPLE)"
   val Pivot         = "a PIVOT or UNPIVOT clause written after the table"
   val Hint          = "a table hint (USE INDEX, WITH (...))"
@@ -33,7 +34,7 @@ object TableClauses:
     */
   def unkept(t: Table, rebuiltName: String): Option[String] =
     val alias = Option(t.getAlias).fold("")(_.toString)
-    if t.getTimeTravel != null || t.getTimeTravelStrAfterAlias != null then Some(TimeTravel)
+    if t.getTimeTravel != null || t.getTimeTravelStrAfterAlias != null then Some(timeTravelOf(t))
     else if t.getSampleClause != null then Some(Sample)
     else if t.getPivot != null || t.getUnPivot != null then Some(Pivot)
     else if t.getIndexHint != null || t.getSqlServerHints != null then Some(Hint)
@@ -41,6 +42,14 @@ object TableClauses:
     else if t.getFullyQualifiedName != rebuiltName then Some(Name)
     else if t.toString != rebuiltName + alias then Some(Other)
     else None
+
+  /** Which time-travel spelling `t` carries: DuckDB's `AT (...)`, or one JSqlParser also reads
+    * (`FOR TIMESTAMP AS OF`, `FOR SYSTEM_TIME AS OF`) that DuckDB refuses, so the refusal names the
+    * one the caller wrote.
+    */
+  private def timeTravelOf(t: Table): String =
+    val text = Option(t.getTimeTravel).orElse(Option(t.getTimeTravelStrAfterAlias)).getOrElse("")
+    if text.trim.toUpperCase(java.util.Locale.ROOT).startsWith("AT") then TimeTravel else ForAsOf
 
   /** [[unkept]] for a rewrite that keeps `t`'s time-travel clause itself (the row-policy rewrite
     * moves a clause [[TimeTravelCarrier]] placed onto the base table): the clause is set aside
