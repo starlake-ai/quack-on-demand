@@ -150,14 +150,7 @@ final class ManagerServer(
 
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
-    path == "/api/auth/login" || path == "/api/auth/change-password" ||
-      path == "/api/auth/forgot-password" || path == "/api/auth/reset-password" ||
-      path == "/api/config/client" ||
-      path == "/api/auth/mode" ||
-      path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
-      path == "/api/auth/oidc/logout" ||
-      path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
-      path == "/api/auth/driver/start" ||
+    ManagerServer.PublicApiPaths.contains(path) ||
       // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
       // Gated on the integration flag, not just on the route being unmounted when off: with
       // SL_ENABLED=false an anonymous POST here must fall through to the same 401 (with its
@@ -178,22 +171,7 @@ final class ManagerServer(
     * every one of them to regular users.
     */
   private def isProfileApi(path: String): Boolean =
-    path == "/api/auth/whoami" || path == "/api/auth/logout" ||
-      path == "/api/profile/usage" || path == "/api/profile/statements" ||
-      path == "/api/profile/pools" ||
-      // Self-service undrop: the caller's own tenant only (no tenant input), run as them, so the
-      // node judges the read of the dropped table and the create.
-      path == "/api/profile/recoverable" || path == "/api/profile/undrop" ||
-      // A user's own S3 credentials: the handlers act on the caller's own user row only.
-      path == "/api/profile/s3/list" || path == "/api/profile/s3/add" ||
-      path == "/api/profile/s3/remove" ||
-      // Personal access tokens are self-service for every principal, admin or
-      // not: the handlers scope every call to the session's own user id, so
-      // there is nothing here a regular user could reach beyond its own tokens.
-      path == "/api/auth/pat/create" || path == "/api/auth/pat/list" ||
-      path == "/api/auth/pat/revoke" || path == "/api/auth/pat/delete" ||
-      // The names valid on a token's tools axis: the same static list for every caller.
-      path == "/api/auth/pat/tools" ||
+    ManagerServer.ProfileApiPaths.contains(path) ||
       // Starlake SSO ticket mint: any valid session may hand its own grant to
       // Starlake, admin or not -- the minted grant mirrors the session's own
       // admin-ness, it grants nothing new. Gated on the integration flag: with
@@ -215,29 +193,12 @@ final class ManagerServer(
       segments: Vector[String],
       endsWithSlash: Boolean
   ): Boolean =
-    def named(parts: String*) = parts.forall(_.nonEmpty)
-    !endsWithSlash && ((method, segments) match
-      case (Method.POST, Vector("api", "branch", "create" | "propose" | "discard"))      => true
-      case (Method.GET, Vector("api", "branch", "tenant", t, "database", d, "branches")) =>
-        named(t, d)
-      case (Method.GET, Vector("api", "branch", "tenant", t, "database", d, "branches", b)) =>
-        named(t, d, b)
-      case (
-            Method.GET,
-            Vector(
-              "api",
-              "branch",
-              "tenant",
-              t,
-              "database",
-              d,
-              "branches",
-              b,
-              "changes" | "diff" | "schema-diff"
-            )
-          ) =>
-        named(t, d, b)
-      case _ => false)
+    !endsWithSlash && ManagerServer.BranchApiRoutes.exists((m, template) =>
+      m == method && template.length == segments.length &&
+        template
+          .lazyZip(segments)
+          .forall((t, s) => if ManagerServer.isPlaceholder(t) then s.nonEmpty else t == s)
+    )
 
   private val limits = cfg.restLimits
 
@@ -1464,6 +1425,74 @@ final class ManagerServer(
       .build
 
 object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
+
+  /** The core `/api` paths the guard admits with no credential: the UI needs these before login.
+    * Exact paths, never prefixes. The config-gated public paths (Starlake SSO redeem, the fleet
+    * heartbeat) and a module's public prefixes are decided in `isPublicApi`.
+    */
+  private[ondemand] val PublicApiPaths: Set[String] = Set(
+    "/api/auth/login",
+    "/api/auth/change-password",
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
+    "/api/config/client",
+    "/api/auth/mode",
+    "/api/auth/oidc/start",
+    "/api/auth/oidc/callback",
+    "/api/auth/oidc/logout",
+    "/api/auth/sql-token/start",
+    "/api/auth/sql-token/callback",
+    "/api/auth/driver/start"
+  )
+
+  /** The paths a NON-ADMIN session may reach (the self-service profile surface), besides the
+    * config-gated Starlake SSO ticket mint decided in `isProfileApi`. Exact paths, never prefixes:
+    * SPI modules mount their own prefixes under `/api`, and a prefix match would hand every one of
+    * them to regular users.
+    */
+  private[ondemand] val ProfileApiPaths: Set[String] = Set(
+    "/api/auth/whoami",
+    "/api/auth/logout",
+    "/api/profile/usage",
+    "/api/profile/statements",
+    "/api/profile/pools",
+    // Self-service undrop: the caller's own tenant only (no tenant input), run as them, so the
+    // node judges the read of the dropped table and the create.
+    "/api/profile/recoverable",
+    "/api/profile/undrop",
+    // A user's own S3 credentials: the handlers act on the caller's own user row only.
+    "/api/profile/s3/list",
+    "/api/profile/s3/add",
+    "/api/profile/s3/remove",
+    // Personal access tokens are self-service for every principal, admin or not: the handlers
+    // scope every call to the session's own user id, so there is nothing here a regular user
+    // could reach beyond its own tokens.
+    "/api/auth/pat/create",
+    "/api/auth/pat/list",
+    "/api/auth/pat/revoke",
+    "/api/auth/pat/delete",
+    // The names valid on a token's tools axis: the same static list for every caller.
+    "/api/auth/pat/tools"
+  )
+
+  /** The branch routes a NON-ADMIN session may reach (see `isBranchApi`), as a method and a path
+    * template split into segments. A `{name}` segment matches any non-empty segment; every other
+    * segment matches only itself. Whole segments, never a prefix: a route added under
+    * `/api/branch/` later stays admin-only until it is listed here.
+    */
+  private[ondemand] val BranchApiRoutes: List[(Method, Vector[String])] = List(
+    Method.POST -> "/api/branch/create",
+    Method.POST -> "/api/branch/propose",
+    Method.POST -> "/api/branch/discard",
+    Method.GET  -> "/api/branch/tenant/{tenant}/database/{database}/branches",
+    Method.GET  -> "/api/branch/tenant/{tenant}/database/{database}/branches/{branch}",
+    Method.GET  -> "/api/branch/tenant/{tenant}/database/{database}/branches/{branch}/changes",
+    Method.GET  -> "/api/branch/tenant/{tenant}/database/{database}/branches/{branch}/diff",
+    Method.GET  -> "/api/branch/tenant/{tenant}/database/{database}/branches/{branch}/schema-diff"
+  ).map((m, path) => m -> path.stripPrefix("/").split('/').toVector)
+
+  private[ondemand] def isPlaceholder(segment: String): Boolean =
+    segment.length > 2 && segment.startsWith("{") && segment.endsWith("}")
 
   /** `resp` as a caller who is not a superuser reads it. A server failure or a conflict can carry a
     * client library's text on QoD's Postgres server, and `shown` keeps what it does not name. Only
