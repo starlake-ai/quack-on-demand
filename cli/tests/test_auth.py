@@ -6,10 +6,10 @@ from qod_cli.main import app
 BASE = "http://localhost:20900"
 
 
-def mock_login_routes(respx_mock, host="edge.example"):
+def mock_login_routes(respx_mock, host="edge.example", superuser=True):
     respx_mock.post(f"{BASE}/api/auth/login").mock(
         return_value=httpx.Response(
-            200, json={"token": "jwt-abc", "username": "admin", "superuser": True}
+            200, json={"token": "jwt-abc", "username": "admin", "superuser": superuser}
         )
     )
     respx_mock.get(f"{BASE}/api/config/client").mock(
@@ -29,6 +29,25 @@ def test_login_stores_token_and_edge_config(runner, respx_mock):
     assert st.edge_host == "edge.example"
     assert st.edge_port == 31338
     assert st.edge_tls is True
+
+
+def test_login_stores_superuser_from_the_answer(runner, respx_mock):
+    mock_login_routes(respx_mock)
+    runner.invoke(app, ["login", "--username", "admin"], input="secret\n")
+    assert load_settings().superuser is True
+
+
+def test_tenant_login_clears_a_stored_superuser(runner, respx_mock):
+    # `qod serve` writes superuser = true; a tenant user's login on that profile must not keep it.
+    from qod_cli.config import save_profile
+
+    save_profile("default", {"superuser": True})
+    mock_login_routes(respx_mock, superuser=False)
+    result = runner.invoke(
+        app, ["login", "--username", "bob", "--tenant", "acme"], input="pw\n"
+    )
+    assert result.exit_code == 0
+    assert load_settings().superuser is False
 
 
 def test_login_substitutes_wildcard_edge_host(runner, respx_mock):
