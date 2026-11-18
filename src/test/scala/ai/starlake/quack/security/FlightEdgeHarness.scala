@@ -77,6 +77,10 @@ object FlightEdgeHarness:
     *   Stops the server and releases the allocator. Idempotent.
     * @param queuedTasks
     *   The tasks waiting for a Flight thread now.
+    * @param refuseNewCalls
+    *   [[FlightEdgeServer.refuseNewCalls]]: the first step of the manager's graceful shutdown.
+    * @param callsInProgress
+    *   [[FlightEdgeServer.callsInProgress]].
     */
   final case class Harness(
       host: String,
@@ -85,7 +89,9 @@ object FlightEdgeHarness:
       shutdown: () => Unit,
       supervisor: PoolSupervisor,
       router: FlightSqlRouter,
-      queuedTasks: () => Int
+      queuedTasks: () => Int,
+      refuseNewCalls: () => Unit,
+      callsInProgress: () => Int
   ):
     /** Build a fresh [[FlightClient]] pointed at this harness.
       *
@@ -248,5 +254,7 @@ object FlightEdgeHarness:
       },
       supervisor = sup,
       router = router,
-      queuedTasks = () => srv.queuedTasks
+      queuedTasks = () => srv.queuedTasks,
+      refuseNewCalls = () => srv.refuseNewCalls(),
+      callsInProgress = () => srv.callsInProgress
     )

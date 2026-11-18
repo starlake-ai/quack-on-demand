@@ -91,14 +91,16 @@ final class ShutdownCoordinator(
     )
     Runtime.getRuntime.addShutdownHook(shutdownHook)
 
-  /** Poll the load tracker until no node reports in-flight work, or `drainTimeoutSec` elapses. */
+  /** Poll until no node reports in-flight work and no FlightSQL call is still running (a statement
+    * whose node answered can still be streaming its result), or `drainTimeoutSec` elapses.
+    */
   private def waitForDrain: IO[Unit] =
     val deadlineNs =
       System.nanoTime() +
         scala.concurrent.duration.SECONDS.toNanos(drainTimeoutSec.toLong)
     def tick: IO[Unit] = IO
       .delay {
-        tracker.snapshotAll.values.map(_.inFlight).sum
+        tracker.snapshotAll.values.map(_.inFlight).sum + edge.callsInProgress
       }
       .flatMap { inflight =>
         if inflight <= 0 then IO.unit
@@ -113,14 +115,16 @@ final class ShutdownCoordinator(
       }
     tick
 
-  /** Graceful drain on cancellation: stop accepting new FlightSQL sessions, await in-flight work,
-    * stop SPI modules (after the edge has drained but before the control-plane pools close, so a
-    * module's stop can still reach its qodhosted_* tables; a stop failure is logged, not fatal),
-    * then SIGTERM child Quack nodes via `backend.cleanup()`.
+  /** Graceful drain on cancellation: the FlightSQL edge refuses new calls while its running ones go
+    * on, the in-flight work is awaited, then the edge stops; SPI modules stop next (after the edge
+    * has drained but before the control-plane pools close, so a module's stop can still reach its
+    * qodhosted_* tables; a stop failure is logged, not fatal), then child Quack nodes get SIGTERM
+    * via `backend.cleanup()`. The native front door still stops at once, closing its sessions' node
+    * connections (#221).
     */
   def gracefulShutdown: IO[Unit] =
-    (IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
-      IO.delay(edge.stop()) *>
+    (IO.delay(logger.info("graceful shutdown: FlightSQL edge refusing new calls")) *>
+      IO.delay(edge.refuseNewCalls()) *>
       IO.delay(quackFrontDoor.foreach(_.stop())) *>
       IO.delay(
         logger.info(
@@ -128,6 +132,8 @@ final class ShutdownCoordinator(
         )
       ) *>
       waitForDrain *>
+      IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
+      IO.delay(edge.stop()) *>
       IO.delay(logger.info("graceful shutdown: stopping modules")) *>
       modules.traverse_(m =>
         m.stop.handleErrorWith(t =>

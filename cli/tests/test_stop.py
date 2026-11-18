@@ -35,6 +35,10 @@ def stop_world(monkeypatch, tmp_path):
 
     monkeypatch.setattr(stop_cmd.os, "kill", fake_kill)
     monkeypatch.setattr(stop_cmd.time, "sleep", lambda s: world.__setitem__("slept", world["slept"] + s))
+    # The manager lives as long as it holds its ports, unless a test says otherwise.
+    monkeypatch.setattr(
+        stop_cmd, "_manager_alive", lambda pid: str(pid) in world["listening"].values()
+    )
     # No embedded pgdata dir in these tests: without this, the finally-sweep in
     # perform_stop would resolve to this developer machine's REAL qod data dir
     # and read whatever postmaster.pid happens to live there.
@@ -57,7 +61,7 @@ def test_stop_nothing_running(runner, stop_world):
 def test_stop_graceful_sigterm(runner, stop_world):
     from qod_cli.main import app
 
-    # First poll after SIGTERM: everything already gone.
+    # The manager's own shutdown stops its nodes: once it has exited, nothing is left to signal.
     orig = stop_world["listening"]
 
     def clear_after_term(pid, sig):
@@ -71,10 +75,159 @@ def test_stop_graceful_sigterm(runner, stop_world):
     result = runner.invoke(app, ["stop"])
     assert result.exit_code == 0, result.output
     assert "stopped cleanly" in result.output
-    assert (211, signal.SIGTERM) not in stop_world["killed"]  # only known pids
-    pids = {pid for pid, sig in stop_world["killed"] if sig == signal.SIGTERM}
-    assert pids == {111, 222}
+    assert stop_world["killed"] == [(111, signal.SIGTERM)]  # the manager alone
     assert orig  # discovery ran against the default ports
+
+
+def _timed_kills(monkeypatch, world):
+    """Record each signal with the seconds slept before it."""
+    from qod_cli.commands import stop as stop_cmd
+
+    def kill(pid, sig):
+        world["killed"].append((pid, sig, world["slept"]))
+
+    monkeypatch.setattr(stop_cmd.os, "kill", kill)
+
+
+def test_stop_signals_the_manager_first_and_its_nodes_only_once_it_has_exited(
+    runner, stop_world, monkeypatch
+):
+    # #221: nodes signalled with the manager died under the statements its drain waits for.
+    from qod_cli.main import app
+    from qod_cli.commands import stop as stop_cmd
+
+    _timed_kills(monkeypatch, stop_world)
+    # The manager drains for 4 s and exits, its ports with it, but leaves a wrapper behind.
+    monkeypatch.setattr(stop_cmd, "_manager_alive", lambda pid: stop_world["slept"] < 4)
+    monkeypatch.setattr(
+        stop_cmd, "_listening_pid", lambda port: "111" if stop_world["slept"] < 4 else None
+    )
+
+    def wrappers_die_on_term(pattern):
+        if "spawn" not in pattern:
+            return []
+        termed = any(p == 222 and s == signal.SIGTERM for p, s, _ in stop_world["killed"])
+        return [] if termed else ["222"]
+
+    monkeypatch.setattr(stop_cmd, "_pgrep", wrappers_die_on_term)
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 0, result.output
+    assert stop_world["killed"] == [(111, signal.SIGTERM, 0), (222, signal.SIGTERM, 4)]
+    assert "stopped cleanly after 5s" in result.output
+
+
+def test_stop_signals_the_nodes_when_the_drain_budget_runs_out_then_sigkills_last(
+    runner, stop_world, monkeypatch
+):
+    from qod_cli.main import app
+    from qod_cli.commands import stop as stop_cmd
+
+    _timed_kills(monkeypatch, stop_world)
+    monkeypatch.setenv("QOD_DRAIN_TIMEOUT_SEC", "5")
+    monkeypatch.setenv("FORCE_AFTER", "3")
+    result = runner.invoke(app, ["stop"])  # nothing ever exits
+    assert result.exit_code == 1
+    budget = 5 + stop_cmd.DRAIN_EXIT_MARGIN_SEC
+    terms = [(p, t) for p, s, t in stop_world["killed"] if s == signal.SIGTERM]
+    kills = {(p, t) for p, s, t in stop_world["killed"] if s == signal.SIGKILL}
+    assert terms == [(111, 0), (222, budget)]
+    assert kills == {(111, budget + 3), (222, budget + 3)}
+    assert f"still running after {budget}s; stopping its nodes" in result.output
+
+
+def test_an_exited_manager_pid_is_never_sigkilled(runner, stop_world, monkeypatch):
+    # The manager exits but a wrapper never does: the SIGKILL sweep must not reach the manager's
+    # old pid, which may already be another process's.
+    from qod_cli.main import app
+    from qod_cli.commands import stop as stop_cmd
+
+    _timed_kills(monkeypatch, stop_world)
+    monkeypatch.setenv("FORCE_AFTER", "3")
+    monkeypatch.setattr(stop_cmd, "_manager_alive", lambda pid: stop_world["slept"] < 2)
+    monkeypatch.setattr(
+        stop_cmd, "_listening_pid", lambda port: "111" if stop_world["slept"] < 2 else None
+    )
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 1  # the wrapper never goes away
+    kills = {p for p, s, _ in stop_world["killed"] if s == signal.SIGKILL}
+    assert 222 in kills
+    assert 111 not in kills
+    assert [(p, s) for p, s, _ in stop_world["killed"] if p == 111] == [(111, signal.SIGTERM)]
+
+
+def test_stop_says_the_manager_drains_and_for_how_long(runner, stop_world, monkeypatch):
+    from qod_cli import config
+    from qod_cli.main import app
+    from qod_cli.commands import stop as stop_cmd
+
+    # The value `qod setup` saved, which `qod start` hands to the manager.
+    config.save_start_env({"QOD_DRAIN_TIMEOUT_SEC": "7"})
+
+    def exit_on_term(pid, sig):
+        stop_world["listening"] = {}
+        stop_world["spawn"] = []
+
+    monkeypatch.setattr(stop_cmd.os, "kill", exit_on_term)
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 0, result.output
+    budget = 7 + stop_cmd.DRAIN_EXIT_MARGIN_SEC
+    assert "stopping the manager (pid 111)" in result.output
+    assert "running statements finish for up to 7s (QOD_DRAIN_TIMEOUT_SEC)" in result.output
+    assert f"waiting up to {budget}s" in result.output
+
+
+def test_stop_with_no_manager_stops_orphan_wrappers_at_once(runner, stop_world, monkeypatch):
+    from qod_cli.main import app
+
+    _timed_kills(monkeypatch, stop_world)
+    stop_world["listening"] = {}
+    monkeypatch.setenv("FORCE_AFTER", "2")
+    result = runner.invoke(app, ["stop"])
+    terms = [(p, t) for p, s, t in stop_world["killed"] if s == signal.SIGTERM]
+    assert terms == [(222, 0)]
+    assert "drain" not in result.output
+
+
+def test_an_interrupt_during_the_drain_still_stops_the_nodes(stop_world, monkeypatch):
+    # A second Ctrl-C ends the wait; the supervisor then kills the manager, and a wrapper would
+    # outlive it, so the wrappers are signalled before the interrupt goes on.
+    from qod_cli.commands import stop as stop_cmd
+
+    def interrupted(s):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(stop_cmd.time, "sleep", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        stop_cmd._stop_manager_and_nodes()
+    assert stop_world["killed"] == [(111, signal.SIGTERM), (222, signal.SIGTERM)]
+
+
+def test_manager_alive_counts_a_zombie_child_as_gone():
+    # Under `qod start` the JVM is the CLI's own child: exited and not yet reaped, it must not hold
+    # the stop for the whole drain budget.
+    import subprocess
+    import time
+
+    from qod_cli.commands import stop as stop_cmd
+
+    def state(pid):
+        return subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True,
+                              text=True).stdout.strip()
+
+    done = subprocess.Popen(["true"])
+    running = subprocess.Popen(["sleep", "30"])
+    try:
+        deadline = time.monotonic() + 10
+        while not state(done.pid).startswith("Z") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert state(done.pid).startswith("Z")  # exited, still unreaped
+        assert stop_cmd._pid_alive(done.pid)
+        assert not stop_cmd._manager_alive(done.pid)
+        assert stop_cmd._manager_alive(running.pid)
+    finally:
+        running.kill()
+        running.wait()
+        done.wait()
 
 
 def test_stop_escalates_to_sigkill(runner, stop_world, monkeypatch):
