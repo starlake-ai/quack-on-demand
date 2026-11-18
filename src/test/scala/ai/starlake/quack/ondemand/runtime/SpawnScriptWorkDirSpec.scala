@@ -123,13 +123,15 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     */
   private def fakeQodNode(at: Path, probe: Path): Path =
     Files.createDirectories(at.getParent)
+    // GNU stat first: GNU `stat -f` reads `-f` as --file-system and succeeds, printing the file
+    // system's status instead of the mode; BSD stat refuses `-c`.
     Files.writeString(
       at,
       s"""#!/bin/sh
          |printf '%s\\n' "$$@" > '$probe/args'
          |pwd -P > '$probe/cwd.part'
          |ls -A | wc -l | tr -d ' ' > '$probe/entries'
-         |(stat -f %Lp . 2>/dev/null || stat -c %a .) > '$probe/mode'
+         |(stat -c %a . 2>/dev/null || stat -f %Lp .) > '$probe/mode'
          |mv '$probe/cwd.part' '$probe/cwd'
          |cat > '$probe/init'
          |trap 'exit 143' TERM INT

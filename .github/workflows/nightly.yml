@@ -1,0 +1,267 @@
+# The whole test suite, every night and on demand. Pull requests run only the scoped channels
+# (iceberg.yml, cli.yml, qod-node.yml, quackwire.yml), so this is the one place the rest of the
+# Scala suite (`sbt test`, about 8,700 tests with the live specs), the UI's vitest suite and the
+# CLI's pytest suite run at all on CI.
+#
+# Not a required check, and not on pull requests (except one that edits this file, so a change
+# here is tried before it lands): environment flakes such as the port collisions of #242 would
+# fail it at random. A red night names the failed tests in the run summary; the JUnit reports are
+# kept as an artifact.
+#
+# The fixtures are those of a full local run, so the live specs run rather than cancel: Postgres
+# (service, under both SL_TEST_PG_* and the manager's QOD_PG_*), the pinned DuckDB release (its
+# CLI, libduckdb in DUCKDB_CACHE_DIR, and the extensions a node cannot install itself, autoinstall
+# being off on nodes), the vendored qod-node in the {bin,lib} layout a manager installs, the
+# Iceberg REST fixture, the duckdb-quack submodule, opa and uv (PowerShell is on the runner).
+# Every cancelled test is listed in the summary with its reason. Expected there: the Windows-only
+# and root-only cases, the opt-in ones (QOD_AUTHZ_LATENCY, QOD_BENCH_*, QOD_E2E_SMOKE),
+# OldProtocolNodeSpec while the vendored qod-node speaks the current protocol, and the fixtures not
+# provisioned yet: an object store (QOD_S3_*, QOD_DEMO_WEED_BIN) and MySQL (SL_TEST_MYSQL_*, which
+# also needs a DuckDB mysql extension).
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 02:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/nightly.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scala:
+    name: sbt test
+    # Forks get the file too; only this repository runs it on a schedule.
+    if: github.event_name != 'schedule' || github.repository == 'starlake-ai/qod'
+    runs-on: ubuntu-latest
+    # A full local run takes about 70 minutes on a laptop; a hosted runner is slower.
+    timeout-minutes: 300
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: azizam
+          # The manager's default control-plane database (defaultMetastore.dbName), there for
+          # anything booting on the default configuration. The specs that need a database create
+          # their own through TestPostgres.
+          POSTGRES_DB: qod
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SL_TEST_PG_HOST: localhost
+      SL_TEST_PG_PORT: "5432"
+      SL_TEST_PG_USER: postgres
+      SL_TEST_PG_PASSWORD: azizam
+      # The manager's own metastore variables, at their defaults, for anything that loads the
+      # manager's configuration; the specs themselves reach Postgres through SL_TEST_PG_*.
+      QOD_PG_HOST: localhost
+      QOD_PG_PORT: "5432"
+      QOD_PG_USER: postgres
+      QOD_PG_PASSWORD: azizam
+      # -Xss8M as in release.yml and snapshot.yml: Main.scala overflows the compiler's default
+      # stack in the splicing phase.
+      SBT_OPTS: "-Xss8M -Xmx4G"
+      # The version a full local run passed with.
+      OPA_VERSION: "1.21.1"
+    steps:
+      # The duckdb-quack submodule is what QuackClientSyncFunctionsSpec reads; without it that
+      # spec cancels.
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Set up Temurin 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: sbt
+
+      - name: Setup sbt launcher
+        uses: sbt/setup-sbt@v1
+
+      # The ADBC client specs (FlightMetadataSchemaSpec, SchemaProbeAdbcSpec, ...) run Python
+      # clients through uv. setup-uv publishes no floating major tag, hence the full version.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Read the DuckDB pin
+        run: |
+          set -euo pipefail
+          # `val duckdb = "X.Y.Z.W"` -> X.Y.Z, the release tag's version, as qod-node.yml reads it.
+          duckdb="$(sed -nE 's/^[[:space:]]*val duckdb[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+".*/\1/p' project/Versions.scala)"
+          [[ -n "$duckdb" ]] || { echo "::error::cannot read val duckdb from project/Versions.scala"; exit 1; }
+          echo "DuckDB pin: v$duckdb"
+          echo "DUCKDB_VERSION=$duckdb" >> "$GITHUB_ENV"
+
+      # The cache layout run-jar.sh and the qod CLI provision: $DUCKDB_CACHE_DIR/<version>/{bin,lib}.
+      # The forked test JVM preloads libduckdb from there (LibDuckDbPreload) and the spawn specs
+      # take the CLI from it. The release CLI also goes on PATH for the specs that look there.
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (CLI, libduckdb, extensions)
+        run: |
+          set -euo pipefail
+          cache="$RUNNER_TEMP/duckdb"
+          home="$cache/$DUCKDB_VERSION"
+          mkdir -p "$home/bin" "$home/lib"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-linux-amd64.tar.gz"
+          curl -fsSL -o "$tmp/libs.tar.gz" "$base/duckdb-shared-libs-linux-amd64.tar.gz"
+          tar -xzf "$tmp/cli.tar.gz" -C "$home/bin" duckdb
+          tar -xzf "$tmp/libs.tar.gz" -C "$home/lib"
+          chmod +x "$home/bin/duckdb"
+          echo "DUCKDB_CACHE_DIR=$cache" >> "$GITHUB_ENV"
+          echo "$home/bin" >> "$GITHUB_PATH"
+          "$home/bin/duckdb" -noheader -list -c "select version();"
+          # Nodes run with autoinstall_known_extensions off and install only httpfs and avro
+          # themselves (spawn-quack-node.sh), and quack (qod-node). Everything else a live spec
+          # attaches or reads must already be in ~/.duckdb/extensions. One missing here is a warning,
+          # not a failure: the specs that need it then show up in the summary.
+          for ext in ducklake postgres iceberg httpfs avro aws azure sqlite spatial tpch fts; do
+            "$home/bin/duckdb" -c "INSTALL $ext;" || echo "::warning::could not install the $ext extension"
+          done
+          ls -l "$home/lib"
+
+      # The vendored binary's only rpath is ../lib, so it runs from a {bin,lib} layout next to the
+      # pinned libduckdb, the way QodNodeBinary installs it. --build-info checks the libduckdb it
+      # loaded.
+      - name: Install the vendored qod-node
+        run: |
+          set -euo pipefail
+          src=native/qod-node/binaries/linux-x86_64
+          echo "$(cat "$src/qod-node.sha256")  $src/qod-node" | sha256sum -c -
+          root="$RUNNER_TEMP/qod-node"
+          mkdir -p "$root/bin"
+          install -m 0755 "$src/qod-node" "$root/bin/qod-node"
+          ln -s "$DUCKDB_CACHE_DIR/$DUCKDB_VERSION/lib" "$root/lib"
+          "$root/bin/qod-node" --build-info
+          echo "QOD_NODE_BIN=$root/bin/qod-node" >> "$GITHUB_ENV"
+
+      - name: Install opa v${{ env.OPA_VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/opa" \
+            "https://github.com/open-policy-agent/opa/releases/download/v$OPA_VERSION/opa_linux_amd64_static"
+          chmod +x "$RUNNER_TEMP/bin/opa"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/opa" version
+
+      - name: Start the Iceberg REST fixture
+        run: docker compose -f scripts/fixtures/iceberg-fixture.yml up -d --wait
+
+      - name: Wait for the catalog
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            if curl -sf "http://localhost:8181/v1/config?warehouse=warehouse" >/dev/null; then
+              echo "catalog ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "catalog never became ready"
+          exit 1
+
+      - name: sbt test
+        run: |
+          set -euo pipefail
+          # -no-colors: the summary step greps plain `[info]` lines.
+          sbt -no-colors test 2>&1 | tee "$RUNNER_TEMP/sbt-test.log"
+
+      # sbt's exit code is the verdict; this only says what happened. ScalaTest marks a failed
+      # test `*** FAILED ***`, an aborted suite `*** ABORTED ***` and a cancelled test
+      # `!!! CANCELED !!!`, its reason on the next line.
+      - name: Summarize the run
+        if: always()
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/sbt-test.log"
+          [[ -s "$log" ]] || { echo "no sbt output captured" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## sbt test"
+            echo
+            echo '```'
+            grep -E '^\[info\] (Tests: succeeded|Suites: completed|Run completed in)' "$log" || echo "no ScalaTest totals in the log"
+            echo '```'
+            # Each hit as `<suite>: <test>`, the suite read from ScalaTest's `[info] <Suite>:`
+            # header above it, and the line after it (the reason) indented below.
+            # Fixed strings, not patterns: awk -v would turn an escaped `\*` back into `*`.
+            for kind in FAILED ABORTED CANCELED; do
+              case "$kind" in
+                CANCELED) marker='!!! CANCELED !!!' ;;
+                *) marker="*** $kind ***" ;;
+              esac
+              count="$(grep -cF -- "$marker" "$log" || true)"
+              [[ "$count" -gt 0 ]] || continue
+              echo
+              echo "### $kind ($count)"
+              echo
+              echo '```'
+              awk -v m="$marker" '
+                /^\[info\] [A-Za-z0-9_.$]+:$/ { suite = substr($0, 8, length($0) - 8); next }
+                hit { sub(/^\[info\] +/, ""); print "    " $0; hit = 0 }
+                index($0, m) { t = $0; sub(/^\[info\] +(- )?/, "", t); print suite ": " t; hit = 1 }
+              ' "$log" | head -400
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbt-test-reports
+          path: |
+            target/test-reports/
+            ${{ runner.temp }}/sbt-test.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Fixture logs on failure
+        if: failure()
+        run: docker compose -f scripts/fixtures/iceberg-fixture.yml logs --no-color
+
+      - name: Tear the fixture down
+        if: always()
+        run: docker compose -f scripts/fixtures/iceberg-fixture.yml down -v
+
+  ui:
+    name: ui (vitest)
+    if: github.event_name != 'schedule' || github.repository == 'starlake-ai/qod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v7
+      # The runner's own Node, as release.yml's UI build uses.
+      - run: node --version && npm --version
+      - run: npm ci
+      - run: npm test
+
+  cli:
+    name: cli (pytest)
+    if: github.event_name != 'schedule' || github.repository == 'starlake-ai/qod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e './cli[dev]'
+      - run: python -m pytest cli/tests -q

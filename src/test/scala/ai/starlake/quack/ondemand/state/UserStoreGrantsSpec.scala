@@ -1,62 +1,43 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.ondemand.auth.LoginRealm
+import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Integration test against the `qodstate_user` table. Cancelled (not failed) when `QOD_PG_HOST` is
-  * not set. Uses the same default-metastore env-vars the rest of the manager runs against, so a
-  * local `docker compose up -d postgres` is enough.
+/** Integration test against the `qodstate_user` table, in a database of its own that the suite
+  * creates and migrates with the real changelog, so it never depends on the state of another
+  * database (a local manager's `qod` is migrated, a fresh server's is empty). Cancelled (not failed)
+  * when Postgres is unreachable (`SL_TEST_PG_*`).
   */
 class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
 
-  private val pgHost = sys.env.getOrElse("QOD_PG_HOST", "")
+  TestPostgres.dropStrayTestDatabases("qodusg")
 
-  private val pgPort     = sys.env.getOrElse("QOD_PG_PORT", "5432")
-  private val pgUser     = sys.env.getOrElse("QOD_PG_USER", "postgres")
-  private val pgPassword = sys.env.getOrElse("QOD_PG_PASSWORD", "azizam")
-  private val pgDb       = sys.env.getOrElse("QOD_PG_DBNAME", "qod")
+  private val dbName = s"qodusg_test_${System.nanoTime()}"
+  private var created = false
 
-  // Cancel (a clean per-test skip) rather than assume-at-construction, which
-  // aborts the whole suite. `store` is lazy so the Hikari pool is built only
-  // once a test has confirmed Postgres is configured.
+  // Cancel (a clean per-test skip) rather than assume-at-construction, which aborts the whole
+  // suite. The database is created and migrated once, by the first test that finds Postgres.
   private def requirePg(): Unit =
-    if pgHost.isEmpty then cancel("QOD_PG_HOST unset; skipping integration test")
+    TestPostgres.ensureReachable()
+    if !created then
+      TestPostgres.psql("postgres", s"""CREATE DATABASE "$dbName"""")
+      created = true
+      new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
 
-  private lazy val store: UserStore = UserStore.fromDefaultMetastore(
-    Map(
-      "pgHost"     -> pgHost,
-      "pgPort"     -> pgPort,
-      "pgUser"     -> pgUser,
-      "pgPassword" -> pgPassword,
-      "dbName"     -> pgDb,
-      "schemaName" -> "public",
-      "dataPath"   -> "/tmp/x"
-    )
-  )
+  private def url: String = TestPostgres.dbUrl(dbName)
+
+  private lazy val store: UserStore =
+    new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
 
   private val u = s"grants-spec-${java.util.UUID.randomUUID().toString.take(6)}"
 
   override def afterAll(): Unit =
-    // Best-effort cleanup; ignore failures so reports stay readable when PG is unavailable
-    // between tests. Skip entirely when PG was never configured (all tests cancelled).
-    if pgHost.isEmpty then ()
-    else
-      scala.util.Try {
-        val c = java.sql.DriverManager.getConnection(
-          s"jdbc:postgresql://$pgHost:$pgPort/$pgDb",
-          pgUser,
-          pgPassword
-        )
-        try
-          // Every username this spec creates starts with the random prefix `u`.
-          val ps = c.prepareStatement("DELETE FROM qodstate_user WHERE username LIKE ?")
-          ps.setString(1, s"$u%")
-          ps.executeUpdate()
-          ps.close()
-        finally c.close()
-      }
+    if created then
+      scala.util.Try(store.close())
+      scala.util.Try(TestPostgres.dropDatabase(dbName))
 
   "grantsForIdentity" should "return an empty list when no row matches" in {
     requirePg()
@@ -189,10 +170,6 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
     }
 
   private def withRawConn(f: java.sql.Connection => Unit): Unit =
-    val c = java.sql.DriverManager.getConnection(
-      s"jdbc:postgresql://$pgHost:$pgPort/$pgDb",
-      pgUser,
-      pgPassword
-    )
+    val c = java.sql.DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
     try f(c)
     finally c.close()
