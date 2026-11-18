@@ -29,7 +29,7 @@ class PolicyColumnSourcesSpec extends AnyFlatSpec with Matchers:
   ):
     val sent    = ListBuffer.empty[(PoolKey, String)]
     val sources = new PolicyColumnSources(
-      duckLake = (_, c, s, t) =>
+      duckLake = (_, _, c, s, t) =>
         if lakeFails then IO.raiseError(new RuntimeException("catalog down"))
         else IO.pure(lake.getOrElse((c, s, t), Nil)),
       node = (k, sql) => IO(sent += ((k, sql))) *> answer,

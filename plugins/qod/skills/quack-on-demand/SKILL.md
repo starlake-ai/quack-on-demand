@@ -2615,8 +2615,9 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders/rows?l
   `invalid_selector`, and paging over a view is not stable under concurrent writes. Under a
   column or row policy, `asOf*` reads a table only when its name, and each of its column
   names, has meant the same table and column in every snapshot the catalog holds: a table
-  renamed, recreated or dropped, or with a column renamed or dropped, answers 404 on `asOf*`
-  until those snapshots expire (reads at the current state are not affected).
+  renamed, recreated or dropped, or with a column renamed or dropped, answers 400
+  `invalid_selector` on `asOf*`, a sent-back `X-QoD-Snapshot` included, until those snapshots
+  expire: page it without `asOf*` (reads at the current state are not affected).
 - No `select` reads the whole row (`SELECT *`). A `select` naming a column whose name holds
   a dot, an `@`, a bracket or a quote is refused (403) to a principal under a column or row
   policy: read the whole row instead.

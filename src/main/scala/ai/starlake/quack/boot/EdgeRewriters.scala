@@ -93,49 +93,49 @@ object EdgeRewriters extends LazyLogging:
       nodeTimeout: FiniteDuration
   ): ColumnCatalog =
     val sources = new PolicyColumnSources(
-      duckLake = (tenant, cat, sch, tab) =>
-        IO.blocking {
-          sup.findTenantDbByCatalogName(tenant, cat).filter(_.kind == TenantDbKind.DuckLake) match
-            case None     => Nil
-            case Some(td) =>
-              sup.getTenantById(td.tenantId) match
-                case None    => Nil
-                case Some(t) => readerOf(t.id, td.name).columnNames(sch, tab)
-        },
+      // The row the history reads too, so a branch pool's columns are the branch's own (#241).
+      duckLake = (tenant, pool, cat, sch, tab) =>
+        IO.blocking(
+          duckLakeReader(sup, readerOf, tenant, pool, cat).fold(List.empty[String])(
+            _.columnNames(sch, tab)
+          )
+        ),
       node = nodeQuery,
       nodeTimeout = nodeTimeout
     )
     new CachedColumnCatalog(
       fetch = sources.fetch,
       instruments = Some(stmtInstruments),
-      // Both from the one row, so a branch pool's answer is kept under the branch's own snapshot.
+      // All three from the one row, so a branch pool's answer is kept under the branch's own
+      // snapshot and judged against the branch's own columns.
       history = (tenant, pool, cat, sch, tab) =>
         IO.blocking(
-          historyReader(sup, readerOf, tenant, pool, cat).exists(_.nameHistoryStable(sch, tab))
+          duckLakeReader(sup, readerOf, tenant, pool, cat).exists(_.nameHistoryStable(sch, tab))
         ),
       latestSnapshot = (tenant, pool, cat) =>
         IO.blocking(
-          historyReader(sup, readerOf, tenant, pool, cat).flatMap(_.maxSnapshotIdBounded())
+          duckLakeReader(sup, readerOf, tenant, pool, cat).flatMap(_.maxSnapshotIdBounded())
         )
     )
 
-  /** The reader of [[duckLakeHistoryRow]]'s row. */
-  private def historyReader(
+  /** The reader of [[duckLakeRow]]'s row. */
+  private def duckLakeReader(
       sup: PoolSupervisor,
       readerOf: (String, String) => DuckLakeCatalogReader,
       tenant: String,
       pool: Option[PoolKey],
       cat: String
   ): Option[DuckLakeCatalogReader] =
-    duckLakeHistoryRow(sup, tenant, pool, cat)
+    duckLakeRow(sup, tenant, pool, cat)
       .flatMap(td => sup.getTenantById(td.tenantId).map(t => readerOf(t.id, td.name)))
 
   /** The DuckLake row whose catalog `cat` names for a statement on `pool`: the pool's own row when
     * it attaches under `cat` (a branch attaches under its parent's alias, so its history is its
     * own), else the tenant's DuckLake row of that name or alias. None for anything else (a
-    * federated or built-in catalog): no history, which the guard reads as unstable.
+    * federated or built-in catalog): no history, which the guard reads as unstable, and no columns,
+    * so they are asked of a node of the pool.
     */
-  private def duckLakeHistoryRow(
+  private def duckLakeRow(
       sup: PoolSupervisor,
       tenant: String,
       pool: Option[PoolKey],
