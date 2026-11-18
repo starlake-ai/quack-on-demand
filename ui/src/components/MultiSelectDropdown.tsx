@@ -3,12 +3,16 @@ import { useEffect, useRef, useState } from 'react';
 export interface MultiSelectOption {
   value: string;
   label: string;
+  /** Hover text for the option, when its label alone does not say enough. */
+  title?: string;
 }
 
 // Form dropdown holding a checkbox list: looks like a closed <select>, opens a
 // panel where several values can be ticked. Closes on outside click and Escape.
 // The caption is rendered here (not by a wrapping <label>) because a label
 // around the trigger button would forward every click inside the panel to it.
+// With `onSelectAll` / `onClear`, the panel opens with "Select all" and "Clear"
+// actions; the caller decides what they mean (a group of a larger selection).
 export default function MultiSelectDropdown({
   caption,
   options,
@@ -16,6 +20,8 @@ export default function MultiSelectDropdown({
   onChange,
   disabled = false,
   placeholder = 'None selected',
+  onSelectAll,
+  onClear,
 }: {
   caption: string;
   options: MultiSelectOption[];
@@ -23,6 +29,8 @@ export default function MultiSelectDropdown({
   onChange: (values: string[]) => void;
   disabled?: boolean;
   placeholder?: string;
+  onSelectAll?: () => void;
+  onClear?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -106,10 +114,30 @@ export default function MultiSelectDropdown({
             overflowY: 'auto',
           }}
         >
+          {(onSelectAll || onClear) && options.length > 0 && (
+            <div className="multi-select-actions">
+              {onSelectAll && (
+                <button
+                  type="button"
+                  className="link-button"
+                  disabled={selected.length === options.length}
+                  onClick={onSelectAll}
+                >
+                  Select all
+                </button>
+              )}
+              {onClear && (
+                <button type="button" className="link-button" disabled={selected.length === 0} onClick={onClear}>
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
           {options.length === 0 && <span className="subtle" style={{ padding: '.45rem .75rem' }}>Nothing to pick</span>}
           {options.map(o => (
             <label
               key={o.value}
+              title={o.title}
               className="checkbox-label"
               style={{ margin: 0, padding: '.35rem .75rem', cursor: 'pointer', color: 'var(--text)' }}
             >

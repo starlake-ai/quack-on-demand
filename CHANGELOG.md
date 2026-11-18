@@ -79,6 +79,17 @@
   TIME WITH TIME ZONE on the local time it is shown as, and `TIME_NS` at nanosecond precision;
   `TIMESTAMP_S` and `TIMESTAMP_MS` filters refuse more fraction digits than the type holds;
   `is.null` applies to every column; `TIME '24:00:00'` is served.
+- **The token form picks tools from a list, and minting refuses a tool name that does not exist.**
+  `GET /api/auth/pat/tools` (and `qod auth pat tools`) lists every name valid on a token's `tools`
+  axis, for any signed-in caller: each MCP tool with its group (`data`, or `admin` for a tool only
+  an admin-owned token is offered), whether a read-only token keeps it, and a short description,
+  plus the reserved `rest` (the REST data edge). The list is the same whether or not MCP is
+  enabled. `POST /api/auth/pat/create` now answers `400 unknown_tool`, naming the unknown entries,
+  for a `tools` list holding a name outside it, from a session or a PAT alike (before, a typo
+  minted a token that silently reached less than asked); tokens already minted are not
+  re-checked. On the profile page the free-text Tools field becomes three dropdowns (Data tools,
+  Admin tools, Other surfaces), each with Select all and Clear; nothing ticked still leaves the axis unrestricted, and a token
+  narrowed to MCP tools without `rest` is flagged as one that will not reach the REST data edge.
 
 ### Fixed
 

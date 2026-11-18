@@ -1,6 +1,11 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
-import type { PatEntry, PatScope } from '../api/types';
+import type { PatEntry, PatScope, PatToolEntry } from '../api/types';
+import {
+  TOOL_GROUPS, clearGroup, missesRest, pickedIn, replaceGroup, selectAllInGroup, toolOptions,
+  toolsRequest,
+} from '../api/patTools';
+import MultiSelectDropdown from './MultiSelectDropdown';
 
 const VERB_CEILINGS = ['RO', 'RW', 'DDL', 'ALL'] as const;
 
@@ -96,7 +101,10 @@ interface PatForm {
   roles: string;
   databases: string;
   pools: string;
+  // Free text, used only when the tool catalog failed to load.
   tools: string;
+  // The names picked in the tool picker, across its groups.
+  toolPicks: string[];
   verbCeiling: string;
   dropAdmin: boolean;
   stmtTimeoutMs: string;
@@ -104,7 +112,7 @@ interface PatForm {
 }
 
 const EMPTY_PAT_FORM: PatForm = {
-  name: '', expiry: '', roles: '', databases: '', pools: '', tools: '',
+  name: '', expiry: '', roles: '', databases: '', pools: '', tools: '', toolPicks: [],
   verbCeiling: '', dropAdmin: false, stmtTimeoutMs: '', maxRows: '',
 };
 
@@ -120,6 +128,10 @@ export function PatSection() {
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState<{ name: string; token: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  // The names valid on the tools axis, for the picker; null while loading and when loading failed
+  // (`toolsFailed`), where the form falls back to the free-text field so it still works.
+  const [toolCatalog, setToolCatalog] = useState<PatToolEntry[] | null>(null);
+  const [toolsFailed, setToolsFailed] = useState(false);
 
   async function load() {
     try {
@@ -130,7 +142,16 @@ export function PatSection() {
     }
   }
 
-  useEffect(() => { void load(); }, []);
+  async function loadTools() {
+    try {
+      setToolCatalog((await api.patTools()).tools);
+      setToolsFailed(false);
+    } catch {
+      setToolsFailed(true);
+    }
+  }
+
+  useEffect(() => { void load(); void loadTools(); }, []);
 
   function set<K extends keyof PatForm>(name: K, value: PatForm[K]) {
     setForm(f => ({ ...f, [name]: value }));
@@ -156,7 +177,7 @@ export function PatSection() {
         roles: parseCsv(form.roles),
         databases: parseCsv(form.databases),
         pools: parseCsv(form.pools),
-        tools: parseCsv(form.tools),
+        tools: toolCatalog ? toolsRequest(form.toolPicks) : parseCsv(form.tools),
         verbCeiling: form.verbCeiling ? (form.verbCeiling as (typeof VERB_CEILINGS)[number]) : undefined,
         dropAdmin: form.dropAdmin,
         stmtTimeoutMs: form.stmtTimeoutMs ? Number(form.stmtTimeoutMs) : undefined,
@@ -324,10 +345,13 @@ export function PatSection() {
               Roles
               <input value={form.roles} onChange={e => set('roles', e.target.value)} placeholder="comma-separated" />
             </label>
-            <label>
-              Tools
-              <input value={form.tools} onChange={e => set('tools', e.target.value)} placeholder="comma-separated" />
-            </label>
+            {!toolCatalog && toolsFailed && (
+              <label>
+                Tools
+                <input value={form.tools} onChange={e => set('tools', e.target.value)}
+                  placeholder="comma-separated (tool list unavailable)" />
+              </label>
+            )}
             <label>
               Verb ceiling
               <select value={form.verbCeiling} onChange={e => set('verbCeiling', e.target.value)}>
@@ -347,6 +371,33 @@ export function PatSection() {
               <input type="checkbox" checked={form.dropAdmin} onChange={e => set('dropAdmin', e.target.checked)} />
               {' '}Drop admin standing on this token
             </label>
+            {toolCatalog && (
+              <div className="cred-wide">
+                <div className="cred-tools">
+                  {TOOL_GROUPS.map(({ group, caption }) => (
+                    <MultiSelectDropdown
+                      key={group}
+                      caption={caption}
+                      options={toolOptions(toolCatalog, group)}
+                      selected={pickedIn(toolCatalog, group, form.toolPicks)}
+                      onChange={values => set('toolPicks', replaceGroup(toolCatalog, group, form.toolPicks, values))}
+                      onSelectAll={() => set('toolPicks', selectAllInGroup(toolCatalog, group, form.toolPicks))}
+                      onClear={() => set('toolPicks', clearGroup(toolCatalog, group, form.toolPicks))}
+                      placeholder="None selected"
+                    />
+                  ))}
+                </div>
+                <div className="subtle">
+                  Tools: nothing selected leaves the tools axis as your own permissions allow.
+                </div>
+                {missesRest(toolCatalog, form.toolPicks) && (
+                  <div className="cred-tools-note">
+                    This token will not reach the REST data edge: add REST data edge (rest) under
+                    Other surfaces to keep it.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="cred-form-actions">
             <button type="submit" disabled={busy || !form.name.trim()}>

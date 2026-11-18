@@ -379,6 +379,13 @@ qod auth pat revoke --id pat-...
 `--max-rows`). A flag left off the command line is unrestricted on that axis, not empty -
 same rule as the REST body above.
 
+`qod auth pat tools` (`GET /api/auth/pat/tools`, any signed-in caller) lists the names
+valid for `--tool`: every MCP tool, grouped `data` or `admin` (an `admin` tool is only
+offered to an admin-owned token), with `readOnly` (kept by a `--verb-ceiling RO` token),
+plus the reserved `rest`. The list does not depend on MCP being enabled. A `--tool` name
+outside it is refused at mint with `400 unknown_tool`, naming it; tokens already minted
+are never re-checked. The UI profile page's token form picks from the same list.
+
 The `tools` axis also governs the read-only REST data edge through the reserved name
 `rest` (no MCP tool can take that name): a token with no `--tool` flag may use the edge,
 a token minted with `--tool` must include `--tool rest` to use it. See "Reading over HTTP

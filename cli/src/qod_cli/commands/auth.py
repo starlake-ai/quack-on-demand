@@ -184,7 +184,10 @@ def create(
         None, "--pool", help="Repeatable. Restrict the token to these pools; omit for unrestricted."
     ),
     tool: list[str] = typer.Option(
-        None, "--tool", help="Repeatable. Restrict the token to these tools; omit for unrestricted."
+        None,
+        "--tool",
+        help="Repeatable. Restrict the token to these tools (see `qod auth pat tools`); "
+        "omit for unrestricted.",
     ),
     verb_ceiling: str = typer.Option(
         None,
@@ -239,6 +242,13 @@ def create(
 def list_(ctx: typer.Context):
     """List your PATs (never shows token values)."""
     call(ctx, "POST", "/api/auth/pat/list")
+
+
+@pat_app.command()
+@covers("GET", "/api/auth/pat/tools")
+def tools(ctx: typer.Context):
+    """List the names valid for --tool: every MCP tool and `rest` (the REST data edge)."""
+    call(ctx, "GET", "/api/auth/pat/tools")
 
 
 @pat_app.command()

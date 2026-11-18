@@ -47,6 +47,7 @@ import type {
   PatCreateRequest,
   PatCreateResponse,
   PatListResponse,
+  PatToolsResponse,
   StatementHistoryResponse,
   CatalogSchemaEntry,
   CatalogTableEntry,
@@ -237,6 +238,8 @@ export const api = {
   revokePat: (id: string) => post<void>('/auth/pat/revoke', { id }),
   // Only dead (revoked/expired) tokens are deletable; a live id answers 400 pat_live.
   deletePat: (id: string) => post<void>('/auth/pat/delete', { id }),
+  // The names valid on the tools axis, the same for every caller (and whether or not MCP is on).
+  patTools:  () => get<PatToolsResponse>('/auth/pat/tools'),
   // ----- the caller's own S3 credentials (decision 23) -----
   // Self-scoped like the PAT routes: no tenant or user param; the secret is write-only.
   listMyS3Credentials:  () => post<S3CredentialListResponse>('/profile/s3/list', {}),

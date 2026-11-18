@@ -943,6 +943,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/pat/tools:
+    get:
+      operationId: getApiAuthPatTools
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatToolsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/sql-token/callback:
     get:
       operationId: getApiAuthSql-tokenCallback
@@ -10402,6 +10436,34 @@ components:
           format: int32
         branchOnly:
           type: boolean
+    PatToolEntry:
+      title: PatToolEntry
+      type: object
+      required:
+      - name
+      - label
+      - group
+      - readOnly
+      - description
+      properties:
+        name:
+          type: string
+        label:
+          type: string
+        group:
+          type: string
+        readOnly:
+          type: boolean
+        description:
+          type: string
+    PatToolsResponse:
+      title: PatToolsResponse
+      type: object
+      properties:
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatToolEntry'
     PoolCohortDto:
       title: PoolCohortDto
       type: object
