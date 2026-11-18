@@ -436,6 +436,17 @@ def _find_extracted_java(cache_dir: Path) -> str | None:
     return None
 
 
+def _jre_cache_dir(cache_dir: Path | None) -> Path:
+    return cache_dir if cache_dir is not None else default_cache_dir() / f"jre-{JRE_MAJOR}"
+
+
+def cached_jre(cache_dir: Path | None = None) -> str | None:
+    """The java of a Java runtime ensure_jre already provisioned, or None. Reads the cache only:
+    no lookup of the latest build, so an offline host keeps the runtime it has."""
+    d = _jre_cache_dir(cache_dir)
+    return _find_extracted_java(d) if d.is_dir() else None
+
+
 def ensure_jre(
     cache_dir: Path | None = None,
     os_name: str = sys.platform,
@@ -443,12 +454,13 @@ def ensure_jre(
 ) -> str:
     """Path to a cached Java runtime's java, downloading it on first use
     (checksum-verified from the publisher's metadata). The default cache is
-    per Java release, so a runtime cached for an older minimum is not reused."""
+    per Java release, so a runtime cached for an older minimum is not reused.
+    A cached runtime is returned before anything is asked of Adoptium."""
     import platform
     import tarfile
     import zipfile
 
-    cache_dir = cache_dir if cache_dir is not None else default_cache_dir() / f"jre-{JRE_MAJOR}"
+    cache_dir = _jre_cache_dir(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     existing = _find_extracted_java(cache_dir)
     if existing:
@@ -626,6 +638,59 @@ def ensure_duckdb_cli(
         raise RuntimeError(f"no duckdb binary found after extracting the CLI archive in {bin_dir}")
     duckdb.chmod(0o755)
     return bin_dir
+
+
+# The DuckDB extensions a node, or the manager's DuckLake initializer, INSTALLs on its own: quack
+# (strictly, at every node start), httpfs and avro (every node), ducklake and postgres (a DuckLake
+# database), aws (an S3 data path signed by the credential chain), azure (an Azure data path) and
+# iceberg (an Iceberg source). An INSTALL of one already in the extension directory makes no
+# request, so having them there is what lets a node start with no network. An extension that a
+# database's or a pool's initSql installs is not in this list.
+NODE_EXTENSIONS = ("quack", "httpfs", "avro", "ducklake", "postgres", "aws", "azure", "iceberg")
+
+
+def _duckdb_proxy_sql(environ) -> str | None:
+    """`SET http_proxy` for the proxy the environment names, as the spawn script writes it: DuckDB
+    reads no proxy variable for an INSTALL."""
+    names = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
+    url = next((environ.get(k) for k in names if environ.get(k)), "")
+    if not url:
+        return None
+    hostport = url.removeprefix("http://").removeprefix("https://").rstrip("/")
+    return "SET http_proxy = '" + hostport.replace("'", "''") + "'"
+
+
+def ensure_node_extensions(
+    duckdb_bin: Path,
+    os_name: str = sys.platform,
+    run=subprocess.run,
+    environ=None,
+) -> Path:
+    """INSTALL every NODE_EXTENSIONS entry with the provisioned duckdb CLI (the DuckDB release the
+    nodes and the jar run) into this user's DuckDB extension directory, the one the nodes and the
+    manager read, and return that directory. One process per extension, so a failure names it; an
+    extension already there is not downloaded again. DuckDB checks each extension's signature when
+    a node loads it."""
+    environ = os.environ if environ is None else environ
+    exe = str(duckdb_bin / ("duckdb.exe" if os_name == "win32" else "duckdb"))
+    env = {**environ, "DUCKDB_AGENT_MODE": "0"}
+    proxy = _duckdb_proxy_sql(environ)
+    prefix = [exe, "-batch", "-noheader", "-list", *(["-cmd", proxy] if proxy else []), ":memory:"]
+
+    def sql(statement: str) -> str:
+        proc = run([*prefix, "-c", statement], capture_output=True, text=True, env=env, timeout=600)
+        if proc.returncode != 0:
+            lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+            raise RuntimeError(f"{statement} failed: {lines[0] if lines else f'exit {proc.returncode}'}")
+        return proc.stdout or ""
+
+    for name in NODE_EXTENSIONS:
+        sql(f"INSTALL {name}")
+    listed = sql("SELECT install_path FROM duckdb_extensions() WHERE extension_name = 'quack'")
+    path = listed.strip().splitlines()[-1].strip() if listed.strip() else ""
+    if not path:
+        raise RuntimeError("quack is not listed as installed after INSTALL quack")
+    return Path(path).parent
 
 
 _CANONICAL_ARCH = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}

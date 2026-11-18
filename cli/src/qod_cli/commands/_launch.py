@@ -198,11 +198,12 @@ def resolve_java() -> str:
             err=True,
         )
         raise typer.Exit(1)
-    typer.echo(
-        f"No Java {launcher.MIN_JAVA_MAJOR}+ found; downloading a Java "
-        f"{launcher.JRE_MAJOR} runtime (cached for next time)...",
-        err=True,
-    )
+    if launcher.cached_jre() is None:
+        typer.echo(
+            f"No Java {launcher.MIN_JAVA_MAJOR}+ found; downloading a Java "
+            f"{launcher.JRE_MAJOR} runtime (cached for next time)...",
+            err=True,
+        )
     return launcher.ensure_jre()
 
 

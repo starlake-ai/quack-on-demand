@@ -779,3 +779,142 @@ def test_start_migrates_a_stored_password(runner, wired):
     assert "Your current admin password is: legacy" in result.output
     assert "QOD_ADMIN_PASSWORD" not in load_start_env()
     assert "QOD_ADMIN_PASSWORD" not in wired["env"]
+
+
+# ---- --download-only and an offline pinned start (#220) ----------------
+
+_REAL_NODE_BINARY = launcher.node_binary
+_RELEASE = "0.13.0"
+
+
+@pytest.fixture
+def fetched(wired, monkeypatch, tmp_path):
+    """`wired` with a recorder on every downloader of the start path; preparing a launch fails."""
+    calls = []
+    release_jar = tmp_path / "jars" / launcher.jar_name(_RELEASE)
+
+    def record(name, result):
+        def fn(*args, **kwargs):
+            calls.append(name)
+            return result
+
+        return fn
+
+    monkeypatch.setattr(launcher, "default_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(launcher, "find_java", lambda: None)
+    monkeypatch.setattr(launcher, "is_musl", lambda root=None: False)
+    monkeypatch.setattr(launcher, "ensure_jre", record("jre", "/cache/jre/bin/java"))
+    monkeypatch.setattr(launcher, "ensure_jar", record("jar", release_jar))
+    monkeypatch.setattr(launcher, "ensure_duckdb_cli", record("duckdb", tmp_path / "duckdb" / "bin"))
+    monkeypatch.setattr(launcher, "ensure_libduckdb", record("libduckdb", tmp_path / "duckdb" / "lib"))
+    monkeypatch.setattr(launcher, "node_binary", record("qod-node", None))
+    monkeypatch.setattr(launcher, "ensure_node_extensions", record("extensions", tmp_path / "ext"))
+
+    def never(*args, **kwargs):
+        raise AssertionError("--download-only must not prepare a launch")
+
+    monkeypatch.setattr(launcher, "materialize_spawn_scripts", never)
+    from qod_cli import admin_password as ap
+
+    monkeypatch.setattr(ap, "control_plane_admin_state", never)
+    return calls
+
+
+def test_download_only_fetches_everything_and_starts_nothing(runner, wired, fetched):
+    from qod_cli.main import app
+
+    result = runner.invoke(app, ["start", "--version", _RELEASE, "--download-only"])
+    assert result.exit_code == 0, result.output
+    assert "cmd" not in wired
+    assert sorted(fetched) == sorted(["jre", "jar", "duckdb", "libduckdb", "qod-node", "extensions"])
+    assert "nothing was started" in result.output
+    assert launcher.jar_name(_RELEASE) in result.output
+    assert f"qod start --version {_RELEASE} now needs no network" in result.output
+
+
+def test_download_only_reads_qod_version(runner, wired, fetched, monkeypatch):
+    from qod_cli.main import app
+
+    monkeypatch.setenv("QOD_VERSION", _RELEASE)
+    result = runner.invoke(app, ["start", "--download-only"])
+    assert result.exit_code == 0, result.output
+    assert "jar" in fetched and "cmd" not in wired
+
+
+@pytest.mark.parametrize("flag", ["--demo", "--with-starflow"])
+def test_download_only_refuses_demo_and_starflow(runner, wired, fetched, flag):
+    from qod_cli.main import app
+
+    result = runner.invoke(app, ["start", "--version", _RELEASE, "--download-only", flag])
+    assert result.exit_code == 1
+    assert "--download-only" in result.output
+    assert fetched == [] and "cmd" not in wired
+
+
+def test_download_only_fails_when_an_extension_cannot_be_installed(
+    runner, wired, fetched, monkeypatch
+):
+    from qod_cli.main import app
+
+    def offline(*args, **kwargs):
+        raise RuntimeError("INSTALL quack failed: HTTP Error")
+
+    monkeypatch.setattr(launcher, "ensure_node_extensions", offline)
+    result = runner.invoke(app, ["start", "--version", _RELEASE, "--download-only"])
+    assert result.exit_code == 1
+    assert "INSTALL quack failed" in result.output
+    assert "nothing was started" not in result.output
+
+
+@pytest.mark.parametrize("argv, asked", [(["--version", _RELEASE], False), ([], True)])
+def test_a_pinned_start_asks_pypi_nothing(runner, wired, fetched, monkeypatch, argv, asked):
+    from qod_cli.main import app
+
+    seen = []
+    monkeypatch.setattr(launcher, "newer_release_hint", lambda current: seen.append(current))
+    monkeypatch.setattr(launcher, "latest_release_version", lambda: _RELEASE)
+    result = runner.invoke(app, ["start", *argv, "--download-only"])
+    assert result.exit_code == 0, result.output
+    assert bool(seen) is asked
+
+
+def test_a_start_of_a_cached_release_makes_no_network_request(runner, wired, monkeypatch, tmp_path):
+    # What --download-only leaves behind, planted: the real resolvers must find all of it in
+    # the cache, and no request may leave (the JRE's "latest build" lookup included).
+    import httpx
+
+    from qod_cli.main import app
+
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(launcher, "default_cache_dir", lambda: cache)
+    monkeypatch.setattr(launcher, "ensure_duckdb_cli", _REAL_ENSURE_CLI)
+    monkeypatch.setattr(launcher, "ensure_libduckdb", _REAL_ENSURE_LIB)
+    monkeypatch.setattr(launcher, "node_binary", _REAL_NODE_BINARY)
+    monkeypatch.setattr(launcher, "find_java", lambda: None)
+    monkeypatch.setattr(launcher, "is_musl", lambda root=None: False)
+    jar = cache / "jars" / launcher.jar_name(_RELEASE)
+    jar.parent.mkdir(parents=True)
+    jar.write_bytes(b"jar")
+    java = cache / f"jre-{launcher.JRE_MAJOR}" / "jdk" / "bin" / "java"
+    java.parent.mkdir(parents=True)
+    java.write_text("")
+    exe = cache / "qod-node" / f"v{_RELEASE}" / "qod-node.exe"  # read on Windows only
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    _duckdb_cache.plant(cache)
+
+    requests = []
+
+    def no_network(*args, **kwargs):
+        requests.append(args[:2])
+        raise httpx.ConnectError("offline")
+
+    for name in ("get", "stream", "request", "post"):
+        monkeypatch.setattr(httpx, name, no_network)
+    monkeypatch.setattr(httpx.Client, "send", no_network)
+    result = runner.invoke(app, ["start", "--version", _RELEASE])
+    assert result.exit_code == 0, result.output
+    assert requests == []
+    assert wired["cmd"][0] == str(java)
+    assert str(jar) in wired["cmd"]
+    assert "downloading" not in result.output

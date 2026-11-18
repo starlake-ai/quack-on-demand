@@ -145,6 +145,50 @@ def _spawn_loaders(env: dict, scripts: dict, state_dir: Path, pg: dict) -> None:
         subprocess.Popen(["bash", str(scripts[script])], env=loader_env, cwd=state_dir)
 
 
+def _provision_node_runtime(java: str, jar_path: Path, app_home: Path):
+    """(duckdb bin dir, libduckdb lib dir, qod-node or None) for a start, downloading what is not
+    cached. One function for a start and --download-only, so the two fetch the same things."""
+    try:
+        duckdb_bin = launcher.ensure_duckdb_cli(app_home)
+        libduckdb = launcher.ensure_libduckdb(app_home, arch=launcher.jvm_arch(java))
+        node_bin = launcher.node_binary(jar_path, app_home)
+    except Exception as e:
+        typer.echo(f"could not provision the node runtime: {e}", err=True)
+        raise typer.Exit(1)
+    return duckdb_bin, libduckdb, node_bin
+
+
+def _download_only(version: str | None, jar: Path | None) -> None:
+    """`qod start --download-only`: everything the start of `version` (or of `jar`) downloads,
+    downloaded and checked, then a summary on stdout. Starts nothing."""
+    java = resolve_java()
+    jar_path = jar.resolve() if jar is not None else resolve_jar(version)
+    app_home = launcher.default_cache_dir()
+    duckdb_bin, libduckdb, node_bin = _provision_node_runtime(java, jar_path, app_home)
+    try:
+        extensions = launcher.ensure_node_extensions(duckdb_bin)
+    except Exception as e:
+        typer.echo(f"could not install the DuckDB extensions nodes need: {e}", err=True)
+        raise typer.Exit(1)
+    lines = [
+        f"manager jar: {jar_path}",
+        f"java: {java}",
+        f"duckdb {launcher.duckdb_version()}: {duckdb_bin}",
+        f"libduckdb: {libduckdb}",
+        f"duckdb extensions ({', '.join(launcher.NODE_EXTENSIONS)}): {extensions}",
+    ]
+    if node_bin is not None:
+        lines.append(f"qod-node: {node_bin}")
+    release = launcher.node_release(jar_path)
+    label = (
+        f"qod start --version {release[1:]}"
+        if jar is None and release != "snapshot"
+        else f"qod start --jar {jar_path}"
+    )
+    typer.echo("\n".join(["downloaded and checked; nothing was started.", *lines]))
+    typer.echo(f"{label} now needs no network for these.")
+
+
 def _manager_running(manager_url: str) -> bool:
     """Seam over serve's GET /ready probe (tests pin it; never a real :20900)."""
     from .serve import _manager_running as probe
@@ -161,6 +205,14 @@ def start(
         help="Manager release to run (default: the latest release).",
     ),
     jar: Path = typer.Option(None, "--jar", help="Run this local jar instead of downloading."),
+    download_only: bool = typer.Option(
+        False,
+        "--download-only",
+        help="Download and check what this start needs (the jar, a Java runtime when none is "
+        "installed, DuckDB, the DuckDB extensions nodes install, on Windows qod-node.exe) into "
+        "this user's cache, print where, and exit without starting. A later start of the same "
+        "--version then needs no network.",
+    ),
     demo: bool = typer.Option(
         False,
         "--demo",
@@ -192,19 +244,40 @@ def start(
     SSO, REST and FlightSQL; it is installed on first use and stopped by
     Ctrl-C and qod stop.
 
-    No Postgres and just want to serve local data? Use qod serve."""
-    try:
-        from .. import __version__
-        from ..launcher import newer_release_hint
+    With --download-only, downloads and checks everything a start of that
+    --version needs into this user's cache and exits: a later qod start
+    --version of it then makes no network request (a host layout pre-fetches
+    a version before switching to it).
 
-        hint = newer_release_hint(__version__)
-        if hint:
-            typer.echo(hint, err=True)
-    except Exception:
-        pass  # purely decorative; must never block a start
+    No Postgres and just want to serve local data? Use qod serve."""
+    # An explicit release is a pinned run (a host's version pin): no PyPI request, which would
+    # be the start's only one with everything cached, and its advice to upgrade this CLI alone
+    # would part the CLI from the jar it runs.
+    pinned = bool(version) and version != "latest"
+    if not pinned:
+        try:
+            from .. import __version__
+            from ..launcher import newer_release_hint
+
+            hint = newer_release_hint(__version__)
+            if hint:
+                typer.echo(hint, err=True)
+        except Exception:
+            pass  # purely decorative; must never block a start
 
     # Before anything is installed or launched, the demo alias included.
     warn_on_static_api_key()
+
+    if download_only and (demo or with_starflow):
+        typer.echo(
+            "error: --download-only fetches what a manager start needs; it does not run with "
+            "--demo or --with-starflow",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if download_only:
+        _download_only(version, jar)
+        return
 
     sf_request = _starflow.request(
         with_starflow, starflow_home, starflow_version, starflow_port, starflow_url,
@@ -245,13 +318,7 @@ def start(
     jar_path = jar.resolve() if jar is not None else resolve_jar(version)
 
     app_home = launcher.default_cache_dir()
-    try:
-        duckdb_bin = launcher.ensure_duckdb_cli(app_home)
-        libduckdb = launcher.ensure_libduckdb(app_home, arch=launcher.jvm_arch(java))
-        node_bin = launcher.node_binary(jar_path, app_home)
-    except Exception as e:
-        typer.echo(f"could not provision the node runtime: {e}", err=True)
-        raise typer.Exit(1)
+    duckdb_bin, libduckdb, node_bin = _provision_node_runtime(java, jar_path, app_home)
     spawn_sh, spawn_ps1 = launcher.materialize_spawn_scripts(app_home / "scripts")
     # `qod setup` persists QOD_*/PROXY_* vars to the CLI config file; a real
     # process env var still wins (same precedence as everywhere else in the
