@@ -94,8 +94,10 @@
       "min_from_version": "0.10.0",
       "rollback_without_restore": true,
       "rollback_blocked_by": [],
-      "notes": "https://github.com/starlake-ai/qod/blob/v0.13.2/CHANGELOG.md",
-      "steps": []
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.13.2/CHANGELOG.md#upgrading",
+      "steps": [
+        { "when": "after", "boot_refuses_until_done": false, "text": "Upgrade the node image and fleet servers with the manager, and restart every node: until a node restarts, each real authorization outage on it reads as a denial instead of a retryable UNAVAILABLE." }
+      ]
     }
   ]
 }
