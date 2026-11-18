@@ -114,6 +114,11 @@ if ! grep -q "^version: ${release_version}\$" charts/quack-on-demand/Chart.yaml;
 fi
 git diff --cached --quiet || git commit -m "Setting qod version to ${release_version}" -q
 
+# The pins and the release's upgrade path (src/main/resources/release/upgrades.json: its
+# min_from_version, rollback rule, steps and changesets) must hold before the tag: release.yml's
+# build-jar runs the same check, but a refusal there comes after the tag is public.
+python3 scripts/release/release_manifest.py --check-pins
+
 # ---- 2. Tag (idempotent) -------------------------------------------------
 if git rev-parse -q --verify "refs/tags/v${release_version}" >/dev/null; then
   echo "tag v${release_version} already exists; skipping."
@@ -129,7 +134,10 @@ if [[ "$(manager_version)" != *-SNAPSHOT ]]; then
   echo "bumping version.sbt -> $next_version"
   sed -i.bak -E "s|\"[^\"]+\"|\"${next_version}\"|" version.sbt
   rm version.sbt.bak
-  git add version.sbt
+  # The next release's entry in upgrades.json, which --check-pins requires on every pull request
+  # from now on: its pull requests list their changesets and steps there.
+  python3 scripts/release/release_manifest.py --add-release "${next_version%-SNAPSHOT}"
+  git add version.sbt src/main/resources/release/upgrades.json
   git commit -m "Setting version to ${next_version}" -q
 fi
 

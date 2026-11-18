@@ -2,8 +2,9 @@
 
 The launcher supervises the manager JVM instead of exec-ing it: the child runs
 in its own session so SIGINT from the terminal lands on the CLI alone, and the
-CLI answers by running the `qod stop` teardown (SIGTERM manager + nodes,
-bounded wait, SIGKILL escalation) rather than letting a group-wide SIGINT
+CLI answers by running the `qod stop` teardown (SIGTERM the manager, wait for
+it to drain and exit, SIGTERM the nodes it left, bounded wait, SIGKILL
+escalation) rather than letting a group-wide SIGINT
 orphan the duckdb node processes.
 """
 

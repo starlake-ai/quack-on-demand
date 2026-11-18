@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "about": "Upgrade paths and rollback, one entry per release, oldest first (#221, #222). min_from_version: the oldest release that upgrades directly to this one, applying the steps of every release after it, in order. rollback_without_restore: whether the previous release boots and serves on the control-plane schema and the catalogs this release leaves; when false, rollback_blocked_by says why, and only a restore of the backup taken before the upgrade goes back. The manager reads this file at boot (ReleaseGate) and release_manifest.py copies the release's entry into release.json. changesets: the Liquibase changelog files the release adds. release.sh adds the next release's entry when it moves version.sbt to its snapshot; a pull request adding a changelog file lists it there, and one adding a one-way change (a drop, a rename, a type change, a new NOT NULL, a DuckDB or DuckLake bump that migrates catalogs) sets rollback_without_restore false and says why. release_manifest.py --check-pins refuses a changelog file no entry lists, and a one-way one under rollback_without_restore true.",
+  "releases": [
+    {
+      "version": "0.11.0",
+      "changesets": ["0047-node-authz-key-secret", "0048-tenant-auth-client-secret", "0049-boot-secret", "0050-policy-version", "0051-tenant-location", "0052-user-s3-credential", "0053-init-sql-trust", "0054-data-path-policy-version", "0055-drop-pool-lockdown"],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": false,
+      "rollback_blocked_by": [
+        "Liquibase 0055 drops qodstate_pool.lockdown, which 0.10.x reads: a 0.10.x manager fails at boot with column \"lockdown\" does not exist"
+      ],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.11.0/CHANGELOG.md#upgrading-from-010x-read-first",
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": false, "text": "Back up the control-plane database: Liquibase 0047 to 0055 run at boot and 0055 is one way." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Replace the static API key with personal access tokens and remove QOD_API_KEY everywhere: a manager ignores it and warns." },
+        { "when": "before", "boot_refuses_until_done": true, "text": "Unset QOD_ACL_FILTERED_METADATA and QOD_ACL_DIALECT (refused at any value), and QOD_ACL_ENABLED and QOD_NODE_LOCKDOWN (refused when off), with their quack-flightsql.acl.* and quack-flightsql.nodeLockdown keys." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Grant tenant users what they read: enforcement can no longer be turned off and per-pool lockdown is gone. On OPA tenants, update the policies for the node's input (columns, via, locations)." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "If users load files, set QOD_TENANT_FILES_ROOT, and list in QOD_USER_S3_ALLOWED_ENDPOINTS any endpoint other than AWS their own S3 keys target." },
+        { "when": "before", "boot_refuses_until_done": true, "text": "In fleet mode set QOD_INTERNAL_URL on every manager; on Kubernetes without the chart set QOD_POD_IP. The REST port + 1 must be free, or set QOD_INTERNAL_PORT. Under HA, set QOD_NODE_KEY_SECRET to one value on every replica, or on none." },
+        { "when": "before", "boot_refuses_until_done": true, "text": "With the Helm chart, unset env.QOD_INTERNAL_URL, env.QOD_INTERNAL_PORT and env.QOD_POD_IP (helm upgrade fails on them), and size the pod for a 2 GiB heap and 512 MiB of direct memory, or set javaOpts." },
+        { "when": "during", "boot_refuses_until_done": false, "text": "Upgrade every HA replica together (scale to one replica or use a Recreate rollout), and upgrade the qod CLI with the manager, on every fleet server too." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node (node protocol 6); on Kubernetes pull this release's node image. Read the boot log's WARN and ERROR lines about untrusted initSql, sql federation sources and parked clientSecretRef values." }
+      ]
+    },
+    {
+      "version": "0.12.0",
+      "changesets": ["0056-branch-three-way-merge"],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.12.0/CHANGELOG.md#upgrading-from-0110",
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": false, "text": "Back up the control-plane database: Liquibase 0056 runs at boot and adds the three-way merge columns to qodstate_branch_merge." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "On Kubernetes, read your maintenance policies: a database with maintenance enabled runs it for the first time after this upgrade." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "On OPA tenants, a rule keyed on columns no longer refuses a branch's change count, which is asked with columns: []: refuse on the table instead." },
+        { "when": "during", "boot_refuses_until_done": false, "text": "Under HA, finish a rolling upgrade before merging a branch." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Propose again any branch proposal made before the upgrade: its merge is refused 409 proposal_stale." }
+      ]
+    },
+    {
+      "version": "0.12.1",
+      "changesets": ["0057-own-keys-policy-version"],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.12.1/CHANGELOG.md#upgrading-from-0120",
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": false, "text": "Back up the control-plane database: Liquibase 0057 runs at boot and adds a policy-version trigger on object-store keys." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Give every database whose metastore names another Postgres server its own pgUser and pgPassword (qod database update): QoD's login is no longer filled in there, and such a database stops connecting at its next node start." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Recompile any manager module calling PoolSupervisor.createTenantDb: it now states writerTrusted." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Upgrade the node image and fleet servers with the manager, and restart every node." }
+      ]
+    },
+    {
+      "version": "0.12.2",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.12.2/CHANGELOG.md#0122",
+      "steps": []
+    },
+    {
+      "version": "0.13.0",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.13.0/CHANGELOG.md#upgrading",
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": true, "text": "Run the manager on Java 25 or later (qod start and qod serve download a Temurin 25 JRE when none is found; run-jar.sh and run-jar.ps1 need JAVA_HOME or java on PATH at 25)." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "A manager launched with -cp passes --enable-native-access=ALL-UNNAMED and --sun-misc-unsafe-memory-access=allow itself." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Correct any database's defaultSchema or defaultDatabase that is not a plain identifier before its next update or manifest import." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Replace any personal access token that administers QoD under verbCeiling RO: it is now read-only on admin REST and MCP too." }
+      ]
+    },
+    {
+      "version": "0.13.1",
+      "changesets": ["0058-maintenance-node-stop"],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.13.1/CHANGELOG.md#upgrading",
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": false, "text": "Set QOD_MAINT_RUN_TIMEOUT_MIN above the longest full maintenance chain of your largest database: it now caps the whole chain, and its default rises from 60 to 240 minutes." },
+        { "when": "before", "boot_refuses_until_done": false, "text": "Clear any database's defaultDatabase that names another catalog than its own (qod database update --default-database ''): it is ignored, and create and update refuse it." },
+        { "when": "during", "boot_refuses_until_done": false, "text": "Under HA, an upgraded leader can fail as stale a maintenance run still executing on a replica of the earlier release; the next tick queues it again." }
+      ]
+    },
+    {
+      "version": "0.13.2",
+      "changesets": ["0059-release-gate"],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.13.2/CHANGELOG.md",
+      "steps": []
+    }
+  ]
+}

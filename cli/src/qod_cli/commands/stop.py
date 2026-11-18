@@ -1,10 +1,14 @@
 """qod stop: scripts/stop-jar.sh without the checkout.
 
 Discovers the manager by its listening ports (it owns both the REST and the
-FlightSQL edge port in one JVM) and the quack nodes by their spawn script,
-SIGTERMs everything, waits up to FORCE_AFTER seconds, then escalates to
-SIGKILL. Works regardless of how the manager was started (qod start, qod start --demo,
-run-jar.sh).
+FlightSQL edge port in one JVM) and the quack nodes by their spawn script.
+The manager is signalled first, alone: on SIGTERM it refuses new statements,
+lets running ones finish for up to QOD_DRAIN_TIMEOUT_SEC, then stops its own
+nodes, so the stop waits for it to exit (the drain plus a margin) before it
+SIGTERMs whatever node wrappers are left, waits up to FORCE_AFTER seconds,
+then escalates to SIGKILL. Signalling the nodes together with the manager
+killed every running statement under the drain (#221). Works regardless of
+how the manager was started (qod start, qod start --demo, run-jar.sh).
 
 Finally sweeps an orphaned embedded control-plane postmaster (`qod serve` /
 QOD_PG_EMBEDDED): a JVM that dies abruptly (the pre-0.9.2 native-load crash is
@@ -12,7 +16,8 @@ the field case that surfaced this) leaves that process running with no port of
 its own the discovery above would ever find, and the next `qod serve` then
 refuses with the live-pid guard until a manual kill. The POSIX manager/node
 stop above usually reaps it as part of the JVM's own shutdown, but not always:
-`_stop_manager_and_nodes` returns as soon as the ports are free, which can
+`_stop_manager_and_nodes` returns as soon as the manager has exited and the ports
+are free, which can
 precede the embedded postmaster's own exit, so this sweep can also fire a
 SIGTERM (and, after 5s, SIGKILL) on a normal stop against a postmaster that is
 already shutting down on its own. That is recoverable (crash-safe WAL replay
@@ -30,7 +35,7 @@ from pathlib import Path
 
 import typer
 
-from ..config import force_after_seconds, load_start_env
+from ..config import drain_timeout_seconds, force_after_seconds, load_start_env
 from ..launcher import default_data_dir
 
 
@@ -94,6 +99,22 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, just not ours to signal
+
+
+def _manager_alive(pid: int) -> bool:
+    """Whether the manager `pid` still runs. A zombie counts as gone: under `qod start` the JVM is
+    this CLI's own child and stays a zombie until the supervisor reaps it after the teardown, so a
+    signal-0 probe alone would wait out the whole drain budget for a manager that has exited. A
+    `ps` that cannot run leaves the signal-0 answer standing."""
+    if not _pid_alive(pid):
+        return False
+    try:
+        proc = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+    except Exception:
+        return True
+    if proc.returncode != 0:
+        return False
+    return not proc.stdout.strip().startswith("Z")
 
 
 def _process_name(pid: int) -> str | None:
@@ -266,6 +287,12 @@ def _finish_starflow_stop(pgid: int) -> None:
         typer.echo(f"WARN: could not stop Starflow: {exc}", err=True)
 
 
+# How much longer than its drain the manager may take to exit. Its JVM shutdown hook waits the drain
+# plus 15 s for the graceful chain (ShutdownCoordinator.installJvmHook) before it forces its own
+# teardown, which stops the nodes (up to 5 s each).
+DRAIN_EXIT_MARGIN_SEC = 20
+
+
 def _stop_manager_and_nodes():
     # Same resolution as `qod start` and `qod status`: a real env var over a value `qod setup`
     # persisted, over the default. Reading the environment alone stopped (and, for nodes, scoped
@@ -281,9 +308,14 @@ def _stop_manager_and_nodes():
     spawn_re = rf"spawn-quack-node\.sh [0-9]+ {mgr_port}-[0-9a-f]+"
     node_re = rf"(qod-node .*--secret-directory|duckdb .*-init) .*quack-node\.{mgr_port}-[0-9a-f]+\."
 
+    def manager_pids() -> set[int]:
+        return {int(p) for p in (_listening_pid(mgr_port), _listening_pid(edge_port)) if p}
+
+    def wrapper_pids() -> set[int]:
+        return {int(p) for p in _pgrep(spawn_re) if p}
+
     def discover() -> set[int]:
-        pids = {_listening_pid(mgr_port), _listening_pid(edge_port), *_pgrep(spawn_re)}
-        return {int(p) for p in pids if p}
+        return manager_pids() | wrapper_pids()
 
     # Unmarked nodes (a manager older than the marker) are left alone, as stop-jar.sh does; say so.
     unmarked = [p for p in _pgrep(r"spawn-quack-node\.sh [0-9]+$") if p]
@@ -293,21 +325,55 @@ def _stop_manager_and_nodes():
             "(an older manager's; scripts/kill-quack-nodes.sh --unmarked stops them)."
         )
 
-    pids = discover()
-    if not pids:
+    managers = manager_pids()
+    if not managers and not wrapper_pids():
         typer.echo(
             f"nothing running on ports {mgr_port} / {edge_port} "
             "and no spawn-quack-node processes of that manager."
         )
         return
 
-    typer.echo(f"stopping pids: {' '.join(str(p) for p in sorted(pids))}")
-    _kill_all(pids, signal.SIGTERM)
+    # The manager first, alone: its graceful shutdown drains the statements running on its nodes
+    # and then stops those nodes itself. With no manager (orphan wrappers only) there is nothing to
+    # drain and the wrappers are stopped at once.
+    waited = 0
+    if managers:
+        drain = drain_timeout_seconds()
+        budget = drain + DRAIN_EXIT_MARGIN_SEC
+        typer.echo(
+            f"stopping the manager (pid {' '.join(str(p) for p in sorted(managers))}): it lets "
+            f"running statements finish for up to {drain}s (QOD_DRAIN_TIMEOUT_SEC), then stops "
+            f"its nodes; waiting up to {budget}s for it to exit."
+        )
+        _kill_all(managers, signal.SIGTERM)
+        try:
+            while waited < budget and any(_manager_alive(p) for p in managers):
+                time.sleep(1)
+                waited += 1
+        except KeyboardInterrupt:
+            # A second Ctrl-C ends the wait, never with the nodes left behind: the supervisor kills
+            # the manager next, and a wrapper outlives a killed manager (CLAUDE.md, "Things to
+            # avoid").
+            typer.echo("interrupted while the manager drains; stopping its nodes now.", err=True)
+            _kill_all(wrapper_pids(), signal.SIGTERM)
+            raise
+        if any(_manager_alive(p) for p in managers):
+            typer.echo(
+                f"the manager is still running after {budget}s; stopping its nodes.", err=True
+            )
+
+    left = wrapper_pids()
+    if not left and not discover() and not any(_manager_alive(p) for p in managers):
+        typer.echo(f"stopped cleanly after {waited}s.")
+        return
+    if left:
+        typer.echo(f"stopping node wrappers: {' '.join(str(p) for p in sorted(left))}")
+        _kill_all(left, signal.SIGTERM)
 
     for i in range(force_after):
         time.sleep(1)
-        if not discover():
-            typer.echo(f"stopped cleanly after {i + 1}s.")
+        if not discover() and not any(_manager_alive(p) for p in managers):
+            typer.echo(f"stopped cleanly after {waited + i + 1}s.")
             return
 
     typer.echo(f"still running after {force_after}s; sending SIGKILL.", err=True)
@@ -316,7 +382,9 @@ def _stop_manager_and_nodes():
     # <tmp>/quack-node.<marker>.XXX/secrets/...` (an earlier release's as `<abs path>/duckdb -init
     # <tmp>/quack-node.<marker>.XXX/init`), so match that argv with this manager's marker (a bare
     # `^qod-node` never matches the absolute path the spawn script uses).
-    leftovers = pids | discover() | {int(p) for p in _pgrep(node_re) if p}
+    # A manager that has exited is left out: its pid may already be another process's.
+    alive = {p for p in managers if _manager_alive(p)}
+    leftovers = alive | left | discover() | {int(p) for p in _pgrep(node_re) if p}
     _kill_all(leftovers, signal.SIGKILL)
     time.sleep(2)
     if discover():

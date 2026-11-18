@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import shutil
 import sys
 
@@ -21,6 +22,9 @@ PIN_FILES = (
     "cli/src/qod_cli/qod_node.py",
     "native/qod-node/CMakeLists.txt",
     "project/Versions.scala",
+    *release_manifest.DOCKERFILES,
+    "version.sbt",
+    "src/main/resources/release/upgrades.json",
 )
 
 
@@ -61,6 +65,7 @@ def _fake_repo(tmp_path: pathlib.Path) -> pathlib.Path:
     for rel in PIN_FILES:
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / rel, repo / rel)
+    shutil.copytree(REPO / release_manifest.CHANGELOG_DIR, repo / release_manifest.CHANGELOG_DIR)
     return repo
 
 
@@ -167,6 +172,98 @@ def test_read_pins_refuses_a_duckdb_release_with_no_asset_sha256(tmp_path):
         release_manifest.read_pins(repo)
 
 
+DOCKER_PIN = "2.0.0/duckdb-cli-linux-amd64.tar.gz) echo "
+
+
+def _edit(repo: pathlib.Path, rel: str, old: str, new: str) -> None:
+    text = (repo / rel).read_text(encoding="utf-8")
+    assert old in text, f"{rel} holds no {old!r}"
+    (repo / rel).write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_every_dockerfile_pins_the_clis_sha256_for_each_asset_it_downloads(rel):
+    version, pins = release_manifest.dockerfile_duckdb_pins(REPO / rel, rel)
+    assert version == launcher.DUCKDB_CLI_VERSION
+    cli = launcher._DUCKDB_SHA256[version]
+    assert pins == {(version, asset): cli[asset] for asset in release_manifest.DOCKER_DUCKDB_ASSETS}
+    text = (REPO / rel).read_text(encoding="utf-8")
+    # Each asset is fetched through the function that checks it, and nothing else downloads one.
+    assert text.count('fetch_duckdb "duckdb-cli-') == 1
+    assert text.count('fetch_duckdb "duckdb-shared-libs-') == 1
+    assert "sha256sum -c -" in text
+    assert text.count("duckdb/duckdb/releases/download") == 1
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_read_pins_refuses_a_dockerfile_sha256_the_cli_does_not_pin(tmp_path, rel):
+    repo = _fake_repo(tmp_path)
+    pinned = launcher._DUCKDB_SHA256[launcher.DUCKDB_CLI_VERSION]["duckdb-cli-linux-amd64.tar.gz"]
+    _edit(repo, rel, DOCKER_PIN + pinned, DOCKER_PIN + "0" * 64)
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins sha256 0{{64}} for duckdb-cli-linux-amd64.tar.gz of DuckDB 2.0.0, "
+        f"launcher.py pins {pinned}$",
+    ):
+        release_manifest.read_pins(repo)
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_read_pins_refuses_a_dockerfile_missing_an_asset_sha256(tmp_path, rel):
+    repo = _fake_repo(tmp_path)
+    text = (repo / rel).read_text(encoding="utf-8")
+    pin = "2.0.0/duckdb-shared-libs-linux-arm64.tar.gz)"
+    line = next(li for li in text.splitlines(keepends=True) if pin in li)
+    _edit(repo, rel, line, "")
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins no sha256 for duckdb-shared-libs-linux-arm64.tar.gz of DuckDB 2.0.0",
+    ):
+        release_manifest.read_pins(repo)
+
+
+@pytest.mark.parametrize("rel", release_manifest.DOCKERFILES)
+def test_read_pins_refuses_a_dockerfile_duckdb_version_with_no_sha256(tmp_path, rel):
+    repo = _fake_repo(tmp_path)
+    _edit(repo, rel, f"ARG DUCKDB_VERSION={launcher.DUCKDB_CLI_VERSION}\n", "ARG DUCKDB_VERSION=9.9.9\n")
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins no sha256 for duckdb-cli-linux-amd64.tar.gz of DuckDB 9.9.9",
+    ):
+        release_manifest.read_pins(repo)
+
+
+def test_read_pins_refuses_a_dockerfile_release_the_cli_pins_nothing_for(tmp_path):
+    repo = _fake_repo(tmp_path)
+    rel = "docker/quack-node/Dockerfile"
+    _edit(repo, rel, "ARG DUCKDB_VERSION=2.0.0\n", "ARG DUCKDB_VERSION=9.9.9\n")
+    text = (repo / rel).read_text(encoding="utf-8")
+    (repo / rel).write_text(text.replace("    2.0.0/duckdb-", "    9.9.9/duckdb-"), encoding="utf-8")
+    with pytest.raises(
+        release_manifest.ManifestError,
+        match=f"^{re.escape(rel)} pins a sha256 for duckdb-cli-linux-amd64.tar.gz of DuckDB 9.9.9, "
+        "launcher.py pins none",
+    ):
+        release_manifest.read_pins(repo)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        # A pin written another way is refused, not skipped.
+        (DOCKER_PIN, "2.0.0/duckdb-cli-linux-amd64.tar.gz)\n    echo ", "unreadable duckdb_sha256 line"),
+        ("duckdb_sha256() {", "duckdb_sha256_off() {", "expected one duckdb_sha256"),
+        ("ARG DUCKDB_VERSION=", "ARG DUCKDB_RELEASE=", "expected one ARG DUCKDB_VERSION"),
+    ],
+)
+def test_read_pins_refuses_a_dockerfile_it_cannot_read_as_the_clis_pins(tmp_path, old, new, message):
+    repo = _fake_repo(tmp_path)
+    rel = "docker/quack-node/Dockerfile"
+    _edit(repo, rel, old, new)
+    with pytest.raises(release_manifest.ManifestError, match=f"^{re.escape(rel)}.*{message}"):
+        release_manifest.read_pins(repo)
+
+
 def test_main_writes_release_json(tmp_path, released, capsys):
     jar, exes = released
     pypi = tmp_path / "pypi.json"
@@ -202,9 +299,176 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     assert "node protocol" in capsys.readouterr().err
 
+    _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
+    libs = "2.0.0/duckdb-shared-libs-linux-amd64.tar.gz) echo "
+    _edit(repo, "docker/fleet-worker/Dockerfile", libs + "9", libs + "8")
+    assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("release_manifest: docker/fleet-worker/Dockerfile pins sha256 8")
+    assert "for duckdb-shared-libs-linux-amd64.tar.gz of DuckDB 2.0.0" in err
+
 
 def test_main_refuses_a_manifest_without_its_release_files(capsys):
     with pytest.raises(SystemExit) as exit_info:
         release_manifest.main(["--version", VERSION])
     assert exit_info.value.code == 2
     assert "missing --commit, --jar, --pypi-json" in capsys.readouterr().err
+
+
+def test_release_json_carries_the_upgrade_path_and_the_rollback_rule(tmp_path, released):
+    jar, exes = released
+    pypi = tmp_path / "pypi.json"
+    pypi.write_text(json.dumps(_pypi()))
+    out = tmp_path / "release.json"
+    argv = ["--version", VERSION, "--commit", "c0ffee", "--jar", str(jar), "--pypi-json", str(pypi), "--out", str(out)]
+    for arch, path in exes.items():
+        argv += ["--qod-node-exe", f"{arch}={path}"]
+    assert release_manifest.main(argv) == 0
+    manifest = json.loads(out.read_text())
+    entry = next(e for e in release_manifest.read_upgrades() if e["version"] == VERSION)
+    assert manifest["min_from_version"] == entry["min_from_version"]
+    assert manifest["rollback_without_restore"] is entry["rollback_without_restore"]
+    assert manifest["rollback_blocked_by"] == entry["rollback_blocked_by"]
+    assert manifest["upgrade_notes"] == entry["notes"]
+    # Upgrading from min_from_version applies the steps of every release after it, in order.
+    versions = [step["version"] for step in manifest["upgrade_steps"]]
+    assert versions == sorted(versions, key=lambda v: tuple(int(p) for p in v.split(".")))
+    assert entry["min_from_version"] not in versions
+    assert "0.11.0" in versions
+    assert all(step["notes"].startswith("https://") for step in manifest["upgrade_steps"])
+
+
+def test_upgrade_fields_refuse_a_release_with_no_entry():
+    with pytest.raises(release_manifest.ManifestError, match="no entry for 9.9.9"):
+        release_manifest.upgrade_fields(release_manifest.read_upgrades(), "9.9.9")
+
+
+def _upgrades(repo: pathlib.Path) -> tuple[pathlib.Path, dict]:
+    path = repo / release_manifest.UPGRADES_FILE
+    return path, json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda d: d["releases"].reverse(), "is not after the release listed before it"),
+        (lambda d: d["releases"][0].update(rollback_blocked_by=[]), "rollback_blocked_by must name"),
+        (lambda d: d["releases"][1].update(rollback_blocked_by=["a column"]), "rollback_blocked_by must name"),
+        (lambda d: d["releases"][1].update(min_from_version="9.0.0"), "upgrades from a later release"),
+        (lambda d: d["releases"][0]["steps"][0].update(when="sometime"), "each step needs when"),
+        (lambda d: d["releases"][0].update(notes="CHANGELOG.md"), "needs a notes URL"),
+        (lambda d: d["releases"][0].update(version="0.11"), "is not a release number"),
+    ],
+)
+def test_read_upgrades_refuses_a_malformed_file(tmp_path, change, message):
+    repo = _fake_repo(tmp_path)
+    path, data = _upgrades(repo)
+    change(data)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(release_manifest.ManifestError, match=message):
+        release_manifest.read_upgrades(repo)
+
+
+def test_check_pins_refuses_a_tree_whose_release_has_no_entry(tmp_path, capsys):
+    repo = _fake_repo(tmp_path)
+    (repo / "version.sbt").write_text('ThisBuild / version := "9.9.9-SNAPSHOT"\n', encoding="utf-8")
+    assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
+    assert "has no entry for 9.9.9 (version.sbt)" in capsys.readouterr().err
+    assert release_manifest.main(["--check-pins"]) == 0
+    assert "upgrade paths:" in capsys.readouterr().out
+
+
+def _changelog(repo: pathlib.Path, name: str, body: str) -> None:
+    (repo / release_manifest.CHANGELOG_DIR / f"{name}.yaml").write_text(body, encoding="utf-8")
+
+
+_ADD_COLUMN = "databaseChangeLog:\n  - changeSet:\n      id: x\n      changes:\n        - addColumn:\n"
+_DROP_COLUMN = "databaseChangeLog:\n  - changeSet:\n      id: x\n      changes:\n        - dropColumn:\n"
+
+
+def _list_in_last_release(repo: pathlib.Path, name: str, rollback: bool = True) -> None:
+    path, data = _upgrades(repo)
+    data["releases"][-1]["changesets"].append(name)
+    if not rollback:
+        data["releases"][-1].update(rollback_without_restore=False, rollback_blocked_by=["drops a column"])
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_check_pins_refuses_a_changelog_file_no_release_lists(tmp_path):
+    repo = _fake_repo(tmp_path)
+    _changelog(repo, "0999-new-thing", _ADD_COLUMN)
+    with pytest.raises(release_manifest.ManifestError, match="no release lists 0999-new-thing"):
+        release_manifest.check_upgrades(repo)
+    _list_in_last_release(repo, "0999-new-thing")
+    release_manifest.check_upgrades(repo)
+
+
+def test_check_pins_refuses_a_release_listing_a_missing_or_shared_changelog_file(tmp_path):
+    repo = _fake_repo(tmp_path)
+    _list_in_last_release(repo, "0999-not-there")
+    with pytest.raises(release_manifest.ManifestError, match="does not hold"):
+        release_manifest.check_upgrades(repo)
+    repo = _fake_repo(tmp_path / "again")
+    _list_in_last_release(repo, "0055-drop-pool-lockdown")
+    with pytest.raises(release_manifest.ManifestError, match="is listed by both 0.11.0"):
+        release_manifest.check_upgrades(repo)
+
+
+def test_check_pins_refuses_a_one_way_change_in_a_release_that_rolls_back(tmp_path):
+    repo = _fake_repo(tmp_path)
+    _changelog(repo, "0999-drop-it", _DROP_COLUMN)
+    _list_in_last_release(repo, "0999-drop-it")
+    with pytest.raises(release_manifest.ManifestError, match="holds 'dropColumn'"):
+        release_manifest.check_upgrades(repo)
+    repo = _fake_repo(tmp_path / "declared")
+    _changelog(repo, "0999-drop-it", _DROP_COLUMN)
+    _list_in_last_release(repo, "0999-drop-it", rollback=False)
+    release_manifest.check_upgrades(repo)
+
+
+def test_a_comment_naming_a_one_way_change_is_not_one(tmp_path):
+    repo = _fake_repo(tmp_path)
+    _changelog(repo, "0999-additive", _ADD_COLUMN + "        # unlike a dropColumn, this keeps the old shape\n")
+    _list_in_last_release(repo, "0999-additive")
+    release_manifest.check_upgrades(repo)
+
+
+def test_add_release_appends_the_next_entry_once(tmp_path, capsys):
+    repo = _fake_repo(tmp_path)
+    last = release_manifest.read_upgrades(repo)[-1]
+    major, minor, patch = (int(p) for p in last["version"].split("."))
+    following = f"{major}.{minor}.{patch + 1}"
+    assert release_manifest.main(["--add-release", following, "--repo", str(repo)]) == 0
+    assert f"added {following}" in capsys.readouterr().out
+    entries = release_manifest.read_upgrades(repo)
+    assert entries[-1] == {
+        "version": following,
+        "changesets": [],
+        "min_from_version": last["min_from_version"],
+        "rollback_without_restore": True,
+        "rollback_blocked_by": [],
+        "notes": f"https://github.com/{launcher.GITHUB_REPO}/blob/v{following}/CHANGELOG.md",
+        "steps": [],
+    }
+    assert entries[:-1] == release_manifest.read_upgrades()
+    assert release_manifest.main(["--add-release", following, "--repo", str(repo)]) == 0
+    assert f"already lists {following}" in capsys.readouterr().out
+    assert len(release_manifest.read_upgrades(repo)) == len(entries)
+    assert release_manifest.main(["--add-release", "0.0.1", "--repo", str(repo)]) == 1
+    assert "is not after" in capsys.readouterr().err
+
+
+def test_upgrade_notes_state_the_path_the_rollback_and_this_releases_steps(capsys):
+    assert release_manifest.main(["--upgrade-notes", "0.11.0"]) == 0
+    one_way = capsys.readouterr().out
+    assert one_way.startswith("## Upgrading\n")
+    assert "Upgrades directly from **0.10.0** or later" in one_way
+    assert "**Does not roll back without a restore**" in one_way
+    assert "0055 drops qodstate_pool.lockdown" in one_way
+    assert "The manager refuses to boot until it is done." in one_way
+    assert release_manifest.main(["--upgrade-notes", "0.12.2"]) == 0
+    quiet = capsys.readouterr().out
+    assert "Rolls back to the previous release without a restore" in quiet
+    assert "Steps for this release" not in quiet
+    assert release_manifest.main(["--upgrade-notes", "9.9.9"]) == 1
+    assert "no entry for 9.9.9" in capsys.readouterr().err

@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Each release states its upgrade path and whether it rolls back without a restore, and the
+  manager enforces both at boot.** `release.json` and the release notes now carry
+  `min_from_version` (the oldest release that upgrades directly to it), the manual steps of every
+  release after it, `rollback_without_restore`, and what makes a rollback one way, from
+  `src/main/resources/release/upgrades.json`. A manager refuses to start when the control plane was
+  last run by a release older than its `min_from_version`, naming the release to go through, and
+  when a newer release changed the schema one way, naming the changesets it does not know and the
+  restore to run, instead of failing later on a missing column. Liquibase `0059` adds the
+  `qodstate_release` table these checks read. Only releases from this one on check: an earlier
+  one booted on a newer schema still fails as before. `release_manifest.py --check-pins` refuses a
+  changelog file no release lists, and a drop, rename or type change in a release that says it
+  rolls back (#221, #222, #223).
 - **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
   (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
   `QOD_DATA_EDGE_ENABLED=true` (config block `quack-data-edge`) serves four `GET` endpoints on the
@@ -107,6 +119,13 @@
   always move together. Switching, and switching back, is then "write the pin, restart", with no
   unit edit and no network; only the install needs the network. `deploy/host/README.md`
   describes the layout.
+- **The Docker images check every DuckDB archive they download before unpacking it (#230).** The
+  manager, node and fleet worker images unpack the DuckDB CLI and libduckdb only when
+  `sha256sum -c` matches the digest the Dockerfile pins for that release and architecture, the
+  same digests the qod CLI checks, and a `DUCKDB_VERSION` build arg with no pinned digest fails
+  the build. `release_manifest.py --check-pins` refuses a Dockerfile digest or `DUCKDB_VERSION`
+  default that disagrees with the qod CLI's, so a DuckDB bump updates the digests in
+  `launcher._DUCKDB_SHA256` and in the three Dockerfiles together.
 
 ### Fixed
 
@@ -116,6 +135,20 @@
   resolved dot segments, so nothing leaked, but the guard and the routes could read one path
   differently. Such a path now skips the API routes, with or without a credential, and answers
   404 (a module's static mount answers with its own 404 page, as before) (#239).
+- **Stopping the manager lets its running statements finish.** `qod stop`, Ctrl-C or SIGTERM on a
+  foreground `qod start` or `qod serve`, and `scripts/stop-jar.sh` signalled the manager and its
+  nodes at the same moment, so the nodes died under the statements the manager's drain was waiting
+  for (a FlightSQL client read `HTTP/1.1 header parser received no bytes`). The FlightSQL edge also
+  cancelled every call still running 3 s into the shutdown, before the drain began. Now the manager
+  gets SIGTERM first, alone: its FlightSQL edge refuses new calls while running ones finish and
+  stream their results, for up to `QOD_DRAIN_TIMEOUT_SEC` (60 s), and the manager then stops its
+  nodes itself. The stop prints that the manager is draining, waits for it to exit (the drain plus
+  20 s), signals only the nodes still left, and kills after `FORCE_AFTER` as before. With nothing
+  running the manager still exits within seconds; a long statement can make a stop take up to the
+  drain plus 20 s, and a lower `QOD_DRAIN_TIMEOUT_SEC` shortens that. A second Ctrl-C on
+  `qod start` still stops everything at once. Not covered yet: the native Quack front door (`:9494`) still closes its sessions when the
+  drain starts, and Ctrl-C on a foreground `scripts/run-jar.sh` still reaches the nodes together
+  with the manager (#221).
 - **A column policy on a branch pool reads the branch's own columns.** It read the parent's, so
   for a user under a column policy a `SELECT *` on the branch left out a column added on the
   branch, and failed on a column renamed there.

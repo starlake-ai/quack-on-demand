@@ -101,9 +101,30 @@ case "${TARGETARCH:-amd64}" in
   arm64) DUCKDB_ARCH=linux-arm64 ;;
   *)     echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;;
 esac
+# The sha256 of each DuckDB release asset this image downloads, one line per <version>/<asset>.
+# They must equal _DUCKDB_SHA256 in cli/src/qod_cli/launcher.py (scripts/release/release_manifest.py
+# --check-pins refuses a difference), and a DUCKDB_VERSION with no line here fails the build.
+duckdb_sha256() {
+  case "$1" in
+    2.0.0/duckdb-cli-linux-amd64.tar.gz) echo c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc ;;
+    2.0.0/duckdb-cli-linux-arm64.tar.gz) echo 859e1875d2a9515fbb4bf8871061437a14af82320da68c753f094c4b776348fe ;;
+    2.0.0/duckdb-shared-libs-linux-amd64.tar.gz) echo 993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1 ;;
+    2.0.0/duckdb-shared-libs-linux-arm64.tar.gz) echo c60eecf91143ca6bbac55c4f4d40dc22520488b0ac257c86e0fe9a2b451cf2b7 ;;
+  esac
+}
+# Downloads one release asset to a file and checks its sha256 before anything unpacks it.
+fetch_duckdb() {
+  digest="$(duckdb_sha256 "${DUCKDB_VERSION}/$1")"
+  if [ -z "$digest" ]; then
+    echo "no pinned sha256 for $1 of DuckDB ${DUCKDB_VERSION}: add it to duckdb_sha256 in this Dockerfile and to _DUCKDB_SHA256 in cli/src/qod_cli/launcher.py" >&2
+    exit 1
+  fi
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$1" \
+    -o "$2"
+  echo "$digest  $2" | sha256sum -c -
+}
 # DuckDB 2.x release assets are flat .tar.gz archives (duckdb-cli-*, duckdb-shared-libs-*).
-curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb-cli-${DUCKDB_ARCH}.tar.gz" \
-  -o /tmp/duckdb-cli.tar.gz
+fetch_duckdb "duckdb-cli-${DUCKDB_ARCH}.tar.gz" /tmp/duckdb-cli.tar.gz
 tar -xzf /tmp/duckdb-cli.tar.gz -C /usr/local/bin duckdb
 chmod +x /usr/local/bin/duckdb
 rm /tmp/duckdb-cli.tar.gz
@@ -113,8 +134,7 @@ rm /tmp/duckdb-cli.tar.gz
 # dynamically (DuckDB::LibraryVersion / ArrowConverter / etc.). The duckdb
 # CLI above is self-contained and does not provide a system-installed
 # libduckdb.so.
-curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb-shared-libs-${DUCKDB_ARCH}.tar.gz" \
-  -o /tmp/libduckdb.tar.gz
+fetch_duckdb "duckdb-shared-libs-${DUCKDB_ARCH}.tar.gz" /tmp/libduckdb.tar.gz
 mkdir -p /tmp/libduckdb
 tar -xzf /tmp/libduckdb.tar.gz -C /tmp/libduckdb
 install -m 0755 /tmp/libduckdb/libduckdb.so /usr/local/lib/libduckdb.so

@@ -1213,6 +1213,17 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
   grant or policy table, a new tenant ACL column, a new source of data folders) never invalidates
   cached verdicts, so nodes keep allowing for up to the verdict's 60 s. Attach it in the same changeset
   that creates it.
+- **List every new Liquibase changelog file in `src/main/resources/release/upgrades.json`**, under
+  the entry of the release it ships in (`changesets`), and set that entry's
+  `rollback_without_restore` false with a reason in `rollback_blocked_by` when the change is one way
+  (a drop, rename or type change, a new NOT NULL, a DuckDB or DuckLake bump that migrates
+  catalogs). `release_manifest.py --check-pins` (every pull request) refuses an unlisted file and a
+  drop, rename or type change under `true`. The same file is the boot's release gate
+  (`ReleaseGate`, around the core Liquibase apply in `Main`; rows `last_version` and `schema_floor`
+  of `qodstate_release`, Liquibase `0059`): a manager refuses a control plane last run by a release
+  older than its `min_from_version`, and one whose `schema_floor` (raised by a one-way release) is
+  above it. `release.sh` and release.yml's next-snapshot job add the next release's entry
+  (`--add-release`); release notes get its Upgrading block (`--upgrade-notes`).
 - **A node S3 secret is scoped to a data path and names every key.** DuckDB signs a URL with the
   secret of the longest matching scope, and httpfs fills any key a secret lacks from the session's
   `s3_*` settings. An unscoped or bucket-wide node secret would sign users' URLs with the node's keys

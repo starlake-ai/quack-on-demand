@@ -87,7 +87,8 @@ def _run_supervised(cmd: list[str], env: dict, teardown=None) -> int:
     teardown that orphans duckdb nodes on ports 21900+ (see "Things to avoid"
     in CLAUDE.md). Instead the child gets its own session, terminal signals
     land on this CLI alone, and the CLI answers with the stop sweep: SIGTERM
-    manager + nodes, bounded wait, SIGKILL escalation. SIGTERM/SIGHUP on the
+    the manager, wait for it to drain and exit, SIGTERM the nodes it left,
+    bounded wait, SIGKILL escalation. SIGTERM/SIGHUP on the
     CLI (kill, closed terminal) take the same path. Returns the manager's
     exit code, or 130 after an interrupt-triggered teardown."""
     if teardown is None:
@@ -154,10 +155,11 @@ def _run_supervised(cmd: list[str], env: dict, teardown=None) -> int:
 
 
 def _reap(proc: subprocess.Popen, grace: int | None) -> None:
-    """End the supervised manager after a teardown. `qod stop` returns once the manager's ports
-    and spawn scripts are gone, but the JVM still runs its own cleanup after its ports close (with
-    `--s3-path` it deletes the demo's run folder), so a completed teardown waits `grace` seconds
-    for it to exit on its own and kills it only past that. `grace=None` (a second interrupt)
+    """End the supervised manager after a teardown. `qod stop` waits for the manager to exit, for
+    its drain plus a margin, then for its ports and spawn scripts, but a manager past that budget
+    can still be running its own cleanup (with `--s3-path` it deletes the demo's run folder), so
+    a completed teardown waits `grace` seconds for it to exit on its own and kills it only past
+    that. `grace=None` (a second interrupt)
     kills at once, and so does an interrupt during the wait.
 
     The wait starts with a SIGTERM of its own: the teardown finds the manager only through its

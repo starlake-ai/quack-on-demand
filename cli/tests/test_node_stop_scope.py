@@ -183,6 +183,102 @@ def test_kill_quack_nodes_unmarked_stops_only_unmarked_nodes(tmp_path):
                 p.wait(timeout=20)
 
 
+# A manager stand-in that drains: on SIGTERM it logs, holds its ports for a while as a real manager
+# drains its statements, and exits, leaving its wrapper behind for the stop to find.
+_FAKE_MANAGER = r"""
+import signal, socket, sys, time
+log, ports = sys.argv[1], [int(p) for p in sys.argv[2:]]
+socks = []
+for p in ports:
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", p))
+    s.listen()
+    socks.append(s)
+def term(*_):
+    open(log, "a").write("manager-term\n")
+    time.sleep(2)
+    open(log, "a").write("manager-exit\n")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, term)
+open(log, "a").write("manager-up\n")
+while True:
+    time.sleep(0.1)
+"""
+
+# Named like the real wrapper, so the stop's marker pattern matches it.
+_FAKE_WRAPPER = """#!/bin/bash
+trap 'echo node-term >> "$LOG"; exit 143' TERM
+while :; do sleep 0.1; done
+"""
+
+_DRAIN_REST, _DRAIN_EDGE = 29981, 29982
+
+
+def _drain_world(tmp_path):
+    busy = subprocess.run(["lsof", "-nP", f"-iTCP:{_DRAIN_REST}", f"-iTCP:{_DRAIN_EDGE}",
+                           "-sTCP:LISTEN", "-t"], capture_output=True, text=True).stdout.strip()
+    if busy or _pgrep(rf"spawn-quack-node\.sh [0-9]+ {_DRAIN_REST}-"):
+        pytest.skip(f"ports {_DRAIN_REST}/{_DRAIN_EDGE} or their marker are in use on this host")
+    log = tmp_path / "order.log"
+    wrapper = tmp_path / "bin" / "spawn-quack-node.sh"
+    wrapper.parent.mkdir()
+    wrapper.write_text(_FAKE_WRAPPER)
+    mgr = subprocess.Popen([sys.executable, "-c", _FAKE_MANAGER, str(log), str(_DRAIN_REST),
+                            str(_DRAIN_EDGE)])
+    node = subprocess.Popen(["bash", str(wrapper), "23491", f"{_DRAIN_REST}-abcd1234"],
+                            env={"PATH": os.environ["PATH"], "LOG": str(log)})
+    assert _wait_for(lambda: log.exists() and "manager-up" in log.read_text())
+    assert _wait_for(lambda: _pgrep(rf"spawn-quack-node\.sh [0-9]+ {_DRAIN_REST}-"))
+    return log, mgr, node
+
+
+def _end(*procs):
+    for p in procs:
+        if p.poll() is None:
+            p.kill()
+        p.wait(timeout=20)
+
+
+def _stop_env():
+    return {"PATH": os.environ["PATH"], "QOD_ON_DEMAND_PORT": str(_DRAIN_REST),
+            "PROXY_PORT": str(_DRAIN_EDGE), "QOD_DRAIN_TIMEOUT_SEC": "5", "FORCE_AFTER": "5"}
+
+
+def test_qod_stop_lets_the_manager_drain_before_it_signals_the_nodes(tmp_path, monkeypatch):
+    # #221: the nodes were signalled with the manager, under the statements its drain waits for.
+    # The manager here is this test's child, so once it exits it is a zombie until reaped: the stop
+    # must read that as gone rather than wait out the drain budget.
+    from qod_cli.commands import stop as stop_cmd
+
+    log, mgr, node = _drain_world(tmp_path)
+    try:
+        for k, v in _stop_env().items():
+            monkeypatch.setenv(k, v)
+        started = time.monotonic()
+        stop_cmd._stop_manager_and_nodes()
+        assert log.read_text().splitlines() == ["manager-up", "manager-term", "manager-exit",
+                                                "node-term"]
+        assert time.monotonic() - started < 15
+    finally:
+        _end(mgr, node)
+
+
+def test_stop_jar_lets_the_manager_drain_before_it_signals_the_nodes(tmp_path):
+    log, mgr, node = _drain_world(tmp_path)
+    try:
+        started = time.monotonic()
+        res = subprocess.run(["bash", str(REPO / "scripts" / "stop-jar.sh")], env=_stop_env(),
+                             capture_output=True, text=True, timeout=120)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "stopping the manager first" in res.stdout
+        assert log.read_text().splitlines() == ["manager-up", "manager-term", "manager-exit",
+                                                "node-term"]
+        assert time.monotonic() - started < 15
+    finally:
+        _end(mgr, node)
+
+
 def test_kill_quack_nodes_refuses_conflicting_modes():
     # Exits on argument parsing, before any process lookup.
     res = subprocess.run(["bash", str(KILL), "--port", "1", "--unmarked"], capture_output=True,

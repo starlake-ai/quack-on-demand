@@ -399,6 +399,23 @@ final class FlightEdgeServer(
       override def appendToOutgoingHeaders(outgoing: CallHeaders): Unit =
         outgoing.insert("authorization", s"Bearer $peerId")
 
+  /** Refuse new calls and let the running ones finish: gRPC's orderly shutdown closes the listener
+    * and sends each connection a GOAWAY, while the executor and the sweeper keep serving the calls
+    * in progress. A statement runs inside its DoGet call, so a running one completes and streams
+    * its result. The manager's graceful shutdown calls this first and [[stop]] once its drain is
+    * over (#221): [[stop]] alone waits 3 s (Arrow's `close`) and then cancels every call still
+    * running, which cut every longer statement before the drain began.
+    */
+  def refuseNewCalls(): Unit =
+    if server != null then server.shutdown()
+
+  /** The calls running on a Flight thread or waiting for one: what a drain waits for, beside the
+    * statements the node load tracker counts.
+    */
+  def callsInProgress: Int =
+    val pool = executor
+    if pool == null then 0 else pool.getActiveCount + pool.getQueue.size
+
   def stop(): Unit =
     if sweeper != null then
       sweeper.shutdownNow()
