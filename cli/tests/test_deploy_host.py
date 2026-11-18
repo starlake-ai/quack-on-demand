@@ -61,7 +61,7 @@ def host(tmp_path):
     home.mkdir()
     etc = tmp_path / "etc"
     etc.mkdir()
-    (etc / "manager.env").write_text(
+    (etc / "qod.env").write_text(
         'QOD_PG_PASSWORD=not-for-the-download\nHTTPS_PROXY="http://proxy.internal:3128"\n'
     )
     env = {
@@ -110,7 +110,7 @@ def test_install_installs_caches_and_pins_the_first_version(host):
     assert result.returncode == 0, result.stderr
     assert (host.prefix / "versions" / "1.2.3" / ".qod-installed").is_file()
     assert host.pin.read_text() == "QOD_VERSION=1.2.3\n"
-    # As the service user, with the download-relevant keys of manager.env and nothing else.
+    # As the service user, with the download-relevant keys of qod.env and nothing else.
     assert host.lines(host.calls) == [
         "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 pg= leak="
     ]
@@ -215,10 +215,16 @@ def _unit():
 def test_the_unit_runs_the_pinned_cli_with_the_pinned_jar():
     text = UNIT.read_text()
     assert "EnvironmentFile=/etc/qod/version.env\n" in text
-    assert "EnvironmentFile=-/etc/qod/manager.env\n" in text
+    # The guide's settings file, required: a missing one must not start on the built-in defaults.
+    assert "EnvironmentFile=/etc/qod/qod.env\n" in text
     unit = _unit()
     assert unit["User"] == "qod"
     assert unit["KillMode"] == "mixed"
+    # The published single-server guide's settings (deploy-single-server.md, section 0.3).
+    assert unit["Restart"] == "always"
+    assert unit["StartLimitIntervalSec"] == "0"
+    assert unit["OOMPolicy"] == "continue"
+    assert unit["NoNewPrivileges"] == "true"
     # The drain and exit (60 + 20), the nodes' stop (10 + 2), the wait for the JVM (10).
     assert int(unit["TimeoutStopSec"]) > 60 + 20 + 10 + 2 + 10
     assert unit["SuccessExitStatus"] == "130"
