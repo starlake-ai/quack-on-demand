@@ -430,11 +430,11 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
-  // A column policy on the table itself makes the column rewriter expand the probe's `*`, and it
-  // cannot print such a name (JSqlParser splits "a.b" when the expansion is parsed again; see
-  // StarExpansion). The probe is refused, fail-closed, and the table answers the one 404 of a
-  // missing object, as on every door. Pinned so lifting that limit in the rewriter shows up here.
-  it should "hide its table from a holder of a column policy on that table" in {
+  // A column policy on the table itself makes the column rewriter expand the probe's `*`. The
+  // expansion prints the dotted column qualified (`"dotted"."a.b"`), which parses back as that one
+  // column, so the table is described and its rows are served, masked (#238; before, the probe
+  // was refused and the table answered the 404 of a missing object).
+  it should "be served, masked, to a holder of a column policy on that table" in {
     val maskDotted =
       RoleColumnPolicy("cp-mask-d", "r-1", "*", "main", "dotted", "c_email", "mask", Some("'***'"))
     for kc <- AllKinds do
@@ -444,10 +444,11 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
           permissions = grant(kc.catalog, "main", "dotted") :: grants(kc),
           columnPolicies = List(maskDotted)
         ) { h =>
-          val missing = h.table("acme", db(kc), "main", "no_such_table", req()).unsafeRunSync()
-          h.table("acme", db(kc), "main", "dotted", req()).unsafeRunSync() shouldBe missing
-          h.rows("acme", db(kc), "main", "dotted", req()).unsafeRunSync().left.map(_._1) shouldBe
-            Left(StatusCode.NotFound)
+          h.table("acme", db(kc), "main", "dotted", req()).unsafeRunSync().isRight shouldBe true
+          h.rows("acme", db(kc), "main", "dotted", req())
+            .unsafeRunSync()
+            .map(ok => parse(ok.body).toOption.get) shouldBe
+            Right(Json.arr(Json.obj("a.b" -> Json.fromInt(1), "c_email" -> Json.fromString("***"))))
         }
       }
   }

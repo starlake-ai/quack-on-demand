@@ -1614,9 +1614,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  // JSqlParser splits a quoted dotted column name when it parses the expansion again
-  // (`c."price.usd"` came out as `"price"."usd"`, another column): refused, never printed.
-  it should "refuse a column whose name holds a dot rather than print another column" in:
+  // JSqlParser's `Column(table, name)` splits a dotted name (`"price"."usd"`, another column); the
+  // expansion is printed qualified, `c."price.usd"`, which parses back as that one column (#238).
+  it should "expand a column whose name holds a dot as that one column" in:
     val (router, capturedSql, _) = setupWithRewriter(
       new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
         new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
@@ -1634,8 +1634,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         Some(effWithPolicies(List(maskCustomerEmailCls)))
       )
       .unsafeRunSync()
-    out.left.toOption.get.reason should include("holds a dot")
-    capturedSql() shouldBe ""
+    withClue(out.toString)(out.isRight shouldBe true)
+    capturedSql() should include("c.\"price.usd\"")
+    capturedSql() should not include "\"price\".\"usd\""
+    capturedSql() should not include "c.c_email"
 
   // `c.to_json()` is `to_json(c)`: the whole row of customer, c_email raw.
   "a method call on a masked table's binding" should "be denied before the node" in:
