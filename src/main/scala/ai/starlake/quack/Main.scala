@@ -65,6 +65,7 @@ import ai.starlake.quack.ondemand.state.{
   PatStore,
   PostgresControlPlaneStore,
   PostgresDbAdmin,
+  ReleaseGate,
   UserStore
 }
 import cats.effect.{ExitCode, IO, IOApp}
@@ -422,7 +423,17 @@ object Main extends IOApp with LazyLogging:
         sys.exit(1)
       case Right(()) => ()
 
+    // The release gate (#221, #222): refuse a jump past this release's min_from_version, and a
+    // schema a newer release changed one way, before Liquibase touches anything; record this
+    // release once the schema is applied.
+    val releaseGate = ReleaseGate.fromDefaultMetastore(mgrCfg0.defaultMetastore.asMap)
+    releaseGate.check() match
+      case Left(message) =>
+        println(message)
+        sys.exit(1)
+      case Right(notes) => notes.foreach(System.err.println)
     LiquibaseRunner.fromDefaultMetastore(mgrCfg0.defaultMetastore.asMap).run()
+    releaseGate.record()
 
     // The session JWT secret: QOD_SESSION_JWT_SECRET when set, else the control plane's, created by
     // the first boot (so it needs the schema applied just above). The rest of the boot runs in

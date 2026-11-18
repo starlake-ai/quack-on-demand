@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0059-release-gate
+      author: qod
+      changes:
+        # Issues #221 and #222: what the boot's release gate (ReleaseGate) reads before Liquibase
+        # runs and writes after it. Row `last_version`: the release of the last manager that
+        # applied the schema (a jump past a release's min_from_version is refused on it). Row
+        # `schema_floor`: the oldest release that can run on this schema, raised by a release whose
+        # migrations are one way (rollback_without_restore false in release/upgrades.json), so an
+        # older manager refuses the schema at boot instead of failing later on a missing column.
+        # Not a policy table: no policy-version trigger.
+        - createTable:
+            tableName: qodstate_release
+            columns:
+              - column: { name: name, type: text, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: value, type: text, constraints: { nullable: false } }
+              - column: { name: updated_at, type: timestamptz, defaultValueComputed: "now()", constraints: { nullable: false } }
