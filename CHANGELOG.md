@@ -104,6 +104,10 @@
 - **A refused connect to a node names no node address to clients** (the manager log has it), and
   marks the node `unreachable`, not `statement_failed`, since nothing was sent; a refused session
   handle on a statement is reported as the probe reports it.
+- **A node's HTTP error names no node address to clients either.** A node answering a status other
+  than 200 reached FlightSQL, MCP and data edge clients as `HTTP 503 from Quack node at
+  http://<host>:<port>/quack`; it now reads `HTTP 503 from Quack node`, and the manager log keeps
+  the address.
 - A user with a row policy on a table now reads it at the snapshot its time-travel clause names
   (`SELECT * FROM customer AT (TIMESTAMP => '...')`, `AT (VERSION => n)`), filtered, under the
   name-history rule of the data edge entry above. Until now the row filter dropped the clause, so
