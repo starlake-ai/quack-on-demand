@@ -102,8 +102,8 @@ std::string TableColumnName(duckdb::TableCatalogEntry &table, const std::string 
 //! path, since a view selecting `rowid AS rid` plans like the rewriter's wrap) read `statement_text`,
 //! parsed again with DuckDB's Parser (an EXECUTE's prepared statement included): DuckDB moves the parsed
 //! arguments out while binding. A plan holding a search call that the text does not show (no text, a
-//! view or macro body calling it) is refused. Rule 4's refusals (AT (TIMESTAMP), the transaction's own
-//! writes) are ResolveSnapshotView's, which the hook calls after this. `pool` is the handle's
+//! view or macro body calling it) is refused. Rule 4's refusal (AT (TIMESTAMP)) is ResolveSnapshotView's,
+//! which the hook calls after this (a transaction's own writes are searched, Task 14). `pool` is the handle's
 //! `tenant/tenantDb/pool`, empty off a quack session.
 std::vector<SearchCall> FindSearchCalls(duckdb::ClientContext &context, duckdb::LogicalOperator &plan,
                                         const std::string *statement_text, const std::string &pool);
@@ -118,8 +118,8 @@ void JudgeSearchText(duckdb::ClientContext &context, duckdb::LogicalOperator &pl
 //! <bundle_root>/.qod_search/<index_id>/<bundle_key>.seg (spec 6.2), `bundle_key` being Task 6's
 //! DataFileRef::bundle_key (the lowercase hex SHA-256 of the data file's absolute path as the target
 //! scan opens it, owner ruling 2026-11-14; no ruled call returns data_file_id). `bundle_root` comes from
-//! the index's own record (6.1), carried by the verdict (Task 9), never from the node's dataPath (a
-//! branch node's dataPath is its sibling prefix).
+//! the index's own record (6.1), read through the record route (IndexRecordFor), never from the node's
+//! dataPath (a branch node's dataPath is its sibling prefix).
 std::string SegmentPath(const std::string &bundle_root, const std::string &index_id, const std::string &bundle_key);
 
 } // namespace qod::search

@@ -85,11 +85,11 @@ front door on `:9494`, and the fifth, the node verdict listener, are described a
 2. **Arrow FlightSQL edge** on `:31338` ([FlightEdgeServer.scala](src/main/scala/ai/starlake/quack/edge/FlightEdgeServer.scala) → [FlightProducerImpl.scala](src/main/scala/ai/starlake/quack/edge/FlightProducerImpl.scala) → [FlightSqlRouter.scala](src/main/scala/ai/starlake/quack/edge/FlightSqlRouter.scala)). TLS is on by default, cert auto-generated at `certs/server-{cert,key}.pem` if missing.
 3. **Quack nodes** on `:21900-22500` - child processes spawned by [scripts/spawn-quack-node.sh](scripts/spawn-quack-node.sh) (local mode) or pods ([KubernetesQuackBackend.scala](src/main/scala/ai/starlake/quack/ondemand/runtime/KubernetesQuackBackend.scala)). Each node is a qod-node process (see "qod-node" below) serving DuckDB Quack, with a metastore env-var contract: `TenantDb.NodeEnvKeys` = `pgHost / pgPort / pgUser / dbName / catalogAlias / schemaName / dataPath / encrypted / createDatabase`, and nothing else of a metastore (tenant-admin input: `BASH_ENV`, `PATH` or `QOD_NODE_BIN` there once ran commands as the launcher's user). Every launcher passes only those keys and the metastore's own secrets (local spawn env, Kubernetes pod env, fleet assignment env, and `qod fleet join`'s overlay, `_NODE_ENV_KEYS`), dropping any other key with one ERROR per pool and key that says how to remove it (`NodeMetastore`); `database/create`, `database/update` and a manifest import refuse a key outside `TenantDb.KnownMetastoreKeys` (those minus the manager-stamped `encrypted`, plus `pgPassword` / `encryptionKey`) with `400 invalid_metastore_key` before writing anything, except that `database/update` takes a secret-named one (`TenantDb.SecretKeys`: no response shows it, an update leaving it out keeps it) sent empty, which removes it (`TenantDb.metastoreUpdateKeyError`). A manifest export leaves such keys out, one ERROR each, so it always imports back; it drops an encryption key silently, in any spelling (no export carries one). The secrets (`pgPassword`, `encryptionKey`, federation and object-store SQL, the node token and the node key: `NodeSecretFiles.Keys`) arrive as files under `QOD_SECRETS_DIR`, never as env vars, and the catalog password then rides a temporary DuckDB secret, never an ATTACH string (`CatalogPgSecret`). **`spawn-quack-node.sh` (or `spawn-quack-node.ps1` on Windows) is invoked by [LocalQuackBackend.scala](src/main/scala/ai/starlake/quack/ondemand/runtime/LocalQuackBackend.scala) - don't run it directly.** `LocalQuackBackend.defaultCommand` picks the script by OS: bash on Unix, `powershell.exe -File spawn-quack-node.ps1` on Windows (path from `spawnScriptWindows` / `QOD_SPAWN_SCRIPT_WINDOWS`).
 
-4. **Native Quack protocol front door** on `:9494` ([QuackFrontDoorServer.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackFrontDoorServer.scala) → [QuackFrontDoor.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackFrontDoor.scala)): what a DuckDB client `ATTACH 'quack:host:9494' AS qod (TYPE quack, TOKEN 'tenant=..&pool=..&user=..&password=..')`es to. The token is the FlightSQL JDBC query string; the handshake is the Flight edge's ([EdgeHandshake.scala](src/main/scala/ai/starlake/quack/edge/EdgeHandshake.scala)); each statement runs through `FlightSqlRouter.executeWith` (the pipeline generalized over the node call) and is relayed to one raw node connection per statement ([QuackNodeLink.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackNodeLink.scala)), the node's result bytes going back to the client untouched. Every PREPARE a link sends follows a fresh session handle (see "qod-node" below); any failure on a client transaction's link (a handle that fails, a statement lost in transport) ends that transaction like an admin kill (the link is disconnected, the pin dropped, the statement and every later one answered with an aborted-transaction error until the client's ROLLBACK, which is served on a fresh link; a client COMMIT lost after it was sent is answered as of unknown outcome instead), because the transaction cannot go on there: DuckDB 2.0 refuses every statement but ROLLBACK and COMMIT in an aborted transaction, the handle's CALL included, and a statement lost in transport may have run; anywhere else a refused handle is a retryable failure. Statements calling a `duckdb_*()` catalog function are soft-pinned to the node that served the session's previous one (`QuackSession.catalogNode`): the client joins its ATTACH-time schema and table listings on per-process oids, so split across nodes they yield a catalog with no tables. The manager never encodes DuckDB chunks; [QuackWire.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackWire.scala) parses only headers and the small request messages and speaks Quack protocol 3 only (DuckDB 2.0 clients; a 1.x client gets `requires a DuckDB 2.0 client`). It admits a 2.0 client's `BEGIN TRANSACTION` and its INSERT data path (`scan_data_from_quack_client`, scoped to that client's own connection). Config block `quack-native` (`QOD_QUACK_*`), TLS off by default because the DuckDB client only speaks plain HTTP to loopback hosts. `QuackCompatibilitySpec` drives the real `duckdb` CLI and Python client end to end (cancelled without `duckdb` on PATH). Design: docs/superpowers/specs/2026-09-20-native-quack-front-door-design.md.
+4. **Native Quack protocol front door** on `:9494` ([QuackFrontDoorServer.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackFrontDoorServer.scala) → [QuackFrontDoor.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackFrontDoor.scala)): what a DuckDB client `ATTACH 'quack:host:9494' AS qod (TYPE quack, TOKEN 'tenant=..&pool=..&user=..&password=..')`es to. The token is the FlightSQL JDBC query string; the handshake is the Flight edge's ([EdgeHandshake.scala](src/main/scala/ai/starlake/quack/edge/EdgeHandshake.scala)); each statement runs through `FlightSqlRouter.executeWith` (the pipeline generalized over the node call) and is relayed to one raw node connection per statement ([QuackNodeLink.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackNodeLink.scala)), the node's result bytes going back to the client untouched. Every PREPARE a link sends follows a fresh session handle (see "qod-node" below); any failure on a client transaction's link (a handle that fails, a statement lost in transport) ends that transaction like an admin kill (the link is disconnected, the pin dropped, the statement and every later one answered with an aborted-transaction error until the client's ROLLBACK, which is served on a fresh link; a client COMMIT lost after it was sent is answered as of unknown outcome instead), because the transaction cannot go on there: DuckDB 2.0 refuses every statement but ROLLBACK and COMMIT in an aborted transaction, the handle's CALL included, and a statement lost in transport may have run; anywhere else a refused handle is a retryable failure. Statements calling a `duckdb_*()` catalog function are soft-pinned to the node that served the session's previous one (`QuackSession.catalogNode`): the client joins its ATTACH-time schema and table listings on per-process oids, so split across nodes they yield a catalog with no tables. The manager never encodes DuckDB chunks; [QuackWire.scala](src/main/scala/ai/starlake/quack/edge/quack/QuackWire.scala) parses only headers and the small request messages and speaks Quack protocol 3 only (DuckDB 2.0 clients; a 1.x client gets `requires a DuckDB 2.0 client`). It admits a 2.0 client's `BEGIN TRANSACTION` and its INSERT data path (`scan_data_from_quack_client`, scoped to that client's own connection). A DuckDB client opens its remote transaction only at its first read of the attached catalog, not at its own `BEGIN`: after a `BEGIN` followed only by statements it sends whole (`quack_query_by_name`), each of those runs and commits on its own and a `ROLLBACK` undoes none of them, so a transaction that must hold them reads a table of the attached catalog first. Config block `quack-native` (`QOD_QUACK_*`), TLS off by default because the DuckDB client only speaks plain HTTP to loopback hosts. `QuackCompatibilitySpec` drives the real `duckdb` CLI and Python client end to end (cancelled without `duckdb` on PATH). Design: docs/superpowers/specs/2026-09-20-native-quack-front-door-design.md.
 
    The manager-to-node native client (libquackwire, on by default) holds a heartbeat lease on each node connection: `QOD_QUACK_NODE_LEASE_SEC` (default 30, floor 1; a heartbeat goes out every third of it). Node connections are released on error and on cancel. It is the only manager-to-node client: there is no embedded fallback.
 
-5. **Node verdict listener** on the REST port + 1 (`QOD_INTERNAL_PORT`, `quack-on-demand.nodeAuthz.internalPort`; the chart's 20901; [NodeInternalServer.scala](src/main/scala/ai/starlake/quack/edge/authz/NodeInternalServer.scala)): the only place serving `POST /api/internal/authz/decide` and `/credentials`, in plain HTTP, so clients filling the REST port's slots cannot stop authorization. It binds loopback for a loopback decide URL, the URL's own address when that is a literal address of this host, else the REST bind address (`BootPreflight.internalBindHost`; no name is looked up). A call's body, up to 1 MiB, is read before its signature can be checked, as the signature covers it, so a client that reaches this port can hold a slot and about 1.4 MiB of heap per connection: at most 256 slots (`QOD_INTERNAL_MAX_CONNECTIONS`), a 5 s body deadline, a 10 s idle timeout. Keep clients off this port with the network: filling it stops authorization, and on Kubernetes with no NetworkPolicy any pod reaches it. `BootPreflight.checkInternalPort` refuses a port equal to another listener's or in the node port range.
+5. **Node verdict listener** on the REST port + 1 (`QOD_INTERNAL_PORT`, `quack-on-demand.nodeAuthz.internalPort`; the chart's 20901; [NodeInternalServer.scala](src/main/scala/ai/starlake/quack/edge/authz/NodeInternalServer.scala)): the only place serving `POST /api/internal/authz/decide` and `/credentials`, and QoD Search's `POST /api/internal/search/records` (below), in plain HTTP, so clients filling the REST port's slots cannot stop authorization. It binds loopback for a loopback decide URL, the URL's own address when that is a literal address of this host, else the REST bind address (`BootPreflight.internalBindHost`; no name is looked up). A call's body, up to 1 MiB, is read before its signature can be checked, as the signature covers it, so a client that reaches this port can hold a slot and about 1.4 MiB of heap per connection: at most 256 slots (`QOD_INTERNAL_MAX_CONNECTIONS`), a 5 s body deadline, a 10 s idle timeout. Keep clients off this port with the network: filling it stops authorization, and on Kubernetes with no NetworkPolicy any pod reaches it. `BootPreflight.checkInternalPort` refuses a port equal to another listener's or in the node port range.
 
 **Limits on unauthenticated work** (docs/superpowers/specs/2026-11-01-unauthenticated-work-limits-design.md). `BoundedBody` reads a request body under a size and a time limit on REST, MCP and the node routes, in arrays of at most 64 KiB while it arrives (G1 gives a larger array whole regions, so one growing array cost twice its size while a client stalled), and refuses JSON nested past 256 levels (`BoundedBody.MaxNesting`, REST `400 json_too_deep`): circe's failure message prints the value it refused, its printer recurses per level and a `StackOverflowError` is fatal under `IOApp`, so 8 KB of `[[[...]]]` halted the JVM, inside any size limit and inside Tapir, where nothing can catch it. A request reading a body before a credential (:9494, public REST routes, node routes) refuses chunked framing with 411 before pulling it, as Ember rescans a chunk-size line per read. REST (`quack-on-demand.restLimits`, `QOD_REST_*`) applies it inside `apiKeyGuard`: 64 KiB on core public routes and 1 MiB on a module's public route (`QOD_REST_MAX_MODULE_PUBLIC_BODY_BYTES`), both read before the route; 16 MiB, after admission, everywhere else under `/api` and on `/mcp`; the guard reads no body outside `/api` (`/mcp` applies the limit itself), so a module route that reads one lives under `/api`. :9494 (`QuackBodyRead`) reads the message header first: a CONNECTION_REQUEST gets 64 KiB and 30 s, a message naming a live session 256 MiB (`QOD_QUACK_MAX_BODY_BYTES`) and 300 s (`QOD_QUACK_CONNECT_BODY_TIMEOUT_SEC` <= `QOD_QUACK_BODY_TIMEOUT_SEC` <= 86400, refused at boot otherwise), and anything else is answered from the bytes already read; with TLS on, its reads have a 60 s deadline, as Ember runs the handshake before its own timeouts start. `QuackCredentials` refuses a token of more than 32 `key=value` pairs before it decodes any.
 
@@ -308,7 +308,8 @@ in `edge/policy`, decision 27: a quoted identifier holding a dot, a catalog-reac
 `query()` / `query_table()` or a SQL-valued SET, an ambiguous two-part name headed by an attached
 catalog, a batch that moves the schema or search path, and a policy rewrite reaching anything the
 original did not, `RewriteScope`); for every caller, a client data scan off the native front door
-(`FlightSqlRouter.clientDataScanRefusal`); and, for a principal the metadata filter narrows, a COPY
+(`FlightSqlRouter.clientDataScanRefusal`); for every caller, superusers included, a star or whole-row
+reference in a statement calling a search function (`SearchStarScreen`, see QoD Search); and, for a principal the metadata filter narrows, a COPY
 it cannot read alone (`FlightSqlRouter.copyListingRefusal`). For tenant principals the gateway rewrites `DESCRIBE`,
 `SHOW <table>`, `PRAGMA table_info` / `show`, `SUMMARIZE <table>` and (when the metadata filter
 narrows) `SHOW TABLES` into SELECTs over the filtered listings plus a read of the object
@@ -558,7 +559,8 @@ outcome=allow|refuse|unavailable, mode=qod|opa}` and the distribution
 and calls refused by authentication or as malformed, are not decisions. The bounded caches report
 Micrometer's Caffeine meters (`cache_size`, `cache_gets_total{result=hit|miss}`,
 `cache_evictions_total`, ...) under `cache` = `qod_minted_handles`, `qod_issued_handles`,
-`qod_dry_run_results`, `qod_effective_sets` and `qod_opa_decisions` (the last only while
+`qod_search_system_handles` (QoD Search, below), `qod_dry_run_results`, `qod_effective_sets` and
+`qod_opa_decisions` (the last only while
 `QOD_OPA_CACHE_TTL_SEC` > 0), plus `qod_cache_capacity{cache}`, their configured bound
 (`CacheMetrics`); these are per replica, so sum them across replicas. Each node answers
 `system.main.qod_authz_stats()` (one row of BIGINT columns since node start: `plan_cache_hits`,
@@ -661,6 +663,240 @@ image ships the vendored binary and libduckdb in `/opt/qod-node`, and no DuckDB 
 locally: `cmake -S native/qod-node -B native/qod-node/build -DQOD_NODE_TESTS=ON
 -DDUCKDB_HOME=<.duckdb/2.0.0, with include/>`, then `DUCKDB_CLI=<release duckdb> ctest --test-dir
 native/qod-node/build`; forked Scala tests use that build (build.sbt sets `QOD_NODE_BIN`).
+
+### QoD Search (Phase 1: off in every shipped build, branch unmerged)
+
+Full-text search over DuckLake tables, decided and run on the node like any statement. **Status:** this
+lives on `search/phase1`, unmerged until Phase 2 (owner ruling D2). The CMake option `QOD_NODE_SEARCH`
+(default OFF) links the Rust library `qod_search_core` (`native/qod-search`, Tantivy; Rust pinned by its
+`rust-toolchain.toml`, 1.96.1, which `native/qod-node/CMakeLists.txt` reads into Corrosion v0.6.1; CMake
+3.22), and every shipped qod-node is built OFF: the manager pieces below ship, no shipped node registers
+a search function. `qod-node --build-info` prints ` search=on` or ` search=off` after its marker (the
+marker itself unchanged); the node image build fails on a binary of the other setting than its `ARG
+QOD_NODE_SEARCH` (OFF). `scripts/release/check-release-pins.sh` (also run by `qod-node.yml`'s `pin` job)
+refuses, naming file and line, any qod-node configure in a workflow or a script that does not name
+`-DQOD_NODE_SEARCH` exactly once, an ON one outside a `build-search*` tree (and any ON in
+`refresh-qod-node-binaries.sh`), the library's test hooks outside a `build-search-hooks*` tree, a
+`build-release` configure without `-DCMAKE_OSX_DEPLOYMENT_TARGET=15.0`, an upload from a
+`build-search*` tree, a `release.yml`, `qod-node.yml` or node Dockerfile not naming
+`QOD_NODE_SEARCH=OFF`, and a CMakeLists whose option does not default to OFF. The node's C++ test hooks compile
+only into the test programs' core (`QOD_NODE_TEST_HOOKS`); a test checks qod-node carries none. Every
+binary that links the library ships its notices (`THIRD-PARTY-NOTICES-qod-search.txt` beside the
+vendored binaries, copied by build.sbt, installed by the node image), generated from `Cargo.lock` and
+the toolchain's standard library by `scripts/release/search-third-party-notices.py` into
+`native/qod-search/THIRD-PARTY-NOTICES.txt` (`--check` fails on a difference or on a license that
+`native/qod-search/allowed-licenses.txt` does not allow). Design:
+docs/search/2026-11-13-search-parity-design.md; the Phase 1 record is docs/search-PHASE1.md.
+
+**The functions** (search build only; classified in `function-classes.tsv`): `qod_search(input, table,
+columns, query, k := NULL, query_json := NULL)` -> `(rowid, score, rank)`, the exact BM25 top k (k
+from 1 to `QOD_SEARCH_MAX_K`; none or NULL is `min(10, QOD_SEARCH_MAX_K)`; `query_json` is refused
+`search_query_unsupported`), and `qod_search_matches(input, table, columns, query, query_json := NULL,
+with_score := false)` -> `(rowid, score)`, every match, streamed. A client joins back on `rowid`:
+`SELECT p.id, h.score FROM qod_search((SELECT rowid FROM t), 't', ['body'], 'duck') h JOIN t p ON
+p.rowid = h.rowid ORDER BY h.rank`. k1 and b are fixed at 1.2 and 0.75 through Phase 1 (owner ruling
+D10). `SearchFunctions.Names` (the gateway's one detector, `callsSearch`, over DuckDB's tokens, which
+over-includes and so fails closed) holds those two plus the reserved `qod_knn` and `qod_hybrid`, which
+no node registers yet; `qod_snippet` is not a search function (ruling 15). **The governed input** (spec 4.2,
+the lineage check, `search_lineage.cpp`, in a `post_bind` hook registered after qod-node's own, so only
+after the verdict admitted the plan): the first argument is a subquery whose one output column traces,
+through bound column references in projections and filters only, to the `rowid` of a `ducklake_scan`
+of the very table `table` names, as DuckDB resolves it (rules 1, 2); no view, join, table function,
+`query()` / `query_table()` on its FROM path, and no search call inside a `query()` literal or a view
+or macro body, at any depth (`search_input_not_governed`, `search_input_wrong_table`); `table` and
+`columns` constant (rule 7, `search_argument_not_constant`); not on a branch (rule 9,
+`search_branch_unsupported`); `AT (VERSION => n)` is read at `n`, `AT (TIMESTAMP => ...)` refused
+(rule 4, `search_at_timestamp_unsupported`, ruling 1). The hook then reads the target's DuckLake table
+id live at the client's snapshot (its oid must be the scanned table's), its index record (none or
+disabled: `search_index_unavailable`), each call column's field id by its current name
+(`search_columns_unsupported`), the population and the snapshot view. `qod_search_build_segment` is
+classed superuser and the node admits it for the system principal only, on a quack session (`QoD:
+function qod_search_build_segment is superuser-only` to anyone else), and refuses an encrypted DuckLake
+(`search_encrypted_unsupported`) before reading a row.
+
+**Populations** (spec 7.5, rules 5 and 8): the BM25 statistics run over the table (`table`) or over the
+rows the principal may see (`allowed`), chosen by the decider and carried per call in the signed plan
+verdict (`SearchPopulation(call, population)`; the verdict carries nothing of the index record, ruling
+18). `AuthzDecider` makes it `allowed` when a row policy of the principal may cover the table, read on
+the table part alone, OPA tenants included; it requires each search column to be a direct object read
+the plan rules judged, and refuses one a column policy may cover (rule 5). Superusers, the system
+principal and connections off a quack session get `table` and make no decide call. A tenant principal's
+search with no population in its verdict is refused `search_population_missing`. Search refusals of the
+decide route that mean a node or manager bug (no pool a search can run on, an unreadable search
+description) answer 503, never a denial.
+
+**Bundles** (spec 6.2, 13): one per DuckLake data file, written by `qod_search_build_segment` at
+`<bundleRoot>/.qod_search/<indexId>/<pathKey>.seg`, `pathKey` the lowercase hex SHA-256 of the data
+file's path as the target scan opens it (`SearchHandlers.pathKeyOf` agrees), published by a temporary
+file and a rename on a local path and by one direct put on an object store; all bundle I/O goes through
+DuckDB's FileSystem, the Rust core does none. Format 3 (`QS_BUNDLE_FORMAT_VERSION` =
+`SearchIndex.BundleFormatVersion`): one Tantivy field per index field, `f<fieldId>`, then a 32-byte
+HMAC-SHA256 over the label `qod-search-bundle|v3|<indexId>|<pathKey>`, 0x0A and the body, under the
+index's key `NodeKeys.searchBundleMacKey(indexId)` = HMAC-SHA256(node-key secret,
+`"qod-search-bundle-mac/v1|" + indexId`) (golden file `native/qod-node/tests/golden/search-mac-v1.txt`,
+shared by the Rust and Scala tests; an all-zero key is refused). The MAC is checked in constant time
+before any other byte is read. Every refusal (MAC mismatch, an earlier format, a mismatch, corrupt,
+larger than `QOD_SEARCH_MAX_BUNDLE_BYTES` by its size read first, unreadable) takes one path: the bundle
+reads as missing and its data file is searched as unindexed, so no answer differs by the reason.
+Rotating the node-key secret makes every bundle read as missing until rebuilt, never wrong; unless
+`QOD_NODE_KEY_SECRET` is pinned, a reader of the control plane can derive every index key and forge
+bundles, as it can mint handles.
+
+**The registry** (Liquibase `0059-search-index`, deliberately off the policy-version trigger: an index
+changes no permission): `qodstate_search_index` (unique on `(tenant_db_id, table_id)`; `fields` JSON of
+`{column, fieldId}`, the DuckLake field ids binding them; `bundle_root`, the tenant-db's data path at
+create; `state` `ready` | `disabled`; `segments_version`, moved by every segment written),
+`qodstate_search_segment` (`(index_id, path_key)`) and `qodstate_search_index_tombstone` (a dropped
+index's bundle root, kept for Phase 2's bundle GC; D3). The index pins the DuckLake table id (review M9):
+a rename keeps it, a drop disables it (`list` computes `disabled` for its answer and writes nothing),
+and a table created again under the name is another table. REST `POST
+/api/search/index/{create,list,delete,build}` (`SearchEndpoints`, `SearchHandlers`, over
+`SearchIndexService` and `SearchIndexStore`): a session or a PAT (a non-admin's profile session reads
+`403 admin_required`), the tenant scope, the PAT's database and pool axes (`403 token_scope`); create
+refuses, in order, `404 not_found`, `400 search_branch_unsupported`, `400 search_ducklake_only`, `400
+search_encrypted_unsupported`, `400 invalid_name`, `400 invalid_search_options` (any `options`, `k1` or
+`b` key), `400 invalid_search_columns` (1 to 32 distinct), `503 catalog_unavailable`, `404
+table_not_found`, `400 search_column_not_found`, `400 search_column_type` (VARCHAR only), `409
+search_no_data_path`, `409 search_index_exists`; delete names the table's current name or `indexId`,
+exactly one (`400 invalid_search_target`); `bundleRoot` is shown to superusers only. `build` is the
+interim operator tool until the indexer (D7), superuser only (`403 superuser_required`): on the named
+pool, as the system principal, it flushes the table's inlined rows, lists the live data files and runs
+one `qod_search_build_segment` per file over the table's own scan (fields projected by field id, never
+`read_parquet` by name), writing a segment row each; a file holding deleted rows is `409
+search_build_deleted_rows`, rowids that are no position plus one offset `409 search_build_nonaffine`;
+audited with actor `system` and `requestedBy`. CLI `qod search create-index | list-indexes | drop-index
+| build`; MCP `create_search_index`, `list_search_indexes`, `drop_search_index` (no build tool:
+`McpCoverageSpec` exclusion); the manifest's optional per-database `searchIndexes` (refuses `options`,
+`k1`, `b` and an index id stored with another tenant-db, table, fields or bundle root; inserting an id
+clears its tombstone). A tenant-db delete and a tenant delete tombstone their indexes in the same
+transaction. Accepted residual: importing `branchOf` onto an indexed row leaves stale index rows until
+that branch's teardown.
+
+**Records reach nodes by a signed per-node fetch** (owner ruling D4, review I1): `POST
+/api/internal/search/records` (`SearchRecordRoute`), on the verdict listener only, never on the REST
+port, in OpenAPI, CLI parity or MCP. Signed like the credentials route (`X-QoD-Node`,
+`X-QoD-Signature` over the body, checked first); body `{"handle","tables":[{"catalog","tableId","name"}]}`,
+1 to 16 tables, at most 64 KiB; the handle must verify for that node, be unexpired and be one this
+replica minted for that node: a superuser's or tenant user's in `IssuedHandles`, the system principal's
+in `SearchSystemHandles` (4096 entries, kept the handle lifetime plus the decide grace, meter
+`cache=qod_search_system_handles`, filled only when a call site sets the explicit flag,
+`ExecCaller.systemSearch` / `searchSystemCall`, never by reading a statement's text), and in both with
+the pool and expiry recorded at mint equal to the handle's, since the node holds the key that signs
+handles and could re-sign one naming another pool. The scope is the recorded pool's tenant-db: a table
+is looked up, by tenant-db id and table id only, when its catalog equals that tenant-db's alias (ASCII
+fold only, as DuckDB names catalogs); any other catalog is answered in `missing`. An unknown nonce or
+an evicted one is `503` (retryable); an unreadable registry `503`. The answer is signed like a verdict,
+each record carrying its `macKey`, with `expiresAt - issuedAt` = 10 s; the node (`FetchIndexRecords`)
+keeps it 10 s from receipt per (catalog, table id), at most 4096, and uses a record only when its
+`bundleRoot` equals the attached catalog's own DuckLake data path (`SameDataPath`: trailing `/` dropped,
+on Windows `\` read as `/` for local paths; a drive root, a bare scheme and a UNC or device path fail
+closed). Records are not per principal and are fetched only after the verdict; a source that cannot
+answer refuses `QoD: authorization unavailable, retry: search index record unavailable`. MAC keys travel
+signed, not encrypted: the verdict listener needs a private network. Off a quack session, or with no
+fetch installed, every table has no record.
+
+**On the node** (`native/qod-node/src/search_*`): `optimize_function` swaps the call's LogicalGet for
+`PhysicalQodSearchSink`, which drains the input in parallel into per-segment allowed bitsets and calls
+the library once in Finalize (`qod_search_matches` streams from there). The snapshot source reads only
+the named exception of spec 13, from C++ on the client's context and transaction with no SQL text:
+`ducklake_current_snapshot`, `ducklake_list_files` at S, the target's own scan (virtual columns; the
+indexed column for the fallback), `parquet_scan` of a delete file that listing named, and the target's
+own `ducklake_table` / `ducklake_schema` / `ducklake_metadata` rows (table id, encryption flag); each
+function looked up in the system catalog by a fixed name. The fallback indexes, per query and in
+memory, the live data files with no usable bundle and the inlined rows, from the target's own scan,
+with the bundle builder's analyzer (so scores equal a bundle's), up to `QOD_SEARCH_MAX_UNINDEXED_ROWS`
+and `_SOURCES`; past either the search fails `search_index_behind` before reading a row. `RowidMap`
+maps each input rowid to its one live (segment, doc) (`search_snapshot_unavailable` for none,
+`search_rowid_ambiguous` for several) and nothing is sized from a rowid's value. `QueryMemory`
+(`QOD_SEARCH_QUERY_MEMORY`) is charged before every allocation in proportion to the data, the
+library's own heap included (`search_memory_exceeded`). Cancellation is checked in the drain, the
+fallback, between segment loads and in the library (`search_cancelled`). **Caches** (Task 12, ruling
+8), the database instance's own and inside DuckDB's buffer manager, so `memory_limit` counts them: open
+segments (each bundle one pinned block opened in place, its heap reserved) and liveness views (only for
+a read at the current snapshot, auto-commit, no AT clause, a catalog not attached read-only, a
+transaction that modified nothing), together at most `min(QOD_SEARCH_SEGMENT_CACHE_BYTES, memory_limit
+/ 4)`, the liveness cache keeping a slice of `min(QOD_SEARCH_LIVENESS_CACHE_BYTES, that / 8)`; `0` turns
+both off; a bundle the cache cannot take is the search's own copy, charged to its budget. Missing and
+refused bundles are remembered by (index id, path key, file size, footer size) until the record's
+`segments_version` moves, at most `QOD_SEARCH_MISS_TTL_SEC` (at most 60, D8), and a build on the node
+forgets its key at once. **Read-your-writes** (Task 14): a search in a writing transaction reads its
+own writes (deletes through the target scan's live set, inserts through a transaction-local fallback
+source), the liveness cache is bypassed and never stores such a view, and a prepared search runs again
+after a write rebinds. The search hook holds no search lock while DuckLake expands the file list, and
+DuckLake's nested statements pass qod-node's hooks as node-internal (Task 13: `TakeSearchLocksForTest`
+lists every search lock by hand, so a new lock joins it).
+
+**The gateway** (`edge/search`, the policy steps): the search flag is read once, from the client's own
+text and the router's input before any rewrite (`screenSql`, `clientSql`), never from a rewriter's
+output or a gateway-built wrapper such as the Flight SQL schema probe. `SearchStarScreen` refuses, for
+every principal, superusers included, a star in a statement that calls a search function (`*`, `t.*`,
+any modifier, `COLUMNS(*)`, the implicit stars of FROM-first, `TABLE t`, pipe queries, DESCRIBE /
+SUMMARIZE of a query) and any whole-row reference (a FROM item's name used whole anywhere, `SELECT p`,
+`to_json(p)`, `p.to_json()`, in predicates and ORDER BY too), judged per statement of a batch on
+JSqlParser's AST walked through every child (`AstChildren`), transaction control skipped, time-travel
+clauses looked past (`ParserInput.timeTravelClauses`, on DuckDB's tokens) and one holding `*` or a query
+word refused; anything unreadable is refused (`search_star_unsupported`). The row-policy rewriter wraps
+every policy table of a search statement as `(SELECT *, rowid FROM <t> WHERE <predicate>)` (rule 3),
+refuses a policy table there carrying a sample or an AT clause the rebuild would drop, and, for a
+principal holding any column policy, keeps `rowid` only when the column-policy step resolved every table
+of the statement and none holds a real `rowid` column (`RealRowidTables`; unresolved counts as real).
+The column-policy step separates each `qod_search` / `qod_search_matches` input (`SearchSeparation`,
+change 9): the input is rewritten as a statement of its own, the call replaced by a placeholder table of
+the function's fixed outputs, the outer statement resolved and masked, the call restored with its
+constants byte for byte; a correlated input, a CTE, `LATERAL`, an alias column list and every shape it
+cannot place fail closed. `CatalogReachingCalls.SearchTableNaming` puts the four functions in the
+table-naming family and `S1Exception` admits them for policy holders, the only place that exception
+lives (invariant 1); its ground 1 holds for reads only, so a policy holder's write or batch holding a
+search call stays denied by `ProtectedWriteGuard`. `RewriteScope` reads a search call's constant table
+literal (one to three identifiers on DuckDB's tokens) as a read of that table, so a rewrite is judged
+against its original; with no policy rewrite the gateway judges no scope and the node's rules 1, 2 and
+7 alone judge the statement.
+
+**Error contract** (spec 9): the node's search refusals are `InvalidInputException("QoD: search_<code>:
+...")`, Flight `INVALID_ARGUMENT`, never booked as denials; only `search_index_behind` is a
+`PermissionException`, so user SQL cannot forge it, and `FlightSqlRouter.isSearchIndexBehind` matches
+its exact prefix and fixed ending (`; retry once the indexer catches up`): Flight `UNAVAILABLE` for a
+single statement, `INVALID_ARGUMENT` `BatchNotRetried` in a batch, history `permanent`, no denial, no
+retry on another node (every node reads the same catalog) (ruling 7). In the allowed population no
+refusal names a row, source or byte count, only the configured cap; whether a cap is passed stays a
+one-bit signal. The native front door relays every one as an untyped error carrying the text; inside a
+client transaction a `search_index_behind` aborts it and the client's `ROLLBACK` succeeds.
+
+**The nine knobs** (`quack-on-demand.search`, `SearchNodeConfig`): `QOD_SEARCH_MAX_UNINDEXED_ROWS`
+(200000), `_MAX_UNINDEXED_SOURCES` (64), `_QUERY_MEMORY` (0 = a quarter of the node's `memory_limit`,
+read per query; else 64 MiB to 1 TiB), `_MAX_K` (10000), `_LIVENESS_CACHE_ENTRIES` (64),
+`_LIVENESS_CACHE_BYTES` (256 MiB), `_SEGMENT_CACHE_BYTES` (4 GiB, the joint bound), `_MISS_TTL_SEC` (60)
+and `_MAX_BUNDLE_BYTES` (1 GiB, 1 MiB to 64 GiB). The defaults and ranges are qod-node's own table
+(`native/qod-node/src/search_knobs.hpp`, which `SearchNodeConfigSpec` parses, so add a knob to both
+together); a value outside a range refuses the manager's boot naming the path and the variable. Every
+runtime hands all nine to every node and none inherits one: the local spawn env drops every inherited
+`QOD_SEARCH_*` first (`SearchNodeConfig.overlay`), the Kubernetes pod env carries them plainly, the
+fleet assignment's `searchLimits` and `qod fleet join` take them from the assignment only
+(`_NODE_SEARCH_ENV`). The node reads each once at start, so a change applies at each node's next start.
+Under the default budget a bundle larger than a quarter of a node's `memory_limit` cannot be searched
+(`search_memory_exceeded`, whose text names `QOD_SEARCH_QUERY_MEMORY`; lead ruling, owner to confirm):
+a node whose largest bundle passes a quarter of its `memory_limit` (possible on any node under 4 GiB, as
+bundles reach 1 GiB by default) needs a fixed budget above that bundle.
+
+**Accepted over-refusals** (rulings recorded in docs/search-PHASE1.md; changing one needs the owner):
+no policy holder time travels through the gateway (a row-policy holder's `AT (TIMESTAMP)` reads `access
+denied`, not `search_at_timestamp_unsupported`; the column-policy rewriter cannot parse `AT (VERSION =>
+n)`, on every statement); a column, lambda parameter or dot-call named like a FROM alias or table in a
+search statement, and a whole-row reference anywhere in one; for column-policy holders, any `WITH`,
+struct field access, an input whose FROM holds a derived table, a table function or a parenthesized
+join, a lambda parameter, an unqualified or unlistable input name, any table with a real `rowid` once a
+row policy wraps, and `qod_knn` / `qod_hybrid`; a rewrite whose original scope is refused and that holds
+a search name (in a literal too); an out-of-BMP character in a plain part of the table literal (rewrite
+path); a Windows data path on a UNC share. **Residuals:** replay of an older valid bundle of the same
+index, path and format; key copies in memory not zeroized; a node keeps a record up to 10 s after an
+index changes; pinned cache memory comes back only when a search's own allocation is refused (`SET
+memory_limit` below it fails); two cache admissions racing can pass the shared bound by one entry each;
+the fallback's in-memory segments do not charge their heap; the interim build shares the query budget,
+so a cell too large to index leaves its file unbundled and the table unsearchable until it is gone;
+DuckLake 2.0 repeats rowids in a transaction that inserts inlined rows, writes a file and updates rows,
+refused `search_rowid_ambiguous`, never a wrong answer; a bundle's `pathKey` hashes the path DuckLake
+hands out, so Windows and POSIX nodes sharing one catalog key a file differently (bundles read as
+missing across them, results correct); the Windows launchers download no notices beside the exe.
 
 ### State storage (Postgres only)
 
@@ -1189,7 +1425,11 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
   when a setting of the tenant initSql allowlist changes class. The classifier makes a built-in
   scalar macro whose body reaches a catalog listing superuser-class (`pg_get_viewdef`: with the
   gateway screens gone it would print every view's SQL); that rule reads scalar macros only, so
-  review any new built-in table macro that reads a listing by hand (DuckDB 2.0.0 has none).
+  review any new built-in table macro that reads a listing by hand (DuckDB 2.0.0 has none). The
+  classification is generated from a `QOD_NODE_SEARCH=ON` build (the script refuses a qod-node whose
+  `--build-info` ends `search=off` or names no search flag, as it would drop the search functions), so
+  every later DuckDB pin bump needs a search build, hence cargo and the Rust release
+  `native/qod-search/rust-toolchain.toml` pins (1.96.1).
 - **Add every new RBAC table to the policy-version trigger.** `qod_bump_policy_version()` (Liquibase
   `0050`, extended by `0051` and `0052`) bumps `qodstate_tenant.policy_version` on writes to the
   tables it is attached to, and `qod_bump_every_policy_version()` (`0054`) bumps every tenant on a

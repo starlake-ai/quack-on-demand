@@ -39,7 +39,8 @@ namespace qod {
 //!    an encrypted DuckLake (search_encrypted_unsupported) before any row is read;
 //!  - a post_bind hook, registered after qod-node's own (so it runs once the verdict admitted the
 //!    statement): per call, the lineage check (FindSearchCalls: rules 1, 2, 7, the branch refusal of rule 9),
-//!    the AT (TIMESTAMP) refusal (rule 4), the writing-transaction refusal, the target's DuckLake table id
+//!    the AT (TIMESTAMP) refusal (rule 4; a transaction that wrote to the target's lake is searched with its
+//!    own writes, Task 14), the target's DuckLake table id
 //!    (DuckLakeTableIdNow), its index record (IndexRecordFor: none or disabled is search_index_unavailable),
 //!    each call column's field id (by its current name; it must be a field of the record and held by the
 //!    table at S, else search_columns_unsupported), the population (the verdict's on a quack session for a

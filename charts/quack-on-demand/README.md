@@ -213,6 +213,24 @@ Set these through `env` (the chart has no dedicated value for them):
 
 The manager refuses to start on a value outside those ranges. Watch `cache_evictions_total{cache="qod_minted_handles"}` and `qod_node_authz_verdict_cache_evictions_total` (exported by the HA leader only) to size them.
 
+## Search node tuning (QoD Search preview)
+
+The released Quack node image is built without QoD Search, so these settings change nothing on it; they apply to nodes of a search-enabled image. Set them through `env` (the chart has no dedicated value for them). The manager checks each against its range at boot (it refuses to start on a value outside it), forwards all nine to every node pod in its plain environment, and a node reads them once at start: restart the nodes after a change.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `QOD_SEARCH_MAX_UNINDEXED_ROWS` | `200000` | The most live rows of a table a search indexes for itself, in memory, when the index lags (0 to 100000000; 0 refuses any lag). Past it the search fails `search_index_behind`, retryable. |
+| `QOD_SEARCH_MAX_UNINDEXED_SOURCES` | `64` | The most unindexed sources (data files with no bundle, plus the inlined rows) a search indexes for itself (1 to 4096). |
+| `QOD_SEARCH_QUERY_MEMORY` | `0` | One search's memory budget in bytes: 0 is a quarter of the node's `memory_limit`, else 67108864 (64 MiB) to 1099511627776 (1 TiB). Under 0, a bundle larger than a quarter of `memory_limit` cannot be searched: on such nodes set a value above the largest bundle. |
+| `QOD_SEARCH_MAX_K` | `10000` | The largest `k` `qod_search` accepts (1 to 10000); a call naming none takes `min(10, this)`. |
+| `QOD_SEARCH_LIVENESS_CACHE_ENTRIES` | `64` | How many tables' liveness at a snapshot a node keeps between searches (0 to 100000). |
+| `QOD_SEARCH_LIVENESS_CACHE_BYTES` | `268435456` | The liveness cache's own byte bound (0 to 1 TiB). |
+| `QOD_SEARCH_SEGMENT_CACHE_BYTES` | `4294967296` | What the node's two search caches hold together (0 to 1 TiB), and never more than a quarter of `memory_limit`; 0 turns both off. |
+| `QOD_SEARCH_MISS_TTL_SEC` | `60` | How long a node remembers a missing bundle before it looks again (0 to 60). |
+| `QOD_SEARCH_MAX_BUNDLE_BYTES` | `1073741824` | The largest index bundle a node reads (1 MiB to 64 GiB); a larger one is never read and its data file is searched as unindexed. |
+
+The node pods fetch index records from the manager on the verdict port (TCP 20901), which the chart's NetworkPolicies already open to them.
+
 ## Manager ↔ Quack node TLS
 
 The manager↔node wire is **plain HTTP**: the manager's native Quack client (libquackwire) always speaks `http://<node>/quack`, and the spawn-quack-node.sh script runs `quack_serve()` without TLS. The auth token Quack ships on every request is still required and enforced; only the transport is unencrypted.

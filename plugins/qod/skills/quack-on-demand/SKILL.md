@@ -2403,7 +2403,11 @@ Things to know:
 - **Transactions.** `BEGIN; ...; COMMIT` from a DuckDB client runs on one node connection
   (unlike FlightSQL, where each statement lands on a fresh node session). Session state
   outside an explicit transaction (SET, temp tables) does not carry over between
-  statements.
+  statements. The client opens its transaction on the gateway only at its first read of
+  the attached catalog, not at its own `BEGIN`: after a `BEGIN` followed only by
+  `quack_query_by_name(...)` calls, each of those runs and commits on its own and a
+  `ROLLBACK` undoes none of them. To hold them in the transaction, read a table of the
+  attached catalog first (`SELECT count(*) FROM qod.main.<table>;`).
 - **Upstream client limitation** (quack extension `40de7ba`, DuckDB 1.5.4, also against a
   raw node): a multi-column result larger than the client's inline batch (about 24k rows)
   fails inside the client with `Attempted to access index 1 within vector of size 1`.
@@ -2414,6 +2418,100 @@ Things to know:
   `SET http_timeout = 600;` (seconds). FlightSQL clients are not affected.
 - **Personal access tokens are not accepted** on this wire (same rule as FlightSQL); use
   a user and password or an OIDC bearer.
+
+## Full-text search (QoD Search preview)
+
+QoD Search indexes VARCHAR columns of a DuckLake table and answers BM25 searches as table
+functions, decided like any other statement: grants, row filters and column masks apply.
+**It is a preview: released Quack nodes are built without it**, so on them the search
+functions do not exist and every search statement fails. `create-index`, `list-indexes` and
+`drop-index` work on any manager that has these commands; `qod search build` and every search
+need nodes of a search-enabled build. Indexes exist on DuckLake databases only, never
+on a branch or an encrypted database. Scoring uses BM25 with k1 = 1.2 and b = 0.75, fixed.
+
+```bash
+# Create an index (a tenant admin of that tenant, or a superuser). --column repeats, 1 to 32
+# VARCHAR columns, in order; --table is TABLE or SCHEMA.TABLE (default: the database's schema).
+qod search create-index --tenant acme --database lake --table main.pages \
+  --column title --column body
+
+# List a tenant's indexes, of one database or all. An index is tied to the table, not its name:
+# a renamed table keeps its index (currentSchema / currentTable show the name now), a dropped
+# table leaves it "disabled", and a table created again under the old name has no index.
+qod --json search list-indexes --tenant acme --database lake
+
+# Build the bundles (superuser only, an interim step until the automatic indexer): flushes the
+# table's inlined rows, then indexes every live data file on a node of the named pool. Answers
+# {"flushed": true, "files": [{"path", "bundle", "docs", "bytes", "ms"}], "skipped": [...]}
+# ("skipped": data files with no live row). Run it again after writes: rows written since are
+# still found, indexed on the fly per query, up to a limit (see failure modes below).
+qod search build --tenant acme --database lake --table main.pages --pool bi
+
+# Drop an index by its table's current name, or by its id (from list-indexes: the way to reach a
+# disabled index whose name a recreated table now holds). Exactly one of the two.
+qod search drop-index --tenant acme --database lake --table main.pages
+qod search drop-index --tenant acme --database lake --index-id <indexId>
+```
+
+The same create, list and drop are MCP tools (`create_search_index`, `list_search_indexes`,
+`drop_search_index`); build is CLI and REST only. A manifest export carries each database's
+`searchIndexes`, and an import recreates them under the same ids (the list of built files is
+not in the manifest: run `qod search build` after an import into a new installation).
+
+Searching, through `qod sql`, any FlightSQL client or a DuckDB client on the Quack port. The
+first argument is the search input: a subquery selecting `rowid` from the table named in the
+second; join the result back on `rowid`:
+
+```sql
+-- the top k (k from 1 to QOD_SEARCH_MAX_K, 10 when omitted), best first
+SELECT p.id, p.title, h.score, h.rank
+FROM qod_search((SELECT rowid FROM main.pages WHERE lang = 'en'), 'main.pages',
+                ['title', 'body'], 'duck river', k := 20) h
+JOIN main.pages p ON p.rowid = h.rowid
+ORDER BY h.rank;
+
+-- every match, for counts and facets (with_score := true to get scores)
+SELECT p.cat, count(*) AS n
+FROM qod_search_matches((SELECT rowid FROM main.pages), 'main.pages', ['body'], 'duck') m
+JOIN main.pages p ON p.rowid = m.rowid
+GROUP BY p.cat;
+```
+
+Rules a search statement must follow: the input reads the named table directly (no view, join
+or table function on its FROM path), `table` and the column list are constants and name
+indexed columns, the statement holds no `*` or `t.*` (list the columns) and no whole-row
+reference (`SELECT p`, `to_json(p)`), and time travel is `AT (VERSION => n)` only. A user with a
+row policy gets scores computed over the rows they may see; a column a column policy covers
+cannot be searched by that user. Inside a transaction a search sees the transaction's own
+writes.
+
+Node limits (manager settings, handed to every node, applied at each node's next start; a value
+out of range stops the manager at boot naming it): `QOD_SEARCH_MAX_UNINDEXED_ROWS` (200000) and
+`QOD_SEARCH_MAX_UNINDEXED_SOURCES` (64), how much unbuilt data a search indexes for itself;
+`QOD_SEARCH_QUERY_MEMORY` (0: a quarter of the node's memory_limit); `QOD_SEARCH_MAX_K` (10000);
+`QOD_SEARCH_LIVENESS_CACHE_ENTRIES` (64), `QOD_SEARCH_LIVENESS_CACHE_BYTES` (256 MiB) and
+`QOD_SEARCH_SEGMENT_CACHE_BYTES` (4 GiB, both caches together, never more than a quarter of
+memory_limit; 0 turns them off); `QOD_SEARCH_MISS_TTL_SEC` (60, how long a node remembers a
+missing bundle); `QOD_SEARCH_MAX_BUNDLE_BYTES` (1 GiB; a larger bundle is never read).
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `400 search_ducklake_only` / `search_branch_unsupported` / `search_encrypted_unsupported` on create | Indexes exist only on unencrypted DuckLake databases, never on a branch | Index the parent database's table |
+| `400 search_column_type` / `search_column_not_found` / `invalid_search_columns` | A column is not VARCHAR, does not exist, repeats, or there are 0 or more than 32 | Name 1 to 32 distinct VARCHAR columns |
+| `400 invalid_search_options` | The request named `options`, `k1` or `b` | Leave them out: they are fixed |
+| `409 search_index_exists` | The table already has an index | Drop it first (`drop-index`), then create |
+| `409 search_no_data_path` | The database has no data path to hold the bundles | Index a table of a database that has a data path (create the database with one, or set the manager's default data path before creating it) |
+| `403 superuser_required` on `search build` | Build is a superuser's | Run it with a superuser profile (`qod --profile <root> search build ...`) |
+| `409 search_build_deleted_rows` on build | A data file holds deleted rows; the interim build covers only files whose rows are all live | Until those files are rewritten, searches index their rows per query, up to the limits. The expected remedy, not a verified one: let a DuckLake maintenance run rewrite the files (it rewrites files whose deleted rows pass its threshold), then build again |
+| `QoD: search_index_unavailable: no index on ...` | No index on that table, the index is disabled (table dropped and recreated), or the node could not use its record | `qod search list-indexes`; create an index on the new table |
+| `QoD: search_columns_unsupported: ...` | A column of the call is not one of the index's | Search only indexed columns, as the table names them now |
+| `access denied: search_star_unsupported: ...` | The statement holds a star or a whole-row reference | List the columns |
+| `QoD: search_input_not_governed: ...` / `search_input_wrong_table` / `search_argument_not_constant` | The input does not read the named table directly, or `table` / columns are not constants | Write the input as `(SELECT rowid FROM <table> [WHERE ...])` with literal arguments |
+| `QoD: search_at_timestamp_unsupported` | `AT (TIMESTAMP => ...)` on the searched table | Use `AT (VERSION => n)` |
+| `QoD: search_index_behind: ... retry once the indexer catches up` (FlightSQL `UNAVAILABLE`) | More unbuilt rows or files than `QOD_SEARCH_MAX_UNINDEXED_ROWS` / `_SOURCES` | Run `qod search build` for the table, or raise the limits (nodes restart to apply) |
+| `QoD: search_memory_exceeded: ...` (may name `QOD_SEARCH_QUERY_MEMORY`) | The search passed its memory budget, or a bundle is larger than a quarter of the node's memory_limit under the default budget | Narrow the input, or set `QOD_SEARCH_QUERY_MEMORY` above the largest bundle and restart the nodes |
+| `QoD: authorization unavailable, retry: search index record unavailable` | The node could not fetch the index's record from the manager replica | Retry; check the nodes reach the manager's verdict port |
+| A row-policy or column-policy user's search with `AT (...)` is refused | Users holding row or column policies cannot time travel through the gateway | Search the current snapshot |
 
 ## Fleet mode (nodes on your own servers, no Kubernetes)
 
