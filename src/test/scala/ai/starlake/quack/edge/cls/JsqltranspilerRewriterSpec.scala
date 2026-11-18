@@ -235,10 +235,16 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       "SELECT * FROM customer c ANTI JOIN orders o ON o.c_id = c.c_id",
       "SELECT * FROM customer c, orders c",
       "SELECT * FROM customer c(a, b) JOIN orders o ON true",
-      "SELECT * FROM customer c JOIN (SELECT 1 AS x) s ON true",
-      // No policy table: a dotted column is no reason to refuse.
-      "SELECT * FROM orders o JOIN items i ON true"
+      "SELECT * FROM customer c JOIN (SELECT 1 AS x) s ON true"
     ).foreach(sql => StarExpansion.expand(sql, multi, List(maskEmail)) shouldBe Right(sql))
+    // A dotted column no longer stops a join's star from being expanded: it prints qualified and
+    // parses back as that one column (#238).
+    StarExpansion.expand(
+      "SELECT * FROM orders o JOIN items i ON true",
+      multi,
+      List(maskEmail)
+    ) shouldBe
+      Right("SELECT o.o_id, o.c_id, i.i_id, i.\"price.usd\" FROM orders o JOIN items i ON true")
   }
 
   it should "resolve unqualified c_email in a multi-join to the customer table" in {

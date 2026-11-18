@@ -67,8 +67,7 @@
   `X-QoD-Snapshot` back included, answers `400 invalid_selector` saying to read without `asOf*`,
   not the `404` of an object the caller cannot see. A `/rows` request with no `select` reads `*`, so a
   column whose name holds a dot or a quote no longer refuses its table to a principal whose
-  policies are on other tables. A column policy on such a table itself still hides it (404), on
-  every door: the column rewriter cannot expand a star over that name.
+  policies are on other tables, nor, since #238, to one holding a column policy on that table.
   Responses are `Cache-Control: private` with `Vary:
   Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
   endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains
@@ -129,6 +128,15 @@
 
 ### Fixed
 
+- **A holder of a column policy can read a table that has a column whose name holds a dot.** To
+  apply the mask the column rewriter expands `*`, and it printed such a column (`"a.b"`) as `a.b`,
+  which DuckDB reads as column `b` of a table `a`: the statement failed to bind (on the REST data
+  edge the table answered the `404` of a missing object), and over a join with a table named `a`
+  it could read that table's `b`. The expansion now prints it qualified by its table
+  (`dotted."a.b"`), which parses back as that one column, on every door; a policy on the dotted
+  column itself masks it. A star over a join where the name could still read another table's
+  column (an unaliased table named like the part before the dot) is refused instead, with a
+  message saying to alias the tables or name the columns (#238).
 - **No REST route sees a path holding a `.` or `..` segment.** A request target such as
   `//data/../api/tenant/list` is read as the host `data` and the path `/../api/tenant/list`, which
   the API guard took as outside `/api` and handed to the routes with no credential. No route

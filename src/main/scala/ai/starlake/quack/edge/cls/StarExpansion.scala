@@ -58,13 +58,16 @@ private[cls] object StarExpansion:
   /** A star with no modifier (EXCLUDE, REPLACE, RENAME, ..): exactly the columns it stands for. */
   private[cls] def unmodified(star: AllColumns): Boolean = transformers(star).isEmpty
 
-  // JSqlParser splits a quoted column name on its dots when the expansion is parsed again
-  // (`c."price.usd"` came out as `"price"."usd"`, another column), so it cannot be printed.
-  private val DottedColumnRefusal =
-    "a star over a table with a column whose name holds a dot cannot be expanded under column " +
-      "policies; name the columns instead"
+  /** `binding.column`, the column quoted when it needs it. Parsed rather than built: JSqlParser's
+    * `Column(table, name)` splits a name holding a dot (`"price.usd"` became `"price"."usd"`,
+    * another column), while a qualified `c."price.usd"` parses back as that one column (#238).
+    */
+  private def qualifiedColumn(binding: String, column: String): Column =
+    CCJSqlParserUtil.parseExpression(s"$binding.${quoteIfNeeded(column)}") match
+      case c: Column => c
+      case other     => sys.error(s"not a column reference: $other")
 
-  // The same split turns a column qualified by a dotted alias (`"x.y".c_email`) into one that binds
+  // JSqlParser's split turns a column qualified by a dotted alias (`"x.y".c_email`) into one that binds
   // nowhere: the resolver masks nothing and the caller's own star would be sent (issue #217 review).
   private val DottedAliasRefusal =
     "a star over a table whose alias or name holds a dot cannot be expanded under column " +
@@ -254,11 +257,10 @@ private[cls] object StarExpansion:
     val drop = excluded.flatten.toSet
     val kept = cols.filterNot(c => drop.contains(lower(c)))
     if !expandable || excluded.contains(None) || replaced.contains(None) then Left(Refusal)
-    else if kept.exists(_.contains('.')) then Left(DottedColumnRefusal)
     else
       val subs = replaced.flatten.toMap
       Right(kept.map { c =>
         subs.get(lower(c)) match
           case Some(expr) => new SelectItem[Expression](expr, new Alias(quoteIfNeeded(c)))
-          case None => new SelectItem[Column](new Column(new Table(bindingName), quoteIfNeeded(c)))
+          case None       => new SelectItem[Column](qualifiedColumn(bindingName, c))
       })
