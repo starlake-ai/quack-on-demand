@@ -48,7 +48,9 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: azizam
-          # UserStoreGrantsSpec reads the default metastore database, `qod`, and creates none.
+          # The manager's default control-plane database (defaultMetastore.dbName), there for
+          # anything booting on the default configuration. The specs that need a database create
+          # their own through TestPostgres.
           POSTGRES_DB: qod
         ports:
           - "5432:5432"
@@ -62,8 +64,8 @@ jobs:
       SL_TEST_PG_PORT: "5432"
       SL_TEST_PG_USER: postgres
       SL_TEST_PG_PASSWORD: azizam
-      # The manager's own metastore variables, at their defaults: the specs that read these rather
-      # than SL_TEST_PG_* cancel while QOD_PG_HOST is unset.
+      # The manager's own metastore variables, at their defaults, for anything that loads the
+      # manager's configuration; the specs themselves reach Postgres through SL_TEST_PG_*.
       QOD_PG_HOST: localhost
       QOD_PG_PORT: "5432"
       QOD_PG_USER: postgres
