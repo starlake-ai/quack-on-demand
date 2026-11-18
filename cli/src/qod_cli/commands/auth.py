@@ -84,6 +84,10 @@ def login(
             "manager_url": manager_url,
             "token": login_resp["token"],
             "sql_user": username,
+            # The FlightSQL realm `qod sql` authenticates in, from the manager's answer: a profile
+            # left at `true` by `qod serve` would otherwise send a tenant user's login to the
+            # superuser realm, where it fails as "Invalid password".
+            "superuser": login_resp.get("superuser") is True,
             "tenant": tenant,
             "pool": pool,
             "edge_host": edge_host,

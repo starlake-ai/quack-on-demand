@@ -154,7 +154,7 @@ named `default`.
 | `pool` | `QOD_POOL` | `""` | Default pool for `qod sql`. |
 | `sql_user` | `QOD_USER` | `""` | FlightSQL username; set by `qod login`. |
 | `sql_password` | `QOD_PASSWORD` | `""` | FlightSQL password; opt-in storage, see "SQL plane" below. |
-| `superuser` | `QOD_SUPERUSER` | `false` | Send the superuser call header on `qod sql`. |
+| `superuser` | `QOD_SUPERUSER` | `false` | Send the superuser call header on `qod sql`. `qod login` sets it from the login's answer. |
 
 ## Command reference
 
