@@ -40,6 +40,11 @@ final class AnonymousCallGuard(maxCalls: Int, onCredential: Attributes => Unit)
     extends ServerInterceptor:
   private val inFlight = new AtomicInteger(0)
 
+  /** The calls with no credentials holding a place now: a spec waits for its own to count before it
+    * probes the limit, as a probe that arrives first takes one of their places.
+    */
+  private[quack] def held: Int = inFlight.get
+
   override def interceptCall[ReqT, RespT](
       call: ServerCall[ReqT, RespT],
       headers: Metadata,

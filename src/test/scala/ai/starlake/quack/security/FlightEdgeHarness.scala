@@ -81,6 +81,8 @@ object FlightEdgeHarness:
     *   [[FlightEdgeServer.refuseNewCalls]]: the first step of the manager's graceful shutdown.
     * @param callsInProgress
     *   [[FlightEdgeServer.callsInProgress]].
+    * @param anonymousCalls
+    *   [[FlightEdgeServer.anonymousCalls]]: the calls with no credentials holding a place now.
     */
   final case class Harness(
       host: String,
@@ -91,7 +93,8 @@ object FlightEdgeHarness:
       router: FlightSqlRouter,
       queuedTasks: () => Int,
       refuseNewCalls: () => Unit,
-      callsInProgress: () => Int
+      callsInProgress: () => Int,
+      anonymousCalls: () => Int
   ):
     /** Build a fresh [[FlightClient]] pointed at this harness.
       *
@@ -256,5 +259,6 @@ object FlightEdgeHarness:
       router = router,
       queuedTasks = () => srv.queuedTasks,
       refuseNewCalls = () => srv.refuseNewCalls(),
-      callsInProgress = () => srv.callsInProgress
+      callsInProgress = () => srv.callsInProgress,
+      anonymousCalls = () => srv.anonymousCalls
     )

@@ -378,6 +378,9 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val silent = plain(h.port)
     try
       (1 to 8).foreach(_ => silent.open("GetFlightInfo"))
+      // A probe that reaches the guard before them takes one of their places, and is let in for
+      // good once it ends: wait until all 8 hold one.
+      soon(h.anonymousCalls() shouldBe 8)
       soon {
         val ex = intercept[FlightRuntimeException](client.getInfo(sqlInfo, timed))
         ex.status().code() shouldBe FlightStatusCode.UNAVAILABLE
@@ -800,6 +803,8 @@ class FlightEdgeLimitsSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val client = h.newClient()
     try
       (1 to 2).foreach(_ => silent.open("GetFlightInfo"))
+      // As above: a probe arriving first would take one of their places.
+      soon(h.anonymousCalls() shouldBe 2)
       soon {
         val ex = intercept[FlightRuntimeException](client.getInfo(sqlInfo, timed))
         ex.status().code() shouldBe FlightStatusCode.UNAVAILABLE

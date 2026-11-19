@@ -102,6 +102,12 @@ final class FlightEdgeServer(
     */
   private[quack] def queuedTasks: Int = executor.getQueue.size
 
+  private var anonymousGuard: AnonymousCallGuard = null
+
+  /** The calls with no credentials holding a place in [[AnonymousCallGuard]] now. */
+  private[quack] def anonymousCalls: Int =
+    if anonymousGuard == null then 0 else anonymousGuard.held
+
   /** The port the edge listens on once started: the configured one, or for port 0 the one the OS
     * assigned at bind time.
     */
@@ -175,7 +181,8 @@ final class FlightEdgeServer(
       nettyBuilder =>
         nettyBuilder.maxConcurrentCallsPerConnection(ConnectionProbation.MaxStreams)
         nettyBuilder.protocolNegotiator(probation)
-        nettyBuilder.intercept(new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove))
+        anonymousGuard = new AnonymousCallGuard(cfg.maxAnonymousCalls, probation.prove)
+        nettyBuilder.intercept(anonymousGuard)
         // headerAuth sees only headers, and every interceptor this hint adds runs after it: the
         // call's own executor is what runs it, so the call's client address rides that executor's
         // tasks, for the audit row of a refused handshake (FlightEdgeServer.clientHost).
