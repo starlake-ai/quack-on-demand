@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
 
 ### Upgrading
 
@@ -91,7 +91,7 @@
   `GET` only, no `Cookie`, dot segments and encoded slashes refused) and the matching rule for
   AWS ALB, GCP, Azure and a Kubernetes Ingress. Callers inside the network bypass the proxy, and a
   NetworkPolicy cannot tell `/data/` from the admin API on the same port. There is no per-client
-  rate limit, authentication throttle or per-user concurrency cap yet: the proxy must rate-limit
+  rate limit, authentication throttle or per-user concurrency cap: the proxy must rate-limit
   per client and per `Authorization` value. With no `pool` named, a request goes to a pool the caller may use: among the
   database's pools, those the token's `pools` axis allows and, when several are left, the first the
   FlightSQL handshake admits the caller to. A UUID, JSON or ENUM column is pattern-matched, range-filtered
@@ -172,7 +172,7 @@
   20 s), signals only the nodes still left, and kills after `FORCE_AFTER` as before. With nothing
   running the manager still exits within seconds; a long statement can make a stop take up to the
   drain plus 20 s, and a lower `QOD_DRAIN_TIMEOUT_SEC` shortens that. A second Ctrl-C on
-  `qod start` still stops everything at once. Not covered yet: the native Quack front door (`:9494`) still closes its sessions when the
+  `qod start` still stops everything at once. Not covered: the native Quack front door (`:9494`) still closes its sessions when the
   drain starts, and Ctrl-C on a foreground `scripts/run-jar.sh` still reaches the nodes together
   with the manager (#221).
 - **A column policy on a branch pool reads the branch's own columns.** It read the parent's, so
