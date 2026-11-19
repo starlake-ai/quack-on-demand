@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Upgrading
+
+- Restart every node after upgrading, and upgrade the node image and fleet servers with the
+  manager. A node of an earlier release ends no outage with the marker this release checks (see
+  the authorization entry under Fixed), so until it restarts each real authorization outage on it
+  (a slow or unreachable replica, a 503) reads as a permanent denial instead of a retryable
+  `UNAVAILABLE`.
+
 ### Added
 
 - **Each release states its upgrade path and whether it rolls back without a restore, and the
@@ -128,6 +136,16 @@
 
 ### Fixed
 
+- **A node refusal that reads like an authorization outage is booked as a denial.** A node's
+  refusal can quote text from the statement after `QoD: `, so a statement could be refused with
+  a message starting `authorization unavailable, retry`. The gateway took that for a retryable
+  outage: the refusal got no `denied` history row and no `data-denial` audit event. Nothing was
+  read or written past the refusal. qod-node now ends a real outage with a marker
+  ` (qod-retry <nonce>.<mac>)` bound to the statement's session handle and the node's key, and the
+  gateway treats the text as an outage only when the marker verifies for that statement on that
+  node, then strips it; anything else is a denial (Flight `UNAUTHORIZED`). An authorization
+  request larger than the verdict listener takes (1 MiB) and one the listener refuses as malformed
+  (400) are now denials too, not retryable outages (#247).
 - **A holder of a column policy can read a table that has a column whose name holds a dot.** To
   apply the mask the column rewriter expands `*`, and it printed such a column (`"a.b"`) as `a.b`,
   which DuckDB reads as column `b` of a table `a`: the statement failed to bind (on the REST data
