@@ -123,3 +123,5 @@ databaseChangeLog:
       file: db/changelog/0058-maintenance-node-stop.yaml
   - include:
       file: db/changelog/0059-release-gate.yaml
+  - include:
+      file: db/changelog/0060-delete-orphan-tenant-users.yaml

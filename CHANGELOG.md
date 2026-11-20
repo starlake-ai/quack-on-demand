@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Upgrading
+
+- Back up the control-plane database first. Liquibase `0060` deletes the users that earlier tenant
+  deletes left in `qodstate_user` (rows naming a tenant that no longer exists), with their role
+  and group memberships, pool permissions, personal access tokens and S3 credentials. Superusers
+  are untouched.
+
+### Fixed
+
+- Deleting a tenant now deletes its users (#265). `qodstate_user.tenant` has no foreign key to the
+  tenant, so `tenant/delete` used to leave every user of the tenant in place, along with their
+  personal access tokens and S3 credentials.
 
 ### Changed
 
