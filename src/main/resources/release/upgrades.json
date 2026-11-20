@@ -101,12 +101,14 @@
     },
     {
       "version": "0.14.1",
-      "changesets": [],
+      "changesets": ["0060-delete-orphan-tenant-users"],
       "min_from_version": "0.10.0",
       "rollback_without_restore": true,
       "rollback_blocked_by": [],
       "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.1/CHANGELOG.md",
-      "steps": []
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": false, "text": "Back up the control-plane database: Liquibase 0060 runs at boot and deletes the users of tenants deleted earlier, with their tokens and S3 credentials." }
+      ]
     }
   ]
 }

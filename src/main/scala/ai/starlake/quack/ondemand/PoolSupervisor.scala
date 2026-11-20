@@ -2448,7 +2448,13 @@ final class PoolSupervisor(
               events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
             if tdbs.nonEmpty then dataFoldersChanged()
+            // qodstate_user.tenant has no foreign key, so the tenant's users would outlive it
+            // (#265). Each delete cascades the user's memberships, personal access tokens and S3
+            // credentials, as deleteUser does.
+            val tenantUsers = store.listUsers(Some(t.id))
+            tenantUsers.foreach(u => store.deleteUser(u.id))
             store.deleteTenant(t.id)
+            if tenantUsers.nonEmpty then invalidateEffectiveCache()
             tenants.remove(t.id)
             // The store cascaded the tenant's locations away.
             locationCache.remove(t.id)
