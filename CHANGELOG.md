@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Deleting a tenant or a database asks for its name to be typed, in the CLI and in the
+  console.** `qod tenant delete` and `qod database delete`, run on a terminal, print what goes
+  with the delete and send nothing unless the name is typed back (surrounding spaces aside, case
+  included); without a terminal (a script, an agent, CI) they ask nothing, as `NUKE=1` does, and
+  no flag or variable skips the question on a terminal. In the console the OK/Cancel boxes of
+  both deletes are now a dialog whose Delete button stays off until the name is typed; a
+  DuckLake database's "purge managed object storage now" question is a checkbox in it, unticked
+  by default, and a refused delete (pools still running) is shown in the dialog. The REST API and
+  the MCP tools are unchanged.
+
 ## 0.14.0
 
 ### Upgrading

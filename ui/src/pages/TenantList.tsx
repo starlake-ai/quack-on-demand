@@ -5,6 +5,7 @@ import { PROVIDER_FIELDS, PROVIDER_LABELS } from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
 import { DeleteIcon } from '../components/Icons';
 import { Modal } from '../components/Modal';
+import { TypedNameConfirm } from '../components/TypedNameConfirm';
 import { tenantHome } from '../nav/links';
 import { useTenants } from '../nav/TenantsContext';
 
@@ -13,6 +14,8 @@ export default function TenantList() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
+  // The tenant whose delete waits for its name to be typed (TypedNameConfirm).
+  const [deleting, setDeleting] = useState<TenantResponse | null>(null);
 
   // "+ New tenant" modal state.
   const [adding, setAdding]     = useState(false);
@@ -91,19 +94,13 @@ export default function TenantList() {
     }
   }
 
-  async function handleDelete(t: TenantResponse) {
+  /** Runs once the name is typed; a refusal throws into the dialog, which shows it and stays open. */
+  async function confirmDelete() {
+    if (!deleting) return;
+    await api.deleteTenant({ name: deleting.name });
+    setDeleting(null);
     setError(null);
-    if (!window.confirm(
-      `Delete tenant "${t.name}"?\n\n` +
-      `This is irreversible. Tenants with active pools cannot be deleted ` +
-      `until the pools are stopped.`
-    )) return;
-    try {
-      await api.deleteTenant({ name: t.name });
-      await reload();
-    } catch (e) {
-      setError(errorMessage(e));
-    }
+    await reload();
   }
 
   const fields = PROVIDER_FIELDS[newProvider];
@@ -227,7 +224,7 @@ export default function TenantList() {
                 <button
                   type="button"
                   className="icon-btn danger"
-                  onClick={() => void handleDelete(t)}
+                  onClick={() => setDeleting(t)}
                   aria-label={`Delete tenant ${t.name}`}
                   disabled={t.pools.length > 0}
                   title={t.pools.length > 0
@@ -242,6 +239,20 @@ export default function TenantList() {
         </tbody>
       </table>
       {createModal}
+      {deleting && (
+        <TypedNameConfirm
+          title={`Delete tenant ${deleting.name}`}
+          name={deleting.name}
+          confirmLabel="Delete tenant"
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleting(null)}
+        >
+          <p style={{ marginTop: 0 }}>
+            This deletes tenant <code>{deleting.name}</code> and cannot be undone. A tenant with
+            active pools cannot be deleted until its pools are stopped.
+          </p>
+        </TypedNameConfirm>
+      )}
     </div>
   );
 }

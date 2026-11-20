@@ -3,6 +3,7 @@ import sys
 import typer
 
 from ..registry import covers
+from ._confirm import confirm_typed_name
 from ._run import call, kv_pairs
 
 app = typer.Typer(help="Tenant CRUD.")
@@ -48,7 +49,11 @@ def create(
 @app.command()
 @covers("POST", "/api/tenant/delete", {"name": "NAME"})
 def delete(ctx: typer.Context, name: str = typer.Argument(...)):
-    """Delete a tenant (must have no pools)."""
+    """Delete a tenant (must have no pools). On a terminal, asks for the name to be typed."""
+    confirm_typed_name(
+        name,
+        f"Deleting tenant '{name}' cannot be undone (a tenant that still has pools is refused).",
+    )
     call(ctx, "POST", "/api/tenant/delete", body={"name": name})
 
 
