@@ -52,13 +52,19 @@ final class MaintenanceRunner(
   private def isBranch(run: MaintenanceRun): Boolean =
     store.listTenantDbs(run.tenant).find(_.name == run.tenantDb).exists(_.branchOf.isDefined)
 
+  /** Whether the run's tenant is disabled: it runs no node, a maintenance one included. */
+  private def tenantDisabled(run: MaintenanceRun): Boolean =
+    store.listTenants().find(_.id == run.tenant).exists(_.disabled)
+
   def executeRun(run: MaintenanceRun): IO[Unit] =
     IO.realTimeInstant.flatMap { startedAt =>
       // Whatever queued it: a branch is never maintained (see MaintenanceScheduler), and no node
-      // is started for one.
-      IO.blocking(isBranch(run)).flatMap { branch =>
-        if branch then
-          val reason = "a branch database is never maintained: it shares its parent's files"
+      // is started for one; nor for a disabled tenant's database (queued before the disable).
+      IO.blocking((isBranch(run), tenantDisabled(run))).flatMap { case (branch, disabled) =>
+        if branch || disabled then
+          val reason =
+            if branch then "a branch database is never maintained: it shares its parent's files"
+            else "the tenant is disabled: it runs no node"
           IO.blocking(store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(reason)))
             .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
         else spawnAndRun(run, startedAt)

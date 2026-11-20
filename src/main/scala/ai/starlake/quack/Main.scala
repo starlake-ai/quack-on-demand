@@ -521,10 +521,15 @@ object Main extends IOApp with LazyLogging:
     // row-only BY CONTRACT (PatAuthenticator's scaladoc): a PAT is bound to one
     // qodstate_user row, and an identity-keyed lookup would fold in the grants of a
     // same-named user in another tenant.
+    // The supervisor is built further down; nothing resolves a token before the REST server binds,
+    // which is after it is set.
+    val supervisorRef =
+      new java.util.concurrent.atomic.AtomicReference[Option[PoolSupervisor]](None)
     val patAuthenticator = new ai.starlake.quack.ondemand.auth.PatAuthenticator(
       patStore,
       userById = userStore.userById,
-      grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.kind))
+      grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.kind)),
+      tenantDisabled = id => supervisorRef.get().exists(_.tenantDisabled(id))
     )
 
     val secretResolver: SecretResolver =
@@ -795,6 +800,7 @@ object Main extends IOApp with LazyLogging:
       drainTimeout = scala.concurrent.duration.DurationInt(mgrCfg.poolDrainTimeoutSec).seconds
     )
     supRef.set(sup)
+    supervisorRef.set(Some(sup))
     usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
     readOnlyCatalogs.wire(
       ai.starlake.quack.edge.authz.FederatedReadOnlyCatalogs.sourcesOf(
@@ -1051,6 +1057,7 @@ object Main extends IOApp with LazyLogging:
       authService = authService,
       tokens = sessionTokens,
       identitySource = mgmtAuth.identitySource,
+      tenantDisabled = sup.tenantDisabled,
       grantsForIdentity = grantsForIdentity,
       authModeResolver = mgmtAuth.authModeResolver,
       cookieSecureOverride = mgmtAuth.cookieSecureOverride,

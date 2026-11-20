@@ -13,10 +13,13 @@ object AuditActions:
   // row carries their real username and tenant.
   val AuthAdminRequired = "auth.admin.required"
   val AuthTokenReadOnly = "auth.token.read_only"
-  val AuthLogin         = "auth.login"
-  val AuthLoginFailure  = "auth.login.failure"
-  val AuthLogout        = "auth.logout"
-  val AuthRevoke        = "auth.revoke"
+
+  /** A credential of a disabled tenant's user refused by the API guard. */
+  val AuthTenantDisabled = "auth.tenant.disabled"
+  val AuthLogin          = "auth.login"
+  val AuthLoginFailure   = "auth.login.failure"
+  val AuthLogout         = "auth.logout"
+  val AuthRevoke         = "auth.revoke"
   // Self-service credential rotation via the public POST /api/auth/change-password.
   val AuthPasswordChange = "auth.password.change"
   // Personal access tokens: long-lived bearer credentials a user mints for itself.
@@ -146,6 +149,7 @@ object AuditActions:
     AuthApiKeyFailure,
     AuthAdminRequired,
     AuthTokenReadOnly,
+    AuthTenantDisabled,
     AuthLogin,
     AuthLoginFailure,
     AuthLogout,

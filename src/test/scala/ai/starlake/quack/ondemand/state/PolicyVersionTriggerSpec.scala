@@ -194,7 +194,8 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Nothing
   }
 
-  "the tenant's ACL and OPA settings" should "each bump it, other tenant columns not" in withDb {
+  "the tenant's ACL and OPA settings and its disabled flag" should
+    "each bump it, other tenant columns not" in withDb {
     (c, _) =>
       delta(c)("UPDATE qodstate_tenant SET acl_mode = 'opa' WHERE id = 'acme'") shouldBe AcmeOnce
       delta(c)("UPDATE qodstate_tenant SET opa_url = 'http://opa:8181' WHERE id = 'acme'") shouldBe
@@ -208,6 +209,8 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
         "UPDATE qodstate_tenant SET opa_send_statement_text = true WHERE id = 'acme'"
       ) shouldBe
         AcmeOnce
+      // Liquibase 0060: open sessions follow a disable through the version.
+      delta(c)("UPDATE qodstate_tenant SET disabled = true WHERE id = 'acme'") shouldBe AcmeOnce
       delta(c)(
         "UPDATE qodstate_tenant SET display_name = 'Acme', disabled = true WHERE id = 'acme'",
         "UPDATE qodstate_tenant SET acl_mode = 'opa' WHERE id = 'acme'"

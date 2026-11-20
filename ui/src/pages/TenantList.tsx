@@ -8,9 +8,12 @@ import { Modal } from '../components/Modal';
 import { TypedNameConfirm } from '../components/TypedNameConfirm';
 import { tenantHome } from '../nav/links';
 import { useTenants } from '../nav/TenantsContext';
+import { useAuth } from '../auth/AuthContext';
 
 export default function TenantList() {
   const shared = useTenants();
+  // Only a superuser disables or enables a tenant: a disabled tenant's admins cannot sign in.
+  const { superuser } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
@@ -215,6 +218,10 @@ export default function TenantList() {
                     type="checkbox"
                     checked={!t.disabled}
                     onChange={() => void toggle(t)}
+                    disabled={!superuser}
+                    title={superuser
+                      ? 'Disabled, the tenant runs no node and its users cannot sign in or connect.'
+                      : 'Only a superuser can disable or enable a tenant.'}
                     aria-label={`Toggle tenant ${t.name} enabled`}
                   />
                   <span className="subtle">{t.disabled ? 'off' : 'on'}</span>

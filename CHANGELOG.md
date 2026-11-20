@@ -4,6 +4,26 @@
 
 ### Changed
 
+- **A disabled tenant is fully inert, and only a superuser disables or enables one.** Until now
+  disabling a tenant (`tenant/setDisabled`, `qod tenant set-disabled`, the console's toggle, the
+  MCP tool) only refused its new FlightSQL and native Quack connections: open ones kept running,
+  its users kept signing in to the console and using their tokens, and its pools kept their
+  nodes. Now, while a tenant is disabled:
+  - its open FlightSQL and native Quack sessions are refused on their next statement, as the flag
+    moves the tenant's policy version (Liquibase `0060`);
+  - its users' password and SSO logins answer `403 tenant_disabled`, their console sessions are
+    refused everything but signing out with the same answer, and their personal access tokens
+    resolve to nothing on REST, MCP, SCIM and the REST data edge;
+  - its pools' nodes are stopped, each pool keeping its own settings, and none starts: a pool
+    create or scale-up answers `409 tenant_disabled`, a resume or node restart fails, and a
+    maintenance run due meanwhile is failed with that reason; the pool list says why in each
+    pool's `statusDetail`;
+  - superusers keep full access to it.
+  Enabling it brings every pool back as it was. Nothing is deleted. Tenant admins could disable
+  their own tenant before; that is now `403 superuser_required`, and the console's toggle is
+  greyed out for them. Residual: an admin of several tenants, one of them disabled, can still
+  manage that one through the management API.
+
 - **Deleting a tenant or a database asks for its name to be typed, in the CLI and in the
   console.** `qod tenant delete` and `qod database delete`, run on a terminal, print what goes
   with the delete and send nothing unless the name is typed back (surrounding spaces aside, case

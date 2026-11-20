@@ -125,6 +125,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authService = fakeSvc,
       tokens = tokens,
       identitySource = ManagementIdentitySource.Db,
+      tenantDisabled = _ => false,
       grantsForIdentity = grantsForIdentity,
       cookieSecureOverride = cookieSecureOverride,
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
@@ -1482,6 +1483,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authService = fakeSvc,
       tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
+      tenantDisabled = _ => false,
       grantsForIdentity = fakeDirectory,
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc),
       patSessionOf = _ => None

@@ -101,7 +101,7 @@
     },
     {
       "version": "0.14.1",
-      "changesets": [],
+      "changesets": ["0060-tenant-disabled-policy-version"],
       "min_from_version": "0.10.0",
       "rollback_without_restore": true,
       "rollback_blocked_by": [],

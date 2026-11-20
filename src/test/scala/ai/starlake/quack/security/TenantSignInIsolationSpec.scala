@@ -157,7 +157,7 @@ class TenantSignInIsolationSpec
       new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
       pgUsers = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
       pats = new PatStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
-      patAuth = new PatAuthenticator(pats, pgUsers.userById, u => List(UserGrant(u.tenant, u.kind)))
+      patAuth = new PatAuthenticator(pats, pgUsers.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false)
       // The same directory for the PAT cases, plus the MCP case's PAT owner: an acme row that is
       // also named root.
       seedDirectory(

@@ -62,11 +62,17 @@ final case class PatPrincipal(
 final class PatAuthenticator(
     pats: PatStore,
     userById: String => Option[RbacUser],
-    grantsFor: RbacUser => List[UserGrant]
+    grantsFor: RbacUser => List[UserGrant],
+    /** Whether a tenant is disabled: a token whose owner belongs to one resolves to nothing, as a
+      * disabled user's does, until a superuser enables the tenant. No default, so no wiring can
+      * leave a disabled tenant's tokens working.
+      */
+    tenantDisabled: String => Boolean
 ):
 
   /** The principal behind `token`, or `None` when the token is not a PAT at all, is unknown /
-    * revoked / expired, or its owner no longer exists or is disabled. A value without the
+    * revoked / expired, or its owner no longer exists, is disabled or belongs to a disabled tenant.
+    * A value without the
     * [[ai.starlake.quack.ondemand.state.PatStore.TokenPrefix PatStore.TokenPrefix]] (a session JWT,
     * an API key) is rejected before any store call, so the shared bearer path can try PATs first
     * without paying a query per request.
@@ -76,7 +82,11 @@ final class PatAuthenticator(
     else
       pats
         .verify(token)
-        .flatMap(rec => userById(rec.userId).filter(_.enabled).map(user => (rec, user)))
+        .flatMap(rec =>
+          userById(rec.userId)
+            .filter(u => u.enabled && !u.tenant.exists(tenantDisabled))
+            .map(user => (rec, user))
+        )
         .map { (rec, user) =>
           val base = scopeFor(user)
           // dropAdmin lands on the SAME demotion login already performs, so a

@@ -428,6 +428,7 @@ object ManagerServerHarness:
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
       // Mirror Main: an SSO login's grants come from the user directory, in its login realm.
+      tenantDisabled = sup.tenantDisabled,
       grantsForIdentity = (realm, identity, email) =>
         userStore.grantsForIdentity(realm, identity, email),
       // Mirror Main: resolve per-tenant login mode from the registry so a db

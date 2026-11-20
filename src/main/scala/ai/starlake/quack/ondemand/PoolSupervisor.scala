@@ -1438,11 +1438,16 @@ final class PoolSupervisor(
     * through here so module event emission can't drift out of sync with a new spawn path.
     */
   private def startNodeEmitting(key: PoolKey, spec: NodeSpec): IO[RunningNode] =
-    backend
-      .start(spec)
-      .flatTap(n =>
-        IO(events.emit(ManagerEvent.NodeStarted(key.tenant, key.tenantDb, key.pool, n.nodeId)))
-      )
+    // A disabled tenant runs no node: the one refusal, as every pool node start passes here
+    // (create, scale-up, resume, restart, reconcile's respawns).
+    if tenantDisabled(key.tenant) then
+      IO.raiseError(new PoolSupervisor.TenantDisabledOff(PoolSupervisor.tenantDisabledMessage(key.tenant)))
+    else
+      backend
+        .start(spec)
+        .flatTap(n =>
+          IO(events.emit(ManagerEvent.NodeStarted(key.tenant, key.tenantDb, key.pool, n.nodeId)))
+        )
 
   /** Stop one node and emit [[ManagerEvent.NodeStopped]] with `reason`. Every `backend.stop` call
     * site routes through here, as with [[startNodeEmitting]].
@@ -1625,7 +1630,24 @@ final class PoolSupervisor(
     }
 
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
-    if state.suspended && state.nodes.nonEmpty then
+    if tenantDisabled(key.tenant) then
+      // A disabled tenant's pool runs no node: they are stopped and forgotten like a suspend's,
+      // without touching the pool's own suspended flag or distribution, so re-enabling the tenant
+      // brings each pool back as it was. Nothing is spawned while the tenant stays disabled.
+      if state.nodes.isEmpty then IO.pure(state)
+      else
+        IO.delay(
+          logger.info(
+            s"reconcile: tenant of $key is disabled; stopping ${state.nodes.size} node(s)"
+          )
+        ) *> drainAndForgetNodes(key, state.nodes) *>
+          IO.delay {
+            val updated = state.copy(nodes = Nil)
+            pools.put(key, updated)
+            publish.topologyChanged()
+            updated
+          }
+    else if state.suspended && state.nodes.nonEmpty then
       // Crash-mid-suspend heal: suspendPool persists suspended=true BEFORE draining, so a crash in
       // that window reloads a suspended pool whose nodes are still alive. Drain-forget them the way
       // suspendPool would. No PoolSuspended re-emission (already announced); per-node NodeStopped
@@ -2012,6 +2034,13 @@ final class PoolSupervisor(
     */
   def getTenantById(id: String): Option[Tenant] = tenants.get(id)
 
+  /** True while `tenantId`'s tenant is disabled: its pools hold no node. Reconcile stops theirs,
+    * and [[startNodeEmitting]], where every pool node starts, refuses
+    * [[PoolSupervisor.TenantDisabledOff]].
+    */
+  def tenantDisabled(tenantId: String): Boolean =
+    tenants.get(tenantId.toLowerCase(Locale.ROOT)).exists(_.disabled)
+
   /** Lookup by surrogate id (`qodstate_tenant_db.id`). The `tenantDbs` map is keyed by id: a direct
     * hit.
     */
@@ -2289,6 +2318,12 @@ final class PoolSupervisor(
     }
   }
 
+  /** Disable or enable a tenant. Disabled, its pools run no node and start none (reconcile stops
+    * them, [[tenantDisabled]]), its data-plane sessions are refused at the handshake and, through
+    * the policy version the flag moves (Liquibase 0060), an open one on its next statement. The
+    * pools are reconciled here at once, each under its lock, so the nodes stop (or, on enable,
+    * start again) without waiting for the leader's next pass; a pool that fails is left to it.
+    */
   def setTenantDisabled(name: String, disabled: Boolean): IO[Either[SupervisorError, Tenant]] =
     IO.blocking {
       withCacheRecovery("setTenantDisabled") {
@@ -2298,9 +2333,28 @@ final class PoolSupervisor(
             val updated = t.copy(disabled = disabled)
             store.upsertTenant(updated)
             tenants.put(updated.id, updated)
+            if t.disabled != disabled then
+              // As for the ACL columns: the generation first, so this replica's open sessions
+              // run their gates again even when the version read fails.
+              policyVersions.advance()
+              policyVersions.publish(policyVersions.readAfterMutation())
             publish.topologyChanged()
             Right(updated)
       }
+    }.flatTap {
+      case Right(t) =>
+        pools.toList
+          .filter { case (key, _) => key.tenant == t.id }
+          .foldLeft(IO.unit) { case (acc, (key, state)) =>
+            acc *> reconcilePool(key, state).void.handleErrorWith(e =>
+              IO.delay(
+                logger.warn(
+                  s"setTenantDisabled: reconciling $key failed, left to reconcile: ${e.getMessage}"
+                )
+              )
+            )
+          }
+      case Left(_) => IO.unit
     }
 
   /** Store the tenant's sign-in state as given: provider, provider config and client secret, the
@@ -5316,6 +5370,16 @@ object PoolSupervisor:
 
   /** The REST code of a database whose data path is local while nodes have local files off. */
   val LocalFilesOffCode: String = "local_files_off"
+
+  val TenantDisabledCode: String = "tenant_disabled"
+
+  def tenantDisabledMessage(tenant: String): String =
+    s"tenant '$tenant' is disabled: its pools run no node until a superuser enables it"
+
+  /** A node start of a disabled tenant's pool ([[PoolSupervisor.tenantDisabled]]); REST answers
+    * a pool create or scale-up so refused `409 tenant_disabled`.
+    */
+  final class TenantDisabledOff(reason: String) extends RuntimeException(reason)
 
   /** A node of a database whose data path is local would have to start with local files off
     * (`quack-on-demand.nodeFiles.allowLocal`), and could only fail: no node was started. `reason`

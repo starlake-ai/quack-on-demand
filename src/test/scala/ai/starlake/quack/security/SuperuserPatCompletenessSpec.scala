@@ -109,7 +109,7 @@ class SuperuserPatCompletenessSpec
         patUserOf =
           Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
         patAuth =
-          Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+          Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
       )
       try
         val pat     = h.superuserPat()
@@ -146,7 +146,7 @@ class SuperuserPatCompletenessSpec
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
       patAuth =
-        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
     )
     try
       val r = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami", apiKey = Some(h.superuserPat()))
@@ -169,7 +169,7 @@ class SuperuserPatCompletenessSpec
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
       patAuth =
-        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
     )
     try
       val r = get(

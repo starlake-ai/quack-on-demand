@@ -69,7 +69,7 @@ class StatementIdentitySpec
       users = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
       pats = new PatStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
       // Row-only grants, as Main wires it: a PAT is bound to its owner's row.
-      patAuth = new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)))
+      patAuth = new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false)
       users.upsertUser(None, SecurityFixtures.RootUsername, SecurityFixtures.RootPassword, "admin")
       users.upsertUser(
         Some(SecurityFixtures.TenantId),
