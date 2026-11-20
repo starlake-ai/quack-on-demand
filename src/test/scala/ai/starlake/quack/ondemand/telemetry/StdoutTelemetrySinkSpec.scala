@@ -335,6 +335,19 @@ class StdoutTelemetrySinkSpec extends AnyFlatSpec with Matchers:
     js(f.flushed().head).get[String]("error").toOption.get should not include "orders"
   }
 
+  it should "call onClosed once its queue has drained, so an s3 writer flushes every line" in {
+    val seen   = new ConcurrentLinkedQueue[String]()
+    val events = new ConcurrentLinkedQueue[String]()
+    val sink   = new StdoutTelemetrySink(
+      new RecordingTelemetryStore,
+      out = l => { Thread.sleep(1); seen.add(l); () },
+      onClosed = () => { events.add(s"closed after ${seen.size}"); throw new RuntimeException("x") }
+    )
+    sink.appendStatements((1 to 50).map(stmt).toList)
+    sink.close()
+    events.asScala.toList shouldBe List("closed after 50")
+  }
+
   "TelemetryConfig.validate" should "accept a known sink and refuse an unknown one or one without a store" in {
     TelemetryConfig.validate("postgres", 7, "stdout") shouldBe Right(())
     TelemetryConfig.validate("postgres", 7, "Stdout").isLeft shouldBe true

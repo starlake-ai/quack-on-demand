@@ -63,6 +63,7 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     sens should contain("quack-flightsql.auth.google.clientSecret")
     sens should contain("quack-flightsql.auth.azure.clientSecret")
     sens should contain("quack-on-demand.metrics.azure.instrumentationKey")
+    sens should contain("quack-on-demand.telemetry.auditS3.secretAccessKey")
   }
 
   it should "drop the removed static API key from the config page" in {

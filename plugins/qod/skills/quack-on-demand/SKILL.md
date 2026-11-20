@@ -2084,7 +2084,17 @@ Tenant admins see only their own tenant's rows. Superusers see everything, inclu
 | `QOD_TELEMETRY_JOURNAL_CAPACITY` | `8192` | Bounded in-process telemetry journal queue depth, also the stdout sink's queue depth. Overflow drops events and increments `qod_journal_dropped_total` (label `table`: `audit` / `stmt_history` = not written to Postgres, `stdout` = not written to stdout). Increase to buffer higher statement throughput under Postgres write latency spikes |
 | `QOD_AUDIT_RETENTION_DAYS` | `90` | Delete rows older than N days (hourly purge); set to `0` to keep forever |
 | `QOD_TELEMETRY_STORE` | `postgres` | `none` disables all recording, hides the Audit UI page, and keeps the drop counter at zero |
-| `QOD_AUDIT_SINK` | `none` | `stdout` also writes every audit and statement event to stdout as one JSON line (`qodEvent=audit` or `statement`) for a log shipper. The line is redacted: SQL literals become `'?'`, engine error text is scrubbed, and on a failed auth event the typed login name and tenant become a keyed hash. Needs `QOD_TELEMETRY_STORE=postgres`. Lines dropped under stdout backpressure count in `qod_journal_dropped_total{table="stdout"}` |
+| `QOD_AUDIT_SINK` | `none` | `stdout` also writes every audit and statement event to stdout as one JSON line (`qodEvent=audit` or `statement`) for a log shipper. The line is redacted: SQL literals become `'?'`, engine error text is scrubbed, and on a failed auth event the typed login name and tenant become a keyed hash. Needs `QOD_TELEMETRY_STORE=postgres`. Lines dropped under stdout backpressure count in `qod_journal_dropped_total{table="stdout"}`. `s3` writes the same redacted lines to a bucket instead (see "Audit to S3" below) |
+| `QOD_AUDIT_S3_BUCKET` | (none) | Bucket for `QOD_AUDIT_SINK=s3`; required with it |
+| `QOD_AUDIT_S3_ENDPOINT` | (AWS) | S3-compatible endpoint URL, e.g. `https://s3.gra.io.cloud.ovh.net` |
+| `QOD_AUDIT_S3_REGION` | `us-east-1` | Region of the audit bucket (OVH: `gra`) |
+| `QOD_AUDIT_S3_PREFIX` | `audit/` | Key prefix of the audit objects |
+| `QOD_AUDIT_S3_URL_STYLE` | `path` | `path` or `vhost` addressing |
+| `QOD_AUDIT_S3_ACCESS_KEY_ID` / `QOD_AUDIT_S3_SECRET_ACCESS_KEY` | (none) | The sink's own key, required: give it `s3:PutObject` on the prefix and nothing else. Never the data or managed-store keys, never passed to a node |
+| `QOD_AUDIT_S3_FLUSH_INTERVAL_SEC` | `60` | Seconds between uploads (1 to 3600) |
+| `QOD_AUDIT_S3_MAX_BATCH_BYTES` | `4194304` | Uncompressed bytes per object (65536 to 16777216); a full batch uploads at once |
+
+**Audit to S3** (`QOD_AUDIT_SINK=s3`): every audit and statement event goes, as the redacted JSON line `stdout` would print, into gzip NDJSON objects `<prefix>date=YYYY-MM-DD/<replica>-<seq>.ndjson.gz` (UTC date of the upload; `<replica>` is the host name and a random boot id, so HA replicas and restarts never share a key). Query them with DuckDB: `SELECT * FROM read_json('s3://<bucket>/audit/**/*.ndjson.gz') WHERE qodEvent = 'audit'`. The sink only ever creates objects: it never overwrites or deletes one, so expiry is a lifecycle rule of yours, and it works on an Object Lock bucket, whose default retention applies (QoD sets none). Uploads run on a background thread and never slow a statement. While the store is unreachable, up to four batches are held; past that lines are dropped and counted in `qod_journal_dropped_total{table="s3"}`, and `qod_audit_s3_pending_bytes` shows what is held (alert when it stays above `QOD_AUDIT_S3_MAX_BATCH_BYTES` for two flush intervals). A crash or a forced stop loses what is held (no disk spool); a clean stop uploads it, waiting at most a few seconds. Postgres stays the record: the bucket holds the redacted copy.
 
 ## Statement history and trends
 
