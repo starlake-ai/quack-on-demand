@@ -191,7 +191,22 @@ final class PostgresControlPlaneStore(
     finally rs.close()
   }
 
-  def deleteTenant(id: String): Unit = withConn(c => deleteById(c, "qodstate_tenant", "id", id))
+  def deleteTenant(id: String): Unit = withConn { c =>
+    // qodstate_user.tenant has no foreign key, so the tenant's users go here, in the tenant row's
+    // own transaction (#265); their tokens, S3 credentials and memberships cascade from them. A
+    // tenant that still has tenant-dbs fails on their FK and rolls the users back with it.
+    c.setAutoCommit(false)
+    try
+      deleteById(c, "qodstate_user", "tenant", id)
+      deleteById(c, "qodstate_tenant", "id", id)
+      c.commit()
+    catch
+      case t: Throwable =>
+        try c.rollback()
+        catch case _: Throwable => ()
+        throw t
+    finally c.setAutoCommit(true)
+  }
 
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit = withConn { c =>
     // Single connection + manual commit so the tenant row and every built-in row either all land
@@ -199,6 +214,9 @@ final class PostgresControlPlaneStore(
     // id is a programmer error.
     c.setAutoCommit(false)
     try
+      // Users a tenant delete of an earlier release left behind under this id (#265) would
+      // otherwise belong to the new tenant, passwords and tokens included.
+      deleteById(c, "qodstate_user", "tenant", tenant.id)
       val tps = c.prepareStatement(
         """INSERT INTO qodstate_tenant
           |  (id, display_name, disabled, auth_provider, auth_config,
