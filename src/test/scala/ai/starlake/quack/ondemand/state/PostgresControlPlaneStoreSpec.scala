@@ -429,6 +429,48 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
       store.listTenants() shouldBe List(tenant)
   }
 
+  it should "delete a tenant's users with it, and no one else's (#265)" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenant(tenant.copy(id = "tenant-2", displayName = "tenant-2"))
+    val alice = store.upsertUserWithHash(Some("tenant-1"), "alice", "h", "user")
+    store.upsertUserWithHash(Some("tenant-2"), "bob", "h", "user")
+    store.upsertUserWithHash(None, "root", "h", "admin")
+
+    store.deleteTenant("tenant-1")
+
+    store.getUserById(alice) shouldBe None
+    store.listUsers(Some("tenant-1")) shouldBe Nil
+    store.listUsers(Some("tenant-2")).map(_.username) shouldBe List("bob")
+    store.findUser(None, "root") should not be empty
+  }
+
+  it should "keep a tenant's users when its delete is refused" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertUserWithHash(Some("tenant-1"), "alice", "h", "user")
+    intercept[java.sql.SQLException](store.deleteTenant("tenant-1"))
+    store.listUsers(Some("tenant-1")).map(_.username) shouldBe List("alice")
+  }
+
+  it should "not hand a new tenant the users an earlier delete left under its id" in
+    withStoreAndUrl { (store, url) =>
+      // What a tenant delete before #265 left behind: users whose tenant row is gone.
+      store.upsertTenant(tenant)
+      store.upsertUserWithHash(Some("tenant-1"), "alice", "h", "user")
+      store.upsertUserWithHash(Some("tenant-2"), "carol", "h", "user")
+      val c = DriverManager.getConnection(url, pgUser, pgPass)
+      try
+        val st = c.createStatement()
+        try st.executeUpdate("DELETE FROM qodstate_tenant WHERE id = 'tenant-1'")
+        finally st.close()
+      finally c.close()
+
+      store.createTenantWithBuiltins(tenant, BuiltinRbac.rowsFor("tenant-1"))
+
+      store.listUsers(Some("tenant-1")) shouldBe Nil
+      store.listUsers(Some("tenant-2")).map(_.username) shouldBe List("carol")
+    }
+
   it should "reject delete of a pool that still has nodes (FK RESTRICT)" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)

@@ -1528,6 +1528,21 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.deleteTenant("foo").unsafeRunSync() shouldBe Right(())
     sup.getTenant("foo") shouldBe None
 
+  it should "delete the tenant's users with it, and recreating the name brings none back (#265)" in:
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(new CapturingBackend, new NodeLoadTracker, st)
+    sup.createTenant(Tenant("foo")).unsafeRunSync()
+    sup.createTenant(Tenant("bar")).unsafeRunSync()
+    val alice = st.upsertUserWithHash(Some("foo"), "alice", "h", "user")
+    st.upsertUserWithHash(Some("bar"), "bob", "h", "user")
+
+    sup.deleteTenant("foo").unsafeRunSync() shouldBe Right(())
+    st.getUserById(alice) shouldBe None
+    sup.listUsers(Some("bar")).map(_.username) shouldBe List("bob")
+
+    sup.createTenant(Tenant("foo")).unsafeRunSync()
+    sup.listUsers(Some("foo")) shouldBe Nil
+
   it should "refuse to delete a tenant that still has pools" in:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
