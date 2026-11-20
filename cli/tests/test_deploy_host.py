@@ -28,7 +28,12 @@ cat >"$dir/bin/pip" <<'PIP'
 #!/bin/sh
 here="$(cd "$(dirname "$0")" && pwd)"
 echo "$*" >>"$here/../pip.log"
-for a in "$@"; do case "$a" in qod==*) v="${a#qod==}";; esac; done
+for a in "$@"; do
+  case "$a" in
+    qod==*) v="${a#qod==}";;
+    *.whl) [ -f "$a" ] || { echo "ERROR: $a does not exist" >&2; exit 1; }; b="${a##*/}"; v="${b#qod-}"; v="${v%%-*}";;
+  esac
+done
 [ "$v" = "9.9.9" ] && { echo "ERROR: No matching distribution found for qod==9.9.9" >&2; exit 1; }
 cat >"$here/qod" <<QOD
 #!/bin/sh
@@ -243,3 +248,86 @@ def test_the_unit_refuses_a_pin_that_is_not_a_release(pin):
     )
     assert proc.returncode == 1
     assert "is not a release version" in proc.stderr
+
+
+def _wheel(tmp_path, name="qod-1.2.3-py3-none-any.whl", body=b"wheel bytes"):
+    import hashlib
+
+    wheel = tmp_path / "dl" / name
+    wheel.parent.mkdir(exist_ok=True)
+    wheel.write_bytes(body)
+    return wheel, hashlib.sha256(body).hexdigest()
+
+
+def test_install_with_a_wheel_installs_a_copy_of_it_and_nothing_from_the_index(host, tmp_path):
+    wheel, digest = _wheel(tmp_path)
+    result = host.run(INSTALL, "1.2.3", "--wheel", str(wheel), "--sha256", digest.upper())
+    assert result.returncode == 0, result.stderr
+    version_dir = host.prefix / "versions" / "1.2.3"
+    (pip_call,) = host.lines(version_dir / "pip.log")
+    # pip read the copy inside the new version's folder, never the caller's file, nor qod==1.2.3.
+    assert f"{version_dir}/.wheel/{wheel.name}" in pip_call
+    assert str(wheel) not in pip_call and "qod==" not in pip_call
+    assert not (version_dir / ".wheel").exists()
+    assert (version_dir / ".qod-installed").is_file()
+    assert host.pin.read_text() == "QOD_VERSION=1.2.3\n"
+    assert host.lines(host.calls) == [
+        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 pg= leak="
+    ]
+
+
+def test_install_refuses_a_wheel_whose_sha256_differs_and_writes_nothing(host, tmp_path):
+    wheel, _ = _wheel(tmp_path)
+    result = host.run(INSTALL, "1.2.3", "--wheel", str(wheel), "--sha256", "0" * 64)
+    assert result.returncode == 1
+    assert "not " + "0" * 64 in result.stderr
+    assert not (host.prefix / "versions").exists()
+    assert not host.pin.exists()
+
+
+@pytest.mark.parametrize(
+    "name", ["qod-1.2.4-py3-none-any.whl", "qodx-1.2.3-py3-none-any.whl", "qod-1.2.3-py3-none-any.tar.gz"]
+)
+def test_install_refuses_a_file_that_is_not_a_wheel_of_that_version(host, tmp_path, name):
+    wheel, _ = _wheel(tmp_path, name=name)
+    result = host.run(INSTALL, "1.2.3", "--wheel", str(wheel))
+    assert result.returncode == 1
+    assert "qod-1.2.3-*.whl" in result.stderr
+    assert not (host.prefix / "versions").exists()
+
+
+def test_install_refuses_a_missing_wheel(host, tmp_path):
+    result = host.run(INSTALL, "1.2.3", "--wheel", str(tmp_path / "qod-1.2.3-py3-none-any.whl"))
+    assert result.returncode == 1
+    assert "not a readable file" in result.stderr
+    assert not (host.prefix / "versions").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--sha256", "a" * 64],  # --sha256 says nothing without --wheel
+        ["--wheel"],
+        ["--wheel", "x.whl", "--sha256", "abc"],
+        ["--wheel", "x.whl", "--sha256", "g" * 64],
+        ["--force"],
+        ["1.2.4"],
+    ],
+)
+def test_install_refuses_malformed_options(host, args):
+    result = host.run(INSTALL, "1.2.3", *args)
+    assert result.returncode == 2, args
+    assert "usage:" in result.stderr
+    assert not (host.prefix / "versions").exists()
+
+
+def test_install_of_an_installed_version_leaves_it_and_says_the_wheel_was_not_used(host, tmp_path):
+    assert host.run(INSTALL, "1.2.3").returncode == 0
+    wheel, digest = _wheel(tmp_path)
+    again = host.run(INSTALL, "1.2.3", "--wheel", str(wheel), "--sha256", digest)
+    assert again.returncode == 0, again.stderr
+    assert "was not used" in again.stdout
+    assert len(host.lines(host.prefix / "versions" / "1.2.3" / "pip.log")) == 1
+    # The file is still checked: a wrong one is refused even when it would not be used.
+    wrong = host.run(INSTALL, "1.2.3", "--wheel", str(wheel), "--sha256", "0" * 64)
+    assert wrong.returncode == 1
