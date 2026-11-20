@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install one qod release side by side with the others, and cache what it runs.
 #
-#   install.sh VERSION
+#   install.sh VERSION [--wheel FILE [--sha256 HEX]]
 #
 # Creates the service user and /etc/qod when missing, installs the qod CLI of VERSION into its own
 # virtualenv, /opt/qod/versions/VERSION, then runs that CLI's
@@ -13,6 +13,13 @@
 # Idempotent: an installed version is not reinstalled, only its cache is checked again (which
 # downloads nothing when it is complete). Never touches another version's folder. A version PyPI
 # or GitHub does not have is refused, and the folder this run created is removed.
+#
+# --wheel FILE installs the qod package from FILE, a wheel named qod-VERSION-*.whl, instead of
+# downloading qod==VERSION; pip still resolves its dependencies from the index. The file is copied
+# into the new virtualenv first and pip installs that copy, so the bytes checked are the bytes
+# installed. --sha256 HEX refuses a FILE whose sha256 is not HEX, before anything is written. For a
+# version already installed FILE is checked and not used: remove /opt/qod/versions/VERSION first
+# to install its bytes.
 #
 # Needs root (it creates a user and writes /opt/qod and /etc/qod), and the network.
 #
@@ -38,15 +45,68 @@ die() {
 }
 
 usage() {
-  echo "usage: install.sh VERSION   (a qod release, for example 0.13.1)" >&2
+  echo "usage: install.sh VERSION [--wheel FILE [--sha256 HEX]]   (VERSION: a qod release, for example 0.13.1)" >&2
   exit 2
 }
 
-[ "$#" -eq 1 ] || usage
+[ "$#" -ge 1 ] || usage
 VERSION="$1"
+shift
 case "$VERSION" in
   "" | *[!0-9.]* | .* | *. | *..*) usage ;;
 esac
+WHEEL=""
+SHA256=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --wheel)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+      WHEEL="$2"
+      shift 2
+      ;;
+    --sha256)
+      [ "$#" -ge 2 ] || usage
+      SHA256="$(printf '%s' "$2" | tr 'A-F' 'a-f')"
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+if [ -n "$SHA256" ]; then
+  [ -n "$WHEEL" ] || usage
+  case "$SHA256" in
+    *[!0-9a-f]*) usage ;;
+  esac
+  [ "${#SHA256}" -eq 64 ] || usage
+fi
+
+# The sha256 of file $1, in lowercase hex.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    die "neither sha256sum nor shasum is installed, so --sha256 cannot be checked"
+  fi
+}
+
+# Refuse file $1 unless its sha256 is the one --sha256 gave (no --sha256: nothing to check).
+check_sha256() {
+  [ -n "$SHA256" ] || return 0
+  actual="$(sha256_of "$1")"
+  [ "$actual" = "$SHA256" ] || die "$WHEEL has sha256 $actual, not $SHA256; nothing was installed"
+}
+
+if [ -n "$WHEEL" ]; then
+  wheel_name="$(basename -- "$WHEEL")"
+  case "$wheel_name" in
+    "qod-$VERSION-"*.whl) ;;
+    *) die "$WHEEL is not a wheel of qod $VERSION (its name must be qod-$VERSION-*.whl)" ;;
+  esac
+  [ -f "$WHEEL" ] && [ -r "$WHEEL" ] || die "$WHEEL is not a readable file"
+  check_sha256 "$WHEEL"
+fi
 
 # The value of KEY in qod.env (systemd EnvironmentFile syntax: KEY=value, optionally quoted),
 # the last one when repeated; nothing when absent.
@@ -121,14 +181,28 @@ trap cleanup EXIT
 
 if [ -f "$marker" ]; then
   echo "qod $VERSION is installed in $dir; checking its cache"
+  if [ -n "$WHEEL" ]; then
+    echo "$WHEEL was not used: remove $dir first to install it"
+  fi
 else
   # A folder without the marker is what an interrupted run of this script left.
   rm -rf "$dir"
   created=1
   echo "installing qod $VERSION into $dir"
   "$PYTHON" -m venv "$dir" || die "could not create a virtualenv with $PYTHON (install python3-venv?)"
-  "$dir/bin/pip" install --quiet --disable-pip-version-check --no-input "qod==$VERSION" ||
-    die "pip could not install qod==$VERSION (is it a published release?); nothing was kept"
+  if [ -n "$WHEEL" ]; then
+    # pip reads the copy, in a folder only root writes, checked again after the copy: what was
+    # checked cannot change before pip reads it. pip keeps the file's name, which must stay a wheel's.
+    mkdir -m 0700 "$dir/.wheel"
+    cp -- "$WHEEL" "$dir/.wheel/$wheel_name"
+    check_sha256 "$dir/.wheel/$wheel_name"
+    "$dir/bin/pip" install --quiet --disable-pip-version-check --no-input "$dir/.wheel/$wheel_name" ||
+      die "pip could not install $WHEEL; nothing was kept"
+    rm -rf "$dir/.wheel"
+  else
+    "$dir/bin/pip" install --quiet --disable-pip-version-check --no-input "qod==$VERSION" ||
+      die "pip could not install qod==$VERSION (is it a published release?); nothing was kept"
+  fi
   reported="$("$dir/bin/qod" --version)"
   [ "$reported" = "qod $VERSION" ] || die "the installed CLI reports '$reported', not 'qod $VERSION'"
 fi
