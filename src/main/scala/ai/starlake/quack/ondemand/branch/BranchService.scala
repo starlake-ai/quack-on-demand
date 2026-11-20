@@ -1829,8 +1829,11 @@ final class BranchService(
     */
   def expireDue(): IO[List[Branch]] = IO.defer {
     val sweptAt = now()
-    val due     = sup
+    // A disabled tenant's branches wait: expiring one tears down what the tenant gets back when a
+    // superuser enables it. Its TTL is judged at the first sweep after that.
+    val due = sup
       .listTenants()
+      .filterNot(_.disabled)
       .flatMap(t => store.listTenantBranches(t.id, BranchStatus.Live))
       .filter(pastTtl(_, sweptAt))
     due.foldLeft(IO.pure(List.empty[Branch])) { (acc, b) =>

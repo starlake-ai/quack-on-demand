@@ -617,6 +617,12 @@ qod pool set-autoscale --tenant acme --db acme_tpch --pool bi
 # Delete a pool: stops nodes AND removes the pool from the registry
 qod pool delete --tenant acme --db acme_tpch --pool bi --force
 
+# Disable a tenant instead of deleting it (superuser only; nothing is deleted):
+# its pools' nodes stop and none start, its users cannot sign in, their sessions
+# and tokens are refused (403 tenant_disabled), and its open FlightSQL / Quack
+# sessions are refused on their next statement. --enabled brings it all back.
+qod tenant set-disabled acme --disabled
+
 # Delete a tenant (must have no pools first). On a terminal it asks for the
 # tenant's name to be typed; without one (a script, an agent) it asks nothing.
 qod tenant delete acme

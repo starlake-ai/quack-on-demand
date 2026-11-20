@@ -1107,7 +1107,8 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
             new ai.starlake.quack.ondemand.auth.PatAuthenticator(
               pats,
               users.userById,
-              u => List(UserGrant(u.tenant, u.kind))
+              u => List(UserGrant(u.tenant, u.kind)),
+              tenantDisabled = _ => false
             )
           )
         )

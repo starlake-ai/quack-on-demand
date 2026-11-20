@@ -33,7 +33,8 @@ final class MaintenanceScheduler(
     s.contains('\'') || s.contains(';') || s.contains('\\') || s.contains('.')
 
   def tickOnce(now: Instant): Unit =
-    store.listTenants().foreach { t =>
+    // A disabled tenant runs no node, a maintenance one included: nothing of it is queued.
+    store.listTenants().filterNot(_.disabled).foreach { t =>
       // Branch catalogs (Epic 1) are never maintained: expiring or cleaning a branch could delete
       // the parent's files it shares. Their lifecycle is the branch teardown.
       store

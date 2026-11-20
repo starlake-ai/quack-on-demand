@@ -413,6 +413,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
       patSessionOf = _ => None
@@ -574,6 +575,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
       patSessionOf = _ => None
@@ -591,6 +593,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
       patSessionOf = _ => None
@@ -621,6 +624,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
       patSessionOf = _ => None

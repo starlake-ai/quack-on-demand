@@ -1,0 +1,33 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0060-tenant-disabled-policy-version
+      author: qod
+      changes:
+        # A tenant's `disabled` flag moves its policy version, like its ACL and OPA settings
+        # (0050), so an open FlightSQL or native Quack session runs its gates again on its next
+        # statement and is refused there once the tenant is disabled. Same BEFORE UPDATE trigger,
+        # with `disabled` added to its WHEN clause.
+        - sql:
+            sql: DROP TRIGGER IF EXISTS qod_policy_version_acl ON qodstate_tenant
+        - sql:
+            sql: >
+              CREATE TRIGGER qod_policy_version_acl BEFORE UPDATE ON qodstate_tenant FOR EACH ROW
+              WHEN (OLD.acl_mode IS DISTINCT FROM NEW.acl_mode
+                OR OLD.opa_url IS DISTINCT FROM NEW.opa_url
+                OR OLD.opa_policy_path IS DISTINCT FROM NEW.opa_policy_path
+                OR OLD.opa_token IS DISTINCT FROM NEW.opa_token
+                OR OLD.opa_send_statement_text IS DISTINCT FROM NEW.opa_send_statement_text
+                OR OLD.disabled IS DISTINCT FROM NEW.disabled)
+              EXECUTE FUNCTION qod_bump_tenant_policy_version()
+      rollback:
+        - sql:
+            sql: DROP TRIGGER IF EXISTS qod_policy_version_acl ON qodstate_tenant
+        - sql:
+            sql: >
+              CREATE TRIGGER qod_policy_version_acl BEFORE UPDATE ON qodstate_tenant FOR EACH ROW
+              WHEN (OLD.acl_mode IS DISTINCT FROM NEW.acl_mode
+                OR OLD.opa_url IS DISTINCT FROM NEW.opa_url
+                OR OLD.opa_policy_path IS DISTINCT FROM NEW.opa_policy_path
+                OR OLD.opa_token IS DISTINCT FROM NEW.opa_token
+                OR OLD.opa_send_statement_text IS DISTINCT FROM NEW.opa_send_statement_text)
+              EXECUTE FUNCTION qod_bump_tenant_policy_version()

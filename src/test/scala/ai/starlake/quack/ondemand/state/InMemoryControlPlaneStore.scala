@@ -41,8 +41,11 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   // authClientSecret is written with authConfig (both taken from `t`).
   def upsertTenant(t: Tenant): Unit =
     tenants.updateWith(t.id) {
-      case Some(old) => Some(t.copy(acl = old.acl))
-      case None      =>
+      case Some(old) =>
+        // As Liquibase 0060: the disabled flag moves the tenant's policy version.
+        if old.disabled != t.disabled then bumpPolicyVersion(t.id)
+        Some(t.copy(acl = old.acl))
+      case None =>
         bumpPolicyVersion(t.id)
         Some(t)
     }

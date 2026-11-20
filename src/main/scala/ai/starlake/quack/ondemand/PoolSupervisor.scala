@@ -1625,7 +1625,24 @@ final class PoolSupervisor(
     }
 
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
-    if state.suspended && state.nodes.nonEmpty then
+    if tenantDisabled(key.tenant) then
+      // A disabled tenant's pool runs no node: they are stopped and forgotten like a suspend's,
+      // without touching the pool's own suspended flag or distribution, so re-enabling the tenant
+      // brings each pool back as it was. Nothing is spawned while the tenant stays disabled.
+      if state.nodes.isEmpty then IO.pure(state)
+      else
+        IO.delay(
+          logger.info(
+            s"reconcile: tenant of $key is disabled; stopping ${state.nodes.size} node(s)"
+          )
+        ) *> drainAndForgetNodes(key, state.nodes) *>
+          IO.delay {
+            val updated = state.copy(nodes = Nil)
+            pools.put(key, updated)
+            publish.topologyChanged()
+            updated
+          }
+    else if state.suspended && state.nodes.nonEmpty then
       // Crash-mid-suspend heal: suspendPool persists suspended=true BEFORE draining, so a crash in
       // that window reloads a suspended pool whose nodes are still alive. Drain-forget them the way
       // suspendPool would. No PoolSuspended re-emission (already announced); per-node NodeStopped
@@ -2012,6 +2029,16 @@ final class PoolSupervisor(
     */
   def getTenantById(id: String): Option[Tenant] = tenants.get(id)
 
+  /** True while `tenantId`'s tenant is disabled: its pools hold no node (reconcile stops theirs and
+    * starts none) and nothing starts one (create, scale-up, resume, node restart refuse
+    * [[SupervisorError.TenantDisabled]]).
+    */
+  def tenantDisabled(tenantId: String): Boolean =
+    tenants.get(tenantId.toLowerCase(Locale.ROOT)).exists(_.disabled)
+
+  private def tenantDisabledRefusal(key: PoolKey): Option[String] =
+    Option.when(tenantDisabled(key.tenant))(PoolSupervisor.tenantDisabledMessage(key.tenant))
+
   /** Lookup by surrogate id (`qodstate_tenant_db.id`). The `tenantDbs` map is keyed by id: a direct
     * hit.
     */
@@ -2289,6 +2316,12 @@ final class PoolSupervisor(
     }
   }
 
+  /** Disable or enable a tenant. Disabled, its pools run no node and start none (reconcile stops
+    * them, [[tenantDisabled]]), its data-plane sessions are refused at the handshake and, through
+    * the policy version the flag moves (Liquibase 0060), an open one on its next statement. The
+    * pools are reconciled here at once, each under its lock, so the nodes stop (or, on enable,
+    * start again) without waiting for the leader's next pass; a pool that fails is left to it.
+    */
   def setTenantDisabled(name: String, disabled: Boolean): IO[Either[SupervisorError, Tenant]] =
     IO.blocking {
       withCacheRecovery("setTenantDisabled") {
@@ -2298,9 +2331,28 @@ final class PoolSupervisor(
             val updated = t.copy(disabled = disabled)
             store.upsertTenant(updated)
             tenants.put(updated.id, updated)
+            if t.disabled != disabled then
+              // As for the ACL columns: the generation first, so this replica's open sessions
+              // run their gates again even when the version read fails.
+              policyVersions.advance()
+              policyVersions.publish(policyVersions.readAfterMutation())
             publish.topologyChanged()
             Right(updated)
       }
+    }.flatTap {
+      case Right(t) =>
+        pools.toList
+          .filter { case (key, _) => key.tenant == t.id }
+          .foldLeft(IO.unit) { case (acc, (key, state)) =>
+            acc *> reconcilePool(key, state).void.handleErrorWith(e =>
+              IO.delay(
+                logger.warn(
+                  s"setTenantDisabled: reconciling $key failed, left to reconcile: ${e.getMessage}"
+                )
+              )
+            )
+          }
+      case Left(_) => IO.unit
     }
 
   /** Store the tenant's sign-in state as given: provider, provider config and client secret, the
@@ -3287,6 +3339,10 @@ final class PoolSupervisor(
               IO.raiseError(
                 new PoolSupervisor.LocalFilesOff(localFilesBlockOf(td).getOrElse(""))
               )
+            case Some(_) if tenantDisabledRefusal(key).isDefined =>
+              IO.raiseError(
+                new PoolSupervisor.TenantDisabledOff(tenantDisabledRefusal(key).getOrElse(""))
+              )
             case Some(td)
                 if pools.keys.exists(k =>
                   k.tenant == key.tenant && k.pool == key.pool && k.tenantDb != key.tenantDb
@@ -3686,9 +3742,12 @@ final class PoolSupervisor(
         // A new node could only start and fail: refused before any node stops, nothing written. A
         // scale that starts none still goes through.
         val localFilesOff = if rolesToAdd.isEmpty then None else localFilesRefusal(key)
+        val disabledOff   = if rolesToAdd.isEmpty then None else tenantDisabledRefusal(key)
 
         if localFilesOff.isDefined then
           IO.raiseError(new PoolSupervisor.LocalFilesOff(localFilesOff.getOrElse("")))
+        else if disabledOff.isDefined then
+          IO.raiseError(new PoolSupervisor.TenantDisabledOff(disabledOff.getOrElse("")))
         else if toRemove.isEmpty && rolesToAdd.isEmpty then
           if newDist == state.distribution then IO.pure(state.nodes)
           else
@@ -3849,6 +3908,8 @@ final class PoolSupervisor(
         // It stays suspended: a node of it could only start and fail.
         case Some(_) if localFilesRefusal(key).isDefined =>
           IO.pure(Left(SupervisorError.LocalFilesOff(localFilesRefusal(key).getOrElse(""))))
+        case Some(_) if tenantDisabledRefusal(key).isDefined =>
+          IO.pure(Left(SupervisorError.TenantDisabled(tenantDisabledRefusal(key).getOrElse(""))))
         case Some(state) =>
           poolIdByKey.get(key).flatMap(poolRows.get) match
             case None =>
@@ -4001,6 +4062,8 @@ final class PoolSupervisor(
           // Before the stop: its replacement could only start and fail.
           case Some(_) if localFilesRefusal(key).isDefined =>
             IO.pure(Left(SupervisorError.LocalFilesOff(localFilesRefusal(key).getOrElse(""))))
+          case Some(_) if tenantDisabledRefusal(key).isDefined =>
+            IO.pure(Left(SupervisorError.TenantDisabled(tenantDisabledRefusal(key).getOrElse(""))))
           case Some(state) =>
             state.nodes.find(_.nodeId == nodeId) match
               case None =>
@@ -5316,6 +5379,16 @@ object PoolSupervisor:
 
   /** The REST code of a database whose data path is local while nodes have local files off. */
   val LocalFilesOffCode: String = "local_files_off"
+
+  val TenantDisabledCode: String = "tenant_disabled"
+
+  def tenantDisabledMessage(tenant: String): String =
+    s"tenant '$tenant' is disabled: its pools run no node until a superuser enables it"
+
+  /** A pool create or scale-up of a disabled tenant ([[PoolSupervisor.tenantDisabled]]), raised
+    * like [[LocalFilesOff]] and answered `409 tenant_disabled`.
+    */
+  final class TenantDisabledOff(reason: String) extends RuntimeException(reason)
 
   /** A node of a database whose data path is local would have to start with local files off
     * (`quack-on-demand.nodeFiles.allowLocal`), and could only fail: no node was started. `reason`

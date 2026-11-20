@@ -115,6 +115,7 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
       authService = dummyAuthService,
       tokens = new SessionTokenStore,
       identitySource = ManagementIdentitySource.Db,
+      tenantDisabled = _ => false,
       grantsForIdentity = noGrants,
       authModeResolver = new ManagementAuthModeResolver(tenants.get, systemMode),
       patSessionOf = _ => None

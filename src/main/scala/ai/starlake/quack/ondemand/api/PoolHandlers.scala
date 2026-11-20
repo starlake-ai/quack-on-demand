@@ -114,7 +114,13 @@ final class PoolHandlers(
           )
         },
         status = PoolHandlers.statusOf(p, blocked = block.isDefined),
-        statusDetail = block.orElse(Option.when(held.nonEmpty)(held.mkString(" "))),
+        statusDetail = block
+          .orElse(
+            Option.when(sup.tenantDisabled(p.key.tenant))(
+              PoolSupervisor.tenantDisabledMessage(p.key.tenant)
+            )
+          )
+          .orElse(Option.when(held.nonEmpty)(held.mkString(" "))),
         metastore = HandlerResolvers.metastoreFor(
           viewer,
           p.metastore,
@@ -361,6 +367,13 @@ final class PoolHandlers(
                               ErrorResponse(PoolSupervisor.LocalFilesOffCode, off.getMessage)
                             )
                           )
+                        case off: PoolSupervisor.TenantDisabledOff =>
+                          Left(
+                            (
+                              StatusCode.Conflict,
+                              ErrorResponse(PoolSupervisor.TenantDisabledCode, off.getMessage)
+                            )
+                          )
                         case n: PoolSupervisor.InvalidPoolName =>
                           Left(
                             (StatusCode.BadRequest, ErrorResponse("invalid_name", n.getMessage))
@@ -464,6 +477,15 @@ final class PoolHandlers(
                             (
                               StatusCode.BadRequest,
                               ErrorResponse(PoolSupervisor.LocalFilesOffCode, off.getMessage)
+                            )
+                          )
+                        )
+                      case Left(off: PoolSupervisor.TenantDisabledOff) =>
+                        IO.pure(
+                          Left(
+                            (
+                              StatusCode.Conflict,
+                              ErrorResponse(PoolSupervisor.TenantDisabledCode, off.getMessage)
                             )
                           )
                         )

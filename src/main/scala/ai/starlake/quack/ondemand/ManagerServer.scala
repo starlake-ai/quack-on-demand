@@ -420,12 +420,45 @@ final class ManagerServer(
           val nonAdminSession = resolved.isDefined && !sessionAdmin
 
           val admitted = sessionAdmin || (nonAdminSession && (isProfileApi(path) || branchApi))
+          // A session of a disabled tenant's user (every tenant it holds disabled) is refused
+          // everything but signing out, until a superuser enables the tenant. A PAT of one already
+          // resolves to nothing (PatAuthenticator).
+          val disabledTenant: Option[String] =
+            resolved.filterNot(_.scope.superuser).flatMap { s =>
+              val own = s.scope.manageableTenants ++ s.profile.tenant
+              Option.when(own.nonEmpty && own.forall(tenants.tenantDisabled))(own.min)
+            }
           // Strip control characters -- jsonb rejects NUL (0x00); cap length so
           // detail stays bounded. An unsanitized `%00` in the path would make
           // the insert throw and the attacker would erase their own trail.
           // Shared by both denial arms below.
           val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
-          if !admitted then
+          if disabledTenant.isDefined && path != "/api/auth/logout" then
+            val username = resolved.map(_.profile.username).getOrElse("unknown")
+            auditDenial("disabled:" + username)(
+              audit.restAs(
+                username,
+                "tenant",
+                "auth",
+                AuditActions.AuthTenantDisabled,
+                "denied",
+                tenant = disabledTenant,
+                detail = Map("path" -> safePath)
+              )
+            )
+              .flatMap(_ =>
+                refuse(
+                  req,
+                  Response[IO](Status.Forbidden)
+                    .withEntity(
+                      """{"error":"tenant_disabled","message":"this tenant is disabled"}"""
+                    )
+                    .withContentType(
+                      org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                    )
+                )
+              )
+          else if !admitted then
             if nonAdminSession then
               // A real, valid session without an admin grant. Answer with the
               // same stable code the login gate uses so clients treat both alike

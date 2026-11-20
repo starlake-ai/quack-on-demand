@@ -78,4 +78,5 @@ enum SupervisorError(val message: String):
   case SuperuserChoice(msg: String)                 extends SupervisorError(msg)
   case DataPathTaken(msg: String)                   extends SupervisorError(msg)
   case LocalFilesOff(msg: String)                   extends SupervisorError(msg)
+  case TenantDisabled(msg: String)                  extends SupervisorError(msg)
   case DefaultDatabaseMismatch(msg: String)         extends SupervisorError(msg)

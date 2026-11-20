@@ -157,7 +157,7 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
       patAuth =
-        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
     )
     def listUsers(tenant: String): HttpResponse[String] =
       val b = HttpRequest

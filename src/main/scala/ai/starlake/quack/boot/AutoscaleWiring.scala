@@ -200,7 +200,9 @@ object AutoscaleWiringSupport:
           val est  = window.get(id).map(_._2.toDouble / (cfg.windowMinutes * 60_000.0))
           val util =
             if capacity <= 0 then None else Some(est.getOrElse(0.0) / capacity.toDouble)
-          AutoscaleView(st.key, mn, mx, st.distribution, st.suspended, st.disabled, util)
+          // A disabled tenant's pool runs no node: never scaled.
+          val held = st.disabled || sup.tenantDisabled(st.key.tenant)
+          AutoscaleView(st.key, mn, mx, st.distribution, st.suspended, held, util)
         }
       }
     }

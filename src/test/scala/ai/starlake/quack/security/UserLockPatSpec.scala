@@ -45,7 +45,7 @@ class UserLockPatSpec
       users = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
       pats = new PatStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
       // Row-only grants, matching PatApiAdmissionSpec: a PAT is bound to one user row.
-      patAuth = new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)))
+      patAuth = new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false)
       users.upsertUser(None, SecurityFixtures.RootUsername, SecurityFixtures.RootPassword, "admin")
       users.upsertUser(
         Some(SecurityFixtures.TenantId),

@@ -33,6 +33,9 @@ final class TenantHandlers(
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
+  /** Whether the tenant `id` is disabled, for the API guard ([[PoolSupervisor.tenantDisabled]]). */
+  def tenantDisabled(id: String): Boolean = sup.tenantDisabled(id)
+
   private def toResponse(t: Tenant): TenantResponse =
     toResponse(t, sup.currentPolicyVersions())
 
@@ -186,10 +189,27 @@ final class TenantHandlers(
             Left((StatusCode.Conflict, ErrorResponse("has_pools", err.message)))
         }
 
+  /** Superusers only: a disabled tenant's own admins can no longer sign in or call the API, so they
+    * could not undo it, and turning one's own tenant off is no tenant admin's call.
+    */
   def setTenantDisabled(req: SetTenantDisabledRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[TenantResponse] =
-    TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
+    val refusal =
+      TenantScopeCheck
+        .reject(apiKey, req.name)(scopeOf)
+        .orElse(
+          Option.when(!scopeOf(apiKey).superuser)(
+            (
+              StatusCode.Forbidden,
+              ErrorResponse(
+                "superuser_required",
+                "only a superuser may disable or enable a tenant"
+              )
+            )
+          )
+        )
+    refusal match
       case Some(err) =>
         audit.rest(
           apiKey,

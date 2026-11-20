@@ -1522,6 +1522,43 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val res = sup.createTenant(Tenant("foo")).unsafeRunSync()
     res.left.toOption.map(_.message).getOrElse("") should include("already exists")
 
+  "PoolSupervisor.setTenantDisabled" should "stop the tenant's nodes, keep its pools as they were, and start them again on enable" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.get(key).get.nodes should have size 1
+    val before = st.policyVersions()("acme")
+
+    sup.setTenantDisabled("acme", disabled = true).unsafeRunSync().isRight shouldBe true
+    sup.tenantDisabled("acme") shouldBe true
+    sup.get(key).get.nodes shouldBe empty
+    b.stopped should not be empty
+    // The pool's own state is untouched: re-enabling brings it back as it was.
+    sup.get(key).get.distribution.total shouldBe 1
+    sup.get(key).get.suspended shouldBe false
+    // Open sessions follow the policy version, which the flag moves.
+    st.policyVersions()("acme") should be > before
+
+    // Reconcile starts nothing while the tenant stays disabled.
+    sup.reconcile().unsafeRunSync()
+    sup.get(key).get.nodes shouldBe empty
+
+    sup.setTenantDisabled("acme", disabled = false).unsafeRunSync().isRight shouldBe true
+    sup.get(key).get.nodes should have size 1
+
+  it should "refuse whatever would start a node of a disabled tenant" in:
+    val (sup, _, _) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.suspendPool(key, "rest").unsafeRunSync().isRight shouldBe true
+    sup.setTenantDisabled("acme", disabled = true).unsafeRunSync()
+
+    sup.resumePool(key, "rest").unsafeRunSync().swap.toOption.get shouldBe
+      a[SupervisorError.TenantDisabled]
+    val other = PoolKey("acme", "acme_default", "other")
+    intercept[PoolSupervisor.TenantDisabledOff](
+      sup.createPool(other, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    )
+    sup.get(other) shouldBe None
+
   "PoolSupervisor.deleteTenant" should "remove a tenant with no tenant-dbs" in:
     val (sup, _) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("foo")).unsafeRunSync()

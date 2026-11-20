@@ -41,7 +41,7 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
     new PatAuthenticator(
       pats,
       id => users.userById(id),
-      u => List(UserGrant(u.tenant, u.kind))
+      u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false
     )
 
   private def seed(
@@ -88,6 +88,26 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       principal.isAdmin shouldBe false
       auth.sessionOf(token).map(_.profile.role) shouldBe Some("user")
   }
+
+  it should "resolve nothing for a token of a disabled tenant's user, and again once enabled" in
+    withFreshDb { (_, users, pats) =>
+      val (_, token) = seed(users, pats, Some("t-acme"), "alice", "admin")
+      var disabled   = Set("t-acme")
+      val auth       = new PatAuthenticator(
+        pats,
+        id => users.userById(id),
+        u => List(UserGrant(u.tenant, u.kind)),
+        tenantDisabled = t => disabled.contains(t)
+      )
+      auth.resolve(token) shouldBe None
+      auth.sessionOf(token) shouldBe None
+      disabled = Set.empty
+      auth.resolve(token) should not be empty
+      // A superuser's token has no tenant, so a disabled tenant never reaches it.
+      val (_, root) = seed(users, pats, None, "root", "admin")
+      disabled = Set("t-acme")
+      auth.resolve(root) should not be empty
+    }
 
   it should "scope a tenant-admin PAT to the tenants it administers" in withFreshDb {
     (_, users, pats) =>
@@ -147,7 +167,7 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       val auth       = new PatAuthenticator(
         pats,
         id => { lookups.incrementAndGet(); users.userById(id) },
-        u => List(UserGrant(u.tenant, u.kind))
+        u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false
       )
       // What is pinned is the end-to-end property: a non-PAT value costs no user lookup (the
       // counter stays at zero) and no connection (the pool is closed, so any query would throw --

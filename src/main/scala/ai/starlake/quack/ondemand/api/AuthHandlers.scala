@@ -90,6 +90,10 @@ final class AuthHandlers(
     tokens: SessionTokenStore,
     identitySource: ManagementIdentitySource,
     grantsForIdentity: GrantsLookup,
+    /** Whether a tenant is disabled: a login whose every tenant is disabled is refused `403
+      * tenant_disabled`. No default, so no wiring can let a disabled tenant's users sign in.
+      */
+    tenantDisabled: String => Boolean,
     cookieSecureOverride: Option[Boolean] = None,
     cookiePath: String = "/api",
     authModeResolver: ManagementAuthModeResolver =
@@ -893,6 +897,26 @@ final class AuthHandlers(
             )
           )
         )
+    else if !superuser && {
+        val own = manageableTenants ++ profile.tenant
+        own.nonEmpty && own.forall(tenantDisabled)
+      }
+    then
+      audit.restAs(
+        profile.username,
+        "tenant",
+        "auth",
+        AuditActions.AuthLoginFailure,
+        "denied",
+        tenant = profile.tenant,
+        detail = Map("reason" -> "tenant_disabled")
+      )
+      Left(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse("tenant_disabled", "this tenant is disabled; ask a superuser to enable it")
+        )
+      )
     else
       val sessionScope = SessionScope(superuser, manageableTenants)
       // The JWT kind claim must reflect AUTHORITY, not the IdP's descriptive
