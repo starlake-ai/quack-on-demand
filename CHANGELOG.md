@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **`deploy/host/install.sh VERSION --wheel FILE [--sha256 HEX]` installs a wheel the caller
+  already checked.** A caller holding a trusted record of the release (the wheel's name and sha256
+  from a signed manifest) can now have exactly those bytes installed: FILE must be named
+  `qod-VERSION-*.whl`, a sha256 other than HEX is refused before anything is written, and pip
+  installs a copy made inside the new version's folder and checked again, so the file cannot change
+  between the check and the install. pip still resolves the dependencies from the index. A version
+  already installed is left as it is and FILE is not used. Whoever may pass `--wheel` chooses code
+  that runs as root during the install, so the README's sudo rule for an upgrade agent now allows
+  the version argument alone (#264).
+
 ### Fixed
 
 - **Deleting a tenant deletes its users.** `tenant/delete` removed the tenant row, its databases,
@@ -11,6 +23,7 @@
   own transaction, so a refused delete keeps them; creating a tenant first removes users an earlier
   delete left under its name, which is also what clears users a delete of an earlier release left
   behind (#265).
+
 
 ## 0.14.0
 
