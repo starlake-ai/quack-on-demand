@@ -21,12 +21,15 @@ import scala.util.control.NonFatal
   * [[AuditRecorder]] and the async [[EventJournal]]). `qodEvent` (`audit` | `statement`) sets these
   * lines apart from regular log output for a log shipper to route.
   *
+  * It is also the front half of `auditSink = s3`: there `out` is [[S3AuditWriter.append]] and
+  * `onClosed` closes the writer once this queue has drained.
+  *
   * Encoding and writing run on one daemon thread behind a bounded queue, so a slow stdout pipe
   * never stalls the store path or a request thread. A line that cannot go out (queue full, a render
   * or write that throws, still queued when `close` gives up) is dropped and counted through
-  * `onDropCounter` (`qod_journal_dropped_total{table="stdout"}`). That counter is per destination
-  * like its `audit` / `stmt_history` siblings, which count rows the store did not persist even when
-  * the stdout line went out.
+  * `onDropCounter` (`qod_journal_dropped_total{table="stdout"}`, or `"s3"` for that sink). That
+  * counter is per destination like its `audit` / `stmt_history` siblings, which count rows the
+  * store did not persist even when the stdout line went out.
   *
   * Log pipelines are a wider audience than the control plane, so the emitted copy (never the
   * store's) is redacted:
@@ -48,7 +51,8 @@ final class StdoutTelemetrySink(
     inner: TelemetryStore,
     capacity: Int = 8192,
     out: String => Unit = println,
-    closeWait: FiniteDuration = 5.seconds
+    closeWait: FiniteDuration = 5.seconds,
+    onClosed: () => Unit = () => ()
 ) extends TelemetryStore:
   import StdoutTelemetrySink.{line, RouterCap, given}
 
@@ -88,6 +92,8 @@ final class StdoutTelemetrySink(
     writer.shutdown()
     if !writer.awaitTermination(closeWait.toMillis, TimeUnit.MILLISECONDS) then
       dropHook(writer.shutdownNow().size)
+    try onClosed()
+    catch case NonFatal(_) => ()
     inner.close()
 
   /** Renders and writes on the writer thread, so the caller pays for neither. */

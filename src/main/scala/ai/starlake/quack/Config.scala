@@ -488,7 +488,7 @@ final case class TelemetryConfig(
     @ConfigField(
       envVar = "QOD_AUDIT_SINK",
       description =
-        "Extra destination for every audit and statement event, on top of the store: none | stdout (one JSON line per event, tagged qodEvent=audit|statement, for a log shipper; SQL literals, engine error text and unauthenticated login names are redacted). Requires store=postgres. Lines dropped under stdout backpressure count in qod_journal_dropped_total{table=stdout}."
+        "Extra destination for every audit and statement event, on top of the store: none | stdout (one JSON line per event, tagged qodEvent=audit|statement, for a log shipper; SQL literals, engine error text and unauthenticated login names are redacted) | s3 (the same lines as gzip NDJSON objects in an S3-compatible bucket, settings under QOD_AUDIT_S3_*). Requires store=postgres. Lines dropped under backpressure count in qod_journal_dropped_total{table=stdout|s3}."
     )
     auditSink: String = "none",
     @field
@@ -497,14 +497,16 @@ final case class TelemetryConfig(
       description =
         "Record refused FlightSQL and native Quack handshakes (a bad or missing credential, a user with no access to the pool) as auth.login.failure audit events, at most one per minute per front door, client address and user name. Off by default; the client is refused either way."
     )
-    auditHandshakeFailures: Boolean = false
+    auditHandshakeFailures: Boolean = false,
+    auditS3: AuditS3Config = AuditS3Config()
 )
 
 object TelemetryConfig:
   def validate(
       store: String,
       stmtHistoryRetentionDays: Int,
-      auditSink: String = "none"
+      auditSink: String = "none",
+      auditS3: AuditS3Config = AuditS3Config()
   ): Either[String, Unit] =
     store match
       case "postgres" | "none" =>
@@ -513,12 +515,99 @@ object TelemetryConfig:
             "telemetry.stmtHistoryRetentionDays must be 0 (keep forever) or >= 2: the daily" +
               " rollup recompute rebuilds whole-day buckets from raw rows"
           )
-        else if auditSink != "none" && auditSink != "stdout" then
-          Left(s"unknown telemetry.auditSink: '$auditSink' (supported: none, stdout)")
+        else if !Set("none", "stdout", "s3").contains(auditSink) then
+          Left(s"unknown telemetry.auditSink: '$auditSink' (supported: none, stdout, s3)")
         else if auditSink != "none" && store == "none" then
           Left("telemetry.auditSink requires telemetry.store=postgres: store=none records nothing")
+        else if auditSink == "s3" then auditS3.validate
         else Right(())
       case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
+
+/** `telemetry.auditSink = s3`: the bucket the audit and statement lines go to. Its own keys, never
+  * the data path's or the managed store's, read by the manager JVM only; a write-only key on the
+  * prefix is enough. Retention is the bucket's own (Object Lock default retention included).
+  */
+final case class AuditS3Config(
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_ENDPOINT",
+      description = "S3-compatible endpoint URL of the audit bucket; empty for AWS."
+    )
+    endpoint: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_REGION",
+      description = "Region passed to the S3 client for the audit bucket."
+    )
+    region: String = "us-east-1",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_BUCKET",
+      description = "Bucket the audit and statement objects are written to (auditSink=s3)."
+    )
+    bucket: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_PREFIX",
+      description =
+        "Key prefix of the audit objects: <prefix>date=YYYY-MM-DD/<replica>-<seq>.ndjson.gz."
+    )
+    prefix: String = "audit/",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_URL_STYLE",
+      description = "Bucket addressing style for the audit bucket: 'path' or 'vhost'."
+    )
+    urlStyle: String = "path",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_ACCESS_KEY_ID",
+      description = "Access key id for the audit bucket (needs s3:PutObject on the prefix only)."
+    )
+    accessKeyId: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_SECRET_ACCESS_KEY",
+      description = "Secret access key for the audit bucket.",
+      sensitive = true
+    )
+    secretAccessKey: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_FLUSH_INTERVAL_SEC",
+      description = "Seconds between uploads of buffered audit lines (1 to 3600)."
+    )
+    flushIntervalSec: Int = 60,
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_S3_MAX_BATCH_BYTES",
+      description =
+        "Uncompressed bytes per audit object (65536 to 16777216); a full batch uploads at once, and at most four batches are held while uploads fail."
+    )
+    maxBatchBytes: Int = 4 * 1024 * 1024
+):
+  /** The prefix as keys use it: no leading slash, one trailing slash unless empty. */
+  def keyPrefix: String =
+    val p = prefix.dropWhile(_ == '/')
+    if p.isEmpty || p.endsWith("/") then p else p + "/"
+
+  def validate: Either[String, Unit] =
+    val endpointOk = endpoint.isEmpty || scala.util
+      .Try(java.net.URI.create(endpoint))
+      .toOption
+      .exists(u =>
+        Set("http", "https").contains(u.getScheme) && u.getHost != null && u.getUserInfo == null
+      )
+    if bucket.isBlank then Left("auditSink=s3 needs QOD_AUDIT_S3_BUCKET")
+    else if accessKeyId.isBlank || secretAccessKey.isBlank then
+      Left("auditSink=s3 needs QOD_AUDIT_S3_ACCESS_KEY_ID and QOD_AUDIT_S3_SECRET_ACCESS_KEY")
+    else if region.isBlank then Left("auditSink=s3 needs QOD_AUDIT_S3_REGION")
+    else if !endpointOk then
+      Left("QOD_AUDIT_S3_ENDPOINT must be an http(s) URL with a host and no user info")
+    else if urlStyle != "path" && urlStyle != "vhost" then
+      Left("QOD_AUDIT_S3_URL_STYLE must be path or vhost")
+    else if flushIntervalSec < 1 || flushIntervalSec > 3600 then
+      Left("QOD_AUDIT_S3_FLUSH_INTERVAL_SEC must be 1 to 3600")
+    else if maxBatchBytes < 64 * 1024 || maxBatchBytes > 16 * 1024 * 1024 then
+      Left("QOD_AUDIT_S3_MAX_BATCH_BYTES must be 65536 to 16777216")
+    else Right(())
+
+  override def toString: String =
+    s"AuditS3Config($endpoint, $region, $bucket, $prefix, $urlStyle, " +
+      s"accessKeyId=${if accessKeyId.isEmpty then "(unset)" else "(set)"}, " +
+      s"secretAccessKey=${if secretAccessKey.isEmpty then "(unset)" else "(set)"}, " +
+      s"$flushIntervalSec s, $maxBatchBytes B)"
 
 /** The REST listener's request limits (`quack-on-demand.restLimits`). */
 final case class RestLimitsConfig(

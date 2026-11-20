@@ -143,6 +143,9 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       // The master secret every node's key derives from.
       "QOD_NODE_KEY_SECRET",
       "QOD_MANAGED_STORE_SECRET_ACCESS_KEY",
+      // The audit sink's write key never reaches a node.
+      "QOD_AUDIT_S3_ACCESS_KEY_ID",
+      "QOD_AUDIT_S3_SECRET_ACCESS_KEY",
       "PGPASSWORD",
       "STRIPE_SECRET_KEY",
       "GITHUB_TOKEN"

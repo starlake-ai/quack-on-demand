@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `QOD_AUDIT_SINK=s3` ships every audit and statement event, as the redacted JSON line `stdout`
+  writes, to an S3-compatible bucket as gzip NDJSON objects (`QOD_AUDIT_S3_*`), with no log
+  shipper (#196). Append only, valid on an Object Lock bucket, never on a statement's thread: an
+  unreachable store holds up to four batches, then drops lines counted in
+  `qod_journal_dropped_total{table="s3"}`; `qod_audit_s3_pending_bytes` shows the backlog. The sink
+  has its own key, which needs only `s3:PutObject` on its prefix and never reaches a node.
+
 ## 0.14.0
 
 ### Upgrading

@@ -42,6 +42,7 @@ import ai.starlake.quack.ondemand.telemetry.{
   EventJournal,
   NoopTelemetryStore,
   PostgresTelemetryStore,
+  S3AuditWriter,
   StdoutTelemetrySink,
   TelemetryStore
 }
@@ -101,6 +102,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[NodeFilesConfig]           = ProductHint[NodeFilesConfig](camelMapping)
   given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
+  given ProductHint[AuditS3Config]             = ProductHint[AuditS3Config](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
@@ -141,6 +143,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
   given ConfigReader[NodeFilesConfig]          = deriveReader[NodeFilesConfig]
   given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]
+  given ConfigReader[AuditS3Config]            = deriveReader[AuditS3Config]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
@@ -348,7 +351,8 @@ object Main extends IOApp with LazyLogging:
       .validate(
         mgrCfg0.telemetry.store,
         mgrCfg0.telemetry.stmtHistoryRetentionDays,
-        mgrCfg0.telemetry.auditSink
+        mgrCfg0.telemetry.auditSink,
+        mgrCfg0.telemetry.auditS3
       )
       .left
       .foreach(msg => sys.error(msg))
@@ -628,9 +632,22 @@ object Main extends IOApp with LazyLogging:
     val baseTelemetryStore: TelemetryStore = mgrCfg.telemetry.store match
       case "none" => NoopTelemetryStore
       case _      => new PostgresTelemetryStore(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
-    val stdoutSink = Option.when(mgrCfg.telemetry.auditSink == "stdout")(
-      new StdoutTelemetrySink(baseTelemetryStore, mgrCfg.telemetry.journalCapacity)
+    val s3AuditWriter = Option.when(mgrCfg.telemetry.auditSink == "s3")(
+      S3AuditWriter(mgrCfg.telemetry.auditS3)
     )
+    val stdoutSink = mgrCfg.telemetry.auditSink match
+      case "stdout" =>
+        Some(new StdoutTelemetrySink(baseTelemetryStore, mgrCfg.telemetry.journalCapacity))
+      case "s3" =>
+        s3AuditWriter.map(w =>
+          new StdoutTelemetrySink(
+            baseTelemetryStore,
+            mgrCfg.telemetry.journalCapacity,
+            out = w.append,
+            onClosed = () => w.close()
+          )
+        )
+      case _ => None
     val telemetryStore: TelemetryStore = stdoutSink.getOrElse(baseTelemetryStore)
     if telemetryStore.enabled then
       logger.info(s"telemetry: postgres (qodstate_audit), auditSink=${mgrCfg.telemetry.auditSink}")
@@ -1470,11 +1487,18 @@ object Main extends IOApp with LazyLogging:
           onStatementDrop = journalStatementDropped
         )
       auditRecorder.onDropCounter(journalDropped)
-      stdoutSink.foreach(_.onDropCounter { n =>
+      val sinkDropped: Int => Unit = n =>
         metricsReg.composite
-          .counter("qod_journal_dropped_total", "table", "stdout")
+          .counter("qod_journal_dropped_total", "table", mgrCfg.telemetry.auditSink)
           .increment(n.toDouble)
-      })
+      stdoutSink.foreach(_.onDropCounter(sinkDropped))
+      s3AuditWriter.foreach { w =>
+        w.onDropCounter(sinkDropped)
+        io.micrometer.core.instrument.Gauge
+          .builder("qod_audit_s3_pending_bytes", w, (x: S3AuditWriter) => x.pendingBytes.toDouble)
+          .description("Audit and statement bytes held for upload to the audit bucket")
+          .register(metricsReg.composite)
+      }
 
       // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey and
       // dropped at once by a federated-source write (federatedSourceCaches below), so a new
