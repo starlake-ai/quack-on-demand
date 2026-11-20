@@ -2448,7 +2448,9 @@ final class PoolSupervisor(
               events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
             if tdbs.nonEmpty then dataFoldersChanged()
+            // Deletes the tenant's users too, with their tokens and S3 credentials (#265).
             store.deleteTenant(t.id)
+            invalidateEffectiveCache()
             tenants.remove(t.id)
             // The store cascaded the tenant's locations away.
             locationCache.remove(t.id)
