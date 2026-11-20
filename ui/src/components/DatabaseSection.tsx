@@ -14,6 +14,7 @@ import { databaseSuffixError } from '../api/databaseName';
 import { defaultDatabaseError } from '../api/defaultDatabase';
 import { editableMetastore, metastoreToSend, superuserKeys } from '../api/metastoreForm';
 import { useAuth } from '../auth/AuthContext';
+import { TypedNameConfirm } from './TypedNameConfirm';
 
 /** Databases page for one tenant (`/t/:tenant/databases`). Lists tenant databases,
   * lets you add a new one (name + dataPath + structured metastore +
@@ -37,6 +38,10 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   // Bumped when the inline browser commits a catalog write (undrop), so the
   // snapshots panel below it refetches and shows the new recovery snapshot.
   const [catalogGen, setCatalogGen] = useState(0);
+  // The database whose delete waits for its name to be typed (TypedNameConfirm), and whether a
+  // DuckLake one's managed object storage is purged now rather than kept for the retention window.
+  const [deleting, setDeleting] = useState<{ name: string; kind: TenantDbKind } | null>(null);
+  const [purgeNow, setPurgeNow] = useState(false);
 
   // Form state. The Name input always starts with the tenant prefix
   // and the locked-prefix logic in `onNameChange` keeps it there.
@@ -217,22 +222,21 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     }
   }
 
-  async function handleDelete(dbName: string, kind: TenantDbKind): Promise<boolean> {
-    if (!confirm(`Delete database '${dbName}' from tenant '${tenant}'?\n\n` +
-                 `This drops the Postgres database '${dbName}' and any DuckLake catalog in it.`)) return false;
-    // Only a ducklake database can hold managed object storage; the second
-    // confirm is meaningless (and confusing) for duckdb-file / memory kinds.
-    const purge = kind === 'ducklake' && confirm('Also purge managed object storage now? ' +
-      'OK = purge immediately, Cancel = retain for the configured window.');
+  function askDelete(dbName: string, kind: TenantDbKind) {
+    setPurgeNow(false);
+    setDeleting({ name: dbName, kind });
+  }
+
+  /** Runs once the name is typed; a refusal throws into the dialog, which shows it and stays open. */
+  async function confirmDelete() {
+    if (!deleting) return;
+    // Only a ducklake database can hold managed object storage.
+    const purge = deleting.kind === 'ducklake' && purgeNow;
+    await api.deleteTenantDb({ tenant, name: deleting.name, purgeManagedData: purge });
+    setDeleting(null);
+    setEditingDb(null);
     setError(null);
-    try {
-      await api.deleteTenantDb({ tenant, name: dbName, purgeManagedData: purge });
-      await reload();
-      return true;
-    } catch (e) {
-      setError(errorMessage(e));
-      return false;
-    }
+    await reload();
   }
 
   function openEdit(d: TenantDbResponse) {
@@ -514,7 +518,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             {error && <div className="login-err">Error: {error}</div>}
             <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'space-between' }}>
               <button type="button" className="danger"
-                onClick={() => void (async () => { const ok = await handleDelete(editingDb.name, editingDb.kind); if (ok) setEditingDb(null); })()}>
+                onClick={() => askDelete(editingDb.name, editingDb.kind)}>
                 Delete database
               </button>
               <div className="row" style={{ gap: 8 }}>
@@ -767,6 +771,27 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             <button type="submit" style={{ minWidth: '7rem' }} disabled={nameError != null || name === prefix}>Create</button>
           </div>
         </form>
+      )}
+
+      {deleting && (
+        <TypedNameConfirm
+          title={`Delete database ${deleting.name}`}
+          name={deleting.name}
+          confirmLabel="Delete database"
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleting(null)}
+        >
+          <p style={{ marginTop: 0 }}>
+            This deletes database <code>{deleting.name}</code> of tenant <code>{tenant}</code> and
+            cannot be undone: a DuckLake catalog on QoD&rsquo;s Postgres server is dropped with it.
+          </p>
+          {deleting.kind === 'ducklake' && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="checkbox" checked={purgeNow} onChange={ev => setPurgeNow(ev.target.checked)} />
+              Also purge its managed object storage now (otherwise it is kept for the retention window)
+            </label>
+          )}
+        </TypedNameConfirm>
       )}
     </div>
   );
