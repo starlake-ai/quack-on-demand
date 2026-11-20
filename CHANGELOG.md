@@ -15,9 +15,9 @@
   - its users' password and SSO logins answer `403 tenant_disabled`, their console sessions are
     refused everything but signing out with the same answer, and their personal access tokens
     resolve to nothing on REST, MCP, SCIM and the REST data edge;
-  - its pools' nodes are stopped, each pool keeping its own settings, and nothing starts one: a
-    pool create, scale-up, resume or node restart answers `409 tenant_disabled`, and maintenance,
-    idle hibernation, autoscale and branch expiry skip the tenant; the pool list says why in each
+  - its pools' nodes are stopped, each pool keeping its own settings, and none starts: a pool
+    create or scale-up answers `409 tenant_disabled`, a resume or node restart fails, and a
+    maintenance run due meanwhile is failed with that reason; the pool list says why in each
     pool's `statusDetail`;
   - superusers keep full access to it.
   Enabling it brings every pool back as it was. Nothing is deleted. Tenant admins could disable

@@ -1545,19 +1545,21 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.setTenantDisabled("acme", disabled = false).unsafeRunSync().isRight shouldBe true
     sup.get(key).get.nodes should have size 1
 
-  it should "refuse whatever would start a node of a disabled tenant" in:
-    val (sup, _, _) = freshSupervisorWithStore()
+  it should "start no node of a disabled tenant, whatever asks for one" in:
+    val (sup, b, _) = freshSupervisorWithStore()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup.suspendPool(key, "rest").unsafeRunSync().isRight shouldBe true
     sup.setTenantDisabled("acme", disabled = true).unsafeRunSync()
+    val started = b.specs.size
 
-    sup.resumePool(key, "rest").unsafeRunSync().swap.toOption.get shouldBe
-      a[SupervisorError.TenantDisabled]
+    // One refusal where every pool node starts: a resume and a create both meet it.
+    sup.resumePool(key, "rest").attempt.unsafeRunSync()
     val other = PoolKey("acme", "acme_default", "other")
     intercept[PoolSupervisor.TenantDisabledOff](
       sup.createPool(other, RoleDistribution(0, 0, 1)).unsafeRunSync()
     )
-    sup.get(other) shouldBe None
+    b.specs.size shouldBe started
+    sup.get(key).map(_.nodes) shouldBe Some(Nil)
 
   "PoolSupervisor.deleteTenant" should "remove a tenant with no tenant-dbs" in:
     val (sup, _) = freshSupervisorWithBackend()

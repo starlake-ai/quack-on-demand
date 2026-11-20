@@ -151,10 +151,7 @@ object HibernationWiringSupport:
   def views(sup: PoolSupervisor, cfg: HibernationConfig): List[HibernationView] =
     sup.list().flatMap { st =>
       idleFor(sup.idleTimeoutSec(st.key), cfg).map { idle =>
-        // A disabled tenant's pool already runs no node: never hibernated, so enabling the
-        // tenant brings it back as it was.
-        val held = st.disabled || sup.tenantDisabled(st.key.tenant)
-        HibernationView(st.key, st.suspended, held, st.distribution.total, idle)
+        HibernationView(st.key, st.suspended, st.disabled, st.distribution.total, idle)
       }
     }
 
