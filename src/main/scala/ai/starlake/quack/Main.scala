@@ -1564,6 +1564,7 @@ object Main extends IOApp with LazyLogging:
       // after it, sharing the one authorizer and the decision endpoint's dry-run results.
       val tenants = new TenantHandlers(
         sup,
+        tenantDeleteEnabled = mgrCfg.tenantDeleteEnabled,
         onAuthChanged = tenantOidcRegistry.invalidate,
         audit = auditRecorder,
         opa = Some(opaAuthorizer),

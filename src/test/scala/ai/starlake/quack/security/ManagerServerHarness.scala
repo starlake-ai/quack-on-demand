@@ -489,6 +489,7 @@ object ManagerServerHarness:
     // spec's recorder; the default noop recorder keeps every other spec's boot unchanged.
     val tenants = new TenantHandlers(
       sup,
+      tenantDeleteEnabled = true,
       onAuthChanged = _ => (),
       audit = audit,
       opa = opa,

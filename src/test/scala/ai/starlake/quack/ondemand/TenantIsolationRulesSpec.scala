@@ -81,7 +81,7 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     val handlers = new TenantDbHandlers(sup, requireEncryption = false)
-    val tenants  = new TenantHandlers(sup, onAuthChanged = _ => ())
+    val tenants  = new TenantHandlers(sup, tenantDeleteEnabled = true, onAuthChanged = _ => ())
 
     /** A direct supervisor call stating a trusted writer, as the manager makes one. */
     def create(

@@ -227,7 +227,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     val userStore   = makeDuckDbUserStore("qod-mcp-coverage-identity-users")
     val users       = new UserHandlers(sup, userStore)
-    val tenants     = new TenantHandlers(sup, onAuthChanged = _ => ())
+    val tenants     = new TenantHandlers(sup, tenantDeleteEnabled = true, onAuthChanged = _ => ())
     val groups      = new GroupHandlers(sup, users)
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)

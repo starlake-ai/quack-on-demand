@@ -226,10 +226,12 @@ export default function TenantList() {
                   className="icon-btn danger"
                   onClick={() => setDeleting(t)}
                   aria-label={`Delete tenant ${t.name}`}
-                  disabled={t.pools.length > 0}
-                  title={t.pools.length > 0
-                    ? `Stop the ${t.pools.length} active pool(s) before deleting.`
-                    : 'Permanently delete this tenant.'}
+                  disabled={t.deleteEnabled === false || t.pools.length > 0}
+                  title={t.deleteEnabled === false
+                    ? 'Tenant deletion is turned off on this manager (QOD_TENANT_DELETE_ENABLED=false). Disable the tenant instead.'
+                    : t.pools.length > 0
+                      ? `Stop the ${t.pools.length} active pool(s) before deleting.`
+                      : 'Permanently delete this tenant.'}
                 >
                   <DeleteIcon />
                 </button>

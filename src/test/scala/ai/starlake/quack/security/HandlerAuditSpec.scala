@@ -157,8 +157,9 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       val fix   = SecurityFixtures.freshStore()
       val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
       sup.restore()
-      val tenants = new TenantHandlers(sup, onAuthChanged = _ => (), audit = audit)
-      val req     = SetTenantAuthRequest(
+      val tenants =
+        new TenantHandlers(sup, tenantDeleteEnabled = true, onAuthChanged = _ => (), audit = audit)
+      val req = SetTenantAuthRequest(
         SecurityFixtures.TenantId,
         "keycloak",
         Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientId" -> "qod"),
@@ -183,6 +184,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     val changed = new java.util.concurrent.ConcurrentLinkedQueue[String]()
     val tenants = new TenantHandlers(
       sup,
+      tenantDeleteEnabled = true,
       onAuthChanged = id => { changed.add(id); () },
       audit = AuditRecorder.noop
     )
@@ -215,8 +217,9 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     val fix   = SecurityFixtures.freshStore()
     val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
     sup.restore()
-    val tenants = new TenantHandlers(sup, onAuthChanged = _ => (), audit = audit)
-    val req     = SetTenantAuthRequest(
+    val tenants =
+      new TenantHandlers(sup, tenantDeleteEnabled = true, onAuthChanged = _ => (), audit = audit)
+    val req = SetTenantAuthRequest(
       SecurityFixtures.TenantId,
       "keycloak",
       Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientSecretRef" -> "env:X"),
@@ -261,6 +264,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     sup.restore()
     val tenants = new TenantHandlers(
       sup,
+      tenantDeleteEnabled = true,
       onAuthChanged = _ => (),
       audit = new AuditRecorder(store, rootLookup)
     )
