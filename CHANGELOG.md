@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 ### Changed
 
 - **Deleting a tenant or a database asks for its name to be typed, in the CLI and in the
@@ -13,6 +14,16 @@
   DuckLake database's "purge managed object storage now" question is a checkbox in it, unticked
   by default, and a refused delete (pools still running) is shown in the dialog. The REST API and
   the MCP tools are unchanged.
+
+### Fixed
+
+- **Deleting a tenant deletes its users.** `tenant/delete` removed the tenant row, its databases,
+  roles, groups, pool grants and locations, and left every user of the tenant in `qodstate_user`,
+  with their personal access tokens and S3 credentials. A tenant created again under the same name
+  then got those users back, with their passwords and tokens. The users now go in the tenant row's
+  own transaction, so a refused delete keeps them; creating a tenant first removes users an earlier
+  delete left under its name, which is also what clears users a delete of an earlier release left
+  behind (#265).
 
 ## 0.14.0
 

@@ -130,6 +130,8 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit =
     if tenants.contains(tenant.id) then
       throw new java.sql.SQLException(s"tenant id ${tenant.id} already exists")
+    // As in Postgres: users an earlier tenant delete left under this id go first (#265).
+    users.values.filter(_.tenant.contains(tenant.id)).foreach(u => deleteUser(u.id))
     tenants.put(tenant.id, tenant)
     bumpPolicyVersion(tenant.id)
     builtins.roles.foreach(putRole)
@@ -209,6 +211,8 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       throw new java.sql.SQLException(s"tenant $id has tenant-db children")
     tenants.remove(id)
     policyVersionsOf.remove(id)
+    // The tenant's users go with it (#265), and what cascades from them.
+    users.values.filter(_.tenant.contains(id)).foreach(u => deleteUser(u.id))
     // CASCADE the RBAC subgraph.
     roles.values.filter(_.tenantId == id).foreach(r => deleteRole(r.id))
     groups.values.filter(_.tenantId == id).foreach(g => deleteGroup(g.id))

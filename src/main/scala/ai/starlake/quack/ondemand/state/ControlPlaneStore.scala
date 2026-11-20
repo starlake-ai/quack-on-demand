@@ -50,11 +50,16 @@ trait ControlPlaneStore:
     * every change to the tenant's RBAC rows and ACL settings. Session handles carry it.
     */
   def policyVersions(): Map[String, Long]
+
+  /** Delete the tenant row and its users (`qodstate_user.tenant` = `id`) in one transaction, with
+    * everything that cascades from either. Throws, deleting nothing, while tenant-dbs remain.
+    */
   def deleteTenant(id: String): Unit
 
   /** Bootstrap a new tenant atomically: the tenant row plus every [[BuiltinRbac]] row (roles,
     * groups, the role permission, the tenant-wide pool grant) in one transaction, so a partial
-    * failure leaves no orphans. Throws on uniqueness violation.
+    * failure leaves no orphans. Users already stored under the id, which a tenant delete before
+    * #265 left behind, are deleted first. Throws on uniqueness violation.
     */
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit
 
