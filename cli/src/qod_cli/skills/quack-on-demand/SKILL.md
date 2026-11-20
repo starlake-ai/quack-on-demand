@@ -617,7 +617,8 @@ qod pool set-autoscale --tenant acme --db acme_tpch --pool bi
 # Delete a pool: stops nodes AND removes the pool from the registry
 qod pool delete --tenant acme --db acme_tpch --pool bi --force
 
-# Delete a tenant (must have no pools first)
+# Delete a tenant (must have no pools first). On a terminal it asks for the
+# tenant's name to be typed; without one (a script, an agent) it asks nothing.
 qod tenant delete acme
 
 # Size a pool's k8s node pods: cpu and memory are each applied as request AND
@@ -1485,6 +1486,7 @@ no BYO-to-managed (or managed-to-BYO) migration, recreate instead.
 
 ```bash
 # Delete: tombstone now, objects purged after retainDays (7 by default).
+# On a terminal it asks for the database's name to be typed, as tenant delete does.
 qod database delete --tenant acme --name acme_sales
 
 # Delete and make the storage purge-eligible immediately (the worker drains it

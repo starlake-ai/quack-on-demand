@@ -57,6 +57,15 @@ install, into `qod`'s cache. The first install also writes the pin. Running it a
 installed version only checks the cache. A version that PyPI or the GitHub release does not have
 is refused, and nothing of it is kept. Other versions are never touched.
 
+`install.sh VERSION --wheel FILE [--sha256 HEX]` installs the qod package from FILE instead of
+downloading `qod==VERSION`, for a caller that already holds the wheel it trusts (checked against
+a signed release record, for example). FILE must be named `qod-VERSION-*.whl`; with `--sha256`,
+a FILE whose sha256 is not HEX is refused before anything is written. The script copies FILE into
+the new version's folder, checks the copy again and has pip install that copy, so the bytes
+checked are the bytes installed; pip still takes the wheel's dependencies from the index. For a
+version already installed, FILE is checked but not used: remove `/opt/qod/versions/VERSION` first
+to install its bytes.
+
 The unit carries the settings of the published single-server guide's unit (`Restart=always`,
 `OOMPolicy=continue`, `NoNewPrivileges=true`, `KillMode=mixed`, `SuccessExitStatus=130`; its
 section 0.3 says why), with a longer `TimeoutStopSec` for the drain and the pin in place of
@@ -99,16 +108,23 @@ raise either.
 
 ## An upgrade agent
 
-The agent needs to run `install.sh` and `switch.sh` as root, nothing else; both take one release
-version and refuse anything else. For example, in `/etc/sudoers.d/qod-upgrade`:
+The agent needs to run `install.sh` and `switch.sh` as root, nothing else. Both take a release
+version; `install.sh` also takes `--wheel FILE`, and a caller who may pass it chooses the code
+installed, which runs as root during the install (pip installs the wheel's dependencies, building
+any source distribution, and the script runs the new CLI once). So a rule for an agent that must
+stay on published releases allows the version argument alone. For example, in
+`/etc/sudoers.d/qod-upgrade` (sudo 1.9.10 or later reads `^...$` as a regular expression):
 
 ```
-qod-upgrade ALL=(root) NOPASSWD: /opt/qod/deploy/install.sh, /opt/qod/deploy/switch.sh
+qod-upgrade ALL=(root) NOPASSWD: /opt/qod/deploy/install.sh ^[0-9.]+$, /opt/qod/deploy/switch.sh
 ```
+
+A rule naming `install.sh` with no arguments, as this guide once showed, lets the agent pass
+`--wheel`: give it that only when the agent is trusted with root.
 
 ## What needs the network
 
-Only `install.sh`: PyPI for the CLI, GitHub for the jar, Adoptium for a Java runtime when the
+Only `install.sh`: PyPI for the CLI (with `--wheel`, for its dependencies only), GitHub for the jar, Adoptium for a Java runtime when the
 host has none, GitHub for DuckDB, the DuckDB extension repository for the extensions. `switch.sh`
 and every start of an installed version use the cache. Behind a proxy, set `HTTPS_PROXY` in
 `/etc/qod/qod.env` (install.sh hands it to the download run) and in root's environment for

@@ -1,6 +1,7 @@
 import typer
 
 from ..registry import covers
+from ._confirm import confirm_typed_name
 from ._run import call, kv_pairs, warn_init_sql
 
 app = typer.Typer(help="Tenant databases (DuckLake catalogs).")
@@ -188,6 +189,17 @@ def delete(
         help="Purge managed object storage immediately instead of after the retention window",
     ),
 ):
+    """Delete a database (must have no pools or live branches). On a terminal, asks for its name."""
+    storage = (
+        "any managed object storage it has is purged now."
+        if purge_managed_data
+        else "any managed object storage it has is kept for the retention window."
+    )
+    confirm_typed_name(
+        name,
+        f"Deleting database '{name}' of tenant '{tenant}' cannot be undone: a DuckLake catalog on "
+        f"QoD's Postgres server is dropped with it, and {storage}",
+    )
     body = {"tenant": tenant, "name": name}
     if purge_managed_data:
         body["purgeManagedData"] = True
