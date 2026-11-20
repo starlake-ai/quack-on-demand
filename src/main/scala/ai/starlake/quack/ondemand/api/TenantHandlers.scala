@@ -24,6 +24,10 @@ import sttp.model.StatusCode
   */
 final class TenantHandlers(
     sup: PoolSupervisor,
+    /** `quack-on-demand.tenantDeleteEnabled` (`QOD_TENANT_DELETE_ENABLED`). No default: every
+      * wiring states it, so none can leave deletion on while the operator turned it off.
+      */
+    tenantDeleteEnabled: Boolean,
     onAuthChanged: String => Unit,
     audit: AuditRecorder = AuditRecorder.noop,
     opa: Option[OpaAuthorizer] = None,
@@ -51,7 +55,8 @@ final class TenantHandlers(
       opaTokenSet = t.acl.opaToken.nonEmpty,
       opaSendStatementText = t.acl.sendStatementText,
       clientSecretSet = t.authClientSecret.isDefined,
-      policyVersion = policyVersions.getOrElse(t.id, 0L)
+      policyVersion = policyVersions.getOrElse(t.id, 0L),
+      deleteEnabled = tenantDeleteEnabled
     )
 
   /** Tenant creation is an inherently cross-tenant action (it mints a brand-new isolation scope),
@@ -168,6 +173,28 @@ final class TenantHandlers(
           tenant = Some(req.name)
         )
         IO.pure(Left(err))
+      case None if !tenantDeleteEnabled =>
+        // After the scope check, so a caller outside the tenant still reads tenant_forbidden.
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.TenantDelete,
+          "denied",
+          tenant = Some(req.name),
+          target = Some(req.name),
+          detail = Map("reason" -> TenantHandlers.DeleteDisabledError)
+        )
+        IO.pure(
+          Left(
+            (
+              StatusCode.Forbidden,
+              ErrorResponse(
+                TenantHandlers.DeleteDisabledError,
+                TenantHandlers.DeleteDisabledMessage
+              )
+            )
+          )
+        )
       case None =>
         sup.deleteTenant(req.name).map {
           case Right(_) =>
@@ -379,3 +406,9 @@ final class TenantHandlers(
     case "pool_not_running"  => StatusCode.Conflict
     case "authz_unavailable" => StatusCode.ServiceUnavailable
     case _                   => StatusCode.BadRequest
+
+object TenantHandlers:
+  val DeleteDisabledError   = "tenant_delete_disabled"
+  val DeleteDisabledMessage =
+    "tenant deletion is turned off on this manager (QOD_TENANT_DELETE_ENABLED=false); " +
+      "disable the tenant instead"

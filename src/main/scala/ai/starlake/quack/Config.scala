@@ -711,6 +711,15 @@ final case class ManagerConfig(
     )
     requireEncryption: Boolean = false,
     @field @ConfigField(
+      envVar = "QOD_TENANT_DELETE_ENABLED",
+      description =
+        "Whether `tenant/delete` (REST, MCP, `qod tenant delete`, the console) may delete a " +
+          "tenant. `false` refuses every delete, a superuser's included, with `403 " +
+          "tenant_delete_disabled`; disable the tenant instead. Nothing else is gated: databases, " +
+          "pools and users can still be deleted one by one."
+    )
+    tenantDeleteEnabled: Boolean = true,
+    @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
         "UI session idle TTL in seconds. A session unused for this long is dropped on the next " +

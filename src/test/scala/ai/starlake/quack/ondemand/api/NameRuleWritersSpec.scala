@@ -24,9 +24,10 @@ class NameRuleWritersSpec extends AnyFlatSpec with Matchers:
     val sup   = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, store)
     sup.restore()
     private val audit = new AuditRecorder(new RecordingTelemetryStore, _ => None)
-    val tenants       = new TenantHandlers(sup, onAuthChanged = _ => (), audit = audit)
-    val tenantDbs     = new TenantDbHandlers(sup, audit = audit, requireEncryption = false)
-    val pools         = new PoolHandlers(sup, new NodeLoadTracker, audit = audit)
+    val tenants       =
+      new TenantHandlers(sup, tenantDeleteEnabled = true, onAuthChanged = _ => (), audit = audit)
+    val tenantDbs = new TenantDbHandlers(sup, audit = audit, requireEncryption = false)
+    val pools     = new PoolHandlers(sup, new NodeLoadTracker, audit = audit)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
       .createTenantDb(

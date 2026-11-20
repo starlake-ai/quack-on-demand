@@ -17,6 +17,12 @@
 
 ### Added
 
+- **`QOD_TENANT_DELETE_ENABLED=false` turns tenant deletion off** (`quack-on-demand.tenantDeleteEnabled`,
+  default `true`). `tenant/delete`, through REST, MCP, `qod tenant delete` or the console, then
+  answers `403 tenant_delete_disabled` to everyone, superusers included, after the usual tenant
+  scope check, and audits the refusal; disable the tenant instead. Tenant responses carry
+  `deleteEnabled`, and the console greys out its delete button with the reason. Databases, pools
+  and users can still be deleted one by one.
 - **`deploy/host/install.sh VERSION --wheel FILE [--sha256 HEX]` installs a wheel the caller
   already checked.** A caller holding a trusted record of the release (the wheel's name and sha256
   from a signed manifest) can now have exactly those bytes installed: FILE must be named

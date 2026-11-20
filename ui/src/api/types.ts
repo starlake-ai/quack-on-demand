@@ -333,6 +333,8 @@ export interface TenantRequest {
 }
 
 export interface TenantResponse {
+  // False when the manager refuses every tenant delete (QOD_TENANT_DELETE_ENABLED=false).
+  deleteEnabled?: boolean;
   id: string;
   // Equal to id (kept for callers that key on `name`); both hold the slug.
   name: string;

@@ -619,6 +619,8 @@ qod pool delete --tenant acme --db acme_tpch --pool bi --force
 
 # Delete a tenant (must have no pools first). On a terminal it asks for the
 # tenant's name to be typed; without one (a script, an agent) it asks nothing.
+# A manager started with QOD_TENANT_DELETE_ENABLED=false refuses every tenant
+# delete (403 tenant_delete_disabled): disable the tenant instead.
 qod tenant delete acme
 
 # Size a pool's k8s node pods: cpu and memory are each applied as request AND

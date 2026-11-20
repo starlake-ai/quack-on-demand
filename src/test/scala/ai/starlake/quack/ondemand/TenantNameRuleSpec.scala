@@ -29,7 +29,7 @@ class TenantNameRuleSpec extends AnyFlatSpec with Matchers:
   private final class Fixture:
     val store    = new InMemoryControlPlaneStore()
     val sup      = new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store)
-    val handlers = new TenantHandlers(sup, onAuthChanged = _ => ())
+    val handlers = new TenantHandlers(sup, tenantDeleteEnabled = true, onAuthChanged = _ => ())
 
   "PoolSupervisor.createTenant" should "refuse an underscore, writing nothing" in {
     val f   = new Fixture

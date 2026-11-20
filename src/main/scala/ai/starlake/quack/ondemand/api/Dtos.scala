@@ -508,7 +508,10 @@ final case class TenantResponse(
     clientSecretSet: Boolean = false,
     // qodstate_tenant.policy_version. Values come from one global sequence: compare them, never
     // subtract them or read them as a count of RBAC changes.
-    policyVersion: Long = 0L
+    policyVersion: Long = 0L,
+    // False when this manager refuses every tenant delete (QOD_TENANT_DELETE_ENABLED=false), so a
+    // client can grey out its delete instead of asking for a name it will refuse.
+    deleteEnabled: Boolean = true
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
